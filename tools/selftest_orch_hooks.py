@@ -7844,10 +7844,14 @@ def _leasehb_status_and_parse_cases(tmp):
     stop keeps its own status, run through the real dispatcher in a child process. (2) A
     written-not-durable refresh on PostToolUse is surfaced as the result's error text, never as
     plain success, with an attempted guard-events row; when that row's append fails too, the
-    withheld-bookkeeping report rides the same text and no row lands. (3) A field write gives its
-    temporary the lease's group before the first byte (a real other group where this process can
-    set one, else the call itself is observed), and a failure to set it refuses the write with
-    nothing published. (4) The special-bit refusal is the field write's alone: the mtime touch
+    withheld-bookkeeping report rides the same text and no row lands; a written-unverified
+    refresh (the replace happened, its verification failed) on PostToolUse is surfaced the same
+    way. (3) A field write passes the lease's proven group to the group change (a proof gid
+    injected distinct from every gid this process could pass otherwise, so a wrong gid is red on
+    a single-group host too), gives the temporary that group, then the lease's mode, then its
+    first byte (the lease in a real other group where this process can set one), and a failure
+    to set the group refuses the write with nothing published. (4) The special-bit refusal is
+    the field write's alone: the mtime touch
     refreshes a setgid lease and keeps its mode. (5) A json field write keeps nested members
     (one of them named like the declared field), escaped key spellings and whitespace variants
     byte-identical, and an escaped spelling of a declared key is a duplicate, a cannot-evaluate.
@@ -7999,10 +8003,29 @@ def _leasehb_status_and_parse_cases(tmp):
            "bookkeeping withheld (the bookkeeping append failed ([Errno {}] injected row write "
            "fault))".format(errno_sp.EIO) in err, pr.lease.read_bytes() != pr_before, rows(pr)),
           (0, None, True, True, True, []))
+    # a written-unverified refresh on PostToolUse (the replace happened, the post-replace
+    # verification failed) is the result's error text too, never plain success (red where that
+    # event returns a clean allow), with an attempted row
+    pv = fixture("postunverified", "holder: s1\nheartbeat_utc: " + now_iso(0.25) + "\n",
+                 hb(field="heartbeat_utc"), age_secs=900)
+    pv_before = pv.lease.read_bytes()
+    pv_fired = []
 
-    # --- (3) the temporary takes the lease's group before its first byte (red where the
-    # temporary keeps the directory's default group: no group change is made), and a failure
-    # to set it is the named no-write refusal with nothing published ---
+    def verify_fault(*_args):
+        pv_fired.append(True)
+        return "injected verify fault"
+    result = patched([(aiqt_hooks, "_orch_lease_hb_verify", verify_fault)], lambda: post(pv))
+    err = result[2] if isinstance(result[2], str) else ""
+    check("leasehb/post-verify-fault-unverified-error-text",
+          (len(pv_fired), result[0], result[1],
+           "WAS replaced but could not be verified afterwards (injected verify fault)" in err,
+           pv.lease.read_bytes() != pv_before, decisions(pv)),
+          (1, 0, None, True, True, ["written-unverified"]))
+
+    # --- (3) the temporary takes the lease's proven group, then the lease's mode, then its
+    # first byte (red where no group change is made, where any gid other than the proven one is
+    # passed, and where the mode change runs ahead of the group change), and a failure to set
+    # the group is the named no-write refusal with nothing published ---
     gp = fixture("tmpgroup", "holder: s1\nheartbeat_utc: " + now_iso(0.25) + "\n",
                  hb(field="heartbeat_utc"), age_secs=900)
     gp_probe = gp.root / "group-probe.txt"
@@ -8018,25 +8041,67 @@ def _leasehb_status_and_parse_cases(tmp):
             except OSError:
                 continue
     lease_gid = os.stat(str(gp.lease)).st_gid
+    # group bits a mode change made ahead of the group change would grant the default group
+    os.chmod(str(gp.lease), 0o640)
+    gp_mode = stat.S_IMODE(os.lstat(str(gp.lease)).st_mode)
+    # the proof stat the keeper reads carries a gid that is none of the directory default, the
+    # effective gid, a supplementary gid or the lease's real gid, so only the lease's PROVEN
+    # group can be the argument: on a host with one group those real gids all coincide, and a
+    # writer passing the effective or the default gid would pass a real-gid comparison there.
+    # The group change then applies the lease's real group in the proof gid's place.
+    known_gids = set(os.getgroups()) | {os.getegid(), default_gid, lease_gid,
+                                        os.stat(str(gp.root)).st_gid}
+    proof_gid = max(known_gids) + 1
+    real_load = aiqt_hooks._orch_lease_hb_load
+    real_fchmod = os.fchmod
+
+    class ProofGidStat:
+        def __init__(self, st):
+            self._st = st
+
+        def __getattr__(self, attr):
+            return getattr(self._st, attr)
+
+        @property
+        def st_gid(self):
+            return proof_gid
+
+    def gp_load(fd):
+        loaded = real_load(fd)
+        if loaded[0] != "ok":
+            return loaded
+        return ("ok", (ProofGidStat(loaded[1][0]), loaded[1][1]))
     gp_tmp = gp.root / ".forced.tmpgroup.hb.tmp"
     gp_events = []
 
     def gp_fchown(fd, uid, gid):
         if is_entry(fd, gp_tmp):
             gp_events.append(("fchown", uid, gid))
+            return real_fchown(fd, uid, lease_gid if gid == proof_gid else gid)
         return real_fchown(fd, uid, gid)
 
-    def gp_write(fd, data):
+    def gp_fchmod(fd, mode):
         if is_entry(fd, gp_tmp):
+            gp_events.append(("fchmod", mode))
+        return real_fchmod(fd, mode)
+
+    def gp_write(fd, data):
+        # the FIRST write through the temporary only: the order check reads the first three
+        if is_entry(fd, gp_tmp) and ("write",) not in gp_events:
             gp_events.append(("write",))
         return real_write(fd, data)
     gp_before = gp.lease.read_bytes()
     result = patched([(aiqt_hooks, "_orch_lease_hb_tmp_name", lambda name_arg: gp_tmp.name),
-                      (os, "fchown", gp_fchown), (os, "write", gp_write)], lambda: stop(gp))
+                      (aiqt_hooks, "_orch_lease_hb_load", gp_load), (os, "fchown", gp_fchown),
+                      (os, "fchmod", gp_fchmod), (os, "write", gp_write)], lambda: stop(gp))
     check("leasehb/field-tmp-takes-lease-group",
-          (gp_events[:2], _verdict(result), gp.lease.read_bytes() != gp_before,
+          (proof_gid in known_gids, [e[2] for e in gp_events if e[0] == "fchown"],
+           _verdict(result), gp.lease.read_bytes() != gp_before,
            os.stat(str(gp.lease)).st_gid == lease_gid, tmp_names(gp.root)),
-          ([("fchown", -1, lease_gid), ("write",)], "allow", True, True, []))
+          (False, [proof_gid], "allow", True, True, []))
+    check("leasehb/field-tmp-group-before-mode-and-write",
+          (gp_mode, gp_events[:3], stat.S_IMODE(os.lstat(str(gp.lease)).st_mode)),
+          (0o640, [("fchown", -1, proof_gid), ("fchmod", 0o640), ("write",)], 0o640))
     gf = fixture("tmpgroupfault", "holder: s1\nheartbeat_utc: " + now_iso(0.25) + "\n",
                  hb(field="heartbeat_utc"), age_secs=900)
     gf_tmp = gf.root / ".forced.tmpgroupfault.hb.tmp"
@@ -12599,7 +12664,7 @@ def _main_isolated(report_path=None):
         check("forced5/deny-2", _verdict(esched({"prompt": "waiting"})), "deny")
         check("forced5/deny-3", _verdict(esched({"prompt": "waiting"})), "deny")
         # the 4th call is cap-relieved (ALLOW_WITH_FINDINGS) over a BLOCKED row: the OLD gate left this
-        # unrecorded; FIX 5 records it.
+        # unrecorded; the gate now records it.
         check("forced5/cap-exit-warns", _verdict(esched({"prompt": "waiting"})), "warn")
         check("forced5/recorded-over-blocked", (esd / "forced-exit.jsonl").exists(), True)
         e1, _b1 = aiqt_hooks._orch_read_jsonl(str(esd / "forced-exit.jsonl"))
@@ -12616,11 +12681,12 @@ def _main_isolated(report_path=None):
         check("forced5/second-resume-clean",
               _verdict(aiqt_hooks.orch_resume_audit(e.payload("SessionStart"))), "allow")
 
-        # FIX 1 (self-discriminating): under a whole-enumerator failure (cannot-evaluate) a BELOW-BOUND
-        # stop DENIES with NO escape, and an operator-owned escape sentinel STILL releases it. Asserting
-        # BOTH here makes the leg fail on a FIX-1 revert AT THIS LEG (the no-escape verdict flips block2 ->
-        # warn), not only at the pure-core legs (core/stop-enum-error-denies, core/stop-cannot-evaluate-
-        # denies) or the f/ce integration legs above. Proves the escape (not a fail-open) is the release.
+        # The fail-closed stop on an enumerator error (self-discriminating): under a whole-enumerator
+        # failure (cannot-evaluate) a BELOW-BOUND stop DENIES with NO escape, and an operator-owned escape
+        # sentinel STILL releases it. Asserting BOTH here makes the leg fail AT THIS LEG when the stop
+        # path stops failing closed on an enumerator error (the no-escape verdict flips block2 -> warn),
+        # not only at the pure-core legs (core/stop-enum-error-denies, core/stop-cannot-evaluate-denies)
+        # or the f/ce integration legs above. Proves the escape (not a fail-open) is the release.
         _orig_es2 = aiqt_hooks._orch_escape_stat
         try:
             f.enum_exit.write_text("3", encoding="utf-8")
@@ -12635,11 +12701,13 @@ def _main_isolated(report_path=None):
             f.enum_exit.write_text("0", encoding="utf-8")
         if (sd / "escape-spoof.json").exists():
             (sd / "escape-spoof.json").unlink()
-        # FIX 1 + C.4: the below-bound cannot-evaluate DENIES (ce/enum-error-denies -> block2 below is the
-        # FIX-1 discriminator for this leg: a revert flips it to warn) and records NO forced exit (C.4
-        # fires only on the bounded ALLOW_WITH_FINDINGS, never on a deny); the SAME enum-error, once the
-        # loop bound is reached, DOES record one. So ce/no-forced-exit-on-deny is read against
-        # ce/enum-error-denies, discriminating the deny (no record) from the unchanged bound-exit.
+        # The fail-closed stop and the forced-exit record together: the below-bound cannot-evaluate
+        # DENIES (ce/enum-error-denies -> block2 below discriminates the fail-closed stop at this leg: a
+        # stop path that stopped failing closed flips it to warn) and records NO forced exit (the
+        # forced-exit record is written only on the bounded ALLOW_WITH_FINDINGS, never on a deny); the
+        # SAME enum-error, once the loop bound is reached, DOES record one. So ce/no-forced-exit-on-deny
+        # is read against ce/enum-error-denies, discriminating the deny (no record) from the unchanged
+        # bound-exit.
         ce = Fixture(tmp, "ce_forced")
         cestop = lambda: aiqt_hooks.orch_stop_guard(ce.payload("Stop"))
         cesd = Path(aiqt_hooks._orch_state_dir_for_root(str(ce.root)))

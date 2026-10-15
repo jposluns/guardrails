@@ -18020,8 +18020,11 @@ def _orch_lease_hb_render(text, cfg, info, new_value):
 def _orch_lease_hb_verify(dirfd, name, cfg, session_id, new_value):
     """Post-replace verification, a seam the self-test injects a failure through: re-open the lease
     under the HELD parent descriptor, re-prove the holder, and require the written value. None when
-    confirmed; else the detail the Stop binding reports as a write that HAPPENED (recorded
-    accurately, never claimed clean: the replace is already published when this runs)."""
+    confirmed; else the detail both bindings report as a write that HAPPENED (recorded
+    accurately, never claimed clean: the replace is already published when this runs). It reads
+    the lease as it stands AFTER the replace, so it confirms only that this session's refreshed
+    value is there: a lease this replace revived or overwrote carries that very value and
+    passes."""
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
                      | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=dirfd)
@@ -18191,8 +18194,11 @@ def _orch_lease_hb_write_field(root, cfg, session_id, now, path, parent, name, s
                 # replace then overwrites it); os.replace creates the destination name either
                 # way. The declared lock closes this for every writer that takes it (the caller
                 # holds it from before the lease was read); for the rest the re-check narrows
-                # the window (it cannot remove it), and the post-replace verification reports a
-                # lost race, it cannot undo it.
+                # the window (it cannot remove it). The post-replace verification does NOT
+                # report either case: it reads this replace's own content, which carries this
+                # session's refreshed value, so the overwritten acquire or the revived lease
+                # reads as a clean refresh; it reports only a change that lands after the
+                # replace, and it can undo nothing.
                 _orch_lease_hb_replace(tmp, name, parent)
                 published = True
             except OSError as exc:
@@ -18324,8 +18330,9 @@ def _orch_lease_hb_refresh(root, cfg, session_id, now, path, parent, name, leaf,
 def _orch_lease_hb_judge(root, cfg, lease, session_id, event, now, path, parent, leaf, name,
                          memory, holder):
     """The decision table over an OPEN lease (every row's fault direction is no-write; the
-    returned text is the Stop banner, and on PostToolUse only a written-not-durable refresh
-    returns text, which that binding carries as the result's error text; a refusal that
+    returned text is the Stop banner, and on PostToolUse only a refresh whose write HAPPENED
+    but is not plain success (written-unverified or written-not-durable) returns text, which
+    that binding carries as the result's error text; a refusal that
     persists unchanged is recorded
     once per state change, never per call: _orch_lease_hb_row_once). Age is the OLDER of the
     mtime age and the declared heartbeat field's age, so a rewrite that bumps only the mtime
@@ -18586,13 +18593,15 @@ def _orch_lease_hb_judge(root, cfg, lease, session_id, event, now, path, parent,
         if outcome is not None:
             kind, detail = outcome
             if kind == "written-unverified":
-                # a write HAPPENED: every one of these is a real event, recorded per occurrence
+                # a write HAPPENED: every one of these is a real event, a guard-events row
+                # ATTEMPTED per occurrence (best-effort, as below), and the warning is returned
+                # on BOTH events, never plain success: the Stop banner, or on PostToolUse the
+                # result's error text (the next Stop can see a fresh lease and would otherwise
+                # say nothing about this write)
                 _orch_lease_hb_event(holder, kind, detail)
-                if event == "Stop":
-                    return ("AIQT guardrail (lease heartbeat): the heartbeat WAS replaced but "
-                            "could not be verified afterwards ({}). A write happened; inspect "
-                            "the lease by hand.".format(detail))
-                return None
+                return ("AIQT guardrail (lease heartbeat): the heartbeat WAS replaced but "
+                        "could not be verified afterwards ({}). A write happened; inspect "
+                        "the lease by hand.".format(detail))
             if kind == "written-not-durable":
                 # a verified write HAPPENED but may not survive a crash: a guard-events row is
                 # ATTEMPTED per occurrence (best-effort: a failed append is reported through
@@ -18689,8 +18698,9 @@ def _orch_lease_hb_event_cleanup(holder, *fds):
 def _orch_lease_heartbeat(data, event, holder=None):
     """The ONE lease-heartbeat core behind orch_lease_heartbeat_post and orch_lease_heartbeat_stop:
     returns the warning text, or None when there is nothing to surface (every warning is
-    returned on Stop only, except a written-not-durable refresh, returned on PostToolUse too,
-    where the binding carries it as the result's error text). Scoped exactly like
+    returned on Stop only, except a written-unverified or written-not-durable refresh, returned
+    on PostToolUse too, where the binding carries it as the result's error text). Scoped exactly
+    like
     the other registry components (silent with no root, no ok registry, or no declaration; silent
     too with no usable payload session_id, because no write and no holder-aimed message can be
     proven without one). The REAL per-tool-call cost: before any lease check, EVERY event pays the
@@ -18901,10 +18911,11 @@ def orch_lease_heartbeat_post(data):
     """cnclse/recncl, PostToolUse (warn-only keeper, never blocks): run the lease-heartbeat core
     after every tool call and stay SILENT on stdout (no systemMessage: guard-events rows, and
     the result's error text, the dispatcher's stderr, are the only traces; the Stop binding
-    owns the message). The error text carries any withheld-bookkeeping report and the one
-    warning the core returns on this event, a written-not-durable refresh (published and
-    verified, but its directory fsync failed), so that write is never reported as plain
-    success: the next Stop sees a fresh lease and would say nothing. The binding contains the
+    owns the message). The error text carries any withheld-bookkeeping report and the warnings
+    the core returns on this event, a written-unverified refresh (published, but the
+    post-replace verification failed) and a written-not-durable refresh (published and
+    verified, but its directory fsync failed), so neither write is ever reported as plain
+    success: the next Stop can see a fresh lease and would say nothing. The binding contains the
     core's own faults: without this catch a core fault would surface the dispatcher's fail-open
     systemMessage on EVERY tool call. A stop raised inside the core still propagates, but one
     that would end the process with status 2 is re-raised as SystemExit(1)

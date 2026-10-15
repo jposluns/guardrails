@@ -431,13 +431,18 @@ descriptor withholds).
   or sticky bit, which a replace cannot carry over faithfully; otherwise an exclusive
   temporary file beside the lease, given the lease's group before its first byte (a new file
   gets the directory's default group, which need not be the lease's; a failure to set it is the
-  named no-write refusal, with nothing published), the original permission bits in full, fsync,
+  named no-write refusal, with nothing published, so where it always fails, for a lease whose
+  group this user is not a member of and is not the directory's default group, or on a
+  filesystem that refuses the change, EVERY field refresh is refused and the lease lapses, with
+  the refusal warned on Stop), the original permission bits in full, fsync,
   an identity re-check against the proof fstat, a descriptor-anchored replace, a directory fsync
   whose failure is a write that HAPPENED but may not be durable, never plain success: reported
   as the Stop warning, or on PostToolUse as the result's error text, with an attempted
   guard-events row (best-effort: a failed append is reported through the withheld-bookkeeping
   warning instead), and
-  a post-replace verification whose failure is reported as a write that HAPPENED; the failure
+  a post-replace verification whose failure is reported as a write that HAPPENED, on both
+  events alike (the Stop warning, or on PostToolUse the result's error text, with an attempted
+  guard-events row); the failure
   cleanup runs from a finally for ANY exception class and unlinks the temporary name only when
   one stat just before the unlink finds it still carrying the inode the write created, so an
   entry whose ownership is unestablished at that stat is never removed (the unlink itself is by
@@ -583,8 +588,9 @@ descriptor withholds).
   binding re-raises an exit whose status would be 2 (an integer code congruent to 2 modulo 256
   within the signed 64-bit range the interpreter converts it through, so 258 as well) as an exit
   with status 1, and every other stop propagates unchanged; PostToolUse surfaces no
-  message (a withheld or failed bookkeeping write, and a written-not-durable refresh, ride the
-  result's error text to the dispatcher's stderr); the bindings catch the core's own faults (a
+  message (a withheld or failed bookkeeping write, a written-unverified refresh and a
+  written-not-durable refresh ride the result's error text to the dispatcher's stderr); the
+  bindings catch the core's own faults (a
   fault inside the judged table becomes one guard-events row ONLY on the branches where the
   proven descriptor is held,
   recorded while it is held; on a busy or faulted lock the table runs with no held descriptor,
@@ -601,8 +607,11 @@ descriptor withholds).
   whole read-prove-write span; a writer that IGNORES the lock, or any writer where none is
   declared, can still race the re-check-to-replace window, where an unlinked lease is
   revived by the replace or a swapped-in acquire is overwritten: the identity re-check
-  narrows that window (it cannot remove it) and the post-replace verification reports it but
-  cannot undo it. Bash can still rewrite the lease or the registry. The past-holder memory
+  narrows that window (it cannot remove it), and the post-replace verification does not report
+  either case (it reads the replace's own content, which carries this session's refreshed
+  value, so the revived lease or the overwritten acquire reads as a clean refresh; it reports
+  only a change that lands after the replace, and it can undo nothing). Bash can still rewrite
+  the lease or the registry. The past-holder memory
   (`lease-heartbeat.json`) and the guard-events append are best-effort, and every bookkeeping
   open, lstat, exclusive temporary create and replace runs RELATIVE to the held
   state-directory and lease parent-directory descriptors, with the saves' temporary descriptor
