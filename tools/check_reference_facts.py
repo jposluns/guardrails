@@ -640,7 +640,7 @@ def main():
 #      continuation, an indented list under an indented phrase line, and a fence inside the
 #      deferred section (its '#' content can no longer end the section: the fence itself is
 #      refused);
-#  6zq-6zs. the round-5 counter-examples, each REFUSED (exit 2, naming a line; 6zq and 6zr exit
+#  6zq-6zs. three counter-examples, each REFUSED (exit 2, naming a line; 6zq and 6zr exit
 #      through the FENCE check, the unterminated-fence refusal naming the fence's opening line,
 #      never the span grammar; 6zs exits through the positive span grammar), never a clean pass
 #      through a mis-bounded section: a backtick fence whose info string holds a backtick (not a
@@ -1030,7 +1030,7 @@ def self_test_main():
         #     (any blockquote, any fence, any nested or indented container between the phrase and
         #     the section end) are refused (exit 2, naming the file and line), never read through
         #     container stripping and never a clean pass through a mis-bounded section. 6zq-6zs are
-        #     the round-5 counter-examples (6zq and 6zr exit through the FENCE check, the
+        #     three counter-examples (6zq and 6zr exit through the FENCE check, the
         #     unterminated-fence refusal naming the opening line, never this span grammar; 6zs
         #     exits through the grammar): on the reader this replaces, 6zq and 6zs each passed
         #     CLEAN (a fence-state inversion through a backtick info string; a stripped '> # fake'

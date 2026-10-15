@@ -14,27 +14,37 @@ exfiltration control. The SHA-256 hashes are UNSALTED and low-entropy n-grams ar
 so this is OBSCURITY, not secrecy (a salt cannot help: a public gate must hash arbitrary public text, so
 any salt would also be public). Deliberate obfuscation (mid-word splits, HTML entities, zero-width chars)
 can evade the hash layer; a ZIP archive is unpacked and its members scanned, but another compressed
-format (a gzip, bzip2 or 7z file, or a self-extracting ZIP whose name does not end in .zip) is only
-byte-scanned, so text compressed inside it is not seen; the structural path patterns are scoped to this
-host's Linux layout. The dual-family verifiers and the private plaintext check are the compensating
-layers. A line carrying a `leak-allow` marker is exempt from the STRUCTURAL layer.
+format (a gzip, bzip2 or 7z file), a ZIP that begins after leading bytes (a self-extracting ZIP) inside a
+walked file not named .zip or inside an archive member, and compressed bytes an archive holds in a comment
+or an extra field are only byte-scanned, so text compressed inside them is not seen; the structural path
+patterns are scoped to this host's Linux layout. The dual-family verifiers and the private plaintext check
+are the compensating layers. A line carrying a `leak-allow` marker is exempt from the STRUCTURAL layer.
 
 SCANNED SET. The walk yields every file in the working tree except the .git, node_modules and
 __pycache__ subtrees (the denylist file included). Each yielded path is first CLASSIFIED by a stat probe
 (a metadata check, not a content read), then its content is read as bytes and handled one of four ways:
   - it is a ZIP archive (a name ending in .zip in any case, or content opening with a ZIP signature,
-    whatever that content decodes as): its own bytes are scanned in the lossless byte view (so member
+    whatever that content decodes as): an archive whose stat size is over MAX_ARCHIVE_FILE_SIZE is
+    CANNOT EVALUATE before its bytes are read (a file not named .zip has only its first four bytes read,
+    to see its signature); otherwise its own bytes are scanned in the lossless byte view (so member
     names, the archive comment and any bytes outside the members are read too), and it is opened with
     the standard-library zipfile module entirely in memory (nothing is extracted to disk and no member
     name is used as a filesystem path), each member's content decoded by the three rules below and
     scanned, a finding named <archive>!<member>:<line>. Before any member is read, the central directory
     is checked against MAX_ARCHIVE_MEMBERS and MAX_ARCHIVE_TOTAL_SIZE (declared uncompressed bytes), and
     each member against the encryption flag, a compression method outside ARCHIVE_METHODS and a
-    nested-archive name; an archive over either bound, a corrupt or encrypted archive, a member that
-    cannot be read or decoded, a member whose stored data does not end exactly at its declared size
-    (re-inflated independently, so a directory understating a size cannot hide the rest of a member),
-    and a nested archive member (by its name or by a ZIP signature opening its content) are each
-    CANNOT EVALUATE, naming the archive or <archive>!<member>;
+    nested-archive name; then the byte spans of the parsed records (each member's local header with its
+    name and extra field, its data and any data descriptor, the central directory, any ZIP64 end record
+    and locator, and the end record with its comment) must be disjoint and cover the file exactly from
+    its first byte to its last, so leading bytes, a gap, an overlap, trailing bytes or a second archive
+    in the same file are CANNOT EVALUATE naming the archive. An archive over any bound, a corrupt or
+    encrypted archive, a member that cannot be read or decoded, a stored member whose stored bytes are
+    not exactly its declared size and its content, a deflated member whose declared compressed bytes
+    are not consumed by exactly one complete deflate stream of exactly its declared size (re-inflated
+    independently, so a directory understating a size or a second stream after the first cannot hide
+    text), and a nested archive member (by its name or by a ZIP signature opening its content) are each
+    CANNOT EVALUATE, naming the archive or <archive>!<member>. An archive's scan stops at its first
+    refusal, so when several members fail, only the first is named;
   - it decodes as UTF-8: it is scanned, whatever its suffix (a .csv, .example or .sha256 included);
   - it starts with a UTF-16 or UTF-32 byte-order mark: the declared encoding is decided by a
     successful decode, never by the 4-byte prefix alone (the UTF-32 LE mark embeds the UTF-16 LE
@@ -103,9 +113,16 @@ TEXT_SUFFIXES = {".md", ".mdc", ".py", ".sh", ".yml", ".yaml", ".toml", ".json",
 # empty archive's end record, a split-archive marker), the same test marking a nested archive member.
 ZIP_SUFFIX = ".zip"
 ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
-# Archive bounds, read from the central directory before any member is read; over either is CANNOT EVALUATE.
+# Archive bounds: the archive's own size is checked on the stat probe before its bytes are read, the other
+# two from the central directory before any member is read; over any of them is CANNOT EVALUATE.
 MAX_ARCHIVE_MEMBERS = 1000  # far above the two-member shipped skill packs; keeps one archive's work finite
-MAX_ARCHIVE_TOTAL_SIZE = 16 * 1024 * 1024  # declared uncompressed bytes; caps memory and a zip bomb's expansion
+# What is bounded is the declared uncompressed bytes per archive (each member read stops one byte past its
+# declared size) and, below, the archive's own size; memory is not capped as such. Measured, not a
+# guarantee: one gate run over an archive holding a single stored member at this bound (a UTF-16 LE
+# byte-order mark, then about 930,000 distinct eight-character words) peaked at 673 MiB resident (VmHWM;
+# CPython 3.14.4, Linux x86-64, the shipped four-hash denylist); a repeated English sentence peaked at 431 MiB.
+MAX_ARCHIVE_TOTAL_SIZE = 16 * 1024 * 1024
+MAX_ARCHIVE_FILE_SIZE = MAX_ARCHIVE_TOTAL_SIZE + 1024 * 1024  # room for stored members at the total bound plus records
 # zipfile caps each deflate read at the size asked for, but its bzip2, LZMA and Zstandard readers expand a
 # whole compressed chunk at once, so a member stored any other way is CANNOT EVALUATE, never read.
 ARCHIVE_METHODS = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
@@ -218,10 +235,18 @@ class CannotEvaluate(Exception):
         self.member = member
 
 
-def _stat_mode(path):
-    """The classification probe: stat() mode, FOLLOWING a file symlink (the file rule). A module-level
-    seam so the self-test can report a non-regular mode deterministically (case 6) on every runner."""
-    return path.stat().st_mode
+def _stat(path):
+    """The classification probe: stat(), FOLLOWING a file symlink (the file rule), for the mode and the
+    size. A module-level seam so the self-test can report a non-regular mode (case 6) and an archive size
+    (case 5s) deterministically on every runner."""
+    return path.stat()
+
+
+def _read_head(path):
+    """The first four bytes, read only from a file over MAX_ARCHIVE_FILE_SIZE to see whether its content
+    opens with a ZIP signature before the rest of it is read."""
+    with path.open("rb") as handle:
+        return handle.read(4)
 
 
 def _read_bytes(path):
@@ -298,24 +323,111 @@ def _is_zip(name, data):
     return name.lower().endswith(ZIP_SUFFIX) or data[:4] in ZIP_SIGNATURES
 
 
-def _member_data_matches(data, info, content):
-    """True when the member's stored data holds exactly `content` and nothing past it. zipfile stops at
-    the size the central directory declares, so a directory that understates a deflated member's size
-    (beside a CRC of the shortened text) would otherwise hide the rest of that member from the scan: the
-    stored bytes are re-read from the local header and inflated independently, bounded at one byte past
-    the declared size, and must end exactly there."""
+def _local_header(data, info):
+    """(begin, extra) for a member's local header: begin is where the member's data starts, past the
+    header's 30 fixed bytes, its name and its extra field at the lengths the local header itself declares
+    (they can differ from the central directory's), and extra is that extra field. None when no local
+    header sits at the member's offset."""
     start = info.header_offset
-    if data[start:start + 4] != b"PK\x03\x04":
-        return False
+    if start < 0 or len(data) < start + 30 or data[start:start + 4] != b"PK\x03\x04":
+        return None
     name_len, extra_len = struct.unpack("<HH", data[start + 26:start + 30])
     begin = start + 30 + name_len + extra_len
+    return begin, data[begin - extra_len:begin]
+
+
+def _member_data_matches(data, info, content):
+    """True when the member's declared compressed bytes hold exactly `content` and nothing else. zipfile
+    stops at the size the central directory declares and at the end of the first deflate stream, so a
+    directory understating a size (beside a CRC of the shortened text) or a second stream after the first
+    would otherwise hide text from the scan: the bytes are re-read from the local header and checked
+    independently. A stored member's bytes must be exactly its declared size and `content`; a deflated
+    member's must be consumed by exactly one complete deflate stream (its end reached, no input left
+    unused or unconsumed) whose output, bounded at one byte past the declared size, is exactly that size
+    and `content`."""
+    header = _local_header(data, info)
+    if header is None:
+        return False
+    begin = header[0]
     raw = data[begin:begin + info.compress_size]
     if len(raw) != info.compress_size:
         return False
     if info.compress_type == zipfile.ZIP_STORED:
-        return raw == content
+        return len(raw) == info.file_size and raw == content
     inflater = zlib.decompressobj(-15)
-    return inflater.decompress(raw, info.file_size + 1) == content and inflater.eof
+    out = inflater.decompress(raw, info.file_size + 1)
+    return (inflater.eof and not inflater.unconsumed_tail and not inflater.unused_data
+            and len(out) == info.file_size and out == content)
+
+
+def _coverage_problems(data, infos, start_dir):
+    """Where the archive's parsed records fail to tile its bytes: an empty list when their spans are
+    disjoint and cover `data` exactly from offset 0 to its end, else one printable problem per gap,
+    overlap or overrun, with its offsets. The spans come from the parsed records only: each member's
+    local header (with its name and extra field), its data (the directory's compressed size) and, where
+    flag bit 3 is set, its data descriptor (an optional signature, a CRC and two sizes, 8 bytes each when
+    the local header carries a ZIP64 extra field); the central directory; any ZIP64 end record and
+    locator; and the end-of-central-directory record with its comment. So leading bytes (a
+    self-extracting stub, or a second archive ahead of this one), a local entry the directory does not
+    list, a gap between members and trailing bytes are each a problem."""
+    size = len(data)
+    # The end record, located the way zipfile locates it: the last 22 bytes when they hold one with no
+    # comment, else the last signature in the final 22 + 65535 bytes.
+    if data[size - 22:size - 18] == b"PK\x05\x06" and data[size - 2:] == b"\x00\x00":
+        end = size - 22
+    else:
+        end = data.rfind(b"PK\x05\x06", max(size - 22 - 0xFFFF, 0))
+    spans = [(end, end + 22 + struct.unpack("<H", data[end + 20:end + 22])[0],
+              "end-of-central-directory record and comment")]
+    locator = end - 20
+    if locator >= 0 and data[locator:locator + 4] == b"PK\x06\x07":
+        # zipfile reads the ZIP64 end record where the locator points, or just before the locator when no
+        # record signature is there (prepended data).
+        pointer = struct.unpack("<Q", data[locator + 8:locator + 16])[0]
+        record = pointer if data[pointer:pointer + 4] == b"PK\x06\x06" else locator - 56
+        spans.append((record, record + 12 + struct.unpack("<Q", data[record + 4:record + 12])[0],
+                      "ZIP64 end-of-central-directory record"))
+        spans.append((locator, end, "ZIP64 end-of-central-directory locator"))
+        directory_size = struct.unpack("<Q", data[record + 40:record + 48])[0]
+    else:
+        directory_size = struct.unpack("<I", data[end + 12:end + 16])[0]
+    spans.append((start_dir, start_dir + directory_size, "central directory"))
+    for info in infos:
+        member = _member_display(info.filename)
+        header = _local_header(data, info)
+        if header is None:
+            return ["no local header at offset {}, where the directory places {}".format(info.header_offset,
+                                                                                        member)]
+        begin, extra = header
+        stop = begin + info.compress_size
+        spans.append((info.header_offset, begin, "local header of " + member))
+        spans.append((begin, stop, "data of " + member))
+        if info.flag_bits & 0x08:
+            length = 12
+            while len(extra) >= 4:
+                tag, field_len = struct.unpack("<HH", extra[:4])
+                if tag == 0x0001:
+                    length = 20
+                extra = extra[4 + field_len:]
+            if data[stop:stop + 4] == b"PK\x07\x08":
+                length += 4
+            spans.append((stop, stop + length, "data descriptor of " + member))
+    problems, position = [], 0
+    for start, stop, what in sorted(spans):
+        if start > position:
+            problems.append("{} byte(s) at offsets {} to {} belong to no record"
+                            .format(start - position, position, start - 1))
+        elif start < position:
+            problems.append("the {} at offsets {} to {} overlaps the record before it"
+                            .format(what, start, stop - 1))
+        if stop > size:
+            problems.append("the {} at offsets {} to {} runs past the archive's last byte (offset {})"
+                            .format(what, start, stop - 1, size - 1))
+        position = max(position, stop)
+    if position < size:
+        problems.append("{} byte(s) at offsets {} to {} belong to no record"
+                        .format(size - position, position, size - 1))
+    return problems
 
 
 def read_archive(data):
@@ -323,12 +435,14 @@ def read_archive(data):
     member is its printable name and texts its decode_views views. Nothing is extracted to disk and no
     member name is used as a filesystem path. Before any member is read, the central directory is
     checked: more than MAX_ARCHIVE_MEMBERS members, more than MAX_ARCHIVE_TOTAL_SIZE declared uncompressed
-    bytes, an encrypted member, a compression method outside ARCHIVE_METHODS, or a member named as an
-    archive each raise CannotEvaluate. So do a corrupt archive, a member that cannot be read (each read
-    asks for at most one byte past the member's declared size, and zipfile stops at that size and checks
-    the CRC), a member whose stored data does not end exactly at its declared size (_member_data_matches),
-    a member whose content opens with a ZIP signature, and a member whose byte-order mark fails its
-    decode. CannotEvaluate carries the member's name when one member is the cause."""
+    bytes, an encrypted member, a compression method outside ARCHIVE_METHODS, a member named as an
+    archive, or parsed records that do not tile the archive's bytes exactly (_coverage_problems) each
+    raise CannotEvaluate. So do a corrupt archive, a member that cannot be read (each read asks for at
+    most one byte past the member's declared size, and zipfile stops at that size and checks the CRC), a
+    member whose declared compressed bytes are not exactly its content (_member_data_matches), a member
+    whose content opens with a ZIP signature, and a member whose byte-order mark fails its decode.
+    CannotEvaluate carries the member's name when one member is the cause; the first refusal ends the
+    archive's scan, so a later failing member is not named."""
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
     except Exception as exc:  # zipfile reports corruption as BadZipFile, ValueError, EOFError and others
@@ -351,6 +465,13 @@ def read_archive(data):
                                      "read".format(info.compress_type), member)
             if _is_zip(info.filename, b""):
                 raise CannotEvaluate("nested archive member, not unpacked; no member was read", member)
+        try:
+            problems = _coverage_problems(data, infos, archive.start_dir)
+        except struct.error as exc:
+            problems = ["a record cannot be parsed: {}".format(exc)]
+        if problems:
+            raise CannotEvaluate("the parsed records do not cover the archive's bytes exactly: {}; no member "
+                                 "was read".format("; ".join(problems)))
         for info in infos:
             member = _member_display(info.filename)
             try:
@@ -364,8 +485,9 @@ def read_archive(data):
                 raise CannotEvaluate("member data cannot be checked: {}: {}".format(type(exc).__name__, exc),
                                      member)
             if not matches:
-                raise CannotEvaluate("member data does not match its declared size, so it was not read in "
-                                     "full", member)
+                raise CannotEvaluate("member data does not match its declared size and content (stored bytes, "
+                                     "or one complete deflate stream with nothing after it), so it was not "
+                                     "read in full", member)
             if _is_zip("", content):
                 raise CannotEvaluate("nested archive member (its content opens with a ZIP signature), not "
                                      "unpacked", member)
@@ -382,10 +504,16 @@ def read_scan_text(path):
     archive's own bytes in the lossless byte view (so member names, the archive comment and any bytes
     outside the members are scanned), lossless False, and archive the read_archive generator over its
     members. A non-regular file (the stat probe follows a file symlink, so a symlink to a regular file
-    reads as its target) raises CannotEvaluate before its content is opened. A read error raises OSError
-    for the caller's fail-closed exit 2 (a dangling symlink included)."""
-    if not stat.S_ISREG(_stat_mode(path)):
+    reads as its target) raises CannotEvaluate before its content is opened, and so does a ZIP archive
+    whose stat size is over MAX_ARCHIVE_FILE_SIZE, before its bytes are read (past its first four when
+    only its signature marks it). A read error raises OSError for the caller's fail-closed exit 2 (a
+    dangling symlink included)."""
+    status = _stat(path)
+    if not stat.S_ISREG(status.st_mode):
         raise CannotEvaluate("not a regular file; its content was never opened")
+    if status.st_size > MAX_ARCHIVE_FILE_SIZE and (_is_zip(path.name, b"") or _is_zip("", _read_head(path))):
+        raise CannotEvaluate("a ZIP archive of {} bytes, over MAX_ARCHIVE_FILE_SIZE ({}); its bytes were not "
+                             "read".format(status.st_size, MAX_ARCHIVE_FILE_SIZE))
     data = _read_bytes(path)
     if _is_zip(path.name, data):
         return (data.decode("utf-8", errors="surrogateescape"),), False, read_archive(data)
@@ -508,7 +636,8 @@ def main():
 #      scanned (a private IP in one of its comment lines is a finding); 4c. a suffixless Latin-1 file is
 #      decoded losslessly and its host path found,
 #   5. a .zip that is not a readable archive is CANNOT EVALUATE (exit 2, naming it), never a skip;
-#      5b. the suffix match is case-insensitive (a corrupt .ZIP is the same CANNOT EVALUATE); 5c. a
+#      5b. the suffix match is case-insensitive (a corrupt .ZIP whose content does not open with a ZIP
+#      signature, so only the suffix makes it an archive, is the same CANNOT EVALUATE); 5c. a
 #      private IP in a deflated member, and a host path in a Latin-1 member and in a UTF-16 member, are
 #      each a finding named <archive>!<member>:<line> (exit 1: members go through the walked-file
 #      decode); 5d. a clean archive passes (exit 0) and is counted as scanned with its members; 5e. a
@@ -521,29 +650,48 @@ def main():
 #      opening its content), a member that cannot be read (a CRC mismatch) and a member whose
 #      byte-order mark fails its decode are each CANNOT EVALUATE naming <archive>!<member> (exit 2);
 #      5m. a directory understating a deflated member's size (beside a CRC of the shortened text) is
-#      CANNOT EVALUATE, not a PASS over the text past the declared size,
+#      CANNOT EVALUATE, not a PASS over the text past the declared size; 5n. a member whose declared
+#      compressed bytes carry a second deflate stream after the first is CANNOT EVALUATE naming
+#      <archive>!<member>; 5o. a deflated local entry absent from the directory ahead of a clean
+#      archive's members, a second archive after the first in one file, a gap between members,
+#      trailing bytes after the end record, two directory records naming one local entry and an end
+#      record whose declared comment runs past the file are each CANNOT EVALUATE naming the archive and
+#      the offsets, with no member read; 5p. records that tile pass (data descriptors written by zipfile
+#      to a stream it cannot seek, one with ZIP64 sizes, and one without its optional signature; local
+#      extra fields the directory lacks; a ZIP64 end record and locator); 5q. a deflate stream that
+#      never ends, stored bytes past the declared size, and a stored and a deflated member whose
+#      directory overstates the size are each CANNOT EVALUATE naming <archive>!<member>; 5r. _member_data_matches refuses compressed bytes
+#      declared past the end of the data; 5s. the archive-size bound is checked just inside, exactly at
+#      and just outside it on the stat probe's size, outside CANNOT EVALUATE before the bytes are read
+#      (under a .zip name and by signature alone), and a text file over it is still read and scanned,
 #   6. a non-regular file (injected FIFO mode) is CANNOT EVALUATE (exit 2, naming it), its content
 #      NEVER read (the read seam raises for it, so a read-before-classification regression shows as a
 #      read error, not the CANNOT EVALUATE line); 6b. a symlink to a regular file is followed and its
 #      target scanned (exit 1); 6c. a symlinked directory is CANNOT EVALUATE (exit 2, naming it), never
 #      silently dropped; 6d. a dangling symlink fails closed (exit 2),
 #   7. an unreadable file (injected PermissionError) fails closed (exit 2).
-# Cases 1 through 6 each fail on the original pre-531 scan. Against the round-1 revision this replaces,
+# Cases 1 through 6 each fail on the original scan. Against the first revision this replaces,
 # 2b, 3b, 3c and 6c are new findings or named skips, 6 and 7 run where that revision skipped, and 4b,
 # 4c, 5b, 6b and 6d pin behaviours a mutant could drop (the denylist walk, the suffixless decode, the
 # case-insensitive allow-list, the stat-follows-a-file-symlink rule, the dangling-symlink error).
-# Against the round-2 revision this replaces, 3d and 3g are new findings and 3e, 3f and 3h pin the
+# Against the second revision this replaces, 3d and 3g are new findings and 3e, 3f and 3h pin the
 # fail-closed malformed-BOM contract, while the raising read seam in 6 makes a read-before-SKIP
-# regression fail rather than pass. Against the round-3 revision this replaces, 3i pins the
+# regression fail rather than pass. Against the third revision this replaces, 3i pins the
 # decode-decided (never prefix-decided) BOM classification and 3j and 3k pin the every-wide-view
 # scan (a mismatched-endian and a misaligned mark), while 3e, 3f and 3h now also assert the file is
-# named. Against the round-4 revision this replaces, 3l-3o pin the UTF-32 views at byte offsets 0 to
+# named. Against the fourth revision this replaces, 3l-3o pin the UTF-32 views at byte offsets 0 to
 # 3 (each of those four planted texts hid from every then-scanned view; 3p was already found by that
 # revision and stays as the phase-3 control) and 3v asserts the WIDE_VIEWS enumeration itself and the
 # views read_scan_text returns. Against the gate that skipped every undecodable .zip, a non-regular file
 # and a symlinked directory with a PASS (exit 0), 1, 5, 5b, 6 and 6c now assert the counts or the exit 2
-# that replaced each skip, and 5c-5m are new; each of these fails on that gate. The planted host path
-# and private IP are assembled from pieces so this source stays clean under its own scan.
+# that replaced each skip, and 5c-5m are new; each of these fails on that gate. Against the gate that
+# accepted a member whose first deflate stream matched and never accounted for the archive's bytes,
+# 5n, each 5o vector, the two overstated-size 5q members and 5s fail: all but 5s passed there (exit 0),
+# 5n and the first four 5o vectors over a private IP held in deflated bytes no member stream read, and
+# 5s's archive was read in full. 5p passes on both and guards the span arithmetic, the other 5q members
+# and 5r pin conditions that gate already held, and 5b now fails when the suffix match is made
+# case-sensitive. The planted host path and private IP are assembled from
+# pieces so this source stays clean under its own scan.
 _HOST_PATH = "/" + "opt/" + "fixture-host/private/path"
 _PRIVATE_IP = "10." + "20.30.40"
 
@@ -578,6 +726,59 @@ def self_test_main():
                 archive.writestr(zipfile.ZipInfo(name, (2020, 1, 1, 0, 0, 0)), data, compress_type=method)
             archive.comment = comment
         return buffer.getvalue()
+
+    def deflate(data, final=True):
+        """A raw deflate stream of data; final=False ends it with a sync flush instead of a final block, so
+        the stream never reaches its end."""
+        packer = zlib.compressobj(9, zlib.DEFLATED, -15)
+        return packer.compress(data) + packer.flush(zlib.Z_FINISH if final else zlib.Z_SYNC_FLUSH)
+
+    def entry(name, content, method=zipfile.ZIP_DEFLATED, stored=None, size=None, before=b"", extra=b"",
+              listed=1, descriptor=b""):
+        """One raw_zip member. Its data defaults to content as the method writes it, and its declared size
+        and CRC to content's; before is placed ahead of its local header, extra is its local header's extra
+        field (the directory's stays empty), listed is how many directory records name it (0 leaves it out),
+        and a non-empty descriptor follows its data and sets flag bit 3."""
+        if stored is None:
+            stored = deflate(content) if method == zipfile.ZIP_DEFLATED else content
+        return (name.encode("ascii"), method, stored, zlib.crc32(content),
+                len(content) if size is None else size, before, extra, listed, descriptor)
+
+    def raw_zip(entries, zip64=False):
+        """A ZIP archive assembled record by record, for layouts zipfile's writer never produces. Offsets
+        count every byte written, so the directory points at each listed member's local header; zip64=True
+        puts a ZIP64 end record and its locator ahead of the end record."""
+        out, directory, count = bytearray(), bytearray(), 0
+        for name, method, stored, crc, size, before, extra, listed, descriptor in entries:
+            out += before
+            offset, flags = len(out), 0x08 if descriptor else 0
+            out += struct.pack("<4s5H3L2H", b"PK\x03\x04", 20, flags, method, 0, 0x21, crc, len(stored), size,
+                               len(name), len(extra)) + name + extra + stored + descriptor
+            directory += listed * (struct.pack("<4s6H3L5H2L", b"PK\x01\x02", 20, 20, flags, method, 0, 0x21, crc,
+                                               len(stored), size, len(name), 0, 0, 0, 0, 0, offset) + name)
+            count += listed
+        start = len(out)
+        out += directory
+        if zip64:
+            record = len(out)
+            out += struct.pack("<4sQ2H2L4Q", b"PK\x06\x06", 44, 45, 45, 0, 0, count, count, len(directory), start)
+            out += struct.pack("<4sLQL", b"PK\x06\x07", 0, record, 1)
+        out += struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, count, count, len(directory), start, 0)
+        return bytes(out)
+
+    class WriteOnly:
+        """A stream with no tell or seek, so zipfile's writer sets flag bit 3 on each member and follows
+        its data with a data descriptor."""
+
+        def __init__(self):
+            self.data = bytearray()
+
+        def write(self, chunk):
+            self.data += chunk
+            return len(chunk)
+
+        def flush(self):
+            pass
 
     def patch_directory(blob, index, offset, fmt, value):
         """Rewrite one field of the index-th central directory record, at its offset from the record's
@@ -837,10 +1038,12 @@ def self_test_main():
                             "(got {}: {!r})".format(rc, out))
 
         # 5/5b. a .zip that is not a readable archive is CANNOT EVALUATE, never a skip, whatever the
-        #     suffix's case.
-        for label, name in (("5", "site/downloads/pack.zip"), ("5b", "site/downloads/pack2.ZIP")):
+        #     suffix's case. 5b's content does not open with a ZIP signature, so only the case-insensitive
+        #     suffix match makes it an archive (a case-sensitive match would scan it as text and pass).
+        for label, name, blob in (("5", "site/downloads/pack.zip", b"PK\x03\x04\xff\xfe\x00binary"),
+                                  ("5b", "site/downloads/pack2.ZIP", b"not an archive\xff\xfe\x00binary")):
             files = dict(clean_files)
-            files[name] = b"PK\x03\x04\xff\xfe\x00binary"
+            files[name] = blob
             rc, out = run_capture(tree("zip-corrupt-" + label, files))
             expect_cannot_evaluate(label, "a corrupt archive", rc, out, name, "not a readable ZIP archive")
 
@@ -979,6 +1182,167 @@ def self_test_main():
                                "site/downloads/short.zip!a.txt",
                                "member data does not match its declared size")
 
+        # 5n. a member whose declared compressed bytes carry a second deflate stream after the first:
+        #     zipfile stops at the first stream's end, whose size and CRC the directory declares, so the
+        #     private IP in the second would pass unread; the member must be one complete stream.
+        secret = ("ip " + _PRIVATE_IP + "\n").encode("ascii")
+        files = dict(clean_files)
+        files["site/downloads/twostream.zip"] = raw_zip([entry("a.txt", b"note\n",
+                                                               stored=deflate(b"note\n") + deflate(secret))])
+        rc, out = run_capture(tree("zip-two-streams", files))
+        expect_cannot_evaluate("5n", "a member holding a second deflate stream", rc, out,
+                               "site/downloads/twostream.zip!a.txt", "member data does not match")
+
+        # 5o. bytes the parsed records do not tile are CANNOT EVALUATE naming the archive and the offsets,
+        #     and no member is read: a deflated local entry ahead of a clean archive's members but absent
+        #     from its directory, a ZIP holding the private IP followed by a clean ZIP in one file, a gap
+        #     between two members, and trailing bytes after the end record each hold the private IP only
+        #     in deflated bytes no member stream reads, so the archive's own byte view does not show it;
+        #     two directory records naming one local entry overlap, and an end record declaring a longer
+        #     comment than the file holds runs past its last byte.
+        clean_pack = zip_blob((("SKILL.md", b"# Skill\n"), ("LICENSE", b"Plain licence text.\n")))
+        secret_pack = zip_blob((("a.txt", secret),))
+        hidden = len(deflate(secret))
+        first = 30 + len("a.txt") + len(deflate(b"plain\n"))
+        uncovered = "{} byte(s) at offsets {} to {} belong to no record"
+        for label, name, blob, problem in (
+                ("5o-unlisted", "unlisted.zip",
+                 raw_zip([entry("hidden.txt", secret, listed=0), entry("SKILL.md", b"# Skill\n")]),
+                 uncovered.format(40 + hidden, 0, 39 + hidden)),
+                ("5o-second", "second.zip", secret_pack + clean_pack,
+                 uncovered.format(len(secret_pack), 0, len(secret_pack) - 1)),
+                ("5o-gap", "gap.zip",
+                 raw_zip([entry("a.txt", b"plain\n"), entry("b.txt", b"plain\n", before=deflate(secret))]),
+                 uncovered.format(hidden, first, first + hidden - 1)),
+                ("5o-trailing", "trailing.zip", clean_pack + deflate(secret),
+                 uncovered.format(hidden, len(clean_pack), len(clean_pack) + hidden - 1)),
+                ("5o-overlap", "overlap.zip", raw_zip([entry("a.txt", b"plain\n", listed=2)]),
+                 "the local header of a.txt at offsets 0 to 34 overlaps the record before it"),
+                ("5o-past-end", "pastend.zip", clean_pack[:-2] + b"\x05\x00",
+                 "the end-of-central-directory record and comment at offsets {} to {} runs past the "
+                 "archive's last byte (offset {})".format(len(clean_pack) - 22, len(clean_pack) + 4,
+                                                          len(clean_pack) - 1))):
+            files = dict(clean_files)
+            files["site/downloads/" + name] = blob
+            rc, out = run_capture(tree("zip-" + label, files))
+            expect_cannot_evaluate(label, "an archive whose records do not tile its bytes", rc, out,
+                                   "site/downloads/" + name,
+                                   "the parsed records do not cover the archive's bytes exactly: " + problem)
+            if "site/downloads/{}!".format(name) in out:
+                failures.append("a member was read from an archive whose records do not tile its bytes "
+                                "(case {}; got {}: {!r})".format(label, rc, out))
+
+        # 5p. layouts whose records do tile pass: members written by zipfile to a stream it cannot seek
+        #     (flag bit 3, each member's data followed by a data descriptor with its signature; the third
+        #     written with force_zip64, so a ZIP64 extra field in its local header and 8-byte sizes in its
+        #     descriptor), a data descriptor without its optional signature, members whose local headers
+        #     carry an extra field the directory does not (their data begins past that field), and a ZIP64
+        #     end record and locator ahead of the end record.
+        stream = WriteOnly()
+        with zipfile.ZipFile(stream, "w") as archive:
+            archive.writestr(zipfile.ZipInfo("SKILL.md", (2020, 1, 1, 0, 0, 0)), b"# Skill\n",
+                             compress_type=zipfile.ZIP_DEFLATED)
+            archive.writestr(zipfile.ZipInfo("LICENSE", (2020, 1, 1, 0, 0, 0)), b"Plain licence text.\n",
+                             compress_type=zipfile.ZIP_STORED)
+            with archive.open(zipfile.ZipInfo("wide.txt", (2020, 1, 1, 0, 0, 0)), "w", force_zip64=True) as handle:
+                handle.write(b"plain\n")
+        with zipfile.ZipFile(io.BytesIO(bytes(stream.data))) as archive:
+            if not all(info.flag_bits & 0x08 for info in archive.infolist()):
+                failures.append("the data-descriptor fixture has a member without flag bit 3 (case 5p)")
+        stamp = b"UT\x05\x00\x01\x00\x00\x00\x00"  # an extended-timestamp extra field, 9 bytes
+        for label, name, blob, count in (
+                ("5p-descriptor", "descriptor.zip", bytes(stream.data), 3),
+                ("5p-unsigned-descriptor", "unsigned.zip",
+                 raw_zip([entry("a.txt", b"plain\n", descriptor=struct.pack(
+                     "<3L", zlib.crc32(b"plain\n"), len(deflate(b"plain\n")), 6))]), 1),
+                ("5p-extra", "extra.zip", raw_zip([entry("a.txt", b"plain\n", extra=stamp),
+                                                   entry("b.txt", b"plain\n", zipfile.ZIP_STORED, extra=stamp)]), 2),
+                ("5p-zip64", "zip64.zip", raw_zip([entry("a.txt", b"plain\n")], zip64=True), 1)):
+            files = dict(clean_files)
+            files["site/downloads/" + name] = blob
+            rc, out = run_capture(tree("zip-" + label, files))
+            if rc != 0 or "including 1 ZIP archive(s) with {} member(s) scanned".format(count) not in out:
+                failures.append("an archive whose records tile its bytes expected exit 0 with its {} member(s) "
+                                "scanned (case {}; got {}: {!r})".format(count, label, rc, out))
+
+        # 5q. each member-stream condition, pinned by a member that breaks only it: a deflate stream that
+        #     never reaches its end (a sync flush and no final block; zipfile reads it whole and its CRC
+        #     agrees), a stored member with bytes past its declared size, and a stored and a deflated member
+        #     whose directory declares one byte more than their data holds. Each member holds only clean
+        #     text, so a gate missing the condition passes where each must be CANNOT EVALUATE.
+        for label, name, member in (
+                ("5q-unfinished", "unfinished.zip",
+                 entry("a.txt", b"plain\n", stored=deflate(b"plain\n", final=False))),
+                ("5q-stored-past", "storedpast.zip",
+                 entry("a.txt", b"plain\n", zipfile.ZIP_STORED, stored=b"plain\nmore\n")),
+                ("5q-stored-short", "storedshort.zip", entry("a.txt", b"plain\n", zipfile.ZIP_STORED, size=7)),
+                ("5q-deflated-short", "deflatedshort.zip", entry("a.txt", b"plain\n", size=7))):
+            files = dict(clean_files)
+            files["site/downloads/" + name] = raw_zip([member])
+            rc, out = run_capture(tree("zip-" + label, files))
+            expect_cannot_evaluate(label, "a member that is not exactly its declared data", rc, out,
+                                   "site/downloads/{}!a.txt".format(name), "member data does not match")
+
+        # 5r. the compressed-length check, which the coverage rule pre-empts in a full run (a data span past
+        #     the archive's end never tiles), is pinned on _member_data_matches directly: a directory
+        #     declaring one compressed byte more than the bytes left after a member's complete data.
+        for method in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+            blob = zip_blob((("a.txt", b"plain\n"),), method=method)
+            with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+                info = archive.infolist()[0]
+            cut = blob[:_local_header(blob, info)[0] + info.compress_size]
+            info.compress_size += 1
+            if _member_data_matches(cut, info, b"plain\n"):
+                failures.append("a member declaring compressed bytes past the end of the data matched its "
+                                "content (case 5r, method {})".format(method))
+
+        # 5s. the archive-size bound, just inside, exactly at and just outside it, checked on the stat
+        #     probe's size before the archive's bytes are read: the stat seam reports each size for a small
+        #     clean archive, and the read seam raises for it outside the bound, so a read before the check
+        #     fails the case. Outside is CANNOT EVALUATE under a .zip name and for a ZIP known only by its
+        #     signature (its first four bytes alone read); a text file reported over the bound is still read
+        #     and scanned, since the bound is the archive's alone.
+        module = sys.modules[__name__]
+        real_stat, real_read = module._stat, module._read_bytes
+        limit = MAX_ARCHIVE_FILE_SIZE
+
+        def run_sized(base, name, size, refuse_read):
+            def sized_stat(path):
+                status = real_stat(path)
+                if path.name == name:
+                    return os.stat_result(tuple(status)[:6] + (size,) + tuple(status)[7:])
+                return status
+
+            def bounded_read(path):
+                if path.name == name and refuse_read:
+                    raise OSError("self-test seam: {} was read past the archive-size bound".format(name))
+                return real_read(path)
+            module._stat, module._read_bytes = sized_stat, bounded_read
+            try:
+                return run_capture(base)
+            finally:
+                module._stat, module._read_bytes = real_stat, real_read
+
+        for label, name, size in (("5s-inside", "sized.zip", limit - 1), ("5s-at", "sized.zip", limit),
+                                  ("5s-outside", "sized.zip", limit + 1),
+                                  ("5s-outside-signature", "sized.bin", limit + 1)):
+            files = dict(clean_files)
+            files["site/downloads/" + name] = zip_blob((("a.txt", b"plain\n"),))
+            rc, out = run_sized(tree("zip-" + label, files), name, size, size > limit)
+            if size > limit:
+                expect_cannot_evaluate(label, "an archive over the archive-size bound", rc, out,
+                                       "site/downloads/" + name,
+                                       "a ZIP archive of {} bytes, over MAX_ARCHIVE_FILE_SIZE".format(size))
+            elif rc != 0 or "including 1 ZIP archive(s) with 1 member(s) scanned" not in out:
+                failures.append("an archive of {} bytes (bound {}) expected exit 0 with its member scanned "
+                                "(case {}; got {}: {!r})".format(size, limit, label, rc, out))
+        files = dict(clean_files)
+        files["docs/big.md"] = secret
+        rc, out = run_sized(tree("text-over-archive-bound", files), "big.md", limit + 1, False)
+        if rc != 1 or "docs/big.md:1: private IP (10/8)" not in out:
+            failures.append("a text file over the archive-size bound expected exit 1 with its finding, read "
+                            "and scanned (case 5s; got {}: {!r})".format(rc, out))
+
         # 6. a non-regular file is CANNOT EVALUATE (exit 2, naming it), its content never read.
         #    Deterministic: the stat seam reports a FIFO mode for one fixture file, so the case runs on
         #    every runner (no /dev/null dependency). The read seam RAISES for that file, so a scan that
@@ -989,10 +1353,10 @@ def self_test_main():
         files["docs/fifo.md"] = ("fd " + _PRIVATE_IP + "\n").encode("ascii")
         base = tree("nonreg", files)
         module = sys.modules[__name__]
-        saved_mode = module._stat_mode
-        def _fifo_mode(path, _real=saved_mode):
+        saved_stat = module._stat
+        def _fifo_stat(path, _real=saved_stat):
             if path.name == "fifo.md":
-                return stat.S_IFIFO | 0o644
+                return os.stat_result((stat.S_IFIFO | 0o644,) + tuple(_real(path))[1:])
             return _real(path)
         saved_read6 = module._read_bytes
         def _refuse_fifo_read(path, _real=saved_read6):
@@ -1000,12 +1364,12 @@ def self_test_main():
                 raise OSError("self-test seam: the non-regular fifo.md was content-read; it must be "
                               "classified before any read")
             return _real(path)
-        module._stat_mode = _fifo_mode
+        module._stat = _fifo_stat
         module._read_bytes = _refuse_fifo_read
         try:
             rc, out = run_capture(base)
         finally:
-            module._stat_mode = saved_mode
+            module._stat = saved_stat
             module._read_bytes = saved_read6
         expect_cannot_evaluate("6", "a non-regular file", rc, out, "docs/fifo.md",
                                "not a regular file; its content was never opened")
@@ -1074,9 +1438,13 @@ def self_test_main():
           "a codename in a Latin-1 .txt, a private IP inside the denylist file, a private IP or host path "
           "in a deflated, Latin-1 or UTF-16 ZIP member (named <archive>!<member>:<line>), in a ZIP under "
           "another name, or in an archive comment are each a finding (exit 1); a clean archive passes, "
-          "counted with its members; each archive bound passes just inside and at it and is CANNOT "
+          "counted with its members, and so do records that tile an archive (data descriptors, ZIP64 sizes "
+          "and end records, local extra fields); each archive bound (member count, total declared size, and "
+          "the archive's own size, read by stat before its bytes) passes just inside and at it and is CANNOT "
           "EVALUATE just outside it, with no member read; a corrupt archive (in either suffix case), an "
-          "encrypted, unsupported-method, nested, CRC-failing, undecodable or size-understated member, an injected "
+          "archive whose records do not tile its bytes (an unlisted entry, a second archive, a gap, trailing "
+          "bytes, overlapping records, a comment past the end), an encrypted, unsupported-method, nested, CRC-failing, undecodable or size-misstated "
+          "member, a member with a second deflate stream or one that never ends, an injected "
           "non-regular file (its content never read: its read seam raises if it is) and a symlinked "
           "directory are each CANNOT EVALUATE (exit 2, naming it), never a skip; and a dangling symlink, "
           "an injected unreadable file, and a BOM-declared stream that decodes as neither declared "
