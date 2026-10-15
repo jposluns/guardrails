@@ -370,7 +370,10 @@ def _not_run_vector(failures):
              {"_non_utf8_dir": _rejects_name, "_shallow_clone": _no_shallow}, (_V10_CASE, _V11_CASE)),
             ("V10 builder returns None", {"_non_utf8_dir": _no_dir}, (_V10_CASE,)),
             ("V11 builder returns None", {"_shallow_clone": _no_clone}, (_V11_CASE,))):
-        saved = {name: globals()[name] for name in injected}
+        saved = {name: value for name, value in globals().items() if name in injected}
+        missing = sorted(name for name in injected if name not in saved)
+        if missing:
+            raise KeyError(", ".join(missing))
         globals().update(injected)
         out = io.StringIO()
         try:
