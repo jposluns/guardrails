@@ -1170,7 +1170,10 @@ def _classify_git_entry(store_root_fd, store_root):
 def _git_rev_parse_output(store_root, *options):
     """The whole decoded output of ONE git rev-parse invocation of `options` at `store_root`, asked
     of git itself with an explicit -C binding and a scrubbed environment (every GIT_* variable
-    removed, so an ambient GIT_DIR, GIT_COMMON_DIR, or GIT_WORK_TREE cannot redirect the answer).
+    removed, so an ambient GIT_DIR, GIT_COMMON_DIR, or GIT_WORK_TREE cannot redirect the answer),
+    with trace forced off through the GIT_TRACE2* / GIT_TRACE* variables, which outrank trace2.*
+    config, so an adopter's trace2.eventTarget cannot turn this read into a file write (the
+    toggles _opf_observe._TRACE_OFF pins for init's ignore probe).
     Any failure (missing git, launch failure, timeout, nonzero exit, or undecodable output)
     refuses; the control root is never guessed and never falls back to the repository root. The
     caller (_git_view) splits the output on its record terminators only."""
@@ -1180,6 +1183,8 @@ def _git_rev_parse_output(store_root, *options):
         raise OpLockError("git binary not found on PATH while the store or an enclosing directory "
                           "carries a .git entry; refusing (the control root is never guessed)")
     env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
+    env.update(GIT_TRACE="0", GIT_TRACE_PACKET="0", GIT_TRACE_PERFORMANCE="0", GIT_TRACE_SETUP="0",
+               GIT_TRACE2="0", GIT_TRACE2_EVENT="0", GIT_TRACE2_PERF="0")
     try:
         proc = subprocess.run(
             [git, "--no-replace-objects", "-C", str(store_root), "rev-parse"] + list(options),

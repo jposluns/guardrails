@@ -166,7 +166,7 @@ _ROUTE_BANNED = frozenset(["print", "builtins", "stdout", "stderr",
 # spelling in one function is a violation in another, str.__new__ is permitted
 # in _InitRestoreLine alone, and a binding (an import alias included) of a
 # rostered external base anywhere on the graph or at module level, other than
-# the five pinned module imports, is a violation. The spellings are
+# the seven pinned module imports, is a violation. The spellings are
 # deliberately variable-name-specific (journal._open_parent, touched.out.split):
 # a rename in opf.py fails the gate until this roster is re-reviewed.
 _ROUTE_ALLOWED_REFS = dict(
@@ -193,19 +193,23 @@ _ROUTE_ALLOWED_REFS = dict(
         "_opf_init.INDEX_TYPES", "_opf_init.build_counters",
         "_opf_init.build_index", "_opf_init.build_manifest",
         "_opf_init.build_version", "_opf_init.build_worklog",
+        "_opf_oplock.OpLockError", "_opf_oplock.acquire_init_operation",
+        "_opf_oplock.attach_init_lease", "_opf_oplock.detach_init_lease",
+        "_opf_oplock.release_init_holder", "_opf_oplock.release_operation",
         "_opf_store.DEFAULT_MACHINE_SUBDIR", "_opf_store.LOCAL_POINTER_REL",
         "_opf_store.MANIFEST_NAME", "_opf_store.NOT_ADOPTED",
         "_opf_store.POINTER_REL", "_opf_store.RESOLVED",
         "_opf_store.WORKING_DIRNAME", "_opf_store._close_fd_exc_safe",
         "_opf_store._journal", "_opf_store._journal._close_fd_quietly",
         "_opf_store._open_dir_nofollow", "_opf_store.resolve_store", "all",
-        "any", "ascii", "dict", "documents.extend", "exc.restore_lines",
+        "any", "ascii", "cap._released", "dict", "documents.extend",
+        "exc.restore_lines", "held._released", "held._spent",
         "journal._check_rel", "journal._lstat_at", "journal._lstat_contained",
         "journal._open_parent", "journal.require_containment", "json.dumps",
         "len", "list", "os.fsync", "os.mkdir", "os.path.abspath",
         "path.startswith", "payloads.items", "res.detail", "res.status", "set",
         "str", "str-literal.format", "str-literal.join", "text.encode", "type",
-        "type().__name__", "val.startswith",
+        "type().__name__", "unwind.append", "uuid.uuid4", "val.startswith",
     ]),
     _init_bare=frozenset([
         "_INIT_BARE_SAFE", "all",
@@ -311,9 +315,9 @@ _ROUTE_EXTERNAL_BASES = frozenset([
     "RuntimeError", "UnicodeError", "all", "any", "ascii", "bool", "dict", "enumerate",
     "float", "int", "isinstance", "issubclass", "json", "len", "list", "ord", "os", "set",
     "sorted", "stat",
-    "str", "super", "tuple", "type",
-    "_opf_check", "_opf_emit", "_opf_init", "_opf_observe", "_opf_store",
-    "_opf_write_guard",
+    "str", "super", "tuple", "type", "uuid",
+    "_opf_check", "_opf_emit", "_opf_init", "_opf_observe", "_opf_oplock",
+    "_opf_store", "_opf_write_guard",
 ])
 
 _ROUTE_EXTERNAL_IMPORTS = dict(
@@ -322,6 +326,8 @@ _ROUTE_EXTERNAL_IMPORTS = dict(
     stat=("import", "stat"),
     Path=("from", "pathlib", "Path"),
     _opf_init=("import", "_opf_init"),
+    _opf_oplock=("import", "_opf_oplock"),
+    uuid=("import", "uuid"),
 )
 
 
@@ -913,6 +919,7 @@ def _suite_isolated(invoke):
         from pathlib import PureWindowsPath
         import _opf_check
         import _opf_observe
+        import _opf_oplock
         import _opf_release
         import _opf_schema
         import _opf_store
@@ -1123,6 +1130,8 @@ def _suite_isolated(invoke):
                     (["--root", "--bogus"], "non-empty directory argument"),
                     (["--root", str(parser_root), "--root", str(parser_root)],
                      "--root given more than once"),
+                    (["--root", str(parser_root), "--recover", "--recover"],
+                     "--recover given more than once"),
                 )
                 for rest, reason in parser_vectors:
                     rc, output = call(["init"] + rest)
@@ -1138,7 +1147,17 @@ def _suite_isolated(invoke):
                       "SOURCES created" in output and "NOT yet git-tracked" in output
                       and "git " in output and "Commit" in output
                       and "opf render --write" in output)
-                check("no git mutation", _snapshot(clean / ".git") == git_before)
+                # The one git write is the operation-lock home: the shared init mutex's anchor, which
+                # is never unlinked, with no active record left behind. Literal names, independent of
+                # _opf_oplock's constants. DISCRIMINATOR: the pre-lease init writes nothing under
+                # .git, so the anchor is absent.
+                git_after = _snapshot(clean / ".git")
+                git_changed = {key for key in set(git_before) | set(git_after)
+                               if git_before.get(key) != git_after.get(key)}
+                check("git writes are only the operation-lock home, anchor kept, no active record",
+                      all(key.split("/")[0] == "opf-oplock" for key in git_changed)
+                      and git_after.get("opf-oplock/mutex.lock", ("absent",))[0] == "file"
+                      and "opf-oplock/active.toml" not in git_after)
                 check("no root VERSION", not (clean / "VERSION").exists())
                 check("heading-only changelog",
                       (clean / "CHANGELOG.md").is_file()
@@ -1262,6 +1281,93 @@ def _suite_isolated(invoke):
                 check("deliverable symlink targets untouched (none followed or created)",
                       outside.read_bytes() == b"untouched\n" and not dangling.exists()
                       and not dangling.is_symlink())
+
+                # Spec 5.7 and 9: plain init publishes under the shared init operation mutex, the
+                # anchor the coupled init and adoption take for the same root. Held here by the
+                # harness, it refuses init at the acquisition, after the read-only preflight, and
+                # nothing is written. DISCRIMINATOR: the pre-lease init takes no mutex and
+                # publishes (rc 0).
+                def anchor_free(root):
+                    try:
+                        probe = _opf_oplock.acquire_init_operation(str(root), "fixture-probe")
+                    except _opf_oplock.OpLockError:
+                        return False
+                    _opf_oplock.release_init_holder(probe)
+                    return True
+
+                held_root = make_git("lease-held")
+                held = _opf_oplock.acquire_init_operation(str(held_root), "fixture-holder")
+                try:
+                    before = _snapshot(held_root)
+                    rc, output = run(held_root)
+                finally:
+                    _opf_oplock.release_init_holder(held)
+                check("lease: a held init mutex refuses plain init",
+                      rc == EXIT_ERROR
+                      and "during taking-the-init-operation-mutex: OpLockError(" in output
+                      and inert("held by another process") in output
+                      and "preflight refused; no publication attempted." in output)
+                check("lease: a held init mutex refusal wrote nothing",
+                      _snapshot(held_root) == before)
+
+                # Decision D4: a dead run's leftover active record under the free anchor refuses a
+                # later init until --recover, which clears it only once its holder is confirmed
+                # dead; a live holder's record is never seized. The planted record names this
+                # root's absent machine store, as a run that stopped before its directories
+                # existed leaves it. DISCRIMINATOR: the pre-lease init never reads the record
+                # (rc 0 on the first vector), and an init that ignores --recover keeps refusing.
+                def plant_active(root, pid):
+                    # The fixture acquisition creates the control directory and its anchor with
+                    # the modes the lock requires; the record is then written beside them.
+                    _opf_oplock.release_init_holder(
+                        _opf_oplock.acquire_init_operation(str(root), "fixture-holder"))
+                    record = root / ".git" / "opf-oplock" / "active.toml"
+                    op_id = "00000000-0000-4000-8000-000000000000"
+                    node = os.uname().nodename
+                    record.write_text("\n".join((
+                        "schema = 2",
+                        "op_id = " + json.dumps(op_id),
+                        "holder = " + json.dumps("opf:{}:{}".format(node, pid)),
+                        'operation = "opf-init-plain"',
+                        'acquired_at = "2026-01-01T00:00:00Z"',
+                        "",
+                        "[owner]",
+                        "pid = {}".format(pid),
+                        "uid = {}".format(os.getuid()),
+                        "nodename = " + json.dumps(node),
+                        "session = " + json.dumps(op_id),
+                        'utc = "2026-01-01T00:00:00Z"',
+                        'pid-start = ""',
+                        "",
+                        "[machine_store]",
+                        "path = " + json.dumps(str(root / working / machine_name)),
+                        'dev = "1"',
+                        'ino = "1"',
+                        "")), encoding="utf-8")
+                    return record
+
+                stale_root = make_git("lease-stale-record")
+                dead = subprocess.Popen([sys.executable, "-I", "-c", ""])
+                dead.wait()
+                stale_record = plant_active(stale_root, dead.pid)
+                before = _snapshot(stale_root)
+                rc, output = run(stale_root)
+                check("lease: a dead run's leftover record refuses plain init without --recover",
+                      rc == EXIT_ERROR and inert("stale operation record") in output
+                      and "preflight refused; no publication attempted." in output
+                      and _snapshot(stale_root) == before and stale_record.is_file())
+                rc, output = call(["init", "--root", str(stale_root), "--recover"])
+                check("lease: --recover clears a dead holder's record, then init publishes",
+                      rc == EXIT_OK and valid_sources(stale_root) and not stale_record.exists())
+                live_root = make_git("lease-live-record")
+                live_record = plant_active(live_root, os.getpid())
+                live_bytes = live_record.read_bytes()
+                before = _snapshot(live_root)
+                rc, output = call(["init", "--root", str(live_root), "--recover"])
+                check("lease: --recover never seizes a live holder's record",
+                      rc == EXIT_ERROR and inert("not confirmed dead") in output
+                      and _snapshot(live_root) == before
+                      and live_record.read_bytes() == live_bytes)
 
                 # Symlinked root, containment-isolated: the symlink target is a REAL directory INSIDE
                 # the same git repo, and --root names the sibling symlink. _init_repo's repo-containment
@@ -2151,9 +2257,13 @@ def _suite_isolated(invoke):
                 # #516: a NESTED product root beneath an enclosing repository with search but no read
                 # permission (0111). _init_repo opens the repository root only as a no-follow probe it
                 # closes unread, and _init_same_root only fstat-s its descriptor, so both open
-                # traverse_only: where os.O_PATH exists init proceeds and a search-only root binds.
+                # traverse_only: where os.O_PATH exists the preflight passes and a search-only root
+                # binds. The init operation mutex then refuses that nested root, with nothing written:
+                # the shared lock binds a nested store's path by listing the git toplevel, which needs
+                # read permission there (the residual _opf_oplock._bind_repository_view discloses).
                 # DISCRIMINATORS: the readable open restored at either site refuses EACCES (the nested
-                # init exits 2 in preflight; the identity check raises PermissionError). Mode bits do not
+                # init exits 2 in preflight, never at the mutex; the identity check raises
+                # PermissionError). Mode bits do not
                 # bind uid 0, so that run discloses a skip. Without os.O_PATH the walk keeps its
                 # documented O_RDONLY fallback, so the EACCES refusal is asserted there instead
                 # (fail-closed); the root refusal is compared by its errno (errno.EACCES, never the
@@ -2211,7 +2321,12 @@ def _suite_isolated(invoke):
                           so_moved == ("moved", "root changed since its contained directory was opened"))
                     if hasattr(os, "O_PATH"):
                         check(label + "a nested product root beneath a search-only (0111) enclosing "
-                              "repository initializes", rc == EXIT_OK and valid_sources(so_product))
+                              "repository passes the preflight and is refused at the init mutex, "
+                              "nothing written",
+                              rc == EXIT_ERROR
+                              and "during taking-the-init-operation-mutex: OpLockError(" in output
+                              and inert(os.strerror(errno.EACCES)) in output
+                              and sorted(entry.name for entry in so_product.iterdir()) == [])
                         check(label + "the root identity check binds a search-only (0111) root",
                               so_bound == ("bound",))
                         return
@@ -3176,6 +3291,144 @@ def _suite_isolated(invoke):
                       sorted(entry.name for entry in late_repo.iterdir())
                       == [".git", "CHANGELOG.md"]
                       and (late_repo / "CHANGELOG.md").read_bytes() == b"late\n")
+
+                # Spec 5.7: every source create runs with .working/toml/lease.toml and its
+                # control-side active record present, both naming the plain init operation; after
+                # success neither remains and the anchor is free again, which this in-process
+                # driver can see (a child process frees it on exit). DISCRIMINATOR: the pre-lease
+                # init creates every source with no lease.
+                lease_repo = make_git("lease-during-publication")
+                lease_real_create = opf._init_create
+                lease_seen = []
+
+                def lease_recording_create(root_fd, relpath, data):
+                    # Both records are canonical emitter output, so the top-level operation key is
+                    # matched as its exact line (no TOML parse in the harness).
+                    lease_path = lease_repo / working / machine_name / "lease.toml"
+                    active_path = lease_repo / ".git" / "opf-oplock" / "active.toml"
+                    operation_line = 'operation = "opf-init-plain"'
+                    lease_seen.append(
+                        lease_path.is_file() and active_path.is_file()
+                        and operation_line in lease_path.read_text(encoding="utf-8").splitlines()
+                        and operation_line in active_path.read_text(encoding="utf-8").splitlines())
+                    return lease_real_create(root_fd, relpath, data)
+
+                rc, output = drive_cmd_init(lease_repo, dict(_init_create=lease_recording_create))
+                check("lease: lease.toml and its active record are held at every source create",
+                      rc == EXIT_OK and len(lease_seen) == len(expected_paths) and all(lease_seen))
+                check("lease: nothing is held after success (no lease, no active record, a free "
+                      "anchor)",
+                      valid_sources(lease_repo)
+                      and not (lease_repo / ".git" / "opf-oplock" / "active.toml").exists()
+                      and anchor_free(lease_repo))
+
+                # Under the mutex the absence checks run again in the preflight's words. A file a
+                # cooperating writer lands between the preflight and the acquisition (planted here
+                # from the preflight's history scan, its last read-only step) is refused with the
+                # deliverable wording; VERSION is no payload, so only the explicit re-read catches
+                # it. The refusal releases the mutex. DISCRIMINATOR: the pre-lease init publishes
+                # beside a planted VERSION (rc 0) and reports a planted CHANGELOG.md only as a
+                # partial publication; without the deliverable re-read under the mutex, VERSION
+                # publishes and CHANGELOG.md is refused only in the generic destination wording.
+                real_scan = opf._init_no_prior_store
+                for plant_name, plant_bytes in (("VERSION", b"2.4.0\n"),
+                                                ("CHANGELOG.md", b"late\n")):
+                    plant_repo = make_git("lease-recheck-" + plant_name.lower().replace(".", "-"))
+
+                    def planting_scan(git_arg, repo_arg, root_arg, plant_repo=plant_repo,
+                                      plant_name=plant_name, plant_bytes=plant_bytes):
+                        result = real_scan(git_arg, repo_arg, root_arg)
+                        if not (plant_repo / plant_name).exists():
+                            (plant_repo / plant_name).write_bytes(plant_bytes)
+                        return result
+
+                    rc, output = drive_cmd_init(plant_repo,
+                                                dict(_init_no_prior_store=planting_scan))
+                    check("lease: a " + plant_name + " landing before the mutex is refused under it",
+                          rc == EXIT_ERROR
+                          and "during re-checking-the-destinations-under-the-mutex: RuntimeError("
+                          in output
+                          and inert("an existing " + plant_name + " sits at") in output
+                          and "preflight refused; no publication attempted." in output)
+                    check("lease: that " + plant_name + " refusal published nothing and left "
+                          "nothing held",
+                          sorted(entry.name for entry in plant_repo.iterdir())
+                          == [".git", plant_name]
+                          and not (plant_repo / ".git" / "opf-oplock" / "active.toml").exists()
+                          and anchor_free(plant_repo))
+
+                # The history scan runs again under the mutex: a store committed and then deleted
+                # between the preflight scan and the acquisition (committed here from the first
+                # scan, a stand-in for a concurrent writer) is refused as a prior store, nothing is
+                # published, and the mutex is released. DISCRIMINATOR: without the re-scan, init
+                # zero-seeds a fresh store over that history (rc 0), which spec 8.2 forbids.
+                race_repo = make_git("lease-recheck-history")
+                race_calls = []
+
+                def committing_scan(git_arg, repo_arg, root_arg):
+                    race_calls.append(root_arg)
+                    result = real_scan(git_arg, repo_arg, root_arg)
+                    if len(race_calls) == 1:
+                        (race_repo / working / machine_name).mkdir(parents=True)
+                        (race_repo / working / machine_name
+                         / _opf_store.MANIFEST_NAME).write_bytes(b"[opf]\n")
+                        (race_repo / _opf_store.POINTER_REL).write_bytes(
+                            b'[store]\ntarget = "dir:."\n')
+                        git_call(race_repo, ["add", "-A"])
+                        git_call(race_repo, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                             "commit", "-q", "-m", "a store"])
+                        git_call(race_repo, ["rm", "-r", "-q", "--", working,
+                                             _opf_store.POINTER_REL])
+                        git_call(race_repo, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                             "commit", "-q", "-m", "drop the store"])
+                    return result
+
+                rc, output = drive_cmd_init(race_repo, dict(_init_no_prior_store=committing_scan))
+                check("lease: a prior store committed before the mutex is refused by the re-scan "
+                      "under it",
+                      rc == EXIT_ERROR and len(race_calls) == 2
+                      and "during checking-git-history-for-a-prior-store" in output
+                      and "prior store" in output
+                      and "preflight refused; no publication attempted." in output)
+                check("lease: the re-scan refusal published nothing and left nothing held",
+                      sorted(entry.name for entry in race_repo.iterdir()) == [".git"]
+                      and not (race_repo / ".git" / "opf-oplock" / "active.toml").exists()
+                      and anchor_free(race_repo))
+
+                # A release failure is reported beside the failure being unwound, on its own
+                # rendered line, never instead of it; after a complete publication a failed final
+                # release is a failure, never exit 0. The injected release closes the holder for
+                # real first, so nothing stays held. DISCRIMINATOR: the pre-lease init releases
+                # nothing (no unwind line, and the clean root exits 0); an unwind that swallowed
+                # the error drops the line, and one that raised it would replace the refusal.
+                real_release = _opf_oplock.release_init_holder
+
+                def failing_release(holder):
+                    real_release(holder)
+                    raise _opf_oplock.OpLockError("injected release failure")
+
+                unwind_repo = make_git("lease-unwind-release-failure")
+                with mock.patch.object(_opf_oplock, "release_init_holder", failing_release):
+                    rc, output = drive_cmd_init(unwind_repo, dict(
+                        _init_no_prior_store=lambda git_arg, repo_arg, root_arg: (
+                            (unwind_repo / "VERSION").write_bytes(b"2.4.0\n")
+                            if not (unwind_repo / "VERSION").exists() else None)))
+                check("lease: a release failure while a refusal unwinds is reported beside it",
+                      rc == EXIT_ERROR
+                      and "opf init: releasing the operation lock failed while this failure "
+                      "unwound: " + inert("injected release failure") in output
+                      and inert("an existing VERSION sits at") in output
+                      and "preflight refused; no publication attempted." in output
+                      and anchor_free(unwind_repo))
+                final_repo = make_git("lease-final-release-failure")
+                with mock.patch.object(_opf_oplock, "release_init_holder", failing_release):
+                    rc, output = drive_cmd_init(final_repo, {})
+                check("lease: a failed final release after publication exits 2, never 0",
+                      rc == EXIT_ERROR
+                      and "during releasing-the-init-operation-mutex: OpLockError(" in output
+                      and inert("injected release failure") in output
+                      and "publication may be partial" in output
+                      and anchor_free(final_repo))
 
                 pp_repo = make_git("partial'$(touch PWNED)" + '"' + "`;#")
 
