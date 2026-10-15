@@ -941,12 +941,16 @@ CONFIG_MEMBER_BOUNDS = {
     # wall on the pre-fix tree and 1345 s with its leg bounds, both passed; the 1200 s default was
     # reached in all three config lanes on three consecutive runs at that load.
     # MEASURED (2026-10-14, plain, load5 about 20 to 24 on the same 24-CPU host): with the member's
-    # added cleanup vectors one complete run took 1497 s wall and passed.
-    # ESTIMATED (the same load-proportional assumption): 3600 s, about 2.4 times that longest
-    # measured run, covers load5 up to about 58.
+    # added cleanup vectors one complete run took 1497 s wall and passed. That run predates the
+    # member's import-batch leg and its re-measured leg table, so it no longer sizes this bound.
+    # MEASURED (2026-10-15, plain, on a shared 24-CPU host, load5 22.8 at the start and 32.6 at the
+    # end), at the member's current legs, leg table and vectors: one complete run took 1667.7 s wall
+    # and passed.
+    # ESTIMATED (the same load-proportional assumption): 3600 s, about 2.2 times that run, covers
+    # load5 up to about 49 scaled from the run's starting load5 (about 70 from its ending load5).
     # DELIBERATE SHORTER DEADLINE: 3600 s sits far BELOW this member's own worst case (its per-leg
     # bounds alone sum to 8839 s, about 2.5 hours, and its self-test's worst case with the negative
-    # leg, cleanup deadlines and vectors is 10807 s; see _LEG_CEILING_S and _job_worst_case_s in the
+    # leg, cleanup deadlines and vectors is 10877 s; see _LEG_CEILING_S and _job_worst_case_s in the
     # member itself), exactly as the default's comment above sanctions: this lane owns no member's
     # verdict, and cutting a stalled rerun short is cannot-evaluate, never a pass or a fail of the
     # member.

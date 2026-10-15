@@ -120,12 +120,26 @@ _SUBSET = [
 # that changes opf/ CARRIES THESE FIGURES FORWARD AS INFERRED, not measured, until the legs are
 # re-measured at the refreshed tree.
 # _LOAD_HEADROOM is the allowance for a slower or more loaded host than that run's. The multiplier is
-# an INFERENCE, not a measurement: the host carried other work during the run, but a host loaded beyond
-# it adds contention these ceilings do not hold; a leg that outgrows its bound trips it (exit 2,
-# fail-closed), never passes clean. One loaded observation checks it: a run of opf.py --self-test on a
-# loaded host, at another tree, took 1348.7 s, 2.78 times this table's 485.6 s, and 3 x 486 = 1458 s
-# covers it by 109.3 s. The multiplier is capped by the job fit (_job_worst_case_s against the 21600 s
-# default job limit): on this table the worst case is 20506 s at 3 and 22702 s at 4.
+# an INFERENCE, not a measurement, and no observation checks it: the host carried other work during the
+# run, but a host loaded beyond it adds contention these ceilings do not hold, and nothing here shows
+# that such contention slows every leg alike. A leg that outgrows its bound trips it (exit 2,
+# fail-closed), never passes clean. Two larger figures bear on it. Both were REPORTED during work on
+# another change and measured at that change's tree (another branch; no revision, date or host was
+# recorded). Both are UNVERIFIED: neither has been reproduced, and neither checks the multiplier.
+#   * opf.py --self-test took 1348.7 s on a loaded host, 2.78 times this table's 485.6 s. Were this
+#     tree's run that slow, 3 x 486 = 1458 s would cover it by 109.3 s.
+#   * adopt-apply's self-test took 812.8 s inside a loaded opf.py --self-test run (opf.py runs the
+#     same _opf_adopt_apply.self_test in-process), about 99 times this table's 8.2 s. Were the
+#     standalone opf-adopt-apply-selftest leg that slow, slowdown under load would be far from uniform,
+#     and the leg would trip its 60 s bound: exit 2, a loud refusal to evaluate, never a false pass.
+# MEASURED against the second figure on 2026-10-15, at this table's opf/ tree, plain, on a shared
+# 24-CPU host, each run against a copy of opf/ alone as the gate runs it: inside one opf.py
+# --self-test run (446.6 s end to end, exit 0, load5 about 25) adopt-apply's self-test took 7.4 s,
+# and four standalone runs of it, two just before and two just after, took 7.7 to 7.9 s (load5 24.2 to
+# 25.1). That is one run at one load: it shows no in-process slowdown here, and says nothing about the
+# heavier load or the host behind the reported figures.
+# The multiplier is capped by the job fit (_job_worst_case_s against the 21600 s default job limit):
+# on this table the worst case is 20576 s at 3 and 22772 s at 4.
 _LEG_CEILING_S = {
     "opf-homes-selftest": 91,  # measured: 90.1 s at load5 13.7
     "opf-homes-contract": 1,  # measured: 0.4 s at load5 13.9
@@ -163,19 +177,31 @@ _LAUNCH_MARGIN_S = 60
 _DRAIN_MARGIN_S = 10
 # The floor equals _LAUNCH_MARGIN_S, which the deliberate-deadline term already reaches for every leg, so
 # it adds nothing while the two stay equal; it keeps the lower limit explicit should the launch margin
-# change. At the former 120 s floor this table's job worst case is 22166 s at a headroom of 3, over the
-# job limit, and no single multiplier both covers the 1348.7 s run above (that needs at least 2.776) and
-# fits the job (that allows at most 2.737).
+# change. The self-test discriminates it all the same: it passes _leg_bounds a launch margin one second
+# below the floor and requires every leg whose other terms then sit below the floor to be raised to
+# exactly the floor. At the former 120 s floor this table's job worst case is 22236 s at a headroom of
+# 3, over the job limit, and no single multiplier both covers the reported 1348.7 s figure above (that
+# needs at least 2.776) and fits the job (that allows at most 2.705).
 _MIN_LEG_BOUND_S = 60
 
 _CI_WORKFLOW = Path(".github") / "workflows" / "quality.yml"
 _CI_JOB = "opf-closure"
 _CI_DEFAULT_JOB_MINUTES = 360  # the GitHub Actions limit for a hosted-runner job that sets no timeout-minutes
 _CI_SETUP_ALLOWANCE_S = 600    # checkout with full history and setup-python, before the gate steps start
-_VECTOR_ALLOWANCE_S = 240      # the self-test step's registration, verdict, table, scan, CI-read and
-                               # time-scaled stub checks, the cleanup doubles, the kill vectors
-                               # (termination and its marker window, leader reap, partial output, the
-                               # runner's cleanup report) and their waits for the escapee included
+# _VECTOR_ALLOWANCE_S is the job's work that no leg bound covers: the self-test step's registration,
+# verdict, table, floor, scan, CI-read and time-scaled stub checks, the cleanup doubles, the kill vectors
+# (termination and its marker window, leader reap, partial output, the runner's cleanup report) and
+# their waits for the escapee, plus the opf/ copy and bound scan of each sweep (the self-test's positive
+# and negative legs and the live gate step). It is sized in two parts:
+#   * the deadlines those vectors hold on a passing run, READ FROM SOURCE, sum to 269 s: the half-ceiling
+#     kill 11 s, the scaled run 6 s, the hang under 36 s, termination 52 s, the two escape runs 104 s,
+#     the runner's cleanup report 57 s and the cleanup doubles 3 s;
+#   * the work no deadline bounds (the bound checks and wait scans, and each sweep's copy and bound
+#     scan) MEASURED at most 12.8 s in three runs on 2026-10-15 (plain, load5 about 23 to 26 on a
+#     shared 24-CPU host; the whole vector phase took 43.7 to 44.9 s), given the legs' 3x headroom:
+#     38.4 s.
+# 269 + 38.4 = 307.4 s, rounded up to 310 s.
+_VECTOR_ALLOWANCE_S = 310
 
 
 class _BoundError(Exception):
@@ -250,10 +276,13 @@ def _self_test_modules(opf_py):
     raise _BoundError("{} has no _self_tests() registry naming helper self-tests".format(opf_py))
 
 
-def _leg_bounds(tools_dir, ceilings=None):
+def _leg_bounds(tools_dir, ceilings=None, launch_margin_s=None):
     """{leg name: (bound_s, ceiling_s, declared waits sum_s)} for every subset leg, derived from the
-    sources under tools_dir. Raises _BoundError (fail-closed) for a leg with no ceiling."""
+    sources under tools_dir. Raises _BoundError (fail-closed) for a leg with no ceiling. ceilings and
+    launch_margin_s default to _LEG_CEILING_S and _LAUNCH_MARGIN_S (the self-test passes a table
+    missing a row, and a launch margin below the floor so that the floor term must raise a bound)."""
     ceilings = _LEG_CEILING_S if ceilings is None else ceilings
+    margin = _LAUNCH_MARGIN_S if launch_margin_s is None else launch_margin_s
     tools_dir = Path(tools_dir)
     bounds = {}
     for name, script, _args in _SUBSET:
@@ -264,7 +293,7 @@ def _leg_bounds(tools_dir, ceilings=None):
         if script == "opf.py":
             sources.extend(tools_dir / module for module in _self_test_modules(tools_dir / script))
         declared = _declared_wait_s(sources)
-        bound = max(_MIN_LEG_BOUND_S, _LOAD_HEADROOM * ceiling, math.ceil(declared) + _LAUNCH_MARGIN_S)
+        bound = max(_MIN_LEG_BOUND_S, _LOAD_HEADROOM * ceiling, math.ceil(declared) + margin)
         bounds[name] = (bound, ceiling, declared)
     return bounds
 
@@ -294,7 +323,8 @@ def _job_worst_case_s(bounds, negative_bound_s):
     """The opf-closure CI job's worst case in seconds: two subset sweeps (the self-test's positive leg
     and the live gate step), the self-test's negative leg, ONE cleanup deadline (_DRAIN_MARGIN_S, the
     drain and the leader reap sharing it) for every leg that can be killed (each leg of both sweeps and
-    the negative leg), the self-test's vectors, and the job's setup."""
+    the negative leg), the work outside every leg bound (_VECTOR_ALLOWANCE_S: the self-test's vectors
+    and each sweep's copy and bound scan), and the job's setup."""
     kills = 2 * len(_SUBSET) + 1
     return (2 * sum(bounds[name] for name, _script, _args in _SUBSET) + negative_bound_s
             + kills * _DRAIN_MARGIN_S + _VECTOR_ALLOWANCE_S + _CI_SETUP_ALLOWANCE_S)
@@ -726,14 +756,16 @@ def _bounds_self_test(root):
     live = dict((name, row[0]) for name, row in required.items())
     # The expectation is recombined here from the ceiling table and the wait scan, independently of
     # _leg_bounds, so a _leg_bounds that drops a term (the headroom, the wait sum) is a named fault,
-    # not a tautology; dropping the floor changes no bound while it equals the launch margin.
-    needs = {}
+    # not a tautology. Dropping the floor changes no LIVE bound while it equals the launch margin; the
+    # lowered-margin vector below is what discriminates the floor term.
+    needs, waits = {}, {}
     for name, script, _args in _SUBSET:
         sources = [tools_dir / script]
         if script == "opf.py":
             sources.extend(tools_dir / module for module in _self_test_modules(tools_dir / script))
+        waits[name] = math.ceil(sum(_declared_wait_sites(sources)))
         needs[name] = max(_MIN_LEG_BOUND_S, _LOAD_HEADROOM * _LEG_CEILING_S[name],
-                          math.ceil(sum(_declared_wait_sites(sources))) + _LAUNCH_MARGIN_S)
+                          waits[name] + _LAUNCH_MARGIN_S)
     faults = _bound_faults(live, needs)
     if faults:
         raise AssertionError("closure/leg-bounds-cover-their-work: " + "; ".join(faults))
@@ -759,6 +791,41 @@ def _bounds_self_test(root):
             raise AssertionError("closure/leg-bounds-mutant (need{:+d}): {!r}".format(delta, got))
     print("RED mutant bound (one second below the independent need of {}) -> named fault; at and one "
           "above the need -> clean".format(leg))
+    # The floor term, discriminated. The launch margin passed to _leg_bounds is LOWERED to one second
+    # below _MIN_LEG_BOUND_S (the module constant untouched): every leg whose headroom and wait-sum
+    # terms both sit below the floor must then be raised to exactly the floor, so a _leg_bounds that
+    # dropped the floor term is a named fault here. At the floor and one second above it the wait-sum
+    # term reaches the floor by itself (the max is tested at and beside its boundary). The lowered case
+    # must raise at least one leg, else the vector discriminates nothing: a named fault, never a pass.
+    floored = []
+    for margin in (_MIN_LEG_BOUND_S - 1, _MIN_LEG_BOUND_S, _MIN_LEG_BOUND_S + 1):
+        lowered = dict((name, row[0]) for name, row in
+                       _leg_bounds(tools_dir, launch_margin_s=margin).items())
+        others = dict((name, max(_LOAD_HEADROOM * _LEG_CEILING_S[name], waits[name] + margin))
+                      for name in names)
+        want = dict((name, max(_MIN_LEG_BOUND_S, others[name])) for name in names)
+        raised = sorted(name for name in names if others[name] < _MIN_LEG_BOUND_S)
+        floor_faults = _bound_faults(lowered, want) + [
+            "{}: bound {}s, not raised to exactly the {}s floor".format(name, lowered[name],
+                                                                         _MIN_LEG_BOUND_S)
+            for name in raised if lowered[name] != _MIN_LEG_BOUND_S]
+        if floor_faults:
+            raise AssertionError("closure/floor-raises-a-bound (launch margin {}s): {}".format(
+                margin, "; ".join(floor_faults)))
+        if margin < _MIN_LEG_BOUND_S:
+            if not raised:
+                raise AssertionError("closure/floor-not-discriminated: at a launch margin of {}s no "
+                                     "leg's other terms sit below the {}s floor".format(
+                                         margin, _MIN_LEG_BOUND_S))
+            floorless = sorted(fault.split(":", 1)[0] for fault in _bound_faults(others, want))
+            if floorless != raised:
+                raise AssertionError("closure/floorless-bounds-not-named: named {!r}, want {!r}".format(
+                    floorless, raised))
+            floored = raised
+    print("RED a launch margin one second below the {}s floor -> the floor raises {} leg(s) to exactly "
+          "that floor ({}), and the same bounds without the floor term are named for exactly those "
+          "legs; at the floor and one second above it -> every bound covers its recombined need".format(
+              _MIN_LEG_BOUND_S, len(floored), ", ".join(floored)))
     # The former flat 600 s bound is refused for exactly the legs whose table-derived need exceeds it,
     # an expectation derived from the live table, never from a recorded constant. LIMIT: this vector
     # exercises only the have-below-need comparison over the live needs (the mutant above already tests
@@ -1461,8 +1528,9 @@ def _negative_verdict_self_test():
 
 def self_test_main():
     """Prove the gate fails without the self-containment property (change-carries-check). The bound and
-    verdict legs run first and fast: the per-leg bounds cover each leg's table-derived need and fit the
-    CI job, time-scaled stub legs show a flat bound below the recorded work killing a correct leg while
+    verdict legs run first and fast: the per-leg bounds cover each leg's table-derived need (the floor
+    term included, shown raising bounds under a launch margin lowered below it) and fit the CI job,
+    time-scaled stub legs show a flat bound below the recorded work killing a correct leg while
     a hang is still cut off and named (descendants that stayed in the leg's process group included),
     the post-kill cleanup closes the pipe and names what it could not complete on every path the
     cleanup doubles script (a failed group kill, whether or not the leader kill was delivered; a drain
