@@ -47,8 +47,11 @@ question-list template fixes them:
   Anything else is CANNOT_EVALUATE naming the line: text before Q1., a missing, repeated or out-of-order
   "QN.", a "QN." past Q{m}., a "QN." inside the findings section, a "QN." inside a fenced block, a
   second findings line, a VERDICT or QA-COMPLETE line out of place (a line starting "Verdict:" inside an
-  answer is the VERDICT line), text after QA-COMPLETE (a second harness line, or one that is not
-  exact, included), and a delivery that ends early. Inside an answer or the findings section every
+  answer is refused at its own line by the letter-skeleton sweep below, or, when it is the
+  delivery's last VERDICT line before QA-COMPLETE, read as the VERDICT line, where a missing answer
+  is refused naming it), text between the VERDICT line and QA-COMPLETE, text after QA-COMPLETE (a
+  second harness line, or one that is not exact, included), and a delivery that ends early. Inside an
+  answer or the findings section every
   other line (a numbered list, a heading, a grade word such as MAJOR, a line starting WORKER_STATUS) is
   content: it moves no boundary and its quotes and file references are checked like any other.
   Also CANNOT_EVALUATE naming the line, anywhere in the body:
@@ -95,19 +98,28 @@ question-list template fixes them:
     unchanged; the canonical pair is found by position from the delivery's end, so a second
     VERDICT line of any value, plain or disguised, is refused at its own line). The skeleton is
     taken twice, from the whole decoded line and from the line with link targets removed
-    (_without_link_targets: an inline "](...)" destination, an "<...>" autolink or tag, a
-    "[label]: target" definition's target), and a match in either reading refuses the line, so
-    a boundary carried as link text ("[QA-COMPLETE](https://x)"), split around a destination
-    ("[VER](https://x)DICT: ..."), or spelled inside a removed target ("<verdict:hold>") is
-    refused. ONE fail-closed sweep over every body line before any block is segmented: ordinary
+    (_without_link_targets: an inline link's destination and title read as CommonMark reads them
+    on one line, balanced nested parentheses, quoted titles and character references included; a
+    full reference link's "[label]"; an "<...>" autolink or tag without attributes; a
+    "[label]: target" definition's target; the targets are found on the raw line and each kept
+    piece is decoded on its own), and a match in either reading refuses the line, so a boundary
+    carried as link text ("[QA-COMPLETE](https://x)"), split around a destination or title
+    ("[VER](https://x 'a)b')DICT: ..."), split around a reference label ("[VER][r]DICT: ..."),
+    or spelled inside a removed target ("<verdict:hold>") is refused; that reading's limits (one
+    line read at a time; no definition, code span, autolink or raw HTML seen) are listed where it
+    is defined. ONE fail-closed sweep over every body line before any block is segmented: ordinary
     text, fenced and indented code content, fence opening lines (info strings included) and
     blockquote lines alike, so an encoded, emphasised, control-padded, escape-masked or fenced
     boundary ("VERDICT&#58; HOLD", "V*ER*DICT: BLOCKERS FOUND", "__VERDICT__: BLOCKERS FOUND",
     "QA&#45;COMPLETE" inside any fence, a U+0001 inside either word), duplicated or not, is
     refused, never read as content. DISCLOSED FALSE-REFUSAL BOUNDARY: both tests are prefix
     tests, so ordinary prose or code whose visible letters begin a boundary word ("Verdict no.
-    2: blockers remain.", "VERDICT_NO_BLOCKERS = False") is refused on purpose, a tested
-    policy; a mention later in the line ("the verdict is clear") stays content.
+    2: blockers remain.", "VERDICT_NO_BLOCKERS = False", "QA COMPLETED tasks:") is refused on
+    purpose, a tested policy; a mention later in the line ("the verdict is clear") stays content.
+    Letters a renderer does not show count too: the whole-line reading keeps a link destination's
+    letters ("[1](#verdict-rules) explains the rule." is refused), and the link-stripped reading
+    drops an autolink's shown target ("<https://example.invalid/run/5> verdict is clear" is
+    refused).
   * A VERDICT value holding a whitespace separator other than space or tab (U+001C and U+0085
     included): str.split would fold it into a clean verdict, so the value is refused, never
     normalised.
@@ -216,10 +228,12 @@ LIMITS. An input file is read up to MAX_INPUT_BYTES (16 MiB); a delivery is pars
 size (the self-test runs, in a capped child each under RUNTIME_CAP_SECONDS, a 16 MiB backtick run after a
 quote, a 16 MiB run of inch marks in the last answer, a 16 MiB whitespace run on the VERDICT line and a
 16 MiB zero-width-space run, digit run and U+FDFA ligature run (the longest NFKC expansion, 18
-characters; bare and after a leading Q) on marker-shaped lines; the 8a61dfb9 forms of the code-span
-and VERDICT scanners exceed that cap on the backtick and whitespace
-runs). At most MAX_QUOTES quotes are checked; each costs at most one pass over the tree's blobs, which
-are read into memory (bounded at MAX_TREE_BYTES) only when a quote needs a tree-wide search or a failure
+characters; bare and after a leading Q) on marker-shaped lines, and 16 MiB runs of "](" and of "[]("
+with no ")" on one line; the 8a61dfb9 forms of the code-span and VERDICT scanners exceed that cap on the
+backtick and whitespace runs, and the earlier link-target pattern (_BACKTRACKING_INLINE_DESTINATION_RE,
+which rescans to the line's end from every "](") on the "](" run). At most MAX_QUOTES quotes are
+checked; each costs at most one pass over the tree's blobs, which are read into memory (bounded at
+MAX_TREE_BYTES) only when a quote needs a tree-wide search or a failure
 needs its diagnostic. The brief's question text is joined line by line, which is not linear in a very
 long question.
 
@@ -250,9 +264,12 @@ tree; findings written after the last answer without the exact "## Findings" lin
 bulleted "- MAJOR:", "### Findings" or "Findings:") are read as text of the last answer, so their words
 can answer a question that does not ask for a quote and their quotes can answer one that does (each
 quote still held to that answer's files); an answer word need not answer the question (only an exact restatement is caught); the boundary
-skeleton keeps ASCII letters only, so a boundary spelled with non-ASCII letters that render like
-ASCII letters (a homoglyph: Cyrillic, fullwidth or mathematical letter forms) keeps no skeleton
-letter and stays content, the skeleton residual. False FAIL: a
+skeleton keeps ASCII letters only, so a non-ASCII letter that renders like an ASCII one (a
+homoglyph: Cyrillic, fullwidth or mathematical letter forms) adds nothing to the skeleton, and a
+boundary spelled with one or more of them stays content unless the line's remaining ASCII letters
+begin a boundary word (the skeleton is empty only when the line holds no ASCII letter at all), the
+skeleton residual; the link-stripped reading of the skeleton reads one line at a time and sees no
+definition, code span, autolink or raw HTML, with the limits _without_link_targets lists. False FAIL: a
 double-quoted word used as a scare quote ("belt and braces"), not an example in "(e.g. ...)", is held to
 the tree; a quote of the brief's own text is held to the tree like any other; an answer that names a
 file absent from the tree its question does not name (a placeholder path without a placeholder
@@ -292,20 +309,28 @@ list marker, the question marker, pin matching, repeated pins, commit-only pins,
 bounds, the over-long reference pre-scan (live through the CLI, in fenced content and in fence
 info strings included), the letter-skeleton boundary refusal (encoded, emphasised, control-padded,
 escape-masked, semicolonless and fenced forms, a VERDICT line of another value, plain or encoded,
-link-text, link-split, autolink-split and fenced reference-definition forms, and the two disclosed
-false-refusal policy rows, live through the CLI with the vector line number asserted, plus prose
-and code acceptance controls and a flip/ check for the sweep and one for the link-target
-removal), the noncharacter decode
-readings, the escape-aware legacy branch, the
+a QA-COMPLETE line with letters after the word, link-text, link-split, single-quoted-title,
+entity-encoded ")", nested-parenthesis, full-reference-link, autolink-split and fenced
+reference-definition forms, and the two disclosed false-refusal policy rows, live through the CLI
+with the vector line number asserted, plus prose and code acceptance controls and a flip/ check
+for the sweep, one for the link-target removal and one for the definition-target removal), the
+noncharacter decode readings, the escape-aware legacy branch, the
 verdict-value separator refusal, the missing-Cc-clause static guard, CRLF
 transport, indented code blocks, ambient GIT_ variables, replace refs, blob re-hashing on both read
-paths, the pinned tree and both runtime scanners; a recording seam also shows the NFKC input for the
+paths, the pinned tree and the three runtime scanners (code spans, the VERDICT line and link
+targets); a recording seam also shows the NFKC input for the
 two U+FDFA runtime fixtures is the bounded head only (whole-remainder normalisation fails those two
-checks on any host, however fast). These have a fixture but no flip/ check, since they
+checks on any host, however fast). The prefix form of the QA-COMPLETE test has a CLI fixture whose
+letters run past the word ("QA COMPLETED tasks:"), which an exact test would pass, but no flip/
+check. These have a fixture but no flip/ check, since they
 sit inside the parser's loop or another guard also refuses the same input: each closed-shape refusal
 (missing, repeated, out-of-order and extra answers, text before Q1., a heading in the findings
-section, a second findings line, VERDICT and QA-COMPLETE placement, a "Verdict:" line inside an
-answer, a second harness status line, a closing harness line that is not the last), raw HTML tags, a
+section, a second findings line, VERDICT and QA-COMPLETE placement, a non-boundary line between
+the VERDICT line and QA-COMPLETE (asserted with its wording and line), the "Verdict:" hint of a
+missing answer, reached when the delivery's VERDICT line stands inside an answer (asserted with its
+wording and line), a second harness status line, a closing harness line that is not the last), a
+"Verdict:" line inside an answer that is not the delivery's last VERDICT line (refused by the
+letter-skeleton sweep at its own line, asserted with that line), raw HTML tags, a
 fence after a tab and a closing fence after a tab, the other marker forms (non-ASCII digits, a
 zero-width or default-ignorable character, indentation, bold, rendered backslash escapes and
 character references (semicolon-terminated and the legacy semicolonless forms alike), ordered-list
@@ -1134,31 +1159,199 @@ _SKELETON_STRIP_RE = re.compile(r"[^A-Za-z]+")
 # never by content.
 _VERDICT_SKELETON = "verdict"
 _COMPLETE_SKELETON = "qacomplete"
-# Link targets the skeleton's second reading removes, each a bounded textual pattern: a
-# reference definition's target (the text after "[label]:" to the line's end), an inline
-# destination with any title ("](" to its first ")"), and an angle-bracketed run with no
-# whitespace ("<" to its first ">": an autolink; a raw HTML tag is refused outside fences before
-# this sweep runs and is removed here only inside them, which errs toward refusing).
+# Link targets the skeleton's second reading removes (_without_link_targets), read from the raw
+# line. A reference definition's target: the text after a leading "[label]:" to the line's end.
+# The label's letters lead the whole-line skeleton, so under the prefix tests a label that begins
+# a boundary word is refused by that reading already; removing the target changes the
+# link-stripped reading's result only where an angle run opened inside the label would otherwise
+# close inside the target (the fenced angle-run self-test row holds that case, and the refusal it
+# adds is of literal code text whose rendered letters begin no boundary word).
 _DEFINITION_TARGET_RE = re.compile(r"^([ \t]*\[[^\]]*\][ \t]*:).*$")
-_INLINE_DESTINATION_RE = re.compile(r"\]\([^)]*\)")
+# An angle-bracketed run with no whitespace ("<" to its first ">"): an autolink, or an HTML tag
+# with no attributes; a tag with attributes holds whitespace and is not removed. The sweep runs
+# before the closed-shape scan, so it sees raw HTML wherever it stands: outside fences, inline
+# code spans and blockquote lines that scan refuses raw HTML afterwards; inside a fence the run is
+# literal code text and is removed here all the same; on a blockquote line the shape scan does not
+# refuse raw HTML, and the quote must still match the tree byte for byte.
 _ANGLE_TARGET_RE = re.compile(r"<[^<>\s]*>")
+# The events of the forward link scan (_link_target_spans): a backslash escape of ASCII
+# punctuation is one event, so an escaped delimiter closes nothing; a bare destination runs to a
+# space or an ASCII control character; a title, an angle destination or a reference label runs to
+# its unescaped closer.
+_LINK_ESCAPE = r"\\[!-/:-@\[-`{-~]"
+_DESTINATION_EVENT_RE = re.compile(_LINK_ESCAPE + r"|[()\x00-\x20\x7f]")
+_ANGLE_EVENT_RE = re.compile(_LINK_ESCAPE + r"|[<>]")
+_LABEL_EVENT_RE = re.compile(_LINK_ESCAPE + r"|[\[\]]")
+_TITLE_EVENT_RES = {'"': re.compile(_LINK_ESCAPE + r'|"'), "'": re.compile(_LINK_ESCAPE + r"|'"),
+                    "(": re.compile(_LINK_ESCAPE + r"|[()]")}
+_LINK_SPACES_RE = re.compile(r"[ \t]*")
+
+
+def _delimiter_at(line, start, events, closer, stops):
+    """The position of the first unescaped closer at or after start (events: that scan's event
+    pattern), or None when an unescaped stop character or the line's end comes first."""
+    for match in events.finditer(line, start):
+        char = match.group()
+        if char == closer:
+            return match.start()
+        if char in stops:
+            return None
+    return None
+
+
+def _paren_reading(line, start):
+    """One forward pass over the destination run from start to its first space or ASCII control
+    character (or the line's end): (start, the run's end, the closing ")" of each "(" in it that
+    directly follows a "]", the last "(" still open at the run's end or None, the first ")" that
+    closes no "(" opened at or after start or None). Escaped parentheses are text. A "(" closes at
+    the first ")" after it where the parentheses between balance, which depends only on the text
+    after it, so one pass serves every "](" inside the run."""
+    stack, closes, unopened, end = [], {}, None, len(line)
+    for match in _DESTINATION_EVENT_RE.finditer(line, start):
+        char = match.group()
+        if char == "(":
+            stack.append(match.start())
+        elif char == ")":
+            if stack:
+                opened = stack.pop()
+                if opened and line[opened - 1] == "]":
+                    closes[opened] = match.start()
+            elif unopened is None:
+                unopened = match.start()
+        elif len(char) == 1:
+            end = match.start()
+            break
+    return start, end, closes, (stack[-1] if stack else None), unopened
+
+
+def _inline_link_end(line, at, reading):
+    """One past the closing ")" of the inline link whose "](" is at at, as CommonMark reads it on
+    one line, or None when none closes there: optional spaces or tabs; a destination, either
+    "<...>" (no unescaped "<" or ">", closed on the line) or a run with no space or ASCII control
+    character whose unescaped parentheses balance (nested pairs included); optionally, after spaces
+    or tabs, a title "...", '...' or (...) (a parenthesised title holds no unescaped "("); optional
+    spaces or tabs; ")". Read on the raw text, so a character reference ("&#41;") is destination or
+    title text, never a delimiter. reading holds the destination run's parenthesis pass."""
+    end = len(line)
+    pos = _LINK_SPACES_RE.match(line, at + 2).end()
+    if pos >= end:
+        return None
+    first = line[pos]
+    if first == ")":
+        return pos + 1
+    if first == "<":
+        close = _delimiter_at(line, pos + 1, _ANGLE_EVENT_RE, ">", "<")
+        if close is None:
+            return None
+        after = close + 1
+    elif first < " " or first == "\x7f":
+        return None
+    elif pos == at + 2:
+        if reading[0] is None or not reading[0][0] <= pos - 1 < reading[0][1]:
+            reading[0] = _paren_reading(line, pos - 1)
+        _, after, closes, open_last, _ = reading[0]
+        if pos - 1 in closes:
+            return closes[pos - 1] + 1
+        if open_last != pos - 1:
+            return None
+    else:
+        _, after, _, open_last, unopened = reading[0] = _paren_reading(line, pos)
+        if unopened is not None:
+            return unopened + 1
+        if open_last is not None:
+            return None
+    pos = _LINK_SPACES_RE.match(line, after).end()
+    if pos >= end:
+        return None
+    if line[pos] == ")":
+        return pos + 1
+    opener = line[pos]
+    if pos == after or opener not in _TITLE_EVENT_RES:
+        return None
+    close = _delimiter_at(line, pos + 1, _TITLE_EVENT_RES[opener], ")" if opener == "(" else opener,
+                          "(" if opener == "(" else "")
+    if close is None:
+        return None
+    pos = _LINK_SPACES_RE.match(line, close + 1).end()
+    return pos + 1 if pos < end and line[pos] == ")" else None
+
+
+def _link_target_spans(line):
+    """(start, end) of each link target of line: an inline link from the "]" of its "](" through
+    its closing ")" (_inline_link_end), and a reference label "[label]" with the "]" directly
+    before it (the label of a full reference link "[text][label]"). A "]" ends a link's text only
+    while an unescaped "[" is open before it, the last such "[" being its opener, as CommonMark's
+    bracket scan pairs them: an unmatched "]" is literal, a "]" whose link does not close drops its
+    opener, and a link that closes drops the openers before its own unless it is an image ("![").
+    ONE forward scan, linear in the line: a link that closes is passed over whole; each destination
+    run is read by one parenthesis pass that every "](" inside it shares; and a title,
+    angle-destination or label scan ends at or before the next unescaped opener of its own kind, so
+    scans of one kind never overlap."""
+    spans, reading, openers, pos = [], [None], [], 0
+    while True:
+        escaped_to = -1
+        for event in _LABEL_EVENT_RE.finditer(line, pos):
+            char, at = event.group(), event.start()
+            if len(char) == 2:
+                escaped_to = event.end()
+                continue
+            if char == "[":
+                openers.append(at > 0 and line[at - 1] == "!" and escaped_to != at)
+                continue
+            if not openers:
+                continue
+            image, close = openers.pop(), None
+            if line[at + 1:at + 2] == "(":
+                close = _inline_link_end(line, at, reading)
+            elif line[at + 1:at + 2] == "[":
+                label = _delimiter_at(line, at + 2, _LABEL_EVENT_RE, "]", "[")
+                # A label of spaces and tabs only (an empty one included) is no label and holds no
+                # letter; its "[" may open the next link's text, so it is left in place.
+                if label is not None and line[at + 2:label].strip(" \t"):
+                    close = label + 1
+            if close is not None:
+                spans.append((at, close))
+                if not image:
+                    openers.clear()
+                pos = close
+                break
+        else:
+            return spans
 
 
 def _without_link_targets(line):
-    """line with each link target removed, so the text a link renders as its label also forms a
-    skeleton: "[QA-COMPLETE](https://x)" keeps "[QA-COMPLETE", "[VER](https://x)DICT: ..." keeps
-    "[VERDICT: ...", and "[label]: target" keeps "[label]:". DISCLOSED RESIDUALS of this textual
-    removal, each erring toward keeping target letters IN the skeleton, which can only break a
-    prefix match and leave the line content: an inline destination holding an unescaped ")"
-    (nested parentheses included) is removed only to its first ")"; a destination, title or
-    definition target continued on a later line is not reassembled (outside fences the shape
-    scan refuses an inline link that may run past its line first); and the removal reads no code
-    spans or escapes, so link-shaped literal text is removed too, which errs toward refusing.
-    An autolink's target is rendered visibly by CommonMark yet removed here, so _boundary_shown
-    also reads the whole line, keeping a boundary spelled inside a removed target refused."""
-    line = _DEFINITION_TARGET_RE.sub(r"\1", line)
-    line = _INLINE_DESTINATION_RE.sub("", line)
-    return _ANGLE_TARGET_RE.sub("", line)
+    """The raw line with its link targets removed, decoded, so the text a link renders as its label
+    also forms a skeleton: "[QA-COMPLETE](https://x)" keeps "[QA-COMPLETE",
+    "[VER](https://x 'a)b')DICT: ..." and "[VER][r]DICT: ..." keep "[VERDICT: ...", and
+    "[label]: target" keeps "[label]:". A definition's target goes first (_DEFINITION_TARGET_RE),
+    then every inline link's destination and title and every reference label
+    (_link_target_spans), then every angle run (_ANGLE_TARGET_RE) of each remaining piece; each
+    piece left is decoded on its own (html.unescape, as _boundary_shown decodes the whole line),
+    so no character reference forms across a removed target. DISCLOSED RESIDUALS: this reading
+    can differ from the rendered text in either
+    direction, and the whole-line reading is unaffected by every one of them. It reads one line,
+    so a destination, title or label continued on a later line is not reassembled and that link is
+    left in place (outside fences, inline code spans and blockquote lines the shape scan refuses
+    an inline link that may run past its line). It pairs brackets as CommonMark does but sees no
+    definition: a full reference link's label is removed whether or not a definition for it
+    exists, and a "[text]" followed by neither "(" nor "[" is read as no link, so the brackets
+    open before it stay open (a defined shortcut reference link would close them). It reads no
+    inline code span, autolink or raw HTML, so a bracket or backslash inside one is read as markup
+    here though it renders literally. Parentheses nested deeper than a renderer's own limit
+    (CommonMark lets an implementation cap the nesting) still close a destination here. A tag with
+    attributes is not removed (_ANGLE_TARGET_RE). An autolink's target is rendered visibly yet
+    removed here, so _boundary_shown also reads the whole line, keeping a boundary spelled inside
+    a removed target refused."""
+    definition = _DEFINITION_TARGET_RE.match(line)
+    if definition:
+        line = definition.group(1)
+    pieces, at = [], 0
+    for start, end in _link_target_spans(line):
+        pieces.append(line[at:start])
+        at = end
+    pieces.append(line[at:])
+    kept = (text for piece in pieces for text in _ANGLE_TARGET_RE.split(piece))
+    return "".join(html.unescape(text) if "&" in text else text for text in kept)
 
 
 def _letter_skeleton(line):
@@ -1178,23 +1371,31 @@ def _boundary_shown(line):
     (_boundary_exempt). The line is decoded once (html.unescape, numeric and named references,
     the semicolonless legacy forms included; the bounded digit-run pre-scan has already refused
     any over-long reference, so this decode never converts an unbounded digit run) and read
-    twice, whole and with link targets removed (_without_link_targets): either skeleton
-    beginning with "verdict" (any value after it) or with "qacomplete" refuses the line, so the
-    link-stripped reading catches a boundary carried or split by link text while the whole-line
-    reading keeps one spelled inside a removed target ("<verdict:hold>", whose target CommonMark
-    renders visibly) refused. It replaces the round-9 to round-11 enumerated readings
-    (D-475-BOUNDARY-SKELETON); the canonical boundary parse (_verdict_of, _verdict_value,
-    _delivery_body) reads the raw text alone and is unchanged. DISCLOSED FALSE-REFUSAL BOUNDARY:
-    both tests are prefix tests, so ordinary prose or code whose visible letters begin a
-    boundary word ("Verdict no. 2: blockers remain.", "VERDICT_NO_BLOCKERS = False") is refused
-    on purpose, a tested policy; a mention later in the line ("the verdict is clear") stays
-    content. DISCLOSED RESIDUAL: the skeleton keeps ASCII letters only, so a substituted
-    non-ASCII letter that renders like an ASCII one (a homoglyph: Cyrillic, fullwidth or
-    mathematical letter forms) is dropped and can prevent a match while the other ASCII letters
-    stay in, and an entirely non-ASCII spelling leaves an empty skeleton and stays content; the
-    link-target removal is textual, with the limits _without_link_targets lists."""
+    twice, whole and with link targets removed (_without_link_targets, which finds the targets
+    on the raw line and decodes what is left): either skeleton beginning with "verdict" (any
+    value after it) or with "qacomplete" refuses the line, so the link-stripped reading catches
+    a boundary carried or split by link text while the whole-line reading keeps one spelled
+    inside a removed target ("<verdict:hold>", whose target CommonMark renders visibly) refused.
+    It replaces the round-9 to round-11 enumerated readings (D-475-BOUNDARY-SKELETON); the
+    canonical boundary parse (_verdict_of, _verdict_value, _delivery_body) reads the raw text
+    alone and is unchanged. DISCLOSED FALSE-REFUSAL BOUNDARY: both tests are prefix tests, so
+    ordinary prose or code whose visible letters begin a boundary word ("Verdict no. 2: blockers
+    remain.", "VERDICT_NO_BLOCKERS = False", "QA COMPLETED tasks:") is refused on purpose, a
+    tested policy; a mention later in the line ("the verdict is clear") stays content. Letters
+    that are not shown count too: the whole-line reading keeps a link destination's letters, so
+    "[1](#verdict-rules) explains the rule." is refused, and the link-stripped reading drops an
+    autolink's shown target, so "<https://example.invalid/run/5> verdict is clear" is refused.
+    DISCLOSED RESIDUAL: the skeleton keeps ASCII letters only, so a substituted non-ASCII letter
+    that renders like an ASCII one (a homoglyph: Cyrillic, fullwidth or mathematical letter
+    forms) is dropped and can prevent a match while the other ASCII letters stay in; a boundary
+    spelled wholly in such letters adds nothing to the skeleton, so the line stays content unless
+    its remaining ASCII letters begin a boundary word (the skeleton is empty only when the line
+    holds no ASCII letter at all: "\uff36\uff25\uff32\uff24\uff29\uff23\uff34: BLOCKERS FOUND" reads
+    "blockersfound" and stays content, while "\uff36\uff25\uff32\uff24\uff29\uff23\uff34: QA-COMPLETE"
+    reads "qacomplete" and is refused); the link-target removal has the limits
+    _without_link_targets lists."""
     decoded = html.unescape(line) if "&" in line else line
-    for text in (decoded, _without_link_targets(decoded)):
+    for text in (decoded, _without_link_targets(line)):
         skeleton = _letter_skeleton(text)
         if skeleton.startswith(_COMPLETE_SKELETON):
             shown = "the {} line".format(COMPLETE_LINE)
@@ -1856,7 +2057,7 @@ FIXTURE_FILES = {
     ".preview/README.md": "| Tool | Role |\n| pattern-self-match.py | matches its own pattern |\n",
     "docs/crlf.md": "Stored with CRLF line ends.\r\nSecond stored line.\r\n",
     "docs/encoded.md": "QA&#45;COMPLETE\nfinal = verdict(x)\n[QA-COMPLETE]: https://example.invalid\n"
-                       "[VERDICT: HOLD]: https://example.invalid\n",
+                       "[VERDICT: HOLD]: https://example.invalid\n[VE<y>R<DICT]:z>\n",
     "VERSION": "0.0.1-fixture\n",
 }
 BRIEF_MIXED = ("Synthetic review brief.\nBRIEF-PIN: {pin}\n\n"
@@ -1991,6 +2192,13 @@ def _self_test_cases(fx):
     refused = ("CANNOT_EVALUATE", True)
     never = re.compile(r"(?!)")
 
+    def refused_at(delivery, vector, words):
+        """(verdict, whether a reason names the line holding exactly vector, then words)."""
+        at_line = delivery.split("\n").index(vector) + 1
+        report = fx.run(delivery)
+        return report["verdict"], "delivery line {}: {}".format(at_line, words) in " ".join(report["reasons"])
+    skeleton_words = "a line whose letter skeleton"
+
     # C1 coverage
     all_unverifiable = _delivery(sha, *(_unverifiable(n) for n in range(1, 5)))
     check("c1/all-unverifiable-no-vote", verdict(fx.run(all_unverifiable)), "NO_VOTE")
@@ -2033,8 +2241,19 @@ def _self_test_cases(fx):
         _mixed(sha).replace("VERDICT: NO BLOCKERS\n{}\n".format(COMPLETE_LINE), "")), "no VERDICT line"), refused)
     # A second VERDICT line of another value is refused by the skeleton sweep at its own line
     # (the canonical pair is found by position from the end), not at the later canonical line.
-    check("shape/second-verdict-cannot-evaluate", refusal(fx.run(
-        _mixed(sha, {4: A4 + "\n\nVERDICT: BLOCKERS"})), "outside the canonical boundary position"), refused)
+    check("shape/second-verdict-cannot-evaluate", refused_at(
+        _mixed(sha, {4: A4 + "\n\nVERDICT: BLOCKERS"}), "VERDICT: BLOCKERS", skeleton_words), refused)
+    # A line between the VERDICT line and QA-COMPLETE whose letters begin no boundary word passes
+    # the sweep, so the closed shape refuses it, at its own line.
+    check("shape/text-between-verdict-and-complete-cannot-evaluate", refused_at(
+        _mixed(sha).replace("\n" + COMPLETE_LINE + "\n", "\nThe review is finished.\n" + COMPLETE_LINE + "\n"),
+        "The review is finished.", "text between the VERDICT line and " + COMPLETE_LINE), refused)
+    # The delivery's last VERDICT line, standing where an answer is still due, is read as the
+    # VERDICT line, and the missing answer is refused at it with the "Verdict:" hint.
+    check("shape/verdict-hint-missing-answer-cannot-evaluate", refused_at(
+        _delivery(sha, A1, A2, verdict="Verdict: the guard holds."), "Verdict: the guard holds.",
+        "Q3. is missing before this line (a line starting \"Verdict:\" is the VERDICT line, inside an answer too)"),
+        refused)
     check("shape/missing-qa-complete-cannot-evaluate", refusal(fx.run(
         _mixed(sha).replace("\n{}\n\n{}\n".format(COMPLETE_LINE, HARNESS_LAST_LINE), "\n")), "no QA-COMPLETE line"),
         refused)
@@ -2082,8 +2301,8 @@ def _self_test_cases(fx):
         _mixed(sha, {2: "Q2. src/beta.py:\n```\n    if ready:\n\t```\n```"})), "indented otherwise"), refused)
     # A "Verdict:" line inside an answer begins the boundary word, so the sweep refuses it at
     # its own line: the disclosed false-refusal policy applied to prose.
-    check("shape/verdict-line-inside-answer-cannot-evaluate", refusal(fx.run(
-        _mixed(sha, {2: A2 + "\nVerdict: the guard holds."})), "outside the canonical boundary position"), refused)
+    check("shape/verdict-line-inside-answer-cannot-evaluate", refused_at(
+        _mixed(sha, {2: A2 + "\nVerdict: the guard holds."}), "Verdict: the guard holds.", skeleton_words), refused)
 
     # Harness lines: only line 1 and the last line, each exact; any other WORKER_STATUS line is content
     check("shape/harness-first-line-passes", verdict(fx.run(_mixed(sha, lead=HARNESS_LEAD))), "PASS")
@@ -2273,9 +2492,9 @@ def _self_test_cases(fx):
           refusal(fx.run(_mixed(sha, {2: A2 + "\nVERDICT&#58; BLOCKERS FOUND"})),
                   "outside the canonical boundary position"), refused)
     check("shape/encoded-verdict-duplicate-cannot-evaluate",
-          refusal(fx.run(_mixed(sha).replace("\n" + COMPLETE_LINE + "\n",
-                                             "\nVERDICT&#58; NO BLOCKERS\n" + COMPLETE_LINE + "\n")),
-                  "outside the canonical boundary position"), refused)
+          refused_at(_mixed(sha).replace("\n" + COMPLETE_LINE + "\n",
+                                         "\nVERDICT&#58; NO BLOCKERS\n" + COMPLETE_LINE + "\n"),
+                     "VERDICT&#58; NO BLOCKERS", skeleton_words), refused)
     for check_id, sep_verdict in (("shape/verdict-separator-unit-cannot-evaluate", "VERDICT: NO\x1cBLOCKERS"),
                                   ("shape/verdict-separator-nel-cannot-evaluate", "VERDICT: NO\x85BLOCKERS")):
         check(check_id, refusal(fx.run(_mixed(sha, verdict=sep_verdict)), "whitespace separator other than"),
@@ -2569,6 +2788,22 @@ def _self_test_cases(fx):
     check("runtime/reference-run-at-cap-bounded",
           (len(reference_run.encode("utf-8")), _capped_run(fx, reference_run, "linear")),
           (MAX_INPUT_BYTES, (0, "PASS")))
+    # A 16 MiB run of "](" with no ")" on one line: the letter-skeleton sweep, which runs before
+    # the shape scan, reads its link targets in one forward pass, and the shape scan then refuses
+    # the inline link that may run past its line; the earlier link-target pattern rescans to the
+    # line's end from every "](" and exceeds the cap.
+    link_openers = _padded(_mixed(sha), "text ", "](", "\nVERDICT:")
+    check("runtime/link-opener-run-at-cap-bounded",
+          (len(link_openers.encode("utf-8")), _capped_run(fx, link_openers, "linear")),
+          (MAX_INPUT_BYTES, (2, "CANNOT_EVALUATE")))
+    check("flip/runtime-link-opener-run-backtracking",
+          _capped_run(fx, link_openers, "backtracking-link-targets"), "timeout")
+    # The same run with an opening bracket before every "](": each "]" now closes link text, so
+    # every "](" goes through the destination read, all of them sharing one parenthesis pass.
+    bracketed_openers = _padded(_mixed(sha), "text ", "[](", "\nVERDICT:")
+    check("runtime/bracketed-link-opener-run-at-cap-bounded",
+          (len(bracketed_openers.encode("utf-8")), _capped_run(fx, bracketed_openers, "linear")),
+          (MAX_INPUT_BYTES, (2, "CANNOT_EVALUATE")))
 
     # The deterministic head bound: a recording seam shows the NFKC input is the head only (marker
     # material up to and including the first non-material character), whatever the host speed;
@@ -2751,7 +2986,16 @@ def _self_test_cases(fx):
     # sweep and the link-target removal each of these deliveries passes or is refused only at
     # another line (the plain-hold row was refused at the canonical line, not its own). The two
     # -policy- rows name the disclosed false-refusal boundary: ordinary content whose visible
-    # letters begin a boundary word is refused on purpose, as policy.
+    # letters begin a boundary word is refused on purpose, as policy. The complete-prefix row's
+    # letters run past "qacomplete", so an exact QA-COMPLETE test would pass it. The link rows
+    # after it render "VERDICT: BLOCKERS FOUND" once the destination and title (a single-quoted
+    # title holding ")", an encoded ")" in the destination, nested parentheses) or the reference
+    # label are read as CommonMark reads them; a removal to the first ")" of the decoded line
+    # passes the first three, and one that reads no reference label passes the fourth. The fenced
+    # angle-run row is literal code text whose letters do not begin a boundary word: it is refused
+    # only because the definition-target removal keeps the angle run opened in the label from
+    # closing in the target, the one case where that removal changes a result, so it is that
+    # removal's discriminating row (flip/shape-definition-target-strip passes it).
     for check_id, swap, vector in (
             ("shape/tilde-fenced-encoded-complete-cli-cannot-evaluate",
              {1: "Q1. docs/encoded.md holds it:\n~~~\nQA&#45;COMPLETE\n~~~"}, "QA&#45;COMPLETE"),
@@ -2797,7 +3041,22 @@ def _self_test_cases(fx):
             ("shape/prose-verdict-prefix-policy-cli-cannot-evaluate",
              {4: A4 + "\nVerdict no. 2: blockers remain."}, "Verdict no. 2: blockers remain."),
             ("shape/identifier-verdict-prefix-policy-cli-cannot-evaluate",
-             {4: A4 + "\nVERDICT_NO_BLOCKERS = False"}, "VERDICT_NO_BLOCKERS = False")):
+             {4: A4 + "\nVERDICT_NO_BLOCKERS = False"}, "VERDICT_NO_BLOCKERS = False"),
+            ("shape/complete-prefix-cli-cannot-evaluate",
+             {4: A4 + "\nQA COMPLETED tasks:"}, "QA COMPLETED tasks:"),
+            ("shape/link-single-quoted-title-verdict-cli-cannot-evaluate",
+             {4: A4 + "\n[VER](https://example.invalid 'a)b')DICT: BLOCKERS FOUND"},
+             "[VER](https://example.invalid 'a)b')DICT: BLOCKERS FOUND"),
+            ("shape/link-entity-paren-verdict-cli-cannot-evaluate",
+             {4: A4 + "\n[VER](https://example.invalid/a&#41;b)DICT: BLOCKERS FOUND"},
+             "[VER](https://example.invalid/a&#41;b)DICT: BLOCKERS FOUND"),
+            ("shape/link-nested-parens-verdict-cli-cannot-evaluate",
+             {4: A4 + "\n[VER](https://example.invalid/a(b)c)DICT: BLOCKERS FOUND"},
+             "[VER](https://example.invalid/a(b)c)DICT: BLOCKERS FOUND"),
+            ("shape/full-reference-link-verdict-cli-cannot-evaluate",
+             {4: A4 + "\n[VER][r]DICT: BLOCKERS FOUND"}, "[VER][r]DICT: BLOCKERS FOUND"),
+            ("shape/fenced-definition-angle-run-cli-cannot-evaluate",
+             {1: "Q1. docs/encoded.md holds it:\n```\n[VE<y>R<DICT]:z>\n```"}, "[VE<y>R<DICT]:z>")):
         delivery = _mixed(sha, swap)
         at_line = delivery.split("\n").index(vector) + 1
         brief_path, delivery_path = fx.files(delivery)
@@ -2820,6 +3079,12 @@ def _self_test_cases(fx):
     link_split = _mixed(sha, {4: A4 + "\n[VER](https://example.invalid)DICT: BLOCKERS FOUND"})
     check("flip/shape-link-target-strip",
           verdict(_patched("_without_link_targets", lambda line: line, lambda: fx.run(link_split))), "PASS")
+    # With a definition-target pattern that never matches, the angle run opened in the label of
+    # the fenced definition closes in its target, the label's tail letters go with it, and the
+    # delivery passes: the definition-target removal is what refuses that row.
+    definition_run = _mixed(sha, {1: "Q1. docs/encoded.md holds it:\n```\n[VE<y>R<DICT]:z>\n```"})
+    check("flip/shape-definition-target-strip",
+          verdict(_patched("_DEFINITION_TARGET_RE", never, lambda: fx.run(definition_run))), "PASS")
     # Named acceptance controls: prose and code mention verdicts and blockers without their
     # visible letters beginning a boundary word, so every line stays content and the delivery
     # stays clean (a line that does begin with one, the -policy- rows above, is refused as the
@@ -2889,6 +3154,18 @@ def _backtracking_verdict_of(line):
     return match.group(1) if match else None
 
 
+# The earlier link-target removal (the line decoded first, then each inline destination taken
+# from "](" to its first ")" by a pattern that rescans to the line's end from every "]("), kept
+# only so the runtime checks can show it exceeds the cap the forward scan meets. Never used by an
+# evaluation.
+_BACKTRACKING_INLINE_DESTINATION_RE = re.compile(r"\]\([^)]*\)")
+
+
+def _backtracking_without_link_targets(line):
+    line = _DEFINITION_TARGET_RE.sub(r"\1", html.unescape(line) if "&" in line else line)
+    return _ANGLE_TARGET_RE.sub("", _BACKTRACKING_INLINE_DESTINATION_RE.sub("", line))
+
+
 # The capped child for the runtime checks: its own address-space limit, then the tool's main(), with
 # the scanners optionally swapped for their 8a61dfb9 forms. It is passed to the interpreter with -c.
 CAPPED_CHILD = (
@@ -2900,6 +3177,8 @@ CAPPED_CHILD = (
     "if sys.argv[3] == 'backtracking':\n"
     "    tool._code_spans = tool._backtracking_code_spans\n"
     "    tool._verdict_of = tool._backtracking_verdict_of\n"
+    "if sys.argv[3] == 'backtracking-link-targets':\n"
+    "    tool._without_link_targets = tool._backtracking_without_link_targets\n"
     "sys.exit(tool.main(sys.argv[4:]))\n")
 CHILD_ADDRESS_LIMIT = 2 * 1024 * 1024 * 1024
 RUNTIME_CAP_SECONDS = 20
@@ -3032,10 +3311,21 @@ GRAMMAR_PROBES = (
     ("_boundary_shown", "VER\x01DICT\\: BLOCKERS FOUND", True),
     # Prefix rows: any value after the VERDICT word, and any text after the QA-COMPLETE letters
     ("_boundary_shown", "VERDICT&#58; HOLD", True), ("_boundary_shown", "VERDICT: HOLD", True),
-    ("_boundary_shown", "VERDICT&#58; BLOCKERS", True),
+    ("_boundary_shown", "VERDICT&#58; BLOCKERS", True), ("_boundary_shown", "QA COMPLETED tasks:", True),
     # Link rows: the link-stripped reading reads the label text, the whole-line reading a target
     ("_boundary_shown", "[QA-COMPLETE](https://example.invalid)", True),
     ("_boundary_shown", "[VER](https://example.invalid)DICT: BLOCKERS FOUND", True),
+    ("_boundary_shown", "[VER](https://example.invalid 'a)b')DICT: BLOCKERS FOUND", True),
+    ("_boundary_shown", "[VER](https://example.invalid/a&#41;b)DICT: BLOCKERS FOUND", True),
+    ("_boundary_shown", "[VER](https://example.invalid/a(b)c)DICT: BLOCKERS FOUND", True),
+    ("_boundary_shown", "[VER](<https://example.invalid/a b> \"t)\" )DICT: BLOCKERS FOUND", True),
+    ("_boundary_shown", "[VER](https://example.invalid/a\\)b)DICT: BLOCKERS FOUND", True),
+    ("_boundary_shown", "[](([VER](https://example.invalid)DICT: BLOCKERS FOUND", True),
+    ("_boundary_shown", "[VER][r]DICT: BLOCKERS FOUND", True),
+    ("_boundary_shown", "[VE<y>R<DICT]:z>", True),
+    # Bracket pairing: a "](" with no "[" open before it is literal, so it neither hides the
+    # letters a later link leaves shown nor removes its own "(...)" text.
+    ("_boundary_shown", "](VER[)][r] DICT: BLOCKERS FOUND", True),
     ("_boundary_shown", "QA-<https://example.invalid>COMPLETE", True),
     ("_boundary_shown", "VER<https://example.invalid>DICT: BLOCKERS FOUND", True),
     ("_boundary_shown", "[QA-COMPLETE]: https://example.invalid", True),
@@ -3049,17 +3339,27 @@ GRAMMAR_PROBES = (
     ("_boundary_shown", "Verdict no. 2: blockers remain.", True),
     ("_boundary_shown", "VERDICT_NO_BLOCKERS = False", True),
     ("_boundary_shown", "verdict = parse(x)", True),
+    # The same policy over letters a renderer does not show: a destination's letters in the
+    # whole-line reading, a later mention exposed by dropping an autolink's shown target.
+    ("_boundary_shown", "[1](#verdict-rules) explains the rule.", True),
+    ("_boundary_shown", "<https://example.invalid/run/5> verdict is clear", True),
     # Negative controls: a boundary word later in the line, or behind an innocent link, does not
     # begin either skeleton, so each line stays content and _boundary_shown returns None for it.
     ("_boundary_shown", "The verdict is clear.", False),
     ("_boundary_shown", "Q3. No blockers were found in the verdict path.", False),
     ("_boundary_shown", "final = verdict(x)", False),
     ("_boundary_shown", "[see](https://verdict.invalid) the notes", False),
+    ("_boundary_shown", "[see](https://example.invalid 'verdict') the notes", False),
+    ("_boundary_shown", "VER](x)DICT: BLOCKERS FOUND", False),
     # Disclosed homoglyph residual: a substituted non-ASCII letter is dropped and prevents the
-    # match while the other ASCII letters stay in; an entirely non-ASCII spelling leaves an
-    # empty skeleton. Neither reads as a boundary.
+    # match while the other ASCII letters stay in; a line with no ASCII letter at all leaves an
+    # empty skeleton. Neither reads as a boundary. A fullwidth VERDICT adds nothing to the
+    # skeleton, so the line's remaining ASCII letters decide: "blockersfound" stays content,
+    # "qacomplete" is refused.
     ("_boundary_shown", "V\u0415RDICT: BLOCKERS FOUND", False),
     ("_boundary_shown", "\uff31\uff21-\uff23\uff2f\uff2d\uff30\uff2c\uff25\uff34\uff25", False),
+    ("_boundary_shown", "\uff36\uff25\uff32\uff24\uff29\uff23\uff34: BLOCKERS FOUND", False),
+    ("_boundary_shown", "\uff36\uff25\uff32\uff24\uff29\uff23\uff34: QA-COMPLETE", True),
     ("_unread_fence", "- ```", True), ("_unread_fence", "```", False),
 )
 
