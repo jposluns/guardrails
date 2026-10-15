@@ -76,7 +76,10 @@ def corpus_findings(root):
     try:
         globs, _exclusions = load_config(root / CONFIG)
         data = tomllib.loads((root / CONFIG).read_text(encoding="utf-8"))
-    except (OSError, ValueError, RecursionError, CannotEvaluate) as exc:
+    except (OSError, ValueError, RecursionError, MemoryError, CannotEvaluate) as exc:
+        # tomllib refuses deep nesting and (CPython 3.14.8 on) a 1001-part key with RecursionError, a
+        # many-part key under a memory limit with MemoryError and an over-long integer with a bare
+        # ValueError: each is cannot-evaluate (exit 2), never a traceback.
         return [], ["cannot read {}: {}".format(CONFIG, exc)]
     if "corpus" not in data:
         # A clearer-message duplicate: with this check removed, the member reconciliation below still
@@ -95,7 +98,8 @@ def corpus_findings(root):
                           "refuses the pack: {} [{}] {}".format(PACK, status, guard, detail)]
     try:
         manifest = tomllib.loads((root / PACK / "pack.toml").read_text(encoding="utf-8"))
-    except (OSError, ValueError, RecursionError) as exc:
+    except (OSError, ValueError, RecursionError, MemoryError) as exc:
+        # The same tomllib refusals as the config read above, each cannot-evaluate.
         return findings, ["cannot read {}/pack.toml: {}".format(PACK, exc)]
     members = ["{}/{}".format(PACK, row["path"]) for row in manifest["members"]]
     try:

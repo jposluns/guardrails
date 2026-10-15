@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T83)
+  check_opf_record.py --self-test                    the fixture suite (T1-T84)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -403,6 +403,10 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T83 the harness's journal reader reads an empty journal only for confirmed absence: a regular file,
       a symlink, a dangling symlink and an unreadable journal home are harness faults (flip: the
       reviewed head's not-a-directory shortcut)
+  T84 a leftover lease whose payload tomllib refuses with RecursionError (a deeply nested value, and a
+      1001-part key under the emulated 3.14.8 key-part cap) is malformed: recovery refuses it with the
+      held-lease refusal, every byte untouched (flip: the pre-fix lease parse, under which the
+      RecursionError escapes to the record verb's unexpected-error backstop)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -5938,6 +5942,32 @@ def flip_t77():
     return patch.object(guard, "_claim_after_release", narrow)
 
 
+# --- T84: a leftover lease tomllib refuses with RecursionError is malformed, refused as held (spec 5.7) ------
+
+def t84_recursion_lease_refused_as_held(fx):
+    """A leftover lease whose payload tomllib refuses with RecursionError (a deeply nested value, and a
+    1001-part key under the emulated 3.14.8 key-part cap) is a malformed lease like any other: recovery
+    refuses it with the held-lease refusal and its remedy, every byte untouched, never the verb backstop's
+    unexpected error."""
+    _t74_refused_leg(fx, "t84-deep-lease", _opf_store._ST_DEEP_TOML.encode("utf-8"))
+    with _opf_store._StKeyPartCap():
+        _t74_refused_leg(fx, "t84-long-key-lease", _opf_store._ST_LONG_KEY_TOML.encode("utf-8"))
+
+
+def flip_t84():
+    """The pre-fix lease parse, catching UnicodeDecodeError and ValueError only: a RecursionError escapes
+    _closed_lease_model to the record verb's backstop."""
+    original = guard._closed_lease_model
+
+    def narrow(raw):
+        try:
+            tomllib.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            pass
+        return original(raw)
+    return patch.object(guard, "_closed_lease_model", narrow)
+
+
 # --- T78: homes 2 is the declaration pair, never homes = 2 alone (spec 4.2) ---------------------------------
 
 def t78_homes2_needs_the_pair(fx):
@@ -6450,6 +6480,7 @@ TESTS = (
     ("T81-homes2-cross-kind-high-water", t81_cross_kind_reservations, flip_t81),
     ("T82-homes2-publication-requires-reservation", t82_publication_requires_reservation, flip_t82),
     ("T83-journal-states-confirmed-absence", t83_journal_states_confirmed_absence, flip_t83),
+    ("T84-recovery-recursion-lease-refused-as-held", t84_recursion_lease_refused_as_held, flip_t84),
 )
 
 

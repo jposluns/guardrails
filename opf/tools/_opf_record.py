@@ -502,7 +502,9 @@ def _read_operand(root_fd, rel):
         raise RecordError("{} is not a regular file; fail-closed".format(rel))
     try:
         model = tomllib.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        # ValueError: tomllib.TOMLDecodeError and an over-long integer literal; RecursionError and MemoryError:
+        # deep nesting and a many-part key.
         raise RecordError("{} does not parse as TOML ({}); fail-closed".format(rel, exc))
     return Operand(rel, data, stat.S_IMODE(st.st_mode), model)
 
@@ -693,7 +695,9 @@ def _read_reservation(afd, kind, entry):
         raise RecordError("cannot read the id reservation {} ({}); fail-closed".format(rel, exc))
     try:
         model = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        # ValueError: tomllib.TOMLDecodeError and an over-long integer literal; RecursionError and MemoryError:
+        # deep nesting and a many-part key.
         raise RecordError("the id reservation {} is malformed ({}); fail-closed".format(rel, exc))
     claims = model.get("claims") if isinstance(model, dict) else None
     operation_id = model.get("operation_id") if isinstance(model, dict) else None
@@ -1482,7 +1486,7 @@ def _reparse(raw, rel):
     """A fresh model parsed from bytes: it shares no object with any model the planner built."""
     try:
         return tomllib.loads(raw.decode("utf-8"))
-    except (AttributeError, UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
+    except (AttributeError, UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise _postcondition_failed("{} cannot be reparsed ({})".format(rel, exc))
 
 
