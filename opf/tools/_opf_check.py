@@ -206,6 +206,8 @@ HOMES2_CHECKS = ("C-EVIDENCE-ENUM",)
 # they stay disjoint from REQUIRED_CHECKS and HOMES2_CHECKS themselves, so any OTHER wiring (even a
 # legitimate-looking alternative such as an imported-keyed roster) reads red, which fails
 # closed: a red on a legitimate alternative, never a green on a wiring nothing grades.
+# C-IMPORTED-PROVENANCE is already implemented (_check_imported_provenance): the driver runs it exactly
+# when the bound roster carries it, so it starts grading when this wiring lands, and not before.
 IMPORTED_CONTENT_CHECKS = ()
 # The exact imported-check id grammar, matched in full: the C-IMPORTED- prefix, then one or more
 # runs of upper-case ASCII letters joined by single hyphens. The class is the one every id in
@@ -2330,6 +2332,117 @@ def _check_evidence(root_fd, homes, rep):
         rep.finding("C-EVIDENCE-ENUM: missing file {!r}".format(path))
 
 
+# Imported-series provenance (C-IMPORTED-PROVENANCE, spec 8.3/8.8). An imported record's import table names the
+# preserved original it was read from, and the import writer publishes that original in its own run's bundle,
+# .working/imported/import/<run-id>/originals/<source-path>, beside the bundle's inventory.toml.
+_IMPORT_EVIDENCE_HOME = _rel(_opf_store.IMPORTED_REL, "import")
+_IMPORT_ORIGINALS_DIRNAME = "originals"
+
+
+def _is_preserved_original(run_id, source):
+    """True when `run_id` is an import run id and `source` is a canonical store-relative file path inside that
+    run's preserved-originals folder, .working/imported/import/<run-id>/originals/<source-path> (spec 8.3/8.8).
+    A path anywhere else, another run's originals included, never anchors a record's provenance."""
+    try:
+        originals = _rel(_opf_store.evidence_run("import", run_id), _IMPORT_ORIGINALS_DIRNAME)
+        _opf_store._home_file(source)
+    except ValueError:
+        return False
+    return source.startswith(originals + "/")
+
+
+def _read_import_inventory(root_fd, run_id, check_id, rep):
+    """Read the inventory.toml of import bundle `run_id` through the contained reader and validate it with the
+    shared evidence-row rules (_evidence_rows: the closed opf.evidence.inventory/v1 shape and the paths the bundle
+    may claim). Returns (rows by path, "ok"), (None, "absent"), or (None, "error") with a CANNOT-EVALUATE already
+    recorded under `check_id`: an unreadable or malformed inventory, a recognized legacy ingest inventory, or a
+    path claimed twice leaves the bundle's claims unknown (spec 4.2)."""
+    rel = _opf_store.evidence_inventory("import", run_id)
+    doc, state = _read_toml(root_fd, rel, rep)
+    if state != "ok":
+        return None, state
+    listed = {}
+    try:
+        for row in _evidence_rows(_opf_store.evidence_run("import", run_id), "import", run_id, doc):
+            if row["path"] in listed:
+                raise ValueError("{!r} is claimed more than once".format(row["path"]))
+            listed[row["path"]] = row
+    except (TypeError, ValueError) as exc:
+        rep.cant("{}: malformed import bundle inventory {!r}: {}".format(check_id, rel, exc))
+        return None, "error"
+    return listed, "ok"
+
+
+def _check_imported_provenance(root_fd, rows, unread, rep):
+    """C-IMPORTED-PROVENANCE (spec 8.3/14.1): re-verify the provenance of every imported row the per-series read
+    gathered (`rows`, the (counter key, id, row) triples of _gather_imported_rows) against the preserved evidence.
+
+    Each row's import table must name an import run id, a source inside that run's originals/ folder, and a
+    64-hex source_sha256; any other provenance is a finding. For each distinct (run, source) pair the original is
+    read once, contained, no-follow and under the product-file cap (_read_bytes), every distinct source_sha256 its
+    rows record must equal the digest of those bytes, and the original must be listed by its bundle's
+    inventory.toml. Each cited bundle's inventory.toml is re-read, and every file it lists is re-read against its
+    recorded size and digest: the doctor carries this itself because C-EVIDENCE-ENUM reads nothing on homes 1
+    (spec 4.2/14.1), and on homes 2 that check also reconciles the whole evidence tree.
+
+    Mismatched evidence is a finding. Missing or unreadable evidence (an absent original or listed file, a
+    symlink or other non-regular entry, an oversize file, or an absent, unreadable or malformed inventory) is a
+    CANNOT-EVALUATE, never a pass (spec 8.3: missing or unreadable evidence fails closed). A series whose leaf
+    could not be read (`unread`) is named as not evaluated rather than passed."""
+    for key in sorted(unread):
+        rep.cant("C-IMPORTED-PROVENANCE: the provenance of the {} records is not evaluated, because their "
+                 "imported leaf could not be read (spec 8.3)".format(key))
+    cited = {}
+    for _key, rid, row in rows:
+        imp = row.get("import")
+        run_id, source, claim = ((imp.get("run"), imp.get("source"), imp.get("source_sha256"))
+                                 if isinstance(imp, dict) else (None, None, None))
+        if not (isinstance(claim, str) and _HEX64_RE.fullmatch(claim) and _is_preserved_original(run_id, source)):
+            rep.finding("C-IMPORTED-PROVENANCE: imported record {!r} carries no verifiable provenance: its import "
+                        "table must name an imp-<YYYYMMDD>T<HHMMSS>Z-<hash16> run, a source under that run's "
+                        "{}/<run-id>/{}/ folder, and a 64-hex source_sha256 (spec 8.3/8.8)".format(
+                            rid, _IMPORT_EVIDENCE_HOME, _IMPORT_ORIGINALS_DIRNAME))
+            continue
+        cited.setdefault(run_id, {}).setdefault(source, {}).setdefault(claim, []).append(rid)
+    measured = {}
+
+    def measure(path):
+        # Each evidence path is read once, so an original its inventory also lists is never read or named twice.
+        if path not in measured:
+            raw, status = _read_bytes(root_fd, path, rep)
+            if status == "absent":
+                rep.cant("C-IMPORTED-PROVENANCE: evidence file {!r} is missing, so it cannot be verified (spec "
+                         "8.3: missing evidence fails closed)".format(path))
+            measured[path] = (len(raw), hashlib.sha256(raw).hexdigest()) if status == "ok" else None
+        return measured[path]
+
+    for run_id in sorted(cited):
+        inventory = _opf_store.evidence_inventory("import", run_id)
+        listed, state = _read_import_inventory(root_fd, run_id, "C-IMPORTED-PROVENANCE", rep)
+        if state == "absent":
+            rep.cant("C-IMPORTED-PROVENANCE: {!r} is missing, so the bundle its imported records cite cannot be "
+                     "verified (spec 8.3/8.8)".format(inventory))
+        for path in sorted(listed or ()):
+            got = measure(path)
+            if got is not None and got != (listed[path]["size"], listed[path]["sha256"]):
+                rep.finding("C-IMPORTED-PROVENANCE: {!r} does not match the size and digest {!r} records for it "
+                            "(spec 4.2/14.1)".format(path, inventory))
+        for source in sorted(cited[run_id]):
+            claims = cited[run_id][source]
+            if listed is not None and source not in listed:
+                rep.finding("C-IMPORTED-PROVENANCE: the preserved original {!r} cited by {} is not listed in {!r} "
+                            "(spec 8.8)".format(source, ", ".join(repr(r) for r in sorted(
+                                {r for rids in claims.values() for r in rids})), inventory))
+            got = measure(source)
+            if got is None:
+                continue
+            for claim in sorted(claims):
+                if claim != got[1]:
+                    rep.finding("C-IMPORTED-PROVENANCE: {} record source_sha256 {} for {!r}, but the preserved "
+                                "original hashes to {} (spec 8.3)".format(
+                                    ", ".join(repr(r) for r in claims[claim]), claim, source, got[1]))
+
+
 # --- containment (C-CONTAINMENT, OPF-SPEC 14.2) ------------------------------------------------------
 
 # The pure classification `classify_containment` returns, the SINGLE authority `_check_containment`
@@ -2343,11 +2456,13 @@ def _check_evidence(root_fd, homes, rep):
 # `imports_root` the derived structures the walk needs; `homes` the store's active homes generation and
 # `control_roots` / `evidence_roots` the store control and homes-2 evidence roots it registers.
 # `worklog_errors` holds generation failures separately from malformed [unmanaged] entries.
+# `import_home` is the import evidence home a homes-1 store registers once the imported series is active
+# (the walk registers its bundles from their inventories), or None.
 ContainmentClassification = collections.namedtuple(
     "ContainmentClassification",
     ("view_targets", "valid_unmanaged", "malformed", "colliding", "managed_file", "layout",
      "perrecord_body_dirs", "archive_root", "imports_root", "control_roots", "evidence_roots", "homes",
-     "worklog_errors"))
+     "worklog_errors", "import_home"))
 
 
 def classify_containment(manifest_data, machine_rel, imported=False):
@@ -2363,9 +2478,11 @@ def classify_containment(manifest_data, machine_rel, imported=False):
     through _opf_store.imported_series_declared, which requires BOTH the declared spec_version AND
     this tooling's own support (SUPPORTED_SPEC_VERSION at or above IMPORTED_SPEC_VERSION), so it is
     False for every store this tooling validates today, the accepted 2.0.0 / homes = 2 reservation
-    included. When True, the imported managed leaves join the managed set; the default False keeps
-    every current store's grading unchanged, so the registration ships inert until activation
-    raises SUPPORTED_SPEC_VERSION to 1.3.0. Returns a ContainmentClassification."""
+    included. When True, the imported managed leaves join the managed set, and on a homes-1 store
+    the import evidence home .working/imported/import becomes a graded container (`import_home`) whose
+    bundles the walk registers from their inventories; the default False keeps every current store's
+    grading unchanged, so the registration ships inert until activation raises
+    SUPPORTED_SPEC_VERSION to 1.3.0. Returns a ContainmentClassification."""
     mrel = machine_rel
     dp = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
     layout = dp.get("layout") if isinstance(dp, dict) else None
@@ -2435,6 +2552,11 @@ def classify_containment(manifest_data, machine_rel, imported=False):
     homes = _opf_store.homes_generation(manifest_data)
     control_roots = _opf_store.store_control_roots(homes)
     evidence_roots = (_opf_store.IMPORTED_REL, _opf_store.ARCHIVE_REL) if homes >= 2 else ()
+    # The import evidence home (spec 4.2/8.8): activated tooling registers the import bundles on homes 1, so
+    # under the `imported` flag it is a graded container there and an [unmanaged] declaration can neither name,
+    # contain, nor sit inside it. A homes-2 store already skips every evidence root, which C-EVIDENCE-ENUM
+    # reconciles, so it needs none.
+    import_home = _IMPORT_EVIDENCE_HOME if imported and homes < 2 else None
 
     def managed_leaf(p):
         # A STRICT managed-leaf test: a ledger, an enabled type index, a per-record body, or a declared
@@ -2503,8 +2625,10 @@ def classify_containment(manifest_data, machine_rel, imported=False):
     perrecord_body_dirs = tuple(_rel(mrel, t) for t in sorted(enabled_types) if t not in _LEDGER_TYPES)
     ledger_index_files = tuple(_rel(mrel, t + INDEX_SUFFIX) for t in sorted(enabled_types)
                                if t in _LEDGER_TYPES)
-    graded_containers = (archive_root,) + control_roots + type_body_dirs
-    managed_dir_prefixes = (mrel, archive_root) + control_roots + type_body_dirs + ledger_index_files
+    import_homes = (import_home,) if import_home is not None else ()
+    graded_containers = (archive_root,) + control_roots + type_body_dirs + import_homes
+    managed_dir_prefixes = ((mrel, archive_root) + control_roots + type_body_dirs + ledger_index_files
+                            + import_homes)
     colliding = []
     valid_unmanaged = []
     for u in unmanaged:
@@ -2523,7 +2647,7 @@ def classify_containment(manifest_data, machine_rel, imported=False):
         colliding=colliding, managed_file=managed_file, layout=layout,
         perrecord_body_dirs=perrecord_body_dirs, archive_root=archive_root, imports_root=imports_root,
         control_roots=control_roots, evidence_roots=evidence_roots, homes=homes,
-        worklog_errors=worklog_errors)
+        worklog_errors=worklog_errors, import_home=import_home)
 
 
 # The legacy import staging area `<machine>/imports` (`.working/toml/imports` under the default layout): where
@@ -2558,7 +2682,10 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
     enabled_types / layout are derived inside that helper from the manifest (D2), so they are no longer
     passed in. `imported` is the explicit imported-series activation flag classify_containment
     documents; the walk itself needs no imported awareness (the imported leaves are plain managed
-    leaves directly in the machine store, spec 8.2/4.2). While IMPORTED_CONTENT_CHECKS is empty, an
+    leaves directly in the machine store, spec 8.2/4.2), except that on a homes-1 store the flag also
+    registers the import evidence home: each .working/imported/import/<run-id>/ bundle registers its
+    inventory.toml and the bundle files that inventory lists, and every other path under
+    .working/imported/ stays unregistered (spec 4.2/8.8). While IMPORTED_CONTENT_CHECKS is empty, an
     ACTIVE imported series is routed to CANNOT-EVALUATE (the activation tripwire below):
     registration without content grading never certifies."""
     cls = classify_containment(manifest_data, machine_rel, imported=imported)
@@ -2598,6 +2725,34 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
     staged_roots = (imports_root, staging_root) if homes2 else (imports_root,)
     kind_roots = tuple(staging_root + "/" + k for k in _opf_store.STAGING_KINDS) if homes2 else ()
     skipped_roots = cls.evidence_roots + ((_opf_store.JOURNALS_REL,) if homes2 else ())
+    import_home = cls.import_home
+    bundle_files, bundle_dirs, unread_bundles = set(), set(), set()
+
+    def register_bundles(runs):
+        # Each import bundle registers from its own inventory.toml (spec 4.2/8.8): the inventory, the bundle
+        # files it lists, and their directories. A bundle with no inventory registers nothing, so the walk grades
+        # it as one unregistered entry; one whose inventory is unreadable or malformed has unknown claims, so it
+        # is a CANNOT-EVALUATE and never graded on a guess. A row naming a path outside the bundle registers
+        # nothing here, and a phase inventory is no member of an import bundle, so it stays unregistered.
+        for run_id in runs:
+            if not _is_import_run_id(run_id):
+                continue
+            bundle = _opf_store.evidence_run("import", run_id)
+            listed, state = _read_import_inventory(root_fd, run_id, "C-CONTAINMENT", rep)
+            if state == "error":
+                unread_bundles.add(bundle)
+            if listed is None:
+                continue
+            bundle_dirs.add(bundle)
+            bundle_files.add(_opf_store.evidence_inventory("import", run_id))
+            for path in listed:
+                if not path.startswith(bundle + "/"):
+                    continue
+                bundle_files.add(path)
+                parent = path.rsplit("/", 1)[0]
+                while parent not in bundle_dirs:
+                    bundle_dirs.add(parent)
+                    parent = parent.rsplit("/", 1)[0]
 
     unmanaged_files = []
 
@@ -2609,6 +2764,10 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
         # as a stray even when empty (round-14: the walk previously graded files only, so an empty rogue
         # directory, or a tree of only empty dirs, escaped grading entirely).
         if full == mrel or _under_any(full, staged_roots):
+            return True
+        if import_home is not None and full in (_opf_store.IMPORTED_REL, import_home):
+            return True
+        if full in bundle_dirs:
             return True
         if full == _rel(mrel, _opf_worklog.DIRECTORY_NAME):
             try:
@@ -2646,7 +2805,7 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
                 rep.finding("C-CONTAINMENT: invalid staging kind {!r}".format(name))
         for f in files:
             full = reldir + "/" + f
-            if not managed_file(full):
+            if not (managed_file(full) or full in bundle_files):
                 unmanaged_files.append(full)
         for d in subdirs:
             full = reldir + "/" + d
@@ -2654,6 +2813,8 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
             # Evidence bytes have their own exact inventory check, distinct from record rotation.
             if full in skipped_roots:
                 continue
+            if full in unread_bundles:
+                continue     # its inventory could not be read: the CANNOT-EVALUATE is recorded
             if _under_any(full, valid_unmanaged) or full == archive_root:
                 continue     # a valid declared-unmanaged subtree is never read; the archive is C-ARCHIVE-ENUM's
             if not managed_dir(full):
@@ -2677,6 +2838,15 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
         rep.finding("C-CONTAINMENT: the manifest declares import_status partial but no active "
                     "imports/<run-id> run is present; a partial status is substantiated only by an import "
                     "or migration actually running (spec 11:943/14.2)")
+    if import_home is not None:
+        # The bundles register before the walk, so no path's grade depends on whether the walk reaches it
+        # before the import home. A home that cannot be listed registers nothing here; the walk lists it
+        # again and records the CANNOT-EVALUATE.
+        try:
+            runs, _home_files = _list_contained(root_fd, import_home)
+        except StoreError:
+            runs = None
+        register_bundles(runs or ())
     walk(WORKING_DIRNAME, 0)
     for p in sorted(unmanaged_files):
         if partial_active:
@@ -3401,6 +3571,16 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
             rep.finding("C-SYNC-AGREE: the manifest declares no sync_target (relocated local-only) but the "
                         "committed pointer names a remote {} target {!r} (spec 5.6)".format(
                             pointer_target.kind, pointer_target.value))
+
+    # --- C-IMPORTED-PROVENANCE: re-read each cited original and bundle inventory (spec 8.3/14.1) -------
+    # It runs exactly when the bound roster carries it, the way C-EVIDENCE-ENUM runs with the homes-2 roster,
+    # so the id and its run cannot disagree. No roster carries it until the spec 1.3.0 activation wires the
+    # imported-content checks into required_checks, so it ships inert. Where it runs, it grades only an active
+    # imported series, from the rows C-ID-SPACE gathered under the same flag.
+    if "C-IMPORTED-PROVENANCE" in rep.required:
+        rep.ran("C-IMPORTED-PROVENANCE")
+        if imported:
+            _check_imported_provenance(root_fd, imported_rows, imported_unread, rep)
 
     # --- C-CONTAINMENT: whole-tree path / unmanaged-path containment (spec 14.2/11) -------------------
     rep.ran("C-CONTAINMENT")
@@ -5153,6 +5333,310 @@ def self_test():
               _i3_pkr is not None and _i3_pkr.checks.get("C-HISTORY-COUNTERS") == "CANNOT-EVALUATE"
               and any("malformed" in m for m in _i3_msgs(_i3_pkr, "C-HISTORY-COUNTERS"))
               and _i3_pmr is not None and _i3_pmr.status == VALID)
+        # C-IMPORTED-PROVENANCE (spec 8.3/8.8/14.1). The fixture is one import bundle,
+        # .working/imported/import/<run-id>/, holding the preserved original under originals/ and an inventory.toml
+        # that lists it; each imported row's import table cites the run, the original and its source_sha256.
+        _p_run = "imp-20260601T000000Z-0123456789abcdef"
+        _p_bundle = _opf_store.evidence_run("import", _p_run)
+        _p_inv = _opf_store.evidence_inventory("import", _p_run)
+        _p_src = _p_bundle + "/originals/notes/TODO.md"
+        _p_other = _p_bundle + "/originals/notes/OTHER.md"
+        _p_text = "- carry the import\n"
+
+        def _p_sha(text):
+            return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+        def _p_w(path):
+            # build() writes its `working` keys beneath .working/.
+            return path[len(WORKING_DIRNAME) + 1:]
+
+        def _p_bundle_files(files=None, listed=None):
+            # `files` maps each bundle path present on disk to its text; `listed` holds the (path, text) rows the
+            # inventory records, by default exactly the files present.
+            files = {_p_src: _p_text} if files is None else files
+            listed = sorted(files.items()) if listed is None else listed
+            out = {_p_w(p): t for p, t in files.items()}
+            out[_p_w(_p_inv)] = {"format": EVIDENCE_FORMAT, "file": [
+                {"path": p, "size": len(t.encode("utf-8")), "sha256": _p_sha(t)} for p, t in listed]}
+            return out
+
+        def _p_row(n, **imp_over):
+            imp = {"source": _p_src, "source_sha256": _p_sha(_p_text), "run": _p_run, "imported_at": TS}
+            imp.update(imp_over)
+            return _i3_row("imported:BI-{}".format(n), **{"import": imp})
+
+        def _p_machine(*rows):
+            return _i3_machine(imp={"imported:BI": len(rows)},
+                               leaves={"backlog_item.imported.index.toml": idx(list(rows))})
+
+        def _p_doctor(machine, working, after=None):
+            root = build(machine, None, working)
+            if after is not None:
+                after(root)
+            res = resolve_store(root)
+            return validate_store(res, observations=_i3_obs()) if res.status == RESOLVED else None
+
+        def _p_symlink_original(root):
+            # The original becomes a symlink to identical bytes outside the store tree.
+            target = root / "outside.md"
+            target.write_text(_p_text, encoding="utf-8")
+            (root / _p_src).unlink()
+            os.symlink(str(target), str(root / _p_src))
+
+        _p_g = globals()
+        _p_prev_rc = required_checks
+        _p_prev_homes = _opf_store.SUPPORTED_HOMES
+        _p_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
+        try:
+            # The active imported series (both tooling gates raised, as in the per-series id vectors) on the 2.0.0
+            # / homes = 2 store; required_checks is patched to carry C-IMPORTED-PROVENANCE, standing in for the
+            # activation wiring, and restored in finally.
+            _opf_store.SUPPORTED_HOMES = 2
+            _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
+            # Before the roster carries the id the check never runs: the stale-digest store below reports no
+            # C-IMPORTED-PROVENANCE verdict and no unknown-id fault (red when the run is not gated on the roster).
+            _p_new = "- carry the import, edited\n"
+            _p_flip_args = (_p_machine(_p_row(1, source_sha256=_p_sha(_p_new)), _p_row(2)),
+                            _p_bundle_files({_p_src: _p_new}))
+            _p_unwired = _p_doctor(*_p_flip_args)
+            check("provenance-not-run-before-roster-wiring",
+                  _p_unwired is not None and "C-IMPORTED-PROVENANCE" not in _p_unwired.checks
+                  and _i3_tripwire_only(_p_unwired))
+            _p_g["required_checks"] = lambda homes, _rc=_p_prev_rc: _rc(homes) + ("C-IMPORTED-PROVENANCE",)
+            # The clean control: two rows citing one listed, matching original pass, and only the activation
+            # tripwire remains (red when the check over-fires on sound evidence).
+            _p_ok = _p_doctor(_p_machine(_p_row(1), _p_row(2)), _p_bundle_files())
+            check("provenance-clean-bundle-passes",
+                  _p_ok is not None and _p_ok.checks.get("C-IMPORTED-PROVENANCE") == "PASS"
+                  and _i3_tripwire_only(_p_ok))
+            # A byte flip the bundle inventory was re-sealed over: the original and its inventory row agree, so
+            # C-EVIDENCE-ENUM passes, and only imported:BI-2 still records the old source_sha256. The provenance
+            # check is the sole layer that sees it, and it names that row alone (red when the digest comparison
+            # is removed, or reads only the first row citing the pair).
+            _p_flip = _p_doctor(*_p_flip_args)
+            check("provenance-byte-flip-finding",
+                  _p_flip is not None and _i3_bad(_p_flip) == {"C-CONTAINMENT", "C-IMPORTED-PROVENANCE"}
+                  and _i3_tripwire(_p_flip)
+                  and _i3_msgs(_p_flip, "C-IMPORTED-PROVENANCE") == [
+                      "C-IMPORTED-PROVENANCE: 'imported:BI-2' record source_sha256 {} for {!r}, but the preserved "
+                      "original hashes to {} (spec 8.3)".format(_p_sha(_p_text), _p_src, _p_sha(_p_new))])
+            # A missing original, still listed, cannot be verified: CANNOT-EVALUATE naming it once, never a pass
+            # (red when an absent evidence file is skipped).
+            _p_miss = _p_doctor(_p_machine(_p_row(1)), _p_bundle_files({}, listed=[(_p_src, _p_text)]))
+            check("provenance-original-missing-cannot-evaluate",
+                  _p_miss is not None and _p_miss.checks.get("C-IMPORTED-PROVENANCE") == "CANNOT-EVALUATE"
+                  and _i3_msgs(_p_miss, "C-IMPORTED-PROVENANCE") == [
+                      "C-IMPORTED-PROVENANCE: evidence file {!r} is missing, so it cannot be verified (spec 8.3: "
+                      "missing evidence fails closed)".format(_p_src)])
+            # A symlinked original is never followed, even to identical bytes: CANNOT-EVALUATE naming it (red
+            # when the read follows the link, which then matches and passes).
+            _p_sym = _p_doctor(_p_machine(_p_row(1)), _p_bundle_files(), after=_p_symlink_original)
+            _p_sym_msgs = _i3_msgs(_p_sym, "C-IMPORTED-PROVENANCE")
+            check("provenance-symlinked-original-cannot-evaluate",
+                  _p_sym is not None and _p_sym.checks.get("C-IMPORTED-PROVENANCE") == "CANNOT-EVALUATE"
+                  and len(_p_sym_msgs) == 1 and _p_src in _p_sym_msgs[0] and "not a regular file" in _p_sym_msgs[0]
+                  and _p_sym_msgs[0] in _p_sym.cannot_evaluate)
+            # Provenance anchors only in the cited run's own originals/ folder: a live store path, a malformed run
+            # id, and another run's originals are each a finding, and nothing they name is read (red when the
+            # originals/ containment test is dropped: the live path is then read and graded instead).
+            _p_live = ".working/notes/TODO.md"
+            _p_elsewhere = _opf_store.evidence_run("import", "imp-20260601T000000Z-fedcba9876543210")
+            _p_out_w = _p_bundle_files()
+            _p_out_w[_p_w(_p_live)] = _p_text
+            _p_out = _p_doctor(_p_machine(_p_row(1, source=_p_live), _p_row(2, run="imp-not-a-run"),
+                                          _p_row(3, source=_p_elsewhere + "/originals/notes/TODO.md")), _p_out_w)
+            check("provenance-source-outside-run-originals-finding",
+                  _p_out is not None and _i3_msgs(_p_out, "C-IMPORTED-PROVENANCE") == [
+                      "C-IMPORTED-PROVENANCE: imported record {!r} carries no verifiable provenance: its import "
+                      "table must name an imp-<YYYYMMDD>T<HHMMSS>Z-<hash16> run, a source under that run's "
+                      ".working/imported/import/<run-id>/originals/ folder, and a 64-hex source_sha256 (spec "
+                      "8.3/8.8)".format("imported:BI-{}".format(n)) for n in (1, 2, 3)])
+            # The original must be listed by its bundle inventory, even when its bytes match its record (red when
+            # the listing requirement is removed).
+            _p_unl = _p_doctor(_p_machine(_p_row(1)), _p_bundle_files(
+                {_p_src: _p_text, _p_other: "other\n"}, listed=[(_p_other, "other\n")]))
+            check("provenance-original-unlisted-finding",
+                  _p_unl is not None and _i3_msgs(_p_unl, "C-IMPORTED-PROVENANCE") == [
+                      "C-IMPORTED-PROVENANCE: the preserved original {!r} cited by 'imported:BI-1' is not listed in "
+                      "{!r} (spec 8.8)".format(_p_src, _p_inv)])
+            # A cited bundle without its inventory.toml, or with a malformed one, cannot be verified:
+            # CANNOT-EVALUATE naming the inventory (red when the absent inventory is skipped, or a malformed one
+            # read as an empty listing).
+            _p_ni_w = _p_bundle_files()
+            del _p_ni_w[_p_w(_p_inv)]
+            _p_ni = _p_doctor(_p_machine(_p_row(1)), _p_ni_w)
+            check("provenance-inventory-missing-cannot-evaluate",
+                  _p_ni is not None and _p_ni.checks.get("C-IMPORTED-PROVENANCE") == "CANNOT-EVALUATE"
+                  and _i3_msgs(_p_ni, "C-IMPORTED-PROVENANCE") == [
+                      "C-IMPORTED-PROVENANCE: {!r} is missing, so the bundle its imported records cite cannot be "
+                      "verified (spec 8.3/8.8)".format(_p_inv)])
+            _p_mf_w = _p_bundle_files()
+            _p_mf_w[_p_w(_p_inv)] = {"format": EVIDENCE_FORMAT, "file": [{"path": _p_src, "size": 1}]}
+            _p_mf = _p_doctor(_p_machine(_p_row(1)), _p_mf_w)
+            check("provenance-inventory-malformed-cannot-evaluate",
+                  _p_mf is not None and _p_mf.checks.get("C-IMPORTED-PROVENANCE") == "CANNOT-EVALUATE"
+                  and _i3_msgs(_p_mf, "C-IMPORTED-PROVENANCE") == [
+                      "C-IMPORTED-PROVENANCE: malformed import bundle inventory {!r}: file rows require exactly "
+                      "path, size and sha256".format(_p_inv)])
+            # An unread imported leaf is named as not evaluated for provenance, never passed (red when the unread
+            # series is skipped silently).
+            _p_ur = _p_doctor(_i3_machine(imp={"imported:BI": 1}, leaves={
+                "backlog_item.imported.index.toml": "record = [ not toml"}), _p_bundle_files())
+            check("provenance-unread-leaf-cannot-evaluate",
+                  _p_ur is not None and _p_ur.checks.get("C-IMPORTED-PROVENANCE") == "CANNOT-EVALUATE"
+                  and _i3_msgs(_p_ur, "C-IMPORTED-PROVENANCE") == [
+                      "C-IMPORTED-PROVENANCE: the provenance of the imported:BI records is not evaluated, because "
+                      "their imported leaf could not be read (spec 8.3)"])
+        finally:
+            _p_g["required_checks"] = _p_prev_rc
+            _opf_store.SUPPORTED_HOMES = _p_prev_homes
+            _opf_store.SUPPORTED_SPEC_VERSION = _p_prev_ssv
+        # The inventory re-read is the provenance check's own evidence coverage on homes 1, where C-EVIDENCE-ENUM
+        # reads nothing (spec 4.2/14.1). Driven directly over a bundle with no other check present: the matching
+        # original passes, and a listed file whose bytes differ from its row is the one finding (red when the
+        # re-read of the listed files is removed).
+        _p_root = build(clean_machine(), None, _p_bundle_files(
+            {_p_src: _p_text, _p_other: "edited\n"}, listed=[(_p_src, _p_text), (_p_other, "other\n")]))
+        _p_rep = _Report()
+        _p_rep.ran("C-IMPORTED-PROVENANCE")
+        _p_fd = os.open(str(_p_root), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _check_imported_provenance(_p_fd, [("imported:BI", "imported:BI-1", _p_row(1))], set(), _p_rep)
+        finally:
+            os.close(_p_fd)
+        check("provenance-inventory-payload-mismatch-finding",
+              _p_rep.cannot == [] and _p_rep.findings == [
+                  "C-IMPORTED-PROVENANCE: {!r} does not match the size and digest {!r} records for it (spec "
+                  "4.2/14.1)".format(_p_other, _p_inv)])
+        # Import-bundle registration (spec 4.2/8.8). On a homes-1 store whose imported series is active, the
+        # containment walk registers each .working/imported/import/<run-id>/ bundle's inventory.toml and the files
+        # it lists, and everything else under .working/imported/ stays unregistered. SUPPORTED_SPEC_VERSION is
+        # patched to IMPORTED_SPEC_VERSION inside the block (restored in finally), so the 1.3.0 store validates
+        # and the containment flag is True; the activation tripwire then holds the store at CANNOT-EVALUATE, and
+        # the vectors judge the C-CONTAINMENT findings.
+
+        def _r_machine():
+            m = clean_machine()
+            m["manifest.toml"]["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
+            return m
+
+        def _r_unregistered(r):
+            return sorted(f for f in (r.findings if r is not None else ()) if "unregistered path" in f)
+
+        def _r_paths(*paths):
+            return sorted("C-CONTAINMENT: unregistered path {!r} at the store location is neither OPF-managed nor "
+                          "enumerated as unmanaged (spec 14.2/11)".format(p) for p in paths)
+
+        _r_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
+        try:
+            _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
+            # The listed original and the inventory register: no finding, and the tripwire is the only
+            # CANNOT-EVALUATE (red when the bundle is not registered: .working/imported is then a stray).
+            _r_ok = run(_r_machine(), working=_p_bundle_files())
+            check("import-bundle-listed-file-registered",
+                  _r_ok is not None and not _r_ok.findings and len(_r_ok.cannot_evaluate) == 1
+                  and _i3_msgs(_r_ok, "C-CONTAINMENT") == _r_ok.cannot_evaluate
+                  and "C-IMPORTED" in _r_ok.cannot_evaluate[0])
+            # Only what the inventory lists registers: an unlisted original, a loose bundle file, an unlisted
+            # directory and a phase inventory are each an unregistered path (red when the bundle registers
+            # wholesale).
+            _r_un_w = _p_bundle_files()
+            for _r_extra in ("/originals/notes/extra.md", "/notes.txt", "/scratch/a.txt"):
+                _r_un_w[_p_w(_p_bundle + _r_extra)] = "x\n"
+            _r_un_w[_p_w(_p_bundle + "/inventory-later.toml")] = {"format": EVIDENCE_FORMAT, "file": []}
+            _r_un = run(_r_machine(), working=_r_un_w)
+            check("import-bundle-unlisted-file-finding",
+                  _r_un is not None and _r_unregistered(_r_un) == _r_paths(
+                      _p_bundle + "/originals/notes/extra.md", _p_bundle + "/notes.txt", _p_bundle + "/scratch",
+                      _p_bundle + "/inventory-later.toml"))
+            # A bundle with no inventory registers nothing: the bundle is one unregistered entry (red when an
+            # absent inventory registers the bundle folder).
+            _r_ni_w = _p_bundle_files()
+            del _r_ni_w[_p_w(_p_inv)]
+            _r_ni = run(_r_machine(), working=_r_ni_w)
+            check("import-bundle-without-inventory-unregistered",
+                  _r_ni is not None and _r_unregistered(_r_ni) == _r_paths(_p_bundle))
+            # A row may name a Move destination outside the bundle (spec 4.2), but an import bundle registers only
+            # its own members, so .working/archive stays an unregistered path (red when a row outside the bundle
+            # registers its path).
+            _r_mv = run(_r_machine(), working=_p_bundle_files({_p_src: _p_text,
+                                                               ".working/archive/moved/notes/x.md": "x\n"}))
+            check("import-bundle-registers-only-its-own-members",
+                  _r_mv is not None and _r_unregistered(_r_mv) == _r_paths(".working/archive"))
+            # An unreadable or malformed inventory leaves the bundle's claims unknown: a C-CONTAINMENT
+            # CANNOT-EVALUATE naming it, and the bundle is not graded on a guess (red when it is walked anyway).
+            _r_bad = []
+            for _r_doc in ("file = [ not toml", {"format": EVIDENCE_FORMAT, "file": [{"path": _p_src}]}):
+                _r_bad_w = _p_bundle_files()
+                _r_bad_w[_p_w(_p_inv)] = _r_doc
+                _r_badr = run(_r_machine(), working=_r_bad_w)
+                _r_bad.append(_r_badr is not None and not _r_badr.findings
+                              and len(_r_badr.cannot_evaluate) == 2
+                              and all(m in _i3_msgs(_r_badr, "C-CONTAINMENT") for m in _r_badr.cannot_evaluate)
+                              and any(_p_inv in m for m in _r_badr.cannot_evaluate))
+            check("import-bundle-malformed-inventory-cannot-evaluate", _r_bad == [True, True])
+            # Only import bundles register: another evidence kind, an invalid run folder, and loose files under
+            # .working/imported/ and its import home stay unregistered (red when the whole imported tree is
+            # admitted as a managed namespace).
+            _r_st_w = _p_bundle_files()
+            for _r_stray in ("imported/adoption/adopt-20260601T000000Z-0123456789abcdef/x.md",
+                             "imported/import/not-a-run/x.md", "imported/loose.md", "imported/import/loose.md"):
+                _r_st_w[_r_stray] = "x\n"
+            _r_st = run(_r_machine(), working=_r_st_w)
+            check("import-home-strays-graded",
+                  _r_st is not None and _r_unregistered(_r_st) == _r_paths(
+                      ".working/imported/adoption", ".working/imported/import/not-a-run",
+                      ".working/imported/loose.md", ".working/imported/import/loose.md"))
+            # A symlinked import home is never followed: the walk names it as a C-CONTAINMENT CANNOT-EVALUATE,
+            # and the registration that runs first neither follows it nor faults the run (red when its listing
+            # failure escapes the check).
+
+            def _r_symlink_home(root):
+                home = root / _IMPORT_EVIDENCE_HOME
+                home.rename(root / "elsewhere")
+                os.symlink(str(root / "elsewhere"), str(home))
+
+            _r_sl = _p_doctor(_r_machine(), _p_bundle_files(), after=_r_symlink_home)
+            check("import-home-symlink-cannot-evaluate-not-followed",
+                  _r_sl is not None and _r_sl.checks.get("C-CONTAINMENT") == "CANNOT-EVALUATE"
+                  and not _r_sl.findings
+                  and not any(m.startswith("internal:") for m in _r_sl.cannot_evaluate)
+                  and any(".working/imported" in m and "exotic" in m for m in _i3_msgs(_r_sl, "C-CONTAINMENT")))
+        finally:
+            _opf_store.SUPPORTED_SPEC_VERSION = _r_prev_ssv
+        # Inactive (the shipped constants), the import home registers nothing: .working/imported stays one
+        # unregistered entry exactly as before (red when the registration ignores the flag).
+        _r_off = run(clean_machine(), working=_p_bundle_files())
+        check("import-bundle-registration-inert-when-inactive",
+              _r_off is not None and _r_off.status == INVALID
+              and _r_unregistered(_r_off) == _r_paths(".working/imported"))
+        # The import home is a graded container once active on homes 1: an [unmanaged] declaration inside it or
+        # containing it collides, and the same declarations stay valid while inactive (red when the home is not
+        # added to the graded containers).
+        _r_um = base_manifest()
+        _r_um["unmanaged"] = dict(paths=[_p_bundle + "/originals", ".working/imported"])
+        _r_um_on = classify_containment(_r_um, ".working/toml", imported=True)
+        _r_um_off = classify_containment(_r_um, ".working/toml")
+        check("import-home-unmanaged-declaration-collides-when-active",
+              len(_r_um_on.colliding) == 2 and _r_um_on.valid_unmanaged == []
+              and _r_um_on.import_home == _IMPORT_EVIDENCE_HOME
+              and _r_um_off.colliding == [] and len(_r_um_off.valid_unmanaged) == 2
+              and _r_um_off.import_home is None)
+        # The registration is the homes-1 one: generation 1 registers the import home, and generation 2, whose
+        # evidence roots C-EVIDENCE-ENUM reconciles, registers none (red when the generation bound admits 2).
+        _r_h2 = base_manifest()
+        _r_h2["opf"]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
+        _r_h2["opf"]["homes"] = 2
+        _r_prev_homes = _opf_store.SUPPORTED_HOMES
+        try:
+            _opf_store.SUPPORTED_HOMES = 2
+            _r_h2_cls = classify_containment(_r_h2, ".working/toml", imported=True)
+        finally:
+            _opf_store.SUPPORTED_HOMES = _r_prev_homes
+        check("import-home-registered-on-homes1-only",
+              _r_h2_cls.homes == 2 and _r_h2_cls.import_home is None
+              and classify_containment(base_manifest(), ".working/toml", imported=True).import_home
+              == _IMPORT_EVIDENCE_HOME)
         # F2 (per-record): worklog/<WL-n>.toml is never a per-record body -> INVALID; a garbage body control
         # is still caught.
         wlr = copy.deepcopy(pr_machine)
