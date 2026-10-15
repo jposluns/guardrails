@@ -5136,7 +5136,10 @@ def _self_test_vectors():
         registry = base_registry + (_D(explanation), _Q(quotation))
         missing = "spec 4.2 missing retired-text quotation: " + quotation
         with tempfile.TemporaryDirectory(prefix="opf-homes-quotation-") as tmp:
-            landed_spec = Path(tmp) / "OPF-SPEC.md"
+            # The planted spec sits at opf/spec/ under its own fixture root, as SPEC does, so main()'s
+            # special-file precheck walks that root (SPEC.parents[1]), never the shared temp root.
+            landed_spec = Path(tmp) / "opf" / "spec" / "OPF-SPEC.md"
+            landed_spec.parent.mkdir(parents=True)
             landed_spec.write_text(landed, encoding="utf-8")
             with patch.dict(_CONTRACT, {"4.2": registry}), patch.object(module, "SPEC", landed_spec):
                 buf = io.StringIO()
@@ -6088,7 +6091,9 @@ def _self_test_vectors():
     # main([]) is red with the guard's own finding, so unwiring informative_findings from
     # main() is a named failure here; the unmodified baseline stays green with no output.
     with tempfile.TemporaryDirectory(prefix="opf-homes-main-") as tmp:
-        planted_spec = Path(tmp) / "OPF-SPEC.md"
+        # Its own fixture root, as above: the precheck walks SPEC.parents[1], here tmp/opf.
+        planted_spec = Path(tmp) / "opf" / "spec" / "OPF-SPEC.md"
+        planted_spec.parent.mkdir(parents=True)
         planted_spec.write_text(text.replace(
             informative_anchor, informative_anchor + " A checker MUST share each record.", 1),
             encoding="utf-8")
