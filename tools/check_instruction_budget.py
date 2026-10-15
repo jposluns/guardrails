@@ -242,6 +242,20 @@ Usage:
 Exit 0 clean; 1 on a finding (PACK over the ratchet, a banned import); 2 on a cannot-evaluate input
 (fail-closed), so an unreadable, malformed, or out-of-grammar input can never read as clean.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_instruction_budget.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import contextlib
 import errno
 import io
@@ -250,7 +264,6 @@ import os
 import re
 import shutil
 import stat
-import sys
 import tempfile
 import types
 import unicodedata
@@ -258,12 +271,21 @@ from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: check_instruction_budget.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_instruction_budget.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_claude  # noqa: E402  the RULES-INDEX markers it writes, never a second copy of them
 import gen_rules  # noqa: E402  its validated frontmatter value parsers, never a second one
+import _selftest_exit_report  # noqa: E402
 
 RULES_REL = ".claude/rules"
 CLAUDE_REL = "CLAUDE.md"
@@ -1235,7 +1257,7 @@ def load_budget(root):
         data = tomllib.loads(read_text(_budget_file(root), BUDGET_REL))
     # ValueError and RecursionError too: tomllib raises a BARE ValueError on an integer literal past
     # CPython's int-string limit, and a RecursionError on a deeply nested array or inline table.
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("{} is not valid TOML ({})".format(BUDGET_REL, exc))
     if set(data) != BUDGET_KEYS:
         raise GateError("{}: keys must be exactly {} (got {})".format(
@@ -1726,7 +1748,7 @@ def _expected_check_ids():
         with open(CHECKS_MANIFEST, "rb") as handle:
             data = tomllib.load(handle)
     # ValueError and RecursionError too, as in load_budget.
-    except (OSError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (OSError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         print("SELF-TEST HARNESS ERROR: cannot read {}: {}".format(CHECKS_MANIFEST, exc),
               file=sys.stderr)
         return None
@@ -1741,21 +1763,12 @@ def _expected_check_ids():
     return None
 
 
-def _write_report(report_path):
-    if report_path is None:
-        return True
-    try:
-        with open(report_path, "w", encoding="utf-8") as handle:
-            json.dump({"format_version": 1, "suite": SUITE_ID, "check_ids": EXECUTED}, handle)
-            handle.write("\n")
-    except OSError as exc:
-        print("SELF-TEST HARNESS ERROR: cannot write execution report {}: {}".format(
-            report_path, exc), file=sys.stderr)
-        return False
-    return True
-
-
 def self_test(report_path=None):
+    if report_path is not None:
+        # The execution report is finalized at interpreter exit, after this run's cleanup
+        # (tools/_selftest_exit_report.py); nothing writes it in band.
+        _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
+        _EXIT_REPORT_ARMED.append(True)
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-instruction-budget-selftest-"))
     try:
         # Counting: frontmatter goes with the blank line after it; a whole-line comment between blank lines
@@ -2669,8 +2682,6 @@ def self_test(report_path=None):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    if not _write_report(report_path):
-        return 2
     expected = _expected_check_ids()
     if expected is None:
         return 2
@@ -2746,6 +2757,13 @@ def main(argv):
 # (D-411-HOSTILE-DISCLOSED).
 _LOADED_FAULTS = []
 _FAULT_MARKER = "LOADED-CODE-FAULT"
+# Holds one entry once self_test has armed the execution report (tools/_selftest_exit_report.py). The
+# report's finalizer is an atexit callback that writes only when exit_with's own exception ends the
+# process, so an armed run ends through exit_with instead of os._exit, after the same settle and fault
+# decision. On that path an atexit callback registered by loaded code does run, before the finalizer;
+# its fault reaches stderr, and tools/check_selftest_execution.py refuses a run with a nonempty error
+# stream.
+_EXIT_REPORT_ARMED = []
 
 
 def _install_fault_hooks():
@@ -2799,7 +2817,8 @@ def _gate_exit(code):
     while a flush was blocked, on a full pipe say, must still fail the verdict; its late marker is written
     straight to fd 2, past the buffers), then os._exit, so no atexit callback registered by loaded code
     runs after the verdict (the gate's own cleanup runs inside its work; this gate registers no atexit work
-    of its own)."""
+    of its own). A self-test that armed the execution report ends through exit_with instead (see
+    _EXIT_REPORT_ARMED)."""
     import os
     import threading as _threads
     import time
@@ -2842,6 +2861,9 @@ def _gate_exit(code):
         except OSError:
             pass
         code = 2
+    if _EXIT_REPORT_ARMED:
+        # The armed execution report is written only when exit_with's exception ends the process.
+        _selftest_exit_report.exit_with(code)
     os._exit(code)
 
 

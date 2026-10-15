@@ -32,11 +32,16 @@ review what the documents say.
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: check_opf_prompt_pack.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_opf_prompt_pack.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import hashlib
 import json
@@ -159,7 +164,10 @@ def _validate(pack_dir):
     raw = _read_regular(pack_dir / MANIFEST_NAME, MAX_MANIFEST_BYTES, "manifest")
     try:
         doc = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    except (ValueError, RecursionError, MemoryError) as exc:
+        # ValueError: tomllib.TOMLDecodeError, a UnicodeDecodeError and an over-long integer literal;
+        # RecursionError: deep nesting and (CPython 3.14.8 on) a 1001-part key; MemoryError: a many-part
+        # key under a memory limit.
         raise _Refusal(CANNOT_EVALUATE, "manifest-parse", "pack.toml does not parse: {}".format(exc))
 
     keys = set(doc)
@@ -537,15 +545,21 @@ def _loaded_exit_vectors(tmp):
     return failures
 
 
+# Whether this file is the process entry (python <file>) rather than an imported module (the opf.py
+# aggregate). It is held as a value, so the final block stays the only __main__ guard in the file
+# (tools/check_entry_guard.py) while self_test still routes an entry run through _fail_closed_main.
+_RUN_AS_ENTRY = __name__ == "__main__"
+
+
 def self_test():
     """The canonical --self-test entry's suite hook (F-SELFTEST-NO-MAIN). Run as this file's process
-    entry (the module __name__ is "__main__"), it routes the suite through _fail_closed_main, which
+    entry (_RUN_AS_ENTRY), it routes the suite through _fail_closed_main, which
     installs the fault recorders before any in-process load, settles them after the suite, and ends the
     process with os._exit, so sys.exit(self_test()) never returns and no atexit callback registered by
     loaded code runs after the verdict. Called in-process (the opf.py aggregate), it runs the suite
     plainly and returns its result; that aggregate entry is the disclosed HARDEN-GATE-ENTRY-WRAP residual
     until the unit runner of #385 lands."""
-    if __name__ == "__main__":
+    if _RUN_AS_ENTRY:
         _fail_closed_main(_self_test)
     return _self_test()
 
@@ -598,6 +612,29 @@ def _self_test_vectors():
                     "PASS" if ok else "FAIL", got[0], got[1] or "").rstrip())
                 if not ok:
                     failures.append("unreadable-subdirectory: {!r}".format(got))
+
+            # A manifest tomllib refuses with RecursionError (a deeply nested value, and a 1001-part key under
+            # the emulated cap) is the manifest-parse refusal, never the backstop's unexpected error.
+            import _opf_store
+            for name, text, capped in (("manifest-deep-nesting", _opf_store._ST_DEEP_TOML, False),
+                                       ("manifest-key-1001-parts", _opf_store._ST_LONG_KEY_TOML, True)):
+                pack = Path(tmp) / name / "prompt-pack"
+                pack.mkdir(parents=True)
+                (pack / MANIFEST_NAME).write_text(text, encoding="utf-8")
+                try:
+                    if capped:
+                        with _opf_store._StKeyPartCap():
+                            got = validate_pack(pack)
+                    else:
+                        got = validate_pack(pack)
+                except RecursionError as exc:
+                    got = (None, None, "escaped RecursionError: {}".format(exc))
+                count += 1
+                ok = got[:2] == (CANNOT_EVALUATE, "manifest-parse") and "does not parse" in got[2]
+                print("{} {}: {} {}".format("PASS" if ok else "FAIL", name, got[0], got[1] or "").rstrip())
+                if not ok:
+                    failures.append("{} (wanted {} manifest-parse, got {} {}: {})".format(
+                        name, CANNOT_EVALUATE, got[0], got[1], got[2]))
 
             # Use a child timeout so a blocking open is a failed check, never a hung self-test.
             # Probe member reads directly: the walk's earlier refusal must not mask a lost open guard.
@@ -965,10 +1002,15 @@ _ENTRY_WIRING = '''if __name__ == "__main__":
 # wrapper, so sys.exit(self_test()) still settles fail-closed and ends with os._exit when this file is
 # the process entry.
 _SELF_TEST_WIRING = '''def self_test():
-    if __name__ == "__main__":
+    if _RUN_AS_ENTRY:
         _fail_closed_main(_self_test)
     return _self_test()
 '''
+
+# The one binding of _RUN_AS_ENTRY, checked by _entry_wiring_failures: a rebinding (a constant, a later
+# store) would route an entry run of self_test around _fail_closed_main.
+_ENTRY_FLAG_WIRING = '_RUN_AS_ENTRY = __name__ == "__main__"\n'
+
 
 def _entry_wiring_failures():
     """One failure string per entry-wiring requirement this file's own source misses (see _ENTRY_WIRING)."""
@@ -991,6 +1033,12 @@ def _entry_wiring_failures():
     if len(wrappers) != 1 or [ast.dump(node) for node in body] != [ast.dump(node) for node in expected_body]:
         failures.append("fault-channel/entry-wiring: self_test is not the entry-aware wrapper (the "
                         "canonical sys.exit(self_test()) must settle through _fail_closed_main)")
+    stores = [node for node in ast.walk(tree)
+              if isinstance(node, ast.Name) and node.id == "_RUN_AS_ENTRY" and not isinstance(node.ctx, ast.Load)]
+    flag = ast.dump(ast.parse(_ENTRY_FLAG_WIRING).body[0])
+    if len(stores) != 1 or sum(ast.dump(node) == flag for node in tree.body) != 1:
+        failures.append("fault-channel/entry-wiring: _RUN_AS_ENTRY is not bound exactly once, at module "
+                        "scope, as the __main__ comparison")
     return failures
 
 def _fault_channel_vectors():

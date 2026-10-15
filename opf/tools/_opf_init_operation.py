@@ -111,11 +111,16 @@ primitive), never a clean skip.
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: _opf_init_operation.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: _opf_init_operation.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import base64
 import binascii
@@ -432,7 +437,7 @@ def validate_bootstrap_provenance(raw, *, expected_basis=None, expected_source_d
         model = tomllib.loads(raw.decode("utf-8", errors="strict"))
     except UnicodeDecodeError:
         return _pv(INVALID, "ENCODING", "raw", "invalid UTF-8")
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         return _pv(INVALID, "PARSE", "raw", "not TOML ({})".format(exc))
     if type(model) is not dict:
         return _pv(INVALID, "TYPE", "root", "must be a table")
@@ -574,7 +579,7 @@ def read_ancestral_counter_seed(store_root, *, pinned_head, evidence_commit, pre
         parsed = tomllib.loads(blob.decode("utf-8", errors="strict"))
     except UnicodeDecodeError:
         raise InitOperationError("ancestral counters blob is not decodable UTF-8; refusing")
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise InitOperationError("ancestral counters blob is not valid TOML ({}); refusing".format(exc))
 
     baseline, importer, module = _roster_namespaces()
@@ -983,7 +988,10 @@ def build_view_roster(operation_id, manifest_payload, source_paths):
     InitOperationError."""
     try:
         manifest = tomllib.loads(manifest_payload.decode("utf-8", "strict"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, AttributeError):
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, AttributeError, RecursionError,
+            MemoryError):
+        # RecursionError: deep nesting and (CPython 3.14.8 on) a 1001-part key; MemoryError: a many-part key
+        # under a memory limit; ValueError: an over-long integer literal too.
         raise InitOperationError("the planned manifest payload is not TOML; the view roster cannot "
                                  "be derived")
     views = manifest.get("views")
@@ -1243,7 +1251,9 @@ def _validate_plan_payloads(plan, payloads, counters_basis):
             _plan_bad("S entry {} is not this generator's exact bytes".format(path))
     try:
         counters = tomllib.loads(payloads[COUNTERS_RELPATH].decode("utf-8", "strict"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError):
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError):
+        # RecursionError: deep nesting and (CPython 3.14.8 on) a 1001-part key; MemoryError: a many-part key
+        # under a memory limit; ValueError: an over-long integer literal too.
         _plan_bad("the counters payload is not TOML")
     if type(counters_basis) is not dict:
         _plan_bad("the counters basis must be a table")
@@ -1909,7 +1919,9 @@ def _health_check(root, root_fd, plan, binding):
     baseline, importer, _module = _roster_namespaces()
     try:
         counters = tomllib.loads(raw.decode("utf-8", "strict"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError):
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError):
+        # RecursionError: tomllib's refusal of deep nesting and (CPython 3.14.8 on) a 1001-part key;
+        # MemoryError: a many-part key under a memory limit.
         raise InitOperationError("the completed adoption's counters are not TOML")
     _hw, findings = validate_counters(counters, known_namespaces=baseline,
                                       optional_namespaces=importer)
@@ -2426,7 +2438,11 @@ def run_init_operation(product_root, *, ancestral=None, recover=False):
         if "preserved and refused" in str(exc):
             result.conflicts.append(str(exc).split(" ", 1)[0])
     except (_opf_oplock.OpLockError, _opf_init_substrate.InitSubstrateError,
-            _journal.JournalError, OSError, ValueError) as exc:
+            _journal.JournalError, OSError, ValueError, RecursionError, MemoryError) as exc:
+        # RecursionError and MemoryError: this maps ANY unmapped one raised inside this protected region (from
+        # the mutex acquisition to the views-ready record), a tomllib parse refusal (deep nesting, a 1001-part
+        # key, a many-part key under a memory limit) at a site with no local mapping included, to
+        # CANNOT-EVALUATE. The preflight before this try and the cleanup in its finally are outside it.
         primary = {"code": CANNOT_EVALUATE, "detail": "{}: {}".format(type(exc).__name__, exc)}
     finally:
         if primary is not None:
@@ -3103,6 +3119,11 @@ def _expected_views(root):
         os.close(fd)
 
 
+def _result_detail(got):
+    """A failed check detail: the InitResult status and primary failure, or the raised exception."""
+    return "{} {}".format(getattr(got, "status", repr(got)), getattr(got, "primary_failure", ""))
+
+
 def _read_or_none(path):
     try:
         with open(path, "rb") as fh:
@@ -3219,6 +3240,50 @@ def _physical_tests(base, env, ok, signal):
     rc, res, err = _child(root, env)
     ok("R2b-edited-completed-is-healthy", res and res["status"] == ALREADY_INITIALIZED
        and _snapshot_all(root) == before, str(res) + err[-400:])
+
+    # R2c completed-adoption counters that tomllib refuses with RecursionError (a deeply nested value, and a
+    # 1001-part key under the emulated cap) refuse through the public seam as not TOML, the worktree
+    # untouched; a RecursionError no site maps is CANNOT-EVALUATE from run_init_operation, never raised,
+    # and the mutex is released (the restored adoption re-runs ALREADY-INITIALIZED).
+    root = _plain_repo(os.path.join(base, "recursion-counters"), env)
+    rc, res, err = _child(root, env)
+    ok("R2c-fixture-ready", res and res["status"] == VIEWS_READY, str(res) + err[-400:])
+    counters_path = os.path.join(root, COUNTERS_RELPATH)
+    good_counters = _read_or_none(counters_path)
+
+    def seam(capped=False):
+        try:
+            if not capped:
+                return init_operation(root)
+            with _opf_store._StKeyPartCap():
+                return init_operation(root)
+        except Exception as exc:  # noqa: BLE001  an escape from the seam is the failure under test
+            return exc
+    for label, text, capped in (("deep", _opf_store._ST_DEEP_TOML, False),
+                                ("key-1001", _opf_store._ST_LONG_KEY_TOML, True)):
+        _write(counters_path, text.encode("utf-8"))
+        before = _snapshot_all(root)
+        got = seam(capped)
+        ok("R2c-{}-counters-refused-not-toml".format(label), isinstance(got, InitResult)
+           and got.status == REFUSED and _snapshot_all(root) == before
+           and "counters are not TOML" in (got.primary_failure or {}).get("detail", ""), _result_detail(got))
+    _write(counters_path, good_counters)
+    this = sys.modules[__name__]
+    real_select = this._select
+
+    def overflowing_select(*_a):
+        raise RecursionError("injected parser overflow")
+    this._select = overflowing_select
+    try:
+        got = seam()
+    finally:
+        this._select = real_select
+    ok("R2c-unmapped-recursion-cannot-evaluate", isinstance(got, InitResult)
+       and got.status == CANNOT_EVALUATE
+       and "RecursionError" in (got.primary_failure or {}).get("detail", ""), _result_detail(got))
+    got = seam()
+    ok("R2c-mutex-released", isinstance(got, InitResult) and got.status == ALREADY_INITIALIZED,
+       _result_detail(got))
 
     # R3 an existing CHANGELOG.md is preserved byte for byte, recorded in E, never created.
     root = _plain_repo(os.path.join(base, "changelog"), env)
@@ -3445,10 +3510,45 @@ def _physical_tests(base, env, ok, signal):
     wt = os.path.join(base, "wt-linked")
     _git(["worktree", "add", "-q", "--detach", wt], main, env)
     rc, res, err = _child(wt, env)
+    gd = _git(["rev-parse", "--absolute-git-dir"], wt, env, allow_fail=True)
+    wt_gitdir = gd.stdout.decode().strip() if gd.returncode == 0 else ""
+
+    def _entry(path):
+        # Any directory entry at path, a dangling symlink included; only a missing entry reads as
+        # absent, any other lstat error propagates rather than passing as absence.
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return False
+        return True
+
+    def _wt_gitdir_clean():
+        # The per-worktree git dir is git's own, distinct from the main one, and holds neither the
+        # substrate home nor the lock module's control directory.
+        return (bool(wt_gitdir) and os.path.isdir(wt_gitdir)
+                and os.path.realpath(wt_gitdir) != os.path.realpath(os.path.join(main, ".git"))
+                and not any(_entry(os.path.join(wt_gitdir, name)) for name in (
+                    _opf_init_substrate.SUBSTRATE_DIRNAME, _opf_oplock.CONTROL_DIRNAME)))
     ok("R11-linked-worktree", res and res["status"] == VIEWS_READY
-       and os.path.isdir(_ops_dir(main)) and not os.path.exists(os.path.join(wt, ".git",
-                                                                                "opf-init")),
-       str(res) + err[-400:])
+       and os.path.isdir(_ops_dir(main)) and _wt_gitdir_clean(), str(res) + err[-400:])
+    # The probe above must be able to fail: each name present where git itself places it for this
+    # worktree (--git-path, derived apart from the probe's own join; planted when absent) makes the
+    # SAME predicate false.
+    for name in (_opf_init_substrate.SUBSTRATE_DIRNAME, _opf_oplock.CONTROL_DIRNAME):
+        gp = _git(["rev-parse", "--path-format=absolute", "--git-path", name], wt, env, allow_fail=True)
+        plant = gp.stdout.decode().strip() if gp.returncode == 0 else ""
+        present = bool(plant) and _entry(plant)
+        planted = False
+        if plant and not present:
+            try:
+                os.mkdir(plant)
+                planted = True
+            except OSError:
+                pass
+        ok("R11-linked-worktree-probe-live-" + name, (present or planted) and not _wt_gitdir_clean(),
+           plant)
+        if planted:
+            os.rmdir(plant)
     plain_dir = os.path.join(base, "not-a-repo")
     os.mkdir(plain_dir)
     rc, res, _err = _child(plain_dir, env)

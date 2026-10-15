@@ -35,18 +35,41 @@ in-run self-guard; tools/check_selftest_execution.py reconciles the report indep
 harness/setup error: bad argv, a relative report path, a duplicate check id, a failed report write, or
 an unreadable, malformed, or suite-missing expectation manifest.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: selftest_orch_hooks.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import json
 import os
 import subprocess
-import sys
 import tempfile
 import shutil
+import threading
 import datetime
+import hashlib
 from pathlib import Path
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: selftest_orch_hooks.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    import os
+    try:
+        sys.stderr.write(
+            "error: selftest_orch_hooks.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
@@ -54,6 +77,7 @@ from _gen_common import repo_root  # noqa: E402
 sys.path.insert(0, str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts"))
 import aiqt_hooks  # noqa: E402
 from _git_fixture_env import scrub_git_environment  # noqa: E402
+import _selftest_exit_report  # noqa: E402
 
 FAILURES = []
 EXECUTED = []        # ordered check ids actually reached this run
@@ -124,6 +148,34 @@ def _verdict(result):
             if isinstance(note, str) and note.strip():
                 return "warn"
     return "unexpected({!r})".format(result)
+
+
+def _registry_ceiling(root, probe):
+    """Wrap a registry probe of the truncation guard's ancestor walk (aiqt_hooks._orch_dirfd_has_registry)
+    so that every directory STRICTLY ABOVE root reads as carrying no registry while every other directory
+    is judged by probe. TEST-ONLY HERMETICITY: the production walk takes no ceiling and is not changed; the
+    walk still climbs to the filesystem root (so a walk failure above root still surfaces), but a registry
+    on the host above the fixture root (for example a live orchestration registry above TMPDIR) can no
+    longer decide a truncation-guard row; only the fixtures under root can. The chain above root is read
+    from root's resolved path and matched by device and inode, so a symlinked TMPDIR is followed to the
+    physical chain the walk itself climbs. The returned probe exposes that set as .above."""
+    above = set()
+    path = os.path.realpath(str(root))
+    while True:
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        st = os.stat(parent)
+        above.add((st.st_dev, st.st_ino))
+        path = parent
+
+    def _probe(dirfd):
+        st = os.fstat(dirfd)
+        if (st.st_dev, st.st_ino) in above:
+            return False
+        return probe(dirfd)
+    _probe.above = frozenset(above)
+    return _probe
 
 
 ENUM_STUB = """#!/usr/bin/env python3
@@ -234,7 +286,1953 @@ def now_iso(hours_ago=0):
     return t.isoformat()
 
 
+AUTH_STUB = """#!/usr/bin/env python3
+import json
+import sys
+import time
+ctl = json.load(open(sys.argv[1]))
+time.sleep(ctl.get("sleep", 0))
+sys.stdout.write(ctl.get("out", ""))
+sys.exit(ctl.get("exit", 0))
+"""
+
+
+def _rdp_git(root, *args):
+    """Run a fixture git command in root with a fixed identity; returns stdout text."""
+    p = subprocess.run(["git", "-C", str(root), "-c", "user.name=T", "-c", "user.email=t@example.invalid",
+                        "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"] + list(args),
+                       check=True, capture_output=True, text=True, timeout=30)
+    return p.stdout.strip()
+
+
+class RdpFixture:
+    """One review dispatch pin fixture: a repo whose seed commit holds seed.txt, src/a.py and old.txt and
+    whose change commit (self.pin) modifies src/a.py, adds src/b.py and deletes old.txt; a registry with a
+    review_dispatch binding (or none); and an authority stub that prints the pin unless told otherwise."""
+    CHANGED = ("old.txt", "src/a.py", "src/b.py")
+
+    def __init__(self, base, name, binding=True):
+        self.root = base / name
+        self.briefs = base / (name + "-briefs")
+        self.briefs.mkdir(parents=True)
+        (self.root / "src").mkdir(parents=True)
+        _rdp_git(base, "init", "-q", "-b", "main", str(self.root))
+        (self.root / "seed.txt").write_text("seed\n", encoding="utf-8")
+        (self.root / "src" / "a.py").write_text("a = 1\n", encoding="utf-8")
+        (self.root / "old.txt").write_text("old\n", encoding="utf-8")
+        _rdp_git(self.root, "add", "-A")
+        _rdp_git(self.root, "commit", "-q", "-m", "seed")
+        self.seed = _rdp_git(self.root, "rev-parse", "HEAD")
+        (self.root / "src" / "a.py").write_text("a = 2\n", encoding="utf-8")
+        (self.root / "src" / "b.py").write_text("b = 1\n", encoding="utf-8")
+        (self.root / "old.txt").unlink()
+        _rdp_git(self.root, "add", "-A")
+        _rdp_git(self.root, "commit", "-q", "-m", "change")
+        self.pin = _rdp_git(self.root, "rev-parse", "HEAD")
+        self.ctl = self.briefs / "authority.json"
+        self.stub = self.briefs / "authority-stub.py"
+        self.stub.write_text(AUTH_STUB, encoding="utf-8")
+        self.authority(self.pin + "\n")
+        self.binding = dict(
+            commands=["orch-dispatch"], brief_option="--brief",
+            labels=dict(target="Review-target:", revision="Reviewed-revision:", path="Review-path:",
+                        repo="Review-repo:", branch="Review-branch:"),
+            authority=dict(argv=[sys.executable, "-I", "-B", str(self.stub), str(self.ctl)], timeout=5),
+            max_brief_bytes=4096)
+        (self.root / ".aiqt").mkdir()
+        self.write_registry(self.binding if binding else None)
+
+    def write_registry(self, binding):
+        reg = dict(version=1, state_dir=str(self.briefs / "state"))
+        if binding is not None:
+            reg["review_dispatch"] = binding
+        (self.root / ".aiqt" / "orchestration.local.json").write_text(json.dumps(reg), encoding="utf-8")
+
+    def rebind(self, binding):
+        """An operator's change of the binding: write the registry and clear the hook's binding record, so
+        the next check records the new binding instead of withholding the dispatch as a changed one."""
+        self.write_registry(binding)
+        shutil.rmtree(self.root / ".git" / "aiqt" / "review-dispatch-binding", ignore_errors=True)
+
+    def ignore_registry(self, patterns=(".aiqt/orchestration.local.json", ".aiqt/orchestration.json")):
+        exclude = self.root / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("".join(p + "\n" for p in patterns), encoding="utf-8")
+
+    def authority(self, out, code=0, sleep=0):
+        self.ctl.write_text(json.dumps(dict(out=out, exit=code, sleep=sleep)), encoding="utf-8")
+
+    def brief(self, lines, name="brief.txt"):
+        path = self.briefs / name
+        path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+        return str(path)
+
+    def good(self, pin=None, paths=None, extra=()):
+        lines = ["Review the change.", "Review-target: revision", "Reviewed-revision: " + (pin or self.pin)]
+        lines += ["Review-path: " + p for p in (self.CHANGED if paths is None else paths)]
+        return self.brief(lines + list(extra))
+
+    def run(self, command, background=False):
+        return aiqt_hooks.review_dispatch_pin(dict(
+            hook_event_name="PreToolUse", cwd=str(self.root), session_id="s1", tool_name="Bash",
+            tool_input=dict(command=command, run_in_background=background)))
+
+    def dispatch(self, brief, background=False):
+        return self.run("orch-dispatch --brief " + brief, background)
+
+
+def _rdp_kind(result):
+    """_verdict, with a deny whose reason carries the UNVERIFIABLE: prefix reported as unverifiable."""
+    verdict = _verdict(result)
+    if verdict == "deny":
+        reason = result[1]["hookSpecificOutput"].get("permissionDecisionReason", "")
+        if reason.startswith("UNVERIFIABLE: "):
+            return "unverifiable"
+    return verdict
+
+
+def _rdp_cases(tmp):
+    """The review dispatch pin vectors (rdp/*). Each fixture is a throwaway repo under tmp."""
+    base = tmp / "rdp"
+    base.mkdir()
+    bare = base / "bare"
+    _rdp_git(base, "init", "-q", "-b", "main", str(bare))
+    check("rdp/registry-absent-inert", _verdict(aiqt_hooks.review_dispatch_pin(dict(
+        hook_event_name="PreToolUse", cwd=str(bare), tool_name="Bash",
+        tool_input=dict(command="orch-dispatch --brief /nonexistent")))), "allow")
+    nb = RdpFixture(base, "nobinding", binding=False)
+    check("rdp/no-binding-inert", _verdict(nb.dispatch(nb.brief(["Review-branch: main"]))), "allow")
+
+    f = RdpFixture(base, "main")
+    branch_only = f.brief(["Review-target: revision", "Review-branch: main"], "branch-only.txt")
+    check("rdp/reconciled-allows", _rdp_kind(f.dispatch(f.good())), "allow")
+    # An undeclared command off rule 4's allowlist is not plain, so a bound session withholds it.
+    check("rdp/undeclared-command-not-plain-unverifiable",
+          _rdp_kind(f.run("other-dispatch --brief " + branch_only)), "unverifiable")
+    check("rdp/missing-target-denies", _rdp_kind(f.dispatch(f.brief(["Reviewed-revision: " + f.pin]))), "deny")
+    check("rdp/unknown-target-denies", _rdp_kind(f.dispatch(f.brief(["Review-target: tip"]))), "deny")
+    check("rdp/duplicate-target-unverifiable", _rdp_kind(f.dispatch(f.brief(
+        ["Review-target: revision", "Review-target: working-tree"]))), "unverifiable")
+    events = f.briefs / "state" / "guard-events.jsonl"
+
+    def _event_rows():
+        try:
+            return [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines() if line]
+        except OSError:
+            return []
+    rows_before = len(_event_rows())
+    wt_kind = _rdp_kind(f.dispatch(f.brief(["Review-target: working-tree"])))
+    new_rows = _event_rows()[rows_before:]
+    check("rdp/working-tree-target-notes", (wt_kind, [(r.get("kind"), r.get("decision")) for r in new_rows]),
+          ("warn", [("review-dispatch-pin", "allow-declared-target")]))
+    check("rdp/branch-only-brief-denies", _rdp_kind(f.dispatch(branch_only)), "deny")
+    check("rdp/short-sha-denies", _rdp_kind(f.dispatch(f.good(pin=f.pin[:12]))), "deny")
+    check("rdp/ref-name-as-pin-denies", [_rdp_kind(f.dispatch(f.good(pin=p))) for p in ("HEAD", "main")],
+          ["deny", "deny"])
+    check("rdp/wrong-length-for-format-denies", _rdp_kind(f.dispatch(f.good(pin=f.pin + "0" * 24))), "deny")
+    check("rdp/uppercase-pin-denies", _rdp_kind(f.dispatch(f.good(pin=f.pin.upper()))), "deny")
+    check("rdp/duplicate-pin-unverifiable", _rdp_kind(f.dispatch(f.good(
+        extra=["Reviewed-revision: " + f.pin]))), "unverifiable")
+    check("rdp/absent-object-pin-unverifiable", _rdp_kind(f.dispatch(f.good(pin="1" * 40))), "unverifiable")
+    _rdp_git(f.root, "tag", "-a", "-m", "t", "rv1", f.pin)
+    tag_oid = _rdp_git(f.root, "rev-parse", "rv1")
+    check("rdp/tag-object-pin-unverifiable", (tag_oid != f.pin, _rdp_kind(f.dispatch(f.good(pin=tag_oid)))),
+          (True, "unverifiable"))
+    f.authority(f.seed + "\n")
+    check("rdp/authority-mismatch-denies", _rdp_kind(f.dispatch(f.good())), "deny")
+    f.authority(f.pin + "\n", code=3)
+    check("rdp/authority-error-unverifiable/exit", _rdp_kind(f.dispatch(f.good())), "unverifiable")
+    f.authority(f.pin + "\n" + f.pin + "\n")
+    check("rdp/authority-error-unverifiable/two-lines", _rdp_kind(f.dispatch(f.good())), "unverifiable")
+    f.authority(f.pin[:12] + "\n")
+    check("rdp/authority-error-unverifiable/short", _rdp_kind(f.dispatch(f.good())), "unverifiable")
+    f.authority(f.pin + "\n", sleep=3)
+    f.rebind(dict(f.binding, authority=dict(f.binding["authority"], timeout=1)))
+    check("rdp/authority-error-unverifiable/timeout", _rdp_kind(f.dispatch(f.good())), "unverifiable")
+    f.rebind(f.binding)
+    f.authority(f.pin + "\n")
+    check("rdp/declared-path-not-in-commit-denies", _rdp_kind(f.dispatch(f.good(
+        paths=f.CHANGED + ("src/c.py",)))), "deny")
+    check("rdp/committed-path-undeclared-denies", _rdp_kind(f.dispatch(f.good(paths=("src/a.py", "src/b.py")))),
+          "deny")
+    em = RdpFixture(base, "emptycommit")
+    _rdp_git(em.root, "commit", "-q", "--allow-empty", "-m", "empty")
+    empty_pin = _rdp_git(em.root, "rev-parse", "HEAD")
+    em.authority(empty_pin + "\n")
+    # A clean clone holds no untracked registry, so only the declared-paths check refuses the empty set there.
+    em_clone = base / "emptycommit-clone"
+    _rdp_git(base, "clone", "-q", str(em.root), str(em_clone))
+    check("rdp/no-declared-paths-denies", [_rdp_kind(f.dispatch(f.good(paths=()))), _rdp_kind(em.dispatch(
+        em.good(pin=empty_pin, paths=(), extra=["Review-repo: " + str(em_clone)])))], ["deny", "deny"])
+    (f.root / "seed.txt").write_text("unrelated edit\n", encoding="utf-8")
+    check("rdp/unrelated-dirty-path-allows", _rdp_kind(f.dispatch(f.good())), "allow")
+    _rdp_git(f.root, "checkout", "-q", "--", "seed.txt")
+    good = f.good()
+    check("rdp/stdin-heredoc-brief-denies", [_rdp_kind(f.run(c)) for c in (
+        "orch-dispatch --brief " + good + " <<'EOF'\nReview-target: working-tree\nEOF",
+        "orch-dispatch --brief - <<EOF\nReview-target: working-tree\nEOF",
+        "cat " + good + " | orch-dispatch --brief " + good,
+        "orch-dispatch --brief " + good + " < " + good,
+        "orch-dispatch",
+        "orch-dispatch --brief " + good + " --brief=" + good)],
+        ["unverifiable", "unverifiable", "unverifiable", "unverifiable", "deny", "deny"])
+    # A file literally named $BRIEF exists, so only the expansion check stops the literal read of it.
+    (f.root / "$BRIEF").write_text("Review-target: working-tree\n", encoding="utf-8")
+    check("rdp/opaque-brief-arg-unverifiable", _rdp_kind(f.run("orch-dispatch --brief $BRIEF")), "unverifiable")
+    (f.root / "$BRIEF").unlink()
+    rel = os.path.relpath(f.good(), str(f.root))
+    check("rdp/relative-brief-resolves-against-cwd", _rdp_kind(f.run("orch-dispatch --brief " + rel)), "allow")
+    check("rdp/cd-then-relative-brief-unverifiable",
+          _rdp_kind(f.run("cd " + str(f.root) + " && orch-dispatch --brief " + rel)), "unverifiable")
+    check("rdp/wrapper-prefixed-dispatch-recognized", [_rdp_kind(f.run(c + branch_only)) for c in (
+        "env FOO=1 nice -n 5 orch-dispatch --brief ", "command /usr/local/bin/orch-dispatch --brief=",
+        "true && nohup orch-dispatch --brief ")], ["unverifiable", "unverifiable", "unverifiable"])
+    import signal as _signal
+
+    class _Blocked(BaseException):
+        """Raised by the alarm; not an OSError, so no handler under test can swallow it."""
+
+    def _alarm(_sig, _frame):
+        raise _Blocked()
+
+    def _bounded(fn):
+        old = _signal.signal(_signal.SIGALRM, _alarm)
+        _signal.alarm(5)
+        try:
+            return fn()
+        except _Blocked:
+            return "blocked"
+        finally:
+            _signal.alarm(0)
+            _signal.signal(_signal.SIGALRM, old)
+    oversize = f.briefs / "oversize.txt"
+    oversize.write_text("Review-target: working-tree\n" + "x" * 5000 + "\n", encoding="utf-8")
+    bad_utf8 = f.briefs / "bad-utf8.txt"
+    bad_utf8.write_bytes(b"Review-target: working-tree\n\xff\n")
+    nul = f.briefs / "nul.txt"
+    nul.write_bytes(b"Review-target: working-tree\n\x00\n")
+    sep = f.briefs / "sep.txt"
+    sep.write_text("Note: see below\u2028Review-target: working-tree\n", encoding="utf-8")
+    unreadable = f.briefs / "unreadable.txt"
+    unreadable.write_text("Review-target: working-tree\n", encoding="utf-8")
+    unreadable.chmod(0)
+    fifo = f.briefs / "fifo.txt"
+    os.mkfifo(str(fifo))
+    got = [_bounded(lambda p=p: _rdp_kind(f.dispatch(str(p)))) for p in (
+        f.briefs / "missing.txt", f.briefs, fifo, oversize, bad_utf8, nul, sep)]
+    # A privileged run reads a mode-0 file anyway, so that one leg is judged only where it can bite.
+    got.append(_rdp_kind(f.dispatch(str(unreadable))) if os.geteuid() != 0 else "unverifiable")
+    unreadable.chmod(0o644)
+    check("rdp/unreadable-brief-unverifiable", got, ["unverifiable"] * 8)
+
+    w = RdpFixture(base, "wtedit")
+    (w.root / "src" / "a.py").write_text("a = 3  # the real fix, never committed\n", encoding="utf-8")
+    check("rdp/pre-change-tip-worktree-edit-denies", _rdp_kind(w.dispatch(w.good())), "deny")
+    st = RdpFixture(base, "staged")
+    (st.root / "src" / "b.py").write_text("b = 2\n", encoding="utf-8")
+    _rdp_git(st.root, "add", "src/b.py")
+    # The working tree goes back to the pinned content, so only the staged-state check sees the change.
+    (st.root / "src" / "b.py").write_text("b = 1\n", encoding="utf-8")
+    check("rdp/staged-only-change-denies", _rdp_kind(st.dispatch(st.good())), "deny")
+    un = RdpFixture(base, "untracked")
+    (un.root / ".git" / "info" / "exclude").write_text("old.txt\n", encoding="utf-8")
+    (un.root / "old.txt").write_text("recreated\n", encoding="utf-8")
+    check("rdp/untracked-recreates-deleted-denies", _rdp_kind(un.dispatch(un.good())), "deny")
+
+    ro = RdpFixture(base, "rootcommit")
+    _rdp_git(ro.root, "checkout", "-q", ro.seed)
+    ro.authority(ro.seed + "\n")
+    check("rdp/root-commit-empty-tree-allows", _rdp_kind(ro.dispatch(ro.good(
+        pin=ro.seed, paths=("old.txt", "seed.txt", "src/a.py")))), "allow")
+
+    mg = RdpFixture(base, "merge")
+    _rdp_git(mg.root, "checkout", "-q", "-b", "side", mg.seed)
+    (mg.root / "side.txt").write_text("side\n", encoding="utf-8")
+    _rdp_git(mg.root, "add", "side.txt")
+    _rdp_git(mg.root, "commit", "-q", "-m", "side")
+    _rdp_git(mg.root, "checkout", "-q", "main")
+    _rdp_git(mg.root, "merge", "-q", "--no-ff", "-m", "merge", "side")
+    merge = _rdp_git(mg.root, "rev-parse", "HEAD")
+    mg.authority(merge + "\n")
+    check("rdp/merge-first-parent-allows", [_rdp_kind(mg.dispatch(mg.good(pin=merge, paths=p))) for p in (
+        ("side.txt",), mg.CHANGED)], ["allow", "deny"])
+
+    shallow = base / "shallow"
+    _rdp_git(base, "clone", "-q", "--depth", "1", "file://" + str(f.root), str(shallow))
+    shallow_result = f.dispatch(f.good(extra=["Review-repo: " + str(shallow)]))
+    shallow_reason = shallow_result[1]["hookSpecificOutput"]["permissionDecisionReason"]
+    check("rdp/shallow-missing-parent-unverifiable",
+          (_rdp_kind(shallow_result), "is not in the repository" in shallow_reason), ("unverifiable", True))
+    check("rdp/repo-label-not-toplevel-unverifiable", [_rdp_kind(f.dispatch(f.good(extra=["Review-repo: " + r])))
+                                                       for r in ("src", str(f.root / "src"))],
+          ["unverifiable", "unverifiable"])
+
+    rp = RdpFixture(base, "replace")
+    _rdp_git(rp.root, "replace", "--graft", rp.pin)
+    rp_parent = aiqt_hooks._review_git(str(rp.root), "rev-parse", "--verify", rp.pin + "^")
+    check("rdp/replace-ref-ignored", ("parent " in _rdp_git(rp.root, "cat-file", "commit", rp.pin),
+                                      _rdp_kind(rp.dispatch(rp.good())),
+                                      rp_parent.stdout.decode().strip() if rp_parent else None),
+          (False, "allow", rp.seed))
+    gf = RdpFixture(base, "grafts")
+    (gf.root / ".git" / "info" / "grafts").write_text(gf.pin + "\n", encoding="utf-8")
+    gf_parent = aiqt_hooks._review_git(str(gf.root), "rev-parse", "--verify", gf.pin + "^")
+    check("rdp/grafts-file-ignored", (_rdp_git(gf.root, "log", "-1", "--format=%P", gf.pin),
+                                      _rdp_kind(gf.dispatch(gf.good())),
+                                      gf_parent.stdout.decode().strip() if gf_parent else None),
+          ("", "allow", gf.seed))
+
+    seen = []
+    real_run = subprocess.run
+
+    def _capture(argv, **kw):
+        seen.append((list(argv), dict(kw.get("env") or {})))
+        return real_run(argv, **kw)
+    aiqt_hooks.subprocess.run = _capture
+    try:
+        aiqt_hooks._review_git(str(f.root), "rev-parse", "HEAD")
+    finally:
+        aiqt_hooks.subprocess.run = real_run
+    argv, env = seen[0] if seen else ([], {})
+    check("rdp/git-env-neutralized", (
+        env.get("GIT_OPTIONAL_LOCKS"), env.get("GIT_NO_REPLACE_OBJECTS"), env.get("GIT_GRAFT_FILE"),
+        env.get("GIT_LITERAL_PATHSPECS"), argv[:9]),
+        ("0", "1", os.devnull, "1", ["git", "-C", str(f.root), "-c", "core.commitGraph=false",
+                                     "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"]))
+
+    ps = RdpFixture(base, "pathspec")
+    for name in ("*", ":(glob)*.py"):
+        (ps.root / name).write_text("literal\n", encoding="utf-8")
+        _rdp_git(ps.root, "add", "--", ":(literal)" + name)
+    _rdp_git(ps.root, "commit", "-q", "-m", "odd names")
+    odd = _rdp_git(ps.root, "rev-parse", "HEAD")
+    ps.authority(odd + "\n")
+    (ps.root / "src" / "a.py").write_text("a = 9\n", encoding="utf-8")
+    check("rdp/pathspec-magic-literal", _rdp_kind(ps.dispatch(ps.good(pin=odd, paths=("*", ":(glob)*.py")))),
+          "allow")
+
+    bm = RdpFixture(base, "branchmoved")
+    (bm.root / "seed.txt").write_text("later\n", encoding="utf-8")
+    _rdp_git(bm.root, "commit", "-q", "-am", "later")
+    check("rdp/branch-label-moved-notes", [_rdp_kind(bm.dispatch(bm.good(extra=["Review-branch: " + b])))
+                                           for b in ("main", "no-such-branch")], ["warn", "warn"])
+
+    mb = RdpFixture(base, "malformed")
+    mb.write_registry(dict(mb.binding, surplus=1))
+    check("rdp/malformed-binding-withholds-every-call", [
+        _rdp_kind(mb.run("ls", background=True)), _rdp_kind(mb.run("ls"))], ["unverifiable", "unverifiable"])
+    mb.write_registry(dict(mb.binding, labels=dict(mb.binding["labels"], path="Review-target:")))
+    check("rdp/duplicate-labels-malformed", _rdp_kind(mb.run("ls", background=True)), "unverifiable")
+    (mb.root / ".aiqt" / "orchestration.local.json").write_text("{not json", encoding="utf-8")
+    # A registry that cannot be parsed cannot say which commands dispatch: a foreground dispatch is withheld
+    # as well as a background one.
+    check("rdp/bad-registry-withholds-every-call", [
+        _rdp_kind(mb.run("ls", background=True)), _rdp_kind(mb.run("ls")),
+        _rdp_kind(mb.run("orch-dispatch --brief /nonexistent"))], ["unverifiable"] * 3)
+
+    # ---------- fail-closed discovery, workdir, descriptors, content, isolation ----------
+    dc = RdpFixture(base, "discovery")
+    good_dc = dc.good()
+    with open(str(dc.root / ".git" / "config"), "a", encoding="utf-8") as fh:
+        fh.write("[broken\n")
+    gone = dc.root / "gone"
+
+    def _why(result):
+        return (_rdp_kind(result), "cannot resolve the session repository" in result[1]["hookSpecificOutput"].get(
+            "permissionDecisionReason", "") if result[1] else False)
+    check("rdp/discovery-failure-unverifiable", [
+        _why(dc.dispatch(good_dc)), _why(aiqt_hooks.review_dispatch_pin(dict(
+            hook_event_name="PreToolUse", cwd=str(gone), tool_name="Bash",
+            tool_input=dict(command="orch-dispatch --brief " + good_dc)))),
+        _rdp_kind(dc.run("ls"))], [("unverifiable", True), ("unverifiable", True), "allow"])
+    ec = RdpFixture(base, "envchdir")
+    (ec.root / "brief.txt").write_text(open(ec.good(), encoding="utf-8").read(), encoding="utf-8")
+    (ec.root / "src" / "brief.txt").write_text("Review-target: revision\nReview-branch: main\n",
+                                                encoding="utf-8")
+    # Only a provably plain dispatch is checked: every wrapper (env and its -C and -S forms, as GNU env and
+    # other env builds read them, timeout, nohup, sudo, xargs, setsid, ionice) is withheld, so no wrapper
+    # grammar decides which brief is read or where.
+    check("rdp/wrapped-dispatch-unverifiable", [_rdp_kind(ec.run(c)) for c in (
+        "orch-dispatch --brief brief.txt", "env -C src orch-dispatch --brief brief.txt",
+        "env --chdir=src orch-dispatch --brief brief.txt", "env -C src -C .. orch-dispatch --brief brief.txt",
+        "env -S '-C src' orch-dispatch --brief brief.txt", "env -Sorch-dispatch --brief src/brief.txt",
+        "env A=1 -S'orch-dispatch --brief src/brief.txt'", "env -S'A=1' -S'orch-dispatch --brief src/brief.txt'",
+        "env -S'orch-dispatch --brief brief.txt' -S'--brief src/brief.txt'",
+        "env -S$'orch-dispatch\\t--brief\\tsrc/brief.txt'", "sudo env -Sorch-dispatch --brief src/brief.txt",
+        "timeout 600 orch-dispatch --brief brief.txt", "setsid orch-dispatch --brief brief.txt",
+        "sudo -u me orch-dispatch --brief brief.txt", "xargs orch-dispatch --brief brief.txt",
+        "ionice -c3 orch-dispatch --brief brief.txt", "bash -c 'orch-dispatch --brief src/brief.txt'")],
+        ["allow"] + ["unverifiable"] * 16)
+    # Every command that is not plain is withheld, whatever it names (an undeclared command off the
+    # allowlist too); a plain one that names no declared command is allowed.
+    check("rdp/non-plain-command-unverifiable", [_rdp_kind(ec.run(c)) for c in (
+        "timeout --frobnicate 5 ls", "env -S'ls -l' /tmp", "ls -la && git log --oneline | head -3",
+        "echo $HOME > /dev/null", "other-dispatch --brief src/brief.txt", "ls -la src")],
+        ["unverifiable"] * 5 + ["allow"])
+    check("rdp/cd-then-absolute-brief-unverifiable",
+          _rdp_kind(f.run("cd " + str(f.root / "src") + " && orch-dispatch --brief " + f.good())), "unverifiable")
+    good = f.good()
+    check("rdp/abbreviated-second-brief-denies", [_rdp_kind(f.run("orch-dispatch --brief " + good + c)) for c in (
+        " --brie " + branch_only, " --bri=" + branch_only)], ["deny", "deny"])
+    # An abbreviation BEFORE the brief, where the last-argument rule cannot catch it.
+    check("rdp/abbreviated-brief-before-last-denies", _rdp_kind(f.run(
+        "orch-dispatch --brie " + branch_only + " --brief " + good)), "deny")
+    check("rdp/unrelated-descriptor-redirect", [_rdp_kind(f.run("orch-dispatch --brief " + good + c)) for c in (
+        " 3</dev/null", " 0<" + good, " <&3")], ["unverifiable", "unverifiable", "unverifiable"])
+
+    ff = RdpFixture(base, "fifos")
+    fifo_brief = ff.briefs / "fifo-brief.txt"
+    os.mkfifo(str(fifo_brief))
+    link_brief = ff.briefs / "link-brief.txt"
+    link_brief.symlink_to(ff.good())
+    check("rdp/fifo-or-symlink-brief-unverifiable-without-blocking", [
+        _bounded(lambda: _rdp_kind(ff.dispatch(str(fifo_brief)))),
+        _bounded(lambda: _rdp_kind(ff.dispatch(str(link_brief))))], ["unverifiable", "unverifiable"])
+    reg = ff.root / ".aiqt" / "orchestration.local.json"
+    reg_text = reg.read_text(encoding="utf-8")
+    reg.unlink()
+    os.mkfifo(str(reg))
+    fifo_reg = _bounded(lambda: _rdp_kind(ff.dispatch(ff.good(), background=True)))
+    reg.unlink()
+    (ff.briefs / "registry.json").write_text(reg_text, encoding="utf-8")
+    reg.symlink_to(ff.briefs / "registry.json")
+    check("rdp/fifo-or-symlink-registry-unverifiable-without-blocking", [
+        fifo_reg, _bounded(lambda: _rdp_kind(ff.dispatch(ff.good(), background=True)))],
+        ["unverifiable", "unverifiable"])
+    ix = RdpFixture(base, "indexflags")
+    (ix.root / "src" / "a.py").write_text("a = 3  # uncommitted\n", encoding="utf-8")
+    _rdp_git(ix.root, "update-index", "--assume-unchanged", "src/a.py")
+    got = [_rdp_kind(ix.dispatch(ix.good()))]
+    _rdp_git(ix.root, "update-index", "--no-assume-unchanged", "src/a.py")
+    _rdp_git(ix.root, "checkout", "-q", "--", "src/a.py")
+    (ix.root / "src" / "b.py").write_text("b = 9\n", encoding="utf-8")
+    _rdp_git(ix.root, "update-index", "--skip-worktree", "src/b.py")
+    got.append(_rdp_kind(ix.dispatch(ix.good())))
+    _rdp_git(ix.root, "update-index", "--no-skip-worktree", "src/b.py")
+    _rdp_git(ix.root, "checkout", "-q", "--", "src/b.py")
+    _rdp_git(ix.root, "config", "core.ignoreStat", "true")
+    _rdp_git(ix.root, "update-index", "--really-refresh")
+    (ix.root / "src" / "a.py").write_text("a = 777\n", encoding="utf-8")
+    got.append(_rdp_kind(ix.dispatch(ix.good())))
+    _rdp_git(ix.root, "checkout", "-q", "--", "src/a.py")
+    _rdp_git(ix.root, "config", "--unset", "core.ignoreStat")
+    (ix.root / "src" / "a.py").chmod(0o755)
+    got.append(_rdp_kind(ix.dispatch(ix.good())))
+    (ix.root / "src" / "a.py").chmod(0o644)
+    got.append(_rdp_kind(ix.dispatch(ix.good())))
+    check("rdp/index-flags-cannot-hide-worktree-edit", got, ["deny", "deny", "deny", "deny", "allow"])
+
+    hostile = {"GIT_DIR": str(bare / ".git"), "GIT_WORK_TREE": str(bare), "GIT_INDEX_FILE": str(bare / "nope")}
+    saved_env = {k: os.environ.get(k) for k in hostile}
+    os.environ.update(hostile)
+    try:
+        # The probes are scrubbed and still read f.root; the dispatch, which inherits the variables, is
+        # withheld, since its verifier would read the repository they name.
+        hostile_kind = (_rdp_kind(f.dispatch(f.good())), aiqt_hooks._review_git(
+            str(f.root), "rev-parse", "HEAD").stdout.decode().strip() == f.pin)
+        graft_parent = aiqt_hooks._review_git(str(gf.root), "rev-parse", "--verify", gf.pin + "^")
+        replace_parent = aiqt_hooks._review_git(str(rp.root), "rev-parse", "--verify", rp.pin + "^")
+    finally:
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    check("rdp/hostile-git-env-scrubbed-and-dispatch-withheld", hostile_kind, ("unverifiable", True))
+    # Each ambient variable on its own withholds the dispatch, named in the reason.
+    ambient_names = (
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_QUARANTINE_PATH", "GIT_NAMESPACE", "GIT_REPLACE_REF_BASE",
+        "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE")
+    ambient_brief = f.good()
+    ambient_got = []
+    for name in ambient_names:
+        saved = os.environ.get(name)
+        os.environ[name] = str(bare / "elsewhere")
+        try:
+            result = f.dispatch(ambient_brief)
+        finally:
+            if saved is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = saved
+        reason = result[1]["hookSpecificOutput"].get("permissionDecisionReason", "") if result[1] else ""
+        ambient_got.append((name, _rdp_kind(result), "sets " + name + "," in reason))
+    check("rdp/each-ambient-git-variable-withholds", ambient_got,
+          [(name, "unverifiable", True) for name in ambient_names])
+    check("rdp/grafts-and-replace-probe-real-parents", [
+        (p.returncode, p.stdout.decode().strip()) if p is not None else None
+        for p in (graft_parent, replace_parent)], [(0, gf.seed), (0, rp.seed)])
+    fm = RdpFixture(base, "fsmonitor")
+    marker = fm.briefs / "fsmonitor-ran"
+    hook = fm.briefs / "fsmonitor.sh"
+    hook.write_text("#!/bin/sh\ntouch '" + str(marker) + "'\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    _rdp_git(fm.root, "config", "core.fsmonitor", str(hook))
+    fm_kind = _rdp_kind(fm.dispatch(fm.good()))
+    aiqt_hooks._review_git(str(fm.root), "status", "--porcelain")
+    check("rdp/fsmonitor-never-runs", (fm_kind, marker.exists()), ("allow", False))
+    saved_budget = aiqt_hooks._RDP_BUDGET
+    f.authority(f.pin + "\n", sleep=3)
+    aiqt_hooks._RDP_BUDGET = 1.0
+    started = aiqt_hooks.time.monotonic()
+    try:
+        budget_kind = _rdp_kind(f.dispatch(f.good()))
+    finally:
+        aiqt_hooks._RDP_BUDGET = saved_budget
+        f.authority(f.pin + "\n")
+    check("rdp/deadline-bounds-the-decision", (budget_kind, aiqt_hooks.time.monotonic() - started < 2.5),
+          ("unverifiable", True))
+    # Each content read and git probe refuses to start once the deadline has passed: a past deadline is set
+    # directly, then each reader is called (a symlink entry exercises the walk without the blob hash).
+    (f.root / "rdp-link").symlink_to("seed.txt")
+    probes = []
+    fd = os.open(str(f.root / "seed.txt"), os.O_RDONLY)
+    try:
+        for name, call in (
+                ("blob", lambda: aiqt_hooks._rdp_blob_id("sha1", 5, fd)),
+                ("read", lambda: aiqt_hooks._rdp_read_fd(fd, 10)),
+                ("entry", lambda: aiqt_hooks._rdp_worktree_entry(str(f.root), b"rdp-link", "sha1")),
+                ("git", lambda: aiqt_hooks._review_git(str(f.root), "rev-parse", "HEAD"))):
+            aiqt_hooks._RDP_DEADLINE[0] = aiqt_hooks.time.monotonic() - 1
+            try:
+                probes.append((name, "returned" if call() is not None else "none"))
+            except TimeoutError:
+                probes.append((name, "timeout"))
+            finally:
+                aiqt_hooks._RDP_DEADLINE[0] = None
+    finally:
+        os.close(fd)
+    (f.root / "rdp-link").unlink()
+    check("rdp/content-read-past-deadline-refused", probes,
+          [("blob", "timeout"), ("read", "timeout"), ("entry", "timeout"), ("git", "none")])
+    # The reported reproduction: a declared file's hash starts after the budget is spent (here the deadline
+    # is moved into the past instead of sleeping), and the decision must not allow.
+    real_blob = aiqt_hooks._rdp_blob_id
+
+    def _late_blob(fmt, header_size, fd):
+        aiqt_hooks._RDP_DEADLINE[0] = aiqt_hooks.time.monotonic() - 1
+        return real_blob(fmt, header_size, fd)
+    aiqt_hooks._rdp_blob_id = _late_blob
+    try:
+        late = [_rdp_kind(f.dispatch(f.good()))]
+    finally:
+        aiqt_hooks._rdp_blob_id = real_blob
+    # An overrun anywhere else (here after the whole reconciliation returned allow) is a cannot-evaluate too.
+    real_reconcile = aiqt_hooks._rdp_reconcile
+
+    def _late_reconcile(*args):
+        out = real_reconcile(*args)
+        aiqt_hooks._RDP_DEADLINE[0] = aiqt_hooks.time.monotonic() - 1
+        return out
+    aiqt_hooks._rdp_reconcile = _late_reconcile
+    try:
+        late.append(_rdp_kind(f.dispatch(f.good())))
+    finally:
+        aiqt_hooks._rdp_reconcile = real_reconcile
+    late.append(_rdp_kind(f.dispatch(f.good())))
+    check("rdp/overdue-read-never-allows", late, ["unverifiable", "unverifiable", "allow"])
+    f.rebind(dict(f.binding, brief_option="-b"))
+    check("rdp/attached-short-second-brief-denies", [_rdp_kind(f.run("orch-dispatch -b " + good + c)) for c in (
+        "", " -b" + branch_only)], ["allow", "deny"])
+    f.rebind(f.binding)
+    # ---------- only a provably plain dispatch is checked; every command that is not plain withholds ----------
+    check("rdp/second-brief-alias-or-group-denies", [_rdp_kind(f.run(c)) for c in (
+        "orch-dispatch --brief " + good + " -b " + branch_only, "orch-dispatch --brief " + good + " extra",
+        "orch-dispatch -- --brief " + good, "orch-dispatch -b " + branch_only + " --brief " + good)],
+        ["deny", "deny", "deny", "allow"])
+    f.rebind(dict(f.binding, brief_option="-b"))
+    check("rdp/grouped-short-second-brief-denies", [_rdp_kind(f.run("orch-dispatch -b " + good + c)) for c in (
+        " -xb " + branch_only, " -xb" + branch_only, "")], ["deny", "deny", "allow"])
+    f.rebind(f.binding)
+    pl = RdpFixture(base, "plain")
+    (pl.root / "brief.txt").write_text(open(pl.good(), encoding="utf-8").read(), encoding="utf-8")
+    (pl.root / "src" / "brief.txt").write_text("Review-target: revision\nReview-branch: main\n", encoding="utf-8")
+    check("rdp/quote-split-or-expanded-name-unverifiable", [_rdp_kind(pl.run(c)) for c in (
+        "cat <<EOF >/dev/null\nx\nEOF\norch-dis''patch --brief src/brief.txt",
+        "diff <(true) /dev/null; orch-dis\\patch --brief src/brief.txt",
+        "{orch-dispatch,} --brief src/brief.txt", "D=orch-dispatch; $D --brief src/brief.txt",
+        "$'\\x6frch-dispatch' --brief src/brief.txt", "$'orch\\x2ddispatch' --brief src/brief.txt",
+        "$\"orch-dispatch\" --brief src/brief.txt", "\\orch-dispatch --brief src/brief.txt",
+        "orch-dispatch --brief brief.txt > out.log", "o{r,}ch-dispatch --brief src/brief.txt")],
+        ["unverifiable"] * 10)
+    check("rdp/shell-control-before-dispatch-unverifiable", [_rdp_kind(pl.run(c)) for c in (
+        "eval cd src; orch-dispatch --brief brief.txt", "pushd src; orch-dispatch --brief brief.txt",
+        "if true; then cd src; fi; orch-dispatch --brief brief.txt", ". ./env.sh; orch-dispatch --brief brief.txt",
+        "PWD=src orch-dispatch --brief brief.txt", "orch-dispatch --brief brief.txt; orch-dispatch --brief brief.txt")],
+        ["unverifiable"] * 6)
+    check("rdp/plain-dispatch-forms-allow", [_rdp_kind(pl.run(c)) for c in (
+        "orch-dispatch --family x --brief=brief.txt", "orch-dispatch \"--brief\" 'brief.txt'",
+        "/usr/local/bin/orch-dispatch --brief brief.txt", "  orch-dispatch  --brief  b'rief'.txt  ")],
+        ["allow"] * 4)
+    # The shared specification admits ONE simple command: an operator, a redirection (even </dev/null) or a
+    # quoted command word makes the dispatch not plain.
+    check("rdp/compound-or-redirected-dispatch-unverifiable", [_rdp_kind(pl.run(c)) for c in (
+        "orch-dispatch --brief brief.txt </dev/null", "orch-dispatch --brief brief.txt 0</dev/null",
+        "'orch-dispatch' --brief brief.txt", "git status && orch-dispatch --brief brief.txt",
+        "orch-dispatch --brief brief.txt | tee /dev/null", "orch-dispatch --brief brief.txt &")],
+        ["unverifiable"] * 6)
+    # A linked worktree, inside the orchestrated tree or beside it, is scoped by the main worktree's registry.
+    lw = RdpFixture(base, "linked")
+    lw_branch = lw.brief(["Review-target: revision", "Review-branch: main"], "branch-only.txt")
+    _rdp_git(lw.root, "worktree", "add", "-q", "--detach", str(lw.root / ".worktrees" / "rev"), lw.pin)
+    _rdp_git(lw.root, "worktree", "add", "-q", "--detach", str(base / "linked-beside"), lw.pin)
+    check("rdp/linked-worktree-scoped", [_rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+        hook_event_name="PreToolUse", cwd=str(wt), session_id="s1", tool_name="Bash",
+        tool_input=dict(command="orch-dispatch --brief " + lw_branch)))) for wt in (
+            lw.root / ".worktrees" / "rev", base / "linked-beside")], ["deny", "deny"])
+    real_walk = aiqt_hooks._rdp_registry_dir
+    aiqt_hooks._rdp_registry_dir = lambda cwd: ("fail", "the ancestor walk failed")
+    try:
+        walk_fail = [_verdict(aiqt_hooks.review_dispatch_pin(dict(
+            hook_event_name="PreToolUse", cwd=str(bare), session_id="s1", tool_name="Bash",
+            tool_input=dict(command="ls", run_in_background=bg)))) for bg in (True, False)]
+    finally:
+        aiqt_hooks._rdp_registry_dir = real_walk
+    check("rdp/ancestor-walk-failure-withholds", walk_fail, ["deny", "deny"])
+    # A submodule's .gitmodules `ignore = all` cannot hide its bump from the changed set, and its checkout is
+    # compared with the pinned gitlink.
+    sb = RdpFixture(base, "submodule")
+    (sb.root / ".gitmodules").write_text('[submodule "lib"]\n\tpath = lib\n\turl = ./lib\n\tignore = all\n',
+                                          encoding="utf-8")
+    _rdp_git(sb.root, "add", ".gitmodules")
+    _rdp_git(sb.root, "update-index", "--add", "--cacheinfo", "160000," + sb.seed + ",lib")
+    _rdp_git(sb.root, "commit", "-q", "-m", "add lib")
+    _rdp_git(sb.root, "update-index", "--cacheinfo", "160000," + sb.pin + ",lib")
+    (sb.root / "src" / "a.py").write_text("a = 4\n", encoding="utf-8")
+    _rdp_git(sb.root, "add", "src/a.py")
+    _rdp_git(sb.root, "commit", "-q", "-m", "bump lib")
+    sb_pin = _rdp_git(sb.root, "rev-parse", "HEAD")
+    sb.authority(sb_pin + "\n")
+    (sb.root / "lib").mkdir()
+    sb_got = [_rdp_kind(sb.dispatch(sb.good(pin=sb_pin, paths=p))) for p in (("src/a.py",), ("lib", "src/a.py"))]
+    _rdp_git(base, "init", "-q", "-b", "main", str(sb.root / "lib"))
+    _rdp_git(sb.root / "lib", "commit", "-q", "--allow-empty", "-m", "other")
+    sb_got.append(_rdp_kind(sb.dispatch(sb.good(pin=sb_pin, paths=("lib", "src/a.py")))))
+    check("rdp/submodule-ignore-config-neutralized", sb_got, ["deny", "allow", "deny"])
+    # A file the pin replaces with a directory is clean when the directory holds the pin's own entries; a
+    # directory where the pin has nothing is not.
+    fd_ = RdpFixture(base, "filetodir")
+    (fd_.root / "seed.txt").unlink()
+    (fd_.root / "seed.txt").mkdir()
+    (fd_.root / "seed.txt" / "inner.txt").write_text("inner\n", encoding="utf-8")
+    _rdp_git(fd_.root, "add", "-A", "--", "seed.txt")
+    _rdp_git(fd_.root, "commit", "-q", "-m", "file to dir")
+    fd_pin = _rdp_git(fd_.root, "rev-parse", "HEAD")
+    fd_.authority(fd_pin + "\n")
+    fd_got = [_rdp_kind(fd_.dispatch(fd_.good(pin=fd_pin, paths=("seed.txt", "seed.txt/inner.txt"))))]
+    dd = RdpFixture(base, "deleteddir")
+    (dd.root / "old.txt").mkdir()
+    (dd.root / "old.txt" / "x").write_text("untracked\n", encoding="utf-8")
+    fd_got.append(_rdp_kind(dd.dispatch(dd.good())))
+    check("rdp/file-replaced-by-directory", fd_got, ["allow", "deny"])
+    # A declared symlink is compared by its target.
+    sl = RdpFixture(base, "symlink")
+    (sl.root / "src" / "l").symlink_to("../seed.txt")
+    _rdp_git(sl.root, "add", "src/l")
+    _rdp_git(sl.root, "commit", "-q", "-m", "link")
+    sl_pin = _rdp_git(sl.root, "rev-parse", "HEAD")
+    sl.authority(sl_pin + "\n")
+    (sl.root / "src" / "l").unlink()
+    (sl.root / "src" / "l").symlink_to("../old.txt")
+    sl_got = [_rdp_kind(sl.dispatch(sl.good(pin=sl_pin, paths=("src/l",))))]
+    (sl.root / "src" / "l").unlink()
+    (sl.root / "src" / "l").symlink_to("../seed.txt")
+    sl_got.append(_rdp_kind(sl.dispatch(sl.good(pin=sl_pin, paths=("src/l",)))))
+    check("rdp/symlink-target-compared", sl_got, ["deny", "allow"])
+    # A read that blocks in the kernel (a hung filesystem; here a sleep that never checks the deadline) cannot
+    # hold the hook past its budget.
+    real_blob = aiqt_hooks._rdp_blob_id
+
+    def _hung_blob(fmt, header_size, fd):
+        aiqt_hooks.time.sleep(3)
+        return real_blob(fmt, header_size, fd)
+    saved_budget = aiqt_hooks._RDP_BUDGET
+    aiqt_hooks._RDP_BUDGET = 1.0
+    aiqt_hooks._rdp_blob_id = _hung_blob
+    started = aiqt_hooks.time.monotonic()
+    try:
+        hung_kind = _rdp_kind(f.dispatch(f.good()))
+    finally:
+        aiqt_hooks._rdp_blob_id = real_blob
+        aiqt_hooks._RDP_BUDGET = saved_budget
+    check("rdp/hung-read-bounded-by-deadline", (hung_kind, aiqt_hooks.time.monotonic() - started < 2.0),
+          ("unverifiable", True))
+    aiqt_hooks.time.sleep(2.5)   # the abandoned worker finishes before the next vector uses f
+    mf = RdpFixture(base, "mutants")
+    check("rdp/duplicate-repo-or-branch-unverifiable", [_rdp_kind(mf.dispatch(mf.good(extra=[
+        lab + " " + v, lab + " " + v]))) for lab, v in (("Review-repo:", str(mf.root)), ("Review-branch:", "main"))],
+        ["unverifiable", "unverifiable"])
+    check("rdp/unparseable-dispatch-unverifiable", _rdp_kind(mf.run("orch-dispatch --brief 'open")),
+          "unverifiable")
+    check("rdp/empty-path-value-unverifiable", _rdp_kind(mf.dispatch(mf.good(extra=["Review-path: "]))),
+          "unverifiable")
+    mf.write_registry(dict(mf.binding, surplus=1))
+    check("rdp/malformed-binding-without-tool-input-unverifiable", _rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+        hook_event_name="PreToolUse", cwd=str(mf.root), tool_name="Bash", tool_input="ls"))), "unverifiable")
+    mf.write_registry(mf.binding)
+    real_review_git = aiqt_hooks._review_git
+
+    failed_probe = []
+    for verb in ("diff-index", "ls-tree"):
+        def _fail_one(repo, *args, stdin=None, _verb=verb):
+            return None if args[:1] == (_verb,) else real_review_git(repo, *args, stdin=stdin)
+        aiqt_hooks._review_git = _fail_one
+        try:
+            failed_probe.append(_rdp_kind(mf.dispatch(mf.good())))
+        finally:
+            aiqt_hooks._review_git = real_review_git
+    check("rdp/failed-state-probe-unverifiable", failed_probe, ["unverifiable", "unverifiable"])
+
+    # ---------- one strict plain-command classifier (the shared specification) ----------
+    check("rdp/plain-spec-vector-table", [(c, aiqt_hooks._rdp_plain_words(c)[0] is not None)
+                                          for c, _p in aiqt_hooks._RDP_PLAIN_VECTORS],
+          list(aiqt_hooks._RDP_PLAIN_VECTORS))
+    bad = mf.brief(["Review-target: revision", "Reviewed-revision: HEAD"], "bad.txt")
+    good = mf.good()
+    # Bash truncates an ANSI-C quoted word at a NUL, so these run orch-dispatch with the unpinned brief.
+    check("rdp/ansi-c-nul-name-unverifiable", [_rdp_kind(mf.run(c + "patch --brief " + bad)) for c in (
+        "$'orch-dis\\0junk'", "$'orch-dis\\x00junk'", "$'orch-dis\\u0000junk'")], ["unverifiable"] * 3)
+    # A non-ASCII digit is no descriptor to bash: it stays the brief argument, so the command is not plain.
+    check("rdp/unicode-digit-not-plain-unverifiable", [_rdp_kind(mf.run(
+        "orch-dispatch --brief " + d + "</dev/null " + good)) for d in ("\u00b2", "\u0661", "\uff10")],
+        ["unverifiable"] * 3)
+    # An earlier command in the same call can rewrite the brief or the tree after the check.
+    check("rdp/same-call-rewrite-unverifiable", [_rdp_kind(mf.run(c)) for c in (
+        "cp " + bad + " " + good + "; orch-dispatch --brief " + good,
+        "cp " + bad + " " + good + " && orch-dispatch --brief " + good,
+        "git -C " + str(mf.root) + " checkout -q " + mf.seed + " && orch-dispatch --brief " + good,
+        "orch-dispatch --brief " + good + " & cp " + bad + " " + good,
+        "printf -v HOME %s /tmp; orch-dispatch --brief " + good)], ["unverifiable"] * 5)
+    check("rdp/case-folded-command-name", [_rdp_kind(mf.run(n + " --brief " + bad)) for n in (
+        "ORCH-DISPATCH", "Orch-Dispatch", "/usr/bin/ORCH-dispatch")], ["deny"] * 3)
+    mf.rebind(dict(mf.binding, brief_option="-b"))
+    check("rdp/short-option-equals-form-denies", [_rdp_kind(mf.run("orch-dispatch -b" + c + good)) for c in (
+        "=", " ")], ["deny", "allow"])
+    mf.rebind(mf.binding)
+    bom = mf.briefs / "bom.txt"
+    bom.write_bytes(b"\xef\xbb\xbf" + "".join(line + "\n" for line in [
+        "Review-target: revision", "Reviewed-revision: " + mf.pin] + [
+        "Review-path: " + p for p in mf.CHANGED]).encode("utf-8"))
+    check("rdp/bom-brief-allows", _rdp_kind(mf.dispatch(str(bom))), "allow")
+    # /proc/self names the hook's own process, not the dispatcher's: here the hook's cwd holds a good brief.
+    saved_cwd = os.getcwd()
+    os.chdir(str(mf.briefs))
+    try:
+        proc_kind = _rdp_kind(mf.dispatch("/proc/self/cwd/brief.txt"))
+    finally:
+        os.chdir(saved_cwd)
+    check("rdp/proc-self-brief-unverifiable", proc_kind, "unverifiable")
+    # The worker finishes after the deadline and after the caller's reset of the shared deadline (simulated
+    # by the worker clearing it), so the worker's own overdue check cannot see it: the verdict is not used.
+    real_judge = aiqt_hooks._rdp_judge
+
+    def _late_judge(*args, **kwargs):
+        aiqt_hooks.time.sleep(0.35)
+        aiqt_hooks._RDP_DEADLINE[0] = None
+        return ("allow", "")
+    saved_budget = aiqt_hooks._RDP_BUDGET
+    aiqt_hooks._RDP_BUDGET = 0.3
+    aiqt_hooks._rdp_judge = _late_judge
+    try:
+        late_kind = _rdp_kind(mf.dispatch(good))
+    finally:
+        aiqt_hooks._rdp_judge = real_judge
+        aiqt_hooks._RDP_BUDGET = saved_budget
+    check("rdp/late-verdict-never-used", late_kind, "unverifiable")
+    fx = RdpFixture(base, "filemode")
+    (fx.root / "src" / "b.py").chmod(0o755)
+    _rdp_git(fx.root, "add", "src/b.py")
+    _rdp_git(fx.root, "commit", "-q", "-m", "exec")
+    fx_pin = _rdp_git(fx.root, "rev-parse", "HEAD")
+    fx.authority(fx_pin + "\n")
+    (fx.root / "src" / "b.py").chmod(0o644)
+    fx_got = []
+    for mode in ("false", "true"):
+        _rdp_git(fx.root, "config", "core.fileMode", mode)
+        fx_got.append(_rdp_kind(fx.dispatch(fx.good(pin=fx_pin, paths=("src/b.py",)))))
+    check("rdp/filemode-false-ignores-exec-bit", fx_got, ["allow", "deny"])
+    # A relative authority runs from the registry's worktree: a linked worktree without its own copy still
+    # gets the registry's authority, and a nested repository's own authority and commit are never used.
+    ra = RdpFixture(base, "relauth")
+    auth = "import subprocess, sys\nsys.stdout.write(subprocess.run(['git', 'rev-parse', 'HEAD'], " \
+           "capture_output=True, text=True).stdout)\n"
+    (ra.root / "auth.py").write_text(auth, encoding="utf-8")
+    ra.write_registry(dict(ra.binding, authority=dict(argv=[sys.executable, "-I", "-B", "auth.py"], timeout=5)))
+    _rdp_git(ra.root, "worktree", "add", "-q", "--detach", str(base / "relauth-linked"), ra.pin)
+    nested = ra.root / "nested"
+    _rdp_git(base, "init", "-q", "-b", "main", str(nested))
+    (nested / "x.txt").write_text("x\n", encoding="utf-8")
+    _rdp_git(nested, "add", "x.txt")
+    _rdp_git(nested, "commit", "-q", "-m", "nested")
+    nested_pin = _rdp_git(nested, "rev-parse", "HEAD")
+    (nested / "auth.py").write_text(auth, encoding="utf-8")
+
+    def _from(cwd, brief, background=False):
+        return _rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+            hook_event_name="PreToolUse", cwd=str(cwd), session_id="s1", tool_name="Bash",
+            tool_input=dict(command="orch-dispatch --brief " + brief, run_in_background=background))))
+    check("rdp/authority-runs-from-registry-worktree", [
+        _from(base / "relauth-linked", ra.good()),
+        _from(nested, ra.good(pin=nested_pin, paths=("x.txt",)))], ["allow", "unverifiable"])
+    # core.worktree moves git's top level to a directory whose registry has no binding: the cwd's own
+    # registry still scopes the session, and the redirected top level is foreign to it.
+    cw = RdpFixture(base, "coreworktree")
+    elsewhere = base / "coreworktree-elsewhere"
+    (elsewhere / ".aiqt").mkdir(parents=True)
+    (elsewhere / ".aiqt" / "orchestration.local.json").write_text(json.dumps(dict(
+        version=1, state_dir=str(cw.briefs / "state2"))), encoding="utf-8")
+    cw_branch = cw.brief(["Review-target: revision", "Review-branch: main"], "branch-only.txt")
+    cw_got = [_rdp_kind(cw.dispatch(cw_branch))]
+    _rdp_git(cw.root, "config", "core.worktree", str(elsewhere))
+    cw_got.append(_rdp_kind(cw.dispatch(cw_branch)))
+    check("rdp/core-worktree-cannot-unscope", cw_got, ["deny", "unverifiable"])
+    # A linked worktree beside its main worktree stays scoped when the shared configuration breaks git
+    # (read from the raw .git and commondir files), and when the git directory is separated from the main
+    # worktree (no main worktree can be located: withheld as a registry state that cannot be read).
+    lb = RdpFixture(base, "linkedbroken")
+    lb_branch = lb.brief(["Review-target: revision", "Review-branch: main"], "branch-only.txt")
+    _rdp_git(lb.root, "worktree", "add", "-q", "--detach", str(base / "linkedbroken-beside"), lb.pin)
+    lb_got = [_from(base / "linkedbroken-beside", lb_branch)]
+    with open(str(lb.root / ".git" / "config"), "a", encoding="utf-8") as fh:
+        fh.write("\n[broken\n")
+    lb_got.append(_from(base / "linkedbroken-beside", lb_branch))
+    check("rdp/linked-worktree-broken-config-scoped", lb_got, ["deny", "unverifiable"])
+    ls_ = RdpFixture(base, "linkedsep")
+    ls_branch = ls_.brief(["Review-target: revision", "Review-branch: main"], "branch-only.txt")
+    _rdp_git(ls_.root, "worktree", "add", "-q", "--detach", str(base / "linkedsep-beside"), ls_.pin)
+    _rdp_git(ls_.root, "init", "-q", "--separate-git-dir=" + str(base / "linkedsep-meta"))
+    subprocess.run(["git", "-C", str(ls_.root), "worktree", "repair"], capture_output=True, timeout=30)
+    check("rdp/linked-worktree-separate-gitdir-withheld", [
+        _from(base / "linkedsep-beside", ls_branch, background=True), _from(base / "linkedsep-beside", ls_branch),
+        _rdp_kind(ls_.dispatch(ls_branch))], ["unverifiable", "unverifiable", "deny"])
+    # The same separated git directory with a broken shared configuration: git cannot resolve the linked
+    # worktree, and the raw .git and commondir files name a common directory that is no main worktree's
+    # .git, so the scope still cannot be known and every call stays withheld.
+    with open(str(base / "linkedsep-meta" / "config"), "a", encoding="utf-8") as fh:
+        fh.write("\n[invalid\n")
+    check("rdp/linked-worktree-separate-gitdir-broken-config-withheld", [
+        _from(base / "linkedsep-beside", "/nonexistent", background=bg) for bg in (False, True)],
+        ["unverifiable", "unverifiable"])
+    # A registry WITHOUT a binding never ends the search for one: not one a linked worktree checks out from
+    # a commit (the binding kept in the main worktree's untracked local registry), not one written beside
+    # or inside a linked worktree, not one in a repository nested inside the orchestrated tree.
+    sw = RdpFixture(base, "shadow")
+    sw_bad = sw.brief(["Review-target: revision", "Reviewed-revision: HEAD"], "bad.txt")
+    unbound = json.dumps(dict(version=1))
+    (sw.root / ".aiqt" / "orchestration.json").write_text(unbound, encoding="utf-8")
+    _rdp_git(sw.root, "add", ".aiqt/orchestration.json")
+    _rdp_git(sw.root, "commit", "-q", "-m", "registry without a binding")
+    _rdp_git(sw.root, "worktree", "add", "-q", "--detach", str(base / "shadow-committed"), "HEAD")
+    sw_dirs = [base / "shadow-committed"]
+    for wt in (base / "shadow-beside", sw.root / ".worktrees" / "inside"):
+        _rdp_git(sw.root, "worktree", "add", "-q", "--detach", str(wt), sw.pin)
+        (wt / ".aiqt").mkdir()
+        (wt / ".aiqt" / "orchestration.local.json").write_text(unbound, encoding="utf-8")
+        sw_dirs.append(wt)
+    sw_nested = sw.root / "nested"
+    _rdp_git(base, "init", "-q", "-b", "main", str(sw_nested))
+    (sw_nested / "x.txt").write_text("x\n", encoding="utf-8")
+    _rdp_git(sw_nested, "add", "x.txt")
+    _rdp_git(sw_nested, "commit", "-q", "-m", "nested")
+    (sw_nested / ".aiqt").mkdir()
+    (sw_nested / ".aiqt" / "orchestration.local.json").write_text(unbound, encoding="utf-8")
+    check("rdp/bindingless-registry-cannot-hide-binding", [_from(d, sw_bad) for d in sw_dirs + [sw_nested]],
+          ["deny", "deny", "deny", "unverifiable"])
+    # A failed or timed-out common-directory probe in a linked worktree: the raw .git and commondir files
+    # still name the main worktree, whose binding checks the dispatch (never a foreground note).
+    real_main = aiqt_hooks._rdp_main_worktree
+
+    def _probe_fails(root):
+        raise OSError("git cannot read the common git directory of {}".format(root))
+    aiqt_hooks._rdp_main_worktree = _probe_fails
+    try:
+        probe_got = [_from(base / "linked-beside", lw_branch, background=bg) for bg in (False, True)]
+    finally:
+        aiqt_hooks._rdp_main_worktree = real_main
+    check("rdp/failed-main-worktree-probe-reads-gitfile", probe_got, ["deny", "deny"])
+    # The authority runs with every ambient GIT_* variable scrubbed, as the git probes do.
+    auth_envs = []
+    auth_argv = f.binding["authority"]["argv"]
+    real_run = aiqt_hooks.subprocess.run
+
+    def _capture_auth(argv, **kw):
+        if list(argv[:len(auth_argv)]) == auth_argv:
+            auth_envs.append(kw.get("env"))
+        return real_run(argv, **kw)
+    saved_param = os.environ.get("GIT_CONFIG_PARAMETERS")
+    os.environ["GIT_CONFIG_PARAMETERS"] = "'aiqt.selftest=1'"
+    aiqt_hooks.subprocess.run = _capture_auth
+    try:
+        f.authority(f.pin + "\n")
+        f.dispatch(f.good())
+    finally:
+        aiqt_hooks.subprocess.run = real_run
+        if saved_param is None:
+            os.environ.pop("GIT_CONFIG_PARAMETERS", None)
+        else:
+            os.environ["GIT_CONFIG_PARAMETERS"] = saved_param
+    check("rdp/authority-git-env-scrubbed", [isinstance(e, dict) and "GIT_CONFIG_PARAMETERS" not in e
+                                             and e.get("GIT_TERMINAL_PROMPT") == "0" for e in auth_envs], [True])
+    # A dispatcher name assembled at run time is not in the raw text: the command is not plain, so it is
+    # withheld although no declared name can be found in it.
+    sw_run = RdpFixture(base, "assembled")
+    as_bad = sw_run.brief(["Review-target: revision", "Reviewed-revision: HEAD"], "bad.txt")
+    check("rdp/assembled-name-unverifiable", [_rdp_kind(sw_run.run(c)) for c in (
+        "o=orch-; ${o}dispatch --brief " + as_bad, "o=orch-dis; ${o}patch --brief " + as_bad,
+        "/usr/local/bin/orch-dispatc? --brief " + as_bad, "orch-dis$(true)patch --brief " + as_bad)],
+        ["unverifiable"] * 4)
+    # A plain command that names a declared command inside an argument (a git alias that runs it), compared
+    # without regard to case: refused, since its -c global sets configuration, which no bound session may.
+    check("rdp/plain-command-naming-dispatch-unverifiable", [_rdp_kind(sw_run.run(c)) for c in (
+        "git -c 'alias.r=!orch-dispatch --brief " + as_bad + "' r",
+        "git -c 'alias.r=!ORCH-Dispatch --brief " + as_bad + "' r")], ["deny"] * 2)
+    # Each rule of the plain-command specification on its own: every forbidden character, bare or in a
+    # double-quoted segment (but literal in a single-quoted one), a tab or a line break, an unterminated
+    # quote, every wrapper command word, also in another case, and rule 4's allowlist: each allowed program,
+    # bare or under one of its four directories, is plain, and any other command word, an allowed one in
+    # another case, or one under another directory or a relative path is not.
+    allowed = (
+        "git opf ls cat echo printf pwd true false test head tail wc grep egrep fgrep diff cmp stat du df date "
+        "basename dirname realpath readlink uniq cut tr mkdir rmdir touch cp mv rm ln chmod").split()
+    forbidden = "$`\\;&|<>(){}[]*?!#~"
+    wrappers = (
+        ". alias ash awk bash builtin bun busybox bwrap caffeinate chroot chrt command coproc csh dash "
+        "deno doas entr env eval exec expect fakeroot find firejail fish flock function gawk gdb ghci "
+        "groovy guile ionice irb jshell julia ksh ltrace lua luajit make mawk mksh nawk nice node nodejs "
+        "nohup nsenter oksh osascript parallel pdksh perl php powershell proot pwsh pypy python racket "
+        "rbash rlwrap rscript ruby runghc runuser script sed setpriv setsid sh source ssh stdbuf strace "
+        "su sudo systemd-run taskset tclsh tcsh time timeout toybox trap unbuffer unshare valgrind watch "
+        "wish xargs yash zsh").split()
+    rule_rows = [("git log a" + ch, False) for ch in forbidden] + \
+        [('git log "a' + ch + '"', False) for ch in forbidden] + \
+        [("git log 'a" + ch + "'", True) for ch in forbidden] + [
+        ("git\tstatus", False), ("git status\n", False), ("git status\r", False), ("git log 'x", False),
+        ('git log "x', False), ("git log x'", False)] + \
+        [(w + " x", False) for w in wrappers] + [(w.upper() + " x", False) for w in wrappers] + \
+        [("/usr/bin/" + w + " x", False) for w in wrappers] + \
+        [(w + " x", True) for w in allowed] + [(d + "/" + w + " x", True) for w in allowed for d in (
+            "/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin")] + [(w.upper() + " x", False) for w in allowed] + \
+        [(c + " x", False) for c in (
+            "sort", "cd", "jq", "tar", "python3.14", "/usr/bin/python3.14", "./ls", "/tmp/x/ls", "bin/ls",
+            "../bin/ls", "/usr//bin/ls", "/usr/bin/../bin/ls", "/ls", "/usr/bin/", "nodejs", "tee", "dd",
+            "install", "rsync", "vim", "less", "orch-dispatch")]
+    check("rdp/plain-spec-each-rule", [(c, aiqt_hooks._rdp_plain_words(c)[0] is not None) for c, _p in rule_rows],
+          rule_rows)
+    check("rdp/plain-words-literal", aiqt_hooks._rdp_plain_words("git commit -m 'fix: a; b' x\"y\"z"),
+          (["git", "commit", "-m", "fix: a; b", "xyz"], None))
+    import contextlib
+    import io
+    saved_decide, saved_stdin = aiqt_hooks._rdp_decide, sys.stdin
+
+    def _boom(data):
+        raise RuntimeError("injected review dispatch fault")
+    try:
+        aiqt_hooks._rdp_decide = _boom
+        sys.stdin = io.StringIO(json.dumps(dict(hook_event_name="PreToolUse", cwd=str(f.root),
+                                                tool_name="Bash", tool_input=dict(command="ls"))))
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc = aiqt_hooks.main(["review_dispatch_pin"])
+    finally:
+        aiqt_hooks._rdp_decide, sys.stdin = saved_decide, saved_stdin
+    check("rdp/handler-crash-fails-closed", rc, 2)
+    _rdp_scope_cases(base, bare)
+
+
+def _rdp_ls(cwd, background):
+    """The review dispatch verdict on a plain `ls` from cwd."""
+    return _rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+        hook_event_name="PreToolUse", cwd=str(cwd), session_id="s1", tool_name="Bash",
+        tool_input=dict(command="ls", run_in_background=background))))
+
+
+def _rdp_scope_cases(base, plain):
+    """Scope vectors: a session with no registry anywhere is never withheld (a linked worktree of a bare
+    repository, a failed common-directory probe, a git that echoes --git-common-dir back), and a bound
+    session cannot switch the hook off through a plain command that writes or removes its registry."""
+    src = base / "baresrc"
+    _rdp_git(base, "init", "-q", "-b", "main", str(src))
+    (src / "x.txt").write_text("x\n", encoding="utf-8")
+    _rdp_git(src, "add", "x.txt")
+    _rdp_git(src, "commit", "-q", "-m", "x")
+    _rdp_git(base, "clone", "-q", "--bare", str(src), str(base / "bareproj.git"))
+    _rdp_git(base / "bareproj.git", "worktree", "add", "-q", str(base / "bareproj-wt"), "main")
+    check("rdp/bare-repository-linked-worktree-unbound-allows",
+          [_rdp_ls(base / "bareproj-wt", bg) for bg in (False, True)], ["allow", "allow"])
+    real_main, real_git = aiqt_hooks._rdp_main_worktree, aiqt_hooks._review_git
+
+    def _probe_fails(root):
+        raise OSError("git cannot read the common git directory of {}".format(root))
+
+    def _old_git(repo, *args, stdin=None):
+        # git before 2.5 echoes an option rev-parse does not know (--git-common-dir) as if it were a path.
+        p = real_git(repo, *args, stdin=stdin)
+        if p is not None and args[:1] == ("rev-parse",) and "--git-common-dir" in args and p.returncode == 0:
+            p.stdout = b"--git-common-dir\n" + p.stdout.split(b"\n", 1)[-1]
+        return p
+    got = []
+    try:
+        aiqt_hooks._rdp_main_worktree = _probe_fails
+        got += [_rdp_ls(plain, bg) for bg in (False, True)]
+        aiqt_hooks._rdp_main_worktree = real_main
+        aiqt_hooks._review_git = _old_git
+        got += [_rdp_ls(plain, bg) for bg in (False, True)]
+    finally:
+        aiqt_hooks._rdp_main_worktree, aiqt_hooks._review_git = real_main, real_git
+    check("rdp/unbound-repository-failed-probe-or-old-git-allows", got, ["allow"] * 4)
+    # A plain command that writes, moves or removes the registry binding this session is refused; a read
+    # of it, and a command naming other .aiqt paths, is not.
+    rg = RdpFixture(base, "regdisarm")
+    rg_bad = rg.brief(["Review-target: revision", "Reviewed-revision: HEAD"], "bad.txt")
+    unbound = rg.briefs / "unbound.json"
+    unbound.write_text(json.dumps(dict(version=1)), encoding="utf-8")
+    local = rg.root / ".aiqt" / "orchestration.local.json"
+    check("rdp/plain-registry-write-denies", [_rdp_kind(rg.run(c)) for c in (
+        "cp " + str(unbound) + " .aiqt/orchestration.local.json", "git rm -q .aiqt/orchestration.json",
+        "rm -rf .aiqt", "mv .aiqt/ elsewhere", "rm " + str(rg.root / ".AIQT" / "Orchestration.Local.JSON"),
+        "ln -sf " + str(unbound) + " .aiqt/orchestration.local.json", "git checkout HEAD -- .aiqt/.",
+        "cp " + str(unbound) + " --target-directory=.aiqt")], ["deny"] * 8)
+    check("rdp/plain-registry-read-allows", [_rdp_kind(rg.run(c)) for c in (
+        "cat .aiqt/orchestration.local.json", "ls .aiqt", "git diff .aiqt/core/x.toml")], ["allow"] * 3)
+    check("rdp/registry-disarm-dispatch-still-denies", _rdp_kind(rg.dispatch(rg_bad)), "deny")
+    # The binding in the committed registry, a bindingless local one beside it: the binding still scopes.
+    reg = dict(version=1, state_dir=str(rg.briefs / "state"), review_dispatch=rg.binding)
+    (rg.root / ".aiqt" / "orchestration.json").write_text(json.dumps(reg), encoding="utf-8")
+    local.write_text(json.dumps(dict(version=1, state_dir=str(rg.briefs / "state"))), encoding="utf-8")
+    check("rdp/bindingless-local-registry-cannot-hide-committed-binding", _rdp_kind(rg.dispatch(rg_bad)), "deny")
+    # The .aiqt directory named without its plain name: a value glued to a short option (alone or in a
+    # group), a quoted glob git expands itself, a pathspec after its magic, a subdirectory entered with -C
+    # while another word climbs with .., and a .. resolved against a cwd inside .aiqt. Other .aiqt paths,
+    # and prose holding a glob character, are not refused.
+    (rg.root / ".aiqt" / "core").mkdir()
+    check("rdp/plain-registry-indirect-name-denies", [_rdp_kind(rg.run(c)) for c in (
+        "git rm -rfq '.aiq*'", "git clean -fdxq '.aiq*'", "git -C .aiqt/core rm -rfq ..",
+        "cp -rt.aiqt " + str(rg.briefs) + "/.", "mv -ft.aiqt x", "git rm -rq ':/.aiqt'",
+        "git rm -rq ':(icase).AIQT'", "git rm -rq '.aiqt/orch*'", "git rm -rq '.a?qt/'")] + [
+        _rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+            hook_event_name="PreToolUse", cwd=str(rg.root / ".aiqt" / "core"), session_id="s1", tool_name="Bash",
+            tool_input=dict(command=c, run_in_background=False)))) for c in ("rm -rf ..", "git rm -rq -C..")],
+        ["deny"] * 11)
+    check("rdp/plain-aiqt-subpath-and-glob-prose-allow", [_rdp_kind(rg.run(c)) for c in (
+        "git add .aiqt/core/x.toml", "git commit -m 'why?'", "touch .aiqt/core/x.toml", "git rm -q '*.py'")],
+        ["allow"] * 4)
+    # A plain git command that moves the repository or its work tree off the bound registry (core.worktree,
+    # core.bare, a configuration include, a separated git directory) is refused; a read of the key is not.
+    check("rdp/plain-git-repository-move-denies", [_rdp_kind(rg.run(c)) for c in (
+        "git config core.worktree " + str(base), "git config --worktree Core.WorkTree " + str(base),
+        "git config core.bare true", "git config --unset core.worktree", "git config set core.bare true",
+        "git config include.path " + str(unbound), "git config includeIf.gitdir:/x/.path " + str(unbound),
+        "git init -q --separate-git-dir=" + str(base / "regdisarm-meta"), "git -c core.worktree=/x config x y",
+        "git -c core.bare=true branch --list")],
+        ["deny"] * 10)
+    # git config is judged by position: only --get, --get-all, --get-regexp, --list or -l (after modifiers,
+    # --show-origin among them), with the operands each takes, or one key alone, reads.
+    reads = ("git config --get core.worktree", "git config --list", "git config core.bare",
+             "git config --show-origin --list", "git config --global --get-all core.worktree",
+             "git config --get core.worktree get", "git config --show-origin core.worktree")
+    check("rdp/plain-git-repository-read-allows", [_rdp_kind(rg.run(c)) for c in reads], ["allow"] * len(reads))
+    # Any other git config form naming repository configuration is a write: a word after the key is its
+    # value (git config core.worktree get sets core.worktree to get), a rename into the core or include
+    # section moves a key there, an edit action opens an editor that can set any key, and a subcommand
+    # behind an unknown global option is judged the same way.
+    writes = ("git config core.worktree get", "git config core.bare true list", "git config get core.bare",
+              "git config --worktree core.worktree /x get", "git config --show-origin core.worktree /x",
+              "git config core.worktree --get", "git config --worktree --rename-section x core",
+              "git config --rename-section x Include", "git config rename-section x includeIf.gitdir:/x/",
+              "git config --edit", "git config -e", "git config edit", "git config --ed",
+              "git --exec-path=/x config core.worktree get", "git --exec-path=/x config --rename-section x core",
+              "git -c core.worktree=/x config --list", "git --config-env=core.bare=V config --list")
+    check("rdp/plain-git-config-judged-by-position", [_rdp_kind(rg.run(c)) for c in writes],
+          ["deny"] * len(writes))
+    # A git subcommand that only reads (status, log, diff, show, rev-parse, ls-files, blame, grep, cat-file)
+    # treats every word as data: a repository key, a registry name or a glob in it is no move and no write.
+    data = ("git log -S core.worktree --oneline", "git log -1 --format='tformat:*'", "git ls-files '*'",
+            "git grep core.worktree", "git log --grep=core.bare", "git log -S include.path", "git diff -- '*'",
+            "git show HEAD:.aiqt/orchestration.local.json", "git -C .aiqt/core log -- ..",
+            "git blame -- .aiqt/orchestration.local.json", "git cat-file -p HEAD:seed.txt",
+            "git rev-parse --git-path core.worktree", "git status -- .aiqt", "git --no-pager log -- '.aiq*'")
+    check("rdp/plain-git-read-words-are-data", [_rdp_kind(rg.run(c)) for c in data], ["allow"] * len(data))
+    # A read subcommand that writes a file (--output, abbreviated or not), runs a program on its matches
+    # (grep -O, --open-files-in-pager) or takes configuration from a -c or --config-env global is judged as
+    # any other git command; so is a subcommand off the read list, or one not written exactly.
+    judged = ("git log -1 --format=%B --output=.aiqt/orchestration.local.json",
+              "git diff --outp=.aiqt/orchestration.local.json", "git show --output .aiqt/orchestration.json",
+              "git grep -O/bin/rm -l review .aiqt", "git grep -lO/bin/rm review .aiqt",
+              "git grep --open-files-in-pager=/bin/rm -l review .aiqt", "git -c core.pager=x log -- '.aiq*'",
+              "git -c x.y=z log -S core.worktree", "git LOG -S core.worktree", "git checkout -- '*'",
+              "git commit -m 'document core.worktree handling'", "git init -q --separate-git-dir=/tmp/x")
+    check("rdp/plain-git-read-that-writes-or-runs-judged", [_rdp_kind(rg.run(c)) for c in judged],
+          ["deny"] * len(judged))
+    # Configuration can make any git command, a read among them, run a program, so no key list closes it:
+    # the external diff sequence (set diff.external to rm -f, then diff the registry with --ext-diff), each
+    # call run only where the hook allows it, would delete the registry and let a missing-brief dispatch
+    # through; every git config write and -c or --config-env global is refused, whatever the key.
+    ed = RdpFixture(base, "extdiff")
+    (ed.root / "other").write_text("different\n", encoding="utf-8")
+    ed_got = []
+    for command, args in (("git config diff.external 'rm -f'", ["config", "diff.external", "rm -f"]),
+                          ("git diff --no-index --ext-diff .aiqt/orchestration.local.json other",
+                           ["diff", "--no-index", "--ext-diff", ".aiqt/orchestration.local.json", "other"])):
+        ed_got.append(_rdp_kind(ed.run(command)))
+        if ed_got[-1] == "allow":
+            subprocess.run(["git", "-C", str(ed.root)] + args, capture_output=True, timeout=30)
+    ed_got += [_rdp_kind(ed.dispatch("/missing")), (ed.root / ".aiqt" / "orchestration.local.json").is_file()]
+    check("rdp/git-external-diff-sequence-cannot-remove-registry", ed_got,
+          ["deny", "deny", "unverifiable", True])
+    keys = ("git config core.pager 'rm -f'", "git config alias.l '!rm -f x'", "git config core.fsmonitor x",
+            "git config --global diff.x.textconv x", "git config filter.x.smudge x", "git config set diff.external x",
+            "git config --file x diff.external x", "git config --add core.hooksPath x",
+            "git config --unset diff.external", "git -c diff.external=x status", "git -c x.y=z commit -m x",
+            "git --config-env=core.pager=V status", "git --exec-path=/x -c diff.external=x status",
+            "git --exec-path=/x config diff.external x")
+    check("rdp/plain-git-config-write-any-key-denies", [_rdp_kind(ed.run(c)) for c in keys], ["deny"] * len(keys))
+    # A read carrying an option that runs a configured or named program (an external diff, a textconv or
+    # smudge filter, a patch a textconv applies to, a signature check, the pager) gets the full checks.
+    runs = ("git diff --textconv .aiqt/orchestration.local.json other", "git diff --textc -- .aiqt",
+            "git show --textconv HEAD:.aiqt/orchestration.local.json", "git cat-file --textconv HEAD:.aiqt/orchestration.json",
+            "git cat-file --filters HEAD:.aiqt/orchestration.json", "git grep --textconv x .aiqt", "git blame --textconv -- .aiqt",
+            "git log -p -- .aiqt", "git log --patch -- .aiqt", "git show -U3 -- .aiqt", "git log -pS x -- .aiqt",
+            "git diff --ext -- .aiqt", "git log --cc -- .aiqt", "git log --word-diff -- .aiqt",
+            "git log --show-signature -- .aiqt", "git log --format='%G?' -- .aiqt", "git -p log -- .aiqt",
+            "git --paginate status .aiqt")
+    check("rdp/plain-git-read-running-program-judged", [_rdp_kind(ed.run(c)) for c in runs], ["deny"] * len(runs))
+    # A plain command that may write into a git directory or a git configuration file (a configuration
+    # file or hook copied, linked or moved into place) is refused; reads of them, and a read naming the
+    # registry with no program-running option, are not.
+    gitdir = ("cp other .git/config", "ln -sf other .git/hooks/post-index-change", "mv other .GIT/config",
+              "git show HEAD:seed.txt --output=.git/config", "cp other x/.gitconfig",
+              "cp other x/.config/git/config", "git init -q --template=/x", "cp -rT other '.gi?'",
+              "chmod +x .git/hooks/pre-commit", "git -C .git commit -m x")
+    check("rdp/plain-git-dir-write-denies", [_rdp_kind(ed.run(c)) for c in gitdir], ["deny"] * len(gitdir))
+    quiet = ("git config --get diff.external", "git config --list", "ls .git", "test -d .git",
+             "cat .git/config", "git diff --stat -- .aiqt/orchestration.local.json",
+             "git log --oneline -- .aiqt/orchestration.local.json", "git diff --text -- .aiqt",
+             "git log --no-ext-diff --no-textconv -S x -- .aiqt", "git status")
+    check("rdp/plain-git-read-without-program-allows", [_rdp_kind(ed.run(c)) for c in quiet],
+          ["allow"] * len(quiet))
+    # A git option or subcommand that runs a program can run shell text no word check sees (.aiqt inside
+    # a pager command), so it is refused outright, whatever the command names: the pager sequence (grep's
+    # --open-files-in-pager set to rm -rf .aiqt), each call run only where the hook allows it, would delete
+    # the registry and let a missing-brief dispatch through.
+    pg = RdpFixture(base, "pager")
+    pg_got = [_rdp_kind(pg.dispatch("/missing"))]
+    pg_got.append(_rdp_kind(pg.run("git grep --open-files-in-pager='rm -rf .aiqt' a -- src/a.py")))
+    if pg_got[-1] == "allow":
+        subprocess.run(["git", "-C", str(pg.root), "grep", "--open-files-in-pager=rm -rf .aiqt", "a", "--",
+                        "src/a.py"], capture_output=True, timeout=30)
+    pg_got += [_rdp_kind(pg.dispatch("/missing")), (pg.root / ".aiqt" / "orchestration.local.json").is_file()]
+    check("rdp/git-pager-option-sequence-cannot-remove-registry", pg_got,
+          ["unverifiable", "deny", "unverifiable", True])
+    # The checks below use a fixture of their own, so a registry removed above cannot make them pass.
+    go = RdpFixture(base, "gitops")
+    programs = ("git grep -O'rm -rf x' a", "git grep -iO a", "git grep --open a", "git grep -e a -O",
+                "git -p status", "git --paginate log", "git diff --ext-diff", "git log --textconv",
+                "git cat-file --filters HEAD:seed.txt", "git log --show-signature", "git log --format='%G?'",
+                "git for-each-ref --format '%(signature)'", "git rebase -x 'rm -rf x' HEAD",
+                "git rebase --exec=x HEAD", "git difftool -x x", "git difftool --extcmd=x",
+                "git clone -u x a b", "git clone --config core.fsmonitor=x a b", "git clone -c x=y a b",
+                "git fetch --upload-pack=x origin", "git push --receive-pack=x origin",
+                "git archive --remote=x --exec=y HEAD", "git send-email --sendmail-cmd=x a",
+                "git --exec-path=/x status", "git bisect run x", "git submodule foreach x",
+                "git filter-branch --tree-filter x", "git --no-advice rebase -x x HEAD",
+                "git commit -S -m x", "git commit --gpg-sign -m x", "git commit -p", "git commit --trailer a=b -m x",
+                "git tag -s v1 -m x", "git tag -v v1", "git tag -u k v1", "git tag --sign v1",
+                "git merge -s x y", "git merge --strategy=x y", "git merge --verify-signatures y", "git merge -S y",
+                "git rebase -s x y", "git rebase -S y", "git cherry-pick --strategy=x y", "git cherry-pick -S y",
+                "git revert --gpg-sign y", "git push --signed origin", "git add -p", "git add -i",
+                "git add --interactive", "git checkout -p", "git restore --patch x", "git reset -p",
+                "git stash -p", "git fetch evil::x", "git clone evil::x d", "git remote add o evil::x",
+                "git push --repo=evil::x", "git log --help", "git diff --ext-diff --",
+                "git log --show-signature --", "git log --grep -- --ext-diff", "git log -n -- --show-signature",
+                "git commit -m -- -S", "git commit --mess -- --gpg-sign", "git diff --cached --ext-diff",
+                "git grep -e -e -e -- -O", "git commit --mess -m -m -- -S", "git blame -n -L -- --ext-diff",
+                "git stash show -- --ext-diff", "git clone -- evil::x d", "git commit --mess --mess --mess -- -S",
+                "git blame -L -- --ext-diff", "git shortlog --committer --grep -- --ext-diff",
+                "git commit --allow-empty --mess --mess --mess -- -S", "git blame -CS --ext-diff f",
+                "git blame -MS --ext-diff f", "git shortlog -wG --ext-diff",
+                "git show --word-diff-regex --grep --ext-diff", "git log -p --word-diff-regex -S --ext-diff",
+                "git show HEAD --default --grep --ext-diff", "git log -p --output --grep --ext-diff",
+                "git show -s --word-diff-regex -S --show-signature", "git log --since-as-filter --author --ext-diff",
+                "git diff --word-diff-regex --grep --ext-diff", "git rev-list --default --grep --ext-diff HEAD",
+                "git shortlog --since-as-filter --grep --ext-diff", "git blame --word-diff-regex -S --ext-diff f",
+                "git log --word-diff-regex -- --ext-diff", "git show --word-diff-reg --grep --ext-diff",
+                "git log --oneline --default --grep --ext-diff", "git log -1 --format=%-GG",
+                "git show -s --pretty=tformat:%+GK", "git log -1 --format='% GT' -- .aiqt",
+                "git log --pretty tformat:%-GS", "git log --format='%<(9)% GF'",
+                "git for-each-ref --format='%(*signature)'", "git tag -l --format '%(*signature:grade)'",
+                "git for-each-ref --sort=signature", "git for-each-ref --sort=signature:grade",
+                "git for-each-ref --sort=-signature", "git for-each-ref --sort='*signature'",
+                "git for-each-ref --sort='-*signature:signer'", "git for-each-ref --sort=v:signature",
+                "git for-each-ref --sort=version:signature:key", "git for-each-ref --so=signature",
+                "git for-each-ref --sor signature", "git for-each-ref --sort=refname --sort=signature",
+                "git for-each-ref --sort refname --sort -signature", "git for-each-ref --no-sort --sort=signature",
+                "git branch --sort=signature", "git branch --so=signature:grade", "git tag --sort='*signature'",
+                "git tag -l --sor '*signature'", "git for-each-ref --sort=contents:signature",
+                "git shortlog --group=%GG HEAD", "git shortlog --gr=%GG HEAD", "git shortlog --g='%G?' HEAD",
+                "git shortlog --group %GG HEAD", "git shortlog --group --format=%GG HEAD",
+                "git shortlog --group=format:%GS HEAD", "git shortlog --group=committer --group=%GK HEAD",
+                "git shortlog -c --group %-GG HEAD")
+    pr_got = []
+    for c in programs:
+        result = go.run(c)
+        specific = result[1].get("hookSpecificOutput") if isinstance(result[1], dict) else None
+        reason = specific.get("permissionDecisionReason", "") if isinstance(specific, dict) else ""
+        pr_got.append((_rdp_kind(result), "runs a program" in reason))
+    check("rdp/plain-git-program-option-denies", pr_got, [("deny", True)] * len(programs))
+    # Options are read with their operands: a search operand glued to -S or -G, or the next word of
+    # --grep, --author or -S, is no patch request (git log -Sconfig reads, its c no -c), and words after
+    # -- are paths, also after an option taking no value or with its value glued (--stat, --cached, -1,
+    # --format=oneline, -n5), or after a word that is itself an option's value, separated as attached
+    # (git grep -e -e -- -O as git grep -e-e -- -O); an option that shares a letter or prefix with a
+    # program-running one runs none.
+    operands = ("git log -Sconfig -- .aiqt", "git log -S config -- .aiqt", "git log -Gcmp -- .aiqt",
+                "git log --grep -c -- .aiqt", "git log --author -p -- .aiqt", "git log -n 3 -- .aiqt",
+                "git log -- .aiqt -p", "git grep -e -O -- .aiqt", "git grep -eOops -- .aiqt",
+                "git cat-file --filter=blob:none --batch-check", "git commit -m 'fix -x and %G'",
+                "git rebase -i HEAD", "git --exec-path", "git log --grep --ext-diff",
+                "git log --grep=--ext-diff", "git show --author --show-signature", "git commit -m --gpg-sign",
+                "git grep -A 1 -e -O", "git tag -m -s v1", "git log --grep --help", "git clone -o -u a b",
+                "git log --grep --format=%G --format=%s", "git diff -- --ext-diff",
+                "git log -- --show-signature", "git log HEAD -- --show-signature", "git grep a -- -O",
+                "git diff --stat -- --ext-diff", "git diff --cached -- --ext-diff", "git log -1 -- --show-signature",
+                "git log --format=oneline -- --show-signature", "git log -n5 -- --show-signature",
+                "git commit -a -- -S", "git grep -e -e -- -O", "git grep -e-e -- -O",
+                "git log --grep --author -- --show-signature", "git log --grep=--author -- --show-signature",
+                "git log -S -n -- --ext-diff", "git log -S-n -- --ext-diff", "git commit --mess --mess -- -S",
+                "git blame -n -- --ext-diff", "git blame -L 1,2 -- --ext-diff", "git shortlog -n -- --ext-diff",
+                "git blame -G -G -- --ext-diff", "git commit --mess --gpg-sign", "git shortlog -G -G -- --ext-diff",
+                "git blame -I -O -- --ext-diff", "git for-each-ref --sort=refname", "git for-each-ref --sort refname",
+                "git branch --sort=-committerdate", "git tag -l --sort=v:refname", "git shortlog --group=author HEAD",
+                "git shortlog --group author --group=trailer:x HEAD", "git shortlog --group=%an HEAD",
+                "git shortlog --grep %GG HEAD", "git log --grep signature", "git tag -m signature v1",
+                "git for-each-ref --sort=refname signature", "git shortlog --group=author %GG",
+                "git for-each-ref --sort refname signature", "git shortlog --group author %GG")
+    check("rdp/plain-git-option-operands-parsed", [_rdp_kind(go.run(c)) for c in operands],
+          ["allow"] * len(operands))
+    patches = ("git log -Sx -p -- .aiqt", "git log -pSconfig -- .aiqt", "git log -cS x -- .aiqt",
+               "git show -U3 -- .aiqt", "git log --grep=x --patch -- .aiqt", "git log --default --grep -p -- .aiqt",
+               "git show --since-as-filter -S -p -- .aiqt", "git log --default -- -p -- .aiqt")
+    check("rdp/plain-git-patch-read-judged", [_rdp_kind(go.run(c)) for c in patches], ["deny"] * len(patches))
+    # A git config read keeps its scope options (--local, --global, --system, --worktree, --file PATH),
+    # --show-origin and --type before any read form; a trailing word after the key is still a value.
+    config_reads = ("git config --show-origin --get core.bare", "git config --local core.bare",
+                    "git config --local --show-origin core.bare", "git config --system --get core.bare",
+                    "git config --worktree core.bare", "git config --global --list",
+                    "git config --file other --get core.bare", "git config -f other core.bare",
+                    "git config --file=.git/config core.bare", "git config --type bool --get core.bare",
+                    "git config --show-scope --show-origin --get-all core.bare")
+    check("rdp/plain-git-config-read-modifiers-allow", [_rdp_kind(go.run(c)) for c in config_reads],
+          ["allow"] * len(config_reads))
+    config_writes = ("git config core.bare --local", "git config --local core.bare true",
+                     "git config --file core.bare", "git config --show-origin core.bare false",
+                     "git config --type bool core.bare true", "git config --file x --unset core.bare")
+    check("rdp/plain-git-config-trailing-word-still-writes", [_rdp_kind(go.run(c)) for c in config_writes],
+          ["deny"] * len(config_writes))
+    # A git subcommand off the allowlist is refused whatever it names: the instaweb sequence (its --httpd
+    # set to rm -rf .aiqt, run only where the hook allows it) would delete the registry and let a
+    # missing-brief dispatch through.
+    iw = RdpFixture(base, "instaweb")
+    iw_got = [_rdp_kind(iw.dispatch("/missing")),
+              _rdp_kind(iw.run("git instaweb --httpd='rm -rf .aiqt lighttpd' --start"))]
+    if iw_got[-1] == "allow":
+        subprocess.run(["git", "-C", str(iw.root), "instaweb", "--httpd=rm -rf .aiqt lighttpd", "--start"],
+                       capture_output=True, timeout=30)
+    iw_got += [_rdp_kind(iw.dispatch("/missing")), (iw.root / ".aiqt" / "orchestration.local.json").is_file()]
+    check("rdp/git-instaweb-sequence-cannot-remove-registry", iw_got, ["unverifiable", "deny", "unverifiable", True])
+    off_list = (("git instaweb --start", "instaweb"), ("git difftool", "difftool"), ("git mergetool", "mergetool"),
+                ("git send-email --to=a x", "send-email"), ("git filter-branch", "filter-branch"),
+                ("git bisect start", "bisect"), ("git submodule status", "submodule"), ("git daemon", "daemon"),
+                ("git web--browse x", "web--browse"), ("git credential fill", "credential"),
+                ("git credential-store get", "credential-store"), ("git credential-cache exit", "credential-cache"),
+                ("git help log", "help"), ("git co main", "co"), ("git my-external", "my-external"),
+                ("git LOG", "LOG"), ("git --no-advice status", "--no-advice"), ("git init", "init"),
+                ("git clean -n", "clean"), ("git gc", "gc"), ("git --help", "--help"))
+    off_got = []
+    for c, word in off_list:
+        result = go.run(c)
+        specific = result[1].get("hookSpecificOutput") if isinstance(result[1], dict) else None
+        reason = specific.get("permissionDecisionReason", "") if isinstance(specific, dict) else ""
+        off_got.append((_rdp_kind(result), "({})".format(word) in reason))
+    check("rdp/plain-git-off-allowlist-subcommand-denies", off_got, [("deny", True)] * len(off_list))
+    allowed = ("git status", "git log", "git diff", "git show", "git rev-parse HEAD", "git ls-files", "git ls-tree HEAD",
+               "git cat-file -t HEAD", "git blame seed.txt", "git grep x", "git describe", "git shortlog",
+               "git merge-base HEAD HEAD", "git rev-list HEAD", "git for-each-ref", "git show-ref", "git branch",
+               "git tag", "git remote", "git config --list", "git add x", "git rm x", "git mv x y", "git commit -m x",
+               "git push", "git fetch", "git stash", "git switch main", "git checkout main", "git restore x",
+               "git reset", "git merge x", "git rebase x", "git cherry-pick x", "git revert x", "git worktree list",
+               "git clone a b", "git", "git --version")
+    check("rdp/plain-git-allowlisted-subcommand-allows", [_rdp_kind(go.run(c)) for c in allowed],
+          ["allow"] * len(allowed))
+    # The binding record (D-433-FAILCLOSED-BINDING): once the hook has seen the registry bind, a registry
+    # removed or rewritten by any command leaves the next dispatch withheld as UNVERIFIABLE, its reason naming
+    # the binding record, never allowed. Each change is made directly, as a command the hook did not judge
+    # would make it, after one dispatch has been checked under the binding.
+    def _reason(result):
+        specific = result[1].get("hookSpecificOutput") if isinstance(result[1], dict) else None
+        return specific.get("permissionDecisionReason", "") if isinstance(specific, dict) else ""
+
+    def _drifted(name, prepare, change):
+        fx = RdpFixture(base, name)
+        prepare(fx)
+        first = _rdp_kind(fx.dispatch("/missing"))
+        change(fx)
+        after = fx.dispatch("/missing")
+        return [first, aiqt_hooks._rdp_scope(str(fx.root))[0], _rdp_kind(after), "binding record" in _reason(after)]
+
+    def _payload(fx):
+        fx.ignore_registry()
+        (fx.root / "payload" / ".aiqt").mkdir(parents=True)
+        (fx.root / "payload" / ".aiqt" / "orchestration.local.json").write_text(json.dumps(dict(version=1)),
+                                                                                encoding="utf-8")
+        _rdp_git(fx.root, "add", "-f", "payload")
+        _rdp_git(fx.root, "commit", "-q", "-m", "payload")
+
+    def _tracked(fx):
+        _rdp_git(fx.root, "branch", "noreg")
+        _rdp_git(fx.root, "add", "-f", ".aiqt/orchestration.local.json")
+        _rdp_git(fx.root, "commit", "-q", "-m", "track the registry")
+    changes = (
+        ("record-rm-tree", lambda fx: None,
+         lambda fx: (_rdp_git(fx.root, "add", "-A"), _rdp_git(fx.root, "rm", "-rfq", "."))),
+        ("record-restore-subtree", _payload, lambda fx: _rdp_git(fx.root, "restore", "--source=HEAD:payload", ".")),
+        ("record-checkout-subtree", _payload, lambda fx: _rdp_git(fx.root, "checkout", "HEAD:payload", "--", ".")),
+        ("record-reset-branch", _tracked, lambda fx: _rdp_git(fx.root, "reset", "-q", "--hard", "noreg")),
+        ("record-rm-aiqt", lambda fx: None, lambda fx: shutil.rmtree(fx.root / ".aiqt")))
+    check("rdp/record-registry-removed-withholds-dispatch", [_drifted(n, p, c) for n, p, c in changes],
+          [["unverifiable", None, "unverifiable", True]] * len(changes))
+    rebound = _drifted("record-rebind", lambda fx: None,
+                       lambda fx: fx.write_registry(dict(fx.binding, commands=["other-dispatch"])))
+    check("rdp/record-registry-rewritten-withholds-dispatch", rebound, ["unverifiable", "ok", "unverifiable", True])
+    # The record is hook-owned state in the common git directory, mode 0600, holding the binding; an operator
+    # clears it outside the session and the next check records the binding then in force. In the session a
+    # plain command naming it is refused, and a plain command naming neither is still allowed while the
+    # registry is changed.
+    rb = RdpFixture(base, "record-operator")
+    rb.dispatch("/missing")
+    home = rb.root / ".git" / "aiqt" / "review-dispatch-binding"
+    records = sorted(home.iterdir()) if home.is_dir() else []
+    record = records[0] if len(records) == 1 else home / "absent.json"
+    modes = [oct(path.stat().st_mode & 0o777) for path in [home] + records if path.exists()]
+    doc = json.loads(record.read_text(encoding="utf-8")) if record.is_file() else {}
+    shutil.rmtree(rb.root / ".aiqt")
+    in_session = [_rdp_kind(rb.run(c)) for c in ("rm " + str(record), "rm -rf .git/aiqt", "ls", "git status")]
+    (rb.root / ".aiqt").mkdir()
+    rb.write_registry(dict(rb.binding, commands=["other-dispatch"]))
+    still = _rdp_kind(rb.dispatch("/missing"))
+    record.unlink(missing_ok=True)
+    cleared = rb.run("other-dispatch --brief /missing")
+    check("rdp/record-location-and-operator-clear",
+          [len(records), modes,
+           [doc.get("worktree"), doc.get("registry_path")] == [".", "."], doc.get("binding", {}).get("commands"),
+           in_session, still, _rdp_kind(cleared), "binding record" in _reason(cleared),
+           json.loads(record.read_text(encoding="utf-8"))["binding"]["commands"] if record.is_file() else None],
+          [1, ["0o700", "0o600"], True, ["orch-dispatch"], ["deny", "deny", "allow", "allow"], "unverifiable", "unverifiable",
+           False, ["other-dispatch"]])
+    # Ordinary git commands are allowed whatever the registry's git state: tracked with an older registry
+    # commit in its history, or untracked and not ignored; the registry stays bound and nothing is withheld.
+    def _ordinary(name, track):
+        fx = RdpFixture(base, name)
+        reg = fx.root / ".aiqt" / "orchestration.local.json"
+        if track:
+            _rdp_git(fx.root, "add", "-f", ".aiqt/orchestration.local.json")
+            _rdp_git(fx.root, "commit", "-q", "-m", "track the registry")
+            reg.write_bytes(reg.read_bytes() + b"\n")
+            _rdp_git(fx.root, "commit", "-q", "-a", "-m", "touch the registry")
+        (fx.root / "src" / "a.py").write_text("a = 3\n", encoding="utf-8")
+        got = []
+        for c in ("git add src/a.py", "git commit -q -m edit", "git checkout HEAD -- src/a.py", "git restore src/a.py",
+                  "git reset --hard HEAD", "git checkout -- .", "git restore .", "git reset -q", "git checkout -q -b side",
+                  "git switch -q main"):
+            got.append(_rdp_kind(fx.run(c)))
+            if got[-1] == "allow":
+                subprocess.run(["git", "-C", str(fx.root), "-c", "user.name=T", "-c", "user.email=t@example.invalid",
+                                "-c", "commit.gpgsign=false"] + c.split(" ")[1:], capture_output=True, timeout=30)
+        after = fx.dispatch("/missing")
+        return got + [aiqt_hooks._rdp_scope(str(fx.root))[0], _rdp_kind(after), "binding record" in _reason(after)]
+    check("rdp/record-ordinary-git-commands-allow", [_ordinary("record-ord-tracked", True),
+                                                     _ordinary("record-ord-untracked", False)],
+          [["allow"] * 10 + ["ok", "unverifiable", False]] * 2)
+    # A record that cannot be read leaves the recorded dispatch commands unknown, so every Bash call is
+    # withheld; a binding whose record cannot be written withholds every dispatch, naming the record.
+    bad = RdpFixture(base, "record-malformed")
+    bad.dispatch("/missing")
+    for path in (bad.root / ".git" / "aiqt" / "review-dispatch-binding").glob("*.json"):
+        path.write_text("{", encoding="utf-8")
+    nw = RdpFixture(base, "record-unwritable")
+    (nw.root / ".git" / "aiqt").write_text("x\n", encoding="utf-8")
+    nw_result = nw.dispatch("/missing")
+    check("rdp/record-unreadable-or-unwritable-withholds",
+          [_rdp_kind(bad.run("ls")), _rdp_kind(nw.run("ls")), _rdp_kind(nw_result),
+           "cannot be recorded" in _reason(nw_result)], ["unverifiable", "allow", "unverifiable", True])
+    # A linked worktree is guarded by its main worktree's record, kept in the shared common git directory.
+    lw = RdpFixture(base, "record-linked")
+    _rdp_git(lw.root, "worktree", "add", "-q", str(base / "record-linked-wt"), "-b", "wt")
+    linked = dict(hook_event_name="PreToolUse", cwd=str(base / "record-linked-wt"), session_id="s1",
+                  tool_name="Bash", tool_input=dict(command="orch-dispatch --brief /missing"))
+    lw_first = _rdp_kind(aiqt_hooks.review_dispatch_pin(dict(linked)))
+    shutil.rmtree(lw.root / ".aiqt")
+    lw_after = aiqt_hooks.review_dispatch_pin(dict(linked))
+    check("rdp/record-linked-worktree-main-registry-removed-withholds",
+          [lw_first, _rdp_kind(lw_after), "binding record" in _reason(lw_after)], ["unverifiable", "unverifiable", True])
+    # The record is keyed by the worktree's identity in its common git directory and the registry's path
+    # relative to the top level, never an absolute path, so a renamed repository keeps its record: the
+    # bound registry is committed, reset away to the registry-free revision, the repository is renamed
+    # outside the session (in it, mv of a directory holding the git directory is refused), and the
+    # dispatch from the renamed repository is still withheld, naming the record.
+    rn = RdpFixture(base, "record-rename")
+    _tracked(rn)
+    rn_first = _rdp_kind(rn.dispatch("/missing"))
+    _rdp_git(rn.root, "reset", "-q", "--hard", "noreg")
+    renamed = base / "record-renamed"
+    rn_mv = _rdp_kind(rn.run("mv " + str(rn.root) + " " + str(renamed)))
+    os.rename(rn.root, renamed)
+    rn_after = aiqt_hooks.review_dispatch_pin(dict(
+        hook_event_name="PreToolUse", cwd=str(renamed), session_id="s1", tool_name="Bash",
+        tool_input=dict(command="orch-dispatch --brief /missing", run_in_background=False)))
+    check("rdp/record-renamed-repository-withholds",
+          [rn_first, rn_mv, _rdp_kind(rn_after), "binding record" in _reason(rn_after),
+           str(renamed / ".git" / "aiqt") in _reason(rn_after)], ["unverifiable", "deny", "unverifiable", True, True])
+    # The protected directory is the RESOLVED common git directory, whatever its spelling: with a separated
+    # git directory not named .git, every plain command but a read whose operand is it, lies inside it or
+    # holds it is refused (absolute, relative, through a symbolic link, a parent), a read and ordinary work
+    # are not, and a registry removed outside the session still withholds the dispatch through the record.
+    sg = RdpFixture(base, "record-sepgit")
+    sg_meta = base / "record-sepgit-meta"
+    _rdp_git(sg.root, "init", "-q", "--separate-git-dir=" + str(sg_meta))
+    sg_first = _rdp_kind(sg.dispatch("/missing"))
+    sg_home = sg_meta / "aiqt" / "review-dispatch-binding"
+    sg_records = sorted(sg_home.iterdir()) if sg_home.is_dir() else []
+    (base / "record-sepgit-alias").symlink_to(sg_meta)
+    refused = ["rm -rf " + str(sg_meta / "aiqt"), "rm -rf " + str(sg_meta), "rm -rf ../record-sepgit-meta/aiqt",
+               "rm -rf " + str(base / "record-sepgit-alias") + "/aiqt", "mv " + str(sg_meta) + " x",
+               "chmod -R 000 " + str(sg_meta), "rm -rf " + str(base), "touch " + str(sg_records[0] if sg_records
+                                                                                      else sg_home),
+               "cp seed.txt " + str(sg_home), "ln -sf /dev/null " + str(sg_home / "x.json"),
+               "rm -rf ../RECORD-SEPGIT-META/AIQT", "git -C " + str(sg_meta) + " rm -rq aiqt",
+               "git diff --output=" + str(sg_home / "x.json")]
+    allowed = ["ls " + str(sg_home), "cat " + str(sg_records[0] if sg_records else sg_home), "git add .",
+               "git status", "mkdir build", "rm -rf build", "touch seed.txt"]
+    sg_refused = [_rdp_kind(sg.run(c)) for c in refused]
+    sg_allowed = [_rdp_kind(sg.run(c)) for c in allowed]
+    shutil.rmtree(sg.root / ".aiqt")
+    sg_after = sg.dispatch("/missing")
+    check("rdp/record-separated-git-dir-protected-by-resolution",
+          [sg_first, len(sg_records), sg_refused, sg_allowed, _rdp_kind(sg_after), "binding record" in _reason(sg_after)],
+          ["unverifiable", 1, ["deny"] * len(refused), ["allow"] * len(allowed), "unverifiable", True])
+    # Where the git directory cannot be located, every plain command but a read is refused in a bound session.
+    check("rdp/record-unresolved-git-dir-refuses",
+          [aiqt_hooks._rdp_names_common_dir(["rm", "x"], str(sg.root), (None, "no git directory")) is not None,
+           aiqt_hooks._rdp_names_common_dir(["cat", "x"], str(sg.root), (None, "no git directory")),
+           aiqt_hooks._rdp_names_common_dir(["rm", "x"], str(sg.root), (None, None))], [True, None, None])
+    # A directory HOLDING the git directory (the repository root, for .git inside it) is refused only to a
+    # command that can delete, move or recursively rewrite it: rm -r or -d, rmdir, mv of it, mv --exchange,
+    # chmod, cp -r or -a of it, a write whose path merges into it (x/., -T) or resolves into the git
+    # directory through a link, and a word the option tables do not model. Writing a new file or directory
+    # into it, and ln naming it (ln never recurses), are allowed.
+    an = RdpFixture(base, "record-ancestor")
+    an_first = _rdp_kind(an.dispatch("/missing"))
+    (base / "record-ancestor-src" / "g").mkdir(parents=True)
+    (an.root / "sub").mkdir()
+    (an.root / "sub" / "g").symlink_to(an.root / ".git")
+    ext = str(base / "record-ancestor-src")
+    refused = ["rm -rf .", "rm -r " + str(an.root), "rm -d .", "rmdir .", "rm --rec .", "rm -rf -- ../record-ancestor",
+               "mv " + str(an.root) + " " + str(base / "record-ancestor-moved"), "mv -t " + str(base) + " .",
+               "mv --exchange seed.txt .", "chmod -R 755 .", "chmod 755 .", "cp -a . " + ext + "/copy",
+               "cp -rl . " + ext + "/links", "cp -r " + ext + "/. .", "cp -rT " + ext + " .",
+               "cp -r " + ext + "/g sub", "ln -sfT seed.txt .", "cp -b -S /../x seed.txt .",
+               "cp --frob seed.txt ."]
+    allowed = ["cp seed.txt .", "touch .", "touch ./f", "touch " + str(an.root), "mkdir newdir", "mkdir -p .",
+               "ln -s seed.txt ./l", "ln -s . self", "ln -sr . self2", "cp -r src .", "mv seed.txt .",
+               "cp -t . seed.txt", "rm -f .", "rm -rf build", "mv -- old.txt .", "cp -a src " + ext + "/s"]
+    an_refused = [_rdp_kind(an.run(c)) for c in refused]
+    an_allowed = [_rdp_kind(an.run(c)) for c in allowed]
+    check("rdp/record-ancestor-only-destructive-forms-refused",
+          [an_first, an_refused, an_allowed],
+          ["unverifiable", ["deny"] * len(refused), ["allow"] * len(allowed)])
+    # A declared dispatch command writes no git directory, so a word of it may name a directory holding
+    # the git directory (--workdir ., the repository root) and the dispatch reaches the pin check; a
+    # word naming the git directory or a path inside it is still refused, and so is a holding directory
+    # to a program the option tables do not model (opf).
+    dw = RdpFixture(base, "dispatch-workdir")
+    dw_good = dw.good()
+    dw_allowed = [_rdp_kind(dw.run(c)) for c in ("orch-dispatch --brief " + dw_good,
+                                                "orch-dispatch --workdir . --brief " + dw_good,
+                                                "orch-dispatch --workdir " + str(dw.root) + " --brief " + dw_good)]
+    dw_inside = [dw.run(c) for c in ("orch-dispatch --workdir .git/aiqt --brief " + dw_good,
+                                     "orch-dispatch --workdir " + str(dw.root / ".git") + " --brief " + dw_good)]
+    dw_guard = (os.path.realpath(dw.root / ".git"), None)
+    check("rdp/dispatch-workdir-holding-dir-allowed-inside-refused",
+          [dw_allowed, [_rdp_kind(r) for r in dw_inside],
+           aiqt_hooks._rdp_names_common_dir(["orch-dispatch", "--workdir", "."], str(dw.root), dw_guard, True),
+           aiqt_hooks._rdp_names_common_dir(["orch-dispatch", "--workdir", ".git/aiqt"], str(dw.root), dw_guard,
+                                            True),
+           aiqt_hooks._rdp_names_common_dir(["orch-dispatch", "--workdir", str(dw.root / ".git")], str(dw.root),
+                                            dw_guard, True),
+           aiqt_hooks._rdp_names_common_dir(["opf", "."], str(dw.root), dw_guard)],
+          [["allow"] * 3, ["deny", "deny"], None, ".git/aiqt", str(dw.root / ".git"), "."])
+    # One check reads each registry ONCE and enforces the recorded binding: a registry removed between the
+    # record comparison and the enforcement (the record check wrapped to remove .aiqt after it compares)
+    # still leaves the dispatch withheld, and no registry directory is read twice within one check.
+    il = RdpFixture(base, "record-interleave")
+    il_before = _rdp_kind(il.dispatch("/missing"))
+    real_check, real_scope = aiqt_hooks._rdp_record_check, aiqt_hooks._rdp_scope
+    reads = []
+
+    def _check_then_remove(*args, **kw):
+        out = real_check(*args, **kw)
+        shutil.rmtree(il.root / ".aiqt", ignore_errors=True)
+        return out
+
+    def _counted(reg_dir):
+        reads.append(os.path.realpath(reg_dir))
+        return real_scope(reg_dir)
+    try:
+        aiqt_hooks._rdp_record_check, aiqt_hooks._rdp_scope = _check_then_remove, _counted
+        il_mid = il.dispatch("/missing")
+    finally:
+        aiqt_hooks._rdp_record_check, aiqt_hooks._rdp_scope = real_check, real_scope
+    il_next = il.dispatch("/missing")
+    check("rdp/record-interleaved-removal-withholds",
+          [il_before, _rdp_kind(il_mid), len(reads) == len(set(reads)), _rdp_kind(il_next),
+           "binding record" in _reason(il_next)], ["unverifiable", "unverifiable", True, "unverifiable", True])
+    # A linked worktree beside a main worktree whose git directory is separated (core.worktree naming the
+    # main worktree): a dispatch is withheld, and the two calls that would point core.worktree at an empty
+    # directory META/get, and so unscope the session, end at the config write, whose trailing word is a
+    # value and no read action.
+    cv = RdpFixture(base, "cfgvalue")
+    cv_meta = base / "cfgvalue-meta"
+    _rdp_git(cv.root, "init", "-q", "--separate-git-dir=" + str(cv_meta))
+    _rdp_git(cv.root, "config", "core.worktree", str(cv.root))
+    cv_wt = base / "cfgvalue-beside"
+    _rdp_git(cv.root, "worktree", "add", "-q", "--detach", str(cv_wt), cv.pin)
+    check("rdp/config-value-word-cannot-unscope-linked-worktree", [_rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+        hook_event_name="PreToolUse", cwd=str(cv_wt), session_id="s1", tool_name="Bash",
+        tool_input=dict(command=c, run_in_background=False)))) for c in (
+            "orch-dispatch --brief /missing", "mkdir " + str(cv_meta / "get"), "git config core.worktree get")],
+        ["unverifiable", "deny", "deny"])
+    # core.worktree moved onto ANOTHER bound tree: the binding above the session cwd still governs, and a
+    # dispatch either binding declares is withheld, never checked against the other repository (before,
+    # the redirected tree's binding decided and the cwd's dispatcher went undeclared, so it was allowed).
+    ca = RdpFixture(base, "conflict-a")
+    cb = RdpFixture(base, "conflict-b")
+    cb.write_registry(dict(cb.binding, commands=["another-dispatch"]))
+    cs = RdpFixture(base, "conflict-same")
+    ca_bad = ca.brief(["Review-target: revision", "Reviewed-revision: HEAD"], "bad.txt")
+    cf_got = [_rdp_kind(ca.dispatch(ca_bad))]
+    _rdp_git(ca.root, "config", "core.worktree", str(cb.root))
+    cf_got += [_rdp_kind(ca.run(c)) for c in (
+        "orch-dispatch --brief " + ca_bad, "another-dispatch --brief " + ca_bad, "ls", "rm -rf .aiqt")]
+    _rdp_git(ca.root, "config", "core.worktree", str(cs.root))
+    cf_got.append(_rdp_kind(ca.dispatch(cs.good())))
+    check("rdp/redirected-bound-tree-conflict-withholds", cf_got,
+          ["deny", "unverifiable", "unverifiable", "allow", "deny", "unverifiable"])
+    # The cannot-say withholds, each on its own: a failed common-directory probe where the raw .git file,
+    # its examination, or the commondir file cannot be read withholds every call (no registry anywhere is
+    # needed for that), and a gone .git/worktrees/NAME directory still names its main worktree.
+    fake = base / "rawgit-fake"
+    fake.mkdir()
+    meta = base / "rawgit-meta" / "worktrees" / "n"
+    (meta / "commondir").mkdir(parents=True)
+    real_root, real_main, real_lstat = aiqt_hooks._orch_root, aiqt_hooks._rdp_main_worktree, aiqt_hooks.os.lstat
+    dotgit = os.path.join(os.path.realpath(str(fake)), ".git")
+
+    def _denied_lstat(path, *a, **k):
+        if str(path) == dotgit:
+            raise PermissionError(13, "Permission denied", dotgit)
+        return real_lstat(path, *a, **k)
+    raw_got = []
+    try:
+        aiqt_hooks._orch_root = lambda data: str(fake)
+        aiqt_hooks._rdp_main_worktree = _probe_fails
+        for text in ("not a pointer\n", "gitdir: " + str(meta) + "\n"):
+            (fake / ".git").write_text(text, encoding="utf-8")
+            raw_got.append(_rdp_ls(fake, False))
+        aiqt_hooks.os.lstat = _denied_lstat
+        try:
+            raw_got.append(_rdp_ls(fake, False))
+        finally:
+            aiqt_hooks.os.lstat = real_lstat
+        (fake / ".git").write_text("gitdir: " + str(rg.root / ".git" / "worktrees" / "gone") + "\n",
+                                   encoding="utf-8")
+        raw_got.append(_rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+            hook_event_name="PreToolUse", cwd=str(fake), session_id="s1", tool_name="Bash",
+            tool_input=dict(command="rm -rf .aiqt", run_in_background=False)))))
+    finally:
+        aiqt_hooks._orch_root, aiqt_hooks._rdp_main_worktree = real_root, real_main
+        aiqt_hooks.os.lstat = real_lstat
+    # The last: git cannot name the common git directory of the gitfile's root, so its binding record cannot
+    # be read and the call is withheld (before the record, the main worktree's binding refused it).
+    check("rdp/raw-gitfile-cannot-say-withholds", raw_got, ["unverifiable"] * 4)
+
+
+def _fixture_tmpdir(prefix):
+    """A fresh temporary directory for the fixtures, never under /dev or /proc: the review dispatch pin
+    refuses a brief there by design (a /dev/shm private to each process, as in a sandbox, names a different
+    file in the hook than in the dispatcher), so a TMPDIR under /dev or /proc is passed over for the first
+    writable system temporary directory outside both. Raises OSError when there is none."""
+    failures = []
+    for where in (None, "/var/tmp", "/tmp"):
+        try:
+            path = tempfile.mkdtemp(prefix=prefix, dir=where)
+        except OSError as exc:
+            failures.append(str(exc))
+            continue
+        real = os.path.realpath(path)
+        if real in ("/dev", "/proc") or real.startswith(("/dev/", "/proc/")):
+            shutil.rmtree(path, ignore_errors=True)
+            failures.append("{} is under /dev or /proc".format(path))
+            continue
+        return Path(path)
+    raise OSError("no writable temporary directory outside /dev and /proc ({})".format("; ".join(failures)))
+
+
+# QA round 7 of the silent-write fixes: the state-directory permission sweep. Each cell of _PERM_SWEEP_TABLE
+# is one hook call after the state directory is set to an owner mode. The row key is (call, writer,
+# turn-state.json, recorded schedule basis, counter earned so far), and the eight cells are owner modes 0000,
+# 0100, ... 0700 in order. call: "sched" a ScheduleWakeup the decision core denies on wake hygiene, "ystop"
+# a ScheduleWakeup stop=true over an actionable item, "stop" a Stop over it, "quiet" a ScheduleWakeup whose
+# quiet-duration claim contradicts the measured gap, "badreg" a ScheduleWakeup under an unreadable registry,
+# "ybadreg" a ScheduleWakeup stop=true under it. Under an unreadable registry the hook resolves the default
+# state directory, never the registry's state_dir, so the badreg and ybadreg cells set that directory and its
+# turn-state.json: the state a relief added before the unreadable-registry deny would read.
+# writer: "opath" the O_PATH directory open, "rdonly" the O_RDONLY fallback of a platform without O_PATH.
+# earned: "0", "cap" (3 schedule denials and 2 stop denials: the cap and the loop bound), "over" (4 and 3: one
+# above each), "big" (9999 each: the largest valid count), "bad" (both counts the malformed value "m", which
+# validation rejects), "nonobj" (turn-state.json holds the JSON array [], not an object), or "sig" (both
+# counts 0, and the payload carries stop_hook_active set to true). A cell is the outcome (a allow, w warn,
+# d deny, b block), the counter on disk after the call (the stop count for ystop, stop and ybadreg, else the
+# schedule count; j while turn-state.json holds no JSON object), the wake digests on disk after it, then c
+# when the output names a failed denial-counter save and w when it
+# names a failed wake-digest save. Each output channel of the outcome is judged on its own (the deny reason
+# and the banner of a deny, the banner of a warn, stderr of a block): the letter needs every channel to name
+# the failure, '-' means none does, and '!' (never expected) means only some do.
+_PERM_SWEEP_TABLE = {
+    ("sched", "opath", "read", "same", "0"): "d00c- d00c- d00c- d10-- d00c- d00c- d00c- d10--",
+    ("sched", "opath", "read", "same", "cap"): "d30c- w30-w d30c- w31-- d30c- w30-w d30c- w31--",
+    ("sched", "opath", "read", "changed", "0"): "d00c- d00c- d00c- d10-- d00c- d00c- d00c- d10--",
+    ("sched", "opath", "read", "changed", "cap"): "d30c- d30c- d30c- d10-- d30c- d30c- d30c- d10--",
+    ("sched", "opath", "unread", "same", "0"): "d00c- d00c- d00c- d10-- d00c- d00c- d00c- d10--",
+    ("sched", "opath", "unread", "same", "cap"): "d30c- d30c- d30c- d10-- d30c- d30c- d30c- d10--",
+    ("sched", "opath", "unread", "changed", "0"): "d00c- d00c- d00c- d10-- d00c- d00c- d00c- d10--",
+    ("sched", "opath", "unread", "changed", "cap"): "d30c- d30c- d30c- d10-- d30c- d30c- d30c- d10--",
+    ("sched", "rdonly", "read", "same", "0"): "d00c- d00c- d00c- d00c- d00c- d00c- d00c- d10--",
+    ("sched", "rdonly", "read", "same", "cap"): "d30c- w30-w d30c- w30-w d30c- w30-w d30c- w31--",
+    ("sched", "rdonly", "read", "changed", "0"): "d00c- d00c- d00c- d00c- d00c- d00c- d00c- d10--",
+    ("sched", "rdonly", "read", "changed", "cap"): "d30c- d30c- d30c- d30c- d30c- d30c- d30c- d10--",
+    ("sched", "rdonly", "unread", "same", "0"): "d00c- d00c- d00c- d00c- d00c- d00c- d00c- d10--",
+    ("sched", "rdonly", "unread", "same", "cap"): "d30c- d30c- d30c- d30c- d30c- d30c- d30c- d10--",
+    ("sched", "rdonly", "unread", "changed", "0"): "d00c- d00c- d00c- d00c- d00c- d00c- d00c- d10--",
+    ("sched", "rdonly", "unread", "changed", "cap"): "d30c- d30c- d30c- d30c- d30c- d30c- d30c- d10--",
+    ("ystop", "opath", "read", "same", "0"): "d00c- d00c- d00c- d10-- d00c- d00c- d00c- d10--",
+    ("ystop", "opath", "read", "same", "cap"): "d20c- w20-- d20c- w20-- d20c- w20-- d20c- w20--",
+    ("ystop", "opath", "read", "changed", "0"): "d00c- d00c- d00c- d10-- d00c- d00c- d00c- d10--",
+    ("ystop", "opath", "read", "changed", "cap"): "d20c- w20-- d20c- w20-- d20c- w20-- d20c- w20--",
+    ("ystop", "opath", "unread", "same", "0"): "d00c- w00-- d00c- w00-- d00c- w00-- d00c- w00--",
+    ("ystop", "opath", "unread", "same", "cap"): "d20c- w20-- d20c- w20-- d20c- w20-- d20c- w20--",
+    ("ystop", "opath", "unread", "changed", "0"): "d00c- w00-- d00c- w00-- d00c- w00-- d00c- w00--",
+    ("ystop", "opath", "unread", "changed", "cap"): "d20c- w20-- d20c- w20-- d20c- w20-- d20c- w20--",
+    ("ystop", "rdonly", "read", "same", "0"): "d00c- d00c- d00c- d00c- d00c- d00c- d00c- d10--",
+    ("ystop", "rdonly", "read", "same", "cap"): "d20c- w20-- d20c- w20-- d20c- w20-- d20c- w20--",
+    ("ystop", "rdonly", "read", "changed", "0"): "d00c- d00c- d00c- d00c- d00c- d00c- d00c- d10--",
+    ("ystop", "rdonly", "read", "changed", "cap"): "d20c- w20-- d20c- w20-- d20c- w20-- d20c- w20--",
+    ("ystop", "rdonly", "unread", "same", "0"): "d00c- w00-- d00c- w00-- d00c- w00-- d00c- w00--",
+    ("ystop", "rdonly", "unread", "same", "cap"): "d20c- w20-- d20c- w20-- d20c- w20-- d20c- w20--",
+    ("ystop", "rdonly", "unread", "changed", "0"): "d00c- w00-- d00c- w00-- d00c- w00-- d00c- w00--",
+    ("ystop", "rdonly", "unread", "changed", "cap"): "d20c- w20-- d20c- w20-- d20c- w20-- d20c- w20--",
+    ("stop", "opath", "read", "same", "0"): "w00c- w00c- w00c- b10-- w00c- w00c- w00c- b10--",
+    ("stop", "opath", "read", "same", "cap"): "w20c- w20-- w20c- w20-- w20c- w20-- w20c- w20--",
+    ("stop", "opath", "read", "changed", "0"): "w00c- w00c- w00c- b10-- w00c- w00c- w00c- b10--",
+    ("stop", "opath", "read", "changed", "cap"): "w20c- w20-- w20c- w20-- w20c- w20-- w20c- w20--",
+    ("stop", "opath", "unread", "same", "0"): "w00c- w00-- w00c- w00-- w00c- w00-- w00c- w00--",
+    ("stop", "opath", "unread", "same", "cap"): "w20c- w20-- w20c- w20-- w20c- w20-- w20c- w20--",
+    ("stop", "opath", "unread", "changed", "0"): "w00c- w00-- w00c- w00-- w00c- w00-- w00c- w00--",
+    ("stop", "opath", "unread", "changed", "cap"): "w20c- w20-- w20c- w20-- w20c- w20-- w20c- w20--",
+    ("stop", "rdonly", "read", "same", "0"): "w00c- w00c- w00c- w00c- w00c- w00c- w00c- b10--",
+    ("stop", "rdonly", "read", "same", "cap"): "w20c- w20-- w20c- w20-- w20c- w20-- w20c- w20--",
+    ("stop", "rdonly", "read", "changed", "0"): "w00c- w00c- w00c- w00c- w00c- w00c- w00c- b10--",
+    ("stop", "rdonly", "read", "changed", "cap"): "w20c- w20-- w20c- w20-- w20c- w20-- w20c- w20--",
+    ("stop", "rdonly", "unread", "same", "0"): "w00c- w00-- w00c- w00-- w00c- w00-- w00c- w00--",
+    ("stop", "rdonly", "unread", "same", "cap"): "w20c- w20-- w20c- w20-- w20c- w20-- w20c- w20--",
+    ("stop", "rdonly", "unread", "changed", "0"): "w00c- w00-- w00c- w00-- w00c- w00-- w00c- w00--",
+    ("stop", "rdonly", "unread", "changed", "cap"): "w20c- w20-- w20c- w20-- w20c- w20-- w20c- w20--",
+    ("sched", "opath", "read", "same", "bad"): "dm0c- dm0c- dm0c- d10-- dm0c- dm0c- dm0c- d10--",
+    ("sched", "rdonly", "read", "same", "bad"): "dm0c- dm0c- dm0c- dm0c- dm0c- dm0c- dm0c- d10--",
+    ("sched", "opath", "read", "same", "sig"): "d00c- d00c- d00c- d10-- d00c- d00c- d00c- d10--",
+    ("sched", "rdonly", "read", "same", "sig"): "d00c- d00c- d00c- d00c- d00c- d00c- d00c- d10--",
+    ("ystop", "opath", "read", "same", "bad"): "dm0c- wm0-- dm0c- wm0-- dm0c- wm0-- dm0c- wm0--",
+    ("ystop", "rdonly", "read", "same", "bad"): "dm0c- wm0-- dm0c- wm0-- dm0c- wm0-- dm0c- wm0--",
+    ("ystop", "opath", "read", "same", "sig"): "w00-- w00-- w00-- w00-- w00-- w00-- w00-- w00--",
+    ("ystop", "rdonly", "read", "same", "sig"): "w00-- w00-- w00-- w00-- w00-- w00-- w00-- w00--",
+    ("stop", "opath", "read", "same", "bad"): "wm0c- wm0-- wm0c- wm0-- wm0c- wm0-- wm0c- wm0--",
+    ("stop", "rdonly", "read", "same", "bad"): "wm0c- wm0-- wm0c- wm0-- wm0c- wm0-- wm0c- wm0--",
+    ("stop", "opath", "read", "same", "sig"): "w00-- w00-- w00-- w00-- w00-- w00-- w00-- w00--",
+    ("stop", "rdonly", "read", "same", "sig"): "w00-- w00-- w00-- w00-- w00-- w00-- w00-- w00--",
+    ("quiet", "opath", "read", "same", "cap"): "w30-w d30-- w30-w d30-- w30-w d30-- w30-w d30--",
+    ("quiet", "rdonly", "read", "same", "cap"): "w30-w d30-- w30-w d30-- w30-w d30-- w30-w d30--",
+    ("badreg", "opath", "read", "same", "cap"): "d30-- d30-- d30-- d30-- d30-- d30-- d30-- d30--",
+    ("badreg", "rdonly", "read", "same", "cap"): "d30-- d30-- d30-- d30-- d30-- d30-- d30-- d30--",
+    ("ybadreg", "opath", "read", "same", "cap"): "d20-- d20-- d20-- d20-- d20-- d20-- d20-- d20--",
+    ("ybadreg", "rdonly", "read", "same", "cap"): "d20-- d20-- d20-- d20-- d20-- d20-- d20-- d20--",
+    ("ybadreg", "opath", "read", "same", "bad"): "dm0-- dm0-- dm0-- dm0-- dm0-- dm0-- dm0-- dm0--",
+    ("ybadreg", "rdonly", "read", "same", "bad"): "dm0-- dm0-- dm0-- dm0-- dm0-- dm0-- dm0-- dm0--",
+    ("ybadreg", "opath", "read", "same", "sig"): "d00-- d00-- d00-- d00-- d00-- d00-- d00-- d00--",
+    ("ybadreg", "rdonly", "read", "same", "sig"): "d00-- d00-- d00-- d00-- d00-- d00-- d00-- d00--",
+    ("ybadreg", "opath", "unread", "same", "0"): "d00-- d00-- d00-- d00-- d00-- d00-- d00-- d00--",
+    ("ybadreg", "rdonly", "unread", "same", "0"): "d00-- d00-- d00-- d00-- d00-- d00-- d00-- d00--",
+    ("ybadreg", "opath", "read", "same", "nonobj"): "dj0-- dj0-- dj0-- dj0-- dj0-- dj0-- dj0-- dj0--",
+    ("ybadreg", "rdonly", "read", "same", "nonobj"): "dj0-- dj0-- dj0-- dj0-- dj0-- dj0-- dj0-- dj0--",
+    ("sched", "opath", "read", "same", "nonobj"): "dj0c- dj0c- dj0c- d10-- dj0c- dj0c- dj0c- d10--",
+    ("sched", "rdonly", "read", "same", "nonobj"): "dj0c- dj0c- dj0c- dj0c- dj0c- dj0c- dj0c- d10--",
+    ("ystop", "opath", "read", "same", "nonobj"): "dj0c- wj0-- dj0c- wj0-- dj0c- wj0-- dj0c- wj0--",
+    ("ystop", "rdonly", "read", "same", "nonobj"): "dj0c- wj0-- dj0c- wj0-- dj0c- wj0-- dj0c- wj0--",
+    ("stop", "opath", "read", "same", "nonobj"): "wj0c- wj0-- wj0c- wj0-- wj0c- wj0-- wj0c- wj0--",
+    ("stop", "rdonly", "read", "same", "nonobj"): "wj0c- wj0-- wj0c- wj0-- wj0c- wj0-- wj0c- wj0--",
+    ("sched", "opath", "read", "same", "over"): "d40c- w40-w d40c- w41-- d40c- w40-w d40c- w41--",
+    ("sched", "rdonly", "read", "same", "over"): "d40c- w40-w d40c- w40-w d40c- w40-w d40c- w41--",
+    ("sched", "opath", "read", "same", "big"):
+        "d99990c- w99990-w d99990c- w99991-- d99990c- w99990-w d99990c- w99991--",
+    ("sched", "rdonly", "read", "same", "big"):
+        "d99990c- w99990-w d99990c- w99990-w d99990c- w99990-w d99990c- w99991--",
+    ("ystop", "opath", "read", "same", "over"): "d30c- w30-- d30c- w30-- d30c- w30-- d30c- w30--",
+    ("ystop", "rdonly", "read", "same", "over"): "d30c- w30-- d30c- w30-- d30c- w30-- d30c- w30--",
+    ("ystop", "opath", "read", "same", "big"):
+        "d99990c- w99990-- d99990c- w99990-- d99990c- w99990-- d99990c- w99990--",
+    ("ystop", "rdonly", "read", "same", "big"):
+        "d99990c- w99990-- d99990c- w99990-- d99990c- w99990-- d99990c- w99990--",
+    ("stop", "opath", "read", "same", "over"): "w30c- w30-- w30c- w30-- w30c- w30-- w30c- w30--",
+    ("stop", "rdonly", "read", "same", "over"): "w30c- w30-- w30c- w30-- w30c- w30-- w30c- w30--",
+    ("stop", "opath", "read", "same", "big"):
+        "w99990c- w99990-- w99990c- w99990-- w99990c- w99990-- w99990c- w99990--",
+    ("stop", "rdonly", "read", "same", "big"):
+        "w99990c- w99990-- w99990c- w99990-- w99990c- w99990-- w99990c- w99990--",
+}
+
+
+def _perm_spare_flag():
+    """A flag bit above every flag the hook passes to os.open: the model leg's stand-in for O_PATH where the
+    platform has none (the seam clears it before the real open)."""
+    used = (os.O_RDONLY | os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_DIRECTORY
+            | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0))
+    return 1 << used.bit_length()
+
+
+class _PermModel:
+    """The model leg's seams: for the operations the hook makes in the state directory sd, refuse what owner
+    mode `mode` on sd, and `fmode` on its turn-state.json, refuse a non-root owner, whatever the real modes
+    (left at 0700 and 0600) and euid; the kernel leg holds this model to the kernel where the modes bind.
+    A name looked up in sd needs search; a create, replace, rename or unlink there needs write too; an open
+    of sd itself without O_PATH needs read; a read of turn-state.json needs its read bit. walk is the bit
+    that marks an O_PATH open (the native O_PATH, or the spare bit, cleared before the real open, which
+    then opens for reading)."""
+
+    def __init__(self, sd, mode, fmode, walk, spare):
+        self.sd, self.mode, self.fmode, self.walk, self.spare = str(sd), mode, fmode, walk, spare
+        st = os.stat(self.sd)
+        self.key = (st.st_dev, st.st_ino)
+        self.real = dict(open=os.open, stat=os.stat, lstat=os.lstat, replace=os.replace, rename=os.rename,
+                         unlink=os.unlink, remove=os.remove, mkdir=os.mkdir)
+
+    def _where(self, path, dir_fd=None):
+        if not isinstance(path, (str, bytes, os.PathLike)):
+            return None
+        name = os.fsdecode(path)
+        if dir_fd is not None and not os.path.isabs(name):
+            st = os.fstat(dir_fd)
+            return "name" if (st.st_dev, st.st_ino) == self.key else None
+        full = os.path.abspath(name)
+        if full == self.sd:
+            return "dir"
+        return "name" if os.path.dirname(full) == self.sd else None
+
+    def _need(self, bits, path, mode=None):
+        if (self.mode if mode is None else mode) & bits != bits:
+            raise PermissionError(13, "Permission denied (modelled)", os.fsdecode(path))
+
+    def _exists(self, path, dir_fd=None):
+        try:
+            self.real["lstat"](path, dir_fd=dir_fd)
+        except FileNotFoundError:
+            return False
+        return True
+
+    def _is_state(self, path):
+        return os.path.basename(os.fsdecode(path)) == "turn-state.json"
+
+    def os_open(self, path, flags, *a, dir_fd=None, **k):
+        lookup = self.walk and flags & self.walk
+        if self.spare and flags & self.spare:
+            flags &= ~self.spare
+        where = self._where(path, dir_fd)
+        if where == "dir" and not lookup:
+            self._need(0o400, path)
+        elif where == "name":
+            self._need(0o100, path)
+            if flags & os.O_CREAT and not self._exists(path, dir_fd):
+                self._need(0o200, path)
+            if (self._is_state(path) and not lookup
+                    and flags & getattr(os, "O_ACCMODE", 3) != os.O_WRONLY):
+                self._need(0o400, path, self.fmode)
+        return self.real["open"](path, flags, *a, dir_fd=dir_fd, **k)
+
+    def open(self, file, mode="r", *a, **k):
+        if self._where(file) == "name":
+            self._need(0o100, file)
+            if any(c in mode for c in "wax+") and not self._exists(file):
+                self._need(0o200, file)
+            if self._is_state(file) and any(c in mode for c in "r+"):
+                self._need(0o400, file, self.fmode)
+        return open(file, mode, *a, **k)
+
+    def lookup(self, name):
+        real = self.real[name]
+
+        def seam(path, *a, dir_fd=None, **k):
+            if self._where(path, dir_fd) == "name":
+                self._need(0o100, path)
+            return real(path, *a, dir_fd=dir_fd, **k)
+        return seam
+
+    def change(self, name):
+        real = self.real[name]
+
+        def seam(path, *a, dir_fd=None, **k):
+            if self._where(path, dir_fd) == "name":
+                self._need(0o300, path)
+            return real(path, *a, dir_fd=dir_fd, **k)
+        return seam
+
+    def move(self, name):
+        real = self.real[name]
+
+        def seam(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+            if "name" in (self._where(src, src_dir_fd), self._where(dst, dst_dir_fd)):
+                self._need(0o300, src)
+            return real(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+        return seam
+
+    def __enter__(self):
+        os.open, os.stat, os.lstat = self.os_open, self.lookup("stat"), self.lookup("lstat")
+        os.replace, os.rename = self.move("replace"), self.move("rename")
+        os.unlink, os.remove, os.mkdir = self.change("unlink"), self.change("remove"), self.change("mkdir")
+        aiqt_hooks.open = self.open
+        return self
+
+    def __exit__(self, *exc):
+        real = self.real
+        os.open, os.stat, os.lstat, os.replace = real["open"], real["stat"], real["lstat"], real["replace"]
+        os.rename, os.unlink, os.remove, os.mkdir = real["rename"], real["unlink"], real["remove"], real["mkdir"]
+        del aiqt_hooks.open
+
+
+def _perm_sweep(base):
+    """Run every _PERM_SWEEP_TABLE row in two legs and return (kernel cells, model cells, mismatches). The
+    MODEL leg runs everywhere: the real modes stay 0700 and 0600 and _PermModel refuses what the owner mode
+    refuses, so a root run and a platform without O_PATH get the same answers (the O_RDONLY fallback open
+    is refused for a mode without read whatever the native O_PATH, and a spare bit stands in for a missing
+    O_PATH). The KERNEL leg uses real chmod and the platform's own writers (O_PATH where it exists, and
+    the O_RDONLY fallback) and runs only without root, since the modes do not bind root; it holds the model
+    to the kernel."""
+    native = getattr(os, "O_PATH", 0)
+    spare = 0 if native else _perm_spare_flag()
+    root_run = os.geteuid() == 0
+    fixtures = dict()
+    for call in ("sched", "ystop", "stop"):
+        fx = Fixture(base, "permsweep-" + call)
+        sd = Path(aiqt_hooks._orch_state_dir_for_root(str(fx.root)))
+        sd.mkdir(parents=True, exist_ok=True)
+        fx.set_items([item("QA-R6", blocker=dict(kind="not-before", ref=now_iso(-48)))] if call == "sched"
+                     else [item("QA-S")])
+        fx.set_turn_state(dict())
+        aiqt_hooks.orch_yield_tool(fx.payload("PreToolUse", "ScheduleWakeup", dict(prompt="waiting")))
+        fixtures[call] = (fx, sd, fx.turn_state().get("schedule_basis"))
+    fixtures["quiet"] = fixtures["sched"]
+    for call, like in (("badreg", "sched"), ("ybadreg", "ystop")):
+        fx, _sd, recorded = fixtures[like]
+        # the directory _orch_state_dir_for_root falls back to when the registry cannot be read
+        sd = Path(aiqt_hooks._state_dir_from_registry(str(fx.root), None))
+        sd.mkdir(parents=True, exist_ok=True)
+        fixtures[call] = (fx, sd, recorded)
+    inputs = dict(sched=dict(prompt="waiting"), quiet=dict(prompt="quiet for 90 minutes, recheck QA-R6"),
+                  badreg=dict(prompt="waiting"), ystop=dict(prompt="done", stop=True),
+                  ybadreg=dict(prompt="done", stop=True))
+    letter = dict(allow="a", warn="w", deny="d", block2="b")
+
+    def _cell(key, mode, model):
+        call, writer, readable, basis, earned = key
+        fx, sd, recorded = fixtures[call]
+        cap, bound, top = aiqt_hooks._ORCH_SCHEDULE_CAP, aiqt_hooks._ORCH_LOOP_BOUND, aiqt_hooks._ORCH_COUNTER_MAX
+        scount, bcount = dict(cap=(cap, bound), over=(cap + 1, bound + 1), big=(top, top)).get(earned, (0, 0))
+        state = dict(schedule_denials=scount, stop_denials=bcount,
+                     schedule_basis=recorded if basis == "same" else "a changed basis")
+        if earned == "bad":
+            state.update(schedule_denials="m", stop_denials="m")
+        extra = dict(stop_hook_active=True) if earned == "sig" else None
+        if call == "quiet":
+            state["last_human_input_utc"] = now_iso()
+        fmode = 0o600 if readable == "read" else 0
+        for name in os.listdir(str(sd)):
+            os.unlink(str(sd / name))
+        (sd / "turn-state.json").write_text("[]" if earned == "nonobj" else json.dumps(state), encoding="utf-8")
+        registry = fx.root / ".aiqt" / "orchestration.local.json"
+        saved_registry = registry.read_bytes()
+        if call in ("badreg", "ybadreg"):
+            registry.write_text("not json", encoding="utf-8")
+        if call == "stop":
+            run = lambda: aiqt_hooks.orch_stop_guard(fx.payload("Stop", extra=extra))
+        else:
+            run = lambda: aiqt_hooks.orch_yield_tool(fx.payload("PreToolUse", "ScheduleWakeup", inputs[call],
+                                                                extra))
+        saved_walk = aiqt_hooks._ORCH_O_WALK
+        try:
+            aiqt_hooks._ORCH_O_WALK = os.O_RDONLY if writer == "rdonly" else (native or spare)
+            if model:
+                with _PermModel(sd, mode, fmode, native or spare, spare):
+                    result = run()
+            else:
+                os.chmod(str(sd / "turn-state.json"), fmode)
+                os.chmod(str(sd), mode)
+                result = run()
+        finally:
+            aiqt_hooks._ORCH_O_WALK = saved_walk
+            os.chmod(str(sd), 0o700)
+            os.chmod(str(sd / "turn-state.json"), 0o600)
+            registry.write_bytes(saved_registry)
+        after = json.loads((sd / "turn-state.json").read_text(encoding="utf-8"))
+        verdict = _verdict(result)
+        obj = result[1] if isinstance(result[1], dict) else dict()
+        hso = obj.get("hookSpecificOutput")
+        reason = hso.get("permissionDecisionReason") if isinstance(hso, dict) else None
+        channels = dict(deny=(reason, obj.get("systemMessage")), warn=(obj.get("systemMessage"),),
+                        block2=(result[2],)).get(verdict, ())
+
+        def named(phrase, mark):
+            found = [isinstance(text, str) and phrase in text for text in channels]
+            return mark if found and all(found) else "!" if any(found) else "-"
+        if not isinstance(after, dict):
+            count, after = "j", dict()
+        else:
+            count = after.get("stop_denials" if call in ("ystop", "stop", "ybadreg") else "schedule_denials", "x")
+        return "{}{}{}{}{}".format(letter.get(verdict, "?"), count, len(after.get("wake_digests") or []),
+                                   named("denial counter could not be", "c"),
+                                   named("prompt digest could not be written", "w"))
+    counts, mismatches = [0, 0], []
+    for model in (False, True):
+        for key, want in _PERM_SWEEP_TABLE.items():
+            if not model and (root_run or (key[1] == "opath" and not native)):
+                continue
+            for index, expected in enumerate(want.split()):
+                got = _cell(key, index << 6, model)
+                counts[model] += 1
+                if got != expected:
+                    mismatches.append(("model" if model else "kernel",) + key + (oct(index << 6), got, expected))
+    return counts[0], counts[1], mismatches
+
+
 def main(report_path=None):
+    if report_path is not None:
+        # The execution report is finalized at interpreter exit, after this run's cleanup
+        # (tools/_selftest_exit_report.py); nothing writes it in band.
+        _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
     from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
     scrub_git_environment()
     with fixture_git_lifecycle():
@@ -243,17 +2241,24 @@ def main(report_path=None):
 
 def _main_isolated(report_path=None):
     try:
-        tmp = Path(tempfile.mkdtemp(prefix="aiqt-orch-selftest-"))
+        tmp = _fixture_tmpdir("aiqt-orch-selftest-")
     except OSError as exc:
         print("SELF-TEST ERROR: no writable temp dir: {}".format(exc), file=sys.stderr)
         return 2
     os.environ["XDG_STATE_HOME"] = str(tmp / "xdg")  # hermetic default state root
+    # Hermetic registry scope: an inherited opt-in AIQT_ORCH_REQUIRE_REGISTRY would turn every no-registry
+    # allow below into a deny; the registry-required checks set and restore it themselves.
+    os.environ.pop(aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV, None)
     # Hermetic git fixtures on a DIRECT run (test-hermeticity): the selftest-execution gate
     # launches this runner git-neutral, but a direct run inherits the caller's environment,
     # where an inherited GIT_INDEX_FILE / GIT_DIR (git exports these to hook children) would
     # redirect every fixture git init/add/commit below into the CALLER's repository.
     scrub_git_environment()
+    # Every truncation-guard verdict is decided by fixtures under tmp alone: the registry walk runs behind
+    # the test-only ceiling above (production takes none), restored in the finally below.
+    saved_probe = aiqt_hooks._orch_dirfd_has_registry
     try:
+        aiqt_hooks._orch_dirfd_has_registry = _registry_ceiling(tmp, saved_probe)
         # ---------- component 1: the stop guard ----------
         f = Fixture(tmp, "stop")
         stop = lambda: aiqt_hooks.orch_stop_guard(f.payload("Stop"))
@@ -790,7 +2795,8 @@ def _main_isolated(report_path=None):
         # a bare `&` detaches a child into untracked async work -> DENY-and-educate (use the tracked
         # background dispatch, or run it foreground and wait; historically this ASKED). The shell forms that
         # also carry an ampersand but do NOT detach (&&, &>, &>>, <&, >&, |&, and any quoted or escaped &)
-        # stay ALLOW; the narrow scanner over-denies (never silently allows) on grammar it cannot model.
+        # stay ALLOW; the narrow scanner over-denies on some grammar it cannot model and silently allows
+        # other forms (the KNOWN FALSE-ALLOW residual disclosed in the manifest).
         check("trunc/fg-detach-trailing-denies", _verdict(bg("long_job &", rib=False)), "deny")
         check("trunc/fg-detach-between-denies", _verdict(bg("worker & echo done", rib=False)), "deny")
         check("trunc/fg-detach-grouped-denies", _verdict(bg("( long_job & )", rib=False)), "deny")
@@ -811,8 +2817,8 @@ def _main_isolated(report_path=None):
         check("trunc/scan-quoted-redirect-detach", aiqt_hooks._orch_foreground_detach('echo ">" &'), True)
         check("trunc/scan-escaped-gt-then-detach", aiqt_hooks._orch_foreground_detach("echo \\>&"), True)
         check("trunc/scan-real-dup-not-detach", aiqt_hooks._orch_foreground_detach("cmd 2>&1"), False)
-        # finding E (unbalanced/ambiguous quoting fails toward treating it as a detach - now a DENY, once an
-        # ASK - never a silent allow of a real `&`): a
+        # finding E (a scan that ENDS inside a quote fails toward treating it as a detach - now a DENY, once
+        # an ASK; a quote misread in mid-string can still shift it into a disclosed silent allow): a
         # scan that ends still inside a quote (an unbalanced quote, or an ANSI-C $'...' construct this scan
         # does not model) could hide a real trailing `&`, so it reports a detach. Without the fix each of
         # these ended `inside quotes` and returned False, silently allowing the real `&`.
@@ -831,12 +2837,1285 @@ def _main_isolated(report_path=None):
         check("trunc/scan-leading-comment-then-detach", aiqt_hooks._orch_foreground_detach("# lead comment\nsleep 100 &"), True)
         check("trunc/fg-comment-then-detach-denies", _verdict(bg("echo hi  # note\nsleep 100 &", rib=False)), "deny")
         check("trunc/fg-comment-amp-allows", _verdict(bg("echo done # & comment", rib=False)), "allow")
-        # inert when the orchestration registry is absent: a foreground bare-& acquires no new prompt.
+        # inert BY DEFAULT when the orchestration registry is absent: a foreground bare-& acquires no new prompt.
         ti = Fixture(tmp, "trunc-inert")
         (ti.root / ".aiqt" / "orchestration.local.json").unlink()
         check("trunc/fg-detach-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
             ti.payload("PreToolUse", "Bash",
                        {"command": "long_job &", "run_in_background": False}))), "allow")
+        # REGISTRY-REQUIRED MODE (opt-in, AIQT_ORCH_REQUIRE_REGISTRY): an ABSENT registry DENIES instead
+        # of leaving the guard inert, with a reason naming the mode and its repair; an explicit off value
+        # keeps the default inert allow, and a PRESENT registry behaves identically in both modes.
+        _rr = aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV
+        _rr_old = os.environ.get(_rr)
+        try:
+            os.environ[_rr] = "1"
+            rr = aiqt_hooks.orch_truncation_guard(
+                ti.payload("PreToolUse", "Bash", {"command": "ls", "run_in_background": False}))
+            rr_reason = (rr[1] or {}).get("hookSpecificOutput", {}).get(
+                "permissionDecisionReason", "")
+            check("trunc/registry-required-absent-denies",
+                  (_verdict(rr), _rr in rr_reason, "orchestration" in rr_reason), ("deny", True, True))
+            check("trunc/registry-required-present-plain-allows", _verdict(bg("python3 build.py")),
+                  "allow")
+            check("trunc/registry-required-present-detach-denies",
+                  _verdict(bg("long_job &", rib=False)), "deny")
+            os.environ[_rr] = "off"
+            check("trunc/registry-required-off-value-inert", _verdict(aiqt_hooks.orch_truncation_guard(
+                ti.payload("PreToolUse", "Bash",
+                           {"command": "long_job &", "run_in_background": False}))), "allow")
+            # The off values are matched EXACTLY, nothing stripped (ASCII case-insensitive): a comparison that
+            # stripped the value first would read a tab, a newline, or an off word wrapped in spaces or
+            # no-break spaces as OFF and allow without a registry. Each reads as ON.
+            _padded = ("\t", "\n", " ", "\u00a0off\u00a0", " off", "off\n", "\u00a0")
+            _padded_on = []
+            for _v in _padded:
+                os.environ[_rr] = _v
+                _padded_on.append(aiqt_hooks._orch_registry_required())
+            check("trunc/registry-required-padded-off-reads-on", _padded_on, [True] * len(_padded))
+            os.environ[_rr] = "\u00a0off\u00a0"
+            check("trunc/registry-required-padded-off-denies", _verdict(aiqt_hooks.orch_truncation_guard(
+                ti.payload("PreToolUse", "Bash", {"command": ":", "run_in_background": False}))), "deny")
+            _exact_off = []
+            for _v in ("", "0", "false", "no", "off", "OFF", "False", "No"):
+                os.environ[_rr] = _v
+                _exact_off.append(aiqt_hooks._orch_registry_required())
+            check("trunc/registry-required-exact-off-values-off", _exact_off, [False] * 8)
+        finally:
+            if _rr_old is None:
+                os.environ.pop(_rr, None)
+            else:
+                os.environ[_rr] = _rr_old
+        # The cautious scanner's disclosed over-refusal residual: a here-document body is scanned as code,
+        # so a safe body carrying an unquoted `&` is denied; the double-quoted commit-message form is read
+        # as double-quoted text and allowed.
+        check("trunc/fg-heredoc-amp-overrefusal-residual-denies",
+              _verdict(bg("cat > f <<'EOF'\nFix A & B\nEOF", rib=False)), "deny")
+        check("trunc/fg-commit-template-amp-allows",
+              _verdict(bg("git commit -m \"$(cat <<'EOF'\nFix A & B\nEOF\n)\"", rib=False)), "allow")
+        # Malformed input fails CLOSED with a reason (before the fix each of these silently allowed): a
+        # tool_input that is missing, null, or not an object; a run_in_background that is not a real
+        # boolean (the string "true" is never read as foreground); a foreground command that is not a
+        # string. An omitted run_in_background is a foreground call and stays in scope as before.
+        raw = lambda extra: _verdict(aiqt_hooks.orch_truncation_guard(dict(
+            {"hook_event_name": "PreToolUse", "cwd": str(t.root), "session_id": "s1",
+             "tool_name": "Bash"}, **extra)))
+        check("trunc/malformed-tool-input-null-denies", raw({"tool_input": None}), "deny")
+        check("trunc/malformed-tool-input-missing-denies", raw({}), "deny")
+        check("trunc/malformed-tool-input-array-denies", raw({"tool_input": ["sleep 5 &"]}), "deny")
+        check("trunc/malformed-tool-input-string-denies", raw({"tool_input": "sleep 5 &"}), "deny")
+        check("trunc/malformed-rib-string-true-denies",
+              raw({"tool_input": {"command": "python3 build.py", "run_in_background": "true"}}), "deny")
+        check("trunc/malformed-rib-string-false-denies",
+              raw({"tool_input": {"command": "ls", "run_in_background": "false"}}), "deny")
+        check("trunc/malformed-rib-int-denies",
+              raw({"tool_input": {"command": "ls", "run_in_background": 1}}), "deny")
+        check("trunc/malformed-rib-null-denies",
+              raw({"tool_input": {"command": "ls", "run_in_background": None}}), "deny")
+        check("trunc/malformed-fg-command-nonstr-denies", raw({"tool_input": {"command": 42}}), "deny")
+        check("trunc/malformed-fg-command-missing-denies", raw({"tool_input": {}}), "deny")
+        check("trunc/rib-omitted-foreground-allows", raw({"tool_input": {"command": "ls -la"}}), "allow")
+        check("trunc/rib-omitted-foreground-detach-denies", raw({"tool_input": {"command": "sleep 5 &"}}),
+              "deny")
+        # Registry scope, the disclosed residual: BY DEFAULT (this run pops AIQT_ORCH_REQUIRE_REGISTRY) with NO
+        # registry file the guard is inert (malformed input
+        # included), while a PRESENT but unreadable or invalid registry keeps it active (fail-closed).
+        check("trunc/malformed-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
+            {"hook_event_name": "PreToolUse", "cwd": str(ti.root), "tool_name": "Bash",
+             "tool_input": None})), "allow")
+        tb = Fixture(tmp, "trunc-badreg")
+        (tb.root / ".aiqt" / "orchestration.local.json").write_text("{not json", encoding="utf-8")
+        check("trunc/bad-registry-detach-denies", _verdict(aiqt_hooks.orch_truncation_guard(
+            tb.payload("PreToolUse", "Bash", {"command": "sleep 5 &"}))), "deny")
+        (tb.root / ".aiqt" / "orchestration.local.json").unlink()
+        (tb.root / ".aiqt" / "orchestration.local.json").mkdir()
+        check("trunc/dir-registry-malformed-denies", _verdict(aiqt_hooks.orch_truncation_guard(
+            {"hook_event_name": "PreToolUse", "cwd": str(tb.root), "tool_name": "Bash",
+             "tool_input": None})), "deny")
+        # Where a `#` opens a comment follows bash as well as the historical str.isspace() rule, and either
+        # rule's detach denies: a `#` after a character bash does not treat as a word break (carriage return,
+        # the 0x1c separator, an ideographic space) is NOT a comment to bash, so the `&` after it detaches;
+        # a `#` after a metacharacter (`;#`) IS a comment to bash, so the apostrophe in it no longer shifts
+        # the scan past the real `&` on the next line. Each was a silent allow before this fix.
+        check("trunc/fg-hash-after-cr-detach-denies", _verdict(bg("touch m y\r#z &", rib=False)), "deny")
+        check("trunc/fg-hash-after-x1c-detach-denies", _verdict(bg("touch m y\x1c#z &", rib=False)), "deny")
+        check("trunc/fg-hash-after-u3000-detach-denies", _verdict(bg("touch m y　#z &", rib=False)),
+              "deny")
+        check("trunc/fg-metachar-comment-quote-shift-denies",
+              _verdict(bg("echo a;# it's\nsleep 5 & echo done # '", rib=False)), "deny")
+        # A scan that ends inside an open quote denies with a reason about the quote, not a false claim
+        # that a bare '&' was found (before this fix it reused the bare-& detach reason).
+        uq = bg("cat > f <<'EOF'\nthe user's file\nEOF", rib=False)
+        uq_reason = (uq[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+        check("trunc/fg-unbalanced-quote-reason-names-quote",
+              (_verdict(uq), "quote still open" in uq_reason, "detaches a child" in uq_reason),
+              ("deny", True, False))
+        # The shared fail-closed contract: a missing tool_name, and a cwd that is missing, null, not a
+        # string, or empty, deny (before this fix each reached an allow). The non-Bash row is a CONTROL, not
+        # a regression row: it guards against a new over-deny and passes before and after the fix.
+        nocwd = {"hook_event_name": "PreToolUse", "session_id": "s1", "tool_name": "Bash",
+                 "tool_input": {"command": "sleep 5 &"}}
+        check("trunc/missing-tool-name-denies", _verdict(aiqt_hooks.orch_truncation_guard(
+            {"hook_event_name": "PreToolUse", "cwd": str(t.root), "session_id": "s1",
+             "tool_input": {"command": "sleep 5 &"}})), "deny")
+        check("trunc/malformed-cwd-missing-denies", _verdict(aiqt_hooks.orch_truncation_guard(nocwd)), "deny")
+        check("trunc/malformed-cwd-null-denies",
+              _verdict(aiqt_hooks.orch_truncation_guard(dict(nocwd, cwd=None))), "deny")
+        check("trunc/malformed-cwd-int-denies",
+              _verdict(aiqt_hooks.orch_truncation_guard(dict(nocwd, cwd=42))), "deny")
+        check("trunc/malformed-cwd-empty-denies",
+              _verdict(aiqt_hooks.orch_truncation_guard(dict(nocwd, cwd=""))), "deny")
+        check("trunc/non-bash-tool-allows", raw({"tool_name": "Write", "tool_input": None}), "allow")
+        # A present but empty or non-string tool_name cannot be matched, so it denies (the wrtscp precedent)
+        # instead of reading as a non-Bash tool; before this fix each reached the out-of-scope allow.
+        check("trunc/malformed-tool-name-empty-denies", raw({"tool_name": ""}), "deny")
+        check("trunc/malformed-tool-name-int-denies", raw({"tool_name": 5}), "deny")
+        check("trunc/malformed-tool-name-list-denies", raw({"tool_name": ["Bash"]}), "deny")
+        # A tool_name carrying a NUL or any other control character is never a real tool name, so it must
+        # not take the non-Bash out-of-scope allow (the round-3 codex finding: a "Bash"-plus-NUL tool_name
+        # was allowed silently); an ordinary non-Bash plain string still allows (the control row).
+        check("trunc/tool-name-nul-denies",
+              raw(dict(tool_name="Bash\x00", tool_input=None)), "deny")
+        check("trunc/tool-name-nul-only-denies",
+              raw(dict(tool_name="\x00", tool_input=None)), "deny")
+        check("trunc/tool-name-control-char-denies",
+              raw(dict(tool_name="Ba\x1bsh", tool_input=None)), "deny")
+        check("trunc/tool-name-ordinary-non-bash-allows",
+              raw(dict(tool_name="mcp__files__read", tool_input=None)), "allow")
+        # A string cwd whose registry walk cannot be carried out (not a readable directory, a NUL, an
+        # unreadable ancestor) denies with a named reason AND an actionable fix; a cwd whose COMPLETED walk
+        # and git-toplevel union find no registry allows BY DEFAULT (a git FAILURE alone never denies by
+        # default: the round-3 git lockout is withdrawn; the registry-required exception is pinned by
+        # trunc/registry-required-git-unavailable-core-worktree-denies). The confirmed-outside CONTROL row passes before and after the fix.
+        def _cwd_case(cwd):
+            res = aiqt_hooks.orch_truncation_guard(dict(nocwd, cwd=cwd))
+            why = (res[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+            return _verdict(res), why
+        cv, cw = _cwd_case(str(t.root) + "\x00x")
+        check("trunc/cwd-nul-denies", (cv, "NUL" in cw), ("deny", True))
+        cv, cw = _cwd_case(str(tmp / "no-such-dir"))
+        check("trunc/cwd-nonexistent-denies", (cv, "not an existing path" in cw), ("deny", True))
+        (tmp / "cwd-file.txt").write_text("x\n", encoding="utf-8")
+        cv, cw = _cwd_case(str(tmp / "cwd-file.txt"))
+        check("trunc/cwd-regular-file-denies", (cv, "not a directory" in cw), ("deny", True))
+        # An unreadable directory: os.access is patched for this one path only (a root-run self-test would
+        # otherwise read every directory as readable).
+        noread = tmp / "cwd-noread"
+        noread.mkdir()
+        saved_access = aiqt_hooks.os.access
+
+        def _no_access(path, mode, *a, **k):
+            return False if str(path) == str(noread) else saved_access(path, mode, *a, **k)
+        try:
+            aiqt_hooks.os.access = _no_access
+            cv, cw = _cwd_case(str(noread))
+        finally:
+            aiqt_hooks.os.access = saved_access
+        check("trunc/cwd-unreadable-dir-denies", (cv, "cannot read and enter" in cw), ("deny", True))
+        # ROUND-3 LOCKOUT WITHDRAWN: scope is the registry walk UNIONED with a git-resolved toplevel's
+        # registry (round 4), and BY DEFAULT a git FAILURE alone never denies (registry-required mode
+        # denies one that hides a registry reachable only through the git toplevel: see the gw rows
+        # below), so a cwd git cannot resolve (a bare
+        # repository, a dubious-ownership refusal, a missing git binary, a broken config, a timeout) is
+        # OUT OF SCOPE when no registry sits on the cwd's ancestor chain (each such row was a blanket deny
+        # at the round-3 revision and now allows: the restored-allow controls), while the SAME failing git
+        # inside an orchestrated tree still applies the guard (a detach denies, a plain command allows).
+        # _recovery_git is patched to raise or refuse, so these rows pin that the union leg turns every
+        # git failure into a clean out-of-scope read, never a deny (these rows run in the default mode).
+        bare = tmp / "cwd-bare.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True,
+                       timeout=30)
+        check("trunc/cwd-bare-repo-no-registry-allows", _cwd_case(str(bare))[0], "allow")
+        barein = t.root / "inner-bare.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(barein)], check=True, capture_output=True,
+                       timeout=30)
+        cv, cw = _cwd_case(str(barein))
+        check("trunc/cwd-bare-repo-in-orchestrated-tree-detach-denies",
+              (cv, "detaches a child" in cw), ("deny", True))
+        check("trunc/cwd-bare-repo-in-orchestrated-tree-plain-allows",
+              _verdict(aiqt_hooks.orch_truncation_guard(dict(
+                  nocwd, cwd=str(barein), tool_input=dict(command="ls -la")))), "allow")
+        saved_git = aiqt_hooks._recovery_git
+
+        def _git_timeout(*_a, **_k):
+            raise subprocess.TimeoutExpired(["git"], 5)
+
+        def _git_oserror(*_a, **_k):
+            raise OSError("simulated spawn failure")
+
+        def _git_missing(*_a, **_k):
+            raise FileNotFoundError(2, "No such file or directory", "git")
+
+        class _GitDubious:
+            returncode = 128
+            stdout = ""
+            stderr = ("fatal: detected dubious ownership in repository at '/fixture'\n"
+                      "To add an exception for this directory, call:\n\n"
+                      "\tgit config --global --add safe.directory /fixture\n")
+
+        def _git_dubious(*_a, **_k):
+            return _GitDubious()
+
+        class _GitBadConfig:
+            returncode = 128
+            stdout = ""
+            stderr = "fatal: bad config line 1 in file /fixture/.gitconfig\n"
+
+        def _git_badconfig(*_a, **_k):
+            return _GitBadConfig()
+        norig = tmp / "cwd-no-registry-repo"
+        norig.mkdir()
+        subprocess.run(["git", "init", "-q", str(norig)], check=True, capture_output=True, timeout=30)
+        try:
+            for _sim, _row in ((_git_timeout, "trunc/git-timeout-no-registry-allows"),
+                               (_git_oserror, "trunc/git-error-no-registry-allows"),
+                               (_git_missing, "trunc/no-git-binary-no-registry-allows"),
+                               (_git_dubious, "trunc/git-dubious-ownership-no-registry-allows"),
+                               (_git_badconfig, "trunc/git-broken-config-no-registry-allows")):
+                aiqt_hooks._recovery_git = _sim
+                check(_row, _cwd_case(str(norig))[0], "allow")
+            # the same failing git INSIDE an orchestrated tree: the registry is on the walk, so the guard
+            # still applies its rules (the detach denies with the DETACH reason, a plain command allows).
+            aiqt_hooks._recovery_git = _git_missing
+            cv, cw = _cwd_case(str(t.root))
+            check("trunc/git-refusal-with-registry-detach-denies",
+                  (cv, "detaches a child" in cw), ("deny", True))
+            check("trunc/git-refusal-with-registry-plain-allows",
+                  _verdict(aiqt_hooks.orch_truncation_guard(dict(
+                      nocwd, cwd=str(t.root), tool_input=dict(command="ls -la")))), "allow")
+        finally:
+            aiqt_hooks._recovery_git = saved_git
+        # inside a .git directory git discovery refuses, but the walk decides: a registry above the work
+        # tree keeps the guard active from inside .git, and a registryless repo's .git is out of scope.
+        cv, cw = _cwd_case(str(t.root / ".git"))
+        check("trunc/cwd-inside-git-dir-with-registry-detach-denies",
+              (cv, "detaches a child" in cw), ("deny", True))
+        check("trunc/cwd-inside-git-dir-no-registry-allows", _cwd_case(str(norig / ".git"))[0], "allow")
+        # the walk's own failure DENIES with an actionable fix: an ancestor directory it cannot open (the
+        # openat of ".." is patched to refuse, as a root-run self-test reads every directory as readable).
+        anc = tmp / "anc-noread"
+        (anc / "child").mkdir(parents=True)
+        saved_open = aiqt_hooks.os.open
+
+        def _no_parent_open(path, flags, *a, **k):
+            if path == ".." and k.get("dir_fd") is not None:
+                raise PermissionError(13, "Permission denied", "..")
+            return saved_open(path, flags, *a, **k)
+        try:
+            aiqt_hooks.os.open = _no_parent_open
+            cv, cw = _cwd_case(str(anc / "child"))
+        finally:
+            aiqt_hooks.os.open = saved_open
+        check("trunc/cwd-unreadable-ancestor-denies",
+              (cv, "ancestor directory" in cw, "search permission" in cw),
+              ("deny", True, True))
+        # a registry in a NON-GIT ancestor tree scopes the guard in (the walk needs no repository), and a
+        # nested repository under an orchestrated tree is scoped in through the ancestor registry.
+        orchtree = tmp / "orch-tree"
+        (orchtree / ".aiqt").mkdir(parents=True)
+        (orchtree / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)),
+                                                               encoding="utf-8")
+        (orchtree / "sub").mkdir()
+        cv, cw = _cwd_case(str(orchtree / "sub"))
+        check("trunc/registry-above-non-git-dir-detach-denies",
+              (cv, "detaches a child" in cw), ("deny", True))
+        check("trunc/registry-above-non-git-dir-plain-allows",
+              _verdict(aiqt_hooks.orch_truncation_guard(dict(
+                  nocwd, cwd=str(orchtree / "sub"), tool_input=dict(command="ls -la")))), "allow")
+        nested = t.root / "nested-repo"
+        nested.mkdir()
+        subprocess.run(["git", "init", "-q", str(nested)], check=True, capture_output=True, timeout=30)
+        cv, cw = _cwd_case(str(nested))
+        check("trunc/nested-repo-under-registry-tree-detach-denies",
+              (cv, "detaches a child" in cw), ("deny", True))
+        outside = tmp / "cwd-outside"
+        outside.mkdir()
+        # git's own discovery is held to tmp as well (GIT_CEILING_DIRECTORIES), so a TMPDIR inside some
+        # repository cannot turn this precondition red.
+        probe = subprocess.run(["git", "-C", str(outside), "rev-parse", "--show-toplevel"],
+                               capture_output=True, text=True, timeout=30,
+                               env=dict(os.environ, GIT_CEILING_DIRECTORIES=os.path.realpath(str(tmp))))
+        check("trunc/cwd-confirmed-outside-repo-allows",
+              (probe.returncode, _cwd_case(str(outside))[0]), (128, "allow"))
+        # HERMETICITY of every truncation-guard row: a registry ABOVE the fixture root never decides a
+        # verdict (before this, a live registry above TMPDIR turned each out-of-scope row above into a
+        # deny and let each registry-present row pass on the host's registry instead of its fixture's).
+        # The run-wide ceiling covers the whole chain up to the filesystem root; on a tree under tmp, a
+        # ceiling at ceil/inner reads the registry at ceil as absent, a registry AT the ceiling root is
+        # still found, and with only the run-wide ceiling (which sits above ceil) the walk finds it, as
+        # the production walk, which takes no ceiling, always does.
+        # BEHAVIOURAL, not declarative (round 4): the old form asserted the root's dev/ino sat in the
+        # ceiling's .above set, which a ceiling that declares the root but delegates its probe anyway
+        # still satisfies. This row drives descriptors through the probes instead: the ACTIVE run-wide
+        # ceiling must read a filesystem-root descriptor as registry-free, and a ceiling built by the
+        # same constructor over an always-True probe must mask the root while still delegating a
+        # descriptor at the ceiling root itself.
+        root_fd = os.open(os.path.realpath(os.sep), aiqt_hooks._ORCH_O_WALK | os.O_DIRECTORY)
+        tmpl_fd = os.open(os.path.realpath(str(tmp)), aiqt_hooks._ORCH_O_WALK | os.O_DIRECTORY)
+        try:
+            always = _registry_ceiling(tmp, lambda dirfd: True)
+            check("trunc/hermetic-run-ceiling-covers-filesystem-root",
+                  (aiqt_hooks._orch_dirfd_has_registry(root_fd), always(root_fd), always(tmpl_fd)),
+                  (False, False, True))
+        finally:
+            os.close(root_fd)
+            os.close(tmpl_fd)
+        ceil = tmp / "ceil-probe"
+        (ceil / ".aiqt").mkdir(parents=True)
+        (ceil / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)), encoding="utf-8")
+        (ceil / "inner" / "sub").mkdir(parents=True)
+        run_probe = aiqt_hooks._orch_dirfd_has_registry
+        try:
+            aiqt_hooks._orch_dirfd_has_registry = _registry_ceiling(ceil / "inner", run_probe)
+            hidden = aiqt_hooks._orch_registry_walk(str(ceil / "inner" / "sub"))
+            aiqt_hooks._orch_dirfd_has_registry = _registry_ceiling(ceil, run_probe)
+            at_root = aiqt_hooks._orch_registry_walk(str(ceil / "inner" / "sub"))
+        finally:
+            aiqt_hooks._orch_dirfd_has_registry = run_probe
+        check("trunc/hermetic-ceiling-hides-registry-above-root", hidden, ("none", None))
+        check("trunc/hermetic-ceiling-keeps-registry-at-root", at_root, ("found", None))
+        check("trunc/hermetic-walk-without-inner-ceiling-finds-registry",
+              aiqt_hooks._orch_registry_walk(str(ceil / "inner" / "sub")), ("found", None))
+        # ROUND 4, UNION LEG: core.worktree (in a repository config, or in the config of a separate git
+        # dir) can point the work tree OFF the cwd's physical ancestor chain. git then resolves a toplevel
+        # the walk never visits, and the registry THERE must still scope the guard in (main's rev-parse
+        # scoping denied these; the walk alone allowed them). Each detach row is red with the union leg
+        # removed; the plain row guards the other direction (an in-scope plain foreground call stays an
+        # allow). The union probes through the run-wide ceiling, so a host registry above tmp still never
+        # decides a row.
+        gw = tmp / "gw"
+        (gw / "B" / ".aiqt").mkdir(parents=True)
+        (gw / "B" / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)),
+                                                               encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(gw / "A")], check=True, capture_output=True, timeout=30)
+        subprocess.run(["git", "-C", str(gw / "A"), "config", "core.worktree", str(gw / "B")],
+                       check=True, capture_output=True, timeout=30)
+        cv, cw = _cwd_case(str(gw / "A"))
+        check("trunc/git-core-worktree-registry-detach-denies",
+              (cv, "detaches a child" in cw), ("deny", True))
+        check("trunc/git-core-worktree-registry-plain-allows",
+              _verdict(aiqt_hooks.orch_truncation_guard(dict(
+                  nocwd, cwd=str(gw / "A"), tool_input=dict(command="ls -la")))), "allow")
+        # Registry-required mode on the union leg: the registry is reachable ONLY through the git toplevel
+        # (core.worktree), so it is PRESENT and a plain call stays an allow. Red when the registry-required
+        # deny is moved above the git-union test (an absent CHAIN registry alone must not deny).
+        _rrg = aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV
+        _rrg_old = os.environ.get(_rrg)
+        try:
+            os.environ[_rrg] = "1"
+            check("trunc/registry-required-git-core-worktree-plain-allows",
+                  _verdict(aiqt_hooks.orch_truncation_guard(dict(
+                      nocwd, cwd=str(gw / "A"), tool_input=dict(command="ls -la")))), "allow")
+            # The strict-mode exception to "a git failure alone never denies": with git unavailable (a
+            # controlled PATH holding no git) the union leg reads False, so the registry reachable ONLY
+            # through core.worktree reads as ABSENT and strict mode DENIES ls -la; the same call with the
+            # variable unset ALLOWS (the default mode's out-of-scope read). Red when a git failure is read
+            # as PRESENT, and red when the strict deny is skipped on a git failure.
+            nogit = tmp / "gw-nogit-bin"
+            nogit.mkdir()
+            _path_old = os.environ.get("PATH")
+            try:
+                os.environ["PATH"] = str(nogit)
+                ng = aiqt_hooks.orch_truncation_guard(dict(
+                    nocwd, cwd=str(gw / "A"), tool_input=dict(command="ls -la")))
+                ng_reason = (ng[1] or {}).get("hookSpecificOutput", {}).get(
+                    "permissionDecisionReason", "")
+                os.environ.pop(_rrg, None)
+                ng_unset = _verdict(aiqt_hooks.orch_truncation_guard(dict(
+                    nocwd, cwd=str(gw / "A"), tool_input=dict(command="ls -la"))))
+            finally:
+                if _path_old is None:
+                    os.environ.pop("PATH", None)
+                else:
+                    os.environ["PATH"] = _path_old
+            check("trunc/registry-required-git-unavailable-core-worktree-denies",
+                  (_verdict(ng), _rrg in ng_reason, ng_unset), ("deny", True, "allow"))
+        finally:
+            if _rrg_old is None:
+                os.environ.pop(_rrg, None)
+            else:
+                os.environ[_rrg] = _rrg_old
+        sepg = tmp / "gw-sep"
+        sepg.mkdir()
+        subprocess.run(["git", "init", "-q", "--separate-git-dir", str(sepg / "meta.git"),
+                        str(sepg / "work")], check=True, capture_output=True, timeout=30)
+        subprocess.run(["git", "--git-dir", str(sepg / "meta.git"), "config", "core.worktree",
+                        str(sepg / "work")], check=True, capture_output=True, timeout=30)
+        (sepg / "work" / ".aiqt").mkdir()
+        (sepg / "work" / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)),
+                                                                    encoding="utf-8")
+        cv, cw = _cwd_case(str(sepg / "meta.git"))
+        check("trunc/git-separate-gitdir-worktree-registry-detach-denies",
+              (cv, "detaches a child" in cw), ("deny", True))
+        # ROUND 4, CRAFTED-.aiqt BRANCHES PINNED: each deny-safe branch of _orch_dirfd_has_registry gets a
+        # row that is red when the branch is removed. A symlinked .aiqt pointing at a REGISTRY-FREE
+        # directory pins both the no-follow open flag (following it would read a clean absent) and the
+        # OSError-reads-PRESENT branch (ELOOP); the dangling symlink and the regular file pin the same
+        # branch through different faults.
+        craft = tmp / "craft"
+        (craft / "target-no-registry").mkdir(parents=True)
+        (craft / "link-dir").mkdir()
+        os.symlink(str(craft / "target-no-registry"), str(craft / "link-dir" / ".aiqt"))
+        cv, cw = _cwd_case(str(craft / "link-dir"))
+        check("trunc/aiqt-symlink-dir-denies", (cv, "detaches a child" in cw), ("deny", True))
+        (craft / "dangling").mkdir()
+        os.symlink(str(craft / "no-such-target"), str(craft / "dangling" / ".aiqt"))
+        cv, cw = _cwd_case(str(craft / "dangling"))
+        check("trunc/aiqt-dangling-symlink-denies", (cv, "detaches a child" in cw), ("deny", True))
+        (craft / "regular-file").mkdir()
+        (craft / "regular-file" / ".aiqt").write_text("not a directory", encoding="utf-8")
+        cv, cw = _cwd_case(str(craft / "regular-file"))
+        check("trunc/aiqt-regular-file-denies", (cv, "detaches a child" in cw), ("deny", True))
+        # A registry NAME whose no-follow stat faults must read PRESENT (the deny-safe branch on the stat
+        # inside a real .aiqt directory). The os.stat seam is a hermetic proxy for a mode-000 .aiqt on a
+        # non-root run (the fault holds on any uid, including root, per the uid-independence precedent).
+        (craft / "stat-fault" / ".aiqt").mkdir(parents=True)
+        saved_stat = aiqt_hooks.os.stat
+        _reg_names = tuple(r.rsplit("/", 1)[-1] for r in aiqt_hooks._ORCH_REGISTRY_FILES)
+
+        def _stat_fault(path, *a, **k):
+            if k.get("dir_fd") is not None and path in _reg_names:
+                raise PermissionError(13, "Permission denied", path)
+            return saved_stat(path, *a, **k)
+        try:
+            aiqt_hooks.os.stat = _stat_fault
+            cv, cw = _cwd_case(str(craft / "stat-fault"))
+        finally:
+            aiqt_hooks.os.stat = saved_stat
+        check("trunc/aiqt-registry-name-stat-fault-denies", (cv, "detaches a child" in cw),
+              ("deny", True))
+        # ROUND 5, THREE-VALUED DISCOVERY: a registry entry the probe can neither rule out nor confirm is
+        # _ORCH_REG_CANNOT_EVALUATE. BY DEFAULT it reads PRESENT (the guard stays active, so a plain
+        # command allows and the detach rows above deny, unchanged); under registry-required mode it is
+        # NOT a registry and a plain command DENIES with the cannot-evaluate reason. Each vector pins the
+        # strict deny AND the unset verdict (plain allow, detach deny), so the strict deny is red when a
+        # cannot-evaluate is read as a registry again and the unset pair is red on any default drift.
+        (craft / "unreadable-dir" / ".aiqt").mkdir(parents=True)
+        (craft / "nonreg-dir" / ".aiqt" / "orchestration.json").mkdir(parents=True)
+        (craft / "nonreg-link" / ".aiqt").mkdir(parents=True)
+        (craft / "nonreg-link" / "real.json").write_text(json.dumps(dict(version=1)), encoding="utf-8")
+        os.symlink(str(craft / "nonreg-link" / "real.json"),
+                   str(craft / "nonreg-link" / ".aiqt" / "orchestration.json"))
+        # ROUND 6: the FIRST present registry name decides (whole-file precedence). A symlinked or directory
+        # orchestration.local.json beside a REGULAR orchestration.json is not confirmed: red under the
+        # mutant "any regular registry name confirms", which reads the regular orchestration.json as True.
+        for _pname in ("local-link-beside-regular", "local-dir-beside-regular"):
+            (craft / _pname / ".aiqt").mkdir(parents=True)
+            (craft / _pname / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)),
+                                                                        encoding="utf-8")
+        (craft / "local-link-beside-regular" / "real.json").write_text(json.dumps(dict(version=1)),
+                                                                     encoding="utf-8")
+        os.symlink(str(craft / "local-link-beside-regular" / "real.json"),
+                   str(craft / "local-link-beside-regular" / ".aiqt" / "orchestration.local.json"))
+        (craft / "local-dir-beside-regular" / ".aiqt" / "orchestration.local.json").mkdir()
+        _r5 = aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV
+        _r5_old = os.environ.get(_r5)
+        _r5_stat = aiqt_hooks.os.stat
+        _r5_unread = os.path.realpath(str(craft / "unreadable-dir" / ".aiqt"))
+
+        def _r5_stat_unreadable(path, *a, **k):
+            # A root run is not bound by mode 000, so the seam supplies the kernel's EACCES there for
+            # the unreadable directory's registry lookups only (the uid-independence precedent).
+            dfd = k.get("dir_fd")
+            if (dfd is not None and path in _reg_names
+                    and os.path.realpath("/proc/self/fd/{}".format(dfd)) == _r5_unread):
+                raise PermissionError(13, "Permission denied", path)
+            return _r5_stat(path, *a, **k)
+
+        def _r5_case(cwd, command):
+            res = aiqt_hooks.orch_truncation_guard(dict(nocwd, cwd=cwd, tool_input=dict(command=command)))
+            why = (res[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+            return _verdict(res), ("could not be confirmed" in why and _r5 in why)
+        _r5_vectors = (("aiqt-regular-file", craft / "regular-file"),
+                       ("aiqt-dangling-symlink", craft / "dangling"),
+                       ("aiqt-unreadable-dir", craft / "unreadable-dir"),
+                       ("aiqt-registry-name-directory", craft / "nonreg-dir"),
+                       ("aiqt-registry-name-symlink", craft / "nonreg-link"),
+                       ("aiqt-local-symlink-beside-regular", craft / "local-link-beside-regular"),
+                       ("aiqt-local-directory-beside-regular", craft / "local-dir-beside-regular"))
+        _r5_rows = {}
+        try:
+            os.chmod(_r5_unread, 0)
+            if os.geteuid() == 0:
+                aiqt_hooks.os.stat = _r5_stat_unreadable
+            for _name, _dir in _r5_vectors:
+                _r5_fd = os.open(str(_dir), aiqt_hooks._ORCH_O_WALK | os.O_DIRECTORY)
+                try:
+                    _probe = aiqt_hooks._orch_dirfd_has_registry(_r5_fd)
+                finally:
+                    os.close(_r5_fd)
+                os.environ.pop(_r5, None)
+                _unset = (_r5_case(str(_dir), "printf ok")[0], _r5_case(str(_dir), "long_job &")[0])
+                os.environ[_r5] = "1"
+                _strict = _r5_case(str(_dir), "printf ok")
+                _r5_rows[_name] = (_probe, _unset, _strict)
+        finally:
+            aiqt_hooks.os.stat = _r5_stat
+            os.chmod(_r5_unread, 0o755)
+            if _r5_old is None:
+                os.environ.pop(_r5, None)
+            else:
+                os.environ[_r5] = _r5_old
+        # The rows sit literally in the for header so the execution-set gate resolves each id.
+        for _cid, _name in (("trunc/registry-required-aiqt-regular-file-plain-denies", "aiqt-regular-file"),
+                            ("trunc/registry-required-aiqt-dangling-symlink-plain-denies",
+                             "aiqt-dangling-symlink"),
+                            ("trunc/registry-required-aiqt-unreadable-dir-plain-denies",
+                             "aiqt-unreadable-dir"),
+                            ("trunc/registry-required-aiqt-registry-name-directory-plain-denies",
+                             "aiqt-registry-name-directory"),
+                            ("trunc/registry-required-aiqt-registry-name-symlink-plain-denies",
+                             "aiqt-registry-name-symlink"),
+                            ("trunc/registry-required-aiqt-local-symlink-beside-regular-plain-denies",
+                             "aiqt-local-symlink-beside-regular"),
+                            ("trunc/registry-required-aiqt-local-directory-beside-regular-plain-denies",
+                             "aiqt-local-directory-beside-regular")):
+            check(_cid, _r5_rows[_name],
+                  (aiqt_hooks._ORCH_REG_CANNOT_EVALUATE, ("allow", "deny"), ("deny", True)))
+        # The CONFIRMED side of the same probe: a regular registry file reads True (not the third value),
+        # and the fixture tree's own regular registry satisfies registry-required mode (plain allow).
+        conf_fd = os.open(str(t.root), aiqt_hooks._ORCH_O_WALK | os.O_DIRECTORY)
+        try:
+            _confirmed = aiqt_hooks._orch_dirfd_has_registry(conf_fd)
+        finally:
+            os.close(conf_fd)
+        try:
+            os.environ[_r5] = "1"
+            _confirmed_strict = _r5_case(str(t.root), "printf ok")
+        finally:
+            if _r5_old is None:
+                os.environ.pop(_r5, None)
+            else:
+                os.environ[_r5] = _r5_old
+        check("trunc/registry-required-confirmed-registry-plain-allows",
+              (_confirmed is True, _confirmed_strict), (True, ("allow", False)))
+        # The UNION leg is three-valued too: a git toplevel (core.worktree, off the ancestor chain) whose
+        # .aiqt is a regular file reads cannot-evaluate, so the default keeps the guard active (detach
+        # denies, plain allows) and registry-required mode denies the plain call.
+        gwc = tmp / "gw-cannot"
+        (gwc / "B").mkdir(parents=True)
+        (gwc / "B" / ".aiqt").write_text("not a directory", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(gwc / "A")], check=True, capture_output=True, timeout=30)
+        subprocess.run(["git", "-C", str(gwc / "A"), "config", "core.worktree", str(gwc / "B")],
+                       check=True, capture_output=True, timeout=30)
+        try:
+            os.environ.pop(_r5, None)
+            _gw_unset = (_r5_case(str(gwc / "A"), "printf ok")[0], _r5_case(str(gwc / "A"), "long_job &")[0])
+            os.environ[_r5] = "1"
+            _gw_strict = _r5_case(str(gwc / "A"), "printf ok")
+        finally:
+            if _r5_old is None:
+                os.environ.pop(_r5, None)
+            else:
+                os.environ[_r5] = _r5_old
+        check("trunc/registry-required-git-toplevel-cannot-evaluate-plain-denies",
+              (aiqt_hooks._orch_git_toplevel_has_registry(str(gwc / "A")), _gw_unset, _gw_strict),
+              (aiqt_hooks._ORCH_REG_CANNOT_EVALUATE, ("allow", "deny"), ("deny", True)))
+        # ROUND 6, THE RECHECK'S THIRD VALUE: when the path-anchored recheck's probe returns
+        # _ORCH_REG_CANNOT_EVALUATE the recheck returns ('cannot-evaluate', None), never ('found', None). The
+        # direct call pins the return; the guard legs make the descriptor walk's own probes miss (the seam
+        # is live only until the recheck starts), so the scope can come only from the recheck: unset, the
+        # guard stays active (plain allow, detach deny); strict, it denies with the cannot-evaluate
+        # reason. Red under the mutant recheck that returns ('found', None) for that probe.
+        _rc_dir = str(craft / "regular-file")
+        _rc_direct = aiqt_hooks._orch_walk_recheck(_rc_dir, [])
+        _rc_probe = aiqt_hooks._orch_dirfd_has_registry
+        _rc_recheck = aiqt_hooks._orch_walk_recheck
+        _rc_live = []
+
+        def _rc_walk_probe(dirfd):
+            return _rc_probe(dirfd) if _rc_live else False
+
+        def _rc_recheck_wrap(cwd, chain):
+            _rc_live.append(True)
+            return _rc_recheck(cwd, chain)
+        _rc_rows = []
+        try:
+            aiqt_hooks._orch_dirfd_has_registry = _rc_walk_probe
+            aiqt_hooks._orch_walk_recheck = _rc_recheck_wrap
+            for _rc_env, _rc_cmd in ((None, "printf ok"), (None, "long_job &"), ("1", "printf ok")):
+                del _rc_live[:]
+                if _rc_env is None:
+                    os.environ.pop(_r5, None)
+                else:
+                    os.environ[_r5] = _rc_env
+                _rc_rows.append(_r5_case(_rc_dir, _rc_cmd))
+        finally:
+            aiqt_hooks._orch_dirfd_has_registry = _rc_probe
+            aiqt_hooks._orch_walk_recheck = _rc_recheck
+            if _r5_old is None:
+                os.environ.pop(_r5, None)
+            else:
+                os.environ[_r5] = _r5_old
+        check("trunc/walk-recheck-cannot-evaluate-strict-denies",
+              (_rc_direct, (_rc_rows[0][0], _rc_rows[1][0]), _rc_rows[2]),
+              (("cannot-evaluate", None), ("allow", "deny"), ("deny", True)))
+        # A SEARCH-ONLY ancestor must not fail the walk: O_PATH steps need only the search permission path
+        # resolution itself needs, so the registry above is still found. The real chmod 0o311 exercises
+        # the kernel on a non-root run; the os.open seam refuses a READ-open of that ancestor so the row
+        # also discriminates on a root run (root is not bound by the chmod) and pins the O_PATH flag
+        # itself (a walk rebuilt on O_RDONLY turns this found into a walk failure).
+        sonly = tmp / "search-only"
+        (sonly / ".aiqt").mkdir(parents=True)
+        (sonly / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)),
+                                                            encoding="utf-8")
+        (sonly / "mid" / "leaf").mkdir(parents=True)
+        saved_open_so = aiqt_hooks.os.open
+        _opath = getattr(os, "O_PATH", 0)
+        _leaf_ino = os.stat(str(sonly / "mid" / "leaf")).st_ino
+
+        def _read_open_refused(path, flags, *a, **k):
+            if (_opath and path == ".." and k.get("dir_fd") is not None
+                    and os.fstat(k["dir_fd"]).st_ino == _leaf_ino and not flags & _opath):
+                raise PermissionError(13, "Permission denied", "..")
+            return saved_open_so(path, flags, *a, **k)
+        try:
+            aiqt_hooks.os.open = _read_open_refused
+            if _opath:
+                os.chmod(str(sonly / "mid"), 0o311)
+            so_res = aiqt_hooks._orch_registry_walk(str(sonly / "mid" / "leaf"))
+        finally:
+            os.chmod(str(sonly / "mid"), 0o755)
+            aiqt_hooks.os.open = saved_open_so
+        check("trunc/walk-search-only-ancestor-finds-registry", so_res, ("found", None))
+        # ROUND 4, CONCURRENT-MOVE DETECTION: descriptor anchoring preserves each opened directory's
+        # identity, not its parent relationship, so a mid-walk rename of an ancestor redirects the ".."
+        # chain. The seam performs REAL renames around the REAL openat (no filesystem result is
+        # fabricated) and restores the tree before the walk returns, the adversarial interleaving from
+        # the round-4 review. With the registry present throughout, the path-anchored recheck finds it and
+        # the detach denies (red with the recheck removed: the walk read only the bypassed chain and
+        # allowed); with no registry anywhere, the recheck's chain comparison catches the redirect and
+        # denies naming the changed chain.
+        race = tmp / "race"
+        saved_open_rc = aiqt_hooks.os.open
+
+        def _race_open_factory(branch, moved):
+            fired = []
+
+            def _race_open(path, flags, *a, **k):
+                if (not fired and path == ".." and k.get("dir_fd") is not None
+                        and os.fstat(k["dir_fd"]).st_ino == os.stat(str(branch)).st_ino):
+                    fired.append(True)
+                    os.rename(str(branch), str(moved))
+                    try:
+                        return saved_open_rc(path, flags, *a, **k)
+                    finally:
+                        os.rename(str(moved), str(branch))
+                return saved_open_rc(path, flags, *a, **k)
+            return _race_open
+        (race / "tree" / ".aiqt").mkdir(parents=True)
+        (race / "tree" / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)),
+                                                                    encoding="utf-8")
+        (race / "tree" / "branch" / "cwd").mkdir(parents=True)
+        (race / "outside").mkdir()
+        try:
+            aiqt_hooks.os.open = _race_open_factory(race / "tree" / "branch",
+                                                    race / "outside" / "branch")
+            cv, cw = _cwd_case(str(race / "tree" / "branch" / "cwd"))
+        finally:
+            aiqt_hooks.os.open = saved_open_rc
+        check("trunc/walk-raced-ancestor-rename-registry-still-denies",
+              (cv, "detaches a child" in cw), ("deny", True))
+        (race / "bare-tree" / "branch" / "cwd").mkdir(parents=True)
+        (race / "bare-outside").mkdir()
+        try:
+            aiqt_hooks.os.open = _race_open_factory(race / "bare-tree" / "branch",
+                                                    race / "bare-outside" / "branch")
+            cv, cw = _cwd_case(str(race / "bare-tree" / "branch" / "cwd"))
+        finally:
+            aiqt_hooks.os.open = saved_open_rc
+        check("trunc/walk-raced-ancestor-rename-chain-mismatch-denies",
+              (cv, "changed its ancestor chain" in cw), ("deny", True))
+        # ROUND 4, SELF-BIND-MOUNT EDGE: a directory bind-mounted onto its own child repeats one dev/ino
+        # between the mount root and its ".." parent without being the filesystem root, so the old
+        # dev/ino-repeat stop read it as the top and missed a registry above. The walk now steps THROUGH a
+        # non-root repeat. The os.fstat seam is a hermetic proxy for `mount --bind bindm/a bindm/a/b`
+        # (mount privilege is unavailable here): the directory opened at a/b reports a's identity, exactly
+        # as the kernel reports the bind source's identity at the mount root, while its ".." still names a.
+        bindm = tmp / "bindm"
+        (bindm / ".aiqt").mkdir(parents=True)
+        (bindm / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)),
+                                                            encoding="utf-8")
+        (bindm / "a" / "b").mkdir(parents=True)
+        saved_fstat = aiqt_hooks.os.fstat
+        _b_st = os.stat(str(bindm / "a" / "b"))
+        _a_st = os.stat(str(bindm / "a"))
+
+        def _bind_sim_fstat(fd):
+            st = saved_fstat(fd)
+            if st.st_ino == _b_st.st_ino and st.st_dev == _b_st.st_dev:
+                return _a_st
+            return st
+        # The path-anchored recheck would ALSO reach the registry here (path resolution crosses mounts),
+        # masking a reverted repeat-stop, so it is stubbed to a clean miss for this row alone: the found
+        # below can then come only from the walk stepping through the non-root repeat. The recheck's own
+        # behaviour is pinned by the raced-ancestor rows above.
+        saved_recheck = aiqt_hooks._orch_walk_recheck
+        try:
+            aiqt_hooks.os.fstat = _bind_sim_fstat
+            aiqt_hooks._orch_walk_recheck = lambda _cwd, _chain: ("none", None)
+            bind_res = aiqt_hooks._orch_registry_walk(str(bindm / "a" / "b"))
+        finally:
+            aiqt_hooks.os.fstat = saved_fstat
+            aiqt_hooks._orch_walk_recheck = saved_recheck
+        check("trunc/walk-self-bind-mount-sim-finds-registry-above", bind_res, ("found", None))
+        # ROUND 5, FAIL-CLOSED BRANCHES PINNED: each branch below keeps main's deny where the scope read
+        # cannot be completed, and each row is red when its branch is turned into a clean miss (an allow).
+        # The cwd carries no registry, so without the fault the call allows; the deny can come only from
+        # the faulted branch. The union leg: git names a toplevel this probe cannot open as a directory (a
+        # regular file, ENOTDIR on any uid) must read IN SCOPE, as main's registry lstat fault did. The
+        # recheck seams are installed only while _orch_walk_recheck runs, so the walk itself is unfaulted:
+        # a realpath fault, an open fault on a textual chain path, and an fstat fault each deny naming the
+        # recheck step that failed.
+        fcb = tmp / "fail-closed"
+        (fcb / "cwd" / "sub").mkdir(parents=True)
+        (fcb / "top-file").write_text("not a directory", encoding="utf-8")
+        fcb_cwd = str(fcb / "cwd" / "sub")
+        saved_top = aiqt_hooks._recovery_toplevel
+        _ut_env = aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV
+        _ut_old = os.environ.get(_ut_env)
+        try:
+            aiqt_hooks._recovery_toplevel = lambda _cwd: str(fcb / "top-file")
+            cv, cw = _cwd_case(fcb_cwd)
+            # ROUND 6, THREE-PART (probe value, unset pair, strict deny with reason): the union leg returns
+            # its OWN value for a toplevel it cannot open, and strict mode denies it with a reason naming
+            # the toplevel, not a .aiqt entry. Red when that except branch returns True (a confirmed
+            # registry: strict allows) and red against round 5 (the .aiqt-fault reason).
+            _ut_probe = aiqt_hooks._orch_git_toplevel_has_registry(fcb_cwd)
+            os.environ.pop(_ut_env, None)
+            _ut_plain = _verdict(aiqt_hooks.orch_truncation_guard(dict(
+                nocwd, cwd=fcb_cwd, tool_input=dict(command="printf ok"))))
+            os.environ[_ut_env] = "1"
+            _ut_res = aiqt_hooks.orch_truncation_guard(dict(
+                nocwd, cwd=fcb_cwd, tool_input=dict(command="printf ok")))
+            _ut_why = (_ut_res[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+        finally:
+            aiqt_hooks._recovery_toplevel = saved_top
+            if _ut_old is None:
+                os.environ.pop(_ut_env, None)
+            else:
+                os.environ[_ut_env] = _ut_old
+        check("trunc/union-unopenable-toplevel-detach-denies", (cv, "detaches a child" in cw),
+              ("deny", True))
+        check("trunc/registry-required-union-unopenable-toplevel-plain-denies",
+              (_ut_probe, (_ut_plain, cv), _verdict(_ut_res),
+               "toplevel git resolves for this cwd could not be opened as a directory" in _ut_why,
+               _ut_env in _ut_why, "could not be confirmed" in _ut_why),
+              (aiqt_hooks._ORCH_REG_TOPLEVEL_UNOPENABLE, ("allow", "deny"), "deny", True, True, False))
+        # ROUND 6, THE DOCTOR REPORTS WHAT THE GUARD DECIDES (tools/orch_doctor.py over
+        # aiqt_hooks._orch_truncation_scope, rooted at a fixture by patching its repo_root). Default mode, no
+        # registry at the root but one ABOVE it: the doctor must not call the suite inert, and names the
+        # truncation guard ACTIVE. Strict mode, a symlinked registry file the loader accepts: the doctor
+        # reports the guard's deny, never "all usable". Red against the round-5 doctor on both rows.
+        import importlib
+        import contextlib
+        import io
+        _doc = importlib.import_module("orch_doctor")
+        _doc_root = _doc.repo_root
+        _doc_env = aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV
+        _doc_old = os.environ.get(_doc_env)
+        (tmp / "doc-above" / ".aiqt").mkdir(parents=True)
+        (tmp / "doc-above" / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)),
+                                                                        encoding="utf-8")
+        (tmp / "doc-above" / "nested").mkdir()
+        # ROUND 7: a registry the loader accepts through a symlinked orchestration.json, with a WORKING
+        # enumerator, a readable mode line, and a writable state directory, so the guard's strict deny is
+        # the ONLY possible finding: unset mode reports "all usable" (exit 0) and a clean resume audit, and
+        # strict mode must count the deny (exit 1, one finding) and carry it into the resume barrier. A
+        # doctor that only prints the deny line, or drops it on --resume-audit, is red here.
+        _doc_fx = Fixture(tmp, "doc-strict-link")
+        _doc_fx.mode.write_text("Operating-mode: attended\n", encoding="utf-8")
+        _doc_local = _doc_fx.root / ".aiqt" / "orchestration.local.json"
+        _doc_real = _doc_fx.root / "registry-real.json"
+        _doc_real.write_text(_doc_local.read_text(encoding="utf-8"), encoding="utf-8")
+        _doc_local.unlink()
+        os.symlink(str(_doc_real), str(_doc_fx.root / ".aiqt" / "orchestration.json"))
+        _doc_barrier = _doc_fx.state / "resume-barrier.json"
+
+        def _doc_run(root, env, *flags):
+            if env is None:
+                os.environ.pop(_doc_env, None)
+            else:
+                os.environ[_doc_env] = env
+            _doc.repo_root = lambda: Path(root)
+            out = io.StringIO()
+            saved_argv = sys.argv
+            sys.argv = [saved_argv[0]] + list(flags)
+            try:
+                with contextlib.redirect_stdout(out):
+                    code = _doc.main()
+            finally:
+                sys.argv = saved_argv
+            return code, out.getvalue()
+
+        def _doc_barrier_read():
+            with open(_doc_barrier, "r", encoding="utf-8") as fh:
+                bar = json.load(fh)
+            return (bar.get("active"), [f for f in bar.get("findings") or [] if "is DENIED" in f] != [])
+        _doc_top = _doc.aiqt_hooks._recovery_toplevel
+        try:
+            _da_code, _da_out = _doc_run(tmp / "doc-above" / "nested", None)
+            _du_code, _du_out = _doc_run(_doc_fx.root, None)
+            _ds_code, _ds_out = _doc_run(_doc_fx.root, "1")
+            _dru_code, _dru_out = _doc_run(_doc_fx.root, None, "--resume-audit")
+            _dru_bar = _doc_barrier_read()
+            _drs_code, _drs_out = _doc_run(_doc_fx.root, "1", "--resume-audit")
+            _drs_bar = _doc_barrier_read()
+            # Default mode, a git toplevel the union leg cannot open (fcb above): the guard is ACTIVE on a
+            # discovery fault, which the doctor must report as that fault, not as a registry found.
+            _doc.aiqt_hooks._recovery_toplevel = lambda _cwd: str(fcb / "top-file")
+            _dt_code, _dt_out = _doc_run(fcb_cwd, None)
+        finally:
+            _doc.aiqt_hooks._recovery_toplevel = _doc_top
+            _doc.repo_root = _doc_root
+            if _doc_old is None:
+                os.environ.pop(_doc_env, None)
+            else:
+                os.environ[_doc_env] = _doc_old
+        check("doctor/default-registry-above-root-not-inert",
+              (_da_code, "the suite is inert here" in _da_out, "truncation guard: ACTIVE" in _da_out),
+              (2, False, True))
+        check("doctor/registry-required-symlinked-registry-reports-deny",
+              (_du_code, "all usable" in _du_out,
+               _ds_code, "DOCTOR: 1 finding(s):\n  truncation guard (" in _ds_out,
+               "is DENIED" in _ds_out and "symlinked registry file" in _ds_out, "all usable" in _ds_out),
+              (0, True, 1, True, True, False))
+        check("doctor/resume-audit-carries-strict-scope-deny",
+              (_dru_code, "resume audit clean" in _dru_out, _dru_bar,
+               _drs_code, "resume audit clean" in _drs_out,
+               "1 finding(s); the barrier stays armed:\n  truncation guard (" in _drs_out, _drs_bar),
+              (0, True, (False, False), 1, False, True, (True, True)))
+        check("doctor/default-toplevel-unopenable-reports-fault-not-registry",
+              (_dt_code, "truncation guard: ACTIVE" in _dt_out, "a registry entry was found" in _dt_out,
+               "git toplevel cannot be opened as a directory" in _dt_out),
+              (2, True, False, True))
+        # ROUND 8, ONE BARRIER TRUTH: both resume-barrier writers (the SessionStart hook and the doctor's
+        # --resume-audit) arm from aiqt_hooks._orch_resume_audit_findings, so a SessionStart after the
+        # doctor armed the barrier for the strict scope deny (the symlinked registry above) keeps it
+        # armed with the same findings; unset mode is clean in both. Red when the hook audits the resume
+        # probes alone (it then clears the barrier while the guard still denies). A registry the loader
+        # reports bad arms the barrier with its own finding in both writers (red when that finding is
+        # dropped from the shared list). In default mode a cannot-evaluate scope found ABOVE a root with no
+        # registry is reported as the fault, not as a registry found (red when the doctor's fault branch
+        # tests only "toplevel-unopenable").
+        _r8_bad = Fixture(tmp, "doc-bad-registry")
+        (_r8_bad.root / ".aiqt" / "orchestration.local.json").write_text("{", encoding="utf-8")
+        _r8_bad_bar = Path(aiqt_hooks._orch_state_dir_for_root(str(_r8_bad.root))) / "resume-barrier.json"
+        (tmp / "doc-cev" / ".aiqt" / "orchestration.json").mkdir(parents=True)
+        (tmp / "doc-cev" / "nested").mkdir()
+
+        def _r8_bar(path):
+            with open(path, "r", encoding="utf-8") as fh:
+                bar = json.load(fh)
+            return bar.get("active"), bar.get("findings")
+        try:
+            _r8_drs = _doc_run(_doc_fx.root, "1", "--resume-audit")[0]
+            _r8_drs_bar = _r8_bar(_doc_barrier)
+            _r8_hrs = _verdict(aiqt_hooks.orch_resume_audit(_doc_fx.payload("SessionStart")))
+            _r8_hrs_bar = _r8_bar(_doc_barrier)
+            os.environ.pop(_doc_env, None)
+            _r8_hru = _verdict(aiqt_hooks.orch_resume_audit(_doc_fx.payload("SessionStart")))
+            _r8_hru_bar = _r8_bar(_doc_barrier)
+            _r8_dbad = _doc_run(_r8_bad.root, None, "--resume-audit")[0]
+            _r8_dbad_bar = _r8_bar(_r8_bad_bar)
+            _r8_hbad = _verdict(aiqt_hooks.orch_resume_audit(_r8_bad.payload("SessionStart")))
+            _r8_hbad_bar = _r8_bar(_r8_bad_bar)
+            _r8_cev_code, _r8_cev_out = _doc_run(tmp / "doc-cev" / "nested", None)
+        finally:
+            _doc.repo_root = _doc_root
+            if _doc_old is None:
+                os.environ.pop(_doc_env, None)
+            else:
+                os.environ[_doc_env] = _doc_old
+        check("doctor/hook-resume-audit-keeps-strict-scope-barrier",
+              (_r8_drs, _r8_drs_bar[0], _r8_hrs, _r8_hrs_bar == _r8_drs_bar,
+               [f for f in _r8_hrs_bar[1] or [] if "is DENIED" in f] != [], _r8_hru, _r8_hru_bar),
+              (1, True, "warn", True, True, "allow", (False, [])))
+        _r8_read = "the orchestration registry could not be read ("
+        check("doctor/resume-audit-registry-unreadable-arms-barrier",
+              (_r8_dbad, _r8_dbad_bar[0], [f for f in _r8_dbad_bar[1] or [] if _r8_read in f] != [],
+               _r8_hbad, _r8_hbad_bar == _r8_dbad_bar),
+              (1, True, True, "warn", True))
+        check("doctor/default-cannot-evaluate-above-root-reports-fault-not-registry",
+              (_r8_cev_code, "truncation guard: ACTIVE" in _r8_cev_out,
+               "hit a fault it reads as present" in _r8_cev_out, "a registry entry was found" in _r8_cev_out,
+               "cannot be confirmed as a registry" in _r8_cev_out),
+              (2, True, True, False, True))
+        # ROUND 9, A WALK FAILURE ARMS THE BARRIER IN EVERY MODE WHERE GIT RESOLVES THE ROOT: a repository
+        # root the truncation guard's walk cannot carry out is denied in every mode, so
+        # _orch_guard_scope_report flags it as a deny and, where git resolves that root (here the fixture
+        # is a real repository and only _orch_registry_walk is mocked), the SessionStart resume audit arms
+        # the barrier and warns with that finding, unset and set alike (red when the 'fail' branch reports
+        # denies=False). Where git resolves no root the audit returns silently before this check. The warning names the condition as a repair,
+        # not only the record.
+        _r9_fx = Fixture(tmp, "doc-walk-fail")
+        _r9_bar = Path(aiqt_hooks._orch_state_dir_for_root(str(_r9_fx.root))) / "resume-barrier.json"
+        _r9_walk = aiqt_hooks._orch_registry_walk
+        _r9_old = os.environ.get(_doc_env)
+        _r9_rows = []
+        try:
+            aiqt_hooks._orch_registry_walk = lambda _cwd: (
+                "fail", ("is a directory this process cannot read and enter", "fix the root's mode"))
+            for _r9_val in (None, "1"):
+                if _r9_val is None:
+                    os.environ.pop(_doc_env, None)
+                else:
+                    os.environ[_doc_env] = _r9_val
+                _r9_rep = aiqt_hooks._orch_guard_scope_report(str(_r9_fx.root))
+                _r9_res = aiqt_hooks.orch_resume_audit(_r9_fx.payload("SessionStart"))
+                _r9_msg = json.dumps(_r9_res[1]) if _r9_res[1] is not None else ""
+                _r9_b = _r8_bar(_r9_bar)
+                _r9_rows.append((_r9_rep[1], _verdict(_r9_res), _r9_b[0],
+                                 [f for f in _r9_b[1] or [] if "denied in every mode" in f] != [],
+                                 "the condition it names" in _r9_msg))
+        finally:
+            aiqt_hooks._orch_registry_walk = _r9_walk
+            if _r9_old is None:
+                os.environ.pop(_doc_env, None)
+            else:
+                os.environ[_doc_env] = _r9_old
+        check("doctor/resume-audit-walk-fail-arms-barrier-every-mode", tuple(_r9_rows),
+              ((True, "warn", True, True, True), (True, "warn", True, True, True)))
+        # ROUND 8, A MISSING GIT TOPLEVEL READS AS ABSENT (decided, not a fault): git names a toplevel that
+        # does not exist (core.worktree naming a removed directory). It holds no registry, so the union leg
+        # returns False and the scope is ('none', None): inert by default, and DENIED in registry-required
+        # mode with the absent-registry reason (fail-closed there), never the unopenable-toplevel reason.
+        _mt_top = aiqt_hooks._recovery_toplevel
+        _mt_old = os.environ.get(_doc_env)
+        try:
+            aiqt_hooks._recovery_toplevel = lambda _cwd: str(fcb / "no-such-toplevel")
+            _mt_probe = aiqt_hooks._orch_git_toplevel_has_registry(fcb_cwd)
+            _mt_scope = aiqt_hooks._orch_truncation_scope(fcb_cwd)
+            os.environ.pop(_doc_env, None)
+            _mt_plain = _verdict(aiqt_hooks.orch_truncation_guard(dict(
+                nocwd, cwd=fcb_cwd, tool_input=dict(command="printf ok"))))
+            os.environ[_doc_env] = "1"
+            _mt_res = aiqt_hooks.orch_truncation_guard(dict(
+                nocwd, cwd=fcb_cwd, tool_input=dict(command="printf ok")))
+            _mt_why = (_mt_res[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+        finally:
+            aiqt_hooks._recovery_toplevel = _mt_top
+            if _mt_old is None:
+                os.environ.pop(_doc_env, None)
+            else:
+                os.environ[_doc_env] = _mt_old
+        check("trunc/union-missing-toplevel-reads-absent-strict-denies",
+              (_mt_probe, _mt_scope, _mt_plain, _verdict(_mt_res),
+               "no .aiqt/orchestration.local.json or" in _mt_why, "could not be opened" in _mt_why),
+              (False, ("none", None), "allow", "deny", True, False))
+        # ROUND 12, WHERE THE RESUME AUDIT STAYS SILENT AND WHERE IT ARMS FOR A ROOT IT CANNOT ENTER: (a) where
+        # _orch_root returns None the audit returns before it reads the registry, silent in both modes,
+        # though the cwd's walk holds a registry (an unparsable one, so a read would warn), while the
+        # guard's scope check from that cwd finds it and allows a plain command. A session cwd that is
+        # missing, None, empty or not a string is just as silent and calls no git: for those calls the git
+        # seam counts its calls and hands back that registry's directory, so a branch that calls git for
+        # such a cwd (a fallback to the process cwd, for example) reads the registry and warns (red).
+        # (b) git resolves a core.worktree toplevel from the repository's git directory: one that exists
+        # without search permission (mode 0o000; a root run is not bound by it, so there the seam supplies
+        # the kernel's EACCES for an lstat under it, matched on the path as created and on its real path,
+        # since git prints the real path) and a regular file each fault the loader's lstat, so the audit
+        # warns in both modes (red when that fault reads as absent) and writes a barrier file this row reads
+        # back: active, its findings non-empty and each named in the warning (red when the barrier is
+        # written inactive or its write fails); one that does not exist reads as absent, so the audit stays
+        # silent and writes no barrier in both modes (red when the audit's absent return is dropped). The
+        # barrier is removed before each call, so one an earlier call wrote cannot satisfy the row.
+        # (c) Arming is best-effort: with XDG_STATE_HOME naming a regular file the barrier cannot be written,
+        # yet the audit for the regular-file toplevel still warns, naming every finding the writable run
+        # named, plus the forced-exit cannot-evaluate finding (opening the log under a state directory that
+        # is not a directory fails other than as not found), and no barrier file exists at that path (red
+        # when the write error propagates or the warning drops a finding). It also lists every path named
+        # resume-barrier* under this self-test's temporary tree (the fixtures and the hermetic default
+        # state root) before and after that run and requires none new (red when a failed write falls back
+        # to another location under that tree; a write outside it is not watched).
+        _r12_nr = tmp / "r12-noroot"
+        (_r12_nr / ".aiqt").mkdir(parents=True)
+        (_r12_nr / ".aiqt" / "orchestration.json").write_text("not json", encoding="utf-8")
+        _r12_wt = dict()
+        for _r12_kind in ("noenter", "file", "missing"):
+            _r12_repo = tmp / "r12-wt" / _r12_kind / "repo"
+            _r12_top = tmp / "r12-wt" / _r12_kind / "top"
+            subprocess.run(["git", "init", "-q", str(_r12_repo)], check=True, capture_output=True, timeout=30)
+            if _r12_kind == "noenter":
+                _r12_top.mkdir()
+            elif _r12_kind == "file":
+                _r12_top.write_text("x", encoding="utf-8")
+            subprocess.run(["git", "-C", str(_r12_repo), "config", "core.worktree", str(_r12_top)],
+                           check=True, capture_output=True, timeout=30)
+            _r12_wt[_r12_kind] = (str(_r12_repo / ".git"), str(_r12_top))
+        _r12_noenter = _r12_wt["noenter"][1]
+        _r12_noenter_under = tuple({_r12_noenter + os.sep, os.path.realpath(_r12_noenter) + os.sep})
+        _r12_xdg_file = tmp / "r12-xdg-file"
+        _r12_xdg_file.write_text("x", encoding="utf-8")
+        _r12_lstat = aiqt_hooks.os.lstat
+
+        def _r12_lstat_seam(path, *a, **k):
+            if isinstance(path, str) and path.startswith(_r12_noenter_under):
+                raise PermissionError(13, "Permission denied", path)
+            return _r12_lstat(path, *a, **k)
+
+        def _r12_barrier_path(root):
+            return os.path.join(aiqt_hooks._orch_state_dir_for_root(root), "resume-barrier.json")
+
+        def _r12_audit(cwd):
+            # (root resolved to the configured toplevel, verdict, warning text, barrier read back) for one
+            # SessionStart run with no barrier file beforehand.
+            root = aiqt_hooks._orch_root(dict(cwd=cwd))
+            if root is not None:
+                try:
+                    os.unlink(_r12_barrier_path(root))
+                except (FileNotFoundError, NotADirectoryError):
+                    pass
+            try:
+                res = aiqt_hooks.orch_resume_audit(dict(hook_event_name="SessionStart", cwd=cwd))
+            except OSError as exc:
+                return root, "raised " + type(exc).__name__, "", None
+            msg = (res[1] or {}).get("systemMessage", "")
+            if root is None:
+                return root, _verdict(res), msg, None
+            try:
+                with open(_r12_barrier_path(root), "r", encoding="utf-8") as fh:
+                    rec = json.load(fh)
+            except (FileNotFoundError, NotADirectoryError):
+                return root, _verdict(res), msg, None
+            except (OSError, ValueError) as exc:
+                return root, _verdict(res), msg, "unreadable " + type(exc).__name__
+            found = rec.get("findings") if isinstance(rec, dict) else None
+            return root, _verdict(res), msg, (
+                rec.get("active") if isinstance(rec, dict) else "not an object",
+                isinstance(found, list) and bool(found) and all(isinstance(f, str) and f in msg for f in found))
+
+        def _r12_barrier_names():
+            # every path named resume-barrier* under this self-test's temporary tree
+            return set(os.path.join(d, n) for d, dirs, files in os.walk(str(tmp))
+                       for n in dirs + files if n.startswith("resume-barrier"))
+
+        def _r12_findings(msg):
+            # the findings text of a resume-audit warning, or a marker no warning carries
+            head, sep, rest = msg.partition("observed reality: ")
+            return rest.partition(". Correct the record")[0] if sep and rest else "\x00no findings"
+        _r12_toplevel = aiqt_hooks._recovery_toplevel
+        _r12_old = os.environ.get(_doc_env)
+        _r12_xdg_old = os.environ.get("XDG_STATE_HOME")
+        _r12_none, _r12_wt_rows, _r12_unwritable = [], [], []
+        try:
+            os.chmod(_r12_noenter, 0o000)
+            if os.geteuid() == 0:
+                aiqt_hooks.os.lstat = _r12_lstat_seam
+            for _r12_val in (None, "1"):
+                if _r12_val is None:
+                    os.environ.pop(_doc_env, None)
+                else:
+                    os.environ[_doc_env] = _r12_val
+                aiqt_hooks._recovery_toplevel = lambda _cwd: None
+                _r12_entry = (
+                    aiqt_hooks._orch_root(dict(cwd=str(_r12_nr))),
+                    _verdict(aiqt_hooks.orch_resume_audit(dict(hook_event_name="SessionStart",
+                                                               cwd=str(_r12_nr)))),
+                    aiqt_hooks._orch_truncation_scope(str(_r12_nr)),
+                    _verdict(aiqt_hooks.orch_truncation_guard(dict(
+                        nocwd, cwd=str(_r12_nr), tool_input=dict(command="printf ok")))))
+                _r12_calls = []
+                aiqt_hooks._recovery_toplevel = lambda _cwd: _r12_calls.append(_cwd) or str(_r12_nr)
+                _r12_entry += (tuple(
+                    (aiqt_hooks._orch_root(_r12_ev), _verdict(aiqt_hooks.orch_resume_audit(_r12_ev)))
+                    for _r12_ev in (dict(hook_event_name="SessionStart"),
+                                    dict(hook_event_name="SessionStart", cwd=None),
+                                    dict(hook_event_name="SessionStart", cwd=""),
+                                    dict(hook_event_name="SessionStart", cwd=7),
+                                    dict(hook_event_name="SessionStart", cwd=[str(_r12_nr)]))),
+                    len(_r12_calls))
+                _r12_none.append(_r12_entry)
+                aiqt_hooks._recovery_toplevel = _r12_toplevel
+                _r12_row, _r12_msgs = [], dict()
+                for _r12_kind in ("noenter", "file", "missing"):
+                    _r12_cwd, _r12_top = _r12_wt[_r12_kind]
+                    _r12_root, _r12_v, _r12_msgs[_r12_kind], _r12_bar = _r12_audit(_r12_cwd)
+                    _r12_row.append((
+                        _r12_root is not None and os.path.realpath(_r12_root) == os.path.realpath(_r12_top),
+                        _r12_v, _r12_bar))
+                _r12_wt_rows.append(tuple(_r12_row))
+                os.environ["XDG_STATE_HOME"] = str(_r12_xdg_file)
+                try:
+                    _r12_cwd, _r12_top = _r12_wt["file"]
+                    _r12_seen = _r12_barrier_names()
+                    _r12_root, _r12_v, _r12_msg, _r12_bar = _r12_audit(_r12_cwd)
+                    _r12_unwritable.append((
+                        _r12_root is not None and os.path.realpath(_r12_root) == os.path.realpath(_r12_top),
+                        _r12_v, _r12_findings(_r12_msgs["file"]) in _r12_msg,
+                        "pending forced-exit.jsonl present but unreadable" in _r12_msg, _r12_bar,
+                        sorted(_r12_barrier_names() - _r12_seen)))
+                finally:
+                    if _r12_xdg_old is None:
+                        os.environ.pop("XDG_STATE_HOME", None)
+                    else:
+                        os.environ["XDG_STATE_HOME"] = _r12_xdg_old
+        finally:
+            aiqt_hooks._recovery_toplevel = _r12_toplevel
+            aiqt_hooks.os.lstat = _r12_lstat
+            os.chmod(_r12_noenter, 0o700)
+            if _r12_old is None:
+                os.environ.pop(_doc_env, None)
+            else:
+                os.environ[_doc_env] = _r12_old
+        check("resume-audit/no-root-silent-every-mode-with-registry-on-walk", tuple(_r12_none),
+              ((None, "allow", ("found", None), "allow", ((None, "allow"),) * 5, 0),) * 2)
+        check("resume-audit/core-worktree-toplevel-unenterable-arms-missing-silent", tuple(_r12_wt_rows),
+              (((True, "warn", (True, True)), (True, "warn", (True, True)), (True, "allow", None)),) * 2)
+        check("resume-audit/barrier-unwritable-still-warns-no-barrier-under-tmp", tuple(_r12_unwritable),
+              ((True, "warn", True, True, None, []),) * 2)
+        # ROUND 8, SEARCH PERMISSION DECIDES A .aiqt DIRECTORY'S PROBE (the documented attribute): mode
+        # 0o100 (search only, no read) confirms the registry inside it; 0o600 (read and write, no search)
+        # and 0o000 cannot be evaluated. A root run is not bound by these modes, so there the seam supplies
+        # the kernel's EACCES for a registry-name stat under a .aiqt lacking the owner search bit.
+        _sp_stat = aiqt_hooks.os.stat
+        _sp_dirs = {}
+        for _sp_mode in (0o100, 0o600, 0o000):
+            _sp_dir = tmp / "search-perm" / ("m%03o" % _sp_mode)
+            (_sp_dir / ".aiqt").mkdir(parents=True)
+            (_sp_dir / ".aiqt" / "orchestration.json").write_text("{}", encoding="utf-8")
+            _sp_dirs[_sp_mode] = _sp_dir
+
+        def _sp_stat_seam(path, *a, **k):
+            dfd = k.get("dir_fd")
+            if dfd is not None and path in _reg_names and not (_sp_stat(dfd).st_mode & 0o100):
+                raise PermissionError(13, "Permission denied", path)
+            return _sp_stat(path, *a, **k)
+        _sp_res = []
+        try:
+            for _sp_mode, _sp_dir in sorted(_sp_dirs.items(), reverse=True):
+                os.chmod(str(_sp_dir / ".aiqt"), _sp_mode)
+            if os.geteuid() == 0:
+                aiqt_hooks.os.stat = _sp_stat_seam
+            for _sp_mode in (0o100, 0o600, 0o000):
+                _sp_fd = os.open(str(_sp_dirs[_sp_mode]), aiqt_hooks._ORCH_O_WALK | os.O_DIRECTORY)
+                try:
+                    _sp_res.append(aiqt_hooks._orch_dirfd_has_registry(_sp_fd))
+                finally:
+                    os.close(_sp_fd)
+            # The O_RDONLY fallback (platforms without O_PATH) also needs READ permission to open .aiqt, so
+            # there the mode 0o100 .aiqt cannot be evaluated: forced here on any platform.
+            _sp_walk = aiqt_hooks._ORCH_O_WALK
+            aiqt_hooks._ORCH_O_WALK = os.O_RDONLY
+            try:
+                _sp_rd_fd = os.open(str(_sp_dirs[0o100]), os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    _sp_res.append(aiqt_hooks._orch_dirfd_has_registry(_sp_rd_fd))
+                finally:
+                    os.close(_sp_rd_fd)
+            finally:
+                aiqt_hooks._ORCH_O_WALK = _sp_walk
+        finally:
+            aiqt_hooks.os.stat = _sp_stat
+            for _sp_dir in _sp_dirs.values():
+                os.chmod(str(_sp_dir / ".aiqt"), 0o755)
+        # Mode 0o100 evaluates normally only under an O_PATH walk (or for root, whom no mode bit binds).
+        _sp_rdonly_100 = True if os.geteuid() == 0 else aiqt_hooks._ORCH_REG_CANNOT_EVALUATE
+        _sp_walk_100 = True if getattr(os, "O_PATH", None) == aiqt_hooks._ORCH_O_WALK else _sp_rdonly_100
+        check("trunc/aiqt-search-permission-decides-probe", tuple(_sp_res),
+              (_sp_walk_100, aiqt_hooks._ORCH_REG_CANNOT_EVALUATE, aiqt_hooks._ORCH_REG_CANNOT_EVALUATE,
+               _sp_rdonly_100))
+        saved_recheck_fc = aiqt_hooks._orch_walk_recheck
+        saved_realpath = aiqt_hooks.os.path.realpath
+        saved_open_fc = aiqt_hooks.os.open
+        saved_fstat_fc = aiqt_hooks.os.fstat
+        _fcb_parent = os.path.realpath(str(fcb / "cwd"))
+
+        def _realpath_fault(path, *a, **k):
+            raise OSError(40, "Too many levels of symbolic links", path)
+
+        def _open_fault(path, flags, *a, **k):
+            if path == _fcb_parent and k.get("dir_fd") is None:
+                raise PermissionError(13, "Permission denied", path)
+            return saved_open_fc(path, flags, *a, **k)
+
+        def _fstat_fault(fd):
+            raise PermissionError(13, "Permission denied")
+
+        def _recheck_under(attr, fake):
+            target = aiqt_hooks.os.path if attr == "realpath" else aiqt_hooks.os
+            saved = getattr(target, attr)
+
+            def _faulted(cwd, chain):
+                setattr(target, attr, fake)
+                try:
+                    return saved_recheck_fc(cwd, chain)
+                finally:
+                    setattr(target, attr, saved)
+            return _faulted
+        # The fault rows sit literally in the for header so the execution-set gate resolves each id.
+        for attr, fake, why, row in (("realpath", _realpath_fault,
+                                      "could not be re-resolved after the registry walk",
+                                      "trunc/walk-recheck-realpath-fault-denies"),
+                                     ("open", _open_fault, "recheck cannot re-resolve (PermissionError)",
+                                      "trunc/walk-recheck-open-fault-denies"),
+                                     ("fstat", _fstat_fault, "recheck cannot examine (PermissionError)",
+                                      "trunc/walk-recheck-fstat-fault-denies")):
+            try:
+                aiqt_hooks._orch_walk_recheck = _recheck_under(attr, fake)
+                cv, cw = _cwd_case(fcb_cwd)
+            finally:
+                aiqt_hooks._orch_walk_recheck = saved_recheck_fc
+                aiqt_hooks.os.path.realpath = saved_realpath
+                aiqt_hooks.os.open = saved_open_fc
+                aiqt_hooks.os.fstat = saved_fstat_fc
+            check(row, (cv, why in cw), ("deny", True))
+        # The walk's own fault branches, pinned the same way: an open fault on the cwd itself (after its
+        # stat and access checks pass) and an fstat fault on an opened ancestor each deny naming the walk
+        # step that failed, never reading the chain as registry-free.
+        _fcb_parent_ino = os.stat(_fcb_parent).st_ino
+
+        def _walk_open_fault(path, flags, *a, **k):
+            if path == fcb_cwd and k.get("dir_fd") is None:
+                raise PermissionError(13, "Permission denied", path)
+            return saved_open_fc(path, flags, *a, **k)
+
+        def _walk_fstat_fault(fd):
+            st = saved_fstat_fc(fd)
+            if st.st_ino == _fcb_parent_ino:
+                raise PermissionError(13, "Permission denied")
+            return st
+        for attr, fake, why, row in (("open", _walk_open_fault,
+                                      "could not be opened for the registry walk (PermissionError)",
+                                      "trunc/walk-cwd-open-fault-denies"),
+                                     ("fstat", _walk_fstat_fault,
+                                      "ancestor directory this walk cannot examine (PermissionError)",
+                                      "trunc/walk-ancestor-fstat-fault-denies")):
+            try:
+                setattr(aiqt_hooks.os, attr, fake)
+                cv, cw = _cwd_case(fcb_cwd)
+            finally:
+                aiqt_hooks.os.open = saved_open_fc
+                aiqt_hooks.os.fstat = saved_fstat_fc
+            check(row, (cv, why in cw), ("deny", True))
+        # The shared dispatcher fails closed on ANY exception while reading stdin: deeply nested JSON raises
+        # RecursionError and a read can raise MemoryError, which the old narrow except let escape as a
+        # traceback with exit 1 (non-blocking). A PreToolUse hook now exits 2 naming the exception; a Stop
+        # hook keeps its warn-and-exit-0 posture.
+        deep = "[" * 200000 + "]" * 200000
+        hook_py = str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts" / "aiqt_hooks.py")
+        dp = subprocess.run([sys.executable, "-I", "-B", hook_py, "orch_truncation_guard"], input=deep,
+                            capture_output=True, text=True, timeout=120)
+        check("trunc/dispatch-deep-json-fails-closed", (dp.returncode, "RecursionError" in dp.stderr),
+              (2, True))
+        ds = subprocess.run([sys.executable, "-I", "-B", hook_py, "orch_stop_guard"], input=deep,
+                            capture_output=True, text=True, timeout=120)
+        check("trunc/dispatch-deep-json-stop-warns", (ds.returncode, "RecursionError" in ds.stdout),
+              (0, True))
+
+        class _MemErrStdin:
+            def read(self, *_a):
+                raise MemoryError("simulated")
+        saved_in, saved_err = sys.stdin, sys.stderr
+        cap = __import__("io").StringIO()
+        try:
+            sys.stdin, sys.stderr = _MemErrStdin(), cap
+            try:
+                mrc = aiqt_hooks.main(["orch_truncation_guard"])
+            except MemoryError:
+                mrc = "escaped"
+        finally:
+            sys.stdin, sys.stderr = saved_in, saved_err
+        check("trunc/dispatch-memoryerror-fails-closed", (mrc, "MemoryError" in cap.getvalue()), (2, True))
 
         # ---------- component 3b: the untracked wait-loop guard (trkasy, deny) ----------
         w = Fixture(tmp, "waitloop")
@@ -1104,6 +4383,699 @@ def _main_isolated(report_path=None):
                   "PreToolUse", "Write", {"file_path": str(r.findings),
                                           "content": "x"}))), "allow")
 
+        # ROUND 14, ATOMIC BARRIER WRITE: an armed barrier is seeded and a json.dump seam writes the first
+        # ten characters of the barrier object, flushes, then raises ENOSPC. For an arming audit (a branch
+        # finding), a clearing audit (clean), the PreToolUse warned-flag write and a direct call of the
+        # helper the doctor uses, the seeded bytes must stay byte-identical and no temporary file may stay
+        # beside it, while the arming audit still warns and the PreToolUse call still surfaces (red when
+        # the barrier is opened for writing in place, as the truncated object then replaces the seed, or
+        # when the temporary file is left behind). A last run without the seam must replace the seeded
+        # barrier with a cleared one (red when the helper stops writing).
+        _r14_bar = rsd / "resume-barrier.json"
+        _r14_seed = json.dumps(dict(active=True, findings=["an earlier finding"], ts="seed", warned=False))
+        _r14_trunc = json.dumps(dict(active=True))[:10]
+        _r14_dump = json.dump
+
+        def _r14_partial_dump(obj, fh, *a, **k):
+            if isinstance(obj, dict) and "active" in obj and "warned" in obj:
+                fh.write(_r14_trunc)
+                fh.flush()
+                raise OSError(28, "No space left on device")
+            return _r14_dump(obj, fh, *a, **k)
+
+        def _r14_left():
+            # (seed unchanged, temporary files left beside the barrier)
+            return (_r14_bar.read_text(encoding="utf-8") == _r14_seed,
+                    sorted(n for n in os.listdir(str(rsd))
+                           if n.startswith("resume-barrier.json.") and n.endswith(".tmp")))
+
+        def _r14_msg(res):
+            if isinstance(res, tuple) and len(res) > 1 and isinstance(res[1], dict):
+                return res[1].get("systemMessage", "")
+            return ""
+        _r14_part = []
+        try:
+            for _r14_branch in ("feature/other", "main"):
+                r.handoff.write_text("Branch: " + _r14_branch + chr(10), encoding="utf-8")
+                _r14_bar.write_text(_r14_seed, encoding="utf-8")
+                json.dump = _r14_partial_dump
+                try:
+                    _r14_res = aiqt_hooks.orch_resume_audit(r.payload("SessionStart"))
+                finally:
+                    json.dump = _r14_dump
+                _r14_part.append((_verdict(_r14_res), "feature/other" in _r14_msg(_r14_res)) + _r14_left())
+            _r14_bar.write_text(_r14_seed, encoding="utf-8")
+            json.dump = _r14_partial_dump
+            try:
+                _r14_res = aiqt_hooks.orch_resume_barrier(r.payload(
+                    "PreToolUse", "Write", dict(file_path=str(r.root / "src.py"), content="x")))
+                try:
+                    aiqt_hooks._orch_barrier_write(str(_r14_bar), dict(active=False, findings=[], ts="x",
+                                                                       warned=False))
+                    _r14_raised = "returned"
+                except OSError as exc:
+                    _r14_raised = "raised errno " + str(exc.errno)
+            finally:
+                json.dump = _r14_dump
+            _r14_part.append((_verdict(_r14_res), "an earlier finding" in _r14_msg(_r14_res)) + _r14_left())
+            _r14_part.append((_r14_raised,) + _r14_left())
+            _r14_res = aiqt_hooks.orch_resume_audit(r.payload("SessionStart"))
+            _r14_part.append((_verdict(_r14_res), json.loads(_r14_bar.read_text(encoding="utf-8")).get("active"),
+                              _r14_left()[1]))
+        finally:
+            json.dump = _r14_dump
+            r.handoff.write_text("Branch: main" + chr(10), encoding="utf-8")
+        check("barrier/partial-write-leaves-previous-barrier-byte-identical", tuple(_r14_part),
+              (("warn", True, True, []), ("allow", False, True, []), ("warn", True, True, []),
+               ("raised errno 28", True, []), ("allow", False, [])))
+        # ROUND 14, A MALFORMED BARRIER READS ARMED: a barrier file that exists but is truncated, empty,
+        # not an object, carries a non-boolean active or a non-string finding, or is a directory (its open
+        # raises IsADirectoryError) surfaces a mutation outside the allowlist on every call, naming the file
+        # as unreadable, and leaves the file as it is, while a record write stays silent (red when it reads
+        # as absent or clear, or surfaces only once). ROUND 15 adds a missing findings key for both active
+        # values with and without warned (red when a missing findings reads as an empty list), a non-boolean
+        # warned (red when any truthy warned reads as already warned), a non-list findings string (red when
+        # the list check is dropped, as "abc" iterates as strings), an extra key and a non-string ts (red
+        # when the key set is not exact), and JSON nested past the recursion limit (red when its
+        # RecursionError escapes the handler, which fails the call closed); the directory note must say to
+        # remove the directory (red when it advises the audit, which cannot replace a directory). An absent
+        # barrier and a well-formed clear one, with or without its optional keys, stay silent (red when
+        # the shape check is stricter than documented), and a clean audit replaces a malformed barrier,
+        # after which the mutation is silent again (the recovery path).
+        _r14_src = dict(file_path=str(r.root / "src.py"), content="x")
+        _r14_mal = []
+        _r14_bodies = (_r14_trunc, "", "[]", json.dumps(dict(active="yes", findings=[])),
+                       json.dumps(dict(active=True, findings=[1])), json.dumps(dict(active=False)),
+                       json.dumps(dict(active=True)), json.dumps(dict(active=False, warned=True)),
+                       json.dumps(dict(active=True, warned=True)),
+                       json.dumps(dict(active=True, findings=[], warned="no")),
+                       json.dumps(dict(active=False, findings="abc")),
+                       json.dumps(dict(active=False, findings=[], extra=1)),
+                       json.dumps(dict(active=False, findings=[], ts=5)), "[" * 200000, None)
+        # ROUND 16: an exception escaping the handler (a RecursionError when the except is narrowed, for
+        # example) is recorded as that body's row by its type name, so one row fails instead of the
+        # exception aborting the suite and hiding the later rows.
+        for _r14_body in _r14_bodies:
+            if _r14_body is None:
+                _r14_bar.unlink()
+                _r14_bar.mkdir()
+            else:
+                _r14_bar.write_text(_r14_body, encoding="utf-8")
+            try:
+                _r14_first = aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))
+                _r14_again = aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))
+                _r14_rec = aiqt_hooks.orch_resume_barrier(r.payload(
+                    "PreToolUse", "Write", dict(file_path=str(r.findings), content="x")))
+            except Exception as exc:
+                _r14_mal.append(("raised " + type(exc).__name__,))
+            else:
+                _r14_m = _r14_msg(_r14_first)
+                _r14_mal.append((_verdict(_r14_first), _verdict(_r14_again), _verdict(_r14_rec),
+                                 str(_r14_bar) in _r14_m and "unreadable or malformed" in _r14_m
+                                 and (_r14_body is not None or "remove the directory" in _r14_m),
+                                 _r14_bar.is_dir() if _r14_body is None
+                                 else _r14_bar.read_text(encoding="utf-8") == _r14_body))
+            if _r14_body is None:
+                _r14_bar.rmdir()
+        _r14_absent = [_verdict(aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src)))]
+        for _r14_body in (dict(active=False, findings=[]), dict(active=False, findings=[], ts="t", warned=False)):
+            _r14_bar.write_text(json.dumps(_r14_body), encoding="utf-8")
+            _r14_res = aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))
+            _r14_absent.append((_verdict(_r14_res), _r14_msg(_r14_res)))
+        _r14_bar.write_text(_r14_trunc, encoding="utf-8")
+        _r14_recover = (_verdict(aiqt_hooks.orch_resume_audit(r.payload("SessionStart"))),
+                        _verdict(aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))))
+        check("barrier/malformed-reads-armed-every-call-clean-audit-clears",
+              (tuple(_r14_mal), tuple(_r14_absent), _r14_recover),
+              ((("warn", "warn", "allow", True, True),) * len(_r14_bodies),
+               ("allow", ("allow", ""), ("allow", "")), ("allow", "allow")))
+        # ROUND 15, A DIRECTORY AT THE BARRIER PATH: a clean audit cannot replace it (the rename raises
+        # IsADirectoryError and the audit swallows it), so it returns allow, the directory stays, and no
+        # temporary file is left beside it; the helper the doctor uses raises IsADirectoryError and leaves
+        # no temporary file (red when the unlink after a failed replace is dropped). Once the directory is
+        # removed, a clean audit writes a clear barrier and the mutation is silent.
+        _r15_dir = []
+
+        def _r15_tmps():
+            return sorted(n for n in os.listdir(str(rsd))
+                          if n.startswith("resume-barrier.json.") and n.endswith(".tmp"))
+        _r14_bar.unlink()
+        _r14_bar.mkdir()
+        try:
+            _r15_dir.append((_verdict(aiqt_hooks.orch_resume_audit(r.payload("SessionStart"))),
+                             _r14_bar.is_dir(), _r15_tmps()))
+            try:
+                aiqt_hooks._orch_barrier_write(str(_r14_bar), dict(active=False, findings=[], ts="x",
+                                                                   warned=False))
+                _r15_raised = "returned"
+            except OSError as exc:
+                _r15_raised = type(exc).__name__
+            _r15_dir.append((_r15_raised, _r14_bar.is_dir(), _r15_tmps()))
+        finally:
+            if _r14_bar.is_dir():
+                _r14_bar.rmdir()
+        _r15_dir.append((_verdict(aiqt_hooks.orch_resume_audit(r.payload("SessionStart"))),
+                         json.loads(_r14_bar.read_text(encoding="utf-8")).get("active"),
+                         _verdict(aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src)))))
+        check("barrier/directory-not-replaced-no-temp-left-removal-clears", tuple(_r15_dir),
+              (("allow", True, []), ("IsADirectoryError", True, []), ("allow", False, "allow")))
+        # ROUND 15, THE WRITER REMOVES ONLY ITS OWN TEMPORARY FILE: (a) an open seam whose context exit
+        # closes the real file and then raises EIO (a close error) must leave the seeded barrier
+        # byte-identical and no temporary file (red when the cleanup does not cover the with block's exit);
+        # (b) with os.urandom pinned so the temporary name is known, a file already at that name (not
+        # created by this call) makes the "x" open raise FileExistsError, and that file must keep its
+        # bytes (red when the helper unlinks a temporary name it did not create).
+        _r15_tmp = []
+        _r15_real_open = open
+
+        class _R15CloseFails:
+            def __init__(self, fh):
+                self.fh = fh
+
+            def __enter__(self):
+                return self.fh.__enter__()
+
+            def __exit__(self, *exc):
+                self.fh.__exit__(*exc)
+                raise OSError(5, "injected close EIO")
+
+        def _r15_open(path, *a, **k):
+            return _R15CloseFails(_r15_real_open(path, *a, **k))
+        _r14_bar.write_text(_r14_seed, encoding="utf-8")
+        aiqt_hooks.open = _r15_open
+        try:
+            try:
+                aiqt_hooks._orch_barrier_write(str(_r14_bar), dict(active=False, findings=[], ts="x",
+                                                                   warned=False))
+                _r15_raised = "returned"
+            except OSError as exc:
+                _r15_raised = "raised errno " + str(exc.errno)
+        finally:
+            del aiqt_hooks.open
+        _r15_tmp.append((_r15_raised,) + _r14_left())
+        _r15_urandom = os.urandom
+        _r15_foreign = Path("{}.{}.{}.tmp".format(_r14_bar, os.getpid(), "00" * 8))
+        _r15_foreign.write_text("foreign", encoding="utf-8")
+        os.urandom = lambda n: bytes(n)
+        try:
+            try:
+                aiqt_hooks._orch_barrier_write(str(_r14_bar), dict(active=False, findings=[], ts="x",
+                                                                   warned=False))
+                _r15_raised = "returned"
+            except OSError as exc:
+                _r15_raised = type(exc).__name__
+        finally:
+            os.urandom = _r15_urandom
+        _r15_tmp.append((_r15_raised, _r14_bar.read_text(encoding="utf-8") == _r14_seed,
+                         _r15_foreign.is_file() and _r15_foreign.read_text(encoding="utf-8") == "foreign"))
+        if _r15_foreign.is_file():
+            _r15_foreign.unlink()
+        _r15_tmp.append(_r14_left()[1])
+        check("barrier/close-error-removes-own-temp-never-foreign-temp", tuple(_r15_tmp),
+              (("raised errno 5", True, []), ("FileExistsError", True, True), []))
+        # ROUND 15, A STATE DIRECTORY PATH THROUGH A REGULAR FILE: with the state directory resolved under
+        # a regular file, the barrier's open raises NotADirectoryError, which reads as an absent barrier:
+        # the mutation is silent with no note (red when NotADirectoryError reads as armed).
+        _r15_file = rsd / "r15-not-a-directory"
+        _r15_file.write_text("x", encoding="utf-8")
+        _r15_sd = aiqt_hooks._orch_state_dir_for_root
+        aiqt_hooks._orch_state_dir_for_root = lambda root: os.path.join(str(_r15_file), "state")
+        try:
+            _r15_res = aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))
+        finally:
+            aiqt_hooks._orch_state_dir_for_root = _r15_sd
+            _r15_file.unlink()
+        check("barrier/state-dir-not-a-directory-reads-absent", (_verdict(_r15_res), _r14_msg(_r15_res)),
+              ("allow", ""))
+        # ROUND 16, THE BARRIER READ NEVER WAITS ON A FIFO OR READS PAST ITS BOUND: a FIFO with no writer
+        # at the barrier path, a symlink to such a FIFO, a symlink to /dev/zero, a regular file one byte
+        # over the bound (a clear barrier padded with spaces) and a symlink to a directory each read as
+        # armed: a mutation outside the allowlist surfaces the note naming the file and the reason, never
+        # the remove-the-directory note, and a repair write in the state directory is allowed with no
+        # note. ROUND 17: every row runs the COMPLETE handler, both the outside and the repair call, and
+        # computes its assertions inside a child capped at its own size plus 64 MiB (RLIMIT_AS) with a
+        # 30-second timeout; this process only creates the file and parses the child's one JSON line, so a
+        # handler that bypasses the reader (the round-15 shape, which opens and reads the barrier itself)
+        # fails its row in the child (a timeout on the FIFO rows, a MemoryError on /dev/zero) and never
+        # reads the file in this process. On 36d79720 (round 14, where _orch_barrier_read does not exist)
+        # the check is red: both FIFO rows time out in the child, the /dev/zero and directory rows warn
+        # without the not-a-regular-file reason, and the padded file reads as clear.
+        _r16_hooks = os.path.dirname(os.path.abspath(aiqt_hooks.__file__))
+        _r16_tools = os.path.dirname(os.path.abspath(__file__))
+        _r16_child_src = (
+            "import json, os, resource, sys\n"
+            "sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[2])\n"
+            "import aiqt_hooks, selftest_orch_hooks as t\n"
+            "vm = int(open('/proc/self/statm').read().split()[0]) * os.sysconf('SC_PAGE_SIZE')\n"
+            "hard = resource.getrlimit(resource.RLIMIT_AS)[1]\n"
+            "soft = vm + (64 << 20) if hard == resource.RLIM_INFINITY else min(vm + (64 << 20), hard)\n"
+            "resource.setrlimit(resource.RLIMIT_AS, (soft, hard))\n"
+            "bar, reason = sys.argv[3], sys.argv[4]\n"
+            "def note(res):\n"
+            "    return res[1].get('systemMessage', '') if isinstance(res[1], dict) else ''\n"
+            "res = aiqt_hooks.orch_resume_barrier(json.loads(sys.argv[5]))\n"
+            "row = [t._verdict(res), bar in note(res) and reason in note(res)\n"
+            "       and 'remove the directory' not in note(res)]\n"
+            "res = aiqt_hooks.orch_resume_barrier(json.loads(sys.argv[6]))\n"
+            "print(json.dumps(row + [[t._verdict(res), note(res)]]))\n")
+
+        def _r16_child(reason):
+            calls = [json.dumps(r.payload("PreToolUse", "Write", dict(file_path=fp, content="x")))
+                     for fp in (str(r.root / "src.py"), str(rsd / "r16-repair.json"))]
+            try:
+                p = subprocess.run([sys.executable, "-I", "-B", "-c", _r16_child_src, _r16_hooks, _r16_tools,
+                                    str(_r14_bar), reason] + calls, capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired:
+                return ("child timed out", False, ("child timed out", ""))
+            try:
+                verdict, ok, fix = json.loads(p.stdout)
+                return (verdict, ok, tuple(fix))
+            except (ValueError, TypeError):
+                return ("child exit {}: {}".format(p.returncode, p.stderr.strip()[-200:]), False, ("", ""))
+        _r16_target = rsd / "r16-target"
+        _r16_bound = getattr(aiqt_hooks, "_ORCH_BARRIER_MAX_BYTES", 64 * 1024)  # a base without it still runs
+        _r16_pad = json.dumps(dict(active=False, findings=[])) + " " * _r16_bound
+        _r16_cases = (
+            ("fifo", lambda: os.mkfifo(str(_r14_bar)), "(not a regular file)"),
+            ("symlink-to-fifo", lambda: (os.mkfifo(str(_r16_target)), _r14_bar.symlink_to(_r16_target)),
+             "(not a regular file)"),
+            ("symlink-to-dev-zero", lambda: _r14_bar.symlink_to("/dev/zero"), "(not a regular file)"),
+            ("oversized", lambda: _r14_bar.write_text(_r16_pad, encoding="utf-8"),
+             "(larger than the {}-byte bound)".format(_r16_bound)),
+            ("symlink-to-directory", lambda: (_r16_target.mkdir(), _r14_bar.symlink_to(_r16_target)),
+             "(not a regular file)"))
+        _r16_rows = []
+        for _r16_name, _r16_make, _r16_reason in _r16_cases:
+            if os.path.lexists(str(_r14_bar)):
+                os.unlink(str(_r14_bar))
+            _r16_make()
+            try:
+                _r16_rows.append((_r16_name,) + _r16_child(_r16_reason))
+            finally:
+                os.unlink(str(_r14_bar))
+                if _r16_target.is_dir() and not _r16_target.is_symlink():
+                    _r16_target.rmdir()
+                elif os.path.lexists(str(_r16_target)):
+                    os.unlink(str(_r16_target))
+        check("barrier/non-regular-or-oversized-reads-armed-promptly-repair-allowed", tuple(_r16_rows),
+              tuple((n, "warn", True, ("allow", "")) for n, _m, _s in _r16_cases))
+        # A symlink to a regular armed barrier reads as that barrier: the first mutation surfaces its
+        # findings, and the warned-flag write replaces the link with a regular file and leaves the target's
+        # bytes unchanged. This row passes on the round-15 base as well: it pins the kept symlink policy and
+        # does not discriminate any round-16 or round-17 change.
+        _r16_armed = json.dumps(dict(active=True, findings=["r16 finding"], warned=False))
+        _r16_target.write_text(_r16_armed, encoding="utf-8")
+        _r14_bar.symlink_to(_r16_target)
+        try:
+            _r16_out = aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))
+            _r16_link = (_verdict(_r16_out), "r16 finding" in _r14_msg(_r16_out), _r14_bar.is_symlink(),
+                         _r14_bar.is_file() and json.loads(_r14_bar.read_text(encoding="utf-8")).get("warned"),
+                         _r16_target.read_text(encoding="utf-8") == _r16_armed)
+        finally:
+            os.unlink(str(_r14_bar))
+            os.unlink(str(_r16_target))
+        check("barrier/symlink-to-regular-reads-as-target-warned-write-replaces-link", _r16_link,
+              ("warn", True, False, True, True))
+        # ROUND 17, A CLOSE ERROR STAYS A READER RESULT: with os.close wrapped so that closing the
+        # barrier's own descriptor really closes it and then raises EIO, an outside write and a repair write
+        # run through the dispatcher (aiqt_hooks.main) exit 0: the outside write warns, naming the file and
+        # OSError, and the repair write is allowed with no output (red when the close error escapes the
+        # reader, where the dispatcher fails the PreToolUse call closed with exit 2).
+        import contextlib as _r17_ctx
+        import errno as _r17_errno
+        import io as _r17_io
+        _r14_bar.write_text(_r14_seed, encoding="utf-8")
+        _r17_st = os.stat(str(_r14_bar))
+        _r17_real_close = os.close
+
+        def _r17_close(fd):
+            try:
+                st = os.fstat(fd)
+            except OSError:
+                st = None
+            _r17_real_close(fd)
+            if st is not None and (st.st_dev, st.st_ino) == (_r17_st.st_dev, _r17_st.st_ino):
+                raise OSError(_r17_errno.EIO, "injected close EIO")
+
+        def _r17_main(file_path):
+            out, err, stdin = _r17_io.StringIO(), _r17_io.StringIO(), sys.stdin
+            sys.stdin = _r17_io.StringIO(json.dumps(r.payload(
+                "PreToolUse", "Write", dict(file_path=file_path, content="x"))))
+            os.close = _r17_close
+            try:
+                with _r17_ctx.redirect_stdout(out), _r17_ctx.redirect_stderr(err):
+                    code = aiqt_hooks.main(["orch_resume_barrier"])
+            finally:
+                os.close = _r17_real_close
+                sys.stdin = stdin
+            note = json.loads(out.getvalue()).get("systemMessage", "") if out.getvalue().strip() else ""
+            return (code, bool(note), str(_r14_bar) in note and "(OSError)" in note, err.getvalue())
+        check("barrier/close-error-is-a-reader-result-never-exit-2",
+              (_r17_main(str(r.root / "src.py")), _r17_main(str(rsd / "r17-repair.json")),
+               _r14_bar.read_text(encoding="utf-8") == _r14_seed),
+              ((0, True, True, ""), (0, False, False, ""), True))
+        # ROUND 17, A DIRECTORY IS NAMED ONLY WHERE THE LSTAT MATCHES WHAT WAS OPENED: given the fstat of
+        # what the reader opened, _orch_barrier_nonregular names a directory only where the lstat of the
+        # path has the same st_dev and st_ino (red when it trusts the lstat alone, or takes no fstat).
+        _r17_da, _r17_db = rsd / "r17-dir-a", rsd / "r17-dir-b"
+        _r17_da.mkdir()
+        _r17_db.mkdir()
+        try:
+            _r17_dir = tuple(aiqt_hooks._orch_barrier_nonregular(str(_r17_da), *st) for st in (
+                (os.stat(str(_r17_da)),), (os.stat(str(_r17_db)),), ()))
+        except (TypeError, AttributeError) as exc:
+            _r17_dir = "raised " + type(exc).__name__
+        finally:
+            _r17_da.rmdir()
+            _r17_db.rmdir()
+        check("barrier/directory-named-only-where-lstat-matches-opened", _r17_dir,
+              ("not a regular file: a directory", "not a regular file", "not a regular file: a directory"))
+        # ROUND 17, A WRITTEN BARRIER ALWAYS FITS THE READER'S BOUND: 400 findings of about 230 bytes (the
+        # 92458-byte shape a forced-exit log produced) are stored as their first findings plus one line
+        # counting the rest, within the bound; the file reads ok, well-formed and armed; the first mutation
+        # surfaces the first finding and records warned, so the next mutation is silent; a single
+        # 100000-character finding is stored cut to 4000 characters; and an object whose other keys alone
+        # exceed the bound raises ValueError and leaves the previous barrier byte-identical (red when the
+        # writer stores the full list, which reads back as larger than the bound).
+        _r17_many = ["forced exit {:04d}: {}".format(i, "x" * 210) for i in range(400)]
+        _r17_rows = []
+        aiqt_hooks._orch_barrier_write(str(_r14_bar), dict(active=True, findings=_r17_many, ts="r17",
+                                                           warned=False))
+        _r17_raw = _r14_bar.read_bytes()  # a regular file this check just wrote
+        _r17_bar = json.loads(_r17_raw.decode("utf-8"))
+        _r17_kept = _r17_bar["findings"][:-1]
+        _r17_rows.append((len(_r17_raw) <= _r16_bound, aiqt_hooks._orch_barrier_well_formed(_r17_bar)
+                          and _r17_bar["active"], 0 < len(_r17_kept) < 400,
+                          _r17_kept == _r17_many[:len(_r17_kept)],
+                          _r17_bar["findings"][-1].startswith(
+                              "{} more finding(s) not stored".format(400 - len(_r17_kept)))))
+        _r17_first = aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))
+        _r17_again = aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))
+        _r17_rows.append((_verdict(_r17_first), "forced exit 0000" in _r14_msg(_r17_first),
+                          json.loads(_r14_bar.read_text(encoding="utf-8")).get("warned"), _verdict(_r17_again)))
+        _r17_big = "y" * 100000
+        aiqt_hooks._orch_barrier_write(str(_r14_bar), dict(active=True, findings=[_r17_big], warned=False))
+        _r17_rows.append(json.loads(_r14_bar.read_text(encoding="utf-8")).get("findings")
+                         == [_r17_big[:4000] + " (cut)"])
+        _r14_bar.write_text(_r14_seed, encoding="utf-8")
+        try:
+            aiqt_hooks._orch_barrier_write(str(_r14_bar), dict(active=True, findings=[], ts="z" * 70000))
+            _r17_raised = "returned"
+        except ValueError as exc:
+            _r17_raised = type(exc).__name__
+        _r17_rows.append((_r17_raised,) + _r14_left())
+        _r14_bar.unlink()
+        check("barrier/written-barrier-fits-bound-first-findings-plus-count", tuple(_r17_rows),
+              ((True, True, True, True, True), ("warn", True, True, "allow"), True,
+               ("ValueError", True, [])))
+        # ROUND 18, A RE-FIT CARRIES THE STORED COUNT FORWARD: the 400-finding barrier above, stored as its
+        # first findings plus a count line, is written again with a "ts" large enough that it no longer
+        # fits; the new count line counts every finding not stored (400 less the findings kept), never the
+        # old count line as one finding (red when the re-fit keeps the old line as a finding to count).
+        aiqt_hooks._orch_barrier_write(str(_r14_bar), dict(active=True, findings=_r17_many, warned=False))
+        _r18_once = json.loads(_r14_bar.read_text(encoding="utf-8"))
+        aiqt_hooks._orch_barrier_write(str(_r14_bar), dict(_r18_once, ts="t" * 20000))
+        _r18_raw = _r14_bar.read_bytes()  # a regular file this check just wrote
+        _r18_twice = json.loads(_r18_raw.decode("utf-8"))
+        _r18_kept = _r18_twice["findings"][:-1]
+        check("barrier/refit-carries-stored-count-forward",
+              (len(_r18_raw) <= _r16_bound, 0 < len(_r18_kept) < len(_r18_once["findings"]) - 1,
+               _r18_kept == _r17_many[:len(_r18_kept)],
+               _r18_twice["findings"][-1].startswith(
+                   "{} more finding(s) not stored here (".format(400 - len(_r18_kept)))),
+              (True, True, True, True))
+        _r14_bar.unlink()
+        # ROUND 18, THE READER COMPARES THE LSTAT WITH WHAT IT OPENED: a directory at the barrier path is
+        # renamed away right after the reader's os.open of it and a new directory made at the path (the
+        # same device, another inode), so the reader's fstat and its lstat disagree; _orch_barrier_read
+        # names it "not a regular file" and the handler gives the generic note, never the
+        # remove-the-directory note. Without the swap the same directory is named a directory and gets
+        # that note. Red when the reader calls _orch_barrier_nonregular(path) without its fstat. The swap
+        # stays on one filesystem, so this vector exercises only the inode half of the reader's
+        # (st_dev, st_ino) comparison; the next vector tests the device half with a faked fstat result.
+        _r18_real_open = os.open
+        _r18_moved = rsd / "r18-dir-moved"
+
+        def _r18_swap_open(path, *a, **k):
+            fd = _r18_real_open(path, *a, **k)
+            if path == str(_r14_bar) and not os.path.lexists(str(_r18_moved)):
+                os.rename(str(_r14_bar), str(_r18_moved))
+                os.mkdir(str(_r14_bar))
+            return fd
+
+        def _r18_dir_row(swap):
+            _r14_bar.mkdir()
+            os.open = _r18_swap_open if swap else _r18_real_open
+            try:
+                read = aiqt_hooks._orch_barrier_read(str(_r14_bar))
+                pair = None
+                if swap:
+                    a_st, b_st = os.lstat(str(_r18_moved)), os.lstat(str(_r14_bar))
+                    pair = (a_st.st_dev == b_st.st_dev, a_st.st_ino != b_st.st_ino)
+            finally:
+                os.open = _r18_real_open
+                for d in (_r18_moved, _r14_bar):
+                    if d.is_dir():
+                        d.rmdir()
+            _r14_bar.mkdir()
+            os.open = _r18_swap_open if swap else _r18_real_open
+            try:
+                note = _r14_msg(aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src)))
+            finally:
+                os.open = _r18_real_open
+                for d in (_r18_moved, _r14_bar):
+                    if d.is_dir():
+                        d.rmdir()
+            return (pair, read, "(not a regular file)" in note, "remove the directory" in note)
+        check("barrier/reader-names-directory-only-where-lstat-matches-its-fstat",
+              (_r18_dir_row(True), _r18_dir_row(False)),
+              (((True, True), ("bad", "not a regular file"), True, False),
+               (None, ("bad", "not a regular file: a directory"), False, True)))
+        # ROUND 20, THE DEVICE HALF OF THAT COMPARISON: _orch_barrier_nonregular is handed a directory's
+        # own lstat result as the opened file (named a directory), then the same inode on another device
+        # and the same device with another inode (both "not a regular file"), and no opened result
+        # (named a directory). A fake stands in for the fstat of a second filesystem, which a self-test
+        # cannot mount. Red when the comparison drops st_dev or st_ino.
+        _r14_bar.mkdir()
+        try:
+            _r20_st = os.lstat(str(_r14_bar))
+            import types as _r20_types
+            _r20_fake = _r20_types.SimpleNamespace
+            _r20_names = tuple(aiqt_hooks._orch_barrier_nonregular(str(_r14_bar), o) for o in (
+                _r20_st, _r20_fake(st_dev=_r20_st.st_dev + 1, st_ino=_r20_st.st_ino),
+                _r20_fake(st_dev=_r20_st.st_dev, st_ino=_r20_st.st_ino + 1), None))
+        finally:
+            _r14_bar.rmdir()
+        check("barrier/nonregular-names-directory-only-where-device-and-inode-match", _r20_names,
+              ("not a regular file: a directory", "not a regular file", "not a regular file",
+               "not a regular file: a directory"))
+        # ROUND 18, THE DESCRIPTOR IS CLOSED EXACTLY ONCE AND AN EARLIER BAD RESULT WINS: with os.close
+        # wrapped so that closing the barrier's descriptor really closes it, is counted, and then raises
+        # EIO, a regular barrier reads ('bad', 'OSError'), and a directory and a FIFO at the barrier path
+        # read as their not-a-regular-file result, never the close error; each row closes the barrier's
+        # descriptor exactly once (red when the reader retries the close after an error, or lets the close
+        # error override an earlier bad result).
+        _r18_fds, _r18_calls = [], []
+        _r18_real_close = os.close
+
+        def _r18_open(path, *a, **k):
+            fd = _r18_real_open(path, *a, **k)
+            if path == str(_r14_bar):
+                _r18_fds.append(fd)
+            return fd
+
+        def _r18_close(fd):
+            if fd not in _r18_fds:
+                return _r18_real_close(fd)
+            _r18_calls.append(fd)
+            _r18_real_close(fd)
+            raise OSError(_r17_errno.EIO, "injected close EIO")
+
+        def _r18_close_row(make):
+            make()
+            del _r18_fds[:], _r18_calls[:]
+            os.open, os.close = _r18_open, _r18_close
+            try:
+                try:
+                    res = aiqt_hooks._orch_barrier_read(str(_r14_bar))
+                except Exception as exc:
+                    res = "raised " + type(exc).__name__
+            finally:
+                os.open, os.close = _r18_real_open, _r18_real_close
+                if _r14_bar.is_dir() and not _r14_bar.is_symlink():
+                    _r14_bar.rmdir()
+                else:
+                    os.unlink(str(_r14_bar))
+            return (res, len(_r18_fds), len(_r18_calls))
+        check("barrier/close-once-never-retried-earlier-bad-result-wins",
+              (_r18_close_row(lambda: _r14_bar.write_text(_r14_seed, encoding="utf-8")),
+               _r18_close_row(_r14_bar.mkdir), _r18_close_row(lambda: os.mkfifo(str(_r14_bar)))),
+              ((("bad", "OSError"), 1, 1), (("bad", "not a regular file: a directory"), 1, 1),
+               (("bad", "not a regular file"), 1, 1)))
+        # ROUND 18, THE OMITTED-FINDINGS LINE POINTS AT EVIDENCE THAT SURVIVES: a fixture with 400
+        # forced-exit records (each a finding of about 200 bytes) and a handoff naming another branch. The
+        # SessionStart audit stores the first findings plus a count line; the doctor's --resume-audit then
+        # no longer lists any omitted forced-exit finding (each is raised once), so the line must not send
+        # the operator there for them. The line names the forced-exit log by its path, and that file holds
+        # every one of the 400 records in full, the omitted ones included; the doctor prints the recurring
+        # handoff finding again, as the line says. Red when the line only says to run the doctor.
+        import re as _r18_re
+        _r18_fx = Fixture(tmp, "r18-omitted")
+        _r18_fx.handoff.write_text("Branch: r18-other-branch\n", encoding="utf-8")
+        _r18_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_r18_fx.root)))
+        _r18_rows = [dict(key="r18-key-{:04d}".format(i), ts="r18-ts-{:04d}".format(i),
+                          open_ids=["R18-{:04d}-{}".format(i, j) + "x" * 24 for j in range(3)])
+                     for i in range(400)]
+        for _r18_row in _r18_rows:
+            aiqt_hooks._orch_append_jsonl(str(_r18_sd / "forced-exit.jsonl"), _r18_row)
+        _r18_old_env = os.environ.pop(_doc_env, None)
+        try:
+            _r18_ss = aiqt_hooks.orch_resume_audit(_r18_fx.payload("SessionStart"))
+            _r18_bar = json.loads((_r18_sd / "resume-barrier.json").read_text(encoding="utf-8"))
+            _doc.repo_root = lambda: Path(_r18_fx.root)
+            _r18_out, _r18_argv = io.StringIO(), sys.argv
+            sys.argv = [_r18_argv[0], "--resume-audit"]
+            try:
+                with contextlib.redirect_stdout(_r18_out):
+                    _r18_dcode = _doc.main()
+            finally:
+                sys.argv = _r18_argv
+                _doc.repo_root = _doc_root
+        finally:
+            if _r18_old_env is not None:
+                os.environ[_doc_env] = _r18_old_env
+        _r18_line = _r18_bar["findings"][-1]
+        _r18_stored = [f for f in _r18_bar["findings"][:-1] if "forced_unresolved at r18-ts-" in f]
+        _r18_omitted = _r18_rows[len(_r18_stored):]
+        _r18_m = _r18_re.search(r"read every forced-exit record in full in (.+?) \(an ignored", _r18_line)
+        _r18_named = _r18_m.group(1) if _r18_m else None
+        _r18_log, _r18_logbad = (aiqt_hooks._orch_read_jsonl(_r18_named) if _r18_named else (None, 0))
+        _r18_doc_out = _r18_out.getvalue()
+        check("barrier/omitted-findings-line-names-surviving-forced-exit-log",
+              (_verdict(_r18_ss), 0 < len(_r18_stored) < 400,
+               _r18_line.startswith("{} more finding(s) not stored here (".format(len(_r18_omitted))),
+               _r18_dcode, any(row["ts"] in _r18_doc_out for row in _r18_omitted),
+               "handoff names branch r18-other-branch" in _r18_doc_out,
+               _r18_named == str(_r18_sd / "forced-exit.jsonl"),
+               _r18_log == _r18_rows and all(row in _r18_log for row in _r18_omitted),
+               # the named log must parse whole: a malformed row is a failure, never a silent skip
+               _r18_logbad,
+               "tools/orch_doctor.py --resume-audit" in _r18_line and "to list them all" not in _r18_line),
+              ("warn", True, True, 1, False, True, True, True, 0, True))
+        # ROUND 19, THE OMITTED-FINDINGS LINE NAMES THE LASTING ESCAPE RECORD: the count line a barrier
+        # too large to store gets (_orch_barrier_fit) is read for the files it names, and each one is read
+        # back. Two ignored escape sentinels in a row (T1, then T2) are each recorded, raised by the resume
+        # probe and renamed to escape-spoof.json.surfaced: the guard-events.jsonl the line names holds an
+        # escape-spoof row for T1 and for T2, and the .surfaced file it names holds T2, never T1 (the line
+        # says it holds only the latest sentinel whose rename succeeded). The line says a forced-exit
+        # finding is normally raised once, at least once if recording it fails, never "only once", and
+        # that the guard-events row is the record only where it was written, a row that could not be
+        # written having been warned about. Red when the line names .surfaced as keeping the escape
+        # records, names a file the hook does not write, or drops the warned-about qualification.
+        _r19_fx = Fixture(tmp, "r19-escape")
+        _r19_root = str(_r19_fx.root)
+        _r19_sd = Path(aiqt_hooks._orch_state_dir_for_root(_r19_root))
+        _r19_line = aiqt_hooks._orch_barrier_fit(
+            dict(active=True, findings=["r19 " + "z" * 3000] * 40, warned=False), str(_r19_sd))["findings"][-1]
+
+        def _r19_named(pattern):
+            m = _r18_re.search(pattern, _r19_line)
+            return m.group(1) if m else None
+        _r19_events = _r19_named(
+            r"its row of kind escape-spoof in (.+?) where that row was written, and a row")
+        _r19_warned = ("where that row was written, and a row that could not be written was warned about "
+                       "when the sentinel was ignored, with a request to record it manually;") in _r19_line
+        _r19_kept = _r19_named(
+            r"record it manually; (.+?) holds only the latest sentinel whose rename succeeded")
+        _r19_left = _r19_named(r"a failed rename leaves it at (.+?), where the next audit raises it again")
+
+        def _r19_detail(path):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    return json.load(fh).get("detail")
+            except (TypeError, OSError, ValueError):
+                return None
+
+        def _r19_spoofs():
+            rows = aiqt_hooks._orch_read_jsonl(_r19_events)[0] if _r19_events else None
+            return [row.get("detail") for row in rows or [] if row.get("kind") == "escape-spoof"]
+
+        def _r19_raise(detail):
+            warn = aiqt_hooks._orch_record_escape_spoof(_r19_root, detail)
+            return (warn, any(detail in f for f in aiqt_hooks._orch_pending_artefact_findings(_r19_root)))
+        check("barrier/omitted-findings-line-escape-record-survives-two-sentinels",
+              (aiqt_hooks._ORCH_BARRIER_REST_RE.match(_r19_line) is not None, _r19_raise("r19-T1"),
+               _r19_raise("r19-T2"), _r19_events == str(_r19_sd / "guard-events.jsonl"), _r19_spoofs(),
+               _r19_kept == str(_r19_sd / "escape-spoof.json.surfaced"), _r19_detail(_r19_kept),
+               "normally raised once (at least once if recording that it was raised fails)" in _r19_line,
+               "raised only once" in _r19_line or "is kept in" in _r19_line, _r19_warned),
+              (True, ("", True), ("", True), True, ["r19-T1", "r19-T2"], True, "r19-T2", True, False, True))
+        # ROUND 19, A FAILED RENAME LEAVES THE SENTINEL WHERE THE LINE SAYS: with escape-spoof.json.surfaced
+        # a directory, a third sentinel (T3) is recorded and raised but its rename fails; the .surfaced
+        # path the line names is that directory (it holds no sentinel), the escape-spoof.json the line names
+        # still holds T3, the next probe raises T3 again, and the guard-events.jsonl the line names holds
+        # T1, T2 and T3 (red when the line names another file for the sentinel a failed rename leaves).
+        # The probe's rename target is checked by the vector above; here it is replaced by a directory
+        # whatever that vector found, so a mutant that never renames still reaches this check by name.
+        _r19_surf = _r19_sd / "escape-spoof.json.surfaced"
+        if os.path.lexists(str(_r19_surf)) and not _r19_surf.is_dir():
+            _r19_surf.unlink()
+        if not _r19_surf.is_dir():
+            _r19_surf.mkdir()
+        check("barrier/omitted-findings-line-escape-record-failed-rename",
+              (_r19_raise("r19-T3"), bool(_r19_kept) and os.path.isdir(_r19_kept),
+               _r19_left == str(_r19_sd / "escape-spoof.json"), _r19_detail(_r19_left),
+               any("r19-T3" in f for f in aiqt_hooks._orch_pending_artefact_findings(_r19_root)),
+               _r19_spoofs()),
+              (("", True), True, True, "r19-T3", True, ["r19-T1", "r19-T2", "r19-T3"]))
+        if _r19_surf.is_dir():
+            _r19_surf.rmdir()
+        # ROUND 20, A FAILED GUARD-EVENTS APPEND IS WARNED ABOUT AND LEAVES NO ROW: in a fresh state
+        # directory, guard-events.jsonl is a directory while sentinel T1 is recorded and raised, then the
+        # directory is removed and T2 is recorded and raised. T1's recorder returns the warning naming
+        # guard-events FAILED and escape-spoof.json ok and asking for a manual record; T2's returns "".
+        # The guard-events.jsonl the line names then holds T2 only, and the .surfaced file holds T2: no
+        # lasting record of T1 exists, which is what the line and ORCHESTRATION.md say ("where that row
+        # was written"). Red when the recorder warns only on a failed escape-spoof.json write.
+        _r20_fx = Fixture(tmp, "r20-escape")
+        _r20_root = str(_r20_fx.root)
+        _r20_sd = Path(aiqt_hooks._orch_state_dir_for_root(_r20_root))
+        _r20_ge = _r20_sd / "guard-events.jsonl"
+        if os.path.lexists(str(_r20_ge)) and not _r20_ge.is_dir():
+            _r20_ge.unlink()
+        _r20_ge.mkdir(parents=True, exist_ok=True)
+
+        def _r20_raise(detail):
+            warn = aiqt_hooks._orch_record_escape_spoof(_r20_root, detail)
+            return (warn, [f for f in aiqt_hooks._orch_pending_artefact_findings(_r20_root) if "r20-" in f])
+
+        def _r20_spoofs():
+            rows = aiqt_hooks._orch_read_jsonl(str(_r20_ge))[0] if _r20_ge.is_file() else None
+            return [row.get("detail") for row in rows or [] if row.get("kind") == "escape-spoof"]
+        _r20_t1 = _r20_raise("r20-T1")
+        if _r20_ge.is_dir():
+            _r20_ge.rmdir()
+        _r20_t2 = _r20_raise("r20-T2")
+        check("barrier/omitted-findings-line-escape-record-guard-events-failure",
+              (_r20_t1[0], any("r20-T1" in f for f in _r20_t1[1]), _r20_t2[0],
+               any("r20-T2" in f for f in _r20_t2[1]), _r20_spoofs(),
+               _r19_detail(str(_r20_sd / "escape-spoof.json.surfaced"))),
+              ("Additionally, an ignored escape sentinel could not be fully recorded (guard-events FAILED, "
+               "escape-spoof.json ok); record the spoof manually before resuming (nocncl).", True, "", True,
+               ["r20-T2"], "r20-T2"))
+        # ROUND 20, A LATER SENTINEL BEFORE THE AUDIT OVERWRITES escape-spoof.json: T3 and then T4 are
+        # recorded with no resume probe between them; the next probe raises T4 and never T3, a second
+        # probe raises neither, and guard-events.jsonl holds a row for each (the docs say the earlier one
+        # then keeps only its guard-events row, so it is not "surfaced once").
+        _r20_w3 = aiqt_hooks._orch_record_escape_spoof(_r20_root, "r20-T3")
+        _r20_w4 = aiqt_hooks._orch_record_escape_spoof(_r20_root, "r20-T4")
+        _r20_p1 = [f for f in aiqt_hooks._orch_pending_artefact_findings(_r20_root) if "r20-" in f]
+        _r20_p2 = [f for f in aiqt_hooks._orch_pending_artefact_findings(_r20_root) if "r20-" in f]
+        check("barrier/omitted-findings-line-escape-record-overwrite-before-audit",
+              (_r20_w3, _r20_w4, any("r20-T4" in f for f in _r20_p1), any("r20-T3" in f for f in _r20_p1),
+               _r20_p2, _r20_spoofs()),
+              ("", "", True, False, [], ["r20-T2", "r20-T3", "r20-T4"]))
+
         # ---------- substrate: the prompt stamp ----------
         p = aiqt_hooks.orch_prompt_stamp(r.payload("UserPromptSubmit",
                                                    extra={"prompt": "hello"}))
@@ -1148,6 +5120,59 @@ def _main_isolated(report_path=None):
         check("core/wake-hygiene-below-cap-denies", v, "DENY")
         v, _r, _d = aiqt_hooks.decide_yield(dict(wake_ctx, schedule_denials=3))
         check("core/wake-hygiene-at-cap-findings", v, "ALLOW_WITH_FINDINGS")
+        # QA round 10: every deny branch is relieved at the loop bound or the cap and above it, never below:
+        # one below, at, one above, and the largest valid count, for each stop and each schedule deny branch.
+        _core_held = dict(actionable=[("A", "t", "no blocker")])
+        _core_branches = [
+            ("stop", "counter", aiqt_hooks._ORCH_LOOP_BOUND, dict(base, **_core_held)),
+            ("stop", "counter", aiqt_hooks._ORCH_LOOP_BOUND, dict(base, enum_status="ENUMERATOR_ERROR")),
+            ("stop", "counter", aiqt_hooks._ORCH_LOOP_BOUND,
+             dict(base, cannot_evaluate=[("CE", "cannot-evaluate", "held")])),
+            ("schedule", "schedule_denials", aiqt_hooks._ORCH_SCHEDULE_CAP,
+             dict(base, kind="schedule_idle", basis_unchanged=True, enum_status="ENUMERATOR_ERROR")),
+            ("schedule", "schedule_denials", aiqt_hooks._ORCH_SCHEDULE_CAP,
+             dict(base, kind="schedule_idle", basis_unchanged=True,
+                  cannot_evaluate=[("CE", "cannot-evaluate", "held")])),
+            ("schedule", "schedule_denials", aiqt_hooks._ORCH_SCHEDULE_CAP, wake_ctx),
+            ("schedule", "schedule_denials", aiqt_hooks._ORCH_SCHEDULE_CAP,
+             dict(base, kind="schedule_idle", basis_unchanged=True, **_core_held)),
+        ]
+        check("core/bound-and-cap-relieve-above-the-limit-not-only-at-it",
+              [[aiqt_hooks.decide_yield(dict(ctx, **{key: n}))[0]
+                for n in (limit - 1, limit, limit + 1, aiqt_hooks._ORCH_COUNTER_MAX)]
+               for _kind, key, limit, ctx in _core_branches],
+              [["DENY"] + ["ALLOW_WITH_FINDINGS"] * 3] * len(_core_branches))
+
+        # Load-shed characterization pins (the load-shed mechanism itself was declined): decide_yield
+        # sets no live-worker count floor, and a shed recorded as a fresh external blocker on queued
+        # items exhausts the set and licenses a stop. They pin CURRENT behaviour, not an endorsement of
+        # it; a reword of cntdef.8 or secres.7 should prompt a recheck that the load-shed advice holds.
+        _ls_live = dict(base, waiting=[("A", "tracked-task", "t1")])
+        _ls_queued = dict(_ls_live, actionable=[("B", "t", "no blocker recorded")])
+        _ls_idle = dict(_ls_live, kind="schedule_idle", wake_named=True)
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_ls_live))
+        check("core/one-live-worker-stop-allows", v, "ALLOW")
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_ls_queued))
+        check("core/one-live-plus-queued-denies", (v, "Two legal exits" in _r), ("DENY", True))
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_ls_idle))
+        check("core/one-live-named-idle-allows", v, "ALLOW")
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_ls_idle, actionable=_ls_queued["actionable"]))
+        check("core/one-live-queued-idle-denies", v, "DENY")
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_ls_queued, counter=2))
+        check("core/queued-loop-bound-findings", v, "ALLOW_WITH_FINDINGS")
+        # the hazard: classify_backlog marks the shed item blocked, so decide_yield sees no actionable
+        # item and ALLOWs the stop (a concurrency cap read as whole-set exhaustion)
+        _ls_cls = aiqt_hooks.classify_backlog(
+            [item("A", blocker={"kind": "tracked-task", "ref": "t1"}),
+             item("B", blocker={"kind": "external", "ref": "load-shed",
+                                "evidence": "host load shed to one workstream",
+                                "observed_at_utc": now_iso(0)})],
+            {"t1"}, True, "", {})
+        v, _r, _d = aiqt_hooks.decide_yield(dict(base, **_ls_cls))
+        check("core/external-shed-blocker-exhausts",
+              (_ls_cls["actionable"], _ls_cls["blocked"], v,
+               _r.startswith("no actionable item remains")),
+              ([], [("B", "external", "load-shed")], "ALLOW", True))
 
         # ---------- C.2: the attestation register for blocker evidence ----------
         # The no-register behaviour stays byte-identical and is already covered above by the fixture-f
@@ -1299,7 +5324,7 @@ def _main_isolated(report_path=None):
         check("attest/ok-snapshot-present", (asd / "attestations-validated.json").exists(), True)
         _o_wja = aiqt_hooks._orch_write_json_atomic
         try:
-            aiqt_hooks._orch_write_json_atomic = lambda p, o: False
+            aiqt_hooks._orch_write_json_atomic = lambda p, o: "PermissionError"
             aiqt_hooks._orch_validate_attestations(areg, str(a.root))
         finally:
             aiqt_hooks._orch_write_json_atomic = _o_wja
@@ -1308,6 +5333,17 @@ def _main_isolated(report_path=None):
         a.set_items([ext("AT-I1", "ci")])
         a.set_turn_state({})
         check("attest/failed-write-holds", _verdict(astop()), "block2")
+        # the failed snapshot write is itself a finding, so the resume audit's warning names it (the findings
+        # list is that warning's text), whatever happens to the audit's own guard-events row
+        try:
+            aiqt_hooks._orch_write_json_atomic = lambda p, o: "PermissionError"
+            _at_fail = aiqt_hooks._orch_validate_attestations(areg, str(a.root))
+        finally:
+            aiqt_hooks._orch_write_json_atomic = _o_wja
+        # REGRESSION PIN: it pins behaviour the 88e0b86 hooks already had, not a change of this PR; it fails on
+        # those hooks now only because its patched writer returns this round's failure detail, not False
+        check("attest/failed-write-finding-names-it",
+              any(x.startswith("the attestation snapshot could not be written") for x in _at_fail), True)
         # a broken chain is held, never read as a smaller clean register
         at_reg.write_text('{"seq": 1, "id": "AT-1", "prev": "beef"}\n', encoding="utf-8")
         check("attest/broken-chain-finding",
@@ -1433,7 +5469,7 @@ def _main_isolated(report_path=None):
         _o_wja3 = aiqt_hooks._orch_write_json_atomic
         try:
             aiqt_hooks._orch_write_json_atomic = (
-                lambda p, o: False if str(p).endswith("checkpoint-init.marker") else _o_wja3(p, o))
+                lambda p, o: "PermissionError" if str(p).endswith("checkpoint-init.marker") else _o_wja3(p, o))
             check("ckpt/marker-unwritable-holds", _verdict(cmstop()), "block2")
         finally:
             aiqt_hooks._orch_write_json_atomic = _o_wja3
@@ -1479,11 +5515,12 @@ def _main_isolated(report_path=None):
         check("forced/bound-exit-warns", _verdict(dstop()), "warn")
         check("forced/artefact-written", (dsd / "forced-exit.jsonl").exists(), True)
         frows, _fbad = aiqt_hooks._orch_read_jsonl(str(dsd / "forced-exit.jsonl"))
-        check("forced/artefact-names-open-ids", frows[-1].get("open_ids"), ["FX-1"])
+        # the artefact must parse whole: a malformed row is a failure, never a silent skip
+        check("forced/artefact-names-open-ids", (frows[-1].get("open_ids"), _fbad), (["FX-1"], 0))
         check("forced/guard-event-kind",
               '"forced_unresolved"' in (dsd / "guard-events.jsonl").read_text(encoding="utf-8"),
               True)
-        # the next resume audit surfaces the pending record ONCE and arms the warn-first barrier
+        # the next resume audit surfaces the pending record (normally once) and arms the warn-first barrier
         check("forced/resume-audit-surfaces",
               _verdict(aiqt_hooks.orch_resume_audit(d.payload("SessionStart"))), "warn")
         dbarrier = json.loads((dsd / "resume-barrier.json").read_text(encoding="utf-8"))
@@ -1506,6 +5543,1115 @@ def _main_isolated(report_path=None):
         finally:
             aiqt_hooks._orch_append_jsonl = _orig_append
 
+        # THE DOCUMENTED STOP FIELD: the hooks reference (Stop input) sends stop_hook_active, true when Claude
+        # Code is already continuing as a result of a stop hook, and advises a blocking Stop hook to check it.
+        # The stop guard honours it as a loop signal below its own counter: an actionable backlog that denies
+        # with no prior denial yields with findings (the recorded forced exit) once the payload says the stop
+        # continues a stop-hook block. Only the JSON true is that signal; a string "true" and an explicit
+        # false still deny.
+        _sha = Fixture(tmp, "stop-hook-active")
+        _sha_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_sha.root)))
+        _sha.set_items([item("SHA-1")])
+        for _sha_value, _sha_id in ((False, "stop-hook-active/false-denies"),
+                                    ("true", "stop-hook-active/string-denies")):
+            _sha.set_turn_state({})
+            check(_sha_id, _verdict(aiqt_hooks.orch_stop_guard(
+                _sha.payload("Stop", extra={"stop_hook_active": _sha_value}))), "block2")
+        _sha.set_turn_state({})
+        check("stop-hook-active/true-yields-with-findings", _verdict(aiqt_hooks.orch_stop_guard(
+            _sha.payload("Stop", extra={"stop_hook_active": True}))), "warn")
+        _sha_rows, _sha_bad = aiqt_hooks._orch_read_jsonl(str(_sha_sd / "forced-exit.jsonl"))
+        # the artefact must hold exactly the expected row and parse whole: a malformed row is a failure
+        check("stop-hook-active/forced-exit-recorded",
+              ([r.get("open_ids") for r in _sha_rows], _sha_bad), ([["SHA-1"]], 0))
+
+        # ROUND 21, A FAILED GUARD-EVENTS APPEND ON A DENY IS WARNED ABOUT AND THE DENY HOLDS: with
+        # guard-events.jsonl a directory (a real failed append, no patched seam), the shared Stop and
+        # TeammateIdle path still blocks (exit 2) with the recording-failure warning on its block reason (it
+        # has no banner); both scheduling denies (the backlog deny and the quiet-claim deny) and the
+        # unattended-ask deny still deny, with the warning in the deny reason and the banner; a bound-forced
+        # checkpoint drop under a clean ALLOW is warned about in the banner. Red on b02061bd, where each of
+        # these dropped the failed row silently. The control leg (the directory removed) shows the warning
+        # is absent when the row is written.
+        _r21 = Fixture(tmp, "r21-events")
+        _r21_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_r21.root)))
+        _r21_ge = _r21_sd / "guard-events.jsonl"
+        _r21_ge.mkdir(parents=True, exist_ok=True)
+        _r21.set_items([item("R21-1")])
+
+        def _r21_block(result, event):
+            code, obj, err = result
+            return (code, obj, "R21-1" in (err or ""),
+                    ("Additionally, the guard-events row for this deny ({}) could not be written; "
+                     "record it manually (nocncl).".format(event)) in (err or ""))
+
+        def _r21_deny(result, kind):
+            obj = result[1] if isinstance(result[1], dict) else {}
+            hso = obj.get("hookSpecificOutput")
+            reason = hso.get("permissionDecisionReason", "") if isinstance(hso, dict) else ""
+            warn = "the guard-events row for this deny ({}) could not be written".format(kind)
+            return (_verdict(result), warn in reason, warn in str(obj.get("systemMessage", "")))
+        _r21.set_turn_state({})
+        check("r21/stop-deny-holds-and-warns",
+              _r21_block(aiqt_hooks.orch_stop_guard(_r21.payload("Stop")), "Stop"),
+              (2, None, True, True))
+        check("r21/stop-deny-counted", _r21.turn_state().get("stop_denials"), 1)
+        _r21.set_turn_state({})
+        check("r21/teammate-idle-deny-holds-and-warns",
+              _r21_block(aiqt_hooks.orch_teammate_idle(_r21.payload("TeammateIdle")), "TeammateIdle"),
+              (2, None, True, True))
+        _r21.set_turn_state({})
+        check("r21/schedule-deny-holds-and-warns",
+              _r21_deny(aiqt_hooks.orch_yield_tool(_r21.payload(
+                  "PreToolUse", "ScheduleWakeup", {"prompt": "recheck R21-1 later"})), "yield-tool"),
+              ("deny", True, True))
+        _r21.set_turn_state({"last_human_input_utc": now_iso(0)})
+        check("r21/quiet-claim-deny-holds-and-warns",
+              _r21_deny(aiqt_hooks.orch_yield_tool(_r21.payload(
+                  "PreToolUse", "ScheduleWakeup",
+                  {"prompt": "user quiet for 20 minutes; recheck R21-1"})), "yield-tool"),
+              ("deny", True, True))
+        _r21.mode.write_text("Operating-mode: unattended\n", encoding="utf-8")
+        check("r21/ask-deny-holds-and-warns",
+              _r21_deny(aiqt_hooks.orch_ask_guard(_r21.payload(
+                  "PreToolUse", "AskUserQuestion", {"questions": [{"question": "which?"}]})), "ask-guard"),
+              ("deny", True, True))
+        _r21.mode.write_text("", encoding="utf-8")
+        _r21.set_items([item("R21-P{:05d}".format(n), state="proposed")
+                        for n in range(aiqt_hooks._ORCH_CHECKPOINT_MAX + 5)])
+        _r21.set_turn_state({})
+        _r21_res = aiqt_hooks.orch_stop_guard(_r21.payload("Stop"))
+        check("r21/checkpoint-bound-drop-warns",
+              (_verdict(_r21_res),
+               "the guard-events row for this dropped (checkpoint-bound) could not be written"
+               in str((_r21_res[1] or {}).get("systemMessage", ""))),
+              ("warn", True))
+        _r21_ge.rmdir()
+        _r21.set_items([item("R21-1")])
+        _r21.set_turn_state({})
+        _r21_ctl = aiqt_hooks.orch_stop_guard(_r21.payload("Stop"))
+        _r21_rows = aiqt_hooks._orch_read_jsonl(str(_r21_ge))[0] or []
+        check("r21/stop-deny-recorded-no-warning",
+              (_r21_ctl[0], "Additionally" in (_r21_ctl[2] or ""),
+               [(r.get("kind"), r.get("decision")) for r in _r21_rows]),
+              (2, False, [("Stop", "deny")]))
+
+        # ROUND 22, THE REMAINING WARNING SITES EACH HAVE A VECTOR: with guard-events.jsonl a directory (a
+        # real failed append), (a) a Stop deny whose counter cannot be persisted fails open with the
+        # allow_unpersistable warning in its banner; (b) a Stop at the loop bound and (c) a stop-classified
+        # scheduling call at the loop bound allow with findings, each banner carrying the allow_with_findings
+        # warning; (d) a resume audit with a finding carries the findings warning; (e) the operator-escape
+        # ALLOW of a Stop and of a scheduling call (the escape seam stands in for a differently-owned
+        # sentinel) is still allowed, its banner saying the override's row could not be written. Each row
+        # fails when its warning is removed. (f) A resume barrier that cannot be written (a directory at its
+        # path, guard-events writable) leaves the finding's warning saying the barrier was not persisted and
+        # never saying a re-run clears it (red on f8fe9112). The control rows show neither warning when the
+        # row and the barrier are written, and the escape row recorded.
+        _r22 = Fixture(tmp, "r22-events")
+        _r22_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_r22.root)))
+        _r22_ge = _r22_sd / "guard-events.jsonl"
+        _r22_ge.mkdir(parents=True, exist_ok=True)
+        _r22.set_items([item("R22-1")])
+
+        def _r22_note(result):
+            obj = result[1] if isinstance(result[1], dict) else dict()
+            return _verdict(result), str(obj.get("systemMessage", ""))
+
+        def _r22_has(result, text):
+            verdict, msg = _r22_note(result)
+            return verdict, text in msg
+        _r22_record = aiqt_hooks._orch_record_denial
+        try:
+            aiqt_hooks._orch_record_denial = lambda *a: "PermissionError"
+            _r22.set_turn_state(dict())
+            check("r22/allow-unpersistable-warns",
+                  _r22_has(aiqt_hooks.orch_stop_guard(_r22.payload("Stop")),
+                           "the guard-events row for this allow_unpersistable (Stop) could not be written"),
+                  ("warn", True))
+        finally:
+            aiqt_hooks._orch_record_denial = _r22_record
+        _r22.set_turn_state(dict(stop_denials=aiqt_hooks._ORCH_LOOP_BOUND))
+        check("r22/stop-findings-warns",
+              _r22_has(aiqt_hooks.orch_stop_guard(_r22.payload("Stop")),
+                       "the guard-events row for this allow_with_findings (Stop) could not be written"),
+              ("warn", True))
+        _r22.set_turn_state(dict(stop_denials=aiqt_hooks._ORCH_LOOP_BOUND))
+        check("r22/yield-findings-warns",
+              _r22_has(aiqt_hooks.orch_yield_tool(_r22.payload(
+                  "PreToolUse", "ScheduleWakeup", dict(stop=True, prompt="end after R22-1"))),
+                  "the guard-events row for this allow_with_findings (yield-tool) could not be written"),
+              ("warn", True))
+        _r22.handoff.write_text("Branch: feature/other" + chr(10), encoding="utf-8")
+        _r22_audit = aiqt_hooks.orch_resume_audit(_r22.payload("SessionStart"))
+        check("r22/resume-audit-findings-warns",
+              (_r22_has(_r22_audit, "the guard-events row for this findings (resume-audit) could not be "
+                                    "written"), "feature/other" in _r22_note(_r22_audit)[1]),
+              (("warn", True), True))
+        _r22.handoff.write_text("Branch: main" + chr(10), encoding="utf-8")
+        _r22_escape = aiqt_hooks._orch_escape_active
+        try:
+            aiqt_hooks._orch_escape_active = lambda reg, root: (True, None)
+            _r22.set_turn_state(dict())
+            _r22_esc_stop = aiqt_hooks.orch_stop_guard(_r22.payload("Stop"))
+            _r22.set_turn_state(dict())
+            _r22_esc_sched = aiqt_hooks.orch_yield_tool(_r22.payload(
+                "PreToolUse", "ScheduleWakeup", dict(prompt="recheck R22-1 later")))
+            check("r22/escape-allow-unrecorded-warns",
+                  (_r22_has(_r22_esc_stop, "the guard-events row recording this operator-escape release "
+                                           "(Stop) could not be written"),
+                   _r22_has(_r22_esc_sched, "the guard-events row recording this operator-escape release "
+                                            "(yield-tool) could not be written")),
+                  (("warn", True), ("warn", True)))
+            _r22_ge.rmdir()
+            _r22.set_turn_state(dict())
+            _r22_esc_ctl = aiqt_hooks.orch_stop_guard(_r22.payload("Stop"))
+            _r22_rows = aiqt_hooks._orch_read_jsonl(str(_r22_ge))[0] or []
+            check("r22/escape-allow-recorded-no-warning",
+                  (_r22_esc_ctl, [(r.get("kind"), r.get("decision"), r.get("detail")) for r in _r22_rows]),
+                  ((0, None, None), [("Stop", "allow", "operator escape artefact present (logged)")]))
+        finally:
+            aiqt_hooks._orch_escape_active = _r22_escape
+        _r22_bar = _r22_sd / "resume-barrier.json"
+        try:
+            _r22_bar.unlink()
+        except FileNotFoundError:
+            pass
+        _r22_bar.mkdir()
+        _r22.handoff.write_text("Branch: feature/other" + chr(10), encoding="utf-8")
+        _r22_unarmed = _r22_note(aiqt_hooks.orch_resume_audit(_r22.payload("SessionStart")))
+        _r22_bar.rmdir()
+        _r22_armed = _r22_note(aiqt_hooks.orch_resume_audit(_r22.payload("SessionStart")))
+        _r22.handoff.write_text("Branch: main" + chr(10), encoding="utf-8")
+        check("r22/resume-barrier-unwritten-warns-never-says-cleared",
+              tuple((v, "feature/other" in m,
+                     "the resume barrier could not be written (IsADirectoryError), so it was not persisted"
+                     in m, "to clear the barrier" in m) for v, m in (_r22_unarmed, _r22_armed))
+              + (json.loads(_r22_bar.read_text(encoding="utf-8")).get("active"),),
+              (("warn", True, True, False), ("warn", True, False, True), True))
+
+        # EVERY FAILED RECORD WRITE ON A DENY, FINDINGS OR ESCAPE PATH IS REPORTED, THE DECISION UNCHANGED:
+        # (1) a scheduling deny whose denial counter cannot be written (turn-state.json a directory, a real
+        # failed write) still denies, past the cap too, with the warning in its deny reason and banner, and a
+        # stop=true call whose counter save fails (the save seam) says the loop bound is not advanced; (2) an
+        # allowed schedule whose wake digest cannot be written allows with a note saying so, on the clean
+        # ALLOW (a real failed write), the cap-relieved ALLOW_WITH_FINDINGS and the operator-escape ALLOW (the
+        # save seam); (3) a genuine prompt whose stamp cannot be written proceeds with a note, and a
+        # timer-originated prompt whose digest cannot be consumed says so in its context line; (4) a brief
+        # declaring a working-tree or a not-a-review target is allowed with a note naming an unwritten
+        # guard-events row; (5) the TeammateIdle operator-escape ALLOW names its unwritten row; (6) a resume
+        # barrier that cannot be written for a reason other than a directory at its path names that error
+        # and the state directory remedy, and a directory names its removal; (7) a clean audit whose clear
+        # fails leaves an armed barrier that is noted once per arming, so one already warned about stays
+        # silent. Each row fails when its warning (or, for (7), the once-per-arming flag) is removed, and each
+        # control leg shows no warning where the write succeeds.
+        _rw = Fixture(tmp, "recwrite")
+        _rw_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_rw.root)))
+        _rw_ts = _rw_sd / "turn-state.json"
+        _rw_ge = _rw_sd / "guard-events.jsonl"
+        _rw_sched = lambda ti: aiqt_hooks.orch_yield_tool(_rw.payload("PreToolUse", "ScheduleWakeup", ti))
+
+        def _rw_msg(result):
+            obj = result[1] if isinstance(result[1], dict) else dict()
+            return _verdict(result), str(obj.get("systemMessage", ""))
+
+        def _rw_note(result, needle):
+            verdict, msg = _rw_msg(result)
+            return verdict, needle in msg
+
+        def _rw_deny(result, needle):
+            obj = result[1] if isinstance(result[1], dict) else dict()
+            hso = obj.get("hookSpecificOutput")
+            reason = hso.get("permissionDecisionReason", "") if isinstance(hso, dict) else ""
+            return _verdict(result), needle in reason, needle in str(obj.get("systemMessage", ""))
+
+        def _rw_context(result):
+            obj = result[1] if isinstance(result[1], dict) else dict()
+            hso = obj.get("hookSpecificOutput")
+            return str(hso.get("additionalContext", "")) if isinstance(hso, dict) else ""
+        _rw_counter = "the denial counter could not be written to turn-state.json"
+        _rw_wake = "this wake's prompt digest could not be written to turn-state.json"
+        _rw.set_items([item("RW-1")])
+        _rw_sd.mkdir(parents=True, exist_ok=True)
+        _rw_ts.unlink(missing_ok=True)
+        _rw_ts.mkdir()
+        check("recwrite/schedule-deny-unpersisted-counter-warns",
+              [_rw_deny(_rw_sched(dict(prompt="recheck RW-1 later")),
+                        _rw_counter + ", so this deny does not count toward the scheduling cap")
+               for _ in range(aiqt_hooks._ORCH_SCHEDULE_CAP + 1)],
+              [("deny", True, True)] * (aiqt_hooks._ORCH_SCHEDULE_CAP + 1))
+        _rw.set_items([])
+        check("recwrite/wake-digest-unwritten-clean-allow-warns",
+              _rw_note(_rw_sched(dict(prompt="check back later")), _rw_wake), ("warn", True))
+        _rw_ts.rmdir()
+        _rw.set_turn_state(dict())
+        check("recwrite/wake-digest-written-no-warning",
+              (_rw_sched(dict(prompt="check back later")), len(_rw.turn_state().get("wake_digests") or [])),
+              ((0, None, None), 1))
+        _rw_save = aiqt_hooks._orch_save_turn_state
+        _rw_escape = aiqt_hooks._orch_escape_active
+        try:
+            _rw.set_items([item("RW-1")])
+            _rw.set_turn_state(dict())
+            aiqt_hooks._orch_save_turn_state = lambda root, state: "PermissionError"
+            check("recwrite/stop-call-deny-unpersisted-counter-warns",
+                  _rw_deny(_rw_sched(dict(stop=True, prompt="end after RW-1")),
+                           _rw_counter + ", so this deny does not count toward the loop bound"),
+                  ("deny", True, True))
+            # QA rounds 9 and 10: the whole unsaved-counter sentence of each deny, and the comment above it, are
+            # pinned so that restoring an earlier wording (a stop relieved only "at" the bound, no
+            # stop_hook_active field, that field claimed as a documented signal of a PreToolUse call, no Stop
+            # fail-open on its own unsaved deny, or a schedule call relieved only "at" the cap) fails this row
+            _rw.set_turn_state(dict())
+            _rw_full = (_rw_counter + ", so this deny does not count toward the {} (PermissionError); {}; record "
+                        "it manually (nocncl).")
+            check("recwrite/unsaved-counter-deny-text-names-each-relief-trigger",
+                  (_rw_deny(_rw_sched(dict(stop=True, prompt="end after RW-1")), _rw_full.format(
+                      "loop bound", "a later stop=true call or Stop takes the loop-bound exit only when the count "
+                      "it reads from turn-state.json is at or above the bound, that file cannot be read as a JSON "
+                      "object or its stop_denials value is malformed (each of which needs a state directory it "
+                      "can search), or that call's payload carries stop_hook_active set to true (a field the "
+                      "Claude Code hooks reference documents in the Stop input and does not list in the "
+                      "PreToolUse input), and a later Stop the decision core denies also allows with findings "
+                      "when its own denial counter cannot be saved")),
+                   _rw_deny(_rw_sched(dict(prompt="recheck RW-1 later")), _rw_full.format(
+                       "scheduling cap", "a later call is relieved only when the count it reads from "
+                       "turn-state.json is at or above the cap on an unchanged basis, which needs a state "
+                       "directory it can search and a turn-state.json it can read")),
+                   "\n".join((
+                       "        # a counter that cannot be saved leaves this deny uncounted; relief on a later call "
+                       "comes only from",
+                       "        # what that call reads (its turn-state count, see _orch_build_ctx, or a "
+                       "stop_hook_active field set to",
+                       "        # true in its payload, documented in the Stop input and not in the PreToolUse "
+                       "input) or, for a Stop,",
+                       "        # from its own deny failing to save, never from this deny. The deny stands and "
+                       "the failure is",
+                       "        # reported on it",
+                       "        unsaved = _orch_record_denial(root, ts, kind, basis)"))
+                   in Path(aiqt_hooks.__file__).read_text(encoding="utf-8")),
+                  (("deny", True, True), ("deny", True, True), True))
+            aiqt_hooks._orch_save_turn_state = _rw_save
+            _rw.set_turn_state(dict())
+            check("recwrite/stop-call-deny-counted-no-warning",
+                  (_rw_deny(_rw_sched(dict(stop=True, prompt="end after RW-1")), _rw_counter),
+                   _rw.turn_state().get("stop_denials")),
+                  (("deny", False, False), 1))
+            _rw.set_turn_state(dict())
+            for _ in range(aiqt_hooks._ORCH_SCHEDULE_CAP):
+                _rw_sched(dict(prompt="recheck RW-1 later"))
+            aiqt_hooks._orch_save_turn_state = lambda root, state: "PermissionError"
+            check("recwrite/wake-digest-unwritten-findings-warns",
+                  _rw_note(_rw_sched(dict(prompt="recheck RW-1 later")), _rw_wake), ("warn", True))
+            aiqt_hooks._orch_escape_active = lambda reg, root: (True, None)
+            _rw.set_turn_state(dict())
+            check("recwrite/wake-digest-unwritten-escape-warns",
+                  _rw_note(_rw_sched(dict(prompt="recheck RW-1 later")), _rw_wake), ("warn", True))
+        finally:
+            aiqt_hooks._orch_save_turn_state = _rw_save
+            aiqt_hooks._orch_escape_active = _rw_escape
+        _rw_ts.unlink()
+        _rw_ts.mkdir()
+        check("recwrite/stamp-unwritten-notes",
+              _rw_note(aiqt_hooks.orch_prompt_stamp(_rw.payload("UserPromptSubmit", extra=dict(prompt="hello"))),
+                       "its time was not stamped and the denial counters were not reset"),
+              ("warn", True))
+        _rw_ts.rmdir()
+        check("recwrite/stamp-written-silent",
+              (aiqt_hooks.orch_prompt_stamp(_rw.payload("UserPromptSubmit", extra=dict(prompt="hello"))),
+               bool(_rw.turn_state().get("last_human_input_utc"))),
+              ((0, None, None), True))
+        _rw.set_turn_state(dict(wake_digests=[hashlib.sha256(b"wake RW-1").hexdigest()]))
+        _rw_wake_prompt = lambda: aiqt_hooks.orch_prompt_stamp(
+            _rw.payload("UserPromptSubmit", extra=dict(prompt="wake RW-1")))
+        try:
+            aiqt_hooks._orch_save_turn_state = lambda root, state: "PermissionError"
+            _rw_timer = _rw_context(_rw_wake_prompt())
+        finally:
+            aiqt_hooks._orch_save_turn_state = _rw_save
+        _rw_timer_ctl = _rw_context(_rw_wake_prompt())
+        check("recwrite/stamp-timer-digest-unconsumed-says-so",
+              ("TIMER-ORIGINATED" in _rw_timer, "consuming this wake's digest failed" in _rw_timer,
+               "TIMER-ORIGINATED" in _rw_timer_ctl, "Additionally" in _rw_timer_ctl,
+               _rw.turn_state().get("wake_digests")),
+              (True, True, True, False, []))
+        _rw_ge.unlink(missing_ok=True)
+        _rw_ge.mkdir()
+        try:
+            aiqt_hooks._orch_escape_active = lambda reg, root: (True, None)
+            _rw.set_turn_state(dict())
+            check("recwrite/teammate-idle-escape-allow-unrecorded-warns",
+                  _rw_note(aiqt_hooks.orch_teammate_idle(_rw.payload("TeammateIdle")),
+                           "the guard-events row recording this operator-escape release (TeammateIdle) could "
+                           "not be written"),
+                  ("warn", True))
+            _rw_ge.rmdir()
+            _rw.set_turn_state(dict())
+            check("recwrite/teammate-idle-escape-allow-recorded-no-warning",
+                  (aiqt_hooks.orch_teammate_idle(_rw.payload("TeammateIdle")),
+                   [(r.get("kind"), r.get("decision")) for r in aiqt_hooks._orch_read_jsonl(str(_rw_ge))[0] or []]),
+                  ((0, None, None), [("TeammateIdle", "allow")]))
+        finally:
+            aiqt_hooks._orch_escape_active = _rw_escape
+        _rw_rd = RdpFixture(tmp, "recwrite-rdp")
+        _rw_rd_ge = _rw_rd.briefs / "state" / "guard-events.jsonl"
+        _rw_rd_out = []
+        for _rw_target in ("working-tree", "not-a-review"):
+            _rw_brief = _rw_rd.brief(["Review-target: " + _rw_target])
+            _rw_rd_ge.unlink(missing_ok=True)
+            _rw_rd_ge.mkdir(parents=True)
+            _rw_failed = _rw_note(_rw_rd.dispatch(_rw_brief),
+                                  "the guard-events row for this allow-declared-target (review-dispatch-pin) "
+                                  "could not be written")
+            _rw_rd_ge.rmdir()
+            _rw_ok = _rw_note(_rw_rd.dispatch(_rw_brief), "Additionally")
+            _rw_rd_out.append((_rw_target, _rw_failed, _rw_ok, [
+                (r.get("kind"), r.get("decision"), r.get("detail"))
+                for r in aiqt_hooks._orch_read_jsonl(str(_rw_rd_ge))[0] or []]))
+        check("recwrite/declared-target-unrecorded-notes", _rw_rd_out, [
+            (t, ("warn", True), ("warn", False),
+             [("review-dispatch-pin", "allow-declared-target", "{}: {}".format(_rw_rd.briefs / "brief.txt", t))])
+            for t in ("working-tree", "not-a-review")])
+        _rw_b = Fixture(tmp, "recwrite-barrier")
+        _rw_b_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_rw_b.root)))
+        _rw_bar = _rw_b_sd / "resume-barrier.json"
+        _rw_audit = lambda: _rw_msg(aiqt_hooks.orch_resume_audit(_rw_b.payload("SessionStart")))
+        shutil.rmtree(_rw_b_sd, ignore_errors=True)
+        _rw_b_sd.write_text("not a directory" + chr(10), encoding="utf-8")
+        _rw_b.handoff.write_text("Branch: feature/other" + chr(10), encoding="utf-8")
+        _rw_bv, _rw_bm = _rw_audit()
+        _rw_b_sd.unlink()
+        check("recwrite/resume-barrier-unwritten-other-error-names-it",
+              (_rw_bv, "feature/other" in _rw_bm,
+               "the resume barrier could not be written (FileExistsError), so it was not persisted" in _rw_bm,
+               "once the state directory can be created and written" in _rw_bm,
+               "remove the directory at the barrier path" in _rw_bm, "to clear the barrier" in _rw_bm),
+              ("warn", True, True, True, False, False))
+        _rw_bar.mkdir(parents=True)
+        _rw_dv, _rw_dm = _rw_audit()
+        _rw_bar.rmdir()
+        check("recwrite/resume-barrier-directory-names-removal",
+              (_rw_dv, "remove the directory at the barrier path {}".format(_rw_bar) in _rw_dm,
+               "once the state directory can be created" in _rw_dm),
+              ("warn", True, False))
+        _rw_b.handoff.write_text("", encoding="utf-8")
+        _rw_write = aiqt_hooks._orch_barrier_write
+
+        def _rw_refuse(path, obj):
+            raise PermissionError("the clear is refused")
+        _rw_outside = lambda: _verdict(aiqt_hooks.orch_resume_barrier(_rw_b.payload(
+            "PreToolUse", "Write", dict(file_path=str(_rw_b.root / "src.py"), content="x"))))
+        _rw_pin = []
+        for _rw_warned in (True, False):
+            _rw_bar.write_text(json.dumps(dict(active=True, findings=["recwrite-armed"], warned=_rw_warned)),
+                               encoding="utf-8")
+            try:
+                aiqt_hooks._orch_barrier_write = _rw_refuse
+                _rw_clean = aiqt_hooks.orch_resume_audit(_rw_b.payload("SessionStart"))
+            finally:
+                aiqt_hooks._orch_barrier_write = _rw_write
+            _rw_pin.append((_rw_warned, _rw_clean, _rw_outside(), _rw_outside(),
+                            json.loads(_rw_bar.read_text(encoding="utf-8")).get("active")))
+        check("recwrite/failed-clear-armed-barrier-noted-once-per-arming", _rw_pin,
+              [(True, (0, None, None), "allow", "allow", True), (False, (0, None, None), "warn", "allow", True)])
+
+        # ROUND 2 OF THE RECORD-WRITE AUDIT, EACH FAILED WRITE REACHES THE OUTPUT EVEN WHEN ITS GUARD-EVENTS ROW
+        # IS WRITTEN: (1) a checkpoint or init marker that cannot be written (only that path refused, so the
+        # guard-events append succeeds) is named in the deny reason and banner of a scheduling deny and in the
+        # block reason of a Stop, and under a persistent fault the clean schedule ALLOW left after the item
+        # vanishes carries the warning instead of returning silently; under a fault that clears after one
+        # window the vanished item is not held, which that window's warning says; (2) the wake-digest warning
+        # promises no classification: with a matching digest already registered the returning prompt reads as
+        # timer-originated, without one as genuine, and the warning fits both; (3) a turn-state save that
+        # fails after writing part of its bytes leaves turn-state.json byte-identical with no temporary file
+        # (the save is atomic), so the unconsumed digest still classifies the next identical prompt, and the
+        # timer path's warning promises no classification and reaches the operator in a systemMessage; (4) a
+        # clean audit's failed clear under a fault that also refuses the warned flag notes the armed barrier on
+        # each mutation; (5) the writers already reported in the output stay reported with their guard-events
+        # append succeeding: escape-spoof.json, forced-exit.jsonl and the ask guard's pending row.
+        _r2 = Fixture(tmp, "recwrite2")
+        _r2_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_r2.root)))
+        _r2_ge = _r2_sd / "guard-events.jsonl"
+        _r2_sched = lambda ti: aiqt_hooks.orch_yield_tool(_r2.payload("PreToolUse", "ScheduleWakeup", ti))
+        _r2_stop = lambda: aiqt_hooks.orch_stop_guard(_r2.payload("Stop"))
+        _r2_prompt = lambda text: aiqt_hooks.orch_prompt_stamp(
+            _r2.payload("UserPromptSubmit", extra=dict(prompt=text)))
+        _r2_wja = aiqt_hooks._orch_write_json_atomic
+        _r2_aj = aiqt_hooks._orch_append_jsonl
+        _r2_wj = aiqt_hooks._orch_write_json
+        _r2_save = aiqt_hooks._orch_save_turn_state
+        _r2_ea = aiqt_hooks._orch_escape_active
+
+        def _r2_refuse(suffix):
+            return lambda p, o: "PermissionError" if str(p).endswith(suffix) else _r2_wja(p, o)
+
+        def _r2_out(result):
+            # (verdict, deny reason or Stop block reason, systemMessage)
+            code, obj, err = result
+            obj = obj if isinstance(obj, dict) else dict()
+            hso = obj.get("hookSpecificOutput")
+            reason = hso.get("permissionDecisionReason", "") if isinstance(hso, dict) else ""
+            return _verdict(result), str(reason or err or ""), str(obj.get("systemMessage", ""))
+
+        def _r2_context(result):
+            obj = result[1] if isinstance(result[1], dict) else dict()
+            hso = obj.get("hookSpecificOutput")
+            return str(hso.get("additionalContext", "")) if isinstance(hso, dict) else ""
+
+        def _r2_events(kind):
+            return sum(1 for r in aiqt_hooks._orch_read_jsonl(str(_r2_ge))[0] or [] if r.get("kind") == kind)
+        _r2_ckpt = "the anti-shrinkage checkpoint backlog-checkpoint.json could not be written"
+        _r2_marker = "the checkpoint-init marker checkpoint-init.marker could not be written"
+        _r2.set_items([item("QA-1")])
+        _r2.set_turn_state(dict())
+        try:
+            aiqt_hooks._orch_write_json_atomic = _r2_refuse("backlog-checkpoint.json")
+            _r2_d = _r2_out(_r2_sched(dict(prompt="recheck QA-1 later")))
+            _r2_s = _r2_out(_r2_stop())
+            _r2_n1 = _r2_events("checkpoint-unwritable")
+            _r2.set_items([], keep_checkpoint=True)
+            _r2.set_turn_state(dict())
+            _r2_v = _r2_out(_r2_sched(dict(prompt="check back later")))
+        finally:
+            aiqt_hooks._orch_write_json_atomic = _r2_wja
+        check("recwrite2/checkpoint-unwritten-named-while-its-row-is-written",
+              (_r2_d[0], _r2_ckpt in _r2_d[1], _r2_ckpt in _r2_d[2],
+               "(checkpoint-unwritable)" in _r2_d[1] + _r2_d[2] + _r2_s[1], _r2_s[0], _r2_ckpt in _r2_s[1], _r2_n1),
+              ("deny", True, True, False, "block2", True, 2))
+        check("recwrite2/checkpoint-unwritten-vanished-item-not-silent",
+              (_r2_v[0], _r2_ckpt in _r2_v[2], _r2_events("checkpoint-unwritable")), ("warn", True, 3))
+        _r2.set_items([item("QA-2")])
+        _r2.set_turn_state(dict())
+        try:
+            aiqt_hooks._orch_write_json_atomic = _r2_refuse("backlog-checkpoint.json")
+            _r2_t = _r2_out(_r2_sched(dict(prompt="recheck QA-2 later")))
+        finally:
+            aiqt_hooks._orch_write_json_atomic = _r2_wja
+        _r2.set_items([], keep_checkpoint=True)
+        _r2.set_turn_state(dict())
+        check("recwrite2/checkpoint-unwritten-once-warns-later-vanish-unheld",
+              (_r2_t[0], "is not held as vanished or demoted unless an earlier checkpoint already records it"
+               in _r2_t[2], _r2_sched(dict(prompt="check back later"))),
+              ("deny", True, (0, None, None)))
+        _r2.set_items([item("QA-3")])
+        _r2.set_turn_state(dict())
+        try:
+            aiqt_hooks._orch_write_json_atomic = _r2_refuse("checkpoint-init.marker")
+            _r2_m1 = _r2_out(_r2_sched(dict(prompt="recheck QA-3 later")))
+            _r2_m2 = _r2_out(_r2_stop())
+        finally:
+            aiqt_hooks._orch_write_json_atomic = _r2_wja
+        check("recwrite2/marker-unwritten-named-while-its-row-is-written",
+              (_r2_m1[0], _r2_marker in _r2_m1[1], _r2_marker in _r2_m1[2], _r2_m2[0], _r2_marker in _r2_m2[1],
+               "(checkpoint-marker-unwritable)" in _r2_m1[1] + _r2_m1[2] + _r2_m2[1],
+               _r2_events("checkpoint-marker-unwritable")),
+              ("deny", True, True, "block2", True, False, 2))
+        _r2_same = "same wake QA"
+        _r2_dig = hashlib.sha256(_r2_same.encode("utf-8")).hexdigest()
+        _r2.set_items([])
+        _r2_wk = []
+        for _r2_pre in ([_r2_dig], []):
+            _r2.set_turn_state(dict(wake_digests=list(_r2_pre)))
+            try:
+                aiqt_hooks._orch_save_turn_state = lambda root, state: "PermissionError"
+                _r2_w = _r2_out(_r2_sched(dict(prompt=_r2_same)))
+            finally:
+                aiqt_hooks._orch_save_turn_state = _r2_save
+            _r2_back = _r2_prompt(_r2_same)
+            _r2_wk.append((_r2_w[0], "may read as genuine human input or as timer-originated" in _r2_w[2],
+                           "will read" in _r2_w[2], "TIMER-ORIGINATED" in _r2_context(_r2_back),
+                           _r2_back == (0, None, None)))
+        check("recwrite2/wake-digest-unwritten-promises-no-classification", _r2_wk,
+              [("warn", True, False, True, False), ("warn", True, False, False, True)])
+        _r2.set_turn_state(dict(wake_digests=[_r2_dig]))
+        _r2_tsp = _r2_sd / "turn-state.json"
+        _r2_before = _r2_tsp.read_bytes()
+        _r2_write = os.write
+
+        def _r2_partial(fd, data):
+            _r2_write(fd, bytes(data[:1]))
+            raise OSError("injected after a partial write")
+        try:
+            os.write = _r2_partial
+            _r2_p = _r2_prompt(_r2_same)
+        finally:
+            os.write = _r2_write
+        _r2_after = _r2_tsp.read_bytes()
+        _r2_tmp_left = bool(list(_r2_sd.glob("turn-state.json*.tmp")))
+        _r2_next = _r2_prompt(_r2_same)
+        check("recwrite2/turn-state-partial-write-leaves-previous-state",
+              (_r2_after == _r2_before, _r2_tmp_left, "TIMER-ORIGINATED" in _r2_context(_r2_next),
+               _r2.turn_state().get("wake_digests")),
+              (True, False, True, []))
+        _r2_pctx = _r2_context(_r2_p)
+        _r2_psys = _r2_p[1].get("systemMessage", "") if isinstance(_r2_p[1], dict) else ""
+        check("recwrite2/timer-unconsumed-uncertain-and-operator-sees-it",
+              ("TIMER-ORIGINATED" in _r2_pctx, "consuming this wake's digest failed" in _r2_pctx,
+               "may read as timer-originated or as genuine human input" in _r2_pctx, "will also read" in _r2_pctx,
+               _r2_psys.startswith("AIQT guardrail: this prompt was read as timer-originated, but turn-state.json "
+                                   "could not be written")),
+              (True, True, True, False, True))
+        _r2_b = Fixture(tmp, "recwrite2-barrier")
+        _r2_bsd = Path(aiqt_hooks._orch_state_dir_for_root(str(_r2_b.root)))
+        _r2_bar = _r2_bsd / "resume-barrier.json"
+        _r2_bsd.mkdir(parents=True, exist_ok=True)
+        _r2_bar.write_text(json.dumps(dict(active=True, findings=["recwrite2-armed"], warned=False)),
+                           encoding="utf-8")
+        _r2_bw = aiqt_hooks._orch_barrier_write
+
+        def _r2_bfail(path, obj):
+            raise PermissionError("the state directory refuses every barrier write")
+        _r2_mut = lambda: _verdict(aiqt_hooks.orch_resume_barrier(_r2_b.payload(
+            "PreToolUse", "Write", dict(file_path=str(_r2_b.root / "src.py"), content="x"))))
+        try:
+            aiqt_hooks._orch_barrier_write = _r2_bfail
+            _r2_bc = aiqt_hooks.orch_resume_audit(_r2_b.payload("SessionStart"))
+            _r2_bm = [_r2_mut() for _ in range(3)]
+        finally:
+            aiqt_hooks._orch_barrier_write = _r2_bw
+        # REGRESSION PIN: this vector passes on the 88e0b86 hooks too; it pins behaviour that was already
+        # correct and does not test a change of this PR
+        check("recwrite2/failed-clear-persistent-fault-noted-each-mutation",
+              (_r2_bc, _r2_bm, json.loads(_r2_bar.read_text(encoding="utf-8")).get("warned")),
+              ((0, None, None), ["warn"] * 3, False))
+        _r2.set_items([])
+        _r2.set_turn_state(dict())
+        try:
+            aiqt_hooks._orch_escape_active = lambda reg, root: (False, "recwrite2 ignored sentinel")
+            aiqt_hooks._orch_write_json = lambda p, o: False if str(p).endswith("escape-spoof.json") else _r2_wj(p, o)
+            _r2_sp = _r2_out(_r2_stop())
+        finally:
+            aiqt_hooks._orch_escape_active = _r2_ea
+            aiqt_hooks._orch_write_json = _r2_wj
+        # REGRESSION PIN: passes on the 88e0b86 hooks too (pins already-correct behaviour, not a change)
+        check("recwrite2/spoof-file-unwritten-named-while-its-row-is-written",
+              (_r2_sp[0], "(guard-events ok, escape-spoof.json FAILED)" in _r2_sp[2], _r2_events("escape-spoof")),
+              ("warn", True, 1))
+        _r2.set_items([item("QA-4")])
+        _r2.set_turn_state(dict(stop_denials=aiqt_hooks._ORCH_LOOP_BOUND))
+        try:
+            aiqt_hooks._orch_append_jsonl = lambda p, o: False if str(p).endswith("forced-exit.jsonl") else _r2_aj(p, o)
+            _r2_fx = _r2_out(_r2_stop())
+        finally:
+            aiqt_hooks._orch_append_jsonl = _r2_aj
+        # REGRESSION PIN: passes on the 88e0b86 hooks too (pins already-correct behaviour, not a change)
+        check("recwrite2/forced-exit-log-unwritten-named-while-its-row-is-written",
+              (_r2_fx[0], "(guard-events ok, forced-exit.jsonl FAILED)" in _r2_fx[2],
+               _r2_events("forced_unresolved")),
+              ("warn", True, 1))
+        _r2.mode.write_text("Operating-mode: unattended" + chr(10), encoding="utf-8")
+        try:
+            aiqt_hooks._orch_append_jsonl = (
+                lambda p, o: False if str(p).endswith("pending-asks.jsonl") else _r2_aj(p, o))
+            _r2_ask = _r2_out(aiqt_hooks.orch_ask_guard(_r2.payload("PreToolUse", "AskUserQuestion",
+                                                                     dict(questions=[]))))
+        finally:
+            aiqt_hooks._orch_append_jsonl = _r2_aj
+            _r2.mode.write_text("", encoding="utf-8")
+        # REGRESSION PIN: passes on the 88e0b86 hooks too (pins already-correct behaviour, not a change)
+        check("recwrite2/pending-ask-unwritten-named-while-its-row-is-written",
+              (_r2_ask[0], "the pending row could NOT be persisted" in _r2_ask[2], _r2_events("ask-guard")),
+              ("deny", True, 1))
+
+        # QA round 2 of the silent-write fixes: _orch_write_json_atomic creates its own temporary file
+        # (O_CREAT|O_EXCL|O_NOFOLLOW under a random name) and replaces the target with only that file.
+        # (1) A symlink planted at the old fixed temporary name, and one at the exact name the writer draws
+        # (os.urandom pinned), change neither the target nor the symlinks' referent: the pinned save fails and
+        # leaves both links, an ordinary save publishes a regular file. (2) Save A writes one byte, save B runs
+        # whole and succeeds, then A's rename fails: A reports the failure and B's file is published whole.
+        # (3) Save B creates its temporary file before A renames and writes after: a reader between the two
+        # reads A's whole file, both report success and B's file is the final one. (4) Under umask 022 an
+        # existing 0600 or 0640 target keeps its bits and a new target is 0600. (5) A failed save whose cleanup
+        # also fails names the temporary file it left in the hook's note. (6) A writable turn-state.json in a
+        # state directory the hook cannot write is not saved, so the Stop deny fails open with findings (the
+        # disclosed decision change; as root the directory mode is not enforced and the deny stands). (7) The
+        # mode reader: a FIFO with no writer, /dev/zero, a file one byte over the bound, a path with a lone
+        # surrogate, a surrogate-escaped non-UTF-8 name of an existing attended file the OS could open, a
+        # socket (refused at the open; that row passes on the 7f97273f hooks too, pinning the corrected
+        # disclosure) and a path with a NUL character each deny the ask, naming the reason,
+        # and a JSON-shaped file nested too deep to parse denies it too, with the unattended deny and no read
+        # failure named, each inside a child with its own RLIMIT_AS and a 30-second timeout.
+        _r3 = Fixture(tmp, "recwrite3")
+        _r3_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_r3.root)))
+        _r3_sd.mkdir(parents=True, exist_ok=True)
+        _r3_ts = _r3_sd / "turn-state.json"
+        _r3_save = lambda state: aiqt_hooks._orch_write_json_atomic(str(_r3_ts), state)
+        _r3_tmps = lambda: sorted(p.name for p in _r3_sd.iterdir() if p.name.endswith(".tmp"))
+        _r3_victim = _r3_sd / "victim.txt"
+        _r3_victim.write_text("victim", encoding="utf-8")
+        _r3_prior = json.dumps(dict(tag="prior")).encode("utf-8")
+        _r3_ts.write_bytes(_r3_prior)
+        _r3_fixed = os.urandom(8)
+        _r3_drawn = _r3_sd / "turn-state.json.{}.tmp".format(_r3_fixed.hex())
+        (_r3_sd / "turn-state.json.tmp").symlink_to(_r3_victim)
+        _r3_drawn.symlink_to(_r3_victim)
+        _r3_urandom = os.urandom
+        try:
+            os.urandom = lambda n: _r3_fixed
+            _r3_pinned = _r3_save(dict(tag="pinned"))
+        finally:
+            os.urandom = _r3_urandom
+        _r3_after_pinned = _r3_ts.read_bytes()
+        _r3_plain = _r3_save(dict(tag="plain"))
+        check("recwrite3/planted-temp-symlink-no-effect",
+              (_r3_pinned, _r3_after_pinned == _r3_prior, _r3_plain, _r3_ts.is_symlink(), _r3.turn_state(),
+               _r3_victim.read_text(encoding="utf-8"), (_r3_sd / "turn-state.json.tmp").is_symlink(),
+               _r3_drawn.is_symlink(), _r3_tmps()),
+              ("FileExistsError", True, None, False, dict(tag="plain"), "victim", True, True,
+               sorted(["turn-state.json.tmp", _r3_drawn.name])))
+        for _r3_link in (_r3_sd / "turn-state.json.tmp", _r3_drawn):
+            if os.path.lexists(str(_r3_link)):  # a writer that removes or replaces them fails the check above
+                os.unlink(str(_r3_link))
+        _r3_real_write, _r3_real_replace, _r3_real_open = os.write, os.replace, os.open
+        _r3_b, _r3_calls = [], []
+
+        def _r3_write_a(fd, data):
+            os.write = _r3_real_write  # the rest of A, and all of B, write unhindered
+            n = _r3_real_write(fd, bytes(data[:1]))
+            _r3_b.append(_r3_save(dict(long_name=123456)))
+            return n
+
+        def _r3_replace_a(src, dst, **kw):
+            _r3_calls.append(src)
+            if len(_r3_calls) == 2:
+                raise OSError("injected: the rename of save A fails")
+            return _r3_real_replace(src, dst, **kw)
+        try:
+            os.write, os.replace = _r3_write_a, _r3_replace_a
+            _r3_a = _r3_save(dict(a=1))
+        finally:
+            os.write, os.replace = _r3_real_write, _r3_real_replace
+        check("recwrite3/overlap-failed-save-leaves-the-successful-one-whole",
+              (_r3_a, _r3_b, _r3.turn_state(), _r3_tmps(), len(set(_r3_calls))),
+              ("OSError", [None], dict(long_name=123456), [], 2))
+        _r3_ev_b, _r3_ev_a = threading.Event(), threading.Event()
+        _r3_seen, _r3_res = [], dict()
+
+        def _r3_open(path, flags, *args, **kw):
+            fd = _r3_real_open(path, flags, *args, **kw)
+            if threading.current_thread().name == "r3-B" and flags & os.O_EXCL:
+                _r3_ev_b.set()
+                _r3_ev_a.wait(10)  # B holds its created temporary file until A has renamed
+            return fd
+
+        def _r3_replace(src, dst, **kw):
+            if threading.current_thread().name != "r3-A":
+                return _r3_real_replace(src, dst, **kw)
+            _r3_ev_b.wait(10)
+            _r3_real_replace(src, dst, **kw)
+            _r3_seen.append(aiqt_hooks._orch_turn_state(str(_r3.root)))
+            _r3_ev_a.set()
+            return None
+        _r3_threads = [threading.Thread(target=lambda n=n, st=st: _r3_res.__setitem__(n, _r3_save(st)), name=n)
+                       for n, st in (("r3-B", dict(stop_denials=7, tag="B")), ("r3-A", dict(stop_denials=1, tag="A")))]
+        try:
+            os.open, os.replace = _r3_open, _r3_replace
+            for _r3_t in _r3_threads:
+                _r3_t.start()
+            for _r3_t in _r3_threads:
+                _r3_t.join(30)
+        finally:
+            os.open, os.replace = _r3_real_open, _r3_real_replace
+        check("recwrite3/overlap-reader-reads-a-whole-file-and-both-report-success",
+              (_r3_res.get("r3-A"), _r3_res.get("r3-B"), _r3_seen, _r3.turn_state(), _r3_tmps()),
+              (None, None, [dict(stop_denials=1, tag="A")], dict(stop_denials=7, tag="B"), []))
+        _r3_modes = []
+        _r3_umask = os.umask(0o022)
+        try:
+            for _r3_mode in (0o600, 0o640):
+                os.chmod(str(_r3_ts), _r3_mode)
+                _r3_save(dict(mode=_r3_mode))
+                _r3_modes.append(oct(os.stat(str(_r3_ts)).st_mode & 0o777))
+            _r3_new = _r3_sd / "r3-fresh.json"
+            aiqt_hooks._orch_write_json_atomic(str(_r3_new), dict(fresh=True))
+            _r3_modes.append(oct(os.stat(str(_r3_new)).st_mode & 0o777))
+        finally:
+            os.umask(_r3_umask)
+        check("recwrite3/permission-bits-kept-new-file-0600-under-umask-022", _r3_modes,
+              ["0o600", "0o640", "0o600"])
+        _r3_unlink = os.unlink
+
+        def _r3_partial(fd, data):
+            _r3_real_write(fd, bytes(data[:1]))
+            raise OSError("injected after a partial write")
+
+        def _r3_no_unlink(path, *args, **kw):
+            raise PermissionError("injected: the temporary file cannot be removed")
+        _r3.set_turn_state(dict(tag="kept"))
+        try:
+            os.write, os.unlink = _r3_partial, _r3_no_unlink
+            _r3_note = _r2_out(aiqt_hooks.orch_prompt_stamp(
+                _r3.payload("UserPromptSubmit", extra=dict(prompt="genuine r3"))))
+        finally:
+            os.write, os.unlink = _r3_real_write, _r3_unlink
+        _r3_left = _r3_tmps()
+        check("recwrite3/failed-cleanup-names-the-left-temporary-file",
+              (_r3_note[0], "removing its temporary file" in _r3_note[2], len(_r3_left),
+               bool(_r3_left) and str(_r3_sd / _r3_left[0]) in _r3_note[2], _r3.turn_state()),
+              ("warn", True, 1, True, dict(tag="kept")))
+        for _r3_name in _r3_left:
+            os.unlink(str(_r3_sd / _r3_name))
+        _r3.set_items([item("QA-R3")])
+        _r3.set_turn_state(dict())
+        os.chmod(str(_r3_sd), 0o555)
+        try:
+            _r3_ro = _r2_out(aiqt_hooks.orch_stop_guard(_r3.payload("Stop")))
+        finally:
+            os.chmod(str(_r3_sd), 0o755)
+        check("recwrite3/unwritable-state-dir-writable-turn-state-fails-open-with-findings",
+              (_r3_ro[0], "the denial counter could not be persisted (PermissionError)" in _r3_ro[2]),
+              ("warn", True) if os.geteuid() != 0 else ("block2", False))
+        _r3_regp = _r3.root / ".aiqt" / "orchestration.local.json"
+        _r3_reg_text = _r3_regp.read_text(encoding="utf-8")
+        _r3_child_src = (
+            "import json, os, resource, sys\n"
+            "sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[2])\n"
+            "import aiqt_hooks, selftest_orch_hooks as t\n"
+            "vm = int(open('/proc/self/statm').read().split()[0]) * os.sysconf('SC_PAGE_SIZE')\n"
+            "hard = resource.getrlimit(resource.RLIMIT_AS)[1]\n"
+            "soft = vm + (64 << 20) if hard == resource.RLIM_INFINITY else min(vm + (64 << 20), hard)\n"
+            "resource.setrlimit(resource.RLIMIT_AS, (soft, hard))\n"
+            "res = aiqt_hooks.orch_ask_guard(json.loads(sys.argv[4]))\n"
+            "hso = res[1].get('hookSpecificOutput') if isinstance(res[1], dict) else None\n"
+            "reason = hso.get('permissionDecisionReason', '') if isinstance(hso, dict) else ''\n"
+            "has, lacks = json.loads(sys.argv[3])\n"
+            "print(json.dumps([t._verdict(res), has in str(reason) and not (lacks and lacks in str(reason))]))\n")
+        _r3_fifo = _r3.root / "r3-mode-fifo"
+        _r3_big = _r3.root / "r3-mode-big.md"
+        _r3_deep = _r3.root / "r3-mode-deep.json"
+        _r3_esc = _r3.root / "r3-mode-\udcff.md"  # the name's byte 0xff, surrogate-escaped
+        _r3_sock = _r3.root / "r3-mode-sock"
+        _r3_bind = ("import os, socket, sys\nos.chdir(sys.argv[1])\ns = socket.socket(socket.AF_UNIX)\n"
+                    "s.bind(sys.argv[2])\ns.close()\n")  # a relative bind: the root may be too long for a path
+        _r3_bound = getattr(aiqt_hooks, "_ORCH_MODE_MAX_BYTES", 1 << 20)  # a base without it still runs
+        _r3_cases = (
+            ("fifo", str(_r3_fifo), lambda: os.mkfifo(str(_r3_fifo)), "is not a regular file"),
+            ("dev-zero", "/dev/zero", lambda: None, "is not a regular file"),
+            ("over-bound", str(_r3_big), lambda: _r3_big.write_bytes(b"a" * (_r3_bound + 1)),
+             "larger than the {}-byte bound".format(_r3_bound)),
+            ("lone-surrogate", str(_r3.root / "r3-mode") + "\ud800", lambda: None, "is not strict UTF-8"),
+            ("surrogate-escaped-openable", str(_r3_esc),
+             lambda: _r3_esc.write_text("Operating-mode: attended\n", encoding="utf-8"),
+             "is not strict UTF-8 (a lone surrogate or a surrogate-escaped non-UTF-8 byte), so it is refused"),
+            ("socket", str(_r3_sock),
+             lambda: subprocess.run([sys.executable, "-I", "-B", "-c", _r3_bind, str(_r3.root), _r3_sock.name],
+                                    check=True, timeout=30),
+             "the mode file cannot be opened (OSError)"),
+            ("nul", str(_r3.root / "r3-mode") + "\x00x", lambda: None, "contains a NUL character"),
+            ("deep-nesting", str(_r3_deep), lambda: _r3_deep.write_text("[" * 100000, encoding="utf-8"),
+             ("the session operating-mode is unattended. RECORD", " because ")))
+        _r3_rows = []
+        _r3_ask = json.dumps(_r3.payload("PreToolUse", "AskUserQuestion", dict(questions=[])))
+        for _r3_name, _r3_path, _r3_make, _r3_reason in _r3_cases:
+            _r3_reg = json.loads(_r3_reg_text)
+            _r3_reg["mode"] = dict(path=_r3_path)
+            _r3_regp.write_text(json.dumps(_r3_reg), encoding="utf-8")  # ensure_ascii escapes the odd paths
+            _r3_make()
+            try:
+                _r3_needle = json.dumps(list(_r3_reason) if isinstance(_r3_reason, tuple) else [_r3_reason, ""])
+                p = subprocess.run([sys.executable, "-I", "-B", "-c", _r3_child_src, _r16_hooks, _r16_tools,
+                                    _r3_needle, _r3_ask], capture_output=True, text=True, timeout=30)
+                try:
+                    _r3_rows.append((_r3_name,) + tuple(json.loads(p.stdout)))
+                except (ValueError, TypeError):
+                    _r3_rows.append((_r3_name, "child exit {}: {}".format(p.returncode, p.stderr.strip()[-200:]),
+                                     False))
+            except subprocess.TimeoutExpired:
+                _r3_rows.append((_r3_name, "child timed out", False))
+            finally:
+                _r3_regp.write_text(_r3_reg_text, encoding="utf-8")
+                for _r3_made in (_r3_fifo, _r3_big, _r3_deep, _r3_esc, _r3_sock):
+                    if os.path.lexists(str(_r3_made)):
+                        os.unlink(str(_r3_made))
+        check("recwrite3/mode-reader-nonregular-oversize-undecodable-path-fails-closed-promptly", tuple(_r3_rows),
+              tuple((n, "deny", True) for n, _p, _m, _r in _r3_cases))
+
+        # QA round 3 of the silent-write fixes: _orch_write_json_atomic opens the parent directory once and
+        # binds the target's lstat, the create, the replace and the cleanup unlink to that descriptor. (1) The
+        # state directory is moved aside and a symlink to a foreign directory put in its place while the
+        # writer fsyncs, the foreign directory holding a file at the exact temporary name the writer draws
+        # (os.urandom pinned): the save lands in the moved original, the foreign file is neither published
+        # nor removed, and no temporary file is left. (2) The same swap, then an injected fsync failure: the
+        # writer removes its own temporary file in the moved original, never the foreign file of that name.
+        # (3) An injected fsync failure with no swap returns its reason, leaves the prior target unchanged and
+        # no temporary file, and the save opens no descriptor it does not close.
+        _r4 = Fixture(tmp, "recwrite4")
+        _r4_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_r4.root)))
+        _r4_sd.mkdir(parents=True, exist_ok=True)
+        _r4_moved = _r4_sd.parent / (_r4_sd.name + ".moved")
+        _r4_foreign = Path(tmp) / "recwrite4-foreign"
+        _r4_foreign.mkdir()
+        _r4_fixed = os.urandom(8)
+        _r4_tmpname = "turn-state.json.{}.tmp".format(_r4_fixed.hex())
+        _r4_alien = json.dumps(dict(foreign=True)).encode("utf-8")
+        _r4_prior = json.dumps(dict(tag="prior")).encode("utf-8")
+        _r4_save = lambda state: aiqt_hooks._orch_write_json_atomic(str(_r4_sd / "turn-state.json"), state)
+        _r4_tmps = lambda d: sorted(p.name for p in d.iterdir() if p.name.endswith(".tmp"))
+        _r4_real_fsync, _r4_urandom = os.fsync, os.urandom
+
+        def _r4_fds():
+            # None where the descriptors cannot be enumerated, never a measured zero
+            try:
+                return len(os.listdir("/proc/self/fd"))
+            except OSError:
+                return None
+
+        def _r4_fd_delta(before):
+            after = _r4_fds()
+            if before is None or after is None:
+                return "cannot-evaluate: the open descriptors cannot be enumerated (/proc/self/fd)"
+            return after - before
+
+        def _r4_swap():
+            os.rename(str(_r4_sd), str(_r4_moved))
+            os.symlink(str(_r4_foreign), str(_r4_sd))
+
+        def _r4_unswap():
+            if os.path.islink(str(_r4_sd)):
+                os.unlink(str(_r4_sd))
+            if os.path.isdir(str(_r4_moved)):
+                os.rename(str(_r4_moved), str(_r4_sd))
+
+        def _r4_run(fsync):
+            (_r4_sd / "turn-state.json").write_bytes(_r4_prior)
+            (_r4_foreign / _r4_tmpname).write_bytes(_r4_alien)
+            try:
+                os.fsync, os.urandom = fsync, (lambda n: _r4_fixed)
+                res = _r4_save(dict(tag="saved"))
+            finally:
+                os.fsync, os.urandom = _r4_real_fsync, _r4_urandom
+            seen = _r4_moved if os.path.isdir(str(_r4_moved)) else _r4_sd
+            out = (res, (seen / "turn-state.json").read_bytes(), _r4_tmps(seen),
+                   os.path.lexists(str(_r4_foreign / "turn-state.json")),
+                   (_r4_foreign / _r4_tmpname).read_bytes() if (_r4_foreign / _r4_tmpname).exists() else None)
+            _r4_unswap()
+            for _r4_left in [_r4_foreign / "turn-state.json"] + [_r4_sd / n for n in _r4_tmps(_r4_sd)]:
+                if os.path.lexists(str(_r4_left)):
+                    os.unlink(str(_r4_left))
+            return out
+
+        def _r4_swap_then_sync(fd):
+            _r4_swap()
+            return _r4_real_fsync(fd)
+
+        def _r4_swap_then_fail(fd):
+            _r4_swap()
+            raise OSError("injected: fsync fails after the parent swap")
+
+        def _r4_fail(fd):
+            raise OSError("injected: fsync fails")
+        _r4_saved = json.dumps(dict(tag="saved"), sort_keys=True).encode("utf-8")
+        check("recwrite4/parent-swapped-during-fsync-never-publishes-foreign-content",
+              _r4_run(_r4_swap_then_sync), (None, _r4_saved, [], False, _r4_alien))
+        check("recwrite4/fsync-failure-after-parent-swap-removes-its-own-temporary-file",
+              _r4_run(_r4_swap_then_fail), ("OSError", _r4_prior, [], False, _r4_alien))
+        # REGRESSION PIN: passes on the 7f97273f hooks too; a writer that skips the fsync fails it
+        _r4_fd0 = _r4_fds()
+        _r4_plain = _r4_run(_r4_fail)
+        check("recwrite4/fsync-failure-returns-its-reason-prior-target-unchanged-no-temporary-file",
+              (_r4_plain, _r4_fd_delta(_r4_fd0)), (("OSError", _r4_prior, [], False, _r4_alien), 0))
+
+        # QA round 4 of the silent-write fixes. (1) A write-and-search-only (0300) state directory: the writer
+        # opens it with _ORCH_O_WALK (O_PATH where available), which needs no read permission, so a direct
+        # save succeeds and the Stop deny stands (block2, its counter persisted) end to end; the O_RDONLY open
+        # of 181ff037 failed every such save and flipped that deny to fail open. As root the directory mode is
+        # not enforced; where O_PATH is absent the row expects the disclosed fallback (the save fails and the
+        # deny fails open with findings). (2) The state directory is swapped for a symlink to a foreign
+        # directory at the writer's stat of the target, before the create: the descriptor-bound no-follow
+        # stat reads the original target, a symlink to a 0640 file, so the new file is 0600, and the create,
+        # the replace and the cleanup act in the moved original. A stat by path reads the foreign target's
+        # 0604, a following stat the linked file's 0640, and a create by path puts the temporary file in the
+        # foreign directory, where the descriptor-bound replace cannot find it: each fails the row. (3) Each
+        # descriptor the save opens is closed exactly once, on success and on an fsync failure, and a
+        # successful save leaves the count of open descriptors unchanged (cannot-evaluate, which fails the
+        # row, where the descriptors cannot be enumerated).
+        _r5 = Fixture(tmp, "recwrite5")
+        _r5_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_r5.root)))
+        _r5_sd.mkdir(parents=True, exist_ok=True)
+        _r5_ts = _r5_sd / "turn-state.json"
+        _r5_direct = _r5_sd / "r5-direct.json"
+        _r5.set_items([item("QA-R5")])
+        _r5.set_turn_state(dict())
+        os.chmod(str(_r5_sd), 0o300)
+        try:
+            _r5_res = aiqt_hooks._orch_write_json_atomic(str(_r5_direct), dict(direct=True))
+            _r5_stop = _r2_out(aiqt_hooks.orch_stop_guard(_r5.payload("Stop")))
+        finally:
+            os.chmod(str(_r5_sd), 0o755)
+        _r5_ok = hasattr(os, "O_PATH") or os.geteuid() == 0
+        check("recwrite5/search-only-state-dir-saves-and-stop-deny-stands",
+              (_r5_res, json.loads(_r5_direct.read_text(encoding="utf-8")) if _r5_direct.exists() else None,
+               _r5_stop[0], "could not be persisted" in _r5_stop[1] + _r5_stop[2],
+               _r5.turn_state().get("stop_denials"), _r4_tmps(_r5_sd)),
+              (None, dict(direct=True), "block2", False, 1, []) if _r5_ok
+              else ("PermissionError", None, "warn", True, None, []))
+        _r5_moved = _r5_sd.parent / (_r5_sd.name + ".moved")
+        _r5_foreign = Path(tmp) / "recwrite5-foreign"
+        _r5_foreign.mkdir()
+        _r5_linked = Path(tmp) / "recwrite5-linked.json"
+        _r5_linked.write_bytes(b'{"linked": true}')
+        os.chmod(str(_r5_linked), 0o640)
+        (_r5_foreign / "turn-state.json").write_bytes(b'{"foreign": true}')
+        os.chmod(str(_r5_foreign / "turn-state.json"), 0o604)
+        _r5_ts.unlink()
+        _r5_ts.symlink_to(_r5_linked)
+        _r5_real_stat, _r5_real_lstat = os.stat, os.lstat
+        _r5_swapped = []
+
+        def _r5_swap_at_stat(real):
+            def _stat(path, *args, **kw):
+                if (not _r5_swapped and isinstance(path, (str, bytes, os.PathLike))
+                        and os.path.basename(os.fsdecode(path)) == "turn-state.json"):
+                    _r5_swapped.append(os.fsdecode(path))
+                    os.rename(str(_r5_sd), str(_r5_moved))
+                    os.symlink(str(_r5_foreign), str(_r5_sd))
+                return real(path, *args, **kw)
+            return _stat
+        try:
+            os.stat, os.lstat = _r5_swap_at_stat(_r5_real_stat), _r5_swap_at_stat(_r5_real_lstat)
+            _r5_res = aiqt_hooks._orch_write_json_atomic(str(_r5_ts), dict(tag="r5"))
+        finally:
+            os.stat, os.lstat = _r5_real_stat, _r5_real_lstat
+        _r5_seen = _r5_moved if os.path.isdir(str(_r5_moved)) else _r5_sd
+        _r5_new = _r5_seen / "turn-state.json"
+        _r5_got = (_r5_res, len(_r5_swapped), _r5_new.read_bytes() if not _r5_new.is_symlink() else "a symlink",
+                   oct(os.lstat(str(_r5_new)).st_mode & 0o777), _r5_linked.read_bytes(),
+                   (_r5_foreign / "turn-state.json").read_bytes(), sorted(os.listdir(str(_r5_foreign))),
+                   _r4_tmps(_r5_seen))
+        if os.path.islink(str(_r5_sd)):
+            os.unlink(str(_r5_sd))
+        if os.path.isdir(str(_r5_moved)):
+            os.rename(str(_r5_moved), str(_r5_sd))
+        check("recwrite5/parent-swapped-at-the-stat-stat-and-create-stay-on-the-descriptor", _r5_got,
+              (None, 1, json.dumps(dict(tag="r5"), sort_keys=True).encode("utf-8"), "0o600", b'{"linked": true}',
+               b'{"foreign": true}', ["turn-state.json"], []))
+        _r5_real_open, _r5_real_close, _r5_real_fsync = os.open, os.close, os.fsync
+
+        def _r5_closes(fsync):
+            opened, closed = [], []
+
+            def _open(path, flags, *args, **kw):
+                fd = _r5_real_open(path, flags, *args, **kw)
+                opened.append(fd)
+                return fd
+
+            def _close(fd):
+                closed.append(fd)
+                return _r5_real_close(fd)
+            before = _r4_fds()
+            try:
+                os.open, os.close, os.fsync = _open, _close, fsync
+                res = aiqt_hooks._orch_write_json_atomic(str(_r5_ts), dict(tag="closes"))
+            finally:
+                os.open, os.close, os.fsync = _r5_real_open, _r5_real_close, _r5_real_fsync
+            return (res, len(opened), [closed.count(fd) for fd in opened], len(closed), _r4_fd_delta(before),
+                    _r4_tmps(_r5_sd))
+        check("recwrite5/each-save-descriptor-closed-exactly-once-on-success-and-failure",
+              (_r5_closes(_r5_real_fsync), _r5_closes(_r4_fail)),
+              ((None, 2, [1, 1], 2, 0, []), ("OSError", 2, [1, 1], 2, 0, [])))
+
+        # QA round 6 of the silent-write fixes: the yield residue counter claims. (1) A write-and-search-only
+        # (0300) state directory: the schedule denials accumulate there and the fourth call on an unchanged
+        # basis is cap-relieved (three denies, then a warn, the counter at 3). The real chmod binds a non-root
+        # run; the os.open seam refuses an open of the state directory itself that lacks O_PATH whenever the
+        # directory's current mode lacks read, whatever the native O_PATH and euid, so the row also
+        # discriminates on a root run and a writer reverted to an O_RDONLY directory open fails it (its saves
+        # fail, the count stays unset and the fourth call denies). Where O_PATH is absent the row expects
+        # the disclosed fallback, as root too (no count, four denies). (2)
+        # Relief already earned survives a later save failure: decide_yield reads the counter before any
+        # save, so three denials in a 0700 directory, then the directory set to search only (0100), still
+        # relieve, and so does a counter at the cap in a 0300 directory under the O_RDONLY fallback writer;
+        # each failed wake-digest save is named in the relief note and leaves the counter at 3. A seam
+        # refusing every create in the state directory makes the 0100 save fail on a root run too.
+        _r6_opath = getattr(os, "O_PATH", 0)
+        _r6_real_open = aiqt_hooks.os.open
+
+        def _r6_run(name, setup_mode, mode, walk=None):
+            fx = Fixture(tmp, name)
+            sd = Path(aiqt_hooks._orch_state_dir_for_root(str(fx.root)))
+            sd.mkdir(parents=True, exist_ok=True)
+            ino = os.stat(str(sd)).st_ino
+            fx.set_items([item("QA-R6", blocker=dict(kind="not-before", ref=now_iso(-48)))])
+            fx.set_turn_state(dict())
+            run = lambda: _r2_out(aiqt_hooks.orch_yield_tool(
+                fx.payload("PreToolUse", "ScheduleWakeup", dict(prompt="waiting"))))
+
+            def _open(path, flags, *a, **k):
+                current = switched[0] if switched else setup_mode
+                if (not current & 0o400 and not (_r6_opath and flags & _r6_opath)
+                        and isinstance(path, (str, bytes, os.PathLike))
+                        and k.get("dir_fd") is None and os.path.abspath(os.fsdecode(path)) == str(sd)):
+                    raise PermissionError(13, "Permission denied", os.fsdecode(path))
+                if (switched and mode == 0o100 and flags & os.O_CREAT and k.get("dir_fd") is not None
+                        and os.fstat(k["dir_fd"]).st_ino == ino):
+                    raise PermissionError(13, "Permission denied", os.fsdecode(path))
+                return _r6_real_open(path, flags, *a, **k)
+            saved_walk = aiqt_hooks._ORCH_O_WALK
+            out, switched = [], []
+            try:
+                aiqt_hooks.os.open = _open
+                os.chmod(str(sd), setup_mode)
+                out += [run() for _ in range(3)]
+                os.chmod(str(sd), mode)
+                switched.append(mode)
+                if walk is not None:
+                    aiqt_hooks._ORCH_O_WALK = walk
+                out.append(run())
+            finally:
+                aiqt_hooks._ORCH_O_WALK = saved_walk
+                aiqt_hooks.os.open = _r6_real_open
+                os.chmod(str(sd), 0o755)
+            return ([o[0] for o in out], "prompt digest could not be written" in out[-1][2],
+                    fx.turn_state().get("schedule_denials"))
+        check("recwrite6/search-only-state-dir-yield-denials-accumulate-and-cap-relieves",
+              _r6_run("recwrite6a", 0o300, 0o300),
+              (["deny", "deny", "deny", "warn"], False, 3) if _r6_opath else (["deny"] * 4, False, None))
+        check("recwrite6/earned-cap-relief-survives-a-failed-save",
+              (_r6_run("recwrite6b", 0o700, 0o100), _r6_run("recwrite6c", 0o700, 0o300, walk=os.O_RDONLY)),
+              ((["deny", "deny", "deny", "warn"], True, 3), (["deny", "deny", "deny", "warn"], True, 3)))
+
+        # QA rounds 7 to 10: one sweep pins the counter-save and relief sentences of the orch-yield-tool-guard
+        # and orch-stop-guard residues (see _PERM_SWEEP_TABLE), the malformed-count, non-object turn-state,
+        # above-the-limit count and stop_hook_active exits included, and that no relief reaches the
+        # unreadable-registry deny of a schedule or stop=true call, judged on the default state directory that
+        # deny's call resolves; it checks each output channel of a cell on its own: the kernel leg runs the
+        # platform's writers without root, the model leg runs both writers everywhere, and every cell matches
+        # the table.
+        check("recwrite7/state-dir-permission-sweep-matches-the-table",
+              _perm_sweep(tmp),
+              (0 if os.geteuid() == 0 else 736 if getattr(os, "O_PATH", 0) else 368, 736, []))
+
+        # QA round 10: a count above the loop bound or the cap is a forced exit like one at it, so a Stop, a
+        # stop=true call and a schedule call each record forced_unresolved at the limit, one above it, and at
+        # the largest valid count (the sweep pins the verdicts; this pins the record).
+        _r10 = Fixture(tmp, "recwrite10")
+        _r10_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_r10.root)))
+        _r10.set_items([item("R10-B", blocker=dict(kind="not-before", ref=now_iso(-48)))])
+        _r10.set_turn_state(dict())
+        aiqt_hooks.orch_yield_tool(_r10.payload("PreToolUse", "ScheduleWakeup", dict(prompt="waiting")))
+        _r10_basis = _r10.turn_state().get("schedule_basis")
+
+        def _r10_forced(kind, count):
+            (_r10_sd / "forced-exit.jsonl").unlink(missing_ok=True)
+            if kind == "schedule":
+                _r10.set_turn_state(dict(schedule_denials=count, schedule_basis=_r10_basis))
+                result = aiqt_hooks.orch_yield_tool(_r10.payload("PreToolUse", "ScheduleWakeup",
+                                                                 dict(prompt="waiting")))
+            else:
+                _r10.set_turn_state(dict(stop_denials=count))
+                result = (aiqt_hooks.orch_stop_guard(_r10.payload("Stop")) if kind == "stop" else
+                          aiqt_hooks.orch_yield_tool(_r10.payload("PreToolUse", "ScheduleWakeup",
+                                                                  dict(prompt="done", stop=True))))
+            rows, _bad = aiqt_hooks._orch_read_jsonl(str(_r10_sd / "forced-exit.jsonl"))
+            # the record must parse whole: a malformed row is a failure, never a silent skip
+            return _verdict(result), len(rows or []), _bad
+        _r10_limits = dict(schedule=aiqt_hooks._ORCH_SCHEDULE_CAP, stop=aiqt_hooks._ORCH_LOOP_BOUND,
+                           ystop=aiqt_hooks._ORCH_LOOP_BOUND)
+        check("recwrite10/forced-exit-recorded-at-and-above-the-bound-and-cap",
+              [(kind, count, _r10_forced(kind, count)) for kind, limit in sorted(_r10_limits.items())
+               for count in (limit, limit + 1, aiqt_hooks._ORCH_COUNTER_MAX)],
+              [(kind, count, ("warn", 1, 0)) for kind, limit in sorted(_r10_limits.items())
+               for count in (limit, limit + 1, aiqt_hooks._ORCH_COUNTER_MAX)])
+
         # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
         e = Fixture(tmp, "forced5")
         esched = lambda ti: aiqt_hooks.orch_yield_tool(
@@ -1522,12 +6668,14 @@ def _main_isolated(report_path=None):
         check("forced5/cap-exit-warns", _verdict(esched({"prompt": "waiting"})), "warn")
         check("forced5/recorded-over-blocked", (esd / "forced-exit.jsonl").exists(), True)
         e1, _b1 = aiqt_hooks._orch_read_jsonl(str(esd / "forced-exit.jsonl"))
-        check("forced5/blocked-id-recorded", e1[-1].get("open_ids"), ["BW-1"])
+        # both reads must parse whole: a malformed row is a failure, never a silent skip
+        check("forced5/blocked-id-recorded", (e1[-1].get("open_ids"), _b1), (["BW-1"], 0))
         # a SECOND forced exit appends (append-only), never clobbering the first
         check("forced5/cap-exit-warns-2", _verdict(esched({"prompt": "waiting"})), "warn")
         e2, _b2 = aiqt_hooks._orch_read_jsonl(str(esd / "forced-exit.jsonl"))
-        check("forced5/two-rows-appended", len(e2), 2)
-        # the resume audit surfaces BOTH exactly once, then a second resume is clean
+        check("forced5/two-rows-appended", (len(e2), _b2), (2, 0))
+        # the resume audit surfaces BOTH, then a second resume is clean (the surfaced-set write succeeds
+        # here; a failed one would raise them again, at least once)
         check("forced5/resume-surfaces-both",
               _verdict(aiqt_hooks.orch_resume_audit(e.payload("SessionStart"))), "warn")
         check("forced5/second-resume-clean",
@@ -1641,28 +6789,14 @@ def _main_isolated(report_path=None):
               set(json.loads((hsd / "forced-exit-surfaced.json").read_text(
                   encoding="utf-8")).get("keys", [])), {"k1", "k2"})
         check("forced5/second-pass-clean", aiqt_hooks._orch_forced_exit_findings(str(hsd)), [])
+        _rdp_cases(tmp)
     finally:
+        aiqt_hooks._orch_dirfd_has_registry = saved_probe
         shutil.rmtree(tmp, ignore_errors=True)
-
-    if report_path is not None:
-        try:
-            with open(report_path, "w", encoding="utf-8") as handle:
-                json.dump({"format_version": 1, "suite": SUITE_ID, "check_ids": EXECUTED}, handle)
-                handle.write("\n")
-        except OSError as exc:
-            # A failed report write must not swallow the assertion diagnostics already collected:
-            # surface what the suite found first, then the harness error.
-            if FAILURES:
-                print("SELF-TEST FAIL:")
-                for f_ in FAILURES:
-                    print("  - " + f_)
-            print("SELF-TEST HARNESS ERROR: cannot write execution report {}: {}".format(
-                report_path, exc), file=sys.stderr)
-            return 2
 
     # In-run execution-set self-guard (defence in depth beside tools/check_selftest_execution.py): the
     # executed set reconciles against the hand-authored expectation manifest even on a direct developer
-    # run. The report above is written FIRST, so it always reflects what actually executed.
+    # run. The report is finalized at interpreter exit, so it always reflects what actually executed.
     expected_ids = _expected_check_ids()
     if expected_ids is None:
         return 2
@@ -1692,11 +6826,26 @@ def _main_isolated(report_path=None):
           "background dispatch that pipes a producer into a truncating sink (head/tail, which discards the "
           "producer's full output and exit status) and a "
           "foreground bare-& detach (historically an ASK for both) while dropping a word-start `#` comment "
-          "and failing an unbalanced/ANSI-C quote toward treating it as a detach (now a deny) rather than a "
-          "silent allow; the ledger records launches and completions; the resume "
-          "audit arms and clears the mutation barrier on real record state; the prompt stamp "
+          "and failing a scan that ends inside an open quote toward a deny with its own reason (a quote the "
+          "scan misreads in mid-string, such as an ANSI-C escaped quote or a quote in a here-document body, "
+          "can still shift it into a disclosed silent allow, and a safe here-document body '&' is a "
+          "disclosed over-refusal), reads a '#' comment by bash's word-start rule as well, denies every "
+          "Bash call that passes the pre-scope checks when the opt-in registry-required mode is set and no registry is found or the nearest registry entry cannot be evaluated (a discovery fault never satisfies that mode; by default it keeps the guard active), and fails "
+          "closed on a missing or unreadable tool_name, an unreadable cwd or one whose registry walk cannot "
+          "be carried out (scope is the ancestor walk with its concurrent-move recheck, unioned with "
+          "a git-resolved toplevel; by default a git failure alone never denies, while the "
+          "registry-required mode denies one that hides a registry reachable only through the git "
+          "toplevel), a malformed tool_input, "
+          "run_in_background, or command, and on any stdin the dispatcher cannot parse; the ledger "
+          "records launches "
+          "and completions; the resume "
+          "audit arms and clears the mutation barrier on real record state (best-effort and atomic: a "
+          "barrier write that fails, before or after the temporary file is opened, leaves the previous "
+          "barrier byte-identical while the warning still surfaces, and a barrier file that is unreadable "
+          "or malformed reads as armed); the prompt stamp "
           "resets guard counters from genuine human input; an actor-owned, symlinked, or writable "
-          "escape sentinel is ignored, recorded, and surfaced once at resume; a declared attestation "
+          "escape sentinel is ignored, recorded (or its failed record warned about), and normally "
+          "raised once at resume; a declared attestation "
           "register gates external/foreign-lease evidence at audit cadence, holding on an unreadable "
           "surface and surfacing unsubstantiated rows; an id that vanishes from the enumeration "
           "without a close receipt is held by the anti-shrinkage checkpoint; a bound- or cap-released "
@@ -1719,4 +6868,4 @@ def _parse_argv(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(report_path=_parse_argv(sys.argv[1:])))
+    _selftest_exit_report.exit_with(main(report_path=_parse_argv(sys.argv[1:])))

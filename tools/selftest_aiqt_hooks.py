@@ -26,8 +26,14 @@ guard with THREE outcomes (allow/ask/deny); under the key above its former ASK i
 (recoverable) or deny (unrecoverable/unclassifiable). This suite distinguishes those outcomes. The rule: for a recognized lossy
 verb, ASK unless the command is a PRISTINE SINGLE BARE `git <verb>` invocation (no shell metacharacter
 anywhere even quoted, no reserved word, no wrapper/redirect/compound, and a command word literally `git`)
-AND either its form is genuinely non-destructive, the whole tree is PROVABLY CLEAN, or the leading opt-out is
-set, in which case ALLOW; a pristine bare whole-tree-clobbering verb (reset --hard, checkout -f, switch
+AND either its form is genuinely non-destructive or the whole tree is PROVABLY CLEAN, in which case ALLOW (no
+in-band override exists: a leading GUARDRAIL_ALLOW_DISCARD, the removed override, is an ordinary assignment no
+code reads to permit anything - a pristine prefixed command gets the bare command's decision, a value the raw
+scans read routes the command exactly where any other leading assignment of the same value routes it, those
+routes snapshot every not-provably-clean resolved base before an allow of a destructive form, and every
+destructive route DENIES, fail closed, when no session cwd resolves AND no concrete -C target was resolved
+(the resolved-target exception: 'git -C <abs repo> reset --hard' with no cwd probes and snapshots that -C
+target and is decided on it) - this no-cwd resolved-target form is not separately pinned here); a pristine bare whole-tree-clobbering verb (reset --hard, checkout -f, switch
 --force) on a confirmed-dirty tree DENIES. This suite proves the EN-6 pristine gate: every shell-grammar and
 wrapper form that hides a real `git reset --hard` while the raw scan still sees a contiguous git+verb keyword
 (an `if`/`for`, a backtick or `$()` substitution, a `|&`, a leading or interspersed redirect, and the
@@ -64,8 +70,10 @@ handler's structured decision.
 It also covers the gate-weakening guard (gate_weakening, gatdis): a git verification-hook bypass
 (--no-verify on commit/merge/push/pull/rebase/am, exact or abbreviated; the short -n only on
 commit/am, where -n IS --no-verify) denies; a checker-shaped segment whose failure is swallowed
-(|| true, || :) or piped into a truncating sink (| head, | tail) asks; option-value, post-'--',
-and push/merge -n edges stay allowed; and the parse-error fallback fails safe.
+(|| true, || :) or piped into an adjacent head or tail allows with a note, except that a narrow
+verification run on the allow-list whose output reaches a sink on the allow-list (head or tail with
+one positive line count, grep -m N/-q/-c/-l/-L, rg -q/-c/-l) denies; option-value, post-'--', and
+push/merge -n edges stay allowed; and the parse-error fallback fails safe.
 
 It also covers the BEST-EFFORT, ASK-only git-commit argument substitution guard
 (commit_msg_subst, sectvl). In a parsed simple segment whose effective command resolves past the named
@@ -106,10 +114,25 @@ floor synthesized in-tree, removed in the finally.
 
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: selftest_aiqt_hooks.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import ast
 import collections
 import contextlib
 import datetime
+import hashlib
 import io
 import json
 import os
@@ -117,7 +140,6 @@ import re
 import shlex
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
@@ -208,8 +230,9 @@ def _leaf_constructors(bodies, ctors):
     exactly one return statement, no node of a _LEAF_REFUSED type (a branch, conditional expression,
     loop, try, match, with, boolean operator, comprehension, lambda, nested definition, yield, await,
     global or nonlocal statement), and no reference to any declared constructor name. At
-    f0c549aa and after this round the leaves are exactly _allow_note, _stop_warn,
-    _dispatcher_fail_open_warn and _deny (pinned by the note-shape pin cases)."""
+    f0c549aa the leaves were exactly _allow_note, _stop_warn, _dispatcher_fail_open_warn and _deny; since
+    _context_note (a note that also carries model context) they are those and _context_note (pinned by
+    the note-shape pin cases)."""
     out = set()
     for name, func in bodies.items():
         nodes = [node for stmt in func.body for node in ast.walk(stmt)]
@@ -236,7 +259,7 @@ def _note_constructor_shape_failures(path=None):
     constructor's call to itself is not another constructor's call); a deny
     constructor (not also declared a note constructor) that returns a note constructor's call; the note
     key ("systemMessage" as a string, inside a non-docstring string, or as an attribute or name) anywhere
-    but the body of a LEAF constructor (see _leaf_constructors: _allow_note, _stop_warn and
+    but the body of a LEAF constructor (see _leaf_constructors: _allow_note, _context_note, _stop_warn and
     _dispatcher_fail_open_warn, and in _deny only its dict that also carries hookSpecificOutput), and the
     note key as a keyword anywhere (in a leaf constructor by the keyword rule next; a keyword never
     counts as building the note or the deny dict in the empty rules above); in a leaf constructor, a call
@@ -254,8 +277,9 @@ def _note_constructor_shape_failures(path=None):
     constructor name (a name, an attribute, or a string equal to it, as a getattr or globals() lookup
     would need) other than as the callee of a call that is the direct value of a return statement; a
     function returning a declared constructor's call that is neither a declared constructor, a HANDLERS
-    entry referenced only from that table, nor main referenced only from its `sys.exit(main(...))` entry
-    line; a decorator on a declared constructor, a HANDLERS entry or main; and, at the dispatcher
+    entry referenced only from that table, nor main referenced only from its `sys.exit(main(...))` or
+    `os._exit(main(...))` entry line (the hook uses the os._exit form, so the interpreter-exit flush of a
+    std stream cannot replace the exit code main chose with the interpreter's own status); a decorator on a declared constructor, a HANDLERS entry or main; and, at the dispatcher
     boundary, a global or nonlocal statement in main (a nonlocal there is also a compile-time syntax
     error, but the scan refuses it so the rule does not lean on the compiler), a main with no `code,
     stdout_obj, stderr_text = HANDLERS[...](data)` binding, any use of HANDLERS other than main's first
@@ -267,7 +291,10 @@ def _note_constructor_shape_failures(path=None):
     assembled at run time ("system" + "Message", an f-string, a join, a decode, a dict built from a
     variable key), a constructor or note reached through getattr, globals(), vars(), importlib or another
     module's copy of the hook source, or a patched json.dumps, print or sys.stdout, for example). Review,
-    not this check, closes those."""
+    not this check, closes those.
+    Exempt: the PYTHON-FLOOR prelude, the one top-level `if` right after the FLOOR_FAIL_OPEN_MODES
+    assignment. It runs before any constructor exists, so it writes its own fail-open note, and
+    tools/check_python_floor.py pins that statement to its HOOK_GUARD_TEMPLATE by AST."""
     path = Path(path or aiqt_hooks.__file__)
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     out = []
@@ -328,6 +355,13 @@ def _note_constructor_shape_failures(path=None):
             out.append("(note-shape-deny-note-{}) the deny constructor {} returns a note constructor's call; "
                        "declare it in NOTE_CONSTRUCTORS so its callers are inventoried".format(name, name))
     docs = _docstring_ids(tree)
+    floor_guard = set()
+    for before, node in zip(tree.body, tree.body[1:]):
+        if (isinstance(before, ast.Assign) and len(before.targets) == 1
+                and isinstance(before.targets[0], ast.Name) and before.targets[0].id == "FLOOR_FAIL_OPEN_MODES"
+                and isinstance(node, ast.If)):
+            floor_guard.update(id(child) for child in ast.walk(node))
+            break
     deny_ok = set()
     for name in deny_names & leaves:
         for node in ast.walk(bodies[name]):
@@ -345,7 +379,7 @@ def _note_constructor_shape_failures(path=None):
             key_text = "attribute"
         elif isinstance(node, ast.Name) and node.id == "systemMessage":
             key_text = "name"
-        if key_text == "keyword" and id(node) in inside_leaf:
+        if key_text == "keyword" and id(node) in inside_leaf or id(node) in floor_guard:
             continue
         if key_text is None or inside_leaf.get(id(node)) in names or id(node) in deny_ok:
             continue
@@ -434,7 +468,8 @@ def _note_constructor_shape_failures(path=None):
         if (isinstance(node, ast.Return) and isinstance(node.value, ast.Call)
                 and isinstance(node.value.func, ast.Name) and node.value.func.id in ctors):
             callee_ok.add(id(node.value.func))
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "exit"
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("exit", "_exit")
                 and len(node.args) == 1 and isinstance(node.args[0], ast.Call)
                 and isinstance(node.args[0].func, ast.Name) and node.args[0].func.id == "main"):
             main_ok.add(id(node.args[0].func))
@@ -741,14 +776,552 @@ def _ask_label_failures(source_path=None):
     return out
 
 
+# (stop-field-claim) The hooks reference (Stop input) documents stop_hook_active on the Stop and SubagentStop
+# payloads: true when Claude Code is already continuing as a result of a stop hook. This is a BOUNDED
+# regression check for the absence phrasings this repository carried (including the "no documented loop
+# bound" wording the diff_wall_stop docstring once used, its "built-in" form and the hyphenated one), not
+# a semantic claim detector: a phrasing outside this list, or one with markup between the words, is
+# residual and passes. A legitimate sentence that matches (a test scenario such as "This test sends no
+# stop_hook_active field.") is reported too, and is admitted only by a path-scoped
+# _STOP_FIELD_CLAIM_PENDING allowance for its own file, which admits only the pattern matches inside its
+# own sentence.
+_STOP_FIELD_CLAIM_RES = tuple(re.compile(p, re.IGNORECASE) for p in (
+    r"\bno\s+[`'\"]?stop_hook_active\b",
+    r"\bnone\s+is\s+documented\s+on\s+(?:subagent)?stop\b",
+    r"\bstop\s+payloads?\s+(?:has|have|carries|carry|holds?|contains?)\s+no\s+(?:loop|stop_hook_active)\b",
+    r"\bstop_hook_active\b[^.;]{0,40}?\b(?:is|are)\s+(?:not|never)\s+(?:documented|sent|provided|present)\b",
+    r"\bstop_hook_active\b[^.;]{0,30}?\bundocumented\b",
+    r"\bundocumented\b[^.;]{0,30}?\bstop_hook_active\b",
+    r"\bno\s+documented\s+(?:built-in\s+)?loop[\s-]+bound\b",
+))
+# The files that carry hook prose about the Stop payload: the hook sources, their manifests and docs, the
+# preview hooks, and the residue renderings generated from the manifest.
+_STOP_FIELD_CLAIM_FILES = (
+    ".aiqt/core/hooks/scripts/aiqt_hooks.py",
+    "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+    ".aiqt/core/hooks/manifest.toml",
+    ".aiqt/core/hooks/preview.toml",
+    ".aiqt/core/hooks/ORCHESTRATION.md",
+    ".aiqt/enforceability.json",
+    "ENFORCEMENT.md",
+    "site/enforcement.html",
+)
+_STOP_FIELD_CLAIM_GLOBS = (".preview/*.py", ".preview/*.md")
+# A sentence another change is rewriting, tolerated verbatim until it lands (a (path, sentence) pair). The
+# allowance admits only the pattern matches that fall inside the single occurrence of its sentence in its
+# named path; an empty sentence, one that no pattern matches, a bare pattern match, or one that occurs more
+# than once in its file (overlapping occurrences included) is refused as a failure, and an entry whose path
+# is not scanned, or whose sentence no longer occurs in that path, is a stale-allowance failure until the
+# entry is removed, so the allowance can neither outlive the sentence nor suppress a match elsewhere.
+# Empty today: the last pending rewrite (the orch-stop-guard residue) landed with PR 473.
+_STOP_FIELD_CLAIM_PENDING = ()
+
+
+def _stop_field_claim_failures(root=None, pending=_STOP_FIELD_CLAIM_PENDING):
+    """(stop-field-claim) A bounded regression check: no hook source comment, docstring or residue carries
+    one of the absence phrasings about stop_hook_active (or the "no documented loop bound" wording) that
+    this repository carried. It matches the fixed _STOP_FIELD_CLAIM_RES list, so other phrasings, or markup
+    between the words, are residual and pass; a finding reports the phrasing, not a proof about the payload.
+    Comment markers and line breaks are folded to single spaces first, so a phrasing wrapped across comment
+    lines is still seen. Coverage fails closed: a missing or unreadable file in the fixed list, a glob that
+    matches nothing, a missing or unreadable .preview/SHA256SUMS inventory, an inventory line outside the
+    check_hooks_preview.parse_sums grammar (the bytes are read without newline translation; a line holding
+    a SUMS_BREAK_CHARS separator `sha256sum -c` does not honour, CR and CRLF spellings included, is
+    reported by line BEFORE `#` comment lines and blank lines are skipped; any other line must be
+    `<64 lowercase hex>  <name>`), a duplicate inventory name, a listing naming no hook while the scan
+    found one, or an inventory .py the scan did not find is a recorded failure, never a clean result. A
+    pending allowance is scoped to its named path and to its own sentence: an empty sentence, one that no
+    pattern matches, one that is itself exactly a pattern match (a bare phrase would admit itself wherever
+    it occurs), or one that occurs more than once in its file (overlapping occurrences included: a
+    second occurrence may start inside the first) is refused; an allowance whose path is not
+    scanned, or whose sentence is absent from that path, is a stale-allowance failure; and only the
+    pattern matches that fall entirely inside the single occurrence of the sentence are admitted, so a
+    match reaching outside the sentence on either edge is still reported."""
+    import check_hooks_preview
+    base = Path(root) if root is not None else repo_root()
+    out = []
+    paths = [base / rel for rel in _STOP_FIELD_CLAIM_FILES]
+    globbed = []
+    for pattern in _STOP_FIELD_CLAIM_GLOBS:
+        found = sorted(base.glob(pattern))
+        if not found:
+            out.append("(stop-field-claim-glob) the glob {} matched nothing under {}; missing preview "
+                       "coverage is a failure, not a clean result".format(pattern, base))
+        globbed.extend(found)
+    paths.extend(globbed)
+    # Reconcile the scanned preview hooks against the authoritative inventory, parsed with the
+    # check_hooks_preview.parse_sums grammar (SUMS_LINE_RE): every malformed line, a duplicate name, a
+    # listing naming no hook while the scan found one, and every listed .py the scan did not find is a
+    # recorded failure (hash agreement with the file bytes stays check_hooks_preview business).
+    scanned = {path.relative_to(base).as_posix() for path in globbed if path.suffix == ".py"}
+    try:
+        inventory = (base / ".preview" / "SHA256SUMS").read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        out.append("(stop-field-claim-inventory) cannot read .preview/SHA256SUMS: {}; without the inventory "
+                   "the preview scan cannot be reconciled, so this is a failure".format(exc))
+    else:
+        listed, hooks = [], []
+        for number, line in enumerate((inventory[:-1] if inventory.endswith("\n") else inventory)
+                                       .split("\n"), 1):
+            breaks = [ch for ch in line if ch in check_hooks_preview.SUMS_BREAK_CHARS]
+            if breaks:
+                out.append("(stop-field-claim-inventory-break) .preview/SHA256SUMS:{}: U+{:04X} is not a "
+                           "line break for `sha256sum -c`, which ends a line at LF only; a line holding a "
+                           "forbidden separator is a failure, never a silent skip (the "
+                           "check_hooks_preview._reject_breaks rule, applied before comment and blank "
+                           "lines are skipped)".format(number, ord(breaks[0])))
+                continue
+            if not line.strip() or line.startswith("#"):
+                continue
+            fields = check_hooks_preview.SUMS_LINE_RE.match(line)
+            if fields is None:
+                out.append("(stop-field-claim-inventory-line) .preview/SHA256SUMS:{}: not a `<64 lowercase hex>"
+                           "  <name>` line; a malformed inventory line is a failure, never a silent "
+                           "skip".format(number))
+                continue
+            name = fields.group(2)
+            if name in listed:
+                out.append("(stop-field-claim-inventory-dup) .preview/SHA256SUMS:{}: {} is listed twice; a "
+                           "duplicate inventory name is a failure".format(number, name))
+                continue
+            listed.append(name)
+            if name.endswith(".py"):
+                hooks.append(name)
+        if scanned and not hooks:
+            out.append("(stop-field-claim-inventory-empty) .preview/SHA256SUMS names no hook while the scan found "
+                       "{}; a listing empty of hooks with a hook present cannot be reconciled, so this is "
+                       "a failure".format(len(scanned)))
+        for name in hooks:
+            rel = ".preview/" + name
+            if rel not in scanned:
+                out.append("(stop-field-claim-inventory-gap) {} is named in .preview/SHA256SUMS but the scan did "
+                           "not find it; a missing inventory entry is a failure".format(rel))
+    folded = {}
+    for path in paths:
+        rel = path.relative_to(base).as_posix()
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            out.append("(stop-field-claim-read) cannot read {}: {}".format(rel, exc))
+            continue
+        folded[rel] = " ".join(re.sub(r"\n[ \t]*#+", " ", raw).split())
+    admitted = {}
+    for rel, sentence in pending:
+        if not sentence.strip():
+            out.append("(stop-field-claim-pending-empty) the pending allowance for {} has an empty sentence, "
+                       "which would admit every match in that file; name the exact sentence or remove the "
+                       "entry".format(rel))
+        elif not any(regex.search(sentence) for regex in _STOP_FIELD_CLAIM_RES):
+            out.append("(stop-field-claim-pending-unmatched) the pending allowance sentence for {} matches "
+                       "no _STOP_FIELD_CLAIM_RES pattern, so there is nothing for it to admit; remove the "
+                       "entry".format(rel))
+        elif any(regex.fullmatch(sentence) for regex in _STOP_FIELD_CLAIM_RES):
+            out.append("(stop-field-claim-pending-bare) the pending allowance sentence for {} is exactly a "
+                       "pattern match, not a sentence containing one, so it would admit that phrase at "
+                       "every occurrence in the file; name the whole surrounding sentence instead".format(rel))
+        elif rel not in folded:
+            out.append("(stop-field-claim-pending-unscanned) the pending allowance for {} names a path this check does "
+                       "not scan (or could not read); point the entry at a scanned path or remove it".format(rel))
+        elif sentence not in folded[rel]:
+            out.append("(stop-field-claim-pending) the pending allowance for {} no longer matches that file; the rewrite "
+                       "it waited for has landed, so remove the entry from _STOP_FIELD_CLAIM_PENDING".format(rel))
+        elif folded[rel].find(sentence, folded[rel].find(sentence) + 1) != -1:
+            # str.count skips overlapping occurrences, so the second occurrence is searched from
+            # first + 1, and the lookahead count in the message counts overlapping occurrences too
+            out.append("(stop-field-claim-pending-multiple) the pending allowance sentence for {} occurs {} "
+                       "times in that file, so it would admit every occurrence instead of one sentence; "
+                       "name a longer sentence that occurs exactly once".format(
+                           rel, len(re.findall("(?={})".format(re.escape(sentence)), folded[rel]))))
+        else:
+            start = folded[rel].find(sentence)
+            admitted.setdefault(rel, []).append((start, start + len(sentence)))
+    for rel, text in folded.items():
+        spans = admitted.get(rel, ())
+        for regex in _STOP_FIELD_CLAIM_RES:
+            for match in regex.finditer(text):
+                if any(lo <= match.start() and match.end() <= hi for lo, hi in spans):
+                    continue
+                out.append("(stop-field-claim) {} carries an absence phrasing about stop_hook_active or the "
+                           "loop bound ({!r}); this bounded regression check pins the absence phrasings "
+                           "this repository carried (the hooks reference documents stop_hook_active on "
+                           "Stop and SubagentStop), and a legitimate matching sentence needs a path-scoped "
+                           "_STOP_FIELD_CLAIM_PENDING allowance".format(rel, match.group(0)))
+    return out
+
+
+def _test_stop_field_claim_check(failures, tmp):
+    """(stop-field-claim-pin) The claim check itself. Every fixture populates the complete required input
+    set (the fixed-list files, the preview hooks, README.md and SHA256SUMS) except the four deliberate
+    fault fixtures: no-preview omits the whole .preview directory, no-sums omits SHA256SUMS, empty-glob
+    carries no preview hook, and fixed-read removes ENFORCEMENT.md. Every vector whose expected findings
+    have deterministic text compares the COMPLETE finding multiset verbatim (path, label and matched
+    phrase, with multiplicity), so a missing finding replaced by a duplicate of another, or an unexpected
+    inventory, read or pending failure, is red, never filtered away; the duplicate-substitution probes
+    drive the comparison helper itself (through a separate failure sink that must record a mismatch) with
+    a duplicated finding list and with a same-length different-finding list, so a helper weakened to a
+    length check is red. The read-failure vectors pin every finding with only the variable OS error text
+    normalized: no-preview compares the complete normalized multiset (each fixed-list path and label
+    kept, the two glob diagnostics pinned verbatim, the inventory diagnostic's fixed text kept) and
+    refuses a read finding replaced by a duplicate of another; no-sums, bad-sums and fixed-read pin the
+    single diagnostic's count, label and prefix. Each phrasing the repository carried is caught with its
+    pinned match multiset, and one fixture exercises each alternation branch of patterns 0 to 3, each
+    quote character of pattern 0 (backtick, apostrophe, double quote), both loop-bound widenings
+    ("built-in" and the hyphen) and one fixture per undocumented order, so dropping either undocumented
+    pattern, or narrowing any other pattern or the quote class, is red; a scenario phrasing and the
+    documented fact pass; a legitimate scenario sentence that matches a pattern is reported, is admitted
+    only by a pending allowance scoped to its own path and to the single occurrence of its own sentence
+    (an empty sentence, one that no pattern matches, a bare pattern match and a sentence occurring more
+    than once, including a second occurrence starting inside the first, are refused and suppress nothing,
+    and a match reaching outside the sentence on either edge, left and right each pinned, is still
+    reported), and neither a cross-file nor an unscanned-path allowance suppresses it (the unscanned path
+    is itself reported); missing or malformed coverage (no .preview directory, a missing or unreadable
+    SHA256SUMS, a forbidden line separator anywhere in the inventory, with one fixture per
+    SUMS_BREAK_CHARS character, the CRLF spelling included, and the shared constant's full value pinned,
+    a third token on an inventory line, a bad hash, a duplicate name, a zero-byte listing with a hook
+    present, an inventory entry the scan did not find, a glob that matches nothing, an unreadable
+    fixed-list file) is reported, never clean."""
+    base = tmp / "stop-field-claim"
+
+    def build(name, files, sums=True):
+        root = base / name
+        (root / ".preview").mkdir(parents=True)
+        for rel in _STOP_FIELD_CLAIM_FILES:
+            if rel not in files:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text("fixture\n", encoding="utf-8")
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        if sums and ".preview/SHA256SUMS" not in files:
+            listed = sorted(rel.split("/", 1)[1] for rel in files
+                            if rel.startswith(".preview/") and rel.endswith(".py"))
+            (root / ".preview" / "SHA256SUMS").write_text(
+                "".join("{}  {}\n".format("0" * 64, hook) for hook in listed), encoding="utf-8")
+        if ".preview/README.md" not in files:
+            (root / ".preview" / "README.md").write_text("fixture\n", encoding="utf-8")
+        return root
+
+    def claim_finding(rel, phrase):
+        return ("(stop-field-claim) {} carries an absence phrasing about stop_hook_active or the "
+                "loop bound ({!r}); this bounded regression check pins the absence phrasings "
+                "this repository carried (the hooks reference documents stop_hook_active on "
+                "Stop and SubagentStop), and a legitimate matching sentence needs a path-scoped "
+                "_STOP_FIELD_CLAIM_PENDING allowance".format(rel, phrase))
+
+    def expect(tag, got, want, sink=None):
+        if sorted(got) != sorted(want):
+            (failures if sink is None else sink).append(
+                "(stop-field-claim-{}) finding multiset mismatch: want {}, got {}".format(
+                    tag, sorted(want), sorted(got)))
+
+    def normalized(finding):
+        # only the variable OS error text is replaced; every path, label and fixed diagnostic
+        # sentence must still match verbatim
+        inventory_prefix = "(stop-field-claim-inventory) cannot read .preview/SHA256SUMS: "
+        inventory_suffix = ("; without the inventory the preview scan cannot be reconciled, so this is "
+                            "a failure")
+        if finding.startswith(inventory_prefix) and finding.endswith(inventory_suffix):
+            return inventory_prefix + "<os error>" + inventory_suffix
+        read_prefix = "(stop-field-claim-read) cannot read "
+        if finding.startswith(read_prefix) and ": " in finding[len(read_prefix):]:
+            return read_prefix + finding[len(read_prefix):].split(": ", 1)[0] + ": <os error>"
+        return finding
+
+    claims = (
+        ("as last_assistant_message (there is NO stop_hook_active field in the current Stop payload).",
+         ("NO stop_hook_active",)),
+        ("because there is no stop_hook_active field and no documented built-in loop bound, a hard exit-2 Stop",
+         ("no stop_hook_active", "no documented built-in loop bound")),
+        ("# re-fire on the forced continuation and wedge the session (no stop_hook_active field, no documented loop\n"
+         "# bound), so on ANY error",
+         ("no stop_hook_active", "no documented loop bound")),
+        ("and with no\n    # stop_hook_active field and no documented loop bound a hard block could wedge the session",
+         ("no stop_hook_active", "no documented loop bound")),
+        ("independent of any platform loop field (none is documented on Stop; a loop-ish field is honoured)",
+         ("none is documented on Stop",)),
+        ("the Stop payload carries no loop field", ("Stop payload carries no loop",)),
+        ("stop_hook_active is not documented on the Stop event", ("stop_hook_active is not documented",)),
+        ("already rendered, and a hard Stop block could wedge the session with no documented loop bound). It",
+         ("no documented loop bound",)),
+        ("the stop_hook_active field stays undocumented for Stop", ("stop_hook_active field stays undocumented",)),
+        ("an undocumented stop_hook_active value on Stop", ("undocumented stop_hook_active",)),
+        ("a hard exit-2 Stop has no documented built-in loop bound", ("no documented built-in loop bound",)),
+        ("the session could wedge with no documented loop-bound", ("no documented loop-bound",)),
+        ("there is no `stop_hook_active` in the Stop payload", ("no `stop_hook_active",)),
+        ("there is no 'stop_hook_active' in the Stop payload", ("no 'stop_hook_active",)),
+        ('there is no "stop_hook_active" in the Stop payload', ('no "stop_hook_active',)),
+        ("none is documented on SubagentStop", ("none is documented on SubagentStop",)),
+        ("the Stop payload has no stop_hook_active",
+         ("no stop_hook_active", "Stop payload has no stop_hook_active")),
+        ("Stop payloads have no loop field", ("Stop payloads have no loop",)),
+        ("Stop payloads carry no loop field", ("Stop payloads carry no loop",)),
+        ("the Stop payload holds no loop field", ("Stop payload holds no loop",)),
+        ("Stop payloads hold no stop_hook_active",
+         ("no stop_hook_active", "Stop payloads hold no stop_hook_active")),
+        ("the Stop payload contains no loop field", ("Stop payload contains no loop",)),
+        ("Stop payloads contain no stop_hook_active",
+         ("no stop_hook_active", "Stop payloads contain no stop_hook_active")),
+        ("stop_hook_active values are never sent on Stop", ("stop_hook_active values are never sent",)),
+        ("stop_hook_active is not provided by the platform", ("stop_hook_active is not provided",)),
+        ("stop_hook_active is never present in the payload", ("stop_hook_active is never present",)),
+    )
+    for index, (claim, phrases) in enumerate(claims):
+        root = build("claim-{}".format(index), {".preview/hook.py": claim + "\n"})
+        got = _stop_field_claim_failures(root, pending=())
+        expect("pin-{}".format(index), got,
+               [claim_finding(".preview/hook.py", phrase) for phrase in phrases])
+    clean = (
+        "Stop hooks receive stop_hook_active, true when Claude Code is already continuing as a result of a stop "
+        "hook. With the stop_hook_active field absent from the payload the count was reset; the payload omits "
+        "the stop_hook_active field; without a `stop_hook_active` field in the input the count stays at the cap.")
+    root = build("clean", {".preview/hook.py": clean + "\n"})
+    got = _stop_field_claim_failures(root, pending=())
+    if got:
+        failures.append("(stop-field-claim-clean) a clean, fully populated fixture must yield no findings "
+                        "at all: {}".format(got))
+    scenario = "This test sends no stop_hook_active field."
+    stale = _stop_field_claim_failures(root, pending=((".preview/hook.py", scenario),))
+    expect("stale", stale, [
+        "(stop-field-claim-pending) the pending allowance for .preview/hook.py no longer matches that "
+        "file; the rewrite it waited for has landed, so remove the entry from _STOP_FIELD_CLAIM_PENDING"])
+    # a refused allowance (an empty sentence, one that no pattern matches, a bare pattern match, or a
+    # sentence occurring more than once, overlapping occurrences included) is reported and
+    # suppresses nothing
+    both = scenario + " Also: there is no stop_hook_active field in the Stop payload."
+    root = build("refused", {".preview/hook.py": both + "\n"})
+    got = _stop_field_claim_failures(root, pending=((".preview/hook.py", ""),))
+    expect("empty-allow", got, [
+        "(stop-field-claim-pending-empty) the pending allowance for .preview/hook.py has an empty "
+        "sentence, which would admit every match in that file; name the exact sentence or remove the "
+        "entry",
+        claim_finding(".preview/hook.py", "no stop_hook_active"),
+        claim_finding(".preview/hook.py", "no stop_hook_active")])
+    got = _stop_field_claim_failures(root, pending=((".preview/hook.py", "stop_hook_active"),))
+    expect("unmatched-allow", got, [
+        "(stop-field-claim-pending-unmatched) the pending allowance sentence for .preview/hook.py matches "
+        "no _STOP_FIELD_CLAIM_RES pattern, so there is nothing for it to admit; remove the entry",
+        claim_finding(".preview/hook.py", "no stop_hook_active"),
+        claim_finding(".preview/hook.py", "no stop_hook_active")])
+    # the allowance admits only the pattern matches inside its own sentence span: a match that starts
+    # inside the sentence but reaches outside it is still reported
+    sentence = "the no stop_hook_active value"
+    root = build("span", {".preview/hook.py": sentence + " is not documented here.\n"})
+    got = _stop_field_claim_failures(root, pending=())
+    expect("span-base", got, [
+        claim_finding(".preview/hook.py", "no stop_hook_active"),
+        claim_finding(".preview/hook.py", "stop_hook_active value is not documented")])
+    got = _stop_field_claim_failures(root, pending=((".preview/hook.py", sentence),))
+    expect("span", got, [claim_finding(".preview/hook.py", "stop_hook_active value is not documented")])
+    sentence = "no stop_hook_active is not documented"
+    root = build("span-left", {".preview/hook.py": "The stop_hook_active flag: " + sentence + ".\n"})
+    got = _stop_field_claim_failures(root, pending=())
+    expect("span-left-base", got, [
+        claim_finding(".preview/hook.py", "no stop_hook_active"),
+        claim_finding(".preview/hook.py", "stop_hook_active flag: no stop_hook_active is not documented")])
+    got = _stop_field_claim_failures(root, pending=((".preview/hook.py", sentence),))
+    expect("span-left", got, [
+        claim_finding(".preview/hook.py", "stop_hook_active flag: no stop_hook_active is not documented")])
+    repro = ("This test sends no stop_hook_active field. Unrelated later prose: Stop hooks get no "
+             "stop_hook_active in this release.")
+    root = build("bare-allow", {".preview/hook.py": repro + "\n"})
+    got = _stop_field_claim_failures(root, pending=((".preview/hook.py", "no stop_hook_active"),))
+    expect("bare-allow", got, [
+        "(stop-field-claim-pending-bare) the pending allowance sentence for .preview/hook.py is exactly a "
+        "pattern match, not a sentence containing one, so it would admit that phrase at every occurrence "
+        "in the file; name the whole surrounding sentence instead",
+        claim_finding(".preview/hook.py", "no stop_hook_active"),
+        claim_finding(".preview/hook.py", "no stop_hook_active")])
+    root = build("multi-allow", {".preview/hook.py": scenario + " " + scenario + "\n"})
+    got = _stop_field_claim_failures(root, pending=((".preview/hook.py", scenario),))
+    expect("multi-allow", got, [
+        "(stop-field-claim-pending-multiple) the pending allowance sentence for .preview/hook.py occurs 2 "
+        "times in that file, so it would admit every occurrence instead of one sentence; name a longer "
+        "sentence that occurs exactly once",
+        claim_finding(".preview/hook.py", "no stop_hook_active"),
+        claim_finding(".preview/hook.py", "no stop_hook_active")])
+    # str.count misses an overlapping second occurrence, so a sentence whose second occurrence starts
+    # inside the first must still be refused as pending-multiple
+    root = build("overlap-allow", {".preview/hook.py": "no stop_hook_active no stop_hook_active no\n"})
+    got = _stop_field_claim_failures(root, pending=((".preview/hook.py", "no stop_hook_active no"),))
+    expect("overlap-allow", got, [
+        "(stop-field-claim-pending-multiple) the pending allowance sentence for .preview/hook.py occurs 2 "
+        "times in that file, so it would admit every occurrence instead of one sentence; name a longer "
+        "sentence that occurs exactly once",
+        claim_finding(".preview/hook.py", "no stop_hook_active"),
+        claim_finding(".preview/hook.py", "no stop_hook_active")])
+    # a legitimate scenario sentence that matches a pattern is reported; with every required input
+    # populated, the allowance scoped to its own path admits it down to a COMPLETE finding set of zero,
+    # so a rejected allowance, an inventory failure or a read failure is red; a cross-file allowance
+    # leaves the other file reported, and an unscanned path is reported stale and suppresses nothing
+    root = build("scenario", {".preview/hook.py": scenario + "\n"})
+    got = _stop_field_claim_failures(root, pending=())
+    expect("scenario", got, [claim_finding(".preview/hook.py", "no stop_hook_active")])
+    got = _stop_field_claim_failures(root, pending=((".preview/hook.py", scenario),))
+    expect("scenario-allow", got, [])
+    root = build("cross-file", {".preview/a.py": scenario + "\n", ".preview/b.py": scenario + "\n"})
+    got = _stop_field_claim_failures(root, pending=((".preview/a.py", scenario),))
+    expect("cross-file", got, [claim_finding(".preview/b.py", "no stop_hook_active")])
+    root = build("unscanned", {".preview/hook.py": scenario + "\n"})
+    got = _stop_field_claim_failures(root, pending=(("docs/typo.md", scenario),))
+    expect("unscanned", got, [
+        "(stop-field-claim-pending-unscanned) the pending allowance for docs/typo.md names a path this "
+        "check does not scan (or could not read); point the entry at a scanned path or remove it",
+        claim_finding(".preview/hook.py", "no stop_hook_active")])
+    # missing, malformed or unreconciled preview coverage is reported, never clean; the no-preview
+    # findings are compared as a complete normalized multiset (only the OS error text replaced), so a
+    # read finding replaced by a duplicate of another is red, as the substitution probe below pins
+    missing = base / "no-preview"
+    missing.mkdir(parents=True)
+    got = _stop_field_claim_failures(missing, pending=())
+    want = ["(stop-field-claim-read) cannot read {}: <os error>".format(rel)
+            for rel in _STOP_FIELD_CLAIM_FILES]
+    want.extend("(stop-field-claim-glob) the glob {} matched nothing under {}; missing preview "
+                "coverage is a failure, not a clean result".format(pattern, missing)
+                for pattern in _STOP_FIELD_CLAIM_GLOBS)
+    want.append("({}) cannot read .preview/SHA256SUMS: <os error>; without the inventory the preview "
+                "scan cannot be reconciled, so this is a failure".format("stop-field-claim-inventory"))
+    expect("no-preview", [normalized(f) for f in got], want)
+    reads = [f for f in got if f.startswith("({}) ".format("stop-field-claim-read"))]
+    if len(reads) >= 2:
+        substituted = [reads[0] if f == reads[-1] else f for f in got]
+        sink = []
+        expect("no-preview-substituted", [normalized(f) for f in substituted], want, sink=sink)
+        if not sink:
+            failures.append("(stop-field-claim-no-preview-substituted) a no-preview finding list with one "
+                            "fixed-list read finding replaced by a duplicate of another must not satisfy "
+                            "the normalized multiset comparison: {}".format(substituted))
+    root = build("no-sums", {".preview/hook.py": clean + "\n"}, sums=False)
+    got = _stop_field_claim_failures(root, pending=())
+    if len(got) != 1 or "(stop-field-claim-inventory) cannot read" not in got[0]:
+        failures.append("(stop-field-claim-no-sums) a missing .preview/SHA256SUMS must be reported, "
+                        "alone: {}".format(got))
+    root = build("bad-sums", {".preview/hook.py": clean + "\n"})
+    (root / ".preview" / "SHA256SUMS").write_bytes(b"\xff\xfe not utf-8\n")
+    got = _stop_field_claim_failures(root, pending=())
+    if len(got) != 1 or "(stop-field-claim-inventory) cannot read" not in got[0]:
+        failures.append("(stop-field-claim-bad-sums) an unreadable .preview/SHA256SUMS must be reported, "
+                        "alone: {}".format(got))
+    root = build("ghost", {".preview/hook.py": clean + "\n",
+                           ".preview/SHA256SUMS": "{}  ghost.py\n{}  hook.py\n".format("0" * 64, "0" * 64)})
+    got = _stop_field_claim_failures(root, pending=())
+    expect("ghost", got, [
+        "(stop-field-claim-inventory-gap) .preview/ghost.py is named in .preview/SHA256SUMS but the scan "
+        "did not find it; a missing inventory entry is a failure"])
+    # the inventory is parsed with the check_hooks_preview.parse_sums grammar: a third token, a bad hash
+    # and a duplicate name are reported by line, and a zero-byte listing with a hook present does not
+    # reconcile; each was silently skipped before
+    root = build("sums-extra", {".preview/hook.py": clean + "\n",
+                                ".preview/SHA256SUMS": "{}  ghost.py extra\n{}  hook.py\n".format("0" * 64, "0" * 64)})
+    got = _stop_field_claim_failures(root, pending=())
+    expect("sums-extra", got, [
+        "(stop-field-claim-inventory-line) .preview/SHA256SUMS:1: not a `<64 lowercase hex>  <name>` "
+        "line; a malformed inventory line is a failure, never a silent skip"])
+    root = build("bad-hash", {".preview/hook.py": clean + "\n",
+                              ".preview/SHA256SUMS": "{}x  hook.py\n".format("0" * 63)})
+    got = _stop_field_claim_failures(root, pending=())
+    expect("bad-hash", got, [
+        "(stop-field-claim-inventory-line) .preview/SHA256SUMS:1: not a `<64 lowercase hex>  <name>` "
+        "line; a malformed inventory line is a failure, never a silent skip",
+        "(stop-field-claim-inventory-empty) .preview/SHA256SUMS names no hook while the scan found 1; a "
+        "listing empty of hooks with a hook present cannot be reconciled, so this is a failure"])
+    root = build("dup-sums", {".preview/hook.py": clean + "\n",
+                              ".preview/SHA256SUMS": "{0}  hook.py\n{0}  hook.py\n".format("0" * 64)})
+    got = _stop_field_claim_failures(root, pending=())
+    expect("dup-sums", got, [
+        "(stop-field-claim-inventory-dup) .preview/SHA256SUMS:2: hook.py is listed twice; a duplicate "
+        "inventory name is a failure"])
+    root = build("zero-sums", {".preview/hook.py": clean + "\n", ".preview/SHA256SUMS": ""})
+    got = _stop_field_claim_failures(root, pending=())
+    no_hook = ("(stop-field-claim-inventory-empty) .preview/SHA256SUMS names no hook while the scan found "
+               "1; a listing empty of hooks with a hook present cannot be reconciled, so this is a failure")
+    expect("zero-sums", got, [no_hook])
+
+    def break_finding(number, code):
+        return ("(stop-field-claim-inventory-break) .preview/SHA256SUMS:{}: U+{:04X} is not a line break "
+                "for `sha256sum -c`, which ends a line at LF only; a line holding a forbidden separator "
+                "is a failure, never a silent skip (the check_hooks_preview._reject_breaks rule, applied "
+                "before comment and blank lines are skipped)".format(number, code))
+
+    row = "{}  hook.py".format("0" * 64)
+    import check_hooks_preview
+    # the claim check and parse_sums share this constant, so a character removed from it would widen
+    # both parsers together; every character has a fixture below, and the full ordered value is pinned
+    # here by code point
+    if [ord(ch) for ch in check_hooks_preview.SUMS_BREAK_CHARS] != [
+            0x000D, 0x000B, 0x000C, 0x001C, 0x001D, 0x001E, 0x0085, 0x2028, 0x2029]:
+        failures.append("(stop-field-claim-break-chars) check_hooks_preview.SUMS_BREAK_CHARS must hold "
+                        "exactly CR, VT, FF, FS, GS, RS, NEL, U+2028 and U+2029: {!r}".format(
+                            check_hooks_preview.SUMS_BREAK_CHARS))
+    for name, sums, want in (
+            ("fs-sums", row + "\N{INFORMATION SEPARATOR FOUR}\n",
+             [break_finding(1, ord("\N{INFORMATION SEPARATOR FOUR}")), no_hook]),
+            ("gs-sums", row + "\N{INFORMATION SEPARATOR THREE}\n",
+             [break_finding(1, ord("\N{INFORMATION SEPARATOR THREE}")), no_hook]),
+            ("rs-sums", row + "\N{INFORMATION SEPARATOR TWO}\n",
+             [break_finding(1, ord("\N{INFORMATION SEPARATOR TWO}")), no_hook]),
+            ("ps-blank-sums", "\N{PARAGRAPH SEPARATOR}\n" + row + "\n",
+             [break_finding(1, ord("\N{PARAGRAPH SEPARATOR}"))]),
+            ("ff-comment-sums", "# note\N{FORM FEED}note\n" + row + "\n",
+             [break_finding(1, ord("\N{FORM FEED}"))]),
+            ("crlf-sums", row + "\r\n", [break_finding(1, 0x000D), no_hook]),
+            ("cr-sums", row + "\r", [break_finding(1, 0x000D), no_hook]),
+            ("nel-blank-sums", "\x85\n" + row + "\n", [break_finding(1, 0x0085)]),
+            ("vt-comment-sums", "# note\x0bnote\n" + row + "\n", [break_finding(1, 0x000B)]),
+            ("ls-comment-sums", "# note\N{LINE SEPARATOR}note\n" + row + "\n",
+             [break_finding(1, ord("\N{LINE SEPARATOR}"))]),
+    ):
+        root = build(name, {".preview/hook.py": clean + "\n", ".preview/SHA256SUMS": sums})
+        got = _stop_field_claim_failures(root, pending=())
+        expect(name, got, want)
+    root = build("dup-substitution", {".preview/hook.py": "the Stop payload has no stop_hook_active\n"})
+    got = _stop_field_claim_failures(root, pending=())
+    want = [claim_finding(".preview/hook.py", "no stop_hook_active"),
+            claim_finding(".preview/hook.py", "Stop payload has no stop_hook_active")]
+    expect("dup-substitution-base", got, want)
+    # both probes drive expect itself, through a separate sink so the expected rejection is not a suite
+    # failure: a duplicated list and a same-length different-finding list must each record a mismatch,
+    # so an expect weakened to a length check is red here
+    substituted = [got[0], got[0]] if len(got) == 2 else [want[0], want[0]]
+    sink = []
+    expect("dup-substitution", substituted, want, sink=sink)
+    if not sink:
+        failures.append("(stop-field-claim-dup-substitution) a finding list with one finding replaced by "
+                        "a duplicate of the other must not satisfy the multiset comparison the vectors "
+                        "above use: {}".format(substituted))
+    altered = [want[0], claim_finding(".preview/other.py", "no stop_hook_active")]
+    sink = []
+    expect("dup-substitution-altered", altered, want, sink=sink)
+    if not sink:
+        failures.append("(stop-field-claim-dup-substitution-altered) a same-length finding list holding a "
+                        "different finding in place of an expected one must not satisfy the multiset "
+                        "comparison the vectors above use: {}".format(altered))
+    root = build("empty-glob", {".preview/SHA256SUMS": "# no hooks\n"})
+    got = _stop_field_claim_failures(root, pending=())
+    expect("empty-glob", got, [
+        "(stop-field-claim-glob) the glob .preview/*.py matched nothing under {}; missing preview "
+        "coverage is a failure, not a clean result".format(root)])
+    # the fixed-list read failure is pinned too: a missing fixed-list file is the only finding
+    root = build("fixed-read", {".preview/hook.py": clean + "\n"})
+    (root / "ENFORCEMENT.md").unlink()
+    got = _stop_field_claim_failures(root, pending=())
+    if len(got) != 1 or "(stop-field-claim-read) cannot read ENFORCEMENT.md" not in got[0]:
+        failures.append("(stop-field-claim-fixed-read) a missing fixed-list file must be reported as the "
+                        "only finding: {}".format(got))
+    shutil.rmtree(str(base), ignore_errors=True)
+
+
 def _test_note_literal_sites(failures, tmp):
     """(nl-*) The note sites that once returned a literal {"systemMessage": ...} (now `return
     _allow_note(...)`), reached from their handlers and judged by _reduce_result: allow-note is required,
     so a silent mutant (allow) and an explicit permissionDecision "allow" mutant (explicit-allow) at the
-    site both fail. The PreToolUse sites are orch_yield_tool's two note returns and orch_resume_barrier's;
-    the PostToolUse ledger returns, the Stop loop-bound _stop_warn and the dispatcher's bad-argv
-    fail-open note are pinned the same way (the other Stop and dispatcher sites: (ns-*)). The fixtures
-    are selftest_orch_hooks.Fixture repos under tmp."""
+    site both fail. The PreToolUse sites are orch_yield_tool's two note returns, orch_resume_barrier's two
+    (an armed barrier, and one that is unreadable or malformed, which reads as armed) and
+    review_dispatch_pin's;
+    the UserPromptSubmit stamp's unwritten-stamp note and its timer-path _context_note (judged by its own
+    shape: model context plus an operator systemMessage, no permissionDecision), the PostToolUse ledger
+    returns, the Stop loop-bound
+    _stop_warn and the dispatcher's bad-argv fail-open note are pinned the same way (the other Stop and
+    dispatcher sites: (ns-*)). The fixtures are selftest_orch_hooks.Fixture repos under tmp."""
     import selftest_orch_hooks as orch
 
     def note(label, result, needle):
@@ -789,6 +1362,25 @@ def _test_note_literal_sites(failures, tmp):
     note("(nl-barrier) an armed resume barrier allows an out-of-record Write with a note",
          aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", dict(
              file_path=str(r.root / "src.py"), content="x"))), "resume barrier")
+    barrier_file = state / "resume-barrier.json"
+    malformed = "barrier file " + str(barrier_file) + " is unreadable or malformed"
+    barrier_file.write_text(json.dumps(dict(active=True, findings=["nl-finding"]))[:20], encoding="utf-8")
+    note("(nl-barrier-truncated) a truncated resume barrier reads as armed and allows an out-of-record "
+         "Write with a note naming the file as unreadable or malformed",
+         aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", dict(
+             file_path=str(r.root / "src.py"), content="x"))), malformed)
+    barrier_file.write_text(json.dumps(["nl-not-an-object"]), encoding="utf-8")
+    note("(nl-barrier-shape) a resume barrier that is not a barrier object reads as armed and allows an "
+         "out-of-record Write with a note naming the file as unreadable or malformed",
+         aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", dict(
+             file_path=str(r.root / "src.py"), content="x"))), malformed)
+    barrier_file.unlink()
+    barrier_file.mkdir()
+    note("(nl-barrier-directory) a directory at the resume barrier path reads as armed and allows an "
+         "out-of-record Write with a note saying to remove the directory, which no audit can replace",
+         aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", dict(
+             file_path=str(r.root / "src.py"), content="x"))), "remove the directory")
+    barrier_file.rmdir()
     note("(nl-ledger-unbound) a TaskOutput with no task_id is surfaced with a note",
          aiqt_hooks.orch_dispatch_ledger(r.payload("PostToolUse", "TaskOutput", dict())), "UNBOUND")
     saved_append = aiqt_hooks._orch_append_jsonl
@@ -797,8 +1389,33 @@ def _test_note_literal_sites(failures, tmp):
         note("(nl-ledger-write) a failed dispatch-ledger write is surfaced with a note",
              aiqt_hooks.orch_dispatch_ledger(r.payload("PostToolUse", "Bash", dict(
                  command="python3 build.py", run_in_background=True))), "dispatch-ledger write failed")
+        # the question guard's fail-open (an empty mode record) stands, and its unwritten guard-events row is noted
+        y.mode.write_text("", encoding="utf-8")
+        note("(nl-question-fail-open-unrecorded) the unattended-question guard's fail-open whose guard-events "
+             "row cannot be written allows with a note naming the unwritten row",
+             aiqt_hooks.orch_ask_guard(y.payload("PreToolUse", "AskUserQuestion", dict(questions=[]))),
+             "recording that fail-open could not be written")
     finally:
         aiqt_hooks._orch_append_jsonl = saved_append
+    saved_save = aiqt_hooks._orch_save_turn_state
+    try:
+        aiqt_hooks._orch_save_turn_state = lambda root, state: "PermissionError"
+        note("(nl-stamp-unwritten) a genuine prompt whose turn-state stamp cannot be written proceeds with a note "
+             "saying the stamp was not written",
+             aiqt_hooks.orch_prompt_stamp(y.payload("UserPromptSubmit", extra=dict(prompt="hello"))),
+             "its time was not stamped")
+        y.set_turn_state(dict(wake_digests=[hashlib.sha256(b"wake NL").hexdigest()]))
+        code, obj, _err = aiqt_hooks.orch_prompt_stamp(y.payload("UserPromptSubmit", extra=dict(prompt="wake NL")))
+        hso = obj.get("hookSpecificOutput") if isinstance(obj, dict) else None
+        if not (code == 0 and isinstance(obj, dict) and set(obj) == {"hookSpecificOutput", "systemMessage"}
+                and isinstance(hso, dict) and set(hso) == {"hookEventName", "additionalContext"}
+                and hso["hookEventName"] == "UserPromptSubmit" and "TIMER-ORIGINATED" in hso["additionalContext"]
+                and "consuming this wake's digest failed" in obj["systemMessage"]):
+            failures.append("(nl-stamp-timer-unconsumed) a timer-originated prompt whose digest cannot be consumed "
+                            "returns model context plus an operator note naming the failed save, got {!r}"
+                            .format((code, obj)))
+    finally:
+        aiqt_hooks._orch_save_turn_state = saved_save
     s = orch.Fixture(base, "stop")
     s.set_items([orch.item("NL-3")])
     s.set_turn_state(dict(stop_denials=aiqt_hooks._ORCH_LOOP_BOUND))
@@ -813,6 +1430,9 @@ def _test_note_literal_sites(failures, tmp):
         obj = "unparseable stdout " + repr(buf.getvalue())
     note("(nl-dispatch-warn) a bad-argv Stop invocation prints the dispatcher's fail-open note",
          (code, obj, None), "could not run")
+    rd = orch.RdpFixture(base, "review-dispatch")
+    note("(nl-review-dispatch) a review dispatch brief that declares a working-tree target allows with a note",
+         rd.dispatch(rd.brief(["Review-target: working-tree"])), "declares target working-tree")
 
 
 def _shape_mutant(source, func_name, lines):
@@ -876,6 +1496,162 @@ _LEAF_REFUSED_MUTANTS = {
     "Global": ("_deny", ["global _qa_last"]),
     "Nonlocal": ("_allow_note", ["nonlocal _qa_last"]),
 }
+
+
+def _close_fd2():
+    """preexec_fn for the closed-stderr stream vectors: descriptor 2 is closed in the child between fork
+    and exec, so the hook starts with sys.stderr None."""
+    os.close(2)
+
+
+def _close_fd1():
+    """preexec_fn for the closed-stdout stream vectors: descriptor 1 is closed in the child between fork
+    and exec, so the hook starts with sys.stdout None."""
+    os.close(1)
+
+
+def _test_stream_failure_exits(failures):
+    """(stream-*) Real-subprocess vectors: the dispatcher's exit codes survive a standard stream that
+    cannot be written or flushed. Each child runs the LIVE hook file under [sys.executable, "-I", "-B"]
+    with one stream pointed at /dev/full (the write or flush raises ENOSPC), at the write end of a pipe
+    whose read end is already closed (EPIPE), or with descriptor 2 or descriptor 1 closed before exec
+    (the hook starts with sys.stderr or sys.stdout None). Expected: every PreToolUse fail-closed path
+    keeps its blocking exit 2 and leaves stdout, the decision channel, empty (the diagnostic line is
+    best-effort and belongs on stderr alone); a deny decision or an allow-note whose stdout cannot be
+    written or flushed, or whose descriptor is closed, exits 2 instead of 0 (the dispatcher cannot
+    inspect the lost object, so a lost decision blocks, never allows); a fail-open mode keeps exit 0
+    with its warning lost. Each failure-stream vector fails on the unhardened code: before the
+    dispatcher hardening these runs ended with the interpreter's own status (1 or 120, both of which
+    the platform treats as non-blocking; a deny or note written to stdout on /dev/full or a broken
+    pipe ended 120, with CPython's "Exception ignored while flushing sys.stdout" on stderr), with
+    exit 0 and the deny or note silently lost (stdout closed), or, with descriptor 2 closed, with the
+    diagnostic printed to STDOUT (print falls back to sys.stdout when sys.stderr is None), which the
+    stderr vectors' empty-stdout assertion catches."""
+    hook = os.path.abspath(aiqt_hooks.__file__)
+    if not os.path.exists("/dev/full"):
+        failures.append("(stream-no-devfull) /dev/full is absent on this host, so the stream-failure "
+                        "vectors cannot run; the dispatcher's failing-stream exits are unproven here")
+        return
+    env = dict((k, v) for k, v in os.environ.items()
+               if not k.startswith(("AIQT_", "ORCH_", "CLAUDE_")))
+    deny_payload = json.dumps(dict(hook_event_name="PreToolUse", tool_name="Write",
+                                   tool_input=dict(file_path="relative.txt"))).encode("utf-8")
+    note_payload = json.dumps(dict(hook_event_name="PreToolUse", tool_name="Bash",
+                                   tool_input=dict(command="cd sub"))).encode("utf-8")
+    miswired_payload = json.dumps(dict(hook_event_name="Stop", tool_name="Write",
+                                       tool_input=dict())).encode("utf-8")
+    wall = "Here is the change:\ndiff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n"
+    wall_payload = json.dumps(dict(hook_event_name="Stop", last_assistant_message=wall)).encode("utf-8")
+
+    def child(label, modes, payload, stdout_to, stderr_to, want_rc, out_needle=None, err_needle=None,
+              out_empty=False):
+        """One hook child. stdout_to / stderr_to: "pipe" (captured), "full" (/dev/full), "broken" (the
+        write end of a pipe whose read end is closed), or "closed" (the descriptor is closed before
+        exec, so the stream is None). A needle, or out_empty, is asserted only against a captured
+        ("pipe") stream."""
+        files = []
+
+        def target(which):
+            if which == "pipe":
+                return subprocess.PIPE
+            if which == "full":
+                handle = open("/dev/full", "wb")
+                files.append(handle)
+                return handle
+            read_end, write_end = os.pipe()
+            os.close(read_end)
+            files.append(write_end)
+            return write_end
+
+        preexec = None
+        if stdout_to == "closed":
+            stdout_target = subprocess.DEVNULL
+            preexec = _close_fd1
+        else:
+            stdout_target = target(stdout_to)
+        if stderr_to == "closed":
+            stderr_target = subprocess.DEVNULL
+            preexec = _close_fd2
+        else:
+            stderr_target = target(stderr_to)
+        try:
+            proc = subprocess.run([sys.executable, "-I", "-B", hook] + list(modes), input=payload,
+                                  stdout=stdout_target, stderr=stderr_target, env=env,
+                                  preexec_fn=preexec, timeout=60)
+        except (OSError, subprocess.SubprocessError) as exc:
+            failures.append("(" + label + ") could not run the hook child: " + repr(exc))
+            return
+        finally:
+            for handle in files:
+                try:
+                    if isinstance(handle, int):
+                        os.close(handle)
+                    else:
+                        handle.close()
+                except OSError:
+                    pass
+        if proc.returncode != want_rc:
+            failures.append("(" + label + ") expected exit " + str(want_rc) + ", got "
+                            + str(proc.returncode))
+        out = (proc.stdout or b"").decode("utf-8", "replace")
+        err = (proc.stderr or b"").decode("utf-8", "replace")
+        if out_needle is not None and out_needle not in out:
+            failures.append("(" + label + ") stdout does not name " + repr(out_needle) + ": " + repr(out))
+        if err_needle is not None and err_needle not in err:
+            failures.append("(" + label + ") stderr does not name " + repr(err_needle) + ": " + repr(err))
+        if out_empty and out:
+            failures.append("(" + label + ") expected empty stdout, the decision channel, got "
+                            + repr(out))
+
+    # Working-stream controls: each path's normal exit and output, so the failure vectors below are
+    # proven against a live baseline, not a stale expectation.
+    child("stream-unknown-ok", ["no_such_mode"], b"garbage", "pipe", "pipe", 2, err_needle="usage")
+    child("stream-badargv-ok", ["absolute_paths", "extra"], b"", "pipe", "pipe", 2,
+          err_needle="failing closed")
+    child("stream-payload-ok", ["absolute_paths"], b"not json", "pipe", "pipe", 2,
+          err_needle="unreadable hook payload")
+    child("stream-hardblock-ok", ["absolute_paths"], miswired_payload, "pipe", "pipe", 2,
+          err_needle="unexpected event")
+    child("stream-deny-ok", ["absolute_paths"], deny_payload, "pipe", "pipe", 0,
+          out_needle='"permissionDecision": "deny"')
+    child("stream-note-ok", ["bash_absolute_paths"], note_payload, "pipe", "pipe", 0,
+          out_needle="systemMessage")
+    child("stream-failopen-ok", ["diff_wall_stop"], b"not json", "pipe", "pipe", 0,
+          out_needle="could not run")
+    child("stream-stopwarn-ok", ["diff_wall_stop"], wall_payload, "pipe", "pipe", 0,
+          out_needle="systemMessage")
+    # The dispatcher's fail-closed stderr diagnostics: exit 2 holds with stderr on /dev/full, on a
+    # broken pipe, and closed outright, and stdout, the decision channel, stays empty. The empty-stdout
+    # assertion is what fails on the unhardened code for the closed state: there the exit was already 2,
+    # but the diagnostic landed on stdout (print falls back to sys.stdout when sys.stderr is None).
+    for stream_state in ("full", "broken", "closed"):
+        child("stream-unknown-stderr-" + stream_state, ["no_such_mode"], b"garbage",
+              "pipe", stream_state, 2, out_empty=True)
+        child("stream-badargv-stderr-" + stream_state, ["absolute_paths", "extra"], b"",
+              "pipe", stream_state, 2, out_empty=True)
+        child("stream-payload-stderr-" + stream_state, ["absolute_paths"], b"not json",
+              "pipe", stream_state, 2, out_empty=True)
+        child("stream-hardblock-stderr-" + stream_state, ["absolute_paths"], miswired_payload,
+              "pipe", stream_state, 2, out_empty=True)
+    # A PreToolUse decision or note whose stdout fails is a lost decision: blocking exit 2, with the
+    # diagnostic (best-effort) naming the lost write; a fail-open mode keeps exit 0, warning lost.
+    for stream_state in ("full", "broken"):
+        child("stream-deny-stdout-" + stream_state, ["absolute_paths"], deny_payload,
+              stream_state, "pipe", 2, err_needle="could not be written to stdout")
+        child("stream-note-stdout-" + stream_state, ["bash_absolute_paths"], note_payload,
+              stream_state, "pipe", 2, err_needle="could not be written to stdout")
+        child("stream-failopen-stdout-" + stream_state, ["diff_wall_stop"], b"not json",
+              stream_state, "pipe", 0)
+        child("stream-stopwarn-stdout-" + stream_state, ["diff_wall_stop"], wall_payload,
+              stream_state, "pipe", 0)
+    # Descriptor 1 closed outright (sys.stdout None): a deny or an allow-note is a lost decision, so
+    # the exit is the blocking 2 with the diagnostic naming the lost write. On the unhardened code
+    # these runs exited 0 with the decision silently lost, the one state where a deny was silently
+    # turned into an allow.
+    child("stream-deny-stdout-closed", ["absolute_paths"], deny_payload, "closed", "pipe", 2,
+          err_needle="could not be written to stdout")
+    child("stream-note-stdout-closed", ["bash_absolute_paths"], note_payload, "closed", "pipe", 2,
+          err_needle="could not be written to stdout")
 
 
 def _test_note_shape_pins(failures, tmp):
@@ -1007,16 +1783,17 @@ def _test_note_shape_pins(failures, tmp):
          "note-shape-empty-_diff_source_fallback")
     textual("(ns-pin-dispatch-codex) codex's warning_only pop of main's stdout_obj before the print is "
             "refused",
-            "    if stdout_obj is not None:\n        print(json.dumps(stdout_obj))\n",
+            "    if stdout_obj is not None:\n        try:\n            print(json.dumps(stdout_obj))\n",
             "    if stdout_obj is not None:\n"
             "        if data.get(\"warning_only\"):\n"
             "            stdout_obj.pop(\"hookSpecificOutput\", None)\n"
-            "        print(json.dumps(stdout_obj))\n", "note-shape-dispatch-L")
+            "        try:\n"
+            "            print(json.dumps(stdout_obj))\n", "note-shape-dispatch-L")
     textual("(ns-pin-dispatch-claude) claude's AIQT_HOOKS_AUDIT_ONLY pop of main's stdout_obj is refused",
-            "        print(json.dumps(stdout_obj))\n",
-            "        if os.environ.get(\"AIQT_HOOKS_AUDIT_ONLY\") and isinstance(stdout_obj, dict):\n"
-            "            stdout_obj.pop(\"hookSpecificOutput\", None)\n"
-            "        print(json.dumps(stdout_obj))\n", "note-shape-dispatch-L")
+            "            print(json.dumps(stdout_obj))\n",
+            "            if os.environ.get(\"AIQT_HOOKS_AUDIT_ONLY\") and isinstance(stdout_obj, dict):\n"
+            "                stdout_obj.pop(\"hookSpecificOutput\", None)\n"
+            "            print(json.dumps(stdout_obj))\n", "note-shape-dispatch-L")
     textual("(ns-pin-dispatch-rebind) a second HANDLERS call in main, bound and edited, is refused",
             "    if stdout_obj is not None:\n",
             "    if data.get(\"_qa_audit\"):\n"
@@ -1187,7 +1964,7 @@ def _test_note_shape_pins(failures, tmp):
         _declared_names(tree, "DENY_CONSTRUCTORS")[1] or ())
     top = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
     leaves = _leaf_constructors({name: top[name] for name in ctors if name in top}, ctors)
-    want = {"_allow_note", "_stop_warn", "_dispatcher_fail_open_warn", "_deny"}
+    want = {"_allow_note", "_context_note", "_stop_warn", "_dispatcher_fail_open_warn", "_deny"}
     if leaves != want:
         failures.append("(ns-pin-leaves) the leaf constructors are {}, expected exactly {}"
                         .format(sorted(leaves), sorted(want)))
@@ -1235,7 +2012,7 @@ def _test_stop_dispatch_note_sites(failures, tmp):
         aiqt_hooks._orch_registry = saved[0]
         s.set_items([orch.item("NS-1")])
         s.set_turn_state(dict())
-        aiqt_hooks._orch_record_denial = lambda *_a: False
+        aiqt_hooks._orch_record_denial = lambda *_a: "PermissionError"
         note("(ns-stop-counter) a Stop deny whose denial counter cannot be saved fails open with a warning",
              aiqt_hooks.orch_stop_guard(s.payload("Stop")), "denial counter could not be persisted")
         aiqt_hooks._orch_record_denial = saved[1]
@@ -1485,10 +2262,6 @@ def main():
 
 
 def _main_with_recorder():
-    if sys.version_info < (3, 12):
-        print("SELF-TEST ERROR: the note-site coverage monitor needs sys.monitoring, which requires Python "
-              "3.12 or later; this interpreter is {}.{}".format(*sys.version_info[:2]), file=sys.stderr)
-        return 2
     monitor = _NoteSiteMonitor()
     monitor.start()
     try:
@@ -1497,11 +2270,32 @@ def _main_with_recorder():
         monitor.stop()
 
 
+def _fixture_tmpdir(prefix):
+    """A fresh temporary directory for the fixtures, never under /dev or /proc: the review dispatch pin
+    refuses a brief there by design (a /dev/shm private to each process, as in a sandbox, names a different
+    file in the hook than in the dispatcher), so a TMPDIR under /dev or /proc is passed over for the first
+    writable system temporary directory outside both. Raises OSError when there is none."""
+    failures = []
+    for where in (None, "/var/tmp", "/tmp"):
+        try:
+            path = tempfile.mkdtemp(prefix=prefix, dir=where)
+        except OSError as exc:
+            failures.append(str(exc))
+            continue
+        real = os.path.realpath(path)
+        if real in ("/dev", "/proc") or real.startswith(("/dev/", "/proc/")):
+            shutil.rmtree(path, ignore_errors=True)
+            failures.append("{} is under /dev or /proc".format(path))
+            continue
+        return Path(path)
+    raise OSError("no writable temporary directory outside /dev and /proc ({})".format("; ".join(failures)))
+
+
 def _main_isolated(monitor):
     scrub_git_environment()
     handler = aiqt_hooks.git_discard
     try:
-        tmp = Path(tempfile.mkdtemp(prefix="aiqt-hooks-selftest-"))
+        tmp = _fixture_tmpdir("aiqt-hooks-selftest-")
     except OSError as exc:
         print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
         return 2
@@ -1561,14 +2355,14 @@ def _main_isolated(monitor):
         # === boundary: the true fail-open boundary ALLOWS ====================================
         expect("(bound-a) non-git command allows", "ls -la {}".format(rp), "allow")
         # An UNPARSEABLE command (unbalanced quote) is not a free ALLOW: a raw scan finds git AND a lossy
-        # verb (checkout) it cannot prove safe -> ASK (F-60.1); a non-lossy unparseable stays ALLOW. Round-15
-        # STRUCTURAL fix: the opt-out is NOT consulted on the unparseable path (the guard cannot parse the
-        # command, so it cannot soundly trust an opt-out-looking prefix inside it), so an opt-out-prefixed
-        # unparseable in-scope command ALSO ASKS (see the r15-raw-* battery below).
-        expect("(bound-b) unparseable + lossy verb allows", 'git checkout -- "unbalanced', "allow", cwd=rp)
+        # verb (checkout) it cannot prove safe -> DENY (D-423-NARROW: the fallback denies every raw-flagged
+        # unparseable command, with no snapshot); a non-lossy unparseable stays ALLOW. No override exists on
+        # any path, so a command carrying the removed GUARDRAIL_ALLOW_DISCARD prefix gets
+        # the same outcome as the bare one (tombstones of the retired opt-out: bound-b3, the r15-raw-* battery).
+        expect("(bound-b) unparseable + lossy verb denies (fallback)", 'git checkout -- "unbalanced', "deny", cwd=rp)
         expect("(bound-b2) unparseable non-lossy command allows", 'ls -la "unbalanced', "allow")
-        expect("(bound-b3) unparseable + lossy + opt-out prefix still ALLOWS (round-15: opt-out not honoured on unparseable)",
-               'GUARDRAIL_ALLOW_DISCARD=1 git reset --hard "unbalanced', "allow", cwd=rp)
+        expect("(bound-b3) unparseable + lossy + removed-override prefix denies like the bare form (no override exists)",
+               'GUARDRAIL_ALLOW_DISCARD=1 git reset --hard "unbalanced', "deny", cwd=rp)
         # (bound-b4) a relative -C redirect with no session cwd is "opaque" (unresolvable); on a
         # NON-destructive form (checkout -b creates a branch, discards nothing) git_discard allows with a
         # note. Falsifiable: a silent allow there reads "allow"; an explicit allow, "explicit-allow".
@@ -1592,8 +2386,10 @@ def _main_isolated(monitor):
         # A worktree-scoped discard on a not-provably-clean tree ASKS (it no longer DENIES per-path, and it
         # no longer proves a disjoint clean path safe - both removed fast paths).
         expect("(co-a) checkout -- dirty allows with a note", "git checkout -- file.txt", "allow-note", cwd=rp)
-        expect("(co-b) checkout -- with optout allows",
-               "GUARDRAIL_ALLOW_DISCARD=1 git checkout -- file.txt", "allow", cwd=rp)
+        # Tombstone of the retired opt-out (it used to ALLOW here with NO snapshot): the removed prefix is an
+        # ordinary assignment, so this is snapshot-then-allow exactly like (co-a).
+        expect("(co-b) checkout -- with the removed-override prefix allows with a note, like co-a",
+               "GUARDRAIL_ALLOW_DISCARD=1 git checkout -- file.txt", "allow-note", cwd=rp)
         expect("(co-c) checkout . dirty allows with a note", "git checkout .", "allow-note", cwd=rp)
         expect("(co-d) checkout <branch> on dirty tree allows with a note", "git checkout other", "allow-note", cwd=rp)
         # Removed path-disjoint fast path: a discard of a CLEAN tracked path on a dirty tree now ASKS (it
@@ -1724,14 +2520,21 @@ def _main_isolated(monitor):
         # === EN-6 round-19 Fix A: an UNPARSEABLE 'git branch' ASKS regardless of any delete flag ====
         # The raw fallback (a tokenizer ValueError) now treats ANY raw 'git' + 'branch' as lossy: it does NOT parse
         # branch flags, so an unparseable 'git branch -d -f topic <heredoc>' / '-df' / '--del --for' can no
-        # longer slip past the old '-D'/'--delete'-only raw check into a silent ALLOW; every form ASKS.
-        _br_hd = " <<'EOF'\n'\nEOF"  # Bash-valid heredoc; the lone ' makes the tokenizer raise -> raw fallback
-        expect("(r19a-1) unparseable branch -d -f allows with a note (was a silent allow)",
-               "git branch -d -f topic" + _br_hd, "allow-note", cwd=rp)
-        expect("(r19a-2) unparseable branch -df (clustered) allows with a note",
-               "git branch -df topic" + _br_hd, "allow-note", cwd=rp)
-        expect("(r19a-3) unparseable branch --del --for (abbrev) allows with a note",
-               "git branch --del --for topic" + _br_hd, "allow-note", cwd=rp)
+        # longer slip past the old '-D'/'--delete'-only raw check into a silent ALLOW; under the ROUND-8
+        # positive grammar every heredoc-carrying form DENIES outright (the operator is outside it).
+        # (r19a-0, restored in R9): an UNPARSEABLE branch delete (an unbalanced quote raises in the
+        # tokenizer) reaches the RAW fallback, whose scan treats any raw git+branch as lossy; no other
+        # lossy keyword appears, so this is RED when _RAW_BRANCH_RE is dropped from _raw_has_lossy_git
+        # (the fallback then clears the command and silently allows).
+        expect("(r19a-0) unparseable branch delete reaches the raw-branch fallback and DENIES",
+               'git branch -D topic "g423', "deny", cwd=rp)
+        _br_hd = " <<'EOF'\n'\nEOF"  # Bash-valid quoted heredoc; it parses, and the R8 grammar denies the operator
+        expect("(r19a-1) heredoc branch -d -f DENIES under the positive grammar (R8; was a silent allow, then a noted allow)",
+               "git branch -d -f topic" + _br_hd, "deny", cwd=rp)
+        expect("(r19a-2) heredoc branch -df (clustered) DENIES under the positive grammar (R8)",
+               "git branch -df topic" + _br_hd, "deny", cwd=rp)
+        expect("(r19a-3) heredoc branch --del --for (abbrev) DENIES under the positive grammar (R8)",
+               "git branch --del --for topic" + _br_hd, "deny", cwd=rp)
         # The PARSEABLE branch classifier is UNCHANGED by the raw-path widening: a parseable force-delete
         # still ASKS, and a parseable non-delete branch-create still ALLOWs.
         expect("(r19a-4) parseable branch -d -f still allows with a note", "git branch -d -f other", "allow-note", cwd=rp)
@@ -1806,23 +2609,122 @@ def _main_isolated(monitor):
         expect("(f97-6) worktree remove -f unflagged, still allows at the true boundary",
                "git worktree remove -f", "allow", cwd=rp)
 
-        # === previously-fooled shell-expansion pathspecs now ASK (F-62.1, F-64.1/2, F-65.F1) ==
+        # === previously-fooled shell-expansion pathspecs now DENY (F-62.1, F-64.1, F-65.F1; R8) ==
         # A pathspec carrying a variable, command substitution, glob, brace, or tilde used to be probed
-        # LITERALLY, so the path-disjoint fast path fired and a real discard was silently ALLOWED. Coarse:
-        # a lossy verb on a not-provably-clean tree ASKS regardless of what the pathspec expands to.
-        expect("(exp-a) checkout -- $VAR pathspec allows with a note (F-62.1)", "git checkout -- $DIR/f", "allow-note", cwd=rp)
-        expect("(exp-b) rm $(cat list) command-substitution allows with a note (F-62.1)", "git rm $(cat list)", "allow-note",
+        # LITERALLY, so the path-disjoint fast path fired and a real discard was silently ALLOWED, and
+        # round 7 snapshot-then-allowed it; the ROUND-8 positive grammar DENIES an expansion character
+        # anywhere in a non-pristine in-scope command (it can name or run an unmodelled discard). The
+        # tilde form stays PRISTINE (tilde is not a pristine-gate metacharacter) and keeps its noted allow.
+        expect("(exp-a) checkout -- $VAR pathspec DENIES (R8)", "git checkout -- $DIR/f", "deny", cwd=rp)
+        expect("(exp-b) rm $(cat list) command-substitution DENIES (R8)", "git rm $(cat list)", "deny",
                cwd=rp)
-        expect("(exp-c) checkout -- glob allows with a note (F-62.1)", 'git checkout -- "*.txt"', "allow-note", cwd=rp)
-        expect("(exp-d) checkout -- brace expansion allows with a note (F-64.1)", "git checkout -- f.{txt,md}", "allow-note",
+        expect("(exp-c) checkout -- glob DENIES (R8)", 'git checkout -- "*.txt"', "deny", cwd=rp)
+        expect("(exp-d) checkout -- brace expansion DENIES (R8)", "git checkout -- f.{txt,md}", "deny",
                cwd=rp)
-        expect("(exp-e) checkout -- tilde allows with a note (F-64.2)", "git checkout -- ~/f", "allow-note", cwd=rp)
-        expect("(exp-f) clean -f $DIR expansion allows with a note (F-65.F1)", "git clean -f $DIR", "allow-note", cwd=rp)
+        expect("(exp-e) checkout -- tilde allows with a note (F-64.2, pristine path)", "git checkout -- ~/f", "allow-note", cwd=rp)
+        expect("(exp-f) clean -f $DIR expansion DENIES (R8)", "git clean -f $DIR", "deny", cwd=rp)
 
-        # === previously-fooled interactive-patch forms now ASK (F-60.2/F-60.3) ===============
-        expect("(patch-a) checkout -p allows with a note (F-60.2)", "git checkout -p", "allow-note", cwd=rp)
-        expect("(patch-b) restore -p --staged allows with a note (F-60.3)", "git restore -p --staged file.txt", "allow-note",
+        # === interactive-patch forms DENY (F-60.2/F-60.3 history; R11 DECIDED item 4, widened by
+        # R12 DECIDED item 2): the hunks interactive patch mode renders pass through the
+        # configured interactive.diffFilter, so every -p/--patch spelling on a lossy verb denies,
+        # the pristine path included - a digit-led cluster too (git reads -2p as --ours plus
+        # --patch), and a SEPARATED option value is consumed by its arity first, so a flag hidden
+        # behind a consumed '--' still denies while a value that merely LOOKS like -p (a -m
+        # message, a -b branch name) allows ==================================================
+        expect("(patch-a) checkout -p DENIES (interactive patch mode; R11 item 4)", "git checkout -p", "deny", cwd=rp)
+        expect("(patch-b) restore -p --staged DENIES (R11 item 4)", "git restore -p --staged file.txt", "deny",
                cwd=rp)
+        expect("(patch-c) checkout -2p DENIES (digit-led cluster; R12 item 2)", "git checkout -2p", "deny", cwd=rp)
+        expect("(patch-d) restore -3p DENIES (digit-led cluster; R12 item 2)", "git restore -3p", "deny", cwd=rp)
+        expect("(patch-e) checkout -bp names the branch p and ALLOWS (R12 item 2 control)",
+               "git checkout -bp", "allow", cwd=rp)
+        expect("(patch-f) stash push -m -- -p DENIES: the '--' is the message, the -p real (R12 item 2)",
+               "git stash push -m -- -p", "deny", cwd=rp)
+        expect("(patch-g) stash push --message -- --patch DENIES (R12 item 2)",
+               "git stash push --message -- --patch", "deny", cwd=rp)
+        expect("(patch-h) stash push -m -p is a push whose message is -p, ALLOWS (R12 item 2 control)",
+               "git stash push -m -p", "allow", cwd=rp)
+        # R13 DECIDED item 1: the -p scan derives its value-taking options from the SAME closed
+        # allowlists as the option validator (_DISCARD_VERB_OPTS / _DISCARD_STASH_OP_OPTS), so a
+        # declared separated value spelled -p is a VALUE (a filename, a style, a branch name), a
+        # consumed separated value that reads as a terminator makes a LATER -p the REAL patch
+        # flag (deny), and a genuine terminator after a consumed value still ends the scan. Red
+        # on the R12 delivery: its private table omitted --pathspec-from-file and the
+        # --orphan/--conflict values, so (patch-i)/(patch-k) denied as patch there while
+        # (patch-j)/(patch-l)/(patch-m)/(patch-n)/(patch-o)/(patch-p) missed the real -p.
+        expect("(patch-i) stash push --pathspec-from-file -p ALLOWS: -p is the filename value "
+               "(R13 item 1)",
+               "git stash push --pathspec-from-file -p", "allow", cwd=rp)
+        expect("(patch-j) stash push --pathspec-from-file -- -p DENIES: the terminator is the "
+               "consumed filename, the -p real (R13 item 1)",
+               "git stash push --pathspec-from-file -- -p", "deny", cwd=rp)
+        expect("(patch-k) checkout --pathspec-from-file -p is scoped, never a patch deny (R13 "
+               "item 1)",
+               "git checkout --pathspec-from-file -p", "allow-note", cwd=rp)
+        expect("(patch-l) checkout --pathspec-from-file -- -p DENIES (R13 item 1)",
+               "git checkout --pathspec-from-file -- -p", "deny", cwd=rp)
+        expect("(patch-m) checkout --orphan -- -p DENIES: the terminator is the consumed branch "
+               "name (R13 item 1)",
+               "git checkout --orphan -- -p", "deny", cwd=rp)
+        expect("(patch-n) checkout --conflict -- -p DENIES: the terminator is the consumed style "
+               "value (R13 item 1)",
+               "git checkout --conflict -- -p", "deny", cwd=rp)
+        expect("(patch-o) restore --pathspec-from-file -- -p DENIES (R13 item 1)",
+               "git restore --pathspec-from-file -- -p", "deny", cwd=rp)
+        expect("(patch-p) reset --pathspec-from-file -- -p DENIES (R13 item 1)",
+               "git reset --pathspec-from-file -- -p", "deny", cwd=rp)
+        expect("(patch-q) the joined --pathspec-from-file=-p spelling stays scoped, a control "
+               "(R13 item 1)",
+               "git checkout --pathspec-from-file=-p", "allow-note", cwd=rp)
+        expect("(patch-r) a genuine terminator after a consumed value leaves -p a pathspec, a "
+               "control (R13 item 1)",
+               "git checkout --pathspec-from-file flist -- -p", "allow-note", cwd=rp)
+        # R14 DECIDED item 1: the option listing of git itself for stash save (the installed
+        # git 2.55.0 'git stash save -h' output) carries "-m, --[no-]message <message>" and
+        # "-S, --[no-]staged", so the save entry of _DISCARD_STASH_OP_OPTS lists -m/--message
+        # as a VALUE option exactly like push (the R13 entry listed an empty value set on the
+        # false premise that save takes no -m): a separated message value that reads as '--'
+        # is the MESSAGE, never the option terminator, so a -p standing after it is REAL. Each
+        # deny below asserts the DENY REASON (the patch rule names the spelling typed), not
+        # only the outcome, so a deny from a different rule (an unlisted-option deny, say)
+        # cannot satisfy the vector. Red on the R13 delivery: (patch-s)/(patch-t) allowed
+        # silently there and (patch-u)/(patch-v) denied as patch spellings; (patch-w) to
+        # (patch-y) are the terminator and class-closing controls the R13 suite lacked.
+        def patch_deny(label, command, needle):
+            data = dict(hook_event_name="PreToolUse", tool_name="Bash",
+                        tool_input=dict(command=command), cwd=rp)
+            code, stdout_obj, _stderr = handler(data)
+            got = _reduce_result(code, stdout_obj)
+            reason = ""
+            if isinstance(stdout_obj, dict):
+                hso = stdout_obj.get("hookSpecificOutput")
+                if isinstance(hso, dict):
+                    reason = str(hso.get("permissionDecisionReason", ""))
+            if got != "deny" or needle not in reason:
+                failures.append("{}: expected a deny whose reason names {!r}, got {} {!r}"
+                                .format(label, needle, got, reason[:220]))
+
+        patch_deny("(patch-s) stash save -m -- -p DENIES: the '--' is the message, the -p real "
+                   "(R14 item 1)", "git stash save -m -- -p", "'git stash save -p'")
+        patch_deny("(patch-t) stash save --message -- --patch DENIES (R14 item 1)",
+                   "git stash save --message -- --patch", "'git stash save --patch'")
+        expect("(patch-u) stash save -m -p is a save whose message is -p, ALLOWS (R14 item 1 "
+               "control)", "git stash save -m -p", "allow", cwd=rp)
+        expect("(patch-v) stash save -mp carries an attached message, ALLOWS (R14 item 1 control)",
+               "git stash save -mp", "allow", cwd=rp)
+        # R15 DECIDED item 2: git keeps the '--' of 'stash save -- -p' in the message (git
+        # 2.55.0 saves a stash whose message is '-- -p'); that '--' still ends option parsing,
+        # so the -p is message text, git enters no patch mode, and the allow below still holds.
+        expect("(patch-w) stash save -- -p: a genuine terminator, git keeps the '--' and saves a "
+               "stash whose message is '-- -p' with no patch mode, ALLOWS exactly as git "
+               "behaves (R14 item 1 control; R15 item 2 wording)",
+               "git stash save -- -p", "allow", cwd=rp)
+        patch_deny("(patch-x) implicit push: stash --pathspec-from-file -- -p DENIES, the "
+                   "terminator is the consumed filename value (R14 item 1)",
+                   "git stash --pathspec-from-file -- -p", "'git stash -p'")
+        patch_deny("(patch-y) restore --conflict -- -p DENIES: the terminator is the consumed "
+                   "style value (R14 item 1)",
+                   "git restore --conflict -- -p", "'git restore -p'")
 
         # === previously-fooled/hanging clean forms now ASK, no probe (F-64.3, F-66.1) ========
         # clean -i used to reach the `clean -n` probe and could hang on interactive input; clean -q
@@ -1837,12 +2739,12 @@ def _main_isolated(monitor):
         # ASKS rather than probe the (possibly wrong, clean) session dir and silently allow.
         (repo / "sub").mkdir(exist_ok=True)
         clean_repo = _init_repo(tmp / "cleanrepo")  # a CLEAN repo a cd might misdirect toward
-        expect("(dir-a) cd sub && git reset --hard allows with a note (F-62.2)", "cd sub && git reset --hard", "allow-note",
+        expect("(dir-a) relative cd before reset --hard DENIES (F-62.2; R8: cd takes one absolute literal path)", "cd sub && git reset --hard", "deny",
                cwd=rp)
-        expect("(dir-b) backgrounded cd & git reset --hard allows with a note (F-64.4/F-66.3)",
-               "cd sub & git reset --hard", "allow-note", cwd=rp)
-        expect("(dir-c) subshell cd misdirect allows with a note (F-62.2)",
-               "( cd {} ) ; git reset --hard".format(str(clean_repo)), "allow-note", cwd=rp)
+        expect("(dir-b) backgrounded cd & git reset --hard denies (non-'&&' join after a cd, D-423)",
+               "cd sub & git reset --hard", "deny", cwd=rp)
+        expect("(dir-c) subshell cd misdirect DENIES (F-62.2; R8: a parenthesis is outside the grammar)",
+               "( cd {} ) ; git reset --hard".format(str(clean_repo)), "deny", cwd=rp)
         expect("(dir-d) -C global option not-certain allows with a note (F-66.2)", "git -C {} reset --hard".format(rp),
                "allow-note", cwd=rp)
         expect("(dir-e) --git-dir global option not-certain allows with a note (F-66.4)",
@@ -1854,31 +2756,31 @@ def _main_isolated(monitor):
         expect("(dir-h) GIT_DIR= env not-certain allows with a note (F-62.3/F-66.4)", "GIT_DIR=.git git reset --hard",
                "allow-note", cwd=rp)
 
-        # === the opt-out is a LEADING assignment on the git command only (F-65.F3, blocker 4) =
-        # The same string buried in an argument (echo) does NOT disable the guard; the command is compound,
-        # so the trailing reset --hard ASKS (a compound cannot be probed clean, blocker 2) rather than allow.
-        expect("(opt-a) buried GUARDRAIL_ALLOW_DISCARD in an arg does not opt out (F-65.F3)",
-               "echo GUARDRAIL_ALLOW_DISCARD=1 ; git reset --hard", "allow-note", cwd=rp)
-        # Blocker 4: an opt-out LEADING a non-git segment does not opt out the later git command; the
-        # command is compound, so the reset --hard ASKS, never a silent allow.
-        expect("(opt-a2) opt-out leading a non-git segment does not opt out the reset (blocker 4)",
-               "GUARDRAIL_ALLOW_DISCARD=1 true ; git reset --hard", "allow-note", cwd=rp)
-        # A genuine leading opt-out prefix on the git command itself still ALLOWs the same reset.
-        expect("(opt-b) leading GUARDRAIL_ALLOW_DISCARD prefix opts out",
-               "GUARDRAIL_ALLOW_DISCARD=1 git reset --hard", "allow", cwd=rp)
+        # === tombstones of the retired GUARDRAIL_ALLOW_DISCARD opt-out (F-65.F3, blocker 4) ==============
+        # The override is removed; each vector below keeps its input and now asserts the outcome of the same
+        # command without the prefix. Buried in an argument (echo): under the ROUND-8 positive grammar
+        # the echo command word is outside the closed list, so the compound DENIES - never a silent
+        # allow, and nothing the same command with FOO=1 in place of the prefix would not also get.
+        expect("(opt-a) buried GUARDRAIL_ALLOW_DISCARD in an arg changes nothing (F-65.F3; R8 word deny)",
+               "echo GUARDRAIL_ALLOW_DISCARD=1 ; git reset --hard", "deny", cwd=rp)
+        # Blocker 4: the removed prefix LEADING a non-git segment changes nothing; under the ROUND-8
+        # grammar a standalone assignment word denies exactly as FOO=1 there does, never a silent allow.
+        expect("(opt-a2) removed prefix leading a non-git segment changes nothing (blocker 4; R8 assign deny)",
+               "GUARDRAIL_ALLOW_DISCARD=1 true ; git reset --hard", "deny", cwd=rp)
+        # FLIPPED (was "allow"): the leading prefix on the git command itself no longer overrides, so the
+        # dirty whole-tree clobber DENIES like (rs-a).
+        expect("(opt-b) leading GUARDRAIL_ALLOW_DISCARD prefix no longer overrides: dirty clobber denies",
+               "GUARDRAIL_ALLOW_DISCARD=1 git reset --hard", "deny", cwd=rp)
 
-        # === EN-6 round-13: opt-out is case-sensitive and last-wins; redirects ASK all forms ==
-        # Fix 1: bash env-var names are case-sensitive, so a LOWERCASE guardrail_allow_discard=1 is NOT the
-        # opt-out. On an unparseable heredoc discard the raw fallback must NOT honour it -> ASK. Round-15
-        # STRUCTURAL fix: the opt-out is no longer consulted on the unparseable path at all, so even the
-        # UPPERCASE form on the same unparseable command now ASKS too (see the r15-raw-* battery below).
-        expect("(r13-1) lowercase optout on unparseable heredoc discard does not opt out -> ALLOW WITH A NOTE",
-               "guardrail_allow_discard=1 git reset --hard <<'EOF'\n'\nEOF", "allow-note", cwd=rp)
-        # Fix 2: bash last-wins on a duplicate leading assignment - =1 then =0 evaluates to 0 (NOT truthy),
-        # so it does NOT opt out (the buggy first-wins saw =1 and ALLOWed). With no resolvable cwd the
-        # un-opted-out reset --hard ASKS ("cannot resolve to the session directory"); had it opted out it
-        # would have short-circuited to ALLOW before the resolvability check.
-        expect("(r13-2) =1 =0 last-wins evaluates 0, does not opt out -> DENY",
+        # === EN-6 round-13: redirects ASK all forms (plus tombstones of the retired opt-out) =========
+        # Fix 1 tombstone: a LOWERCASE guardrail_allow_discard=1 on a heredoc discard is an ordinary
+        # assignment, as every spelling of the removed prefix now is -> the bare outcome, a DENY under
+        # the ROUND-8 positive grammar (the heredoc operator and the assignment word are outside it).
+        expect("(r13-1) lowercase removed prefix on heredoc discard -> DENY like the bare form (R8)",
+               "guardrail_allow_discard=1 git reset --hard <<'EOF'\n'\nEOF", "deny", cwd=rp)
+        # Fix 2 tombstone (last-wins =1 then =0): no override exists, so with no resolvable cwd the reset
+        # --hard DENIES ("cannot resolve to the session directory"), the outcome of the bare command.
+        expect("(r13-2) =1 =0 duplicate removed prefix: same as the bare command -> DENY",
                "GUARDRAIL_ALLOW_DISCARD=1 GUARDRAIL_ALLOW_DISCARD=0 git reset --hard", "deny")
         # Fix 3: a command-local redirect (-C/--git-dir/--work-tree/inline GIT_DIR=) means the repository
         # view cannot be proven to be the session cwd, so the early view-uncertainty gate ASKS for ALL forms
@@ -1896,44 +2798,348 @@ def _main_isolated(monitor):
         # allow that lost the redirected index). Same-repo --git-dir still allows (dir-e/dir-f below).
         expect("(r13-3c-f5) --git-dir to a DIFFERENT repo on reset --hard now DENIES (finding 5)",
                "git --git-dir=/x reset --hard", "deny", cwd=rp)
-        # No regression: a plain non-destructive form with NO redirect and NO opt-out still ALLOWs on a dirty
+        # No regression: a plain non-destructive form with NO redirect still ALLOWs on a dirty
         # tree (recovery-snapshot-backed), exactly as before Fix 3.
         expect("(r13-4a) plain reset --soft with no redirect still allows", "git reset --soft", "allow",
                cwd=rp)
         expect("(r13-4b) plain switch with no redirect still allows", "git switch other", "allow", cwd=rp)
 
-        # === EN-6 round-15: end the opt-out silent-allow class (Fix 1 structural + Fix 2 empty value) =====
-        # Fix 2 (parseable path): the opt-out value capture now matches an EMPTY value, so an empty FINAL
-        # leading assignment is evaluated by bash last-wins as falsy and does NOT opt out. With no resolvable
-        # cwd the un-opted-out reset --hard ASKS ("cannot resolve to the session directory"); had the empty
-        # value been ignored (the old (.+) capture) the earlier =1 would have wrongly opted out to ALLOW.
-        expect("(r15-empty) empty final opt-out assignment is falsy (last-wins), does not opt out -> DENY",
+        # === EN-6 round-15 tombstones: the opt-out silent-allow class, now closed by removal ============
+        # Fix 2 tombstone (empty final assignment): no override exists, so with no resolvable cwd the reset
+        # --hard DENIES ("cannot resolve to the session directory"), the outcome of the bare command.
+        expect("(r15-empty) empty final removed-prefix assignment: same as the bare command -> DENY",
                "GUARDRAIL_ALLOW_DISCARD=1 GUARDRAIL_ALLOW_DISCARD= git reset --hard", "deny")
-        # Fix 1 (STRUCTURAL): the opt-out is no longer consulted on the UNPARSEABLE (raw-fallback) path at
-        # all - a regex cannot soundly parse an opt-out out of a command the shell lexer could not parse - so
-        # every opt-out-looking prefix on an unparseable in-scope discard now ASKS. The five raw variants that
-        # previously wrung a silent ALLOW out of the raw scan (quoted-falsy that reads truthy raw, an
-        # interspersed other assignment, an opt-out leading a DIFFERENT command, a `0;` captured truthy, and a
-        # quoted "false"), each on an unparseable heredoc discard (the lone quote makes the tokenizer raise), must ASK.
-        _hd = " <<'EOF'\n'\nEOF"  # Bash-valid heredoc whose lone ' makes the tokenizer raise -> raw fallback
-        expect("(r15-raw-quotedfalsy) quoted-falsy opt-out on unparseable discard -> ALLOW WITH A NOTE",
-               'GUARDRAIL_ALLOW_DISCARD="0" git reset --hard' + _hd, "allow-note", cwd=rp)
-        expect("(r15-raw-interspersed) interspersed other assignment on unparseable discard -> ALLOW WITH A NOTE",
-               "GUARDRAIL_ALLOW_DISCARD=1 OTHER=x git reset --hard" + _hd, "allow-note", cwd=rp)
-        expect("(r15-raw-othercmd) opt-out leading a DIFFERENT command on unparseable discard -> ALLOW WITH A NOTE",
-               "GUARDRAIL_ALLOW_DISCARD=1 true; git reset --hard" + _hd, "allow-note", cwd=rp)
-        expect("(r15-raw-semicolon) `0;` captured-truthy opt-out on unparseable discard -> ALLOW WITH A NOTE",
-               "GUARDRAIL_ALLOW_DISCARD=0; git reset --hard" + _hd, "allow-note", cwd=rp)
-        expect("(r15-raw-quotedfalse) quoted \"false\" opt-out on unparseable discard -> ALLOW WITH A NOTE",
-               'GUARDRAIL_ALLOW_DISCARD="false" git reset --hard' + _hd, "allow-note", cwd=rp)
-        # Fix 3 (documented override semantics): a leading PARSEABLE opt-out on a pristine bare command is an
-        # explicit operator override, evaluated FIRST, so it short-circuits the command-local-redirect (-C)
-        # view-uncertainty gate too -> ALLOW (the manifest now qualifies that gate "unless the leading opt-out
-        # is set"). Contrast (clean-d): the same -C form WITHOUT the opt-out ASKS.
-        expect("(r15-optout-redirect) leading opt-out short-circuits the -C redirect gate -> ALLOW",
-               "GUARDRAIL_ALLOW_DISCARD=1 git -C /tmp reset --hard", "allow", cwd=rp)
-        # No regression (opt-b, co-a, rs-a above): a plain parseable opt-out still ALLOWs; a plain lossy form
-        # with no opt-out still ASKS (co-a) and a dirty whole-tree clobber still DENIES (rs-a).
+        # Fix 1 tombstones: no override exists on any path, so each removed-
+        # prefix spelling that once wrung a silent ALLOW out of the raw scan (quoted-falsy that reads truthy
+        # raw, an interspersed other assignment, the prefix leading a DIFFERENT command, a `0;` captured
+        # truthy, and a quoted "false"), each on a quoted-heredoc discard (which parses), gets the bare
+        # form's outcome: a DENY under the ROUND-8 positive grammar (the heredoc operator, the quoting
+        # and the assignment word are each outside it), never more permissive than FOO=<value> gets.
+        _hd = " <<'EOF'\n'\nEOF"  # Bash-valid quoted heredoc appended to each discard below (parses; R8 denies the operator)
+        expect("(r15-raw-quotedfalsy) quoted-falsy removed prefix on heredoc discard -> DENY (R8)",
+               'GUARDRAIL_ALLOW_DISCARD="0" git reset --hard' + _hd, "deny", cwd=rp)
+        expect("(r15-raw-interspersed) interspersed other assignment on heredoc discard -> DENY (R8)",
+               "GUARDRAIL_ALLOW_DISCARD=1 OTHER=x git reset --hard" + _hd, "deny", cwd=rp)
+        expect("(r15-raw-othercmd) removed prefix leading a DIFFERENT command on heredoc discard -> DENY (R8)",
+               "GUARDRAIL_ALLOW_DISCARD=1 true; git reset --hard" + _hd, "deny", cwd=rp)
+        expect("(r15-raw-semicolon) `0;` captured-truthy removed prefix on heredoc discard -> DENY (R8)",
+               "GUARDRAIL_ALLOW_DISCARD=0; git reset --hard" + _hd, "deny", cwd=rp)
+        expect("(r15-raw-quotedfalse) quoted \"false\" removed prefix on heredoc discard -> DENY (R8)",
+               'GUARDRAIL_ALLOW_DISCARD="false" git reset --hard' + _hd, "deny", cwd=rp)
+        # Fix 3 tombstone, FLIPPED (was "allow"): the removed prefix no longer short-circuits the command-local
+        # redirect (-C) gate, so the command gets the outcome of the bare 'git -C /tmp reset --hard'.
+        expect("(r15-optout-redirect) removed prefix no longer bypasses the -C redirect gate -> DENY",
+               "GUARDRAIL_ALLOW_DISCARD=1 git -C /tmp reset --hard", "deny", cwd=rp)
+        expect("(r15-optout-redirect-bare) the same -C form without the prefix -> DENY",
+               "git -C /tmp reset --hard", "deny", cwd=rp)
+
+        # === REMOVED OVERRIDE: the GUARDRAIL_ALLOW_DISCARD prefix (vectors rmo-1 to rmo-8) ================
+        # The prefix was writable by the guarded actor and skipped the recovery snapshot, so it is removed; a
+        # leading assignment of it is an ordinary env assignment whose value no code reads to permit
+        # anything: on a pristine command whose unprefixed form is in scope it gets the unprefixed command's
+        # decision (rmo-1); where the raw scans read its value as a metacharacter (rmo-6) or a target-redirect
+        # word on an unparseable command (rmo-8 case c) it gets exactly what FOO=<the same value> gets
+        # (decision, reason text and snapshot count); and a lossy keyword in the value (rmo-8 case d) brings
+        # the command into scope exactly as FOO does and gets FOO's allow-or-deny decision with the reason
+        # text free to differ (the prefix is the one leading assignment the dir-simple check treats as
+        # benign, so it stays on the pristine path where FOO takes the view-override branch). Any of these
+        # can differ from the unprefixed command's decision, never toward an unsnapshotted allow of a
+        # destructive form with no session cwd (those routes deny: rmo-6, fcl).
+        _rmo = "GUARDRAIL_ALLOW_DISCARD=1 "
+        _rmo_note = (getattr(aiqt_hooks, "_REMOVED_DISCARD_PREFIX_NOTE", None)
+                     or "(the removed-prefix migration note is missing)").strip()
+        _rmo_clean = str(_init_repo(tmp / "repo-removed-override"))
+
+        def _rmo_text(command, cwd=None):
+            """(reduced decision, every reason and banner the handler emitted) for one Bash command."""
+            data = dict(hook_event_name="PreToolUse", tool_name="Bash", tool_input=dict(command=command))
+            if cwd is not None:
+                data["cwd"] = cwd
+            code, stdout_obj, _stderr = handler(data)
+            texts = []
+            if isinstance(stdout_obj, dict):
+                texts.append(str(stdout_obj.get("systemMessage", "")))
+                hso = stdout_obj.get("hookSpecificOutput")
+                if isinstance(hso, dict):
+                    texts.append(str(hso.get("permissionDecisionReason", "")))
+            return _reduce_result(code, stdout_obj), " ".join(texts)
+
+        # (rmo-1) Equivalence battery, per in-scope form class: on the PRISTINE path the prefixed command
+        # ('=' and the '+=' append spelling) gets the decision of the bare command; on the ROUND-8
+        # non-pristine path the prefix is an assignment word the positive grammar refuses, so the
+        # prefixed command DENIES exactly as FOO=<value> does (see rmo-6/fcl), which for the compound
+        # row differs from the bare outcome by design. Both wants are pinned so none drifts. (rmo-2) No
+        # advertisement: no bare-command reason or
+        # banner names the prefix, and a prefixed one names it only inside the migration sentence.
+        _rmo_battery = (
+            ("pristine-clean", "git reset --hard", _rmo_clean, None, "allow", "allow"),
+            ("pristine-dirty-clobber", "git reset --hard", rp, None, "deny", "deny"),
+            ("pristine-dirty-scoped", "git checkout -- file.txt", rp, None, "allow-note", "allow-note"),
+            ("c-redirect", "git -C {} reset --hard".format(rp), rp, None, "allow-note", "allow-note"),
+            ("ambient-git-var", "git reset --hard", rp, "GIT_NAMESPACE", "allow-note", "allow-note"),
+            ("compound", "git reset --hard ; true", rp, None, "allow-note", "deny"),
+            ("heredoc", "git reset --hard" + _hd, rp, None, "deny", "deny"),
+        )
+        for _case, _cmd, _cwd, _env, _want, _want_pref in _rmo_battery:
+            if _env is not None:
+                os.environ[_env] = "removed-override-selftest"
+            try:
+                _bare, _bare_text = _rmo_text(_cmd, _cwd)
+                _prefs = [(_p, _rmo_text(_p + _cmd, _cwd)) for _p in (_rmo, "GUARDRAIL_ALLOW_DISCARD+=1 ")]
+            finally:
+                if _env is not None:
+                    os.environ.pop(_env, None)
+            for _p, (_pref, _pref_text) in _prefs:
+                if _bare != _want or _pref != _want_pref:
+                    failures.append("(rmo-1-{}) the bare and the {!r}-prefixed command must be {} and the prefixed {}, got {} "
+                                    "and {}".format(_case, _p, _want, _want_pref, _bare, _pref))
+                if ("GUARDRAIL_ALLOW_DISCARD" in _bare_text
+                        or "GUARDRAIL_ALLOW_DISCARD" in _pref_text.replace(_rmo_note, "")):
+                    failures.append("(rmo-2-{}) a reason or banner names the removed prefix outside the "
+                                    "migration sentence: {!r} / {!r}".format(_case, _bare_text, _pref_text))
+        # (rmo-2) the deny paths the battery does not reach: both snapshot-failure denies (forced) and the
+        # no-session-cwd unparseable deny, which once told the actor the prefix "then opts out".
+        _orig_rmo_rec = aiqt_hooks._record_recovery
+        aiqt_hooks._record_recovery = lambda repo, verb: ("fail", "forced failure (self-test)")
+        try:
+            _rmo_denies = [_rmo_text("git reset --hard", rp), _rmo_text("git checkout -- file.txt", rp)]
+        finally:
+            aiqt_hooks._record_recovery = _orig_rmo_rec
+        _rmo_denies.append(_rmo_text('git reset --hard "unbalanced'))
+        for _i, (_dec, _text) in enumerate(_rmo_denies):
+            if _dec != "deny" or "GUARDRAIL_ALLOW_DISCARD" in _text:
+                failures.append("(rmo-2-deny-{}) expected a deny that does not name the removed prefix, got {} "
+                                "{!r}".format(_i, _dec, _text))
+        # (rmo-2) structural: no string in the hook module (reason, banner or docstring) spells the prefix as
+        # an assignment, the form every retired advertisement used: any value, '=' or '+=', any case, a '+'
+        # chain of literals, or an f-string whose fields are literals or such chains. BOUNDARY (disclosed): the
+        # scan folds literals only, so a spelling assembled from a name, a call, %-formatting, str.format or
+        # str.join is not resolved (an f-string field it cannot fold reads as '', and a '+' chain with such an
+        # operand is skipped). The one exempt string is the pattern of _REMOVED_DISCARD_PREFIX_RE itself,
+        # which recognizes the assignment and advertises nothing.
+        _rmo_adv_re = re.compile(r"(?i)GUARDRAIL_ALLOW_DISCARD[\s()\\+?]*=")
+        _rmo_exempt = getattr(getattr(aiqt_hooks, "_REMOVED_DISCARD_PREFIX_RE", None), "pattern", None)
+
+        def _rmo_fold(node):
+            """The text of a str constant, a '+' chain of them, or an f-string (a field folds when it is such a
+            literal or chain with no conversion or format spec, else reads as ''), else None."""
+            if isinstance(node, ast.Constant):
+                return node.value if isinstance(node.value, str) else None
+            if isinstance(node, ast.JoinedStr):
+                _parts = []
+                for _v in node.values:
+                    if isinstance(_v, ast.Constant):
+                        _parts.append(_v.value)
+                    elif (isinstance(_v, ast.FormattedValue) and _v.conversion == -1
+                          and _v.format_spec is None):
+                        _parts.append(_rmo_fold(_v.value) or "")
+                    else:
+                        _parts.append("")
+                return "".join(_parts)
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                _l, _r = _rmo_fold(node.left), _rmo_fold(node.right)
+                return None if _l is None or _r is None else _l + _r
+            return None
+
+        def _rmo_adv_lines(source):
+            """Line numbers of every string in `source` that spells a GUARDRAIL_ALLOW_DISCARD assignment."""
+            _hits = set()
+            for _n in ast.walk(ast.parse(source)):
+                _t = _rmo_fold(_n)
+                if _t is not None and _t != _rmo_exempt and _rmo_adv_re.search(_t):
+                    _hits.add(_n.lineno)
+            return sorted(_hits)
+
+        _rmo_adv = _rmo_adv_lines(Path(aiqt_hooks.__file__).read_text(encoding="utf-8"))
+        if _rmo_adv:
+            failures.append("(rmo-2-source) aiqt_hooks.py strings still spell a GUARDRAIL_ALLOW_DISCARD "
+                            "assignment at lines {}".format(_rmo_adv))
+        # (rmo-2-scan) the scan catches each literal spelling below (including an f-string whose field is a
+        # literal or a '+' chain of literals), and passes a mention that spells no assignment.
+        for _src in ('X = "Prefix GUARDRAIL_ALLOW_DISCARD=1 to override."',
+                     'X = "prefix GUARDRAIL_ALLOW_DISCARD=true"', 'X = "set guardrail_allow_discard=yes"',
+                     'X = "GUARDRAIL_ALLOW_DISCARD+=1 git reset --hard"',
+                     'X = "GUARDRAIL_ALLOW_DISCARD" + "=1"', 'X = "GUARDRAIL_ALLOW_" + ("DISCARD" + "=on")',
+                     'X = f"GUARDRAIL_ALLOW_DISCARD={v}"', 'def f():\n    "Use GUARDRAIL_ALLOW_DISCARD = 1."\n',
+                     'X = f"GUARDRAIL_ALLOW_{\'DISCARD\'}=1"',
+                     'X = f"GUARDRAIL_ALLOW_{\'DIS\' + \'CARD=on\'}"'):
+            if not _rmo_adv_lines(_src):
+                failures.append("(rmo-2-scan) the advertisement scan misses {!r}".format(_src))
+        if _rmo_adv_lines('X = "the GUARDRAIL_ALLOW_DISCARD prefix no longer overrides this guard"'):
+            failures.append("(rmo-2-scan-mention) the advertisement scan flags a mention that spells no assignment")
+        # (rmo-3) Pristine classification unchanged: the prefix (truthy or falsy) stays an ordinary leading
+        # assignment that redirects nothing, so the prefixed pristine form on a clean tree reaches the probe
+        # and ALLOWs (on the dirty tree the same command denies, rmo-1, so the probe decided).
+        for _v in ("=1", "=0", "+=1"):
+            _toks = ["GUARDRAIL_ALLOW_DISCARD" + _v, "git", "reset", "--hard"]
+            if (not aiqt_hooks._segment_dir_simple(_toks)
+                    or _decision(handler, " ".join(_toks), cwd=_rmo_clean) != "allow"):
+                failures.append("(rmo-3-{}) a leading GUARDRAIL_ALLOW_DISCARD{} must stay a benign leading "
+                                "assignment that reaches the clean probe and allows".format(_v, _v))
+        # (rmo-4) MIGRATION, this release only (the next release deletes this vector and keeps rmo-2): a
+        # truthy prefix adds the removal sentence, naming 'git stash' as the route, to the reason of the
+        # decision the bare command gets; a falsy prefix adds nothing.
+        _dec, _text = _rmo_text(_rmo + "git reset --hard", rp)
+        if _dec != "deny" or _rmo_note not in _text or "git stash" not in _rmo_note:
+            failures.append("(rmo-4) the prefixed dirty clobber must deny with the migration sentence, got {} "
+                            "{!r}".format(_dec, _text))
+        _dec, _text = _rmo_text(_rmo + "git checkout -- file.txt", rp)
+        if _dec != "allow-note" or _rmo_note not in _text:
+            failures.append("(rmo-4-note) the prefixed scoped discard must allow with a note carrying the "
+                            "migration sentence, got {} {!r}".format(_dec, _text))
+        _dec, _text = _rmo_text("GUARDRAIL_ALLOW_DISCARD=0 git reset --hard", rp)
+        if _dec != "deny" or _rmo_note in _text:
+            failures.append("(rmo-4-falsy) a falsy prefix must deny without the migration sentence, got {} "
+                            "{!r}".format(_dec, _text))
+        # (rmo-6) A metacharacter value, even quoted, makes the command non-pristine exactly as any other
+        # leading assignment of that value does: the prefixed command gets exactly what FOO=<the same value>
+        # gets (decision, reason text with the snapshot ref name normalised, and recovery-snapshot count), on the dirty session tree and with no
+        # session cwd. That is the ROUND-8 non-pristine positive grammar, which the bare command does not
+        # take (it denies via the probe, rmo-1): the grammar refuses the quoting/metacharacter outright,
+        # so with and without a session cwd it DENIES and takes NO snapshot, for FOO and the prefix alike
+        # (fail closed: nothing runs, nothing is lost, no snapshot basis is claimed).
+        _rmo_snaps = []
+
+        def _rmo_count(repo, verb):
+            _rmo_snaps.append(repo)
+            return _orig_rmo_rec(repo, verb)
+
+        aiqt_hooks._record_recovery = _rmo_count
+        try:
+            for _v in ("';'", "'!'", "'x|y'", '"a;b"', "'$x'", "'*'"):
+                for _where, _cwd in (("cwd", rp), ("nocwd", None)):
+                    _got = []
+                    for _name in ("GUARDRAIL_ALLOW_DISCARD", "FOO"):
+                        del _rmo_snaps[:]
+                        _dec, _text = _rmo_text("{}={} git reset --hard".format(_name, _v), _cwd)
+                        _got.append((_dec, re.sub(r"refs/aiqt-recovery/[0-9A-Za-z-]+", "refs/aiqt-recovery/<id>",
+                                                  _text), len(_rmo_snaps)))
+                    _want_dec = "deny"  # R8: the grammar refuses the spelling with or without a cwd
+                    if (_got[0] != _got[1] or _got[0][0] != _want_dec
+                            or _got[0][2] > 0):
+                        failures.append("(rmo-6-{}-{}) the prefix with a metacharacter value must get exactly "
+                                        "what FOO with that value gets (a deny with no snapshot, with or "
+                                        "without a session cwd, R8), got {!r}"
+                                        .format(_where, _v, _got))
+        finally:
+            aiqt_hooks._record_recovery = _orig_rmo_rec
+        # (rmo-7) The prefix pattern accepts the token shapes _ENV_ASSIGN_RE treats as a leading assignment:
+        # '+=' (the migration note folds it as an append, bash last-wins) and a value spanning a newline, so
+        # _segment_dir_simple and _removed_prefix_note agree on every token. MIGRATION, this release only:
+        # the next release deletes the note half of this vector together with rmo-4. The '=1 +=' case tells
+        # the '+=' append fold from a plain last-wins overwrite (bash keeps '1'; an overwrite would read '').
+        _rmo_note_fn = getattr(aiqt_hooks, "_removed_prefix_note", None)
+        if _rmo_note_fn is None:
+            failures.append("(rmo-7-missing) aiqt_hooks._removed_prefix_note is not defined")
+            _rmo_note_fn = lambda _t: ""
+        for _toks, _want_note in (
+                (["GUARDRAIL_ALLOW_DISCARD=1", "GUARDRAIL_ALLOW_DISCARD+=", "git", "reset", "--hard"], True),
+                (["GUARDRAIL_ALLOW_DISCARD+=1", "git", "reset", "--hard"], True),
+                (["GUARDRAIL_ALLOW_DISCARD=0", "GUARDRAIL_ALLOW_DISCARD+=1", "git", "reset", "--hard"], True),
+                (["GUARDRAIL_ALLOW_DISCARD=", "GUARDRAIL_ALLOW_DISCARD+=", "git", "reset", "--hard"], False),
+                (["GUARDRAIL_ALLOW_DISCARD=1", "GUARDRAIL_ALLOW_DISCARD=0", "git", "reset", "--hard"], False),
+                (["GUARDRAIL_ALLOW_DISCARD=1\n", "git", "commit"], True),
+                (["GUARDRAIL_ALLOW_DISCARD=a\nb", "git", "commit"], True),
+                (["GUARDRAIL_ALLOW_DISCARD=\n0", "git", "commit"], True)):
+            _simple = aiqt_hooks._segment_dir_simple(_toks)
+            _has_note = bool(_rmo_note_fn(_toks))
+            if not _simple or _has_note != _want_note:
+                failures.append("(rmo-7) {!r}: expected a benign assignment (simple) with note={}, got "
+                                "simple={} note={}".format(_toks, _want_note, _simple, _has_note))
+        _dec, _text = _rmo_text("GUARDRAIL_ALLOW_DISCARD+=1 git reset --hard", rp)
+        if _dec != "deny" or _rmo_note not in _text:
+            failures.append("(rmo-7-append) the '+=' prefixed dirty clobber must deny like the bare command, "
+                            "with the migration sentence, got {} {!r}".format(_dec, _text))
+        # (rmo-8) Bounded equivalence (the residue's cases c and d): the raw scans read the prefix's value as
+        # text, so where they match it the prefixed command gets what FOO=<the same value> gets - case (c)
+        # exactly, and case (d) the same deny DECISION with the reason text differing (the prefix stays on
+        # the pristine dir-simple path; FOO takes the view-override branch) - and
+        # that can differ from the unprefixed command's decision. (c) On an unparseable command (an unquoted <<EOF heredoc whose body holds a lone quote) the
+        # fallback denies every raw-flagged command (D-423-NARROW), prefixed or not, so the prefixed and the
+        # FOO forms get exactly the bare command's deny. (d) A lossy keyword in the value brings 'git log -1'
+        # into scope and it denies, where the unprefixed command is allowed silently.
+        for _case, _bare_cmd, _v, _want_bare, _want_pref in (
+                ("c-unparseable-redirect", "git reset --hard <<EOF\n'\nEOF", "'-C /tmp'", "deny", "deny"),
+                ("d-scope-keyword", "git log -1", "reset", "allow", "deny")):
+            _got_bare = _rmo_text(_bare_cmd, rp)[0]
+            _got = [_rmo_text("{}={} {}".format(_n, _v, _bare_cmd), rp)[0]
+                    for _n in ("GUARDRAIL_ALLOW_DISCARD", "FOO")]
+            if _got_bare != _want_bare or _got != [_want_pref, _want_pref]:
+                failures.append("(rmo-8-{}) expected the unprefixed command {} and the prefix and FOO both {}, "
+                                "got {} and {}".format(_case, _want_bare, _want_pref, _got_bare, _got))
+        # (fcl) ROUND-8 FAIL-CLOSED (the orchestrator-confirmed fail-open), scoped to NO SESSION CWD: with
+        # no session cwd a work-losing git verb is never MORE permissive with a leading assignment than
+        # without one - every destructive route DENIES with no snapshot, as the bare pristine command does
+        # on an unresolvable worktree: the non-pristine path (a metacharacter in the assignment value:
+        # ; | & $ ( and the compound/stash shapes), the view-override branch (a quote-only or benign
+        # assignment value, a -c global option, an ambient GIT_* var), and the prefix spellings of both.
+        # WITH a session cwd the DECISIONS differ by design (the dirty-tree snapshot-then-allow asymmetry,
+        # disclosed in the enforcement residue): bare 'git reset --hard' on a dirty tree DENIES while
+        # 'FOO=1 git reset --hard' (any leading assignment) snapshot-then-ALLOW-NOTES - both leave the work
+        # recoverable (the deny keeps it in place; the allow takes an inert snapshot first) - and
+        # 'FOO=1 git checkout -b nb' allow-notes WITHOUT the defensive backstop snapshot the bare allow
+        # form takes. An unreadable/nonexistent session cwd denies
+        # through the failed probe/snapshot on both paths (fcl-badcwd).
+        _fcl_nocwd = (
+            ("np-semicolon", "FOO=';' git reset --hard"),
+            ("np-pipe", "FOO='|' git reset --hard"),
+            ("np-amp", "FOO='&' git clean -fd"),
+            ("np-dollar", "FOO='$x' git rm -rf ."),
+            ("np-paren", "FOO='(' git restore ."),
+            ("np-rmo-semicolon", "GUARDRAIL_ALLOW_DISCARD=';' git reset --hard"),
+            ("np-stash", "FOO=';' git stash drop"),
+            ("np-bare-compound", "git reset --hard ; true"),
+            ("vo-quote-value", "FOO=\"'\" git reset --hard"),
+            ("vo-plain-assign", "FOO=1 git reset --hard"),
+            ("pr-rmo-quote", "GUARDRAIL_ALLOW_DISCARD=\"'\" git checkout -f"),
+            ("vo-c-option", "git -c core.pager=cat reset --hard"),
+        )
+        aiqt_hooks._record_recovery = _rmo_count
+        try:
+            for _case, _cmd in _fcl_nocwd:
+                del _rmo_snaps[:]
+                _dec, _ = _rmo_text(_cmd)
+                if _dec != "deny" or _rmo_snaps:
+                    failures.append("(fcl-nocwd-{}) expected a no-snapshot deny with no session cwd, got {} "
+                                    "with {} snapshot(s)".format(_case, _dec, len(_rmo_snaps)))
+        finally:
+            aiqt_hooks._record_recovery = _orig_rmo_rec
+        os.environ["GIT_NAMESPACE"] = "fail-closed-selftest"
+        try:
+            _dec, _ = _rmo_text("git reset --hard")
+        finally:
+            os.environ.pop("GIT_NAMESPACE", None)
+        if _dec != "deny":
+            failures.append("(fcl-nocwd-ambient) expected a deny for an ambient-GIT_*-overridden destructive "
+                            "discard with no session cwd, got {}".format(_dec))
+        _fcl_badcwd = str(tmp / "fcl-missing-dir")  # never created: the probe and snapshot both fail there
+        for _case, _cmd in (("np", "FOO=';' git reset --hard"), ("vo", "FOO=1 git reset --hard"),
+                            ("bare", "git reset --hard")):
+            _dec, _ = _rmo_text(_cmd, _fcl_badcwd)
+            if _dec != "deny":
+                failures.append("(fcl-badcwd-{}) expected a deny on an unreadable/nonexistent session cwd, "
+                                "got {}".format(_case, _dec))
+        # (rmo-5) Dead code: the retired opt-out names are bound in neither script copy (the source module
+        # live, and both files by their top-level bindings), so no future caller resurrects the path.
+        _rmo_dead = ("_DISCARD_OPTOUT_RE", "_DISCARD_FALSY", "_segment_has_optout", "_OPTOUT_PRISTINE",
+                     "_OPTOUT_REISSUE")
+        _rmo_copies = (Path(aiqt_hooks.__file__),
+                       repo_root() / "plugin" / "aiqt-guardrails-hooks" / "hooks" / "scripts" / "aiqt_hooks.py")
+        for _copy in _rmo_copies:
+            _bound = set()
+            for _node in ast.parse(_copy.read_text(encoding="utf-8")).body:
+                if isinstance(_node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    _bound.add(_node.name)
+                elif isinstance(_node, (ast.Assign, ast.AnnAssign)):
+                    for _t in (_node.targets if isinstance(_node, ast.Assign) else [_node.target]):
+                        if isinstance(_t, ast.Name):
+                            _bound.add(_t.id)
+            _live = [n for n in _rmo_dead if n in _bound]
+            if _live:
+                failures.append("(rmo-5) {} still binds the retired opt-out names {}".format(_copy.name, _live))
+        _live = [n for n in _rmo_dead if hasattr(aiqt_hooks, n)]
+        if _live:
+            failures.append("(rmo-5-live) the loaded hook module still carries {}".format(_live))
 
         # === ROUND-2 FINDING 4: a command-local worktree redirect (-C/--work-tree/GIT_WORK_TREE) on a
         # === DESTRUCTIVE discard snapshots the ACTUAL TARGET repo, not the session cwd; when the target
@@ -2094,8 +3300,8 @@ def _main_isolated(monitor):
         # CLEAN repo the trailing lossy verb must ASK, not be allowed by a stale pre-write probe.
         compound_repo = _init_repo(tmp / "compoundrepo")
         rco = str(compound_repo)
-        expect("(b2-a) printf >> f && reset --hard allows with a note on clean tree (blocker 2)",
-               "printf x >> file.txt && git reset --hard", "allow-note", cwd=rco)
+        expect("(b2-a) printf >> f && reset --hard DENIES: the >> redirect target is not preserved (R7C MAJOR 5)",
+               "printf x >> file.txt && git reset --hard", "deny", cwd=rco)
         expect("(b2-b) stash apply && reset --hard allows with a note on clean tree (blocker 2)",
                "git stash apply && git reset --hard", "allow-note", cwd=rco)
 
@@ -2109,7 +3315,7 @@ def _main_isolated(monitor):
         # Blocker 5: abbreviated destructive options are recognized by prefix, so they do not slip through
         # as inert tokens on the dirty tree.
         expect("(b5-a) checkout --for (abbrev --force) denies", "git checkout --for", "deny", cwd=rp)
-        expect("(b5-b) checkout --patc (abbrev --patch) allows with a note", "git checkout --patc", "allow-note", cwd=rp)
+        expect("(b5-b) checkout --patc (abbrev --patch) denies (R11 item 4)", "git checkout --patc", "deny", cwd=rp)
         expect("(b5-c) switch --dis (abbrev --discard-changes) denies", "git switch --dis other", "deny",
                cwd=rp)
         expect("(b5-d) branch --del --force (abbrev) allows with a note", "git branch --del --force other", "allow-note",
@@ -2145,8 +3351,8 @@ def _main_isolated(monitor):
         for label, cmd in (("command", "command git reset --hard"), ("exec", "exec git reset --hard"),
                            ("env", "env git reset --hard"), ("bang", "! git reset --hard"),
                            ("time", "time git reset --hard"), ("builtin", "builtin git reset --hard")):
-            expect("(b8-{}) wrapper hiding git reset --hard snapshot-then-allows".format(label), cmd,
-                   "allow-note", cwd=rp)
+            expect("(b8-{}) wrapper hiding git reset --hard denies (closed grammar, D-423)".format(label),
+                   cmd, "deny", cwd=rp)
         expect("(b8-status) wrapper over a non-lossy git command allows", "command git status", "allow",
                cwd=rp)
 
@@ -2154,33 +3360,42 @@ def _main_isolated(monitor):
         # A lossy-verb command reaches the clean probe ONLY when it is a PRISTINE SINGLE BARE 'git <verb>'
         # invocation - no shell metacharacter anywhere (even quoted), no reserved word, no wrapper/redirect/
         # compound, and a command word that is literally 'git'. Each form below hides a real reset --hard
-        # behind shell structure the lexer does not model; the coarse GD-41 cut still silently allowed some
-        # of these, and each MUST now ASK. Tested on the dirty repo (a silent allow would discard the fix).
+        # behind shell structure; the coarse GD-41 cut still silently allowed some of these. A pipe-both
+        # operator is outside the R8 positive grammar and DENIES; an accepted 2>/dev/null redirect keeps
+        # its snapshot-then-allow. Tested on the dirty repo (a silent allow would discard the fix).
         pristine_asks = [
-            ("gram-if", "if true; then git reset --hard; fi"),            # reserved words + ';'
-            ("gram-for", "for x in 1; do git reset --hard; done"),        # a for-loop
-            ("gram-backtick", "echo `git reset --hard`"),                 # backtick command substitution
-            ("gram-dollar-paren", "echo $(git reset --hard)"),            # $( ) command substitution
-            ("gram-pipe-amp", "echo x |& git reset --hard"),              # a '|&' pipe-both
-            ("gram-lead-redirect", "> log git reset --hard"),            # a LEADING stdout redirect
-            ("gram-mid-redirect", "git 2>/dev/null reset --hard"),        # an interspersed redirect
-            ("wrap-sudo", "sudo git reset --hard"),                       # a privilege wrapper
-            ("wrap-nice", "nice git reset --hard"),                       # a scheduling wrapper
-            ("wrap-timeout", "timeout 5 git reset --hard"),               # a timeout wrapper
-            ("wrap-nohup", "nohup git reset --hard"),                     # a nohup wrapper
-            ("wrap-sh-c", 'sh -c "git reset --hard"'),                    # an interpreter -c wrapper
-            ("wrap-bash-c", 'bash -c "git reset --hard"'),                # an interpreter -c wrapper
-            ("wrap-stdbuf", "stdbuf -oL git reset --hard"),              # a wrapper NOT in any enumerated list
-            ("wrap-doas", "doas git reset --hard"),                      # a privilege wrapper not in any list
-            ("wrap-setsid", "setsid git reset --hard"),                 # a session wrapper not in any list
-            ("wrap-eval", "eval 'git reset --hard'"),                   # eval runs its quoted argument
+            ("gram-pipe-amp", "echo x |& git reset --hard", "deny"),              # a '|&' pipe-both
+            ("gram-mid-redirect", "git 2>/dev/null reset --hard", "allow-note"),        # an interspersed redirect
         ]
-        for label, cmd in pristine_asks:
-            expect("(pristine-{}) shell structure hides a reset --hard -> snapshot-then-allows".format(label),
-                   cmd, "allow-note", cwd=rp)
-        # A pathed git ('/usr/bin/git') is not the literal command word 'git', so it is not pristine -> ASK.
-        expect("(pristine-pathed) a pathed git is not literally 'git' -> allows with a note", "/usr/bin/git reset --hard",
-               "allow-note", cwd=rp)
+        for label, cmd, want in pristine_asks:
+            expect("(pristine-{}) shell structure around a reset --hard, judged by the positive grammar (R8)".format(label),
+                   cmd, want, cwd=rp)
+        # R7C MAJOR 5: a leading stdout redirect to a path other than /dev/null is not preserved -> DENIES.
+        expect("(pristine-gram-lead-redirect) a leading redirect to a file now DENIES (R7C MAJOR 5)",
+               "> log git reset --hard", "deny", cwd=rp)
+        # D-423-NARROW: every wrapper, interpreter, eval, reserved-word compound or substitution that
+        # reaches a git word is outside the closed grammar and denies (previously each snapshot-then-
+        # allowed against the session cwd).
+        for _flbl, _fcmd in (
+                ("gram-if", "if true; then git reset --hard; fi"),
+                ("gram-for", "for x in 1; do git reset --hard; done"),
+                ("gram-backtick", "echo " + chr(96) + "git reset --hard" + chr(96)),
+                ("gram-dollar-paren", "echo " + chr(36) + "(git reset --hard)"),
+                ("wrap-sudo", "sudo git reset --hard"),
+                ("wrap-nice", "nice git reset --hard"),
+                ("wrap-timeout", "timeout 5 git reset --hard"),
+                ("wrap-nohup", "nohup git reset --hard"),
+                ("wrap-doas", "doas git reset --hard"),
+                ("wrap-setsid", "setsid git reset --hard"),
+                ("wrap-sh-c", "sh -c " + chr(34) + "git reset --hard" + chr(34)),
+                ("wrap-bash-c", "bash -c " + chr(34) + "git reset --hard" + chr(34)),
+                ("wrap-eval", "eval " + chr(39) + "git reset --hard" + chr(39)),
+                ("wrap-stdbuf", "stdbuf -oL git reset --hard")):
+            expect("(pristine-{}) closed grammar denies this wrapped form".format(_flbl), _fcmd, "deny", cwd=rp)
+        # A pathed git ('/usr/bin/git') is not the literal command word 'git': a non-git segment reaching a
+        # git word -> deny under the closed grammar.
+        expect("(pristine-pathed) a pathed git is not literally 'git' -> denies (closed grammar)",
+               "/usr/bin/git reset --hard", "deny", cwd=rp)
 
         # === switch --merge/--conflict overwrite local changes -> scoped, ASK on a dirty tree (fix 3) =
         expect("(swm-a) switch --merge on dirty tree allows with a note", "git switch --merge other", "allow-note", cwd=rp)
@@ -2220,9 +3435,10 @@ def _main_isolated(monitor):
         expect("(alias-inline) git -c alias.x=reset x --hard DENIES (CLAUDE-F1)",
                "git -c alias.x=reset x --hard", "deny", cwd=rp)
         # A glob char (*?[) can bash-expand an option name (in a dir with a file named --hard, '--h*' becomes
-        # '--hard'), so any lossy command carrying one is not pristine -> ASK.
-        expect("(glob-opt) reset --soft --h* allows with a note (glob defeats the pristine gate)", "git reset --soft --h*",
-               "allow-note", cwd=rp)
+        # '--hard'), so any lossy command carrying one is not pristine; the ROUND-8
+        # positive grammar DENIES the glob character itself (it could expand a destructive option).
+        expect("(glob-opt) reset --soft --h* DENIES (a glob is outside the positive grammar, R8)", "git reset --soft --h*",
+               "deny", cwd=rp)
         # An abbreviated --pathspec-from-f and any unrecognized option-only checkout must not default to allow.
         expect("(pfr-abbrev) checkout --pathspec-from-f=paths allows with a note", "git checkout --pathspec-from-f=paths",
                "allow-note", cwd=rp)
@@ -2784,32 +4000,32 @@ def _main_isolated(monitor):
             failures.append("(rec-viewoverride-trace-file) the guard's git calls must scrub GIT_TRACE; no "
                             "trace file may be written")
 
-        # (rec-heredoc) C: a Bash-valid but tokenizer-UNPARSEABLE discard (an unbalanced quote inside a quoted
-        # heredoc) reaches the raw-lossy fallback. It must ASK and, on a dirty tree, take a best-effort
-        # recovery snapshot FIRST - before the fix the ValueError path returned ASK with NO recovery ref.
+        # (rec-heredoc) C, FLIPPED BY ROUND 8: a Bash-valid QUOTED-heredoc discard parses (the body is
+        # literal data) and reaches the positive grammar, which DENIES the heredoc operator outright and
+        # takes NO snapshot (the command is refused, so nothing is lost and no snapshot basis is claimed).
         rec_hd = _init_repo(tmp / "rec-heredoc")
         (rec_hd / "file.txt").write_text("committed line\nheredoc dirty\n", encoding="utf-8")
-        hd_cmd = "git reset --hard <<'EOF'\n'\nEOF"  # Bash-valid heredoc; the lone ' makes the tokenizer raise
+        hd_cmd = "git reset --hard <<'EOF'\n'\nEOF"  # Bash-valid quoted heredoc (parses; the body is literal)
         got_hd = _decision(handler, hd_cmd, cwd=str(rec_hd))
-        if got_hd != "allow-note":
-            failures.append("(rec-heredoc) an unparseable in-scope discard on a dirty tree snapshot-then-allows "
-                            "(best-effort snapshot taken), got {}".format(got_hd))
-        if not _recovery_refs(rec_hd):
-            failures.append("(rec-heredoc-snap) expected a best-effort recovery ref for an unparseable "
-                            "dirty-tree discard (Class C)")
+        if got_hd != "deny":
+            failures.append("(rec-heredoc) a heredoc-carrying in-scope discard DENIES under the R8 grammar "
+                            "(no snapshot claimed), got {}".format(got_hd))
+        if _recovery_refs(rec_hd):
+            failures.append("(rec-heredoc-snap) a DENIED heredoc discard must NOT write a recovery "
+                            "ref (R8: refused, nothing lost)")
 
-        # (rec-unbalanced) an unbalanced-quote discard (no target redirect) reaches _git_discard_fallback; on a
-        # DIRTY session cwd its recovery snapshot succeeds, so it allows with a recovery-pointer note.
-        # Falsifiable: a silent allow there reads "allow"; an explicit allow, "explicit-allow".
+        # (rec-unbalanced) an unbalanced-quote discard reaches _git_discard_fallback, which under
+        # D-423-NARROW DENIES every raw-flagged unparseable command and attempts NO recovery snapshot (the
+        # command is refused, so nothing is lost and no snapshot basis is claimed).
         rec_ub = _init_repo(tmp / "rec-unbalanced")
         (rec_ub / "file.txt").write_text("committed line\nunbalanced dirty\n", encoding="utf-8")
         got_ub = _decision(handler, 'git reset --hard "unbalanced', cwd=str(rec_ub))
-        if got_ub != "allow-note":
-            failures.append("(rec-unbalanced) an unparseable discard on a dirty tree whose recovery snapshot "
-                            "succeeds allows with a note, got {}".format(got_ub))
-        if not _recovery_refs(rec_ub):
-            failures.append("(rec-unbalanced-snap) expected a recovery ref before the unparseable discard's "
-                            "allow-with-note")
+        if got_ub != "deny":
+            failures.append("(rec-unbalanced) an unparseable discard on a dirty tree denies under the "
+                            "narrowed fallback, got {}".format(got_ub))
+        if _recovery_refs(rec_ub):
+            failures.append("(rec-unbalanced-snap) the narrowed fallback must NOT snapshot a denied "
+                            "unparseable discard")
 
         # (rec-subdir-tmp) C2: cwd is a SUBDIR of the repo and TMPDIR points at the worktree ROOT (above cwd).
         # The temp-dir containment check anchors on the resolved TOPLEVEL, not the cwd, so the temp dir is
@@ -2869,8 +4085,13 @@ def _main_isolated(monitor):
             with open(badname, "wb") as fh:
                 fh.write(b"junk\n")
             made_bad = True
-        except OSError:
-            made_bad = False  # a filesystem that refuses the byte name: skip this case gracefully
+        except OSError as _bad_exc:
+            made_bad = False
+            # R11 (DECIDED item 5): a silent skip here could ship a non-UTF-8 recovery defect
+            # behind a green run; record a NAMED coverage failure instead.
+            failures.append("(rec-badname-cov) could not create the non-UTF-8 byte-name fixture "
+                            "({}): the non-UTF-8 snapshot-failure case is UNCOVERED on this "
+                            "filesystem, recorded as a failure rather than skipped".format(_bad_exc))
         if made_bad:
             try:
                 got_bad = _decision(handler, "git checkout -- file.txt", cwd=str(rec_bad))
@@ -2941,20 +4162,19 @@ def _main_isolated(monitor):
         # wrapped/compound discard is recoverable. Decision stays ASK; a recovery ref is created.
         rec_fd = _init_repo(tmp / "rec-fd")
         (rec_fd / "file.txt").write_text("committed line\nfd work\n", encoding="utf-8")
-        expect("(rec-fd-nonpristine) compound checkout on dirty tree allows with a note",
-               "git checkout -- file.txt && echo done", "allow-note", cwd=str(rec_fd))
+        expect("(rec-fd-nonpristine) accepted compound checkout on dirty tree allows with a note",
+               "git checkout -- file.txt && true", "allow-note", cwd=str(rec_fd))
         if not _recovery_refs(rec_fd):
             failures.append("(rec-fd-nonpristine-snap) expected a recovery ref on a non-pristine in-scope ASK "
                             "of a dirty tree (F-D EXPAND)")
-        # A non-pristine WRAPPED form (a wrapper hides the verb from the segment scan; raw_lossy is the
-        # signal) is likewise snapshot-backed against the session cwd.
+        # A non-pristine WRAPPED form is outside the closed grammar (D-423-NARROW): it DENIES, and no
+        # snapshot is taken (the command is refused, so the dirty tree is untouched).
         rec_fdw = _init_repo(tmp / "rec-fd-wrap")
         (rec_fdw / "file.txt").write_text("committed line\nwrapped fd\n", encoding="utf-8")
-        expect("(rec-fd-wrap) wrapped reset --hard on dirty tree allows with a note", "sudo git reset --hard", "allow-note",
-               cwd=str(rec_fdw))
-        if not _recovery_refs(rec_fdw):
-            failures.append("(rec-fd-wrap-snap) expected a recovery ref on a wrapped in-scope ASK of a dirty "
-                            "tree (F-D EXPAND, raw_lossy path)")
+        expect("(rec-fd-wrap) wrapped reset --hard on dirty tree denies (closed grammar)",
+               "sudo git reset --hard", "deny", cwd=str(rec_fdw))
+        if _recovery_refs(rec_fdw):
+            failures.append("(rec-fd-wrap-snap) a denied wrapped discard must NOT snapshot the session cwd")
 
         # (rec-fd-nonsnap) C6 (structural): a NON-PRISTINE in-scope command whose ONLY visible lossy sub is a
         # non-snappable verb (stash drop / branch -D) now ALSO takes a best-effort snapshot on a dirty tree.
@@ -2965,10 +4185,10 @@ def _main_isolated(monitor):
         # decision still ASKS.
         rec_ns = _init_repo(tmp / "rec-fd-nonsnap")
         (rec_ns / "file.txt").write_text("committed line\nnonsnap\n", encoding="utf-8")
-        expect("(rec-fd-nonsnap-stash) compound stash drop on dirty tree allows with a note",
-               "git stash drop && echo done", "allow-note", cwd=str(rec_ns))
-        expect("(rec-fd-nonsnap-branch) compound branch -D on dirty tree allows with a note",
-               "git branch -D other && echo done", "allow-note", cwd=str(rec_ns))
+        expect("(rec-fd-nonsnap-stash) accepted compound stash drop on dirty tree allows with a note",
+               "git stash drop && true", "allow-note", cwd=str(rec_ns))
+        expect("(rec-fd-nonsnap-branch) accepted compound branch -D on dirty tree allows with a note",
+               "git branch -D other && true", "allow-note", cwd=str(rec_ns))
         if not _recovery_refs(rec_ns):
             failures.append("(rec-fd-nonsnap-snap) expected a recovery ref for a non-pristine in-scope "
                             "command on a dirty tree (accepted over-snapshot of a stash/branch form)")
@@ -3232,42 +4452,37 @@ def _main_isolated(monitor):
             failures.append("(rec-ledger-nonfatal-snap) the successful snapshot ref must be present despite a "
                             "ledger fault")
 
-        # (rec-c6-subst/rec-c6-wrap/rec-c6-eval) C6 (structural): a non-pristine in-scope command can hide a
-        # snappable verb behind shell substitution ($(...)), a wrapper (sudo), or split-quoting/eval that no
-        # lexical scan can reliably see. The guard no longer gates the snapshot on detecting a snappable verb:
-        # any non-pristine in-scope command on a not-provably-clean tree is snapshot-backed, so an approved
-        # hidden reset/checkout always has a recovery point. Each dirty-tree ASK below must create a ref.
+        # (rec-c6-subst/rec-c6-wrap/rec-c6-eval) D-423-NARROW: a non-pristine in-scope command that hides a
+        # verb behind shell substitution ($(...)), a wrapper (sudo), or split-quoting/eval reaches a git
+        # word outside the closed grammar, so it DENIES outright (previously snapshot-then-allow); nothing
+        # runs, so no snapshot is warranted or taken.
         rec_c6a = _init_repo(tmp / "rec-c6-subst")
         (rec_c6a / "file.txt").write_text("committed line\nc6 subst\n", encoding="utf-8")
-        expect("(rec-c6-subst) stash drop + hidden checkout -f allows with a note",
-               "git stash drop && $(echo git checkout -f)", "allow-note", cwd=str(rec_c6a))
-        if not _recovery_refs(rec_c6a):
-            failures.append("(rec-c6-subst-snap) expected a recovery ref: a hidden snappable verb (checkout "
-                            "-f) behind a substitution must still snapshot on a dirty tree")
+        expect("(rec-c6-subst) stash drop + hidden checkout -f denies (closed grammar)",
+               "git stash drop && $(echo git checkout -f)", "deny", cwd=str(rec_c6a))
+        if _recovery_refs(rec_c6a):
+            failures.append("(rec-c6-subst-snap) a denied substitution-hidden discard must NOT snapshot")
         rec_c6b = _init_repo(tmp / "rec-c6-wrap")
         (rec_c6b / "file.txt").write_text("committed line\nc6 wrap\n", encoding="utf-8")
-        expect("(rec-c6-wrap) stash drop + hidden wrapped reset --hard allows with a note",
-               "git stash drop; sudo git reset --hard", "allow-note", cwd=str(rec_c6b))
-        if not _recovery_refs(rec_c6b):
-            failures.append("(rec-c6-wrap-snap) expected a recovery ref: a hidden snappable verb (reset "
-                            "--hard) behind a wrapper must still snapshot on a dirty tree")
-        # The split-quote/eval case is the one a raw lexical scan CANNOT catch: `re'set'` has no contiguous
-        # `reset` in the raw string, yet bash assembles `reset` at runtime. The structural fix snapshots it
-        # anyway, because the command is non-pristine on a not-provably-clean tree.
+        expect("(rec-c6-wrap) stash drop + hidden wrapped reset --hard denies (closed grammar)",
+               "git stash drop; sudo git reset --hard", "deny", cwd=str(rec_c6b))
+        if _recovery_refs(rec_c6b):
+            failures.append("(rec-c6-wrap-snap) a denied wrapper-hidden discard must NOT snapshot")
+        # The split-quote/eval case is the one a raw lexical scan CANNOT catch: the eval segment still
+        # carries a contiguous 'git' word, so the closed grammar denies the whole command.
         rec_c6d = _init_repo(tmp / "rec-c6-eval")
         (rec_c6d / "file.txt").write_text("committed line\nc6 eval\n", encoding="utf-8")
-        expect("(rec-c6-eval) stash drop + split-quote eval reset allows with a note",
-               "git stash drop; eval git re'set' --hard", "allow-note", cwd=str(rec_c6d))
-        if not _recovery_refs(rec_c6d):
-            failures.append("(rec-c6-eval-snap) expected a recovery ref: a snappable verb hidden by "
-                            "split-quoting/eval must still snapshot on a dirty tree")
-        # A pure stash/echo non-pristine command with NO snappable verb anywhere NOW ALSO snapshots (the
+        expect("(rec-c6-eval) stash drop + split-quote eval reset denies (closed grammar)",
+               "git stash drop; eval git re'set' --hard", "deny", cwd=str(rec_c6d))
+        if _recovery_refs(rec_c6d):
+            failures.append("(rec-c6-eval-snap) a denied eval-hidden discard must NOT snapshot")
+        # A pure stash/true non-pristine command with NO snappable verb anywhere NOW ALSO snapshots (the
         # rec-c6-nosnap assertion FLIPS): the guard cannot prove no snappable verb is hidden, so it never
         # gates on absence. Over-snapshotting a pure stash form is an accepted inert cost, never an
         # under-protection.
         rec_c6c = _init_repo(tmp / "rec-c6-nosnap")
         (rec_c6c / "file.txt").write_text("committed line\nc6 nosnap\n", encoding="utf-8")
-        expect("(rec-c6-nosnap) stash drop; echo hi allows with a note", "git stash drop; echo hi", "allow-note",
+        expect("(rec-c6-nosnap) stash drop; true allows with a note", "git stash drop; true", "allow-note",
                cwd=str(rec_c6c))
         if not _recovery_refs(rec_c6c):
             failures.append("(rec-c6-nosnap-snap) expected a recovery ref: any non-pristine in-scope command "
@@ -3275,7 +4490,7 @@ def _main_isolated(monitor):
 
         # ROUND-3 FINDING 1: a NON-PRISTINE discard whose effective worktree is a -C redirect or a cd'd-into
         # target must snapshot THAT target (so the recovery ref contains the state the command discards), not
-        # blindly the session cwd. Revert _nonpristine_discard_actions and the ref lands only in the session
+        # blindly the session cwd. Revert _discard_positive_grammar and the ref lands only in the session
         # repo while the target (T) has NONE -> the note would falsely claim recovery. Discriminates on ref
         # LOCATION: the target repo must carry a recovery ref.
         r3f1_sess = _init_repo(tmp / "r3f1-sess")
@@ -3401,24 +4616,24 @@ def _main_isolated(monitor):
         # FINDING 3b: a WRAPPED git carrying a -C redirect to T loses T -> DENY (was allow-with-session-snap).
         expect("(r6-f3-wrapper) 'env git -C T restore' (wrapped + redirect) DENIES (finding 3)",
                "env git -C {} restore -- file.txt".format(r6tc), "deny", cwd=rp)
-        # CONTROL: a subshell/substitution or wrapper with NO redirect targets the FOREGROUND session cwd, so it
-        # is snapshot-backed and ALLOWS (the C6 design). These flip to DENY if finding-3 over-fires on depth
-        # alone rather than on a moved target, so they lock the fix's precision.
-        expect("(r6-f3-ctl-subshell-nocd) '(git reset --hard)' with no internal cd still allows (foreground cwd)",
-               "(git reset --hard)", "allow-note", cwd=rp)
-        expect("(r6-f3-ctl-substitution) 'echo $(git checkout -f)' still allows (runs at the foreground cwd)",
-               "echo $(git checkout -f)", "allow-note", cwd=rp)
-        expect("(r6-f3-ctl-wrap-noredirect) 'env git reset --hard' with no redirect still allows (session cwd)",
-               "env git reset --hard", "allow-note", cwd=rp)
+        # D-423-NARROW: a subshell, substitution or wrapper reaching a git word is outside the closed
+        # grammar even with NO redirect, so these former snapshot-then-allow controls now DENY by design.
+        expect("(r6-f3-ctl-subshell-nocd) '(git reset --hard)' with no internal cd denies (closed grammar)",
+               "(git reset --hard)", "deny", cwd=rp)
+        expect("(r6-f3-ctl-substitution) 'echo $(git checkout -f)' denies (closed grammar)",
+               "echo $(git checkout -f)", "deny", cwd=rp)
+        expect("(r6-f3-ctl-wrap-noredirect) 'env git reset --hard' with no redirect denies (closed grammar)",
+               "env git reset --hard", "deny", cwd=rp)
         # FINDING 4: an UNPARSEABLE (unquoted heredoc) discard carrying a -C to a DIFFERENT dirty repo, on a
         # CLEAN session cwd, no longer allows on the clean-cwd basis -> DENY (was a silent allow at :3349).
         r6clean = _init_repo(tmp / "r6-clean")   # session cwd is CLEAN
         expect("(r6-f4-fallback-redirect) unparseable 'git -C Tdirty restore <<EOF' on a clean cwd DENIES "
                "(finding 4)", "git -C {} restore -- file.txt <<EOF\nx\nEOF".format(r6tc), "deny",
                cwd=str(r6clean))
-        # CONTROL: an unparseable lossy discard with NO redirect still allows on a clean cwd (no target moved).
-        expect("(r6-f4-ctl-noredirect) unparseable 'git checkout -- x <<EOF' with no redirect still allows",
-               "git checkout -- file.txt <<EOF\nx\nEOF", "allow", cwd=str(r6clean))
+        # D-423-NARROW: the fallback denies EVERY raw-flagged unparseable command, redirect or not, clean
+        # session cwd or not (the disclosed fallback cost).
+        expect("(r6-f4-ctl-noredirect) unparseable 'git checkout -- x <<EOF' with no redirect denies",
+               "git checkout -- file.txt <<EOF\nx\nEOF", "deny", cwd=str(r6clean))
         # FINDING 5: a --git-dir/GIT_DIR STAGED discard to a DIFFERENT repo destroys that repo's index, which a
         # session snapshot cannot capture -> DENY (was allow-with-session-snap). (reset --hard case: r13-3c-f5.)
         r6stg = _init_repo(tmp / "r6-staged")
@@ -3427,6 +4642,167 @@ def _main_isolated(monitor):
         expect("(r6-f5-gitdir-staged) 'git --git-dir=T/.git restore --staged' to a DIFFERENT repo DENIES "
                "(finding 5)", "git --git-dir={}/.git restore --staged -- file.txt".format(str(r6stg)),
                "deny", cwd=rp)
+        # === PR #423 ROUND-4 (codex findings 1-3, claude MAJOR-1): wrapped and stash discards preserve
+        # === or deny. Each vector below flips on the pinned base commit.
+        # (r9f1) D-423-NARROW: a WRAPPED work-losing verb is outside the closed grammar even after a
+        # resolvable cd, so it DENIES and takes no snapshot (the plain 'cd B && git reset --hard' spelling
+        # is the accepted route, covered by r3f1b and the g423 preserve-then-allow battery).
+        r9_sess = _init_repo(tmp / "r9-sess")                       # clean session repo
+        r9_b = _init_repo(tmp / "r9-B")
+        (r9_b / "file.txt").write_text("committed line\nprecious\n", encoding="utf-8")   # dirty B
+        expect("(r9f1a) 'cd B && env git reset --hard' denies (wrapper outside the closed grammar)",
+               "cd {} && env git reset --hard".format(str(r9_b)), "deny", cwd=str(r9_sess))
+        if _recovery_refs(r9_b):
+            failures.append("(r9f1a-snap) a denied wrapped discard must NOT snapshot the cd target B")
+        # a wrapped discard whose cd target cannot be established DENIES (fail closed).
+        expect("(r9f1b) 'cd - && env git reset --hard' (unresolvable cd target) DENIES",
+               "cd - && env git reset --hard", "deny", cwd=str(r9_sess))
+        # (r9f2) codex finding 2 / claude MAJOR-1: every stash-destructive form - wrapped, reserved-word
+        # compound, or the unparseable fallback - preserves the stash exactly as the bare form does, or
+        # denies; each repo below is CLEAN with one stash entry, so worktree cleanliness proves nothing.
+
+        def _r9_stash_repo(name):
+            r = _init_repo(tmp / name)
+            (r / "file.txt").write_text("committed line\nstash me\n", encoding="utf-8")
+            _git(r, "stash", env_identity=True)
+            return r
+
+        r9_env = _r9_stash_repo("r9-env")
+        expect("(r9f2a) 'env git stash clear' denies (wrapper outside the closed grammar)",
+               "env git stash clear", "deny", cwd=str(r9_env))
+        if _stash_refs(r9_env):
+            failures.append("(r9f2a-refs) a denied wrapped stash clear must NOT write stash recovery refs")
+        r9_sudo = _r9_stash_repo("r9-sudo")
+        expect("(r9f2b) 'sudo git stash drop' denies (wrapper outside the closed grammar)",
+               "sudo git stash drop", "deny", cwd=str(r9_sudo))
+        if _stash_refs(r9_sudo):
+            failures.append("(r9f2b-refs) a denied wrapped stash drop must NOT write stash recovery refs")
+        r9_if = _r9_stash_repo("r9-if")
+        expect("(r9f2c) 'if true; then git stash clear; fi' denies (reserved-word compound outside the "
+               "closed grammar)", "if true; then git stash clear; fi", "deny", cwd=str(r9_if))
+        if _stash_refs(r9_if):
+            failures.append("(r9f2c-refs) a denied reserved-word stash clear must NOT write stash recovery "
+                            "refs")
+        r9_hd = _r9_stash_repo("r9-hd")
+        expect("(r9f2d) unparseable heredoc 'git stash clear <<EOF' denies (the narrowed fallback takes "
+               "no preservation)", "git stash clear <<EOF\n'\nEOF", "deny", cwd=str(r9_hd))
+        if _stash_refs(r9_hd):
+            failures.append("(r9f2d-refs) the narrowed fallback must NOT write stash recovery refs for a "
+                            "denied unparseable command")
+        # preservation failure DENIES on the wrapped and on the fallback form, as the bare form already did.
+        _r9_orig_rsr = aiqt_hooks._record_stash_recovery
+        aiqt_hooks._record_stash_recovery = lambda repo: ("fail", "forced failure (self-test)")
+        try:
+            expect("(r9f2e) 'env git stash clear' DENIES when the stash cannot be preserved",
+                   "env git stash clear", "deny", cwd=str(r9_env))
+            expect("(r9f2f) heredoc 'git stash clear <<EOF' DENIES when the stash cannot be preserved",
+                   "git stash clear <<EOF\n'\nEOF", "deny", cwd=str(r9_env))
+        finally:
+            aiqt_hooks._record_stash_recovery = _r9_orig_rsr
+        # (r9f3) codex finding 3: a failed or malformed stash-presence probe is a preservation FAILURE,
+        # never 'none'; confirmed absence stays exactly rc 1 + empty output + empty error text.
+        r9_probe = _r9_stash_repo("r9-probe")
+        _r9_orig_rg = aiqt_hooks._recovery_git
+
+        def _r9_probe_rg(rc, out, err):
+            def _patched(repo, args, env_extra=None, timeout=10):
+                if args[:3] == ["rev-parse", "--verify", "-q"]:
+                    return subprocess.CompletedProcess(args, rc, stdout=out, stderr=err)
+                return _r9_orig_rg(repo, args, env_extra=env_extra, timeout=timeout)
+            return _patched
+
+        aiqt_hooks._recovery_git = _r9_probe_rg(128, "", "fatal: I/O error (self-test)")
+        try:
+            _r9_res = aiqt_hooks._record_stash_recovery(str(r9_probe))
+            if _r9_res[0] != "fail":
+                failures.append("(r9f3a) a rc-128 stash presence probe must be a preservation FAILURE, got "
+                                "{!r} (codex round-4 finding 3)".format(_r9_res[0]))
+            expect("(r9f3b) bare 'git stash clear' DENIES on a failed stash presence probe",
+                   "git stash clear", "deny", cwd=str(r9_probe))
+        finally:
+            aiqt_hooks._recovery_git = _r9_orig_rg
+        aiqt_hooks._recovery_git = _r9_probe_rg(0, "", "")
+        try:
+            if aiqt_hooks._record_stash_recovery(str(r9_probe))[0] != "fail":
+                failures.append("(r9f3c) a rc-0 EMPTY-OUTPUT stash probe is malformed and must be a "
+                                "preservation FAILURE, never 'none'")
+        finally:
+            aiqt_hooks._recovery_git = _r9_orig_rg
+        # control: confirmed absence (a stash-less repo probes rc 1, silent) stays 'none', so the finding-3
+        # fix narrows 'none' to confirmed absence without denying the nothing-to-preserve case.
+        if aiqt_hooks._record_stash_recovery(str(r9_sess))[0] != "none":
+            failures.append("(r9f3d) a stash-less repo must stay a confirmed 'none' (nothing to preserve)")
+
+        # === PR #423 round-6 (R10): closed-grammar denials and M1/M2/M3/M5/M6 killers; each flips on base.
+        r10_b = _init_repo(tmp / "r10-b")
+        (r10_b / "file.txt").write_text("committed line" + chr(10) + "precious" + chr(10), encoding="utf-8")
+        r10_bc = str(r10_b)
+        _DOLLAR = chr(36)
+        _BT = chr(96)
+        _NL = chr(10)
+        _DQ = chr(34)
+        _SQ = chr(39)
+        expect("(r10-env-chdir-eq)", "env --chdir=" + r10_bc + " git reset --hard", "deny", cwd=rp)
+        expect("(r10-env-chdir-C)", "env -C" + r10_bc + " git reset --hard", "deny", cwd=rp)
+        expect("(r10-sudo-D)", "sudo -D " + r10_bc + " git reset --hard", "deny", cwd=rp)
+        expect("(r10-builtin-cd)", "builtin cd " + r10_bc + " && git reset --hard", "deny", cwd=rp)
+        expect("(r10-command-cd)", "command cd " + r10_bc + " && git stash clear", "deny", cwd=rp)
+        expect("(r10-env-u-git)", "env -u git git stash clear", "deny", cwd=rp)
+        expect("(r10-sudo-u-git)", "sudo -u git git stash clear", "deny", cwd=rp)
+        expect("(r10-cd-env-u)", "cd " + r10_bc + " && env -u git git reset --hard", "deny", cwd=rp)
+        expect("(r10-stash-cmdsub)", "git stash " + _DOLLAR + "(echo clear)", "deny", cwd=rp)
+        expect("(r10-stash-var)", "op=clear; git stash " + _DOLLAR + "op", "deny", cwd=rp)
+        expect("(r10-stash-xargs)", "echo clear | xargs git stash", "deny", cwd=rp)
+        expect("(r10-stash-backtick)", "git stash " + _BT + "echo clear" + _BT, "deny", cwd=rp)
+        expect("(r10-sh-c-stash)", "sh -c " + _DQ + "git stash clear" + _DQ, "deny", cwd=rp)
+        r10_fb = _r9_stash_repo("r10-fb")
+        _fbcmd = "git stash cl" + _SQ + _SQ + "ear <<EOF" + _NL + _SQ + _NL + "EOF"
+        expect("(r10-fallback-heredoc)", _fbcmd, "deny", cwd=str(r10_fb))
+        if _stash_refs(r10_fb):
+            failures.append("(r10-fallback-heredoc-refs) the narrowed fallback must NOT preserve or allow; "
+                            "it denies the raw-flagged unparseable form outright")
+        expect("(r10-m3-semicd)", "cd " + r10_bc + "; env git reset --hard", "deny", cwd=rp)
+        expect("(r10-m5-semicd)", "cd " + r10_bc + "; env git stash clear", "deny", cwd=rp)
+        expect("(r10-m6-cddash)", "cd - && env git stash clear", "deny", cwd=rp)
+        r10_m1 = _r9_stash_repo("r10-m1")
+        _m1_orig = aiqt_hooks._recovery_git
+
+        def _m1_rg(repo, args, env_extra=None, timeout=10):
+            if args[:3] == ["rev-parse", "--verify", "-q"]:
+                return subprocess.CompletedProcess(args, 0, stdout="deadbeef" + _NL, stderr="")
+            if args[:1] == ["reflog"]:
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            return _m1_orig(repo, args, env_extra=env_extra, timeout=timeout)
+
+        aiqt_hooks._recovery_git = _m1_rg
+        try:
+            if aiqt_hooks._record_stash_recovery(str(r10_m1))[0] != "fail":
+                failures.append("(r10-m1) a present ref with an empty reflog must be a preservation FAILURE")
+        finally:
+            aiqt_hooks._recovery_git = _m1_orig
+        r10_m2 = _r9_stash_repo("r10-m2")
+        _m2_orig = aiqt_hooks._recovery_git
+
+        def _probe_rg(rc, out, err):
+            def _f(repo, args, env_extra=None, timeout=10):
+                if args[:3] == ["rev-parse", "--verify", "-q"]:
+                    return subprocess.CompletedProcess(args, rc, stdout=out, stderr=err)
+                return _m2_orig(repo, args, env_extra=env_extra, timeout=timeout)
+            return _f
+
+        aiqt_hooks._recovery_git = _probe_rg(1, "", "warning: something" + _NL)
+        try:
+            if aiqt_hooks._record_stash_recovery(str(r10_m2))[0] != "fail":
+                failures.append("(r10-m2) rc 1 with stderr text must be a preservation FAILURE, never none")
+        finally:
+            aiqt_hooks._recovery_git = _m2_orig
+        for _rc, _o, _e, _tag in ((1, " " + _NL, "", "ws-out"), (1, "", chr(9), "ws-err"), (1, None, None, "nn")):
+            aiqt_hooks._recovery_git = _probe_rg(_rc, _o, _e)
+            try:
+                if aiqt_hooks._record_stash_recovery(str(r10_m2))[0] != "fail":
+                    failures.append("(r10-probe-" + _tag + ") a malformed probe must be the expected preservation FAILURE (R8: not merely not-none)")
+            finally:
+                aiqt_hooks._recovery_git = _m2_orig
         # FINDING 6: a staged-index commit-tree failure while distinct staged content is present must FAIL the
         # snapshot (fail closed), not silently drop the staged payload. Fault-inject the staged commit-tree.
         r6f6 = tmp / "r6-f6-staged"
@@ -3507,8 +4883,13 @@ def _main_isolated(monitor):
         try:
             _git(cf3, "stash", "push", "-m", "wip", env_identity=True)   # one stash entry to preserve
             _cf3stashok = True
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError) as _cf3_exc:
             _cf3stashok = False
+            # R11 (DECIDED item 5): record the lost cf4 coverage instead of silently skipping it.
+            failures.append("(cf4-stash-cov) could not create the stash entry for the bound "
+                            "recovery-advice assertion ({}): the cf4 target-bound stash recovery "
+                            "case is UNCOVERED, recorded as a failure rather than skipped"
+                            .format(_cf3_exc))
         if _cf3stashok:
             _cf3code, _cf3obj, _ = aiqt_hooks._stash_drop_clear_outcome(str(cf3), "clear")
             _cf3msg = _cf3obj.get("systemMessage", "") if isinstance(_cf3obj, dict) else ""
@@ -3566,6 +4947,878 @@ def _main_isolated(monitor):
         # flagged by the raw scan) entering the view-override branch DENIES (was allowed with no snapshot). ==
         expect("(clf1-checkout-index) a -C-redirected 'checkout-index -a -f' DENIES (CLAUDE-F1)",
                "git -C {} checkout-index -a -f".format(rp), "deny", cwd=rp)
+
+        # === PR #423 D-423-NARROW (g423): the closed allowlist grammar, ONE representative per category =
+        # Every vector is RED ON REVERT of the narrowing: the allow categories assert the grammar's own
+        # note text (the pin's note read "is not a pristine single bare ..." instead), each deny category
+        # asserts the GRAMMAR reason (never a snapshot failure; the pin allow-noted these or denied with a
+        # different reason), and the preserve-then-allow categories additionally assert the preserved
+        # CONTENT against the pre-command state of the repository actually targeted.
+        _G423 = "closed allowlist grammar"
+
+        def g423_note(label, command, cwd):
+            # R7C MINOR 9: assert the ALLOW OUTCOME (the command is permitted) separately from the note text.
+            _dec, _text = _rmo_text(command, cwd)
+            if _dec not in ("allow", "allow-note"):
+                failures.append("{}: expected an ALLOW outcome (command permitted), got {} {!r}"
+                                .format(label, _dec, _text[:220]))
+            elif _G423 not in _text:
+                failures.append("{}: allowed, but the note must carry the grammar text, got {!r}"
+                                .format(label, _text[:220]))
+
+        def g423_deny(label, command, needle, cwd):
+            _dec, _text = _rmo_text(command, cwd)
+            if _dec != "deny" or needle not in _text or _G423 not in _text:
+                failures.append("{}: expected a grammar deny naming {!r}, got {} {!r}"
+                                .format(label, needle, _dec, _text[:220]))
+
+        # ALLOW category: a read-only subcommand chain. ROUND 8 closed the other three round-7 allow
+        # categories: a global option other than -C, every -c key, and every leading assignment
+        # (cosmetic GIT_* included) are now outside the positive grammar and DENY (the 'stash'
+        # keyword puts each in scope; 'stash list' resolves to the safe role).
+        g423_note("(g423-allow-readonly) read-only subcommand segment", "git log --oneline -1 && git stash list", rp)
+        g423_deny("(g423-deny-nopager) global option other than -C (was allow-listed in R7)", "git --no-pager stash list && :",
+                  "--no-pager", rp)
+        g423_deny("(g423-deny-ckeyany) any -c key (was allow-listed color.ui in R7)", "git -c color.ui=false stash list && :",
+                  "'-c'", rp)
+        g423_deny("(g423-deny-cosmassign) cosmetic GIT_PAGER assignment (was allow-listed in R7)", "GIT_PAGER=cat git stash list && :",
+                  "assignment", rp)
+
+        # DENY categories (one each), each asserting the grammar reason.
+        g423_deny("(g423-deny-global) unlisted global", "git --no-replace-objects reset --hard && :",
+                  "--no-replace-objects", rp)
+        g423_deny("(g423-deny-ckey) unlisted -c key", "git -c core.fsmonitor=false reset --hard && :",
+                  "'-c'", rp)
+        g423_deny("(g423-deny-sub) unlisted subcommand", "git checkout-index -a -f && :",
+                  "checkout-index", rp)
+        g423_deny("(g423-deny-wrapper) wrapper", "env git reset --hard", "'env'", rp)
+        g423_deny("(g423-deny-interp) interpreter", "sh -c " + chr(34) + "git reset --hard" + chr(34),
+                  "character", rp)
+        g423_deny("(g423-deny-eval) eval", "eval " + chr(39) + "git reset --hard" + chr(39), "'eval'", rp)
+        g423_deny("(g423-deny-xargs) xargs", "echo . | xargs git checkout --", "character", rp)
+        g423_deny("(g423-deny-subshell) subshell", "( git reset --hard )", "character", rp)
+        g423_deny("(g423-deny-cd) relative cd operand", "true; cd sub && git reset --hard",
+                  "ABSOLUTE literal path", rp)
+        g423_deny("(g423-deny-assign) non-cosmetic assignment", "GIT_INDEX_FILE=g423idx git reset --hard && :",
+                  "assignment", rp)  # the name is deliberately not echoed (rmo-2)
+        g423_deny("(g423-deny-unparseable) raw-flagged unparseable", 'git reset --hard "g423',
+                  "could not be parsed", rp)
+
+        # R7C new category vectors (each RED on the delivered pre-fix hook; see the fix report).
+        g423_deny("(g423-deny-comment) comment-delimiter heredoc",
+                  "# " + "<<" + chr(39) + "EOF" + chr(39) + chr(10) + "git -C /g423X reset --hard" + chr(10) + "cat <<EOF" + chr(10) + "EOF",
+                  "could not be parsed", rp)
+        g423_deny("(g423-deny-evalcd) eval-hidden directory change",
+                  "eval " + chr(34) + "cd /g423X" + chr(34) + " && git stash clear", "character", rp)
+        g423_deny("(g423-deny-expand) expansion in an assignment value",
+                  "FOO=" + chr(34) + chr(36) + "(git -C /g423X stash clear)" + chr(34) + " git stash list && :",
+                  "character", rp)
+        g423_deny("(g423-deny-stdassign) standalone env assignment before a discard",
+                  "export GIT_DIR=g423dir && git reset --hard", "assignment", rp)
+        g423_deny("(g423-deny-cdopt) cd option other than -P or -L",
+                  "cd -e && git reset --hard", "ABSOLUTE literal path", rp)
+        g423_deny("(g423-deny-cdotdot) -C operand with a parent-directory component",
+                  "git -C /g423X/.. reset --hard && :", "ABSOLUTE literal path", rp)
+        g423_deny("(g423-deny-redir) output redirection to a path",
+                  "git stash list " + chr(62) + " /g423X/out.txt && :", "redirection", rp)
+        g423_note("(g423-allow-stashmsg) a stash push message is read as a push",
+                  "git stash -m g423msg && :", rp)
+        g423_S = _init_repo(tmp / "g423-S")
+        g423_B = _init_repo(tmp / "g423-B")
+
+        _G423_IDX_RE = re.compile(r"[0-7]{6} [0-9a-f]{40} [0-3]\t.+")
+
+        def _g423_hex40(s):
+            # R8 (codex 7): a full object-id FORMAT check; a 40-char non-hex string is malformed output,
+            # never evidence.
+            return isinstance(s, str) and re.fullmatch(r"[0-9a-f]{40}", s) is not None
+
+        def _g423_blob_id(text):
+            # R9 (codex 4): the expected blob id, derived INDEPENDENTLY of git (the loose-object
+            # header sha1 over the exact bytes), so the index comparison cannot inherit a fixture
+            # fault from the probe side.
+            data = text.encode("utf-8")
+            return hashlib.sha1(b"blob " + str(len(data)).encode("ascii") + b"\x00" + data).hexdigest()
+
+        def _g423_want_index(tag):
+            # The EXPECTED post-prep index of a g423 fixture repo: the two _init_repo seeds at their
+            # committed bytes (the dirty file.txt edit is UNSTAGED, so the index keeps the commit)
+            # plus the staged staged.txt bytes.
+            return {"clean.txt": _g423_blob_id("clean line" + chr(10)),
+                    "file.txt": _g423_blob_id("committed line" + chr(10)),
+                    "staged.txt": _g423_blob_id("staged " + tag + chr(10))}
+
+        def _g423_index_ok(out, want):
+            # R8 (codex 7) reworked by R9 (codex 4): every ls-files --stage record must be
+            # well-formed AND the parsed records must BE the expected index - the exact path set,
+            # the plain-blob mode, stage zero, and the independently derived blob id per path.
+            # Format acceptance alone (or a before/after equality) can hold while the intended
+            # fixture state was never established, so it is not evidence.
+            records = [l for l in out.splitlines() if l.strip()]
+            if not records or any(_G423_IDX_RE.fullmatch(l) is None for l in records):
+                return False
+            got = {}
+            for l in records:
+                meta, path = l.split(chr(9), 1)
+                mode, oid, stage = meta.split(" ")
+                if mode != "100644" or stage != "0" or path in got:
+                    return False
+                got[path] = oid
+            return got == want
+
+        # The validators themselves fail loud on malformed-success samples (value just inside, at, and
+        # outside each bound), so a fixture fault cannot pass as evidence.
+        for _sample, _want in ((chr(97) * 40, True), (chr(103) * 40, False), (chr(97) * 39, False),
+                               (chr(97) * 41, False), ("", False)):
+            if _g423_hex40(_sample) is not _want:
+                failures.append("(g423-hex40) validator must read {!r} as {}".format(_sample, _want))
+        # R9 (codex 4) negative controls: the expected-state comparison must refuse a wrong path, a
+        # missing staged entry, an invalid mode, a conflict stage, a wrong blob id, malformed
+        # records and empty output; only the exact expected record set validates.
+        _g423_w = _g423_want_index("S")
+        _g423_good = chr(10).join("100644 {} 0".format(_g423_w[p]) + chr(9) + p
+                                  for p in sorted(_g423_w)) + chr(10)
+        if not _g423_index_ok(_g423_good, _g423_w):
+            failures.append("(g423-idxok-good) the exact expected index record set must validate")
+        for _nlabel, _mut in (
+                ("wrong-path", _g423_good.replace("file.txt", "unrelated.txt")),
+                ("missing-staged", chr(10).join(l for l in _g423_good.splitlines()
+                                                if "staged.txt" not in l) + chr(10)),
+                ("invalid-mode", _g423_good.replace("100644", "777777", 1)),
+                ("conflict-stage", _g423_good.replace(" 0" + chr(9), " 3" + chr(9), 1)),
+                ("wrong-id", _g423_good.replace(_g423_w["file.txt"], chr(97) * 40)),
+                ("malformed", "not an index record" + chr(10)),
+                ("empty", "")):
+            if _g423_index_ok(_mut, _g423_w):
+                failures.append("(g423-idxok-{}) a {} record set must not validate as the expected "
+                                "index".format(_nlabel, _nlabel))
+
+        def _g423_state(repo, tag):
+            shas = subprocess.run(["git", "-C", str(repo), "reflog", "show", "--no-abbrev", "--format=%H",
+                                   "refs/stash"], capture_output=True, text=True, timeout=30,
+                                  env=git_fixture_env())
+            head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True,
+                                  text=True, timeout=30, env=git_fixture_env())
+            idx = subprocess.run(["git", "-C", str(repo), "ls-files", "--stage"], capture_output=True,
+                                 text=True, timeout=30, env=git_fixture_env())
+            if head.returncode != 0 or not _g423_hex40(head.stdout.strip()):
+                failures.append("(g423-state-head) HEAD probe of {} failed (rc={} out={!r})"
+                                .format(repo, head.returncode, head.stdout))
+            if shas.returncode != 0 or not all(_g423_hex40(s.strip()) for s in shas.stdout.splitlines() if s.strip()):
+                failures.append("(g423-state-stash) stash reflog probe of {} failed or returned a malformed id (rc={} err={!r})"
+                                .format(repo, shas.returncode, shas.stderr.strip()))
+            if idx.returncode != 0 or not _g423_index_ok(idx.stdout, _g423_want_index(tag)):
+                failures.append("(g423-state-index) index probe of {} failed or did not show the expected "
+                                "records (rc={} out={!r} err={!r})"
+                                .format(repo, idx.returncode, idx.stdout, idx.stderr.strip()))
+            return {"stash": sorted(s.strip() for s in shas.stdout.splitlines() if s.strip()),
+                    "head": head.stdout.strip(),
+                    "index": idx.stdout,
+                    "bytes": {p: (repo / p).read_text(encoding="utf-8")
+                              for p in ("file.txt", "staged.txt", "untracked.txt")}}
+
+        def _g423_prep(repo, tag):
+            (repo / "file.txt").write_text("committed line" + chr(10) + "stash-1 " + tag + chr(10),
+                                           encoding="utf-8")
+            _git(repo, "stash", env_identity=True)
+            (repo / "file.txt").write_text("committed line" + chr(10) + "stash-2 " + tag + chr(10),
+                                           encoding="utf-8")
+            _git(repo, "stash", env_identity=True)
+            (repo / "file.txt").write_text("committed line" + chr(10) + "dirty " + tag + chr(10),
+                                           encoding="utf-8")
+            (repo / "staged.txt").write_text("staged " + tag + chr(10), encoding="utf-8")
+            _git(repo, "add", "staged.txt")
+            (repo / "untracked.txt").write_text("untracked " + tag + chr(10), encoding="utf-8")
+            return _g423_state(repo, tag)
+
+        g423_S_pre = _g423_prep(g423_S, "S")
+        g423_B_pre = _g423_prep(g423_B, "B")
+        for _pname, _pstate in (("S", g423_S_pre), ("B", g423_B_pre)):
+            # R8 (codex 7): assert the EXPECTED fixture population (two stash creations in _g423_prep),
+            # not merely a nonempty stash, so a population mismatch fails rather than weakening the
+            # preservation comparison below.
+            if len(_pstate["stash"]) != 2:
+                failures.append("(g423-pop-{}) fixture expected exactly 2 stash entries, got {}"
+                                .format(_pname, _pstate["stash"]))
+        # R9 wrong-target fixtures (DECIDED item 6): real repos, each with one stash entry, at the
+        # exact names the wrong-target vectors below use, so a wrong-target registration surfaces as
+        # a wrong-repo recovery/stash ref or an outright allow (on R7C these vectors ALLOWED, the
+        # red-by-OUTCOME requirement; a nonexistent path would instead deny for a preservation
+        # failure, a red by reason text only).
+        g423_V = _init_repo(tmp / "g423-V")        # the session repo of the pushd/envbuiltin vectors
+        g423_Vc = _init_repo(g423_V / "child")     # a real repo at the relative name 'child'
+        g423_V1 = _init_repo(g423_V / "+1")        # a real repo named like a directory-stack selector
+        for _vrepo in (g423_V, g423_Vc, g423_V1):
+            (_vrepo / "file.txt").write_text("committed line" + chr(10) + "v-stash" + chr(10),
+                                             encoding="utf-8")
+            _git(_vrepo, "stash", env_identity=True)
+        # R9 (codex 2) fixture: one stash entry, so a WRONG op read that preserves the stash leaves a
+        # visible ref; the worktree is clean after the stash, so an implicit-push allow snapshots
+        # nothing here.
+        g423_M = _init_repo(tmp / "g423-M")
+        (g423_M / "file.txt").write_text("committed line" + chr(10) + "m-stash" + chr(10),
+                                         encoding="utf-8")
+        _git(g423_M, "stash", env_identity=True)
+
+        # R8 category vectors (NINE g423-prefixed calls in this block: eight denies plus one allow,
+        # covering the codex R7C findings; each RED on the round-7C hook, which allowed or
+        # misregistered these shapes - see the R8 and R9 fix reports; R9 points the wrong-target
+        # vectors below at EXISTING fixture repos so they are red on R7C by OUTCOME, not by reason
+        # text: with a real, preservable target R7C preserved-and-ALLOWED each of them).
+        g423_deny("(g423-deny-hdhd) heredoc data opening a nested quoted heredoc hid a real discard (codex 1)",
+                  "cat " + '<' * 2 + "PLAIN" + '\n' + '<' * 2 + "'" + "EOF" + "'" + '\n'
+                  + "PLAIN" + '\n' + "git -C /g423B stash clear" + '\n' + "EOF",
+                  "could not be parsed", rp)
+        g423_deny("(g423-deny-argsub) command substitution in an ordinary git argument (codex 2)",
+                  "git stash list " + '"' + '$' + "(git -C /g423B stash clear)" + '"' + " && :",
+                  "character", rp)
+        g423_deny("(g423-deny-assignsub) parameter expansion in an assignment value (codex 2)",
+                  "FOO=" + '$' + "BAR git stash list && :", "character", rp)
+        g423_deny("(g423-deny-envbuiltin) printf -v mutates the environment (codex 3)",
+                  "printf -v CDPATH {} && cd child && git stash clear".format(str(g423_V)),
+                  "spelled bare and unquoted", str(g423_V))
+        g423_deny("(g423-deny-exportgit) exported GIT_ environment survives a directory change (codex 4)",
+                  "export GIT_DIR={}/.git && cd {} && git stash clear".format(str(g423_B), str(g423_S)),
+                  "assignment", rp)
+        g423_deny("(g423-deny-quotedcd) a quoted cd command word is not a modelled cd (codex 4 MEDIUM)",
+                  "'" + "cd" + "'" + " {} && git stash clear".format(str(g423_B)),
+                  "spelled bare and unquoted", rp)
+        g423_deny("(g423-deny-pushd) a directory-stack selector is not a path (codex 5)",
+                  "pushd +1 && git stash clear", "spelled bare and unquoted", str(g423_V))
+        g423_deny("(g423-deny-rwredir) a read-write open is not an input redirect (codex 6)",
+                  "git stash list 1" + '<' + ">/g423B/file && :", "character", rp)
+        g423_note("(g423-allow-stashpathspec) a message push with option terminator and pathspec is a push (codex 8)",
+                  "git stash -m g423msg -- file.txt && :", rp)
+        # R9 wrong-target visibility (DECIDED item 6): the four vectors above now name REAL repos,
+        # so a wrong-target registration surfaces as a ref in one of them (none may appear; the
+        # grammar denies before any preservation or snapshot).
+        for _wname, _wrepo in (("V", g423_V), ("V-child", g423_Vc), ("V-plus1", g423_V1),
+                               ("S", g423_S), ("B", g423_B)):
+            if _recovery_refs(_wrepo):
+                failures.append("(g423-wrongtarget-{}) a denied wrong-target vector must register NO "
+                                "recovery ref in {}".format(_wname, _wrepo))
+        # R9 DECIDED item 1 (claude BLOCKER 1): ls-remote is DELISTED (its --upload-pack/-u runs an
+        # arbitrary command string; the subcommand also opens network access), and every remaining
+        # read-only subcommand accepts only its vetted exact option spellings. One deny vector per
+        # form, each asserting the OUTCOME through g423_deny, never only the reason text.
+        g423_deny("(g423-deny-lsremote-up) ls-remote --upload-pack is gone with its subcommand (R9 item 1)",
+                  "git ls-remote --upload-pack 'git -C {} stash clear' {} && true"
+                  .format(str(g423_B), str(g423_S)), "ls-remote", rp)
+        g423_deny("(g423-deny-lsremote-u) the -u spelling and the bare subcommand are gone too (R9 item 1)",
+                  "git ls-remote -u 'g423up' 'g423url' && git stash list", "ls-remote", rp)
+        g423_deny("(g423-deny-grep-pager) grep --open-files-in-pager runs a program per match (R9 item 1)",
+                  "git grep --open-files-in-pager=g423pager -e stash && :", "--open-files-in-pager", rp)
+        g423_deny("(g423-deny-grep-O) the attached -O spelling denies as unvetted (R9 item 1)",
+                  "git grep -Og423pager stash && :", "-Og423pager", rp)
+        g423_deny("(g423-deny-log-output) log --output writes a file, unvetted (R9 item 1)",
+                  "git log --output=g423out --grep=stash && :", "--output=g423out", rp)
+        g423_deny("(g423-deny-ro-abbrev) a git-accepted long-option abbreviation is not a vetted exact "
+                  "spelling (R9 item 1)",
+                  "git status --porcel && git stash list", "--porcel", rp)
+        # R11 MINOR: the --porcelain value validator enumerates the four documented spellings
+        # (v1, v2, 1, 2); each in-bound spelling is a control, and each neighbour just outside
+        # the enumeration (0 and 3 on the numeric end, v3 on the v end, 12 as a non-version
+        # pairing) denies.
+        for _pv in ("1", "2", "v1", "v2"):
+            g423_note("(g423-allow-porcelain-{}) a documented porcelain version spelling is a "
+                      "control (R11 minor)".format(_pv),
+                      "git status --porcelain={} && git stash list".format(_pv), rp)
+        for _pv in ("0", "3", "v3", "12"):
+            g423_deny("(g423-deny-porcelain-{}) a neighbour outside the enumerated porcelain "
+                      "spellings denies (R11 minor)".format(_pv),
+                      "git status --porcelain={} && git stash list".format(_pv),
+                      "--porcelain={}".format(_pv), rp)
+        g423_note("(g423-allow-ro-opts) vetted read-only options (flags, joined values, the -1 "
+                  "shorthand, '--') still allow (R9 item 1, joined-only since R10)",
+                  "git log --oneline -1 --grep=g423 && git -C {} grep -n stash -- file.txt"
+                  .format(str(g423_S)), rp)
+        # R10 DECIDED item 1 (both reviews): a value option is accepted ONLY as the joined
+        # --opt=value spelling git itself reads joined. R9 consumed a SEPARATED word as the value
+        # of an optional-value option, so 'log --pretty --output=<path>' passed vetting while git
+        # read --output as an option of its own and truncated the path. help, diff, show and blame
+        # are DELISTED and -p/--patch is gone everywhere (an accepted command line must not run a
+        # configured program through git itself), the --pretty/--format value is a named format or
+        # a prefixed placeholder string excluding every %G signature placeholder (narrowed to the
+        # EXACT seven names and a MANDATORY t?format: prefix by R11 item 1), and an explicit
+        # 'stash list' carries no argument ('stash show' at most one positional stash reference,
+        # R11 items 3-4). Each deny below
+        # asserts the OUTCOME and is red (an allow) on the R9 delivery.
+        g423_deny("(g423-deny-pretty-sep) a separated word is never a --pretty value: the hidden "
+                  "--output denies (R10 item 1)",
+                  "git log --pretty --output={}/g423out && git stash list".format(str(g423_S)),
+                  "--pretty", rp)
+        g423_deny("(g423-deny-format-sep) the --format spelling of the same hole denies (R10 item 1)",
+                  "git log --format --output={}/g423out && git stash list".format(str(g423_S)),
+                  "--format", rp)
+        g423_deny("(g423-deny-show-extdiff) show is delisted: --pretty --ext-diff cannot enable an "
+                  "external diff program (R10 item 1)",
+                  "git show --pretty --ext-diff && git stash list", "'show'", rp)
+        g423_deny("(g423-deny-diff-p) diff is delisted with -p/--patch everywhere (textconv and "
+                  "external-diff drivers run on patch output) (R10 item 1)",
+                  "git diff -p && git stash list", "'diff'", rp)
+        g423_deny("(g423-deny-help) help is delisted (it launches a viewer, and a configured "
+                  "man.<tool>.cmd is shell-evaluated) (R10 item 1)",
+                  "git help stash && :", "'help'", rp)
+        g423_deny("(g423-deny-formatG) a %G signature placeholder is outside the --format value "
+                  "allowlist (it runs the configured signature program) (R10 item 1)",
+                  "git log '--format=%G?' && git stash list", "--format=%G?", rp)
+        g423_deny("(g423-deny-stashlist-arg) an explicit stash list carries NO argument: its "
+                  "arguments ride to git log around the vetted grammar (R10 item 1)",
+                  "git stash list --output={}/g423out && :".format(str(g423_S)), "--output", rp)
+        g423_deny("(g423-deny-stashshow-p) an explicit stash show carries no option-shaped "
+                  "argument: its options ride to git diff (R10 item 1)",
+                  "git stash show -p && :", "stash show -p", rp)
+        g423_note("(g423-allow-log-oneline) the bare 'log --oneline -1' control still allows "
+                  "(R10 item 1)",
+                  "git log --oneline -1 && git stash list", rp)
+        g423_note("(g423-allow-pretty-joined) the joined '--pretty=oneline -1' control still "
+                  "allows (R10 item 1)",
+                  "git log --pretty=oneline -1 && git stash list", rp)
+        # R11 DECIDED item 1 (codex BLOCKER 1): the --pretty/--format value is EXACTLY one of the
+        # seven named formats or a format:/tformat:-prefixed placeholder string. A %-free value
+        # outside the seven exact names used to fully match the optional-prefix branch, and git
+        # resolves such a value as a built-in format name or a pretty.<name> CONFIGURATION alias
+        # (which can carry %G), so an accepted command line could run the configured signature
+        # program. The five name denies below are red (an allow) on the R10 delivery; the seven
+        # named-format controls, the format:%H control and the %G/t?format guards stay green.
+        g423_deny("(g423-deny-pretty-name) an arbitrary --pretty name denies: a pretty.<name> "
+                  "config alias could carry %G (R11 item 1)",
+                  "git log --pretty=g423sig -1 && git stash list", "--pretty=g423sig", rp)
+        g423_deny("(g423-deny-format-name) the --format spelling of the same hole denies "
+                  "(R11 item 1)",
+                  "git log --format=g423sig -1 && git stash list", "--format=g423sig", rp)
+        g423_deny("(g423-deny-pretty-email) the built-in name email is outside the seven named "
+                  "formats (R11 item 1)",
+                  "git log --pretty=email -1 && git stash list", "--pretty=email", rp)
+        g423_deny("(g423-deny-pretty-mboxrd) the built-in name mboxrd is outside the seven named "
+                  "formats (R11 item 1)",
+                  "git log --pretty=mboxrd -1 && git stash list", "--pretty=mboxrd", rp)
+        g423_deny("(g423-deny-pretty-abbrev) an abbreviation of a named format denies: git reads "
+                  "a prefix, this grammar does not (R11 item 1)",
+                  "git log --pretty=one -1 && git stash list", "--pretty=one", rp)
+        for _g423fmt in ("oneline", "short", "medium", "full", "fuller", "reference", "raw"):
+            g423_note("(g423-allow-pretty-{}) the exact named format {} still allows (R11 item 1)"
+                      .format(_g423fmt, _g423fmt),
+                      "git log --pretty={} -1 && git stash list".format(_g423fmt), rp)
+        g423_note("(g423-allow-format-prefixed) a format:-prefixed placeholder string allows "
+                  "(R11 item 1 allow control)",
+                  "git log --format=format:%H -1 && git stash list", rp)
+        g423_deny("(g423-deny-tformatG) a %G placeholder inside the t?format: prefix still "
+                  "denies (R11 item 1 guard)",
+                  "git log --pretty=tformat:%GK -1 && git stash list", "--pretty=tformat:%GK", rp)
+        # R11 DECIDED item 2 (codex BLOCKER 2): for-each-ref --sort took free text, and git sort
+        # atoms include signature fields that run the configured signature program, so --sort is
+        # REMOVED from the vetted table outright. The three sort denies below are red (an allow)
+        # on the R10 delivery; the bare for-each-ref control and the --format guard stay green.
+        g423_deny("(g423-deny-fer-sort-sig) for-each-ref --sort with a signature atom denies "
+                  "(R11 item 2)",
+                  "git for-each-ref --sort=signature:grade && git stash list",
+                  "--sort=signature:grade", rp)
+        g423_deny("(g423-deny-fer-sort-rsig) the reverse -signature sort key denies (R11 item 2)",
+                  "git for-each-ref --sort=-signature:grade && git stash list",
+                  "--sort=-signature:grade", rp)
+        g423_deny("(g423-deny-fer-sort-vsig) the v: version-prefixed signature sort key denies "
+                  "(R11 item 2)",
+                  "git for-each-ref --sort=v:signature:grade && git stash list",
+                  "--sort=v:signature:grade", rp)
+        g423_note("(g423-allow-fer-bare) a plain for-each-ref still allows (R11 item 2 allow "
+                  "control)",
+                  "git for-each-ref && git stash list", rp)
+        g423_deny("(g423-deny-fer-format) for-each-ref --format stays delisted (R10 item 1 "
+                  "guard)",
+                  "git for-each-ref --format=refs && git stash list", "--format=refs", rp)
+        # R11 DECIDED item 3 (claude MAJOR 1): the stash list/show argument rule holds on the
+        # PRISTINE single-command path too. On the R10 delivery each single-command form below
+        # rode the pristine allow path to a SILENT allow (stash list --output truncates its target
+        # through git log; stash show -p selects the delisted patch-output class), so both denies
+        # are red by outcome on R10. No metacharacter and no trailing join: these stay pristine.
+        expect("(g423-deny-stashlist-arg-bare) a PRISTINE stash list --output denies (R11 item 3)",
+               "git stash list --output={}/g423out".format(str(g423_S)), "deny", cwd=rp)
+        expect("(g423-deny-stashshow-p-bare) a PRISTINE stash show -p denies (R11 item 3)",
+               "git stash show -p", "deny", cwd=rp)
+        # R12 DECIDED item 4 coverage: the stash list/show argument rule holds on the pristine
+        # path for the -C spelling (the -C value is skipped, so the subcommand still resolves to
+        # stash) and for the bare retained '--' (git stash show then selects patch output
+        # itself). Both were already denied on the R11 delivery; the vectors pin the spellings.
+        expect("(g423-deny-stashlist-c-bare) a PRISTINE -C stash list --output denies (R12 item 4)",
+               "git -C {} stash list --output=g423x".format(rp), "deny", cwd=rp)
+        expect("(g423-deny-stashshow-dd-bare) a PRISTINE stash show -- denies (R12 item 4)",
+               "git stash show --", "deny", cwd=rp)
+        # R11 DECIDED item 4: -p/--patch on the lossy verbs selects interactive patch mode, whose
+        # hunks pass through the configured interactive.diffFilter, so it DENIES on the grammar
+        # path and the pristine path alike (the pristine flips are (patch-a)/(patch-b)/(b5-b)
+        # above). Each compound deny below was snapshot-then-allowed (or stash-push allowed) on
+        # the R10 delivery, so it is red by outcome there. stash show now carries AT MOST ONE
+        # positional stash reference and nothing else, so a retained "--" (git stash show then
+        # selects patch output itself) and a second positional deny; the one-reference control
+        # stays green on both ends of that bound (zero and one allow, two denies).
+        g423_deny("(g423-deny-checkout-p) checkout -p denies in a compound (R11 item 4)",
+                  "git checkout -p && :", "git checkout -p", rp)
+        g423_deny("(g423-deny-restore-p) restore -p denies in a compound (R11 item 4)",
+                  "git restore -p && :", "git restore -p", rp)
+        g423_deny("(g423-deny-reset-p) reset -p denies in a compound (R11 item 4)",
+                  "git reset -p && :", "git reset -p", rp)
+        g423_deny("(g423-deny-stash-p) an implicit-push stash -p denies (R11 item 4)",
+                  "git stash -p && :", "git stash -p", rp)
+        g423_deny("(g423-deny-stashpush-p) stash push -p denies naming the spelling typed, op "
+                  "word included (R11 item 4; R12 item 4)",
+                  "git stash push -p && :", "git stash push -p", rp)
+        g423_deny("(g423-deny-stashshow-dd) a retained stash show option terminator denies: git "
+                  "stash show -- selects patch output (R11 item 4)",
+                  "git stash show -- && :", "stash show --", rp)
+        g423_deny("(g423-deny-stashshow-two) a second stash show positional denies (R11 item 4)",
+                  "git stash show 0 1 && :", "stash show 1", rp)
+        g423_note("(g423-allow-stashshow-ref) stash show with ONE positional stash reference "
+                  "still allows (R11 item 4 allow control)",
+                  "git stash show 0 && :", rp)
+        # R12 DECIDED item 1 (claude BLOCKER 1): on the compound-grammar path every recognized
+        # lossy verb's options are vetted against a CLOSED per-verb allowlist of exact spellings
+        # with their arity; any option outside it denies. git branch lists no --sort, --format,
+        # --edit-description or --list spelling there: the sort atoms and the format placeholders
+        # carry signature fields that run the configured signature program (the for-each-ref
+        # class R11 delisted), and --edit-description launches the configured editor. Every deny
+        # below is red (an allow-note) on the R11 delivery; the -D control stays green.
+        g423_deny("(g423-deny-branch-sortsig) branch --sort with a signature atom denies "
+                  "(R12 item 1)",
+                  "git branch --sort=signature:grade && git stash list", "--sort=signature:grade",
+                  rp)
+        g423_deny("(g423-deny-branch-sortrsig) the reverse -signature sort key denies (R12 item 1)",
+                  "git branch --sort=-signature:grade && :", "--sort=-signature:grade", rp)
+        g423_deny("(g423-deny-branch-sortvsig) the version v:signature sort key denies "
+                  "(R12 item 1)",
+                  "git branch --sort=v:signature:grade && :", "--sort=v:signature:grade", rp)
+        g423_deny("(g423-deny-branch-format) branch --format placeholders deny (R12 item 1)",
+                  "git branch '--format=%(signature)' && :", "--format=%(signature)", rp)
+        g423_deny("(g423-deny-branch-editdesc) branch --edit-description launches the editor; "
+                  "unlisted, denies (R12 item 1)",
+                  "git branch --edit-description && :", "--edit-description", rp)
+        g423_deny("(g423-deny-branch-list) branch --list is the listing/format family; unlisted "
+                  "(R12 item 1)",
+                  "git branch --list && :", "--list", rp)
+        g423_note("(g423-allow-branch-bigd) the exact-spelling branch -D write form still allows "
+                  "(R12 item 1 allow control)",
+                  "git branch -D other && :", rp)
+        g423_deny("(g423-deny-stashdrop-opt) an unlisted stash drop option denies (R12 item 1 "
+                  "stash leg)",
+                  "git stash drop --weird && :", "--weird", rp)
+        # R13 DECIDED item 3 coverage: one unlisted-option deny vector for EVERY other verb table
+        # (branch and the stash drop leg have theirs above), so widening any single verb allowlist
+        # cannot leave the suite green. Each was already denied on the R12 delivery (the tables are
+        # unchanged); the vectors pin the spellings.
+        g423_deny("(g423-deny-checkout-opt) an unlisted checkout option denies (R13 item 3)",
+                  "git checkout --track origin/b && :", "--track", rp)
+        g423_deny("(g423-deny-switch-opt) an unlisted switch option denies (R13 item 3)",
+                  "git switch --track origin/b && :", "--track", rp)
+        g423_deny("(g423-deny-restore-opt) an unlisted restore option denies (R13 item 3)",
+                  "git restore --pathspec-file-nul f.txt && :", "--pathspec-file-nul", rp)
+        g423_deny("(g423-deny-reset-opt) an unlisted reset option denies (R13 item 3)",
+                  "git reset --pathspec-file-nul && :", "--pathspec-file-nul", rp)
+        g423_deny("(g423-deny-rm-opt) an unlisted rm option denies (R13 item 3)",
+                  "git rm --pathspec-file-nul f.txt && :", "--pathspec-file-nul", rp)
+        g423_deny("(g423-deny-clean-opt) git clean --interactive is unlisted and interactive; "
+                  "denies (R13 item 3)",
+                  "git clean --interactive && :", "--interactive", rp)
+        # R12 DECIDED item 3 (codex MAJOR 2): a compound that CONSUMES a stash entry (stash pop,
+        # stash branch) together with another lossy verb denies - a successful pop applies then
+        # drops the entry, so the second verb can destroy the just-applied content while the
+        # entry is gone and the pre-command snapshot cannot contain it. A consuming command
+        # alone, or joined only with read-only segments, keeps its handling. Both denies are red
+        # (allow-notes) on the R11 delivery.
+        g423_deny("(g423-deny-pop-hard) stash pop then reset --hard denies (R12 item 3)",
+                  "git stash pop && git reset --hard", "git stash pop", rp)
+        g423_deny("(g423-deny-stashbranch-hard) stash branch then reset --hard denies "
+                  "(R12 item 3)",
+                  "git stash branch newbranch && git reset --hard", "git stash branch", rp)
+        g423_note("(g423-allow-pop-alone) a stash pop joined only with ':' keeps its handling "
+                  "(R12 item 3 control)",
+                  "git stash pop && :", rp)
+        g423_note("(g423-allow-pop-readonly) a stash pop with a read-only segment keeps its "
+                  "handling (R12 item 3 control)",
+                  "git stash pop && git log --oneline -1", rp)
+        # R13 DECIDED item 3: the read-only stash forms (list, show) are NOT a lossy verb for the
+        # stash-consume rule - a pop joined with them destroys nothing - while a pop joined with a
+        # genuinely lossy stash form (apply rewrites the worktree) still denies. Both allows are
+        # red (stashconsume denies) on the R12 delivery.
+        g423_note("(g423-allow-pop-stashlist) a stash pop with a stash list segment keeps its "
+                  "handling: list is read-only (R13 item 3)",
+                  "git stash pop && git stash list", rp)
+        g423_note("(g423-allow-pop-stashshow) a stash pop with a one-reference stash show segment "
+                  "keeps its handling (R13 item 3)",
+                  "git stash pop && git stash show 0", rp)
+        g423_deny("(g423-deny-pop-apply) a stash pop with a stash apply still denies: apply "
+                  "rewrites the worktree (R13 item 3 bound)",
+                  "git stash pop && git stash apply", "git stash pop", rp)
+        # R12 DECIDED item 2 (both reviews): option values are consumed by their declared arity
+        # BEFORE the -p scan, and a digit-led short cluster carrying p denies (git reads -2p/-3p
+        # as --ours/--theirs plus --patch and enters patch mode). These are the grammar-path
+        # legs; the pristine legs are (patch-c) to (patch-h). Each deny is red on the R11
+        # delivery, and the -m -p message control flips from deny to allow there.
+        g423_deny("(g423-deny-checkout-2p) the digit-led -2p cluster denies in a compound "
+                  "(R12 item 2)",
+                  "git checkout -2p && :", "git checkout -2p", rp)
+        g423_deny("(g423-deny-restore-3p) the digit-led -3p cluster denies in a compound "
+                  "(R12 item 2)",
+                  "git restore -3p && :", "git restore -3p", rp)
+        g423_note("(g423-allow-checkout-bp) -bp names the branch p and still allows (R12 item 2 "
+                  "allow control)",
+                  "git checkout -bp && :", rp)
+        g423_deny("(g423-deny-stashpush-msep) a separated -m value is consumed, so the later -p "
+                  "is REAL and denies (R12 item 2)",
+                  "git stash push -m -- -p && :", "git stash push -p", rp)
+        g423_deny("(g423-deny-stashpush-msgsep) the --message spelling of the same hole denies "
+                  "(R12 item 2)",
+                  "git stash push --message -- --patch && :", "git stash push --patch", rp)
+        g423_note("(g423-allow-stashpush-mp) -m -p is a push whose message is -p, a plain push "
+                  "(R12 item 2 allow control)",
+                  "git stash push -m -p && :", rp)
+        # R13 DECIDED item 1 (both reviews): ONE arity specification serves the option validator
+        # AND the -p scan (the scan derives its value-taking options from _DISCARD_VERB_OPTS and
+        # _DISCARD_STASH_OP_OPTS), so a separated --pathspec-from-file value spelled -p is a
+        # FILENAME (no patch deny) while a consumed terminator value makes the later -p REAL and
+        # the deny names the patch spelling, on the grammar path exactly as on the pristine path
+        # ((patch-i) to (patch-r)). Red on the R12 delivery: the push allow below was a patch deny
+        # there, and each terminator-value deny named the option spelling, not the patch flag.
+        g423_note("(g423-allow-stashpush-pfffile) a separated --pathspec-from-file value spelled "
+                  "-p is a filename, a plain push (R13 item 1)",
+                  "git stash push --pathspec-from-file -p && :", rp)
+        g423_deny("(g423-deny-stashpush-pffdd) the consumed terminator value makes the later -p "
+                  "REAL (R13 item 1)",
+                  "git stash push --pathspec-from-file -- -p && :", "git stash push -p", rp)
+        g423_deny("(g423-deny-checkout-pffdd) checkout --pathspec-from-file -- -p denies as a "
+                  "patch spelling (R13 item 1)",
+                  "git checkout --pathspec-from-file -- -p && :", "git checkout -p", rp)
+        g423_deny("(g423-deny-checkout-orphandd) checkout --orphan -- -p: the terminator is the "
+                  "consumed branch name, the -p real (R13 item 1)",
+                  "git checkout --orphan -- -p && :", "git checkout -p", rp)
+        g423_deny("(g423-deny-checkout-conflictdd) checkout --conflict -- -p: the terminator is "
+                  "the consumed style value, the -p real (R13 item 1)",
+                  "git checkout --conflict -- -p && :", "git checkout -p", rp)
+        g423_deny("(g423-deny-restore-pffdd) restore --pathspec-from-file -- -p denies as a patch "
+                  "spelling (R13 item 1)",
+                  "git restore --pathspec-from-file -- -p && :", "git restore -p", rp)
+        g423_deny("(g423-deny-reset-pffdd) reset --pathspec-from-file -- -p denies as a patch "
+                  "spelling (R13 item 1)",
+                  "git reset --pathspec-from-file -- -p && :", "git reset -p", rp)
+        g423_note("(g423-allow-checkout-pffsep) checkout --pathspec-from-file -p: the -p is the "
+                  "filename value (R13 item 1 control)",
+                  "git checkout --pathspec-from-file -p && :", rp)
+        g423_note("(g423-allow-checkout-pffjoined) the joined --pathspec-from-file=-p spelling, a "
+                  "control (R13 item 1)",
+                  "git checkout --pathspec-from-file=-p && :", rp)
+        g423_note("(g423-allow-checkout-pffterm) a genuine terminator after a consumed value "
+                  "leaves -p a pathspec (R13 item 1 control)",
+                  "git checkout --pathspec-from-file flist -- -p && :", rp)
+        # R14 DECIDED item 1 (grammar path): stash save derives -m/--message from the option
+        # listing of git itself (the installed git 2.55.0 'git stash save -h' output lists
+        # "-m, --[no-]message <message>" and "-S, --[no-]staged" for save exactly as for push;
+        # the R13 save entry listed an EMPTY value set on the false premise that save takes no
+        # -m), so a message value reading as '--' never terminates the -p scan on this path
+        # either. Red on the R13 delivery: the two denies below were verbopt denies there (the
+        # save table listed no -m, so the needle naming the patch spelling fails), and the
+        # -m/-mp controls were patch denies (R15 item 3: the -p scan runs before option
+        # validation and, with no -m value consumed, read the -p, or the p of -mp, as a patch
+        # flag); the terminator control was green, and the implicit-push and restore
+        # --conflict denies were green already (the class behaviour existed with no vector;
+        # they close R14 item 1 on the grammar path).
+        g423_deny("(g423-deny-stashsave-mdd) stash save -m -- -p: the consumed terminator is "
+                  "the message, the -p real (R14 item 1)",
+                  "git stash save -m -- -p && :", "git stash save -p", rp)
+        g423_deny("(g423-deny-stashsave-msgdd) stash save --message -- --patch denies on the "
+                  "real patch flag (R14 item 1)",
+                  "git stash save --message -- --patch && :", "git stash save --patch", rp)
+        g423_note("(g423-allow-stashsave-msep) stash save -m -p is a save whose message is -p "
+                  "(R14 item 1 control)", "git stash save -m -p && :", rp)
+        g423_note("(g423-allow-stashsave-mjoined) stash save -mp carries an attached message "
+                  "(R14 item 1 control)", "git stash save -mp && :", rp)
+        g423_note("(g423-allow-stashsave-term) a genuine terminator: git keeps the '--' and "
+                  "saves a stash whose message is '-- -p', no patch mode (R14 item 1 control; "
+                  "R15 item 2 wording)", "git stash save -- -p && :", rp)
+        # R15 DECIDED item 3: the save entry lists --no-include-untracked exactly as push does
+        # ('git stash save -h' lists "-u, --[no-]include-untracked" for save as for push); the
+        # R14 entry omitted it, an over-deny (a verbopt deny) on which this control is red.
+        g423_note("(g423-allow-stashsave-noincl) stash save --no-include-untracked is a listed "
+                  "save flag (R15 item 3)", "git stash save --no-include-untracked && :", rp)
+        g423_deny("(g423-deny-stashimpl-pffdd) implicit push --pathspec-from-file -- -p: the "
+                  "terminator is the consumed filename value (R14 item 1)",
+                  "git stash --pathspec-from-file -- -p && :", "git stash -p", rp)
+        g423_deny("(g423-deny-restore-conflictdd) restore --conflict -- -p: the terminator is "
+                  "the consumed style value (R14 item 1)",
+                  "git restore --conflict -- -p && :", "git restore -p", rp)
+        # R11 MINOR: one deny vector per delisted or removed read-only form that had none, so
+        # restoring any of them to the table cannot leave the suite green, plus the %C/%x
+        # placeholder guards (the %(...) extension is asserted on the compiled pattern, because a
+        # parenthesis is already outside the grammar's character class on the command path).
+        for _lbl, _cmd, _needle in (
+                ("blame", "git blame file.txt && git stash list", "'blame'"),
+                ("catfile-p", "git cat-file -p HEAD && git stash list", "'-p'"),
+                ("log-p", "git log -p -1 && git stash list", "'-p'"),
+                ("log-patch", "git log --patch -1 && git stash list", "--patch"),
+                ("format-colour", "git log --format=format:%Cred -1 && git stash list",
+                 "--format=format:%Cred"),
+                ("format-hex", "git log --format=tformat:%x41 -1 && git stash list",
+                 "--format=tformat:%x41")):
+            g423_deny("(g423-deny-{}) a delisted or unvetted read-only spelling denies "
+                      "(R11 minor guard)".format(_lbl), _cmd, _needle, rp)
+        if aiqt_hooks._RO_PRETTY.fullmatch("format:%(trailers)") is not None:
+            failures.append("(g423-pretty-ext) _RO_PRETTY must refuse the %(...) extension "
+                            "placeholders (they reach unvetted fields)")
+        # _RO_TEXT boundary (R11 minor, DEL added per R12 item 4): the printable bounds (space,
+        # 0x20, and tilde, 0x7e) pass inside a quoted value; TAB (0x09) and LF (0x0a) are control
+        # bytes and deny, and DEL (0x7f), the upper neighbour just outside the printable range,
+        # denies too. Each is carried in a single-quoted token so the raw lexer accepts the word.
+        g423_note("(g423-allow-grep-printable) printable bytes in a quoted --grep value allow",
+                  "git log '--grep=a b~' -1 && git stash list", rp)
+        for _lbl, _byte in (("tab", chr(9)), ("lf", chr(10)), ("del", chr(127))):
+            g423_deny("(g423-deny-grep-{}) a control byte inside a quoted --grep value denies "
+                      "(R11 minor; R12: DEL)".format(_lbl),
+                      "git log '--grep=a" + _byte + "b' -1 && git stash list", "--grep=a", rp)
+        if aiqt_hooks._RO_TEXT.fullmatch("a" + chr(127) + "b") is not None:
+            failures.append("(g423-rotext-del) _RO_TEXT must refuse DEL (0x7f), a control byte")
+        if aiqt_hooks._discard_readonly_args(
+                "log", ["--grep=a" + chr(127) + "b"]) != "--grep=a" + chr(127) + "b":
+            failures.append("(g423-roargs-del) a --grep value carrying DEL must be the named "
+                            "offending spelling")
+        # R12 DECIDED item 4, narrowed by R13 DECIDED item 2: the PUBLISHED residue carries no
+        # internal round label in any form (ROUND, round or rounds followed within a few
+        # non-word characters by a number: round 12, ROUND-12, round: 12, any case), checked
+        # over the three regenerated publications. A bare R plus digits is NOT a round label:
+        # R1 to R6 are the residual-class ids of the secrets residues (the classes
+        # tools/check_secrets.py enumerates), which the R12 scrub wrongly deleted, so their
+        # presence in the regenerated views is asserted below, per residue (R14 item 2).
+        _roundlabel_rx = re.compile(r"\brounds?\W{0,3}\d", re.IGNORECASE)
+        # R14 DECIDED item 2: positive controls for the label regex itself. The publications
+        # are already clean, so without these a regex that can never match would leave the
+        # suite green: the round-label forms must match, while a residual-class id, a word
+        # that merely contains "round", and a spelling past the three-separator bound must
+        # not. R15 DECIDED item 1: both ends of the {0,3} separator bound are pinned. At the
+        # lower end, "round12" (zero separators) must match, red under a {1,3} mutant; at the
+        # upper end, "round - 3" (three) must match and "round -  3" (four, just past the
+        # bound) must not, red under a {0,4} mutant.
+        for _ctl, _want in (("ROUND-12", True), ("round: 12", True), ("round - 3", True),
+                            ("round12", True), ("R1", False), ("Around 5", False),
+                            ("round -  3", False), ("round  -  3", False)):
+            if (_roundlabel_rx.search(_ctl) is not None) is not _want:
+                failures.append("(g423-roundlabel-ctl) the round-label regex must {} {!r}"
+                                .format("match" if _want else "not match", _ctl))
+        for _pubname in ("ENFORCEMENT.md", "site/enforcement.html", ".aiqt/enforceability.json"):
+            _pubtxt = (repo_root() / _pubname).read_text(encoding="utf-8")
+            _m = _roundlabel_rx.search(_pubtxt)
+            if _m is not None:
+                failures.append("(g423-roundlabel) the published residue must carry no round "
+                                "label; {} carries {!r}".format(_pubname, _m.group(0)))
+        # R14 DECIDED item 2: the residual-class ids are asserted PER RESIDUE in each of the
+        # three regenerated views, never document-wide (document-wide, the secrets-scan
+        # residue alone could supply every id while the secrets-shift-left residue lost its
+        # own, the gap the R13 predicate carried). Membership as at the pin: secrets-scan
+        # holds R1 to R6; secrets-shift-left holds R1, R2, R3, R4 and R6. Each span is
+        # located by the structure of its own view (the section under the mechanism heading,
+        # the details element carrying the mechanism id, the residue string of the mechanism
+        # entry); a missing or ambiguous anchor reports every id of that mechanism rather
+        # than falling back document-wide (fail-closed, never silently green).
+        _g423_residue_ids = (("secrets-scan", ("R1", "R2", "R3", "R4", "R5", "R6")),
+                             ("secrets-shift-left", ("R1", "R2", "R3", "R4", "R6")))
+
+        def _g423_residue_span(pubname, pubtxt, mech):
+            if pubname == ".aiqt/enforceability.json":
+                _spans = [str(_e.get("residue", ""))
+                          for _rule in json.loads(pubtxt).get("rules", [])
+                          for _lst in (_rule.get("gates", []), _rule.get("hooks", []))
+                          for _e in _lst if _e.get("id") == mech]
+                return _spans[0] if len(_spans) == 1 else None
+            _kind = "gate" if mech == "secrets-scan" else "hook"
+            if pubname == "ENFORCEMENT.md":
+                _anchor, _stop = "### `{}:{}`".format(_kind, mech), "\n### `"
+            else:
+                _anchor, _stop = 'id="mechanism-{}-{}"'.format(_kind, mech), "</details>"
+            if pubtxt.count(_anchor) != 1:
+                return None
+            _start = pubtxt.index(_anchor) + len(_anchor)
+            _end = pubtxt.find(_stop, _start)
+            return pubtxt[_start:_end] if _end >= 0 else None
+
+        def _g423_missing_residue_ids(pubname, pubtxt):
+            _missing = []
+            for _mech, _rids in _g423_residue_ids:
+                _span = _g423_residue_span(pubname, pubtxt, _mech)
+                for _rid in _rids:
+                    if _span is None or re.search(r"\b{}\b".format(_rid), _span) is None:
+                        _missing.append((_mech, _rid))
+            return _missing
+
+        for _pubname in ("ENFORCEMENT.md", "site/enforcement.html", ".aiqt/enforceability.json"):
+            _pubtxt = (repo_root() / _pubname).read_text(encoding="utf-8")
+            for _mech, _rid in _g423_missing_residue_ids(_pubname, _pubtxt):
+                failures.append("(g423-residual-ids) {} must keep the residual-class id {} in "
+                                "the {} residue itself (a class id, not a round label; R13 "
+                                "item 2, per residue per R14 item 2)".format(_pubname, _rid, _mech))
+            # R14 DECIDED item 2 mutation control: DELETING one id (R4) from one residue
+            # (secrets-shift-left) in this one view must be reported missing even though the
+            # mutation is invisible document-wide (the secrets-scan residue still carries R4),
+            # which is exactly the single-residue loss the R13 document-wide predicate passed.
+            if _pubname == ".aiqt/enforceability.json":
+                _doc = json.loads(_pubtxt)
+                _hits = [_e for _rule in _doc.get("rules", []) for _e in _rule.get("hooks", [])
+                         if _e.get("id") == "secrets-shift-left"]
+                _mut_txt = None
+                if len(_hits) == 1 and re.search(r"\bR4\b", str(_hits[0].get("residue", ""))):
+                    _hits[0]["residue"] = re.sub(r"\bR4\b", "", str(_hits[0]["residue"]))
+                    _mut_txt = json.dumps(_doc)
+            else:
+                _span = _g423_residue_span(_pubname, _pubtxt, "secrets-shift-left")
+                _mut_txt = None
+                if _span is not None and re.search(r"\bR4\b", _span) is not None:
+                    _mut_txt = _pubtxt.replace(_span, re.sub(r"\bR4\b", "", _span), 1)
+            if _mut_txt is None:
+                failures.append("(g423-residual-mut-build) {}: could not build the one-residue R4 "
+                                "deletion mutant".format(_pubname))
+                continue
+            if re.search(r"\bR4\b", _mut_txt) is None:
+                failures.append("(g423-residual-mut-dwide) {}: the mutant must keep R4 visible "
+                                "document-wide (in the secrets-scan residue), else it cannot "
+                                "discriminate the per-residue assertion from the document-wide "
+                                "one".format(_pubname))
+            if ("secrets-shift-left", "R4") not in _g423_missing_residue_ids(_pubname, _mut_txt):
+                failures.append("(g423-residual-mut-miss) {}: deleting R4 from the "
+                                "secrets-shift-left residue alone must be reported missing"
+                                .format(_pubname))
+        # R9 DECIDED item 5 (claude 1): a cd is honoured only across '&&'; across ';' the directory
+        # is unprovable even when the operand is a REAL repo (with eff = nd regardless of the join,
+        # this would preserve S's stash and ALLOW, so the vector is red by outcome on that mutation).
+        g423_deny("(g423-deny-semicd) a cd followed by ';' never feeds a later discard (R9 item 5)",
+                  "cd {} ; git stash clear".format(str(g423_S)), "cannot follow through", rp)
+        # R9 DECIDED item 3 (codex 2): the stash operation is ONLY the first argument. Every
+        # implicit-push spelling below must ALLOW as a push WITHOUT preserving the stash (git runs
+        # none of them as a drop or clear: it either pushes or refuses the spelling outright), so a
+        # wrong op read is red by outcome (the R8 walk preserved g423_M's entry and said so in the
+        # note). The explicit-position control is (g423-p2) below: a FIRST-word drop preserves.
+        def g423_push(label, command):
+            _dec, _text = _rmo_text(command, str(g423_M))
+            if _dec not in ("allow", "allow-note") or _G423 not in _text:
+                failures.append("{}: expected a grammar allow (an implicit push), got {} {!r}"
+                                .format(label, _dec, _text[:220]))
+            elif "were first preserved under durable refs" in _text:
+                failures.append("{}: a push spelling must not preserve the stash (a wrong op read): "
+                                "{!r}".format(label, _text[:220]))
+
+        g423_push("(g423-stash-impl-path) -m msg with a stray pathspec (git refuses it; R9 item 3)",
+                  "git stash -m g423msg file.txt && :")
+        g423_push("(g423-stash-impl-drop) -m msg with a stray token named drop (R9 item 3)",
+                  "git stash -m g423msg drop && :")
+        g423_push("(g423-stash-impl-mjoined) attached -m<msg> with a token named clear (R9 item 3)",
+                  "git stash -mg423msg clear && :")
+        g423_push("(g423-stash-impl-msgeq) --message=<msg> with a token named drop (R9 item 3)",
+                  "git stash --message=g423msg drop && :")
+        g423_push("(g423-stash-dd-pathdrop) a '--' pathspec named drop is a push operand (R9 item 3)",
+                  "git stash -m g423msg -- drop && :")
+        g423_push("(g423-stash-dd-pathclear) a '--' pathspec named clear is a push operand (R9 item 3)",
+                  "git stash --message=g423msg -- clear && :")
+        if _stash_refs(g423_M):
+            failures.append("(g423-stash-impl-norefs) no implicit-push spelling may preserve g423_M's "
+                            "stash, found {}".format(_stash_refs(g423_M)))
+        # R9 DECIDED item 4 (codex 3): a redirect operator ends the preceding word (bash adjacency),
+        # an all-digit word there is an IO number (only 2 accepted, other numbers keep their named
+        # rejection), and doubled accepted redirects are DECIDED accepted (each is in the closed set;
+        # bash runs the same command with both streams at /dev/null).
+        g423_note("(g423-redir-joined) a redirect directly after a word ends the word (R9 item 4)",
+                  "git stash list>/dev/null && :", rp)
+        g423_note("(g423-redir-joined-log) adjacency on a read-only segment (R9 item 4)",
+                  "git log>/dev/null && git stash list", rp)
+        g423_note("(g423-redir-joined-true) adjacency on a true segment (R9 item 4)",
+                  "true>/dev/null && git stash list", rp)
+        g423_note("(g423-redir-quoted) a redirect directly after a quoted literal (R9 item 4)",
+                  "git log -1 'g423q'>/dev/null && git stash list", rp)
+        g423_note("(g423-redir-doubled) doubled /dev/null redirects are both accepted (R9 item 4)",
+                  "git stash list>/dev/null>/dev/null && :", rp)
+        g423_deny("(g423-redir-numbered) an IO number other than 2 keeps its named rejection (R9 item 4)",
+                  "git stash list 1>/dev/null && :", "1>", rp)
+        g423_note("(g423-redir-stderr) the spaced 2>/dev/null form is unchanged (R9 item 4)",
+                  "git stash list 2>/dev/null && :", rp)
+        # PRESERVE-THEN-ALLOW categories: a worktree discard and a stash removal in the session repository
+        # S, and the same through -C to a second repository B. Each asserts CONTENT: the snapshot tree
+        # holds S's/B's known dirty tracked, staged and untracked bytes, the preserved stash refs resolve
+        # to the pre-command stash SHAs of the repository actually targeted, and the OTHER repository's
+        # worktree bytes, stash entries and HEAD are unchanged (its only permitted change is the inert
+        # session catch-all snapshot ref the design requires for the -C forms).
+
+        def _g423_tree_ok(label, repo, refs, tag):
+            if len(refs) != 1:
+                failures.append("{}: expected exactly one new worktree snapshot ref in {}, got {}"
+                                .format(label, repo, refs))
+                return
+            for path, want in (("file.txt", "committed line" + chr(10) + "dirty " + tag + chr(10)),
+                               ("staged.txt", "staged " + tag + chr(10)),
+                               ("untracked.txt", "untracked " + tag + chr(10))):
+                show = subprocess.run(["git", "-C", str(repo), "show", refs[0] + ":" + path],
+                                      capture_output=True, text=True, timeout=30, env=git_fixture_env())
+                if show.returncode != 0 or show.stdout != want:
+                    failures.append("{}: snapshot {}:{} must hold the pre-command bytes {!r}, got rc={} {!r}"
+                                    .format(label, refs[0], path, want, show.returncode, show.stdout))
+
+        def _g423_stash_ok(label, repo, refs, pre):
+            # R7C MEDIUM 6 + R8 (codex 7): require the EXPECTED stash population (the two-entry fixture)
+            # and full 40-hex resolved object ids before comparing.
+            if len(pre["stash"]) != 2:
+                failures.append("{}: fixture expected the two-entry stash population in {}, got {}"
+                                .format(label, repo, pre["stash"]))
+            got = []
+            for ref in refs:
+                rv = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", ref],
+                                    capture_output=True, text=True, timeout=30, env=git_fixture_env())
+                if rv.returncode != 0 or not _g423_hex40(rv.stdout.strip()):
+                    failures.append("{}: preserved stash ref {} did not resolve (rc={} out={!r})"
+                                    .format(label, ref, rv.returncode, rv.stdout))
+                    continue
+                got.append(rv.stdout.strip())
+            if sorted(got) != pre["stash"] or len(refs) != len(pre["stash"]):
+                failures.append("{}: the preserved stash refs must resolve exactly to the pre-command "
+                                "stash SHAs {}, got {}".format(label, pre["stash"], sorted(got)))
+
+        def _g423_unchanged(label, repo, pre, tag):
+            now = _g423_state(repo, tag)
+            if now != pre:
+                failures.append("{}: the other repository {} must be unchanged (stash/HEAD/worktree "
+                                "bytes), pre {} vs now {}".format(label, repo, pre, now))
+
+        # (g423-p1) worktree discard in the session repository S.
+        g423_note("(g423-p1) session worktree discard preserve-then-allows", "git reset --hard && true",
+                  str(g423_S))
+        _g423_p1_refs = [r for r in _recovery_refs(g423_S) if "stash" not in r]
+        _g423_tree_ok("(g423-p1-tree)", g423_S, _g423_p1_refs, "S")
+        if _recovery_refs(g423_B):
+            failures.append("(g423-p1-other) a session-repo discard must write NO recovery ref in B")
+        _g423_unchanged("(g423-p1-other-state)", g423_B, g423_B_pre, "B")
+
+        # (g423-p2) stash removal in the session repository S.
+        g423_note("(g423-p2) session stash removal preserve-then-allows", "git stash drop && true",
+                  str(g423_S))
+        _g423_p2_refs = _stash_refs(g423_S)
+        _g423_stash_ok("(g423-p2-shas)", g423_S, _g423_p2_refs, g423_S_pre)
+        if _recovery_refs(g423_B):
+            failures.append("(g423-p2-other) a session-repo stash removal must write NO recovery ref in B")
+        _g423_unchanged("(g423-p2-other-state)", g423_B, g423_B_pre, "B")
+
+        # (g423-p3) worktree discard through -C to the second repository B (the session catch-all also
+        # snapshots S, by design; S's own state stays untouched).
+        _g423_s_wt_before = [r for r in _recovery_refs(g423_S) if "stash" not in r]
+        g423_note("(g423-p3) -C worktree discard preserve-then-allows",
+                  "git -C {} reset --hard && true".format(str(g423_B)), str(g423_S))
+        _g423_p3_refs = [r for r in _recovery_refs(g423_B) if "stash" not in r]
+        _g423_tree_ok("(g423-p3-tree)", g423_B, _g423_p3_refs, "B")
+        if len([r for r in _recovery_refs(g423_S) if "stash" not in r]) <= len(_g423_s_wt_before):
+            failures.append("(g423-p3-catchall) the session catch-all snapshot of S is required for every "
+                            "in-scope command")
+        _g423_unchanged("(g423-p3-other-state)", g423_S, g423_S_pre, "S")
+
+        # (g423-p4) stash removal through -C to the second repository B. S's stash refs from the earlier
+        # p2 preservation stay; p4 must add NO new one there.
+        _g423_s_stash_before = _stash_refs(g423_S)
+        g423_note("(g423-p4) -C stash removal preserve-then-allows",
+                  "git -C {} stash clear && true".format(str(g423_B)), str(g423_S))
+        _g423_p4_refs = _stash_refs(g423_B)
+        _g423_stash_ok("(g423-p4-shas)", g423_B, _g423_p4_refs, g423_B_pre)
+        if _stash_refs(g423_S) != _g423_s_stash_before:
+            failures.append("(g423-p4-other) a -C stash removal must preserve NO new stash ref in S")
+        _g423_unchanged("(g423-p4-other-state)", g423_S, g423_S_pre, "S")
 
         # === protected_line (prtbrn/artbr1): force-push to a protected ref + direct protected commit ===
         plg = aiqt_hooks.protected_line
@@ -3993,7 +6246,8 @@ def _main_isolated(monitor):
                 ("repeated-same-C", "git -C {F} -C {F} commit"),
                 ("attached-C", "git -C{F} commit"),
                 ("relative-C", "git -C . commit"),
-                ("discard-opt-out", "GUARDRAIL_ALLOW_DISCARD=1 git -C {F} commit"),
+                ("removed-discard-prefix", "GUARDRAIL_ALLOW_DISCARD=1 git -C {F} commit"),
+                ("removed-discard-prefix-append", "GUARDRAIL_ALLOW_DISCARD+=1 git -C {F} commit"),
                 ("cd-config", "cd {M} && git -c core.worktree={M} -C {F} commit"),
                 ("cd-config-env", "cd {M} && git --config-env=core.worktree=WT -C {F} commit"),
                 ("cd-assignment", "cd {M} && FOO=bar git -C {F} commit"),
@@ -4450,16 +6704,54 @@ def _main_isolated(monitor):
         pexpect("(pl-r6f2-guard) a force-push hidden after an ANSI-C $'EOF' heredoc is now seen and DENIES "
                 "(finding 2)", _f2cmd, "deny", cwd=plr)
 
-        # CLAUDE-F1: the protected_line raw FALLBACK strips QUOTED-heredoc bodies before scanning, so a
-        # 'git push --force ... main' that appears only inside a quoted heredoc body (literal data, here forced
-        # to the fallback by a process substitution the lexer cannot parse) no longer FALSE-DENIES. Revert the
-        # _strip_quoted_heredoc_bodies pass in the fallback and this flips to 'deny' (the body over-matches).
-        pexpect("(pl-cf1) push-force inside a QUOTED heredoc body (fallback) does not false-deny (CLAUDE-F1)",
-                "cat <(echo x) <<'EOF'\ngit push -f origin main\nEOF", "allow", cwd=plr)
-        # DISCRIMINATION: a REAL force-push OUTSIDE the quoted heredoc body, on the same unparseable command,
-        # is preserved by the body-strip and still DENIES (no under-deny introduced).
+        # CLAUDE-F1 reworked by R10 (DECIDED item 3): the protected_line raw FALLBACK scans the RAW
+        # command text; the R7C quoted-heredoc body-strip is REMOVED. Stripping removes text, so any
+        # stripping defect can only HIDE a live push from the fail-safe scan: the R9 stripper still
+        # erased a real force-push behind a STACKED heredoc and behind a nested-quote command
+        # substitution (both red by outcome below on the R9 delivery). The cost is this ACCEPTED,
+        # DISCLOSED over-deny: force-push-shaped PROSE inside a purely quoted heredoc body now DENIES
+        # on the fallback path (it was (pl-cf1)'s allow through R9).
+        pexpect("(pl-cf1) push-force prose inside a QUOTED heredoc body DENIES on the raw fallback "
+                "(accepted, disclosed over-deny; R10 item 3)",
+                "cat <(echo x) <<'EOF'\ngit push -f origin main\nEOF", "deny", cwd=plr)
+        # A REAL force-push OUTSIDE the quoted heredoc body on the same unparseable command still DENIES.
         pexpect("(pl-cf1-outside) a real force-push OUTSIDE the quoted heredoc body still DENIES (CLAUDE-F1)",
                 "git push -f origin main <(echo x)", "deny", cwd=plr)
+
+        # R9 (codex 1) closed the single unquoted-opener case by returning the command unstripped; R10
+        # (DECIDED item 3) removes stripping outright, because the R9 stripper still mis-tracked the
+        # sibling shapes below (each erased the live force-push from the scan and silently ALLOWED on
+        # the R9 delivery; each must DENY by outcome now).
+        pexpect("(pl-r9hd) a force-push after an unquoted heredoc whose body opens a quoted-heredoc "
+                "lookalike DENIES (R9)",
+                "cat <<PLAIN" + chr(10) + "<<'EOF'" + chr(10) + "PLAIN" + chr(10)
+                + "git push --force origin main" + chr(10) + "EOF", "deny", cwd=plr)
+        pexpect("(pl-r10hd-stacked) STACKED heredocs: after the first quoted opener the R9 stripper "
+                "skipped the rest of the opening line, never saw <<B, and read B's body as a quoted "
+                "opener that swallowed the live push (R10 item 3)",
+                "cat <<'A' <<B" + chr(10) + "A" + chr(10) + "<<'EOF'" + chr(10) + "B" + chr(10)
+                + "git push --force origin main" + chr(10) + "EOF", "deny", cwd=plr)
+        _r10q = chr(34)   # a double quote, composed like the g423 expansion vectors above
+        _r10d = chr(36)   # a dollar sign
+        _r10b = chr(96)   # a backquote
+        _r10nest = _r10q + "<<'EOF'" + _r10q  # a quoted-heredoc LOOKALIKE inside double quotes
+        pexpect("(pl-r10hd-cmdsub) a quoted-heredoc lookalike nested in quotes inside a command "
+                "substitution: the R9 stripper's flat double-quote tracking read it as a real opener "
+                "and swallowed the live push (R10 item 3)",
+                "true <(true)" + chr(10) + "echo " + _r10q + _r10d + "(echo " + _r10nest + ")" + _r10q
+                + chr(10) + "git push --force origin main", "deny", cwd=plr)
+        pexpect("(pl-r10hd-backquote) the backquote command-substitution form of the same shape "
+                "DENIES (R10 item 3)",
+                "true <(true)" + chr(10) + "echo " + _r10q + _r10b + "echo " + _r10nest + _r10b + _r10q
+                + chr(10) + "git push --force origin main", "deny", cwd=plr)
+        pexpect("(pl-r10hd-paramexp) the ${...} parameter-expansion form of the same shape DENIES "
+                "(R10 item 3)",
+                "true <(true)" + chr(10) + "echo " + _r10q + _r10d + "{x:-" + _r10nest + "}" + _r10q
+                + chr(10) + "git push --force origin main", "deny", cwd=plr)
+        pexpect("(pl-r9hd-control) the plain force-push control DENIES", "git push --force origin main",
+                "deny", cwd=plr)
+        # The former quoted-prose DISCRIMINATION control is gone with the stripping: (pl-cf1) above
+        # now asserts the disclosed over-deny by outcome instead.
 
         # Push retains its HEAD probe. Commit uses the separate bounded proof probe.
         _orig_head = aiqt_hooks._head_branch
@@ -5113,10 +7405,13 @@ def _main_isolated(monitor):
             failures.append("(f17-lex-raise) a QUOTED heredoc must NOT raise (its body is literal data; "
                             "finding 17)")
         # No lexical Bash guard fires on the quoted-heredoc prose (each returns allow / allow-note, never a
-        # deny caused by the body). git_discard's UNCONDITIONAL raw scan is heredoc-body-stripped too.
+        # deny caused by the body). ROUND 8 removed git_discard from this battery: its raw scan no longer
+        # strips heredoc bodies (stripping could hide a real discard), so the prose's lossy keywords put
+        # the command in scope and the positive grammar denies the heredoc operator - a disclosed
+        # over-deny, asserted separately below (f17-discard-deny).
         for _f17g in (aiqt_hooks.diff_source_pretool, aiqt_hooks.gate_weakening,
                       aiqt_hooks.bash_absolute_paths, aiqt_hooks.git_explicit_binding,
-                      aiqt_hooks.commit_msg_subst, aiqt_hooks.git_discard):
+                      aiqt_hooks.commit_msg_subst):
             _f17c, _f17o, _ = _f17g({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                      "tool_input": {"command": _f17_quoted}, "cwd": "/tmp"})
             _f17d = (_f17o.get("hookSpecificOutput", {}).get("permissionDecision")
@@ -5124,14 +7419,31 @@ def _main_isolated(monitor):
             if _f17d == "deny":
                 failures.append("(f17-guard-{}) a lexical guard must not fire on quoted-heredoc prose "
                                 "(finding 17); got deny".format(getattr(_f17g, "__name__", _f17g)))
-        # DISCRIMINATION: the SAME lossy verb OUTSIDE a quoted heredoc is still caught (body-strip preserves
-        # everything outside the body), so the allow above is the body exclusion, not a blanket pass.
+        _f17dd, _f17do, _ = aiqt_hooks.git_discard({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                                    "tool_input": {"command": _f17_quoted}, "cwd": "/tmp"})
+        _f17ddec = (_f17do.get("hookSpecificOutput", {}).get("permissionDecision")
+                    if isinstance(_f17do, dict) else None)
+        if _f17ddec != "deny":
+            failures.append("(f17-discard-deny) git_discard must DENY heredoc prose whose raw text names a "
+                            "lossy keyword (R8: no body stripping, the grammar denies the operator); got "
+                            "{!r}".format(_f17ddec))
+        # DISCRIMINATION: the SAME lossy verb OUTSIDE a quoted heredoc stays IN SCOPE (the raw scan reads
+        # the FULL raw text; git_discard strips nothing), so it gets a structured decision, never the
+        # out-of-scope boundary allow.
         _f17r, _f17ro, _ = aiqt_hooks.git_discard(
             {"hook_event_name": "PreToolUse", "tool_name": "Bash",
              "tool_input": {"command": "git reset --hard <<'EOF'\nnote\nEOF"}, "cwd": brr})
-        if not (isinstance(_f17ro, dict)):
+        _f17rodec = (_f17ro.get("hookSpecificOutput", {}).get("permissionDecision")
+                     if isinstance(_f17ro, dict) else None)
+        if _f17rodec != "deny":
+            # R11 (DECIDED item 5), path named by R12 (DECIDED item 4): the dict-only shape check
+            # passed for ANY structured outcome; the discrimination needs the decision itself.
+            # This quoted heredoc PARSES (the shared lexer reads it), so the POSITIVE GRAMMAR
+            # path runs and denies the heredoc operator, which is outside the closed character
+            # class; the raw-flagged unparseable fallback never fires on this fixture.
             failures.append("(f17-outside) a real 'git reset --hard' OUTSIDE a quoted heredoc must still be "
-                            "in scope (not a boundary allow); finding 17 preserves it")
+                            "in scope and DENY (the positive grammar denies the heredoc operator), "
+                            "got {!r}; finding 17 preserves it".format(_f17rodec))
 
         # === L11: additional diff-source vectors (the AIRTIGHT-NARROW contract) =======================
         dexpect("(l11-d1) bare git diff denies", "git diff", "deny")
@@ -5827,8 +8139,9 @@ def _main_isolated(monitor):
         gexpect("(gw-n4) positive --verify allows", "git commit --verify -m 'x'", "allow")
 
         # ROUND-2 FINDING 14: the checker-shape swallow/truncate HEURISTIC is too broad (a benign optional
-        # probe is common and is not a gate bypass), so it ALLOWS-WITH-NOTE, not deny. Only the CONFIRMED
-        # --no-verify bypass above still DENIES. These previously denied; each now allows with a note.
+        # probe is common and is not a gate bypass), so it ALLOWS-WITH-NOTE, not deny. These previously
+        # denied; each swallow now allows with a note. The truncating-pipe vectors here (gw-s, gw-t) are
+        # verification runs whose output reaches a truncating sink, so the gatdis deny tier DENIES them.
         gexpect("(gw-o) pytest || true allows-with-note (heuristic relaxed, finding 14)", "pytest || true",
                 "allow-note")
         gexpect("(gw-p) pytest || : allows-with-note (finding 14)", "pytest -q || :", "allow-note")
@@ -5836,9 +8149,9 @@ def _main_isolated(monitor):
                 "make test || true", "allow-note")
         gexpect("(gw-r) checker-named script || true allows-with-note (name parts; finding 14)",
                 "tools/run_all_checks.sh || true", "allow-note")
-        gexpect("(gw-s) pytest | head allows-with-note (truncating sink; finding 14)", "pytest | head",
-                "allow-note")
-        gexpect("(gw-t) pytest | tail -20 allows-with-note (finding 14)", "pytest -q | tail -20", "allow-note")
+        gexpect("(gw-s) pytest | head denies (verification run into a truncating sink; deny tier)",
+                "pytest | head", "deny")
+        gexpect("(gw-t) pytest -q | tail -20 denies (deny tier)", "pytest -q | tail -20", "deny")
         gexpect("(gw-u) python -m pytest || true allows-with-note (runner -m module; finding 14)",
                 "python -m pytest || true", "allow-note")
         gexpect("(gw-v) npm test || true allows-with-note (finding 14)", "npm test || true", "allow-note")
@@ -5887,8 +8200,8 @@ def _main_isolated(monitor):
         gexpect("(gw-ao) a plain pytest with no swallow allows", "pytest", "allow")
         gexpect("(gw-ap) ruff check . || true allows-with-note (finding 14)", "ruff check . || true",
                 "allow-note")
-        gexpect("(gw-aq) npm test | tail allows-with-note (truncating sink; finding 14)", "npm test | tail",
-                "allow-note")
+        gexpect("(gw-aq) npm test | tail denies (runner target 'test' into a truncating sink; deny tier)",
+                "npm test | tail", "deny")
         # DISCLOSED safe-direction over-deny (residue): a separated option VALUE that itself spells
         # --no-verify is scanned in the option region and DENIES; git would read it as the --message
         # value (no bypass), so this is a deliberate deny-direction over-match, never a silent allow.
@@ -5900,8 +8213,8 @@ def _main_isolated(monitor):
         # redirect-pollution slips (F1/F2, routed to the common enforcement-hook redesign) are pinned.
         gexpect("(gw-as) newline before the swallow allows-with-note (F3 adjacency held; finding 14)",
                 "pytest ||\n true", "allow-note")
-        gexpect("(gw-at) newline before the truncating sink allows-with-note (F3 held; finding 14)",
-                "pytest |\n head", "allow-note")
+        gexpect("(gw-at) newline before the truncating sink denies (F3 adjacency held; deny tier)",
+                "pytest |\n head", "deny")
         gexpect("(gw-au) am --resolvemsg -n consumes -n as the message value, allows (F4)",
                 "git am --resolvemsg -n patch.mbox", "allow")
         gexpect("(gw-av) pytest || true allows-with-note (adjacency lock held; finding 14)",
@@ -5936,8 +8249,8 @@ def _main_isolated(monitor):
                 "git commit --no-verify -m x >/dev/null", "deny")
         gexpect("(gw-l11c) leading redirect before the checker no longer hides the swallow; allows-with-note "
                 "(finding 14)", ">/dev/null pytest || true", "allow-note")
-        gexpect("(gw-l11d) interspersed redirect does not hide the truncating sink; allows-with-note "
-                "(finding 14)", "pytest 2>/dev/null | head", "allow-note")
+        gexpect("(gw-l11d) interspersed redirect does not hide the truncating sink; denies (deny tier)",
+                "pytest 2>/dev/null | head", "deny")
         # A QUOTED redirect-shaped option value stays argv and does not mask the bypass verb.
         gexpect("(gw-l11e) a quoted '>' -m value does not hide the trailing --no-verify, denies",
                 "git commit -m '>' --no-verify", "deny")
@@ -5945,6 +8258,1715 @@ def _main_isolated(monitor):
         # bypass subcommand from the gate-weakening scan -> DENY.
         gexpect("(qa-b1-gw) backslash-newline no-verify does not slip via an empty argv element, denies",
                 "git \\\n commit --no-verify -m x", "deny")
+
+        # === gatdis deny tier: a VERIFICATION RUN whose output reaches a truncating sink =====================
+        # Two tiers: the narrow verification-run predicate piped into a truncating sink DENIES; everything else
+        # the broad checker heuristic matches keeps the finding-14 allow-with-note. Each pair below differs in
+        # one feature, so reverting the clause it tests turns one of its vectors red.
+        _ct = [
+            # step 2, the sink grammar (_truncating_sink_kind)
+            ("(gw-ct-s1) grep -m is a truncating sink, denies", "pytest | grep -m 5 FAIL", "deny"),
+            ("(gw-ct-s2) a plain grep filter is not truncating, allows", "pytest | grep FAIL", "allow"),
+            ("(gw-ct-s3) grep -e m: the m is the -e value, allows", "pytest | grep -e m", "allow"),
+            ("(gw-ct-s4) grep -q (a textual success token) denies", "pytest | grep -q passed", "deny"),
+            ("(gw-ct-s5) sed -n 1,40p notes", "pytest | sed -n 1,40p", "allow-note"),
+            ("(gw-ct-s6) sed 50q notes", "pytest | sed 50q", "allow-note"),
+            ("(gw-ct-s7) sed 's/q/x/' substitutes, notes", "pytest | sed 's/q/x/'", "allow-note"),
+            ("(gw-ct-s8) awk 'NR<=50' notes", "pytest | awk 'NR<=50'", "allow-note"),
+            ("(gw-ct-s9) awk '{print NR, $0}' compares nothing, notes", "pytest | awk '{print NR, $0}'",
+             "allow-note"),
+            ("(gw-ct-s10) '| command tail' resolves through the wrapper, notes (outside the canonical deny shape)", "pytest | command tail",
+             'allow-note'),
+            ("(gw-ct-s11) an alias-suppressing '| \\tail' denies", "pytest | \\tail", "deny"),
+            ("(gw-ct-s12) cut is never a deny sink, notes", "pytest | cut -c1-80", "allow-note"),
+            ("(gw-ct-s13) head --help is off the sink list, notes", "pytest | head --help",
+             'allow-note'),
+            # step 3, the effective argv (_gate_effective_argv)
+            ("(gw-ct-w1) nice-wrapped self-test into tail denies",
+             "nice -n 10 python3 -I -B tools/selftest_aiqt_hooks.py 2>&1 | tail -5", "deny"),
+            ("(gw-ct-w2) the same self-test redirected to an absolute file allows",
+             "nice -n 10 python3 -I -B tools/selftest_aiqt_hooks.py > /var/tmp/x/s.log 2>&1", "allow"),
+            ("(gw-ct-w3) timeout-wrapped pytest into tail denies", "timeout 600 pytest | tail", "deny"),
+            ("(gw-ct-w4) timeout-wrapped pytest redirected allows",
+             "timeout 600 pytest > /var/tmp/x/s.log 2>&1", "allow"),
+            ("(gw-ct-w5) sudo -u ci pytest into tail notes (outside the canonical deny shape)", "sudo -u ci pytest | tail", 'allow-note'),
+            ("(gw-ct-w6) sudo -u ci pytest redirected allows", "sudo -u ci pytest > /var/tmp/x/s.log 2>&1",
+             "allow"),
+            ("(gw-ct-w7) env CI=1 pytest: env can set the mode, notes", "env CI=1 pytest | tail", "allow-note"),
+            ("(gw-ct-w8) env CI=1 pytest redirected allows", "env CI=1 pytest > /var/tmp/x/s.log 2>&1", "allow"),
+            # step 4, the narrow predicate (_is_verification_run)
+            ("(gw-ct-p1) a --check run into head notes", "tools/gen_hooks.py --check | head", "allow-note"),
+            ("(gw-ct-p2) the same generator without --check allows", "tools/gen_hooks.py | head", "allow"),
+            ("(gw-ct-p3) --no-check-certificate is not --check, allows",
+             "wget --no-check-certificate https://example.invalid/x | head", "allow"),
+            ("(gw-ct-p4) git rev-parse --verify is git, allows", "git rev-parse --verify HEAD | head -1", "allow"),
+            ("(gw-ct-p5) inline python code keeps the broad note", "python3 -c 'import tests' | head",
+             "allow-note"),
+            ("(gw-ct-p6) python3 -m pytest into head denies", "python3 -m pytest | head", "deny"),
+            ("(gw-ct-p7) make -n is a dry run: the broad note stays", "make -n test | head", "allow-note"),
+            ("(gw-ct-p8) make test into head denies", "make test | head", "deny"),
+            ("(gw-ct-p9) pytest --collect-only lists tests: the broad note stays", "pytest --collect-only | tail",
+             "allow-note"),
+            ("(gw-ct-p10) uv run hops to python -m pytest, notes", "uv run python -m pytest | tail", "allow-note"),
+            ("(gw-ct-p11) bare make has no checker target, allows", "make | head", "allow"),
+            ("(gw-ct-p12) the test builtin keeps the broad note", "test -d /cache | head", "allow-note"),
+            ("(gw-ct-p13) ruff --version keeps the broad note", "ruff --version | head -1", "allow-note"),
+            # step 5, the pipeline walk (_verification_sink)
+            ("(gw-ct-k1) a non-truncating filter stage passes the cut on, notes",
+             "pytest -q 2>&1 | grep -v DEBUG | tail -30", "allow-note"),
+            ("(gw-ct-k2) '|&' into tail denies", "npm run lint |& tail", "deny"),
+            ("(gw-ct-k3) a ')' group is the producer, notes (outside the canonical deny shape)", "(cd opf && pytest) | tail", 'allow-note'),
+            ("(gw-ct-k4) a '}' group is the producer, notes (outside the canonical deny shape)", "{ pytest -q; } 2>&1 | tail", 'allow-note'),
+            ("(gw-ct-k5) inside a for-loop body, notes (outside the canonical deny shape)", "for f in a; do pytest $f | tail; done", 'allow-note'),
+            ("(gw-ct-k6) inside an if condition, notes (outside the canonical deny shape)", "if make test | tail; then :; fi", 'allow-note'),
+            ("(gw-ct-k7) an earlier real-file tee does not exempt the sink, denies",
+             "pytest | tee /var/tmp/x/l | tail", "deny"),
+            ("(gw-ct-k8) a real-file tee with no sink allows", "pytest | tee /var/tmp/x/l", "allow"),
+            ("(gw-ct-k9) the piped segment is echo, not the check, notes (outside the canonical deny shape)", "pytest && echo ok | head", 'allow-note'),
+            ("(gw-ct-k10) less is not truncating, allows", "pytest | less", "allow"),
+            ("(gw-ct-k11) a sibling group's pipe is not the check's, notes (outside the canonical deny shape)", "pytest; (echo x) | tail", 'allow-note'),
+            ("(gw-ct-k12) a check whose pipe ends inside its group notes (outside the canonical deny shape)", "(pytest | grep x); echo | tail",
+             'allow-note'),
+            # step 6, precedence
+            ("(gw-ct-o1) a later --no-verify deny keeps precedence (still deny)",
+             "pytest | tail; git commit -n -m x", "deny"),
+            ("(gw-ct-o2) an earlier set (any option, pipefail too) is not a known-benign command, notes",
+             "set -o pipefail; pytest -q | tail -20", "allow-note"),
+            # step 7, the parse-error path
+            ("(gw-ct-e1) a recovered prefix proves the sink before an unquoted heredoc, denies",
+             "pytest | tail; cat <<EOF\nx\nEOF", "deny"),
+            ("(gw-ct-e2) an in-progress (unclosed) sink segment is not proof: the raw note stays",
+             'pytest | tail "unbalanced', "allow-note"),
+            # the incident shape and its absolute-redirect form
+            ("(gw-ct-i1) the incident command notes",
+             "python3 -I -B tools/check_release_cut.py --self-test --red-on-revert | tail -20", "allow-note"),
+            ("(gw-ct-i2) the incident command redirected to an absolute file allows",
+             "python3 -I -B tools/check_release_cut.py --self-test --red-on-revert > /var/tmp/x/rc.log 2>&1",
+             "allow"),
+            # must stay allowed
+            ("(gw-ct-m1) reading a checker-named file allows", "head -50 tools/check_x.py", "allow"),
+            ("(gw-ct-m2) cat of a test file into head allows", "cat tests/x.py | head", "allow"),
+            ("(gw-ct-m3) ls of a tests dir into head allows", "ls tests | head", "allow"),
+            ("(gw-ct-m4) grep for 'check' into head allows", "grep -rn check tools | head", "allow"),
+            ("(gw-ct-m5) git log of tests into head allows", "git log -- tests/ | head", "allow"),
+            ("(gw-ct-m6) capture to a file, then read its tail, allows",
+             "pytest -q > /var/tmp/x/p.log 2>&1; tail -n 30 /var/tmp/x/p.log", "allow"),
+            # round 2 (per-clause revert sweep): each entry below turns red when one clause of the deny tier is
+            # reverted alone (sink options and words, wrapper option grammars, every included and excluded
+            # run form, compound commands piped after done, fi or esac, and rg -L, which is --follow).
+            ('(gw-ct-s14) grep -c denies', 'pytest | grep -c FAIL', 'deny'),
+            ('(gw-ct-s15) grep -l denies', 'pytest | grep -l x', 'deny'),
+            ('(gw-ct-s16) grep -L (files-without-match) denies', 'pytest | grep -L x', 'deny'),
+            ('(gw-ct-s17) rg -L is --follow, not a sink, allows', 'pytest | rg -L FAIL', 'allow'),
+            ('(gw-ct-s18) rg -l denies (the pair of s17)', 'pytest | rg -l FAIL', 'deny'),
+            ('(gw-ct-s19) rg -tc: c is the -t value, allows', 'pytest | rg -tc FAIL', 'allow'),
+            ('(gw-ct-s20) rg -m: an rg config file can add --passthru, notes', 'pytest | rg -m 3 FAIL', 'allow-note'),
+            ('(gw-ct-s21) rg -q denies', 'pytest | rg -q passed', 'deny'),
+            ('(gw-ct-s22) rg -c denies', 'pytest | rg -c FAIL', 'deny'),
+            ('(gw-ct-s23) rg -gc: c is the -g value, allows', 'pytest | rg -gc FAIL', 'allow'),
+            ('(gw-ct-s24) rg -rq: q is the -r value, allows', 'pytest | rg -rq FAIL', 'allow'),
+            ('(gw-ct-s25) rg -Ec: c is the -E value, allows', 'pytest | rg -Ec FAIL', 'allow'),
+            ('(gw-ct-s26) rg -Tc: c is the -T value, allows', 'pytest | rg -Tc FAIL', 'allow'),
+            ('(gw-ct-s27) rg -ec: c is the -e value, allows', 'pytest | rg -ec', 'allow'),
+            ('(gw-ct-s28) rg -fcodes.txt: the -f value, allows', 'pytest | rg -fcodes.txt', 'allow'),
+            ('(gw-ct-s29) egrep -c denies', 'pytest | egrep -c FAIL', 'deny'),
+            ('(gw-ct-s30) fgrep -q denies', 'pytest | fgrep -q ok', 'deny'),
+            ('(gw-ct-s31) grep --max-count=3, a long option, notes', 'pytest | grep --max-count=3 FAIL', 'allow-note'),
+            ('(gw-ct-s32) grep --quiet, a long option, notes', 'pytest | grep --quiet ok', 'allow-note'),
+            ('(gw-ct-s33) grep --silent, a long option, notes', 'pytest | grep --silent ok', 'allow-note'),
+            ('(gw-ct-s34) grep --count, a long option, notes', 'pytest | grep --count FAIL', 'allow-note'),
+            ('(gw-ct-s35) grep --files-with-matches, a long option, notes', 'pytest | grep --files-with-matches x', 'allow-note'),
+            ('(gw-ct-s36) grep --regexp -c: -c is the pattern, allows', 'pytest | grep --regexp -c', 'allow'),
+            ('(gw-ct-s37) grep --regexp=x -c, a long option, notes', 'pytest | grep --regexp=x -c', 'allow-note'),
+            ('(gw-ct-s38) grep --file -q: -q is the file, allows', 'pytest | grep --file -q', 'allow'),
+            ('(gw-ct-s39) grep -- -c: -c is the pattern, allows', 'pytest | grep -- -c', 'allow'),
+            ('(gw-ct-s40) grep -e -q: -q is the pattern, allows', 'pytest | grep -e -q', 'allow'),
+            ('(gw-ct-s41) grep -fcodes.txt: the -f value, allows', 'pytest | grep -fcodes.txt', 'allow'),
+            ('(gw-ct-s42) tail --version is off the sink list, notes',
+             'pytest | tail --version', 'allow-note'),
+            ('(gw-ct-s43) sed --quiet notes', 'pytest | sed --quiet 1,5p', 'allow-note'),
+            ('(gw-ct-s44) sed --silent notes', 'pytest | sed --silent 1,5p', 'allow-note'),
+            ('(gw-ct-s45) sed --expression=5q notes', 'pytest | sed --expression=5q', 'allow-note'),
+            ('(gw-ct-s46) sed --expression 5q notes', 'pytest | sed --expression 5q', 'allow-note'),
+            ('(gw-ct-s47) sed -e 5q notes', 'pytest | sed -e 5q', 'allow-note'),
+            ('(gw-ct-s48) sed -e5q notes', 'pytest | sed -e5q', 'allow-note'),
+            ('(gw-ct-s49) sed -f: the q operand is a file, notes', 'pytest | sed -f fix.sed q', 'allow-note'),
+            ('(gw-ct-s50) sed --file=: the q operand is a file, notes', 'pytest | sed --file=fix.sed q', 'allow-note'),
+            ('(gw-ct-s51) sed --regexp-extended is a long option, not -e, notes',
+             'pytest | sed --regexp-extended 5q', 'allow-note'),
+            ('(gw-ct-s52) sed /FAILED/q notes', "pytest | sed '/FAILED/q'", 'allow-note'),
+            ('(gw-ct-s53) gsed 5q notes', 'pytest | gsed 5q', 'allow-note'),
+            ('(gw-ct-s54) awk -f: the program is not visible, notes', 'pytest | awk -f exit.awk', 'allow-note'),
+            ('(gw-ct-s55) awk -F value skipped, notes', "pytest | awk -F , 'NR<5'", 'allow-note'),
+            ('(gw-ct-s56) awk -v value skipped, notes', "pytest | awk -v n=1 'NR<5'", 'allow-note'),
+            ('(gw-ct-s57) awk --field-separator value skipped, notes',
+             "pytest | awk --field-separator , 'NR<5'", 'allow-note'),
+            ('(gw-ct-s58) awk --assign value skipped, notes', "pytest | awk --assign n=1 'NR<5'", 'allow-note'),
+            ('(gw-ct-s59) awk exit notes', "pytest | awk '/FAIL/{print; exit}'", 'allow-note'),
+            ('(gw-ct-s60) gawk notes', "pytest | gawk 'NR<5'", 'allow-note'),
+            ('(gw-ct-s61) mawk notes', "pytest | mawk 'NR<5'", 'allow-note'),
+            ('(gw-ct-s62) nawk notes', "pytest | nawk 'NR<5'", 'allow-note'),
+            ('(gw-ct-s63) sed -n in a cluster notes', 'pytest | sed -En 1,5p', 'allow-note'),
+            ('(gw-ct-w9) timeout -s value skipped, denies', 'timeout -s KILL 600 pytest | tail', 'deny'),
+            ('(gw-ct-w10) timeout -k value skipped, denies', 'timeout -k 5 600 pytest | tail', 'deny'),
+            ('(gw-ct-w11) timeout --signal value skipped, denies', 'timeout --signal KILL 600 pytest | tail', 'deny'),
+            ('(gw-ct-w12) timeout --kill-after value skipped, denies',
+             'timeout --kill-after 5 600 pytest | tail', 'deny'),
+            ('(gw-ct-w13) timeout -- ends options, denies', 'timeout -- 600 pytest | tail', 'deny'),
+            ('(gw-ct-w14) timeout flag without a value, denies',
+             'timeout --preserve-status 600 pytest | tail', 'deny'),
+            ('(gw-ct-w15) sudo VAR=value skipped, notes (outside the canonical deny shape)', 'sudo CI=1 pytest | tail', 'allow-note'),
+            ('(gw-ct-w16) sudo -- ends options, notes (outside the canonical deny shape)', 'sudo -- pytest | tail', 'allow-note'),
+            ('(gw-ct-w17) sudo flag without a value, notes (outside the canonical deny shape)', 'sudo -E pytest | tail', 'allow-note'),
+            ('(gw-ct-w18.0) sudo -g value skipped, notes (outside the canonical deny shape)', 'sudo -g v pytest | tail', 'allow-note'),
+            ('(gw-ct-w18.1) sudo -C value skipped, notes (outside the canonical deny shape)', 'sudo -C v pytest | tail', 'allow-note'),
+            ('(gw-ct-w18.2) sudo -D value skipped, notes (outside the canonical deny shape)', 'sudo -D v pytest | tail', 'allow-note'),
+            ('(gw-ct-w18.3) sudo -h value skipped, notes (outside the canonical deny shape)', 'sudo -h v pytest | tail', 'allow-note'),
+            ('(gw-ct-w18.4) sudo -p value skipped, notes (outside the canonical deny shape)', 'sudo -p v pytest | tail', 'allow-note'),
+            ('(gw-ct-w18.5) sudo -U value skipped, notes (outside the canonical deny shape)', 'sudo -U v pytest | tail', 'allow-note'),
+            ('(gw-ct-w18.6) sudo -r value skipped, notes (outside the canonical deny shape)', 'sudo -r v pytest | tail', 'allow-note'),
+            ('(gw-ct-w18.7) sudo -t value skipped, notes (outside the canonical deny shape)', 'sudo -t v pytest | tail', 'allow-note'),
+            ('(gw-ct-w18.8) sudo --user value skipped, notes (outside the canonical deny shape)', 'sudo --user v pytest | tail', 'allow-note'),
+            ('(gw-ct-w18.9) sudo --group value skipped, notes (outside the canonical deny shape)', 'sudo --group v pytest | tail', 'allow-note'),
+            ('(gw-ct-w18.10) sudo --close-from value skipped, notes (outside the canonical deny shape)', 'sudo --close-from v pytest | tail', 'allow-note'),
+            ('(gw-ct-w18.11) sudo --chdir value skipped, notes (outside the canonical deny shape)', 'sudo --chdir v pytest | tail', 'allow-note'),
+            ('(gw-ct-w18.12) sudo --host value skipped, notes (outside the canonical deny shape)', 'sudo --host v pytest | tail', 'allow-note'),
+            ('(gw-ct-w18.13) sudo --prompt value skipped, notes (outside the canonical deny shape)', 'sudo --prompt v pytest | tail', 'allow-note'),
+            ('(gw-ct-w18.14) sudo --other-user value skipped, notes (outside the canonical deny shape)', 'sudo --other-user v pytest | tail', 'allow-note'),
+            ('(gw-ct-w18.15) sudo --role value skipped, notes (outside the canonical deny shape)', 'sudo --role v pytest | tail', 'allow-note'),
+            ('(gw-ct-w18.16) sudo --type value skipped, notes (outside the canonical deny shape)', 'sudo --type v pytest | tail', 'allow-note'),
+            ('(gw-ct-w19) wrappers repeat (timeout then sudo), notes (outside the canonical deny shape)',
+             'timeout 600 sudo -u ci pytest | tail', 'allow-note'),
+            ('(gw-ct-w20) then pytest | tail notes (outside the canonical deny shape)', 'if x; then pytest | tail; fi', 'allow-note'),
+            ('(gw-ct-w21) else pytest | tail notes (outside the canonical deny shape)', 'if x; then :; else pytest | tail; fi', 'allow-note'),
+            ('(gw-ct-w22) elif pytest | tail notes (outside the canonical deny shape)', 'if x; then :; elif pytest | tail; then :; fi', 'allow-note'),
+            ('(gw-ct-w23) while pytest | tail notes (outside the canonical deny shape)', 'while pytest | tail; do :; done', 'allow-note'),
+            ('(gw-ct-w24) until pytest | tail notes (outside the canonical deny shape)', 'until pytest | tail; do :; done', 'allow-note'),
+            ('(gw-ct-w25) ! pytest | tail notes (outside the canonical deny shape)', '! pytest | tail', 'allow-note'),
+            ('(gw-ct-w26) a brace group holding the pipe notes (outside the canonical deny shape)', '{ pytest | tail; }', 'allow-note'),
+            ('(gw-ct-w27) time pytest | tail denies', 'time pytest | tail', 'deny'),
+            ('(gw-ct-p14) grep as the command word reads, allows', 'grep -rn -e --check tools | head', 'allow'),
+            ('(gw-ct-p15) head as the command word reads, allows', 'head -- --check | tail', 'allow'),
+            ('(gw-ct-p16) tail as the command word reads, allows', 'tail -- --verify | head', 'allow'),
+            ('(gw-ct-p17) cat as the command word reads, allows', 'cat -- --self-test | head', 'allow'),
+            ('(gw-ct-p18) the [ builtin is not a run', '[ "$1" = --check ] | head', 'allow'),
+            ('(gw-ct-p19) the [[ keyword is not a run, notes', '[[ $1 == --check ]] | head', 'allow-note'),
+            ('(gw-ct-p20) --help keeps the broad note', 'pytest --help | head', 'allow-note'),
+            ('(gw-ct-p21) -h keeps the broad note', 'pytest -h | head', 'allow-note'),
+            ('(gw-ct-p22) -V keeps the broad note', 'mypy -V | head', 'allow-note'),
+            ('(gw-ct-p23) --co keeps the broad note', 'pytest --co | tail', 'allow-note'),
+            ('(gw-ct-p24) --dry-run keeps the broad note', 'npm test --dry-run | head', 'allow-note'),
+            ('(gw-ct-p25) make --just-print keeps the broad note', 'make --just-print test | head', 'allow-note'),
+            ('(gw-ct-p26) make --recon keeps the broad note', 'make --recon test | head', 'allow-note'),
+            ('(gw-ct-p27) make -q keeps the broad note', 'make -q test | head', 'allow-note'),
+            ('(gw-ct-p28) make --question keeps the broad note', 'make --question test | head', 'allow-note'),
+            ('(gw-ct-p29) make -kn (n in a cluster) keeps the broad note', 'make -kn test | head', 'allow-note'),
+            ('(gw-ct-p30) make -Cnested: the n is the -C value, denies', 'make -Cnested test | head', 'deny'),
+            ('(gw-ct-p31) make -kq (q in a cluster) keeps the broad note', 'make -kq test | head', 'allow-note'),
+            ('(gw-ct-p32) node test.js notes (outside the canonical deny shape)', 'node test.js | tail', 'allow-note'),
+            ('(gw-ct-p33) node -e inline code is not a run', 'node -e \'require("./test")\' | head', 'allow-note'),
+            ('(gw-ct-p34) node -p inline code is not a run', 'node -p \'require("./test")\' | head', 'allow-note'),
+            ('(gw-ct-p35) node --eval inline code is not a run',
+             'node --eval \'require("./test")\' | head', 'allow-note'),
+            ('(gw-ct-p36) node --print inline code is not a run',
+             'node --print \'require("./test")\' | head', 'allow-note'),
+            ('(gw-ct-p37) ruby test_x.rb notes (round 4)', 'ruby test_x.rb | tail', 'allow-note'),
+            ('(gw-ct-p38) ruby -e inline code is not a run, notes', 'ruby -e \'load "test_x.rb"\' | head', 'allow-note'),
+            ('(gw-ct-p39) perl t/check.pl notes', 'perl t/check.pl | tail', 'allow-note'),
+            ('(gw-ct-p40) perl -e inline code is not a run, notes', 'perl -e \'do "t/check.pl"\' | head', 'allow-note'),
+            ('(gw-ct-p41) perl -E inline code is not a run, notes', 'perl -E \'do "t/check.pl"\' | head', 'allow-note'),
+            ('(gw-ct-p42) bash runs a checker script, denies', 'bash tools/run_all_checks.sh | tail', 'deny'),
+            ('(gw-ct-p43) bash -c is R1, not judged by the deny tier',
+             'bash -c tools/run_all_checks.sh | tail', 'allow-note'),
+            ('(gw-ct-p44) python -W value skipped, notes', 'python3 -W ignore tools/selftest_x.py | tail', 'allow-note'),
+            ('(gw-ct-p45) python -X value skipped, notes', 'python3 -X dev tools/selftest_x.py | tail', 'allow-note'),
+            ('(gw-ct-p46) python --check-hash-based-pycs value skipped, notes',
+             'python3 --check-hash-based-pycs never tools/selftest_x.py | tail', 'allow-note'),
+            ('(gw-ct-p47) python3 -mpytest (attached module) denies', 'python3 -mpytest | tail', 'deny'),
+            ('(gw-ct-p48) an interpreter script with --check denies',
+             'python3 tools/gen_hooks.py --check | head', 'deny'),
+            ('(gw-ct-p49) --self-test notes', 'tools/gen_hooks.py --self-test | head', 'allow-note'),
+            ('(gw-ct-p50) --selftest notes', 'tools/gen_hooks.py --selftest | head', 'allow-note'),
+            ('(gw-ct-p51) --verify notes', 'tools/gen_hooks.py --verify | head', 'allow-note'),
+            ('(gw-ct-p52) --check=value notes', 'tools/build.py --check=strict | head', 'allow-note'),
+            ('(gw-ct-p53-r) node -r value skipped, notes (outside the canonical deny shape)', 'node -r v test.js | tail', 'allow-note'),
+            ('(gw-ct-p53-C) node -C value skipped, notes (outside the canonical deny shape)', 'node -C v test.js | tail', 'allow-note'),
+            ('(gw-ct-p53--require) node --require value skipped, notes (outside the canonical deny shape)', 'node --require v test.js | tail', 'allow-note'),
+            ('(gw-ct-p53--import) node --import value skipped, notes (outside the canonical deny shape)', 'node --import v test.js | tail', 'allow-note'),
+            ('(gw-ct-p53--loader) node --loader value skipped, notes (outside the canonical deny shape)', 'node --loader v test.js | tail', 'allow-note'),
+            ('(gw-ct-p53--experimental-loader) node --experimental-loader value skipped, notes (outside the canonical deny shape)',
+             'node --experimental-loader v test.js | tail', 'allow-note'),
+            ('(gw-ct-p53--conditions) node --conditions value skipped, notes (outside the canonical deny shape)',
+             'node --conditions v test.js | tail', 'allow-note'),
+            ('(gw-ct-p54) node --require=value takes no next token, notes (outside the canonical deny shape)',
+             'node --require=x test.js | tail', 'allow-note'),
+            ('(gw-ct-p55-I) ruby -I value skipped, notes (round 4)', 'ruby -I v test_x.rb | tail', 'allow-note'),
+            ('(gw-ct-p55-C) ruby -C value skipped, notes (round 4)', 'ruby -C v test_x.rb | tail', 'allow-note'),
+            ('(gw-ct-p55-E) ruby -E value skipped, notes (round 4)', 'ruby -E v test_x.rb | tail', 'allow-note'),
+            ('(gw-ct-p55-r) ruby -r value skipped, notes (round 4)', 'ruby -r v test_x.rb | tail', 'allow-note'),
+            ('(gw-ct-p56-o) bash -o value skipped, notes', 'bash -o v tools/run_all_checks.sh | tail', 'allow-note'),
+            ('(gw-ct-p56-O) bash -O value skipped, notes', 'bash -O v tools/run_all_checks.sh | tail', 'allow-note'),
+            ('(gw-ct-p56+o) bash +o value skipped, notes', 'bash +o v tools/run_all_checks.sh | tail', 'allow-note'),
+            ('(gw-ct-p57-make) make test denies', 'make test | head', 'deny'),
+            ('(gw-ct-p57-npm) npm test denies', 'npm test | head', 'deny'),
+            ('(gw-ct-p57-pnpm) pnpm test notes', 'pnpm test | head', 'allow-note'),
+            ('(gw-ct-p57-yarn) yarn test notes', 'yarn test | head', 'allow-note'),
+            ('(gw-ct-p57-npx) npx test notes', 'npx test | head', 'allow-note'),
+            ('(gw-ct-p57-go) go test denies', 'go test | head', 'deny'),
+            ('(gw-ct-p57-cargo) cargo test denies', 'cargo test | head', 'deny'),
+            ('(gw-ct-p57-mvn) mvn test notes', 'mvn test | head', 'allow-note'),
+            ('(gw-ct-p57-mvnw) mvnw test notes', 'mvnw test | head', 'allow-note'),
+            ('(gw-ct-p57-gradle) gradle test notes', 'gradle test | head', 'allow-note'),
+            ('(gw-ct-p57-gradlew) gradlew test notes', 'gradlew test | head', 'allow-note'),
+            ('(gw-ct-p57-rake) rake test notes', 'rake test | head', 'allow-note'),
+            ('(gw-ct-p57-bundle) bundle test notes', 'bundle test | head', 'allow-note'),
+            ('(gw-ct-p57-poetry) poetry test notes', 'poetry test | head', 'allow-note'),
+            ('(gw-ct-p57-pipenv) pipenv test notes', 'pipenv test | head', 'allow-note'),
+            ('(gw-ct-p57-uv) uv test notes', 'uv test | head', 'allow-note'),
+            ('(gw-ct-p57-uvx) uvx test notes', 'uvx test | head', 'allow-note'),
+            ('(gw-ct-p57-deno) deno test notes', 'deno test | head', 'allow-note'),
+            ('(gw-ct-p57-bun) bun test notes', 'bun test | head', 'allow-note'),
+            ('(gw-ct-p58) poetry run hops to pytest, notes', 'poetry run pytest | tail', 'allow-note'),
+            ('(gw-ct-p59) bundle exec hops to rspec, notes', 'bundle exec rspec | tail', 'allow-note'),
+            ('(gw-ct-p60-C) make -C value skipped, denies', 'make -C v test | head', 'deny'),
+            ('(gw-ct-p60-f) make -f value skipped, denies', 'make -f v test | head', 'deny'),
+            ('(gw-ct-p60-I) make -I value skipped, denies', 'make -I v test | head', 'deny'),
+            ('(gw-ct-p60-o) make -o value skipped, notes', 'make -o v test | head', 'allow-note'),
+            ('(gw-ct-p60-W) make -W value skipped, notes', 'make -W v test | head', 'allow-note'),
+            ('(gw-ct-p60--directory) make --directory value skipped, denies',
+             'make --directory v test | head', 'deny'),
+            ('(gw-ct-p60--file) make --file value skipped, denies', 'make --file v test | head', 'deny'),
+            ('(gw-ct-p60--makefile) make --makefile value skipped, denies', 'make --makefile v test | head', 'deny'),
+            ('(gw-ct-p60--include-dir) make --include-dir value skipped, denies',
+             'make --include-dir v test | head', 'deny'),
+            ('(gw-ct-p60--old-file) make --old-file value skipped, notes', 'make --old-file v test | head', 'allow-note'),
+            ('(gw-ct-p60--assume-old) make --assume-old value skipped, notes',
+             'make --assume-old v test | head', 'allow-note'),
+            ('(gw-ct-p60--what-if) make --what-if value skipped, notes', 'make --what-if v test | head', 'allow-note'),
+            ('(gw-ct-p60--new-file) make --new-file value skipped, notes', 'make --new-file v test | head', 'allow-note'),
+            ('(gw-ct-p60--assume-new) make --assume-new value skipped, notes',
+             'make --assume-new v test | head', 'allow-note'),
+            ('(gw-ct-p61) make -j N skipped, denies', 'make -j 4 test | head', 'deny'),
+            ('(gw-ct-p62) make -l N skipped, denies', 'make -l 2 test | head', 'deny'),
+            ('(gw-ct-p63) a make VAR=value argument can set the mode, notes', 'make CI=1 test | head', 'allow-note'),
+            ('(gw-ct-p64) a directly run checker-named script notes', 'tools/run_all_checks.sh | tail', 'allow-note'),
+            ('(gw-ct-p65) python -- then the script, notes', 'python3 -- tools/selftest_x.py | tail', 'allow-note'),
+            ('(gw-ct-k13) a sink inside a ( group notes (outside the canonical deny shape)', 'pytest | (head -5)', 'allow-note'),
+            ("(gw-ct-k14) a sibling brace group's pipe is not the check's, notes (outside the canonical deny shape)",
+             'pytest; { echo x; } | tail', 'allow-note'),
+            ('(gw-ct-k15) a $( ) substitution continues the segment, notes (outside the canonical deny shape)',
+             'pytest --basetemp=$(mktemp -d) | tail', 'allow-note'),
+            ('(gw-ct-k16) a for loop whose body runs the check, piped, notes (outside the canonical deny shape)',
+             'for f in a; do pytest $f; done | tail', 'allow-note'),
+            ('(gw-ct-k17) a while condition runs the check, piped, notes (outside the canonical deny shape)',
+             'while pytest; do :; done | tail', 'allow-note'),
+            ('(gw-ct-k18) an until condition runs the check, piped, notes (outside the canonical deny shape)',
+             'until pytest; do :; done | head', 'allow-note'),
+            ('(gw-ct-k19) an if condition runs the check, piped after fi, notes (outside the canonical deny shape)',
+             'if pytest; then :; fi | tail', 'allow-note'),
+            ('(gw-ct-k20) an if branch runs the check, piped after fi, notes (outside the canonical deny shape)',
+             'if x; then pytest; elif y; then :; else :; fi |& head', 'allow-note'),
+            ('(gw-ct-k21) a select body runs the check, piped, notes (outside the canonical deny shape)',
+             'select x in a; do pytest; done | tail', 'allow-note'),
+            ('(gw-ct-k22) a case arm runs the check, piped after esac, notes (outside the canonical deny shape)',
+             'case x in a) pytest;; esac | tail', 'allow-note'),
+            ('(gw-ct-k23) a loop nested in an if, piped after fi, notes (outside the canonical deny shape)',
+             'if true; then for x in y; do pytest; done; fi | tail', 'allow-note'),
+            ('(gw-ct-k24) a ( group inside a loop body, piped after done, notes (outside the canonical deny shape)',
+             'for f in a; do (pytest); done | tail', 'allow-note'),
+            ("(gw-ct-k25) a sibling for loop's pipe is not the check's, notes (outside the canonical deny shape)",
+             'pytest; for f in a; do echo; done | tail', 'allow-note'),
+            ("(gw-ct-k26) a sibling if's pipe is not the check's, notes (outside the canonical deny shape)",
+             'pytest; if x; then :; fi | tail', 'allow-note'),
+            ("(gw-ct-k27) a sibling case's pipe is not the check's, notes (outside the canonical deny shape)",
+             'pytest; case x in a) :;; esac | tail', 'allow-note'),
+            ('(gw-ct-k28) a loop not piped, then a piped echo, notes (outside the canonical deny shape)',
+             'for f in a; do pytest; done; echo | tail', 'allow-note'),
+            ('(gw-ct-k29) a loop whose check is captured, not piped, allows',
+             'for f in a; do pytest > /var/tmp/x/p.log 2>&1; done', 'allow'),
+            ('(gw-ct-k30) a loop inside a piped brace group notes (outside the canonical deny shape)',
+             '{ for f in a; do pytest; done; } | tail', 'allow-note'),
+            ("(gw-ct-k31) a sibling while loop's pipe is not the check's, notes (outside the canonical deny shape)",
+             'pytest; while x; do :; done | tail', 'allow-note'),
+            ("(gw-ct-k32) a sibling until loop's pipe is not the check's, notes (outside the canonical deny shape)",
+             'pytest; until x; do :; done | tail', 'allow-note'),
+            ("(gw-ct-k33) a sibling select's pipe is not the check's, notes (outside the canonical deny shape)",
+             'pytest; select x in a; do :; done | tail', 'allow-note'),
+            ("(gw-ct-k34) a sibling if inside a loop body is not the check's, notes (outside the canonical deny shape)",
+             'pytest; for f in a; do if x; then :; fi | tail; done', 'allow-note'),
+            ("(gw-ct-k35) a sibling for after then is not the check's, notes (outside the canonical deny shape)",
+             'pytest; if y; then for x in a; do :; done | tail; fi', 'allow-note'),
+            ("(gw-ct-k36) a sibling brace group after do is not the check's, notes (outside the canonical deny shape)",
+             'pytest; for f in a; do { echo; } | tail; done', 'allow-note'),
+            ('(gw-ct-e3) a recovered complete prefix before an unbalanced quote denies',
+             'pytest | tail; echo "unbalanced', 'deny'),
+            ('(gw-ct-k37) time before a sibling for loop keeps the opener scan going, notes (outside the canonical deny shape)',
+             'pytest; time for f in a; do :; done | tail', 'allow-note'),
+            ('(gw-ct-k38) a for header word that spells a keyword is not an opener, notes (outside the canonical deny shape)',
+             '{ pytest; for x in if; do :; done; } | tail', 'allow-note'),
+            ('(gw-ct-k39) a select header word that spells a keyword is not an opener, notes (outside the canonical deny shape)',
+             '{ pytest; select x in if; do :; done; } | tail', 'allow-note'),
+            ('(gw-ct-k40) a case subject that spells a keyword is not an opener, notes (outside the canonical deny shape)',
+             '{ pytest; case if in a) :;; esac; } | tail', 'allow-note'),
+            ('(gw-ct-k41) a keyword-shaped argument is not an opener, notes (outside the canonical deny shape)', '{ pytest; echo if; } | tail', 'allow-note'),
+            ('(gw-ct-k42) two openers in one segment are both tracked, notes (outside the canonical deny shape)',
+             'pytest; { { echo; }; } | tail', 'allow-note'),
+            ('(gw-ct-k43) a closed sibling loop inside the piped group, notes (outside the canonical deny shape)',
+             '{ pytest; for x in a; do :; done; } | tail', 'allow-note'),
+            ('(gw-ct-p66) inline code with a --check operand is not a run, notes',
+             "python3 -c 'import sys' --check | head", 'allow-note'),
+            ('(gw-ct-p67) after --, a -c-shaped operand is the script, notes',
+             'python3 -- -c-check.py | tail', 'allow-note'),
+            ('(gw-ct-k44) a for loop variable named like a keyword is not an opener, notes (outside the canonical deny shape)',
+             '{ pytest; for if in a; do :; done; } | tail', 'allow-note'),
+            ('(gw-ct-k45) a select variable named like a keyword is not an opener, notes (outside the canonical deny shape)',
+             '{ pytest; select if in a; do :; done; } | tail', 'allow-note'),
+            # round 3: a case pattern's ')' (and its leading '(' and '|' alternations) closes no group, so a
+            # later arm's pipe is never the earlier arm's check's (_gate_case_patterns). Every clause of that
+            # pass, and each of its two uses in _gate_pipe_out, has an entry below that turns red when that
+            # clause alone is reverted.
+            ("(gw-ct-k46) a later case arm's pipe is not the check's, notes (outside the canonical deny shape)",
+             'case x in a) pytest;; b) echo | tail;; esac', 'allow-note'),
+            ('(gw-ct-k47) a case arm that pipes its own check notes (outside the canonical deny shape)', 'case x in a) pytest | tail;; esac', 'allow-note'),
+            ("(gw-ct-k48) leading-paren patterns: a later arm's pipe is not the check's, notes (outside the canonical deny shape)",
+             'case x in (a) pytest;; (b) echo | tail;; esac', 'allow-note'),
+            ("(gw-ct-k49) a|b alternations: a later arm's pipe is not the check's, notes (outside the canonical deny shape)",
+             'case x in a|b) pytest;; c|d) echo | tail;; esac', 'allow-note'),
+            ("(gw-ct-k50) ';&' and ';;&' end an arm: a later arm's pipe is not the check's, notes (outside the canonical deny shape)",
+             'case x in a) pytest;;& b) :;& c) echo | tail;; esac', 'allow-note'),
+            ("(gw-ct-k51) newline-separated arms: a later arm's pipe is not the check's, notes (outside the canonical deny shape)",
+             'case x in\n a) pytest\n ;;\n b) echo | tail\nesac', 'allow-note'),
+            ("(gw-ct-k52) a case nested in a loop: a later arm's pipe is not the check's, notes (outside the canonical deny shape)",
+             'for i in 1; do case x in a) pytest;; b) echo | tail;; esac; done', 'allow-note'),
+            ('(gw-ct-k53) a case nested in a loop, the loop piped after done, notes (outside the canonical deny shape)',
+             'for i in 1; do case x in a) pytest;; b) echo | tail;; esac; done | tail', 'allow-note'),
+            ("(gw-ct-k54) a case nested in an arm: the outer later arm's pipe is not the check's, notes (outside the canonical deny shape)",
+             'case x in a) case y in b) pytest;; c) :;; esac;; d) echo | head;; esac', 'allow-note'),
+            ('(gw-ct-k55) a case nested in an arm, piped after its own esac, notes (outside the canonical deny shape)',
+             'case x in a) case y in b) pytest;; c) :;; esac | tail;; d) echo;; esac', 'allow-note'),
+            ('(gw-ct-k56) leading-paren patterns, the case piped after esac, notes (outside the canonical deny shape)',
+             'case x in (a) pytest;; (b) :;; esac | tail', 'allow-note'),
+            ('(gw-ct-k57) pattern words that spell keywords are not openers, notes (outside the canonical deny shape)',
+             'case x in a) pytest;; if|for) :;; esac | tail', 'allow-note'),
+            ('(gw-ct-k58) a checker-named pattern word is not a run, notes (outside the canonical deny shape)',
+             'case x in a|pytest) echo | tail;; esac', 'allow-note'),
+            ('(gw-ct-k59) an earlier case compound (esac after ;;) is not a known-benign command, notes',
+             'case x in a) :;; esac; pytest | tail', 'allow-note'),
+            ('(gw-ct-k60) an earlier case compound (esac after an arm) is not a known-benign command, notes',
+             'case x in a) :; esac; pytest | tail', 'allow-note'),
+            ('(gw-ct-k61) a check in the case subject is captured, not piped, notes (outside the canonical deny shape)',
+             'case $(pytest) in a) echo | tail;; esac', 'allow-note'),
+            ("(gw-ct-k62) an 'in' inside the subject's substitution is not the header's, notes (outside the canonical deny shape)",
+             'case $(pytest in) in a) echo | tail;; esac', 'allow-note'),
+            ('(gw-ct-k63) a substitution inside a pattern runs its own pipe, notes (outside the canonical deny shape)',
+             'case x in $(pytest | tail)) :;; esac', 'allow-note'),
+            ("(gw-ct-k64) an esac after an arm with no ';;' closes its case, notes (outside the canonical deny shape)",
+             'case $(case y in a) pytest; esac) in b) echo | tail;; esac', 'allow-note'),
+            ("(gw-ct-k65) an alternation '|' after the case subject is not a pipe, notes (outside the canonical deny shape)",
+             'case $(pytest) in a|tail) :;; esac', 'allow-note'),
+            ("(gw-ct-k66) past a filter stage, a later arm's pipe is still not the check's, notes (outside the canonical deny shape)",
+             'case x in a) pytest | grep -v x;; b) echo | tail;; esac', 'allow-note'),
+        ]
+        for _ct_label, _ct_cmd, _ct_want in _ct:
+            gexpect(_ct_label, _ct_cmd, _ct_want)
+        # Round 4: the deny is held to the canonical shape (a simple first-stage verification run piped through plain
+        # filters into a stage that cuts its stdin); every form named in the first QA keeps its new verdict here.
+        _ct_r4 = [
+            ('(gw-r4-c1.1) allows',
+             "printf '%s\\n' --verify | head", 'allow'),
+            ('(gw-r4-c1.2) allows',
+             'rg -n -- --check .aiqt/core/hooks/scripts/aiqt_hooks.py | head', 'allow'),
+            ('(gw-r4-c1.3) notes',
+             'command -v pytest | head', 'allow-note'),
+            ('(gw-r4-c2.1) notes',
+             'case x in a|pytest) echo ordinary;; esac | head', 'allow-note'),
+            ('(gw-r4-c2.2) notes',
+             'case x in a) echo ordinary;; pytest) echo ordinary;; esac | head', 'allow-note'),
+            ('(gw-r4-c3.1) notes',
+             '{ pytest > /abs/check.log 2>&1; echo ordinary; } | head', 'allow-note'),
+            ('(gw-r4-c4.1) notes',
+             'pytest | awk \'{print "exit", $0}\'', 'allow-note'),
+            ('(gw-r4-c4.2) notes',
+             "pytest | awk '{print $0} # exit'", 'allow-note'),
+            ('(gw-r4-c4.3) notes',
+             "pytest | awk 'NR<=50'", 'allow-note'),
+            ('(gw-r4-c4.4) notes',
+             "pytest | awk '/FAIL/{exit}'", 'allow-note'),
+            ('(gw-r4-c4.5) notes',
+             "pytest | sed '50q # stop'", 'allow-note'),
+            ('(gw-r4-c4.6) notes',
+             "pytest | sed 's/q # x/y/'", 'allow-note'),
+            ('(gw-r4-c5.1) denies',
+             'pytest | timeout 5 head', 'deny'),
+            ('(gw-r4-c5.2) notes',
+             'pytest | sudo head', 'allow-note'),
+            ('(gw-r4-c5.3) notes',
+             'pytest | { head; }', 'allow-note'),
+            ('(gw-r4-c5.4) notes',
+             'pytest | (true; head)', 'allow-note'),
+            ('(gw-r4-c5.5) notes',
+             'pytest > >(head)', 'allow-note'),
+            ('(gw-r4-c5.6) notes',
+             'head < <(pytest)', 'allow-note'),
+            ('(gw-r4-c5.7) notes',
+             'head <<< "$(pytest)"', 'allow-note'),
+            ('(gw-r4-c5.8) notes',
+             'env -S pytest | head', 'allow-note'),
+            ('(gw-r4-c5.9) denies',
+             'time -p pytest | head', 'deny'),
+            ('(gw-r4-c6.1) denies',
+             'pytest | tee /abs/check.log | grep -m 1 FAIL | tail', 'deny'),
+            ('(gw-r4-c6.2) denies',
+             'pytest | tee /abs/check.log | tail', 'deny'),
+            ('(gw-r4-c6.3) notes',
+             'pytest | grep FAIL | tee /abs/check.log | tail', 'allow-note'),
+            ('(gw-r4-g.1) head --help is off the sink list, notes',
+             'pytest | head --help', 'allow-note'),
+            ('(gw-r4-g.2) tail --version is off the sink list, notes',
+             'pytest | tail --version', 'allow-note'),
+            ('(gw-r4-m1.1) notes',
+             'tox -l | head', 'allow-note'),
+            ('(gw-r4-m1.2) notes',
+             'tox --listenvs | head', 'allow-note'),
+            ('(gw-r4-m1.3) notes',
+             'nox --list | head', 'allow-note'),
+            ('(gw-r4-m1.4) notes',
+             'pytest --markers | head', 'allow-note'),
+            ('(gw-r4-m1.5) notes',
+             'pytest --fixtures | head', 'allow-note'),
+            ('(gw-r4-m1.6) notes',
+             'pytest --fixtures-per-test | head', 'allow-note'),
+            ('(gw-r4-m1.7) notes',
+             'pytest --setup-plan | head', 'allow-note'),
+            ('(gw-r4-m1.8) notes',
+             'jest --listTests | head', 'allow-note'),
+            ('(gw-r4-m1.9) notes',
+             'vitest list | head', 'allow-note'),
+            ('(gw-r4-m1.10) notes',
+             'npx vitest list | head', 'allow-note'),
+            ('(gw-r4-m1.11) notes',
+             'go test -list . ./... | head', 'allow-note'),
+            ('(gw-r4-m1.12) notes',
+             'cargo test -- --list | head', 'allow-note'),
+            ('(gw-r4-m1.13) notes',
+             'tsc --listFiles | head', 'allow-note'),
+            ('(gw-r4-m1.14) notes',
+             'npx eslint --print-config x.js | head', 'allow-note'),
+            ('(gw-r4-m1.15) notes',
+             'jest --showConfig | head', 'allow-note'),
+            ('(gw-r4-m1.16) notes',
+             'tsc --showConfig | head', 'allow-note'),
+            ('(gw-r4-m1.17) notes',
+             'ruff check --show-settings | head', 'allow-note'),
+            ('(gw-r4-m1.18) notes',
+             'ruff rule E501 | head', 'allow-note'),
+            ('(gw-r4-m1.19) notes',
+             'pylint --generate-rcfile | head', 'allow-note'),
+            ('(gw-r4-m1.20) notes',
+             'eslint --init | head', 'allow-note'),
+            ('(gw-r4-m1.21) notes',
+             'cargo test --no-run 2>&1 | tail', 'allow-note'),
+            ('(gw-r4-m1.22) notes',
+             'go vet -n ./... | head', 'allow-note'),
+            ('(gw-r4-m1.23) notes',
+             'make test-data | head', 'allow-note'),
+            ('(gw-r4-m1.24) notes',
+             'make lint-fix | head', 'allow-note'),
+            ('(gw-r4-m1.25) notes',
+             'python3 scripts/gen_test_data.py | head', 'allow-note'),
+            ('(gw-r4-m1.26) notes',
+             './scripts/test-data-gen.sh | head', 'allow-note'),
+            ('(gw-r4-m1.27) notes',
+             'python3 tools/audit_log_reader.py events.log | head', 'allow-note'),
+            ('(gw-r4-m1.28) notes',
+             './test.sh | head', 'allow-note'),
+            ('(gw-r4-m1.29) notes',
+             'python3 tools/list_tests.py | head', 'allow-note'),
+            ('(gw-r4-m1.30) notes',
+             'npm test -- --listTests | head', 'allow-note'),
+            ('(gw-r4-m1.31) notes',
+             'ruff format . | head', 'allow-note'),
+            ('(gw-r4-m2.1) notes',
+             'command -v pytest | head -1', 'allow-note'),
+            ('(gw-r4-m2.2) notes',
+             'command -v pytest ruff mypy | head', 'allow-note'),
+            ('(gw-r4-m2.3) notes',
+             'command -V pytest | head', 'allow-note'),
+            ('(gw-r4-m3.1) denies',
+             'pytest | tee /tmp/a.log | tail', 'deny'),
+            ('(gw-r4-m3.2) allows',
+             'pytest | tee /tmp/a.log | grep -v DEBUG', 'allow'),
+            ('(gw-r4-m4.1) notes',
+             'pytest > >(tail)', 'allow-note'),
+            ('(gw-r4-m4.2) notes',
+             'pytest 2> >(tail)', 'allow-note'),
+            ('(gw-r4-m4.3) notes',
+             'tail <(pytest)', 'allow-note'),
+            ('(gw-r4-m4.4) notes',
+             'head -20 <(pytest)', 'allow-note'),
+            ('(gw-r4-m4.5) notes',
+             'tail < <(pytest)', 'allow-note'),
+            ('(gw-r4-m4.6) notes',
+             'pytest | tee >(tail) >/dev/null', 'allow-note'),
+            ('(gw-r4-m4.7) notes',
+             'tail <<< "$(pytest)"', 'allow-note'),
+            ('(gw-r4-m4.8) notes',
+             'head <<< $(pytest)', 'allow-note'),
+            ('(gw-r4-m4.9) notes',
+             'echo "$(pytest)" | tail', 'allow-note'),
+            ('(gw-r4-m4.10) notes',
+             'x=$(pytest 2>&1); echo "$x" | tail', 'allow-note'),
+            ('(gw-r4-m4.11) notes',
+             'echo "$(pytest | tail)"', 'allow-note'),
+            ('(gw-r4-m4.12) notes',
+             'echo `pytest | tail`', 'allow-note'),
+            ('(gw-r4-m4.13) notes',
+             'out=$(pytest | tail); echo "$out"', 'allow-note'),
+            ('(gw-r4-m5.1) denies',
+             'pytest | timeout 5 tail', 'deny'),
+            ('(gw-r4-m5.2) notes',
+             'pytest | sudo tail', 'allow-note'),
+            ('(gw-r4-m6.1) denies',
+             'time -p pytest | tail', 'deny'),
+            ('(gw-r4-m6.2) notes',
+             'ionice -c3 pytest | tail', 'allow-note'),
+            ('(gw-r4-m6.3) notes',
+             'chrt -i 0 pytest | tail', 'allow-note'),
+            ('(gw-r4-m6.4) notes',
+             'taskset -c 0 pytest | tail', 'allow-note'),
+            ('(gw-r4-m6.5) notes',
+             'xvfb-run pytest | tail', 'allow-note'),
+            ('(gw-r4-m6.6) notes',
+             'unbuffer pytest | tail', 'allow-note'),
+            ('(gw-r4-m6.7) notes',
+             'script -q -c pytest /dev/null | tail', 'allow-note'),
+            ('(gw-r4-m6.8) notes',
+             'watch pytest | head', 'allow-note'),
+            ('(gw-r4-m6.9) notes',
+             'pytest | if true; then tail; fi', 'allow-note'),
+            ('(gw-r4-m6.10) notes',
+             'pytest | case x in *) tail;; esac', 'allow-note'),
+            ('(gw-r4-m6.11) notes',
+             'pytest | (tail -5)', 'allow-note'),
+            ('(gw-r4-m6.12) notes',
+             'pytest | busybox tail', 'allow-note'),
+            ('(gw-r4-m7.1) notes',
+             'python3 manage.py test | tail', 'allow-note'),
+            ('(gw-r4-m7.2) notes',
+             'python3 setup.py test | tail', 'allow-note'),
+            ('(gw-r4-m7.3) notes',
+             'php artisan test | tail', 'allow-note'),
+            ('(gw-r4-m7.4) notes',
+             'rails test | tail', 'allow-note'),
+            ('(gw-r4-m7.5) notes',
+             'mix test | tail', 'allow-note'),
+            ('(gw-r4-m7.6) notes',
+             'dotnet test | tail', 'allow-note'),
+            ('(gw-r4-m7.7) notes',
+             'swift test | tail', 'allow-note'),
+            ('(gw-r4-m7.8) notes',
+             'bazel test //... | tail', 'allow-note'),
+            ('(gw-r4-m7.9) notes',
+             'ninja test | tail', 'allow-note'),
+            ('(gw-r4-m7.10) notes',
+             'just test | tail', 'allow-note'),
+            ('(gw-r4-m7.11) notes',
+             'node --test | tail', 'allow-note'),
+            ('(gw-r4-m7.12) notes',
+             'php vendor/bin/phpunit | tail', 'allow-note'),
+            ('(gw-r4-canon.1) denies',
+             'pytest | head', 'deny'),
+            ('(gw-r4-canon.2) denies',
+             'pytest |\n head', 'deny'),
+            ('(gw-r4-canon.3) denies',
+             'cd /x; pytest -q 2>&1 | tail -20', 'deny'),
+            ("(gw-r4-canon.3b) a run joined to cd by '&&' runs whenever cd succeeds, denies (round 10)",
+             'cd /x && pytest -q 2>&1 | tail -20', 'deny'),
+            ('(gw-r4-canon.4) denies',
+             'python3 -I -B tools/selftest_aiqt_hooks.py 2>&1 | tail -5', 'deny'),
+            ('(gw-r4-canon.5) denies',
+             'npm run lint |& tail', 'deny'),
+            ('(gw-r4-canon.6) an earlier case compound, notes',
+             'case x in a) :;; esac; pytest | tail', 'allow-note'),
+            ('(gw-r4-canon.7) notes',
+             'pytest | head file.txt', 'allow-note'),
+            ('(gw-r4-canon.8) notes',
+             'pytest | head < /abs/f', 'allow-note'),
+            ('(gw-r4-canon.9) notes',
+             'pytest | grep -v x file.txt | head', 'allow-note'),
+            ('(gw-r4-canon.10) notes',
+             'pytest | echo hi | head', 'allow-note'),
+            ('(gw-r4-canon.11) a recursive grep with no input operand may read its stdin, notes (round 11)',
+             'pytest | grep -rm1 FAIL', 'allow-note'),
+            ('(gw-r4-canon.12) allows',
+             'pytest > /abs/log 2>&1; tail -50 /abs/log', 'allow'),
+            ('(gw-r4-canon.13) notes',
+             'cat x | pytest | head', 'allow-note'),
+            ('(gw-r4-k1) a pattern word in a later case arm is not a producer, notes',
+             'case x in a) :;; pytest|head) :;; esac', 'allow-note'),
+            ('(gw-r4-k2) a producer whose stdout is redirected is outside the deny, notes',
+             'pytest > /abs/check.log | head', 'allow-note'),
+            ('(gw-r4-k3) a substitution inside the sink stage is outside the deny, notes',
+             'pytest | head -n $(echo 5)', 'allow-note'),
+            ('(gw-r4-k4) a --check after a bare option may be its value, notes',
+             'python3 tools/build.py -o --check | head', 'allow-note'),
+            ('(gw-r4-k5) a pattern alternation spelling a pipe into head is not a pipeline, notes',
+             'case x in a) :;; pytest|head|b) :;; esac', 'allow-note'),
+        ]
+        for _ct_label, _ct_cmd, _ct_want in _ct_r4:
+            gexpect(_ct_label, _ct_cmd, _ct_want)
+        # Round 5: both ends of the deny are ALLOW-LISTS (_GATE_VERIFY_RUNS and the python and shell script
+        # forms for the producer; head, tail, cut and the grep-family limiting options for the sink; cat, tee,
+        # tr and uniq between them). Every form the second QA reported keeps its verdict here (r5-x: codex,
+        # r5-m: claude), and the r5-p vectors pin each clause of the allow-list grammar.
+        _ct_r5 = [
+            ('(gw-r5-x1.1) notes',
+             "pytest | sed 's/x/;q;/'", 'allow-note'),
+            ('(gw-r5-x1.2) notes',
+             "pytest | sed '# ;q;'", 'allow-note'),
+            ('(gw-r5-x2.1) notes',
+             "pytest | awk '{x=/exit/; print $0}'", 'allow-note'),
+            ('(gw-r5-x3.1) notes',
+             "pytest | awk '{print $0; x=NR==1}'", 'allow-note'),
+            ('(gw-r5-x4.1) notes',
+             'pytest | sort -o /abs/log | tail', 'allow-note'),
+            ('(gw-r5-x5.1) notes',
+             'pytest | sort -T /tmp | tail', 'allow-note'),
+            ('(gw-r5-x5.2) notes',
+             'pytest | sort --parallel 2 | tail', 'allow-note'),
+            ('(gw-r5-m1.1) notes',
+             'pytest --cache-show | head', 'allow-note'),
+            ('(gw-r5-m1.2) notes',
+             'ctest -N | head', 'allow-note'),
+            ('(gw-r5-m1.3) notes',
+             'ctest --show-only | head', 'allow-note'),
+            ('(gw-r5-m1.4) notes',
+             'ctest --print-labels | head', 'allow-note'),
+            ('(gw-r5-m1.5) notes',
+             'clang-tidy --dump-config | head', 'allow-note'),
+            ('(gw-r5-m1.6) notes',
+             'clang-tidy --explain-config | head', 'allow-note'),
+            ('(gw-r5-m1.7) notes',
+             'flake8 --bug-report | head', 'allow-note'),
+            ('(gw-r5-m1.8) notes',
+             'pre-commit install | tail', 'allow-note'),
+            ('(gw-r5-m1.9) notes',
+             'pre-commit install-hooks | tail', 'allow-note'),
+            ('(gw-r5-m1.10) notes',
+             'pre-commit autoupdate | tail', 'allow-note'),
+            ('(gw-r5-m1.11) notes',
+             'pre-commit gc | tail', 'allow-note'),
+            ('(gw-r5-m1.12) notes',
+             'pre-commit migrate-config | tail', 'allow-note'),
+            ('(gw-r5-m1.13) notes',
+             'pre-commit sample-config | head', 'allow-note'),
+            ('(gw-r5-m1.14) notes',
+             'ruff analyze graph | head', 'allow-note'),
+            ('(gw-r5-m1.15) notes',
+             'ruff generate-shell-completion zsh | head', 'allow-note'),
+            ('(gw-r5-m1.16) notes',
+             'jest --clearCache | head', 'allow-note'),
+            ('(gw-r5-m1.17) notes',
+             'golangci-lint cache clean | head', 'allow-note'),
+            ('(gw-r5-m1.18) notes',
+             'golangci-lint cache status | head', 'allow-note'),
+            ('(gw-r5-m1.19) notes',
+             'golangci-lint completion bash | head', 'allow-note'),
+            ('(gw-r5-m1.20) notes',
+             'tox depends | head', 'allow-note'),
+            ('(gw-r5-m1.21) notes',
+             'go test -c ./pkg | tail', 'allow-note'),
+            ('(gw-r5-m1.22) notes',
+             'gradle test -m | head', 'allow-note'),
+            ('(gw-r5-m1.23) notes',
+             'pyright --createstub requests | tail', 'allow-note'),
+            ('(gw-r5-m1.24) notes',
+             'rubocop --show-cops | head', 'allow-note'),
+            ('(gw-r5-m1.25) notes',
+             'cppcheck --errorlist | head', 'allow-note'),
+            ('(gw-r5-m1.26) notes',
+             'cppcheck --doc | head', 'allow-note'),
+            ('(gw-r5-m2.1) denies',
+             'pytest -k config | tail', 'deny'),
+            ('(gw-r5-m2.2) denies',
+             'pytest -k list | tail', 'deny'),
+            ('(gw-r5-m2.3) denies',
+             'pytest -k version | tail', 'deny'),
+            ('(gw-r5-m2.4) denies',
+             'pytest -k format | tail', 'deny'),
+            ('(gw-r5-m2.5) denies',
+             'pytest -m env | tail', 'deny'),
+            ('(gw-r5-m2.6) denies',
+             'mypy -p config | tail', 'deny'),
+            ('(gw-r5-m2.7) denies',
+             'eslint config | tail', 'deny'),
+            ('(gw-r5-m2.8) denies',
+             'pytest config | tail', 'deny'),
+            ('(gw-r5-m2.9) denies',
+             'tox -e format | tail', 'deny'),
+            ('(gw-r5-m2.10) denies',
+             'tox -e clean | tail', 'deny'),
+            ('(gw-r5-m2.11) notes',
+             'ctest -V | tail', 'allow-note'),
+            ('(gw-r5-m3.1) notes',
+             'pytest | grep FAIL > /abs/f | head', 'allow-note'),
+            ('(gw-r5-m3.2) notes',
+             'pytest | cat > /abs/f | head', 'allow-note'),
+            ('(gw-r5-m3.3) denies',
+             'ruff format --check . | head', 'deny'),
+            ('(gw-r5-m3.4) denies',
+             'nice -10 pytest | tail', 'deny'),
+            ('(gw-r5-m3.5) notes',
+             'python3 tools/build.py -- --check | head', 'allow-note'),
+            ('(gw-r5-m3.6) notes',
+             "pytest | awk '/exit/'", 'allow-note'),
+            ('(gw-r5-m3.7) tail +N is off the sink list, notes',
+             'pytest | tail +5', 'allow-note'),
+            ('(gw-r5-m4.1) denies',
+             'cargo fmt --check | tail', 'deny'),
+            ('(gw-r5-m6.1) notes',
+             'python3 tools/list_checks.py | head', 'allow-note'),
+            ('(gw-r5-m6.2) notes',
+             'python3 tools/report_checks.py | head', 'allow-note'),
+            ('(gw-r5-m6.3) notes',
+             'python3 tools/gen_checks_md.py | head', 'allow-note'),
+            ('(gw-r5-m6.4) notes',
+             './list-checks.sh | head', 'allow-note'),
+            ('(gw-r5-m6.5) notes',
+             'python3 tools/checks_summary.py | head', 'allow-note'),
+            ('(gw-r5-m6.6) notes',
+             'bash tools/show_selftests.sh | head', 'allow-note'),
+            ('(gw-r5-p1) a listed long value option, attached, denies',
+             'pytest --tb=short | tail', 'deny'),
+            ('(gw-r5-p2) a listed long value option, separated, denies',
+             'pytest --maxfail 1 | tail', 'deny'),
+            ("(gw-r5-p3) a separated value that starts with '-' may be an unlisted option, notes",
+             'pytest --tb --co | head', 'allow-note'),
+            ("(gw-r5-p4) a short value letter's separated value that starts with '-', notes",
+             'pytest -k --co | head', 'allow-note'),
+            ('(gw-r5-p5) a short flag cluster, denies',
+             'pytest -qx | tail', 'deny'),
+            ('(gw-r5-p6) a short value letter with an attached value, denies',
+             'pytest -rA | tail', 'deny'),
+            ('(gw-r5-p7) an unlisted short letter (help), notes',
+             'pytest -h | head', 'allow-note'),
+            ('(gw-r5-p8) an unlisted long option (collect-only), notes',
+             'python3 -m pytest --collect-only | head', 'allow-note'),
+            ("(gw-r5-p9) '--' leaves the form, notes",
+             'cargo test -- --list | tail', 'allow-note'),
+            ('(gw-r5-p10) go test -run ^$ runs no test, notes',
+             'go test -run ^$ ./... | tail', 'allow-note'),
+            ('(gw-r5-p11) go test -run=^$ runs no test, notes',
+             'go test -run=^$ | tail', 'allow-note'),
+            ('(gw-r5-p12) go test with a run pattern, denies',
+             'go test -run TestX ./... | tail', 'deny'),
+            ('(gw-r5-p13) a bare make -j takes no value, so test is the target, denies',
+             'make -j test | head', 'deny'),
+            ('(gw-r5-p14) make -j with a non-digit attached value, notes',
+             'make -jx test | head', 'allow-note'),
+            ('(gw-r5-p15) a second make target is outside the form, notes',
+             'make test lint | head', 'allow-note'),
+            ('(gw-r5-p16) npm run with an unlisted script name, notes',
+             'npm run test:unit | tail', 'allow-note'),
+            ('(gw-r5-p17) npm run lint with passed-on arguments, notes',
+             'npm run lint -- --fix | tail', 'allow-note'),
+            ('(gw-r5-p18) ruff format without --check formats files, notes',
+             'ruff format . | head', 'allow-note'),
+            ('(gw-r5-p19) ruff check with a path operand, denies',
+             'ruff check src | head', 'deny'),
+            ('(gw-r5-p20) ruff check --fix is a fixer, notes',
+             'ruff check --fix . | head', 'allow-note'),
+            ('(gw-r5-p21) ruff check -e is --exit-zero, notes',
+             'ruff check -e . | head', 'allow-note'),
+            ('(gw-r5-p22) a clustered -IB, denies',
+             'python3 -IB tools/selftest_x.py | tail', 'deny'),
+            ('(gw-r5-p23) a python script with a verify option must be a .py file, notes',
+             'python3 tools/gen_hooks --check | head', 'allow-note'),
+            ('(gw-r5-p24) an unprefixed python script with no argument, allows',
+             'python3 tools/gen_hooks.py | tail', 'allow'),
+            ('(gw-r5-p25) sh running a selftest script, denies',
+             'sh tools/selftest_x.sh | tail', 'deny'),
+            ('(gw-r5-p26) bash running a prefixed script with an argument, notes',
+             'bash tools/run_all_checks.sh --fast | tail', 'allow-note'),
+            ('(gw-r5-p27) plain cat passes the cut on, denies',
+             'pytest | cat | tail', 'deny'),
+            ('(gw-r5-p28) cat - passes the cut on, denies',
+             'pytest | cat - | tail', 'deny'),
+            ('(gw-r5-p29) cat with an option is outside the pass-through list, notes',
+             'pytest | cat -n | tail', 'allow-note'),
+            ('(gw-r5-p30) tee -a passes the cut on, denies',
+             'pytest | tee -a /abs/l | tail', 'deny'),
+            ('(gw-r5-p31) tee with an unlisted option, notes',
+             'pytest | tee -p /abs/l | tail', 'allow-note'),
+            ('(gw-r5-p32) tr passes the cut on, denies',
+             'pytest | tr -d x | tail', 'deny'),
+            ('(gw-r5-p33) tr asked for help is not a pass-through, notes',
+             'pytest | tr --help | tail', 'allow-note'),
+            ('(gw-r5-p34) uniq with no option passes the cut on, denies',
+             'pytest | uniq | tail', 'deny'),
+            ('(gw-r5-p35) uniq with an option is outside the pass-through list, notes',
+             'pytest | uniq -c | tail', 'allow-note'),
+            ('(gw-r5-p36) a grep filter stage is outside the pass-through list, notes',
+             'pytest | grep FAIL | tail', 'allow-note'),
+            ('(gw-r5-p37) a sed program behind a plain wrapper, notes',
+             'pytest | env sed 5q', 'allow-note'),
+            ('(gw-r5-p38) a sed program that deletes all but the last line, notes',
+             "pytest | sed '$!d'", 'allow-note'),
+            ('(gw-r5-p39) a plain grep filter as the last stage is residual R4, allows',
+             'pytest | grep FAIL', 'allow'),
+            ('(gw-r5-p40) grep -m as the sink, denies',
+             'pytest | uniq | grep -m 1 FAIL', 'deny'),
+            ('(gw-r5-p41) rg -L is --follow, not a sink, allows',
+             'pytest | rg -L FAIL', 'allow'),
+            ('(gw-r5-p42) tox run with an environment, denies',
+             'tox run -e py311 | tail', 'deny'),
+            ('(gw-r5-p43) tox list is a listing, notes',
+             'tox list | tail', 'allow-note'),
+            ('(gw-r5-p44) nox with a session, denies',
+             'nox -s tests | tail', 'deny'),
+            ('(gw-r5-p45) nox -l lists the sessions, notes',
+             'nox -l | tail', 'allow-note'),
+            ('(gw-r5-p46) make check, denies',
+             'make check | head', 'deny'),
+            ('(gw-r5-p47) make lint, denies',
+             'make lint | head', 'deny'),
+            ('(gw-r5-p48) npm run test, denies',
+             'npm run test | tail', 'deny'),
+            ('(gw-r5-p49) npm run check, denies',
+             'npm run check | tail', 'deny'),
+            ('(gw-r5-p50) cargo fmt without --check formats files, allows',
+             'cargo fmt | tail', 'allow'),
+            ('(gw-r5-p51) go test -list lists the tests, notes',
+             'go test -list . | tail', 'allow-note'),
+            ('(gw-r5-p52) cat reading a named file does not pass the pipe on, notes',
+             'pytest | cat /abs/f | tail', 'allow-note'),
+            ('(gw-r5-p53) uniq reading a named file does not pass the pipe on, notes',
+             'pytest | uniq /abs/f | tail', 'allow-note'),
+            ("(gw-r5-p54) an unlisted long option leaves the form, notes",
+             'pytest --co | head', 'allow-note'),
+        ]
+        for _ct_label, _ct_cmd, _ct_want in _ct_r5:
+            gexpect(_ct_label, _ct_cmd, _ct_want)
+        # Round 6: the sink end is a closed list of exact shapes too (head or tail with no option or one positive
+        # line count; grep, egrep or fgrep with exactly one of -m N, -q, -c, -l or -L and one pattern; rg with -q,
+        # -c or -l; never cut), and a producer whose environment or configuration the command sets only notes.
+        # Every form the third QA reported keeps its verdict here (r6-x: codex, r6-m: claude); r6-p pins clauses.
+        _ct_r6 = [
+            ('(gw-r6-x1.1) tail +N with N=1 passes every line on, notes',
+             'pytest | tail -n +1', 'allow-note'),
+            ('(gw-r6-x1.2) head -n -0 passes every line on, notes',
+             'pytest | head -n -0', 'allow-note'),
+            ('(gw-r6-x1.3) cut -b 1- passes every byte on, notes',
+             'pytest | cut -b 1-', 'allow-note'),
+            ('(gw-r6-x2.1) the -m after --label is its value, notes',
+             'pytest | grep --label -m .', 'allow-note'),
+            ('(gw-r6-x2.2) the -m after rg --replace is its value, notes',
+             'pytest | rg --replace -m .', 'allow-note'),
+            ('(gw-r6-x3.1) rg -m with --passthru passes every line on, notes',
+             'pytest | rg -m 1 --passthru .', 'allow-note'),
+            ('(gw-r6-x3.2) rg --passthru before -m, the same, notes',
+             'pytest | rg --passthru -m 1 .', 'allow-note'),
+            ('(gw-r6-x4.1) go test -shuffle with no value is an error, not a run, notes',
+             'go test -shuffle | head', 'allow-note'),
+            ('(gw-r6-x4.2) go test -shuffle on, denies',
+             'go test -shuffle on | head', 'deny'),
+            ('(gw-r6-x4.3) go test -shuffle=off, denies',
+             'go test -shuffle=off ./... | head', 'deny'),
+            ('(gw-r6-x4.4) go test -shuffle with an integer seed, denies',
+             'go test -shuffle=12345 | head', 'deny'),
+            ('(gw-r6-x4.5) go test -shuffle with another value, notes',
+             'go test -shuffle=maybe | head', 'allow-note'),
+            ('(gw-r6-x4.6) go test -shuffle does not take a package as its value, notes',
+             'go test -shuffle ./... | head', 'allow-note'),
+            ('(gw-r6-x5.1) ruff --config takes inline settings (fix-only=true), notes',
+             'ruff check --config fix-only=true . | head', 'allow-note'),
+            ('(gw-r6-x5.2) pytest -o can set addopts, notes',
+             'pytest -o addopts=--collect-only | head', 'allow-note'),
+            ('(gw-r6-x5.3) ruff check -v (verbose), denies',
+             'ruff check -v . | head', 'deny'),
+            ('(gw-r6-x5.4) cargo test -r (release), denies',
+             'cargo test -r | head', 'deny'),
+            ('(gw-r6-x5.5) cargo test --all-targets, denies',
+             'cargo test --all-targets | head', 'deny'),
+            ('(gw-r6-x5.6) a cargo test -- passthrough, notes',
+             'cargo test -- --nocapture | head', 'allow-note'),
+            ('(gw-r6-x5.7) an npm test -- passthrough, notes',
+             'npm test -- --runInBand | head', 'allow-note'),
+            ('(gw-r6-m1.1) a sed substitution, notes',
+             'pytest | sed s/a/b/', 'allow-note'),
+            ('(gw-r6-m1.2) awk 1, notes',
+             'pytest | awk 1', 'allow-note'),
+            ('(gw-r6-m1.3) a collect-only run into grep -c, notes',
+             'pytest --collect-only | grep -c x', 'allow-note'),
+            ('(gw-r6-m1.4) a sort stage before head, notes',
+             'pytest | sort | head', 'allow-note'),
+            ('(gw-r6-m1.5) cargo test --all-targets into grep -q, denies',
+             'cargo test --all-targets | grep -q ok', 'deny'),
+            ('(gw-r6-m2.1) PYTEST_ADDOPTS set by a leading word, notes',
+             'PYTEST_ADDOPTS=--collect-only pytest | head', 'allow-note'),
+            ('(gw-r6-m2.2) PYTEST_ADDOPTS set through env, notes',
+             'env PYTEST_ADDOPTS=--co pytest | head', 'allow-note'),
+            ('(gw-r6-m2.3) MAKEFLAGS set by a leading word, notes',
+             'MAKEFLAGS=n make test | head', 'allow-note'),
+            ('(gw-r6-m2.4) a make VAR=value argument, notes',
+             'make TESTARGS=--collect-only test | head', 'allow-note'),
+            ('(gw-r6-m2.5) pytest --override-ini, notes',
+             'pytest --override-ini=addopts=--collect-only | head', 'allow-note'),
+            ('(gw-r6-m3.1) tail -n +1, notes',
+             'pytest | tail -n +1', 'allow-note'),
+            ('(gw-r6-m3.2) tail +1, notes',
+             'pytest | tail +1', 'allow-note'),
+            ('(gw-r6-m3.3) head -n -0, notes',
+             'pytest | head -n -0', 'allow-note'),
+            ('(gw-r6-m3.4) head -c -0, notes',
+             'pytest | head -c -0', 'allow-note'),
+            ('(gw-r6-m3.5) cut -c1-, notes',
+             'pytest | cut -c1-', 'allow-note'),
+            ('(gw-r6-m3.6) cut -f1-, notes',
+             'pytest | cut -f1-', 'allow-note'),
+            ('(gw-r6-m4.1) make --quiet (the long form of -s), denies',
+             'make --quiet test | head', 'deny'),
+            ('(gw-r6-m4.2) make --load-average (the long form of -l), denies',
+             'make --load-average=2 test | head', 'deny'),
+            ('(gw-r6-m4.3) make --max-load (the long form of -l), denies',
+             'make --max-load=2 test | head', 'deny'),
+            ('(gw-r6-m4.4) make --no-print-directory (listed in the residue), denies',
+             'make --no-print-directory test | head', 'deny'),
+            ('(gw-r6-m4.5) nox -x (listed in the residue), denies',
+             'nox -x -s t | tail', 'deny'),
+            ('(gw-r6-m4.6) nox -f and -r (listed in the residue), denies',
+             'nox -f noxfile.py -r | tail', 'deny'),
+            ('(gw-r6-m5.1) cargo test --all-targets, denies',
+             'cargo test --all-targets | tail', 'deny'),
+            ('(gw-r6-m5.2) cargo test -r, denies',
+             'cargo test -r | tail', 'deny'),
+            ('(gw-r6-m5.3) pytest --doctest-modules, denies',
+             'pytest --doctest-modules | tail', 'deny'),
+            ('(gw-r6-m5.4) pytest --cov=src --cov-branch, denies',
+             'pytest --cov=src --cov-branch | tail', 'deny'),
+            ("(gw-r6-m5.5) a pytest '--' (left noting), notes",
+             'pytest -q -- tests | tail', 'allow-note'),
+            ('(gw-r6-m5.6) go test -mod=vendor, denies',
+             'go test -mod=vendor ./... | tail', 'deny'),
+            ('(gw-r6-m5.7) ruff check --force-exclude, denies',
+             'ruff check --force-exclude . | head', 'deny'),
+            ('(gw-r6-m5.8) mypy --warn-unreachable, denies',
+             'mypy --warn-unreachable src | tail', 'deny'),
+            ('(gw-r6-m5.9) a python -IBm cluster (left noting), notes',
+             'python3 -IBm pytest | head', 'allow-note'),
+            ('(gw-r6-m5.10) cargo fmt -- --check (left noting), notes',
+             'cargo fmt --all -- --check | head', 'allow-note'),
+            ('(gw-r6-m6.1) a versioned interpreter is outside both tiers, allows (as main does; disclosed)',
+             'python3.12 -m pytest | head', 'allow'),
+            ('(gw-r6-m6.2) python3 -mpytest, denies',
+             'python3 -mpytest | head', 'deny'),
+            ('(gw-r6-p1) head -n N, denies',
+             'pytest | head -n 5', 'deny'),
+            ('(gw-r6-p2) head -nN, denies',
+             'pytest | head -n5', 'deny'),
+            ('(gw-r6-p3) head --lines=N, denies',
+             'pytest | head --lines=5', 'deny'),
+            ('(gw-r6-p4) head -N, denies',
+             'pytest | head -5', 'deny'),
+            ('(gw-r6-p5) tail -n N, denies',
+             'pytest | tail -n 20', 'deny'),
+            ('(gw-r6-p6) grep -m N with a pattern, denies',
+             'pytest | grep -m 1 FAIL', 'deny'),
+            ('(gw-r6-p7) grep -q -e PATTERN, denies',
+             'pytest | grep -q -e FAIL', 'deny'),
+            ('(gw-r6-p8) an -e value may start with -, denies',
+             'pytest | grep -q -e -x', 'deny'),
+            ('(gw-r6-p9) rg -q, denies',
+             'pytest | rg -q ok', 'deny'),
+            ('(gw-r6-p10) rg -c, denies',
+             'pytest | rg -c FAIL', 'deny'),
+            ('(gw-r6-p11) rg -l, denies',
+             'pytest | rg -l x', 'deny'),
+            ('(gw-r6-p12) head -n 0 is not a positive count, notes',
+             'pytest | head -n 0', 'allow-note'),
+            ('(gw-r6-p13) head -c is a byte count, notes',
+             'pytest | head -c 5', 'allow-note'),
+            ('(gw-r6-p14) tail -f, notes',
+             'pytest | tail -f', 'allow-note'),
+            ('(gw-r6-p15) head --lines N (separated), notes',
+             'pytest | head --lines 5', 'allow-note'),
+            ('(gw-r6-p16) head with an operand, notes',
+             'pytest | head -n 5 -', 'allow-note'),
+            ('(gw-r6-p17) head -n +N carries a sign, notes',
+             'pytest | head -n +5', 'allow-note'),
+            ('(gw-r6-p18) grep -m 0, notes',
+             'pytest | grep -m 0 FAIL', 'allow-note'),
+            ('(gw-r6-p19) grep -m -1, notes',
+             'pytest | grep -m -1 FAIL', 'allow-note'),
+            ('(gw-r6-p20) grep -m1 (attached), notes',
+             'pytest | grep -m1 FAIL', 'allow-note'),
+            ('(gw-r6-p21) a grep cluster, notes',
+             'pytest | grep -qi FAIL', 'allow-note'),
+            ('(gw-r6-p22) a second grep option, notes',
+             'pytest | grep -q -i FAIL', 'allow-note'),
+            ('(gw-r6-p23) two limiting flags, notes',
+             'pytest | grep -q -c FAIL', 'allow-note'),
+            ('(gw-r6-p24) an option after the pattern, notes',
+             'pytest | grep FAIL -q', 'allow-note'),
+            ('(gw-r6-p25) two patterns, notes',
+             'pytest | grep -q -e a -e b', 'allow-note'),
+            ("(gw-r6-p26) a '--' before the pattern, notes",
+             'pytest | grep -q -- FAIL', 'allow-note'),
+            ('(gw-r6-p27) no pattern, notes',
+             'pytest | grep -q', 'allow-note'),
+            ('(gw-r6-p28) rg -m, notes',
+             'pytest | rg -m 1 FAIL', 'allow-note'),
+            ('(gw-r6-p29) rg --passthru, notes',
+             'pytest | rg -q --passthru x', 'allow-note'),
+            ('(gw-r6-p30) rg -L is --follow, allows',
+             'pytest | rg -L x', 'allow'),
+            ('(gw-r6-p31) pytest -c names another config file, notes',
+             'pytest -c pytest.ini | head', 'allow-note'),
+            ('(gw-r6-p32) ruff --config names another config file, notes',
+             'ruff check --config ruff.toml . | head', 'allow-note'),
+            ('(gw-r6-p33) mypy --config-file, notes',
+             'mypy --config-file m.ini src | tail', 'allow-note'),
+            ('(gw-r6-p34) eslint -c, notes',
+             'eslint -c x.json . | tail', 'allow-note'),
+            ('(gw-r6-p35) tox -c, notes',
+             'tox -c tox.ini | tail', 'allow-note'),
+            ('(gw-r6-p36) a bare env wrapper on the producer, notes',
+             'env pytest | tail', 'allow-note'),
+            ('(gw-r6-p37) env behind nice, notes',
+             'nice -n 10 env pytest | tail', 'allow-note'),
+            ('(gw-r6-p38) a leading VAR=value word, notes',
+             'CI=1 pytest | tail', 'allow-note'),
+            ('(gw-r6-p39) go test -mod=mod can rewrite go.mod, notes',
+             'go test -mod=mod | head', 'allow-note'),
+            ('(gw-r6-p40) the sink end still peels env, denies',
+             'pytest | env head', 'deny'),
+            ('(gw-r6-p41) a checker in a substitution and a raw | tail, notes',
+             'echo $(pytest) | tail', 'allow-note'),
+        ]
+        for _ct_label, _ct_cmd, _ct_want in _ct_r6:
+            gexpect(_ct_label, _ct_cmd, _ct_want)
+        # The deny message says what the sink passes on, and never that an allow-listed sink merely "cuts its
+        # input"; each note text claims only what its reason proves (no "truncating stage", no "compound").
+        for _r6_cmd, _r6_want in (("pytest | tail -n 5", "which passes on only the last 5 lines of its input"),
+                                  ("pytest | head", "which passes on only the first 10 lines of its input"),
+                                  ("pytest | grep -q ok", "which prints nothing at all"),
+                                  ("pytest | grep -m 2 FAIL", "which passes on only the first 2 lines that match"),
+                                  ("pytest | rg -c FAIL", "which normally prints only a count of the lines that match"),
+                                  ("pytest | grep -L x", "which prints only a name when no line matches")):
+            _ct_code, _ct_out, _ = gwg(dict(hook_event_name="PreToolUse", tool_name="Bash",
+                                            tool_input=dict(command=_r6_cmd)))
+            _ct_reason = ((_ct_out or dict()).get("hookSpecificOutput") or dict()).get("permissionDecisionReason",
+                                                                                      "")
+            if _r6_want not in _ct_reason or "cuts its input" in _ct_reason:
+                failures.append("(gw-r6-msg1) the deny for {!r} must say {!r}; got {!r}".format(
+                    _r6_cmd, _r6_want, _ct_reason))
+        for _r6_cmd, _r6_want in (("pytest | sed s/a/b/", "('sed program')"),
+                                  ("pytest | awk 1", "('awk program')"),
+                                  ("pytest | sort | head", "('head')"),
+                                  ("pytest --collect-only | grep -c x", "('grep -c')"),
+                                  ("echo $(pytest) | tail", "appears to contain a command substitution"),
+                                  ("pytest | tail -n +1", "may pass on only part of its output")):
+            _ct_code, _ct_out, _ = gwg(dict(hook_event_name="PreToolUse", tool_name="Bash",
+                                            tool_input=dict(command=_r6_cmd)))
+            _ct_note = (_ct_out or dict()).get("systemMessage", "")
+            if (_r6_want not in _ct_note or "truncating stage" in _ct_note or "compound" in _ct_note
+                    or "a truncating sink whose" in _ct_note):
+                failures.append("(gw-r6-msg2) the note for {!r} must say {!r} and claim no truncation or "
+                                "compound; got {!r}".format(_r6_cmd, _r6_want, _ct_note))
+        # Round 7: the deny tier holds only when every top-level segment before the producer pipeline is a known-benign
+        # command (cd DIR, echo with plain literal words, true, ':', pwd; round 8 drops printf); the sink option
+        # grammar is the installed tools' --help, an option of unknown arity notes, and a count is judged lexically
+        # (r7-c: claude, r7-x: codex, r7-p: clauses).
+        _ct_r7 = [
+            ('(gw-r7-c1.1) an earlier export sets the run environment, notes',
+             'export PYTEST_ADDOPTS=--collect-only; pytest | head', 'allow-note'),
+            ('(gw-r7-c1.2) an assignment then an export, notes',
+             'PYTEST_ADDOPTS=--co; export PYTEST_ADDOPTS; pytest | head', 'allow-note'),
+            ('(gw-r7-c1.3) export MAKEFLAGS=n before make test, notes',
+             'export MAKEFLAGS=n && make test | head', 'allow-note'),
+            ('(gw-r7-c1.4) typeset -x, notes',
+             'typeset -x PYTEST_ADDOPTS=--co; pytest | head', 'allow-note'),
+            ('(gw-r7-c1.5) set -a then an assignment, notes',
+             'set -a; PYTEST_ADDOPTS=--co; pytest | head', 'allow-note'),
+            ('(gw-r7-p1) every known-benign earlier command, denies',
+             'cd /x; true; :; pwd; echo hi; echo; pytest | head', 'deny'),
+            ("(gw-r7-p2) cd DIR && the run, denies (round 10)",
+             'cd /x && pytest | head', 'deny'),
+            ('(gw-r7-p3) an empty newline segment before the run, denies',
+             'true\n\npytest | head', 'deny'),
+            ('(gw-r7-p4) a background cd before the run, denies',
+             'cd x & pytest | head', 'deny'),
+            ('(gw-r7-p5) echo with an option argument, notes',
+             'echo -n x; pytest | head', 'allow-note'),
+            ('(gw-r7-p6) printf -v assigns a variable, notes',
+             'printf -v X y; pytest | head', 'allow-note'),
+            ('(gw-r7-p7) a ${X:=v} expansion assigns a variable, notes',
+             'echo ${X:=1}; pytest | head', 'allow-note'),
+            ("(gw-r7-p8) ': ${X:=v}' assigns a variable, notes",
+             ': ${X:=1}; pytest | head', 'allow-note'),
+            ('(gw-r7-p9) a $[X=v] arithmetic assigns a variable, notes',
+             'echo $[X=1]; pytest | head', 'allow-note'),
+            ('(gw-r7-p10) a redirection can write a configuration file, notes',
+             'echo x > pytest.ini; pytest | head', 'allow-note'),
+            ('(gw-r7-p11) a function definition, notes',
+             'f() { :; }; pytest | head', 'allow-note'),
+            ('(gw-r7-p12) cd -, notes',
+             'cd -; pytest | head', 'allow-note'),
+            ('(gw-r7-p13) cd with two operands, notes',
+             'cd a b; pytest | head', 'allow-note'),
+            ('(gw-r7-p14) source, notes',
+             'source x; pytest | head', 'allow-note'),
+            ("(gw-r7-p15) '.', notes",
+             '. x; pytest | head', 'allow-note'),
+            ('(gw-r7-p16) unset, notes',
+             'unset X; pytest | head', 'allow-note'),
+            ('(gw-r7-p17) alias, notes',
+             'alias x=y; pytest | head', 'allow-note'),
+            ('(gw-r7-p18) declare -x, notes',
+             'declare -x A=1; pytest | head', 'allow-note'),
+            ('(gw-r7-p19) a bare assignment, notes',
+             'X=1; pytest | head', 'allow-note'),
+            ('(gw-r7-p20) pwd -P, notes',
+             'pwd -P; pytest | head', 'allow-note'),
+            ('(gw-r7-p21) true with an argument, notes',
+             'true x; pytest | head', 'allow-note'),
+            ('(gw-r7-p22) a subshell, notes',
+             '(cd x); pytest | head', 'allow-note'),
+            ('(gw-r7-p23) a brace group, notes',
+             '{ cd x; }; pytest | head', 'allow-note'),
+            ('(gw-r7-p24) an earlier pipeline, notes',
+             'pytest | grep -m1 x; pytest | head', 'allow-note'),
+            ('(gw-r7-p25) set -e, notes',
+             'set -e; pytest | head', 'allow-note'),
+            ('(gw-r7-p26) a later command does not matter, denies',
+             'pytest | head; export X=1', 'deny'),
+            ("(gw-r7-x2.1) a quoted '$(...) | tail' is text, notes (raw-text evidence, worded 'appears')",
+             "echo '$(pytest) | tail'", 'allow-note'),
+            ("(gw-r7-x2.2) '||' is not a pipe, allows (as main does)",
+             'x=$(pytest --co) || head -n1 notes.txt', 'allow'),
+            ('(gw-r7-x2.3) a lexed check after the sink, allows (as main does)',
+             'echo x | sed 5q; echo $(pytest)', 'allow'),
+            ('(gw-r7-x2.4) a backquote check after the sink, notes without an order claim',
+             'echo x | sed 5q; echo `pytest`', 'allow-note'),
+            ('(gw-r7-x3.1) rg --color takes a value, notes',
+             'pytest | rg --color never -m 1 .', 'allow-note'),
+            ('(gw-r7-x3.2) grep --binary-files takes a value, notes',
+             'pytest | grep --binary-files text -m 1 .', 'allow-note'),
+            ('(gw-r7-x3.3) a known value option before a named file, allows',
+             'pytest | grep --binary-files text -m 1 x file.txt', 'allow'),
+            ('(gw-r7-x3.4) an abbreviated long option (--max for --max-count), notes',
+             'pytest | grep --max=1 x', 'allow-note'),
+            ('(gw-r7-x3.5) a short letter outside GNU grep (ugrep -g takes a value), notes',
+             "pytest | grep -g '*.py' -m 1 x", 'allow-note'),
+            ('(gw-r7-x3.6) a long option outside the rg grammar, notes',
+             'pytest | rg --unknown-opt x -m 1 y', 'allow-note'),
+            ('(gw-r7-x4.1) a 4,400-digit zero count, notes',
+             'pytest | head -n ' + '0' * 4400, 'allow-note'),
+            ('(gw-r7-x4.2) a 4,400-digit zero grep count, notes',
+             'pytest | grep -m ' + '0' * 4400 + ' x', 'allow-note'),
+            ('(gw-r7-x4.3) a leading-zero count, denies',
+             'pytest | head -n 0001', 'deny'),
+            ('(gw-r7-x4.4) a 4,401-digit positive count, denies',
+             'pytest | tail -n ' + '9' * 4401, 'deny'),
+            ('(gw-r7-c3.1) a long grep count on a collect-only run, notes',
+             'pytest --co | grep -m 1' + '0' * 4400 + ' x', 'allow-note'),
+            ('(gw-r7-c3.2) a long grep count after a substitution, notes',
+             'echo $(pytest) | grep -m ' + '1' * 4401 + ' x', 'allow-note'),
+            ('(gw-r7-x5.1) a sink that is not the final stage, denies',
+             'pytest | head | false', 'deny'),
+            ('(gw-r7-c8.1) eslint --no-config-lookup is not an eslint 6.4.0 option, notes',
+             'eslint --no-config-lookup . | head', 'allow-note'),
+            ('(gw-r7-c8.2) eslint --no-error-on-unmatched-pattern is not an eslint 6.4.0 option, notes',
+             'eslint --no-error-on-unmatched-pattern . | head', 'allow-note'),
+            ('(gw-r7-c4.1) eslint --rule stays listed, denies',
+             "eslint --rule 'no-undef: off' . | head", 'deny'),
+        ]
+        for _ct_label, _ct_cmd, _ct_want in _ct_r7:
+            gexpect(_ct_label, _ct_cmd, _ct_want)
+        # Round 8: printf is never a benign earlier command and echo is benign only with plain literal words; a run
+        # joined to an earlier command by '||' notes (by '&&' it denies since round 10, D-469-AND-DENY); a limiting
+        # grep option is matched at any abbreviation length; a stage reads its stdin when any input operand or file
+        # option names it; the rg grammar carries -./--hidden and the negations its --help names (r8-x: codex,
+        # r8-c: claude).
+        _ct_r8 = [
+            ("(gw-r8-x1.1) printf %n assigns a variable (PATH=0), notes",
+             "printf '%n' PATH; pytest | head", 'allow-note'),
+            ('(gw-r8-x1.2) an unquoted printf %n, notes',
+             'printf %n PATH; pytest | head', 'allow-note'),
+            ('(gw-r8-x1.3) any printf, notes',
+             'printf hi; pytest | head', 'allow-note'),
+            ("(gw-r8-c4.1) printf -v spelled $'\\x2dv', notes",
+             "printf $'\\x2dv' PATH %s /tmp/x; pytest | head", 'allow-note'),
+            ('(gw-r8-c4.2) printf with an expanded format, notes',
+             'printf "$O" PATH /x; pytest | head', 'allow-note'),
+            ("(gw-r8-c4.3) echo -n spelled $'\\x2dn', notes",
+             "echo $'\\x2dn' x; pytest | head", 'allow-note'),
+            ('(gw-r8-c4.4) echo with a double-quoted word, notes',
+             'echo "x"; pytest | head', 'allow-note'),
+            ('(gw-r8-c4.5) echo with a single-quoted word, notes',
+             "echo 'x'; pytest | head", 'allow-note'),
+            ('(gw-r8-c4.6) echo with a backslash, notes',
+             'echo \\x; pytest | head', 'allow-note'),
+            ('(gw-r8-c4.7) echo with a parameter expansion, notes',
+             'echo $X; pytest | head', 'allow-note'),
+            ('(gw-r8-c4.8) echo with a glob, notes',
+             'echo *; pytest | head', 'allow-note'),
+            ('(gw-r8-c4.9) echo with a brace expansion that can spell an option, notes',
+             'echo {a,-n}; pytest | head', 'allow-note'),
+            ('(gw-r8-c4.10) echo with plain literal words, denies',
+             'echo a=b x.y; pytest | head', 'deny'),
+            ('(gw-r8-c2.1) echo piped into the run is not an earlier command, notes',
+             'echo x | pytest | head', 'allow-note'),
+            ('(gw-r8-c2.2) true piped into the run, notes',
+             'true | pytest | head', 'allow-note'),
+            ("(gw-r8-c2.3) echo piped by '|&' into the run, notes",
+             'echo x |& pytest | head', 'allow-note'),
+            ("(gw-r8-c3.1) 'true ||' never runs the pipeline, notes",
+             'true || pytest | head', 'allow-note'),
+            ("(gw-r8-c3.2) 'true &&' before the run, denies (round 10)",
+             'true && pytest | head', 'deny'),
+            ("(gw-r8-c3.3) 'echo hi &&' before the run, denies (round 10)",
+             'echo hi && pytest | head', 'deny'),
+            ("(gw-r8-c3.4) 'cd DIR ||' before the run, notes",
+             'cd /x || pytest | head', 'allow-note'),
+            ("(gw-r8-c3.5) '&&' then a newline before the run, denies (round 10)",
+             'cd /x &&\npytest | head', 'deny'),
+            ("(gw-r8-c3.6) '||' then blank lines before the run, notes",
+             'true ||\n\npytest | head', 'allow-note'),
+            ("(gw-r8-c3.7) '&&' between earlier commands only, denies",
+             'cd /x && true; pytest | head', 'deny'),
+            ("(gw-r8-c3.8) '&&' before an earlier echo only, denies",
+             'true && echo x; pytest | head', 'deny'),
+            ('(gw-r8-c1.1) grep --m 1 is --max-count, notes',
+             'pytest | grep --m 1 x', 'allow-note'),
+            ('(gw-r8-c1.2) grep --m=1, notes',
+             'pytest | grep --m=1 x', 'allow-note'),
+            ('(gw-r8-c1.3) grep --q is --quiet, notes',
+             'pytest | grep --q x', 'allow-note'),
+            ('(gw-r8-c1.4) grep --s is --silent, notes',
+             'pytest | grep --s x', 'allow-note'),
+            ('(gw-r8-c1.5) grep --c may be --count (GNU grep calls it ambiguous), notes',
+             'pytest | grep --c x', 'allow-note'),
+            ("(gw-r8-x2.1) grep -r with an explicit '-' operand reads its stdin, notes",
+             'pytest | grep -r -m 1 . -', 'allow-note'),
+            ("(gw-r8-x2.2) grep with '-' beside a named file reads its stdin, notes",
+             'pytest | grep -m 1 . - /dev/null', 'allow-note'),
+            ('(gw-r8-x2.3) grep -f - reads its patterns from its stdin, notes',
+             'pytest | grep -m 1 -f - file.txt', 'allow-note'),
+            ('(gw-r8-x2.4) an attached -f-, notes',
+             'pytest | grep -m 1 -f- file.txt', 'allow-note'),
+            ('(gw-r8-x2.5) --file=-, notes',
+             'pytest | grep -m 1 --file=- file.txt', 'allow-note'),
+            ('(gw-r8-x2.6) a separated --file -, notes',
+             'pytest | grep -m 1 --file - file.txt', 'allow-note'),
+            ('(gw-r8-x2.7) a /dev/stdin operand, notes',
+             'pytest | grep -m 1 x /dev/stdin', 'allow-note'),
+            ('(gw-r8-x2.8) a /dev/fd/0 operand under -r, notes',
+             'pytest | grep -rm 1 x /dev/fd/0', 'allow-note'),
+            ('(gw-r8-x2.16) grep --exclude-from=- reads its exclude list from its stdin, notes',
+             'pytest | grep -r -m 1 --exclude-from=- x dir', 'allow-note'),
+            ('(gw-r8-x2.17) a separated --exclude-from -, notes',
+             'pytest | grep -r -m 1 --exclude-from - x dir', 'allow-note'),
+            ('(gw-r8-x2.18) a named exclude list, allows (as main does)',
+             'pytest | grep -r -m 1 --exclude-from=ex.txt x dir', 'allow'),
+            ("(gw-r8-x2.9) rg with '-' beside a named file, notes",
+             'pytest | rg -q x - /dev/null', 'allow-note'),
+            ("(gw-r8-x2.10) cut with '-' beside a named file, notes",
+             'pytest | cut -f 1 - file.txt', 'allow-note'),
+            ('(gw-r8-x2.11) grep on a named file only, allows (as main does)',
+             'pytest | grep -m 1 . /dev/null', 'allow'),
+            ('(gw-r8-x2.12) a recursive grep with no operand may read its stdin (round 11), notes',
+             'pytest | grep -r -m 1 .', 'allow-note'),
+            ('(gw-r8-x2.13) a named pattern file, allows (as main does)',
+             'pytest | grep -m 1 -f pats.txt file.txt', 'allow'),
+            ("(gw-r8-x2.14) a first operand '-' is GNU grep's pattern but ugrep's stdin (round 12), notes",
+             'pytest | grep -m 1 - file.txt', 'allow-note'),
+            ("(gw-r8-x2.15) cut -f takes a value: its '-' is a field list, allows (as main does)",
+             'pytest | cut -f - file.txt', 'allow'),
+            ('(gw-r8-x3.1) rg --hidden is a known flag before a named file, allows',
+             'pytest | rg --hidden -m 1 x /dev/null', 'allow'),
+            ('(gw-r8-x3.2) rg -. is a known flag before a named file, allows',
+             'pytest | rg -. -m 1 x /dev/null', 'allow'),
+            ('(gw-r8-x3.3) rg --no-context-separator before a named file, allows',
+             'pytest | rg --no-context-separator -m 1 x /dev/null', 'allow'),
+            ('(gw-r8-x3.4) rg --maxdepth takes a value, allows before a named file',
+             'pytest | rg --maxdepth 2 -m 1 x /dev/null', 'allow'),
+            ('(gw-r8-x3.5) rg --hidden reading its stdin with -q, notes',
+             'pytest | rg --hidden -q x', 'allow-note'),
+        ]
+        for _ct_label, _ct_cmd, _ct_want in _ct_r8:
+            gexpect(_ct_label, _ct_cmd, _ct_want)
+        # Round 10 (answers QA round 9): a grep directory mode is resolved in option order, so a later -d read or
+        # skip undoes -r; every stdin name, file option and rg grammar entry has a pin its mutant fails; a stdin
+        # path is normalised lexically; a run joined by '&&' to known-benign commands denies, by '||' notes
+        # (r9-x: codex, r9-c: claude, r9-d: decision D-469-AND-DENY).
+        _ct_r9 = [
+            ('(gw-r9-x1.1) grep -r then -d read reads its stdin, notes',
+             'pytest | grep -r -d read -m 1 x', 'allow-note'),
+            ('(gw-r9-x1.2) grep -r then --directories=read, notes',
+             'pytest | grep -r --directories=read -q x', 'allow-note'),
+            ('(gw-r9-x1.3) an attached -dread after -r in one cluster, notes',
+             'pytest | grep -rdread -m1 x', 'allow-note'),
+            ('(gw-r9-x1.4) grep -R then -d skip, notes',
+             'pytest | grep -R -d skip -q x', 'allow-note'),
+            ('(gw-r9-x1.5) a separated --directories read after -r, notes',
+             'pytest | grep -r --directories read -q x', 'allow-note'),
+            ("(gw-r9-x1.6) an abbreviated mode 'rea' after -r, notes",
+             'pytest | grep -r -d rea -m 1 x', 'allow-note'),
+            ("(gw-r9-x1.7) an ambiguous mode 'r' (grep rejects it), notes",
+             'pytest | grep -r -d r -m 1 x', 'allow-note'),
+            ('(gw-r9-x1.8) -d read then -r may still read its stdin (round 11), notes',
+             'pytest | grep -d read -r -m 1 x', 'allow-note'),
+            ('(gw-r9-x1.9) --directories=skip then -R may still read its stdin (round 11), notes',
+             'pytest | grep --directories=skip -R -q x', 'allow-note'),
+            ('(gw-r9-x1.10) -d read then --recursive may still read its stdin (round 11), notes',
+             'pytest | grep -d read --recursive -m 1 x', 'allow-note'),
+            ('(gw-r9-x1.11) -d recurse alone may still read its stdin (round 11), notes',
+             'pytest | grep -d recurse -m 1 x', 'allow-note'),
+            ("(gw-r9-x1.12) an abbreviated mode 'rec' after -d read, no operand (round 11), notes",
+             'pytest | grep -d read -d rec -m 1 x', 'allow-note'),
+            ('(gw-r9-x1.13) -r -d read on a named file, allows',
+             'pytest | grep -r -d read -m 1 x file.txt', 'allow'),
+            ('(gw-r9-x2.1) a /proc/self/fd/0 operand under -r, notes',
+             'pytest | grep -rm 1 x /proc/self/fd/0', 'allow-note'),
+            ('(gw-r9-c1.1) a /proc/self/fd/0 operand, notes',
+             'pytest | grep -m 1 x /proc/self/fd/0', 'allow-note'),
+            ('(gw-r9-c1.2) a /proc/self/status operand is an ordinary file, allows',
+             'pytest | grep -m 1 x /proc/self/status', 'allow'),
+            ('(gw-r9-x2.2) rg -f - reads its patterns from its stdin, notes',
+             'pytest | rg -m 1 -f - file.txt', 'allow-note'),
+            ('(gw-r9-x2.3) rg attached -f-, notes',
+             'pytest | rg -m 1 -f- file.txt', 'allow-note'),
+            ('(gw-r9-x2.4) rg --file=-, notes',
+             'pytest | rg -m 1 --file=- file.txt', 'allow-note'),
+            ('(gw-r9-x2.5) rg separated --file -, notes',
+             'pytest | rg -m 1 --file - file.txt', 'allow-note'),
+            ('(gw-r9-x2.6) rg with a named pattern file, allows',
+             'pytest | rg -m 1 -f pats.txt file.txt', 'allow'),
+            ('(gw-r9-x2.7) rg --file= with a named pattern file, allows',
+             'pytest | rg -m 1 --file=pats.txt file.txt', 'allow'),
+            ('(gw-r9-c1.3) egrep -f -, notes',
+             'pytest | egrep -m 1 -f - file.txt', 'allow-note'),
+            ('(gw-r9-c1.4) fgrep -f -, notes',
+             'pytest | fgrep -m 1 -f - file.txt', 'allow-note'),
+            ('(gw-r9-c1.5) egrep with a named pattern file, allows',
+             'pytest | egrep -m 1 -f pats.txt file.txt', 'allow'),
+            ('(gw-r9-c1.6) fgrep with a named pattern file, allows',
+             'pytest | fgrep -m 1 -f pats.txt file.txt', 'allow'),
+            ('(gw-r9-c1.7) rg --maxdepth takes a value, so x is the pattern and the stage reads its stdin, notes',
+             'pytest | rg --maxdepth 2 -m 1 x', 'allow-note'),
+            ('(gw-r9-c1.8) rg --maxdepth before a named directory, allows',
+             'pytest | rg --maxdepth 2 -m 1 x dir', 'allow'),
+            ('(gw-r9-c1.9) rg -. is a flag, so the stage reads its stdin, notes',
+             'pytest | rg -. -m 1 x', 'allow-note'),
+            ('(gw-r9-c1.10) rg -. before a named directory, allows',
+             'pytest | rg -. -m 1 x dir', 'allow'),
+            ('(gw-r9-c1.11) rg --hidden is a flag, so the stage reads its stdin, notes',
+             'pytest | rg --hidden -m 1 x', 'allow-note'),
+            ('(gw-r9-c1.12) rg --hidden before a named directory, allows',
+             'pytest | rg --hidden -m 1 x dir', 'allow'),
+            ("(gw-r9-c1.13) echo with a tilde (expanded by the shell) is not a plain word, notes",
+             'echo ~; pytest | head', 'allow-note'),
+            ('(gw-r9-c3.1) //dev/stdin reads the stdin, notes',
+             'pytest | grep -m 1 x //dev/stdin', 'allow-note'),
+            ('(gw-r9-c3.2) /dev//stdin, notes',
+             'pytest | grep -m 1 x /dev//stdin', 'allow-note'),
+            ('(gw-r9-c3.3) /dev/./stdin, notes',
+             'pytest | grep -m 1 x /dev/./stdin', 'allow-note'),
+            ('(gw-r9-c3.4) /dev/../dev/stdin, notes',
+             'pytest | grep -m 1 x /dev/../dev/stdin', 'allow-note'),
+            ('(gw-r9-c3.5) /proc/thread-self/fd/0, notes',
+             'pytest | grep -m 1 x /proc/thread-self/fd/0', 'allow-note'),
+            ('(gw-r9-c3.6) /proc/self/fd//0, notes',
+             'pytest | grep -m 1 x /proc/self/fd//0', 'allow-note'),
+            ('(gw-r9-c3.7) a normalised spelling as a pattern file, notes',
+             'pytest | grep -m 1 -f //dev/stdin file.txt', 'allow-note'),
+            ('(gw-r9-c3.8) //dev/null is an ordinary file, allows',
+             'pytest | grep -m 1 x //dev/null', 'allow'),
+            ('(gw-r9-c3.9) /dev/../etc/hosts is an ordinary file, allows',
+             'pytest | grep -m 1 x /dev/../etc/hosts', 'allow'),
+            ('(gw-r9-c3.10) a relative dev/stdin stays a disclosed residual, allows',
+             'pytest | grep -m 1 x dev/stdin', 'allow'),
+            ("(gw-r9-d.1) cd DIR && the run, denies",
+             'cd /x && pytest -q 2>&1 | tail -20', 'deny'),
+            ("(gw-r9-d.2) 'true &&' before the run, denies",
+             'true && pytest | head', 'deny'),
+            ("(gw-r9-d.3) 'true ||' never runs the pipeline, notes",
+             'true || pytest | head', 'allow-note'),
+            ("(gw-r9-d.4) '&&' after a command that is not known-benign, notes",
+             'make build && pytest | tail', 'allow-note'),
+            ("(gw-r9-d.5) '&&' after a '||' list of known-benign commands, denies",
+             'true || cd /x && pytest | head', 'deny'),
+            ("(gw-r9-d.6) '||' after a '&&' list of known-benign commands, notes",
+             'cd /x && true || pytest | head', 'allow-note'),
+        ]
+        for _ct_label, _ct_cmd, _ct_want in _ct_r9:
+            gexpect(_ct_label, _ct_cmd, _ct_want)
+        # Round 11 (answers QA round 10): a grep word may run another grep (the ugrep a shell function may run as
+        # grep reads its stdin under -r), so a recursive grep-family stage with no input operand notes; an option
+        # left without its value at the end notes; each rejected -d/--directories spelling, the grep-only -d
+        # handling and each grep word have a pin their mutant fails (r10-x: codex, r10-c: claude).
+        _ct_r10 = [
+            ('(gw-r10-c1.1) grep -r with no input operand may read its stdin, notes',
+             'pytest | grep -r -m 1 x', 'allow-note'),
+            ('(gw-r10-c1.2) grep -R -q with no input operand, notes',
+             'pytest | grep -R -q x', 'allow-note'),
+            ('(gw-r10-c1.3) grep --recursive with no input operand, notes',
+             'pytest | grep --recursive -m 1 x', 'allow-note'),
+            ('(gw-r10-c1.4) grep --dereference-recursive with no input operand, notes',
+             'pytest | grep --dereference-recursive -c x', 'allow-note'),
+            ('(gw-r10-c1.5) grep --directories=recurse with no input operand, notes',
+             'pytest | grep --directories=recurse -m 1 x', 'allow-note'),
+            ('(gw-r10-c1.6) egrep -r with no input operand, notes',
+             'pytest | egrep -r -m 1 x', 'allow-note'),
+            ('(gw-r10-c1.7) fgrep -r with no input operand, notes',
+             'pytest | fgrep -r -q x', 'allow-note'),
+            ('(gw-r10-c1.8) grep -r on a named directory, allows',
+             'pytest | grep -r -m 1 x dir', 'allow'),
+            ('(gw-r10-c1.9) grep -r is never a deny-tier sink, notes',
+             'pytest | grep -r -q x', 'allow-note'),
+            ('(gw-r10-x1.1) a final -d on a grep with no input operand notes by the no-operand rule (x1.3 pins -d)',
+             'pytest | grep -r -m1 x -d', 'allow-note'),
+            ('(gw-r10-x1.2) a final --directories, no input operand: the no-operand rule notes (x1.4 pins it)',
+             'pytest | grep -r -m1 x --directories', 'allow-note'),
+            ('(gw-r10-x1.3) a final -d with no value after a named file, notes',
+             'pytest | grep -m 1 x file.txt -d', 'allow-note'),
+            ('(gw-r10-x1.4) a final --directories with no value after a named file, notes',
+             'pytest | grep -m 1 x file.txt --directories', 'allow-note'),
+            ('(gw-r10-x1.5) a final -d read after a named file, allows',
+             'pytest | grep -m 1 x file.txt -d read', 'allow'),
+            ('(gw-r10-x1.6) a final -e with no value after a named file, notes',
+             'pytest | grep -m 1 file.txt -e', 'allow-note'),
+            ("(gw-r10-c2.1) --directories=r, no input operand: the no-operand rule notes (c2.3 pins the value)",
+             'pytest | grep -r --directories=r -m 1 x', 'allow-note'),
+            ("(gw-r10-c2.2) attached -dr, no input operand: the no-operand rule notes (c2.4 pins the value)",
+             'pytest | grep -r -dr -m 1 x', 'allow-note'),
+            ("(gw-r10-c2.3) a rejected --directories=r value before a named file, notes",
+             'pytest | grep --directories=r -m 1 x file.txt', 'allow-note'),
+            ("(gw-r10-c2.4) a rejected attached -dr value before a named file, notes",
+             'pytest | grep -dr -m 1 x file.txt', 'allow-note'),
+            ("(gw-r10-c2.5) a rejected separated -d r value before a named file, notes",
+             'pytest | grep -d r -m 1 x file.txt', 'allow-note'),
+            ("(gw-r10-c2.6) a rejected separated --directories r value before a named file, notes",
+             'pytest | grep --directories r -m 1 x file.txt', 'allow-note'),
+            ("(gw-r10-c2.7) an empty --directories= value before a named file, notes",
+             'pytest | grep --directories= -m 1 x file.txt', 'allow-note'),
+            ("(gw-r10-c2.8) an accepted --directories=rec value before a named file, allows",
+             'pytest | grep --directories=rec -m 1 x file.txt', 'allow'),
+            ("(gw-r10-c2.9) an accepted attached -drea value before a named file, allows",
+             'pytest | grep -drea -m 1 x file.txt', 'allow'),
+            ("(gw-r10-c2.10) an accepted separated -d skip value before a named file, allows",
+             'pytest | grep -d skip -m 1 x file.txt', 'allow'),
+            ("(gw-r10-c3.1) egrep with a rejected -dr value before a named file, notes",
+             'pytest | egrep -dr -m 1 x file.txt', 'allow-note'),
+            ("(gw-r10-c3.2) fgrep with a rejected --directories=r value before a named file, notes",
+             'pytest | fgrep --directories=r -m 1 x file.txt', 'allow-note'),
+            ("(gw-r10-c3.3) rg -d is --max-depth, so its value is no directory mode, allows",
+             'pytest | rg -d 2 -m 1 x file.txt', 'allow'),
+            ("(gw-r10-c3.4) rg attached -d2 before a named file, allows",
+             'pytest | rg -d2 -m 1 x file.txt', 'allow'),
+            ('(gw-r10-c4.1) a path through the /dev/fd symlink stays a disclosed residual, allows',
+             'pytest | grep -m 1 x /dev/fd/../../self/fd/0', 'allow'),
+        ]
+        for _ct_label, _ct_cmd, _ct_want in _ct_r10:
+            gexpect(_ct_label, _ct_cmd, _ct_want)
+        # Round 12 (answers QA round 11): ugrep, which a grep word may run, reads a first operand '-' as its stdin
+        # and an operand before an -f/--file as the pattern, so a grep word notes in both shapes; the GNU-only
+        # readings that name an input file still allow; an option left without its value after a named file notes
+        # for cut too (r11-c: claude).
+        _ct_r11 = [
+            ('(gw-r11-c1.1) an operand before -f is the pattern under ugrep, so the stage reads its stdin, notes',
+             'pytest | grep -m 1 FAIL -f pats.txt', 'allow-note'),
+            ("(gw-r11-c1.2) a first operand '-' is the stdin under ugrep, notes",
+             'pytest | grep -q - FAIL', 'allow-note'),
+            ("(gw-r11-c1.3) a first operand '-' with -c, notes",
+             'pytest | grep -c - FAIL', 'allow-note'),
+            ('(gw-r11-c1.4) an operand before --file, notes',
+             'pytest | grep -m 1 FAIL --file pats.txt', 'allow-note'),
+            ('(gw-r11-c1.5) an operand before --file=, notes',
+             'pytest | grep -m 1 FAIL --file=pats.txt', 'allow-note'),
+            ('(gw-r11-c1.6) an operand before an -f in a cluster, notes',
+             'pytest | grep FAIL -cf pats.txt', 'allow-note'),
+            ('(gw-r11-c1.7) an operand before -f, then one naming the stdin (GNU grep reads it too), notes',
+             'pytest | grep -m 1 FAIL -f pats.txt /dev/stdin', 'allow-note'),
+            ("(gw-r11-c1.8) egrep with a first operand '-', notes",
+             'pytest | egrep -c - FAIL', 'allow-note'),
+            ('(gw-r11-c1.9) fgrep with an operand before -f, notes',
+             'pytest | fgrep -m 1 FAIL -f pats.txt', 'allow-note'),
+            ("(gw-r11-c1.10) a first operand '-' after '--', notes",
+             'pytest | grep -c -- - FAIL', 'allow-note'),
+            ('(gw-r11-c1.11) an operand between two -f options, notes conservatively',
+             'pytest | grep -m 1 -f a.txt FAIL -f b.txt', 'allow-note'),
+            ('(gw-r11-c1.12) an operand between two --file options, notes conservatively',
+             'pytest | grep -m 1 --file=a.txt FAIL --file b.txt', 'allow-note'),
+            ('(gw-r11-c2.1) an operand after -f is an input file under both greps, allows',
+             'pytest | grep -m 1 -f pats.txt FAIL', 'allow'),
+            ('(gw-r11-c2.2) an operand before -f, then a named file (the input under ugrep), allows',
+             'pytest | grep -m 1 FAIL -f pats.txt log.txt', 'allow'),
+            ("(gw-r11-c2.3) '-' as the -e pattern is no operand, allows",
+             'pytest | grep -c -e - log.txt', 'allow'),
+            ("(gw-r11-c2.4) a second operand '-' only, before a named file, still notes",
+             'pytest | grep -c FAIL - log.txt', 'allow-note'),
+            ('(gw-r11-c2.5) rg is not ugrep: an operand before -f is a path, allows',
+             'pytest | rg -m 1 FAIL -f pats.txt', 'allow'),
+            ("(gw-r11-c2.6) rg reads a first operand '-' as the pattern, allows",
+             'pytest | rg -c - FAIL', 'allow'),
+            ('(gw-r11-c2.7) an operand before -f, no limiting option, allows',
+             'pytest | grep FAIL -f pats.txt', 'allow'),
+            ('(gw-r11-c3.1) cut with a final -f after a named file, notes',
+             'pytest | cut log.txt -f', 'allow-note'),
+            ('(gw-r11-c3.2) cut with -f 1 after a named file, allows',
+             'pytest | cut log.txt -f 1', 'allow'),
+        ]
+        for _ct_label, _ct_cmd, _ct_want in _ct_r11:
+            gexpect(_ct_label, _ct_cmd, _ct_want)
+        # The deny message, the deny banner and each note text, pinned in full (or, for a sink, its whole clause from
+        # "piped into" to "The rule:"), so any change to a text fails here.
+        _r7_rule = (" The rule: no piping a check to a truncating sink. The sink can cut the lines that explain a "
+                    "failure, and by default a pipeline's exit status is that of its final stage, not the check's, so "
+                    "a failing check can read as a pass ('set -o pipefail' makes the pipeline fail when any stage "
+                    "fails, though not always with the check's own status, and the output is still cut). ")
+        _r7_fix = ("Run the check alone with its full output in a file at an absolute path and no pipe after it, for "
+                   "example `<command> > /abs/path/check.log 2>&1`, take the verdict from that command's own exit "
+                   "status, then read the file in a separate step.")
+        _r7_head = ("AIQT rule gatdis (gate-discipline): this 'pytest' command is on the hook's list of known "
+                    "verification runs, and its output is piped into ")
+        _r7_deny_texts = (
+            ("pytest | head -5",
+             _r7_head + "'head -5', which passes on only the first 5 lines of its input." + _r7_rule + _r7_fix),
+            ("pytest | head | false",
+             _r7_head + "'head', which passes on only the first 10 lines of its input." + _r7_rule + _r7_fix),
+            ("pytest | tee /var/tmp/x/l | tail -n 010",
+             _r7_head + "'tail -n 010', which passes on only the last 10 lines of its input." + _r7_rule
+             + "The tee stage writes '/var/tmp/x/l', but by default the pipeline's status is still not the check's. "
+             + _r7_fix),
+            ("pytest | uniq | tee /var/tmp/x/l | tail",
+             _r7_head + "'tail', which passes on only the last 10 lines of its input." + _r7_rule
+             + "The tee stage writes '/var/tmp/x/l', but only what passed the filter stages before it, and by "
+             "default the pipeline's status is still not the check's. " + _r7_fix),
+        )
+        for _r7_cmd, _r7_want in _r7_deny_texts:
+            _ct_code, _ct_out, _ = gwg(dict(hook_event_name="PreToolUse", tool_name="Bash",
+                                            tool_input=dict(command=_r7_cmd)))
+            _ct_reason = ((_ct_out or dict()).get("hookSpecificOutput") or dict()).get("permissionDecisionReason", "")
+            if _ct_reason != _r7_want:
+                failures.append("(gw-r7-msg1) the deny for {!r} must read exactly {!r}; got {!r}".format(
+                    _r7_cmd, _r7_want, _ct_reason))
+        _ct_code, _ct_out, _ = gwg(dict(hook_event_name="PreToolUse", tool_name="Bash",
+                                        tool_input=dict(command="pytest | head -5")))
+        _r7_banner = ("AIQT guardrail: denied a known verification run piped into a truncating sink (head -5) (rule "
+                      "gatdis); write the full output to a file and read it.")
+        if (_ct_out or dict()).get("systemMessage") != _r7_banner:
+            failures.append("(gw-r7-msg2) the deny banner must read exactly {!r}; got {!r}".format(
+                _r7_banner, (_ct_out or dict()).get("systemMessage")))
+        _r7_rgcfg = " (an rg configuration file named by RIPGREP_CONFIG_PATH can add an option that changes this, as "
+        for _r7_cmd, _r7_want in (
+                ("pytest | head", "'head', which passes on only the first 10 lines of its input."),
+                ("pytest | head -n 010", "'head -n 010', which passes on only the first 10 lines of its input."),
+                ("pytest | tail -n 0001", "'tail -n 0001', which passes on only the last line of its input."),
+                ("pytest | head --lines=3", "'head --lines=3', which passes on only the first 3 lines of its input."),
+                ("pytest | grep -m 007 x",
+                 "'grep -m 007', which passes on only the first 7 lines that match its pattern."),
+                ("pytest | grep -m 1 x", "'grep -m 1', which passes on only the first line that matches its pattern."),
+                ("pytest | egrep -q x", "'egrep -q', which prints nothing at all."),
+                ("pytest | grep -c x", "'grep -c', which prints only a count of the lines that match its pattern."),
+                ("pytest | grep -l x", "'grep -l', which prints only a name when a line matches its pattern."),
+                ("pytest | fgrep -L x", "'fgrep -L', which prints only a name when no line matches its pattern."),
+                ("pytest | rg -q x", "'rg -q', which normally prints nothing at all" + _r7_rgcfg + "--stats does)."),
+                ("pytest | rg -c x", "'rg -c', which normally prints only a count of the lines that match its "
+                                      "pattern" + _r7_rgcfg + "--stats or --invert-match does)."),
+                ("pytest | rg -l x", "'rg -l', which normally prints only a name when a line matches its pattern"
+                                      + _r7_rgcfg + "--stats or --invert-match does).")):
+            _ct_code, _ct_out, _ = gwg(dict(hook_event_name="PreToolUse", tool_name="Bash",
+                                            tool_input=dict(command=_r7_cmd)))
+            _ct_reason = ((_ct_out or dict()).get("hookSpecificOutput") or dict()).get("permissionDecisionReason", "")
+            if "piped into " + _r7_want + " The rule:" not in _ct_reason:
+                failures.append("(gw-r7-msg3) the deny for {!r} must say {!r}; got {!r}".format(
+                    _r7_cmd, _r7_want, _ct_reason))
+        _r7_advice = (" If the check gates this work, run it alone with its full output in a file at an absolute path "
+                      "and read the file, so its failure signal is not cut; if this is only an output glance, this is "
+                      "allowed.")
+        _r7_subst = ("AIQT guardrail (rule gatdis, gate-discipline): the text of this command appears to contain a "
+                     "command substitution whose first word looks like a check")
+        for _r7_cmd, _r7_want in (
+                ("echo '$(pytest) | tail'",
+                 _r7_subst + ", and appears to pipe into 'head' or 'tail'. The hook reads both from the raw text, "
+                 "where either may be quoted text, so it does not prove that the substitution runs, that the pipe "
+                 "exists, or that any output is dropped; this is a note, not a refusal." + _r7_advice),
+                ("echo x | sed 5q; echo `pytest`",
+                 _r7_subst + ", and the command has a pipe followed, later, by a stage that may pass on only part of "
+                 "what it reads ('sed program'). The hook reads the substitution from the raw text, where it may be "
+                 "quoted text, so it does not prove that the substitution runs, that this stage receives its output, "
+                 "or that the stage drops any of it; this is a note, not a refusal." + _r7_advice),
+                ("pytest | rg --color never -m 1 .",
+                 "AIQT guardrail (rule gatdis, gate-discipline): a command that looks like a check is followed by a "
+                 "pipe and, later in this command, by a stage that may pass on only part of what it reads ('rg -m'). "
+                 "The hook does not prove that this stage receives the check's output or that it drops any of it, so "
+                 "this is a note, not a refusal." + _r7_advice),
+                ("export PYTEST_ADDOPTS=--collect-only; pytest | head",
+                 "AIQT guardrail (rule gatdis, gate-discipline): 'pytest' looks like a verification gate and is piped "
+                 "into 'head', which may pass on only part of its output, and under default pipeline semantics a "
+                 "pipeline's exit status is that of its final stage, not the checker's. If it gates this work, run it "
+                 "bare (or redirect the output to a file and read that) so its failure signal is not discarded; if it "
+                 "is only a benign output glance, this is allowed.")):
+            _ct_code, _ct_out, _ = gwg(dict(hook_event_name="PreToolUse", tool_name="Bash",
+                                            tool_input=dict(command=_r7_cmd)))
+            if (_ct_out or dict()).get("systemMessage") != _r7_want:
+                failures.append("(gw-r7-msg4) the note for {!r} must read exactly {!r}; got {!r}".format(
+                    _r7_cmd, _r7_want, (_ct_out or dict()).get("systemMessage")))
+        # The deny message names an ABSOLUTE capture path (bash_absolute_paths denies a relative one), never
+        # suggests an exit-status echo trailer, and points a tee stage at its own file.
+        _ct_code, _ct_out, _ = gwg({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                     "tool_input": {"command": "pytest -q | tail -20"}})
+        _ct_reason = ((_ct_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+        if ("> /abs/path/check.log 2>&1" not in _ct_reason or "echo $?" in _ct_reason
+                or "no pipe after it" not in _ct_reason
+                or "take the verdict from that command's own exit status" not in _ct_reason
+                or "known verification runs" not in _ct_reason):
+            failures.append("(gw-ct-msg1) the deny reason must name the allow-listed shape, suggest an absolute "
+                            "capture path with no pipe after it, take the verdict from that command's own exit "
+                            "status, and suggest no exit-status echo; got {!r}".format(_ct_reason))
+        _ct_code, _ct_out, _ = gwg({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                     "tool_input": {"command": "pytest | tee /var/tmp/x/l | tail"}})
+        _ct_reason = ((_ct_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+        if ("The tee stage writes '/var/tmp/x/l'" not in _ct_reason or "> /abs/path/check.log 2>&1" not in _ct_reason
+                or "drop the" in _ct_reason or "full output already" in _ct_reason):
+            failures.append("(gw-ct-msg2) the tee variant must name the tee file and recommend the complete capture "
+                            "command, never dropping a stage; got {!r}".format(_ct_reason))
+        # A filter before the tee: the file is never called the full output (codex finding 6). Since round 5 the
+        # only filtering pass-through stages are tr and uniq; a plain cat filters nothing (gw-ct-msg8).
+        _ct_code, _ct_out, _ = gwg(dict(hook_event_name="PreToolUse", tool_name="Bash",
+                                        tool_input=dict(command="pytest | uniq | tee /var/tmp/x/l | tail")))
+        _ct_reason = ((_ct_out or dict()).get("hookSpecificOutput") or dict()).get("permissionDecisionReason", "")
+        if "only what passed the filter stages" not in _ct_reason or "full output already" in _ct_reason:
+            failures.append("(gw-ct-msg7) a filtered tee capture must not be called the full output; got {!r}"
+                            .format(_ct_reason))
+        _ct_code, _ct_out, _ = gwg(dict(hook_event_name="PreToolUse", tool_name="Bash",
+                                        tool_input=dict(command="pytest | cat | tee /var/tmp/x/l | tail")))
+        _ct_reason = ((_ct_out or dict()).get("hookSpecificOutput") or dict()).get("permissionDecisionReason", "")
+        if "The tee stage writes '/var/tmp/x/l'" not in _ct_reason or "only what passed" in _ct_reason:
+            failures.append("(gw-ct-msg8) a plain cat before the tee filters nothing; got {!r}".format(_ct_reason))
+        # A --no-verify deny keeps its own message when a verification sink precedes it (the deny tier is held
+        # until the segment loop ends), and a /dev/ tee is not a capture file the message may point at.
+        _ct_code, _ct_out, _ = gwg({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                     "tool_input": {"command": "pytest | tail; git commit -n -m x"}})
+        _ct_reason = ((_ct_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+        if "bypass of the verification hooks" not in _ct_reason:
+            failures.append("(gw-ct-msg5) a --no-verify deny must keep its own message; got {!r}".format(_ct_reason))
+        _ct_code, _ct_out, _ = gwg({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                     "tool_input": {"command": "pytest | tee /dev/null | tail"}})
+        _ct_reason = ((_ct_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+        if "> /abs/path/check.log 2>&1" not in _ct_reason or "The tee stage writes" in _ct_reason:
+            failures.append("(gw-ct-msg6) a /dev/ tee is not a capture file; got {!r}".format(_ct_reason))
+        # The suggested capture form itself passes bash_absolute_paths (the relative form it replaces denies).
+        _ct_abs = _decision(aiqt_hooks.bash_absolute_paths, "pytest -q > /var/tmp/x/check.log 2>&1", cwd="/tmp")
+        if _ct_abs != "allow":
+            failures.append("(gw-ct-msg3) the absolute capture form must pass bash_absolute_paths; got {}"
+                            .format(_ct_abs))
+        _ct_rel = _decision(aiqt_hooks.bash_absolute_paths, "pytest -q > check.log 2>&1", cwd="/tmp")
+        if _ct_rel != "deny":
+            failures.append("(gw-ct-msg4) the relative capture form is expected to deny under "
+                            "bash_absolute_paths; got {}".format(_ct_rel))
 
         # GD-124: this BEST-EFFORT, ASK-only guard scans every token after a recognized git commit
         # subcommand. The handler reads _lex_command's per-token opacity without Git option binding; it
@@ -7470,10 +11492,21 @@ def _main_isolated(monitor):
                 aiqt_hooks.HANDLER_EVENT.get("git_explicit_binding") != "PreToolUse"):
             failures.append("(eb-e22) git_explicit_binding handler/event wiring is missing or wrong")
 
+        # (pf-modes) PYTHON-FLOOR: the floor guard runs before HANDLER_EVENT exists, so it carries its own
+        # FLOOR_FAIL_OPEN_MODES literal; it must name exactly the handlers whose event is fail-open, or an
+        # older interpreter would block a Stop-type event (or wave a PreToolUse one through).
+        _pf_want = tuple(sorted(name for name, event in aiqt_hooks.HANDLER_EVENT.items()
+                                if event in aiqt_hooks.FAIL_OPEN_EVENTS))
+        if aiqt_hooks.FLOOR_FAIL_OPEN_MODES != _pf_want:
+            failures.append("(pf-modes) FLOOR_FAIL_OPEN_MODES {!r} differs from the fail-open handlers in "
+                            "HANDLER_EVENT {!r}".format(aiqt_hooks.FLOOR_FAIL_OPEN_MODES, _pf_want))
+
         _test_git_stash_ref(failures)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)
+        _test_stream_failure_exits(failures)
+        _test_stop_field_claim_check(failures, tmp)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
@@ -8029,6 +12062,32 @@ def _main_isolated(monitor):
         if not any(r.get("kind") == "wrtscp" and r.get("decision") == "allow"
                    and "companion-store" in r.get("detail", "") for r in cs_rows):
             failures.append("(ws-cs-audit) a companion-store ALLOW must emit a wrtscp allow guard-event row")
+        # A failed guard-events append changes no write-scope decision and is never silent: the companion-store
+        # write still allows, with a note naming the unwritten audit row, and an undeclared-repo write still
+        # denies, with the recording-failure warning in both its deny reason and its banner.
+        cs_saved_append = aiqt_hooks._orch_append_jsonl
+        try:
+            aiqt_hooks._orch_append_jsonl = lambda path, row: False
+            cs_note = aiqt_hooks.write_scope_guard({"hook_event_name": "PreToolUse", "tool_name": "Write",
+                                                    "tool_input": {"file_path": os.path.join(str(cs_store),
+                                                                                         "audit2.md")},
+                                                    "cwd": str(cs_sess)})
+            cs_deny = aiqt_hooks.write_scope_guard({"hook_event_name": "PreToolUse", "tool_name": "Write",
+                                                    "tool_input": {"file_path": os.path.join(str(cs_other),
+                                                                                         "z.md")},
+                                                    "cwd": str(cs_sess)})
+        finally:
+            aiqt_hooks._orch_append_jsonl = cs_saved_append
+        if _reduce_result(cs_note[0], cs_note[1]) != "allow-note" \
+                or "(wrtscp) could not be written" not in cs_note[1].get("systemMessage", ""):
+            failures.append("(ws-cs-audit-unwritten) a companion-store ALLOW whose audit row cannot be written "
+                            "must allow with a note naming it, got {!r}".format(cs_note))
+        cs_deny_hso = (cs_deny[1] or {}).get("hookSpecificOutput") or {}
+        if _reduce_result(cs_deny[0], cs_deny[1]) != "deny" \
+                or "(wrtscp) could not be written" not in cs_deny_hso.get("permissionDecisionReason", "") \
+                or "(wrtscp) could not be written" not in cs_deny[1].get("systemMessage", ""):
+            failures.append("(ws-deny-unrecorded) a write-scope DENY whose guard-events row cannot be written must "
+                            "still deny, warning in its reason and banner, got {!r}".format(cs_deny))
         # Classifier discrimination: the matcher matches only the declared root, never an undeclared repo.
         _cs_stores = aiqt_hooks._wrtscp_companion_stores(aiqt_hooks._recovery_toplevel(str(cs_sess)))
         if aiqt_hooks._wrtscp_target_companion_store(
@@ -8049,8 +12108,13 @@ def _main_isolated(monitor):
             _cs_probe_link = cs_sess / ".aiqt" / "_symlink_probe"
             os.symlink(str(cs_store), str(_cs_probe_link))
             _cs_probe_link.unlink()
-        except OSError:
+        except OSError as _cs_exc:
             _cs_can_symlink = False
+            # R11 (DECIDED item 5): the finding-2 freeze-ordering assertions need symlinks; a
+            # silent skip could ship an ordering regression behind a green run on such a platform.
+            failures.append("(ws-cs-symlink-cov) cannot create symlinks on this platform ({}): the "
+                            "finding-2 freeze-before-companion assertions are UNCOVERED, recorded "
+                            "as a failure rather than skipped".format(_cs_exc))
         if _cs_can_symlink:
             # (a) A frozen-FLOOR entry that symlinks INTO the declared store. A covered Write to it resolves
             # OUT into the store, yet the floor freeze DENIES it (not a companion allow).
@@ -8204,7 +12268,8 @@ def _main_isolated(monitor):
             elif _got.startswith("unexpected") or _got == "explicit-allow":
                 failures.append("(noask-gensrc-shape-{}-{!r}) gensrc_guard returned an unrecognized decision "
                                 "shape: {}".format(_tool, _fp, _got))
-    # orch PreToolUse guards must not ask either (inert-probe legs, kept for shape coverage).
+    # orch PreToolUse guards must not ask either (shape-coverage legs: the truncation guard now DENIES a
+    # nonexistent cwd fail-closed rather than treating it as out of scope; either way it must not ask).
     for _og, _od in ((aiqt_hooks.orch_truncation_guard,
                       {"hook_event_name": "PreToolUse", "tool_name": "Bash",
                        "tool_input": {"command": "sleep 1 &"}, "cwd": "/nonexistent-noask-probe"}),
@@ -8221,8 +12286,9 @@ def _main_isolated(monitor):
                             "decision shape: {}".format(getattr(_og, "__name__", _og), _got))
 
     # ROUND-2 FINDING 18: exercise the orchestration PreToolUse guards on REAL triggering inputs (a real git
-    # repo + a version-1 orchestration registry), not only the inert /nonexistent probe (root None -> early
-    # allow). This ADDS orch_yield_tool (previously unexercised by this invariant, so a restored ask path
+    # repo + a version-1 orchestration registry), not only the /nonexistent probe (which never reaches the
+    # registry: the yield guard allows it as having no root, the truncation guard denies it pre-scope).
+    # This ADDS orch_yield_tool (previously unexercised by this invariant, so a restored ask path
     # there passed both suites) and drives orch_truncation on a REAL detach. Each must NOT return 'ask', and
     # the decision must GENUINELY RUN (a real deny), so a restored ask path - however its constructor is
     # named - is caught by behaviour, not by the evadable _ask-attribute check above.
@@ -8326,11 +12392,14 @@ def _main_isolated(monitor):
 
     # (note-shape) every note is built inside the declared constructor set, (an-coverage) every
     # `return <constructor>(...)` site in the hook source ran at least once above, and
-    # (label-unique) no case label names two cases.
+    # (label-unique) no case label names two cases, and (stop-field-claim) a bounded regression check:
+    # no hook prose carries one of the absence phrasings about stop_hook_active (or the loop bound) that
+    # this repository carried.
     failures.extend(_note_constructor_shape_failures())
     failures.extend(_note_site_coverage_failures(monitor))
     failures.extend(_ask_label_failures())
     failures.extend(_duplicate_label_failures())
+    failures.extend(_stop_field_claim_failures())
 
     if failures:
         print("SELF-TEST FAIL:")
@@ -8351,11 +12420,15 @@ def _main_isolated(monitor):
           "command (finding 11). prsunc "
           "(git_discard) recovers-then-allows: a recoverable discard is snapshotted then ALLOWED with a "
           "recovery-pointer note, a confirmed whole-tree clobber on a dirty tree DENIES (with a snapshot "
-          "when one could be made), and it DENIES-and-educates only when a warranted recovery snapshot "
+          "when one could be made), and it DENIES-and-educates when a warranted recovery snapshot "
           "cannot be created (a forced snapshot failure, an over-cap or bad-path snapshot, a temp dir "
-          "inside the repo, a ref collision, an embedded-NUL or no-session cwd) or the command cannot be "
-          "classified/resolved (an inline -c alias, an unrecognized flagged subcommand such as "
-          "checkout-index or read-tree --reset, an unresolvable worktree); a provably-clean tree ALLOWS "
+          "inside the repo, a ref collision, an embedded-NUL or no-session cwd), when the command cannot "
+          "be classified/resolved (an inline -c alias, an unrecognized flagged subcommand such as "
+          "checkout-index or read-tree --reset, an unresolvable worktree), and when a non-pristine "
+          "in-scope command falls outside the D-423-NARROW closed allowlist grammar (a wrapper, "
+          "interpreter, eval, xargs, subshell or brace group reaching a git word; an unlisted global, "
+          "-c key, leading assignment or subcommand; an unhonoured cd; or any raw-flagged unparseable "
+          "command, which the fallback now denies outright with no snapshot); a provably-clean tree ALLOWS "
           "with no snapshot; an ambient GIT_*/redirect view-override snapshot-then-allows on a dirty cwd "
           "and ALLOWS on a clean one (nothing to snapshot); stash/branch are not snapshottable and "
           "allow-with-note. prtbrn/artbr1 (protected_line) DENIES a force-push or protected-branch "
@@ -8373,9 +12446,11 @@ def _main_isolated(monitor):
           "unclassifiable form and DENIES), and ALLOWS-WITH-NOTE only a redirect whose worktree it cannot pin "
           "(a --git-dir/GIT_DIR/-c form or an opaque -C/--work-tree) (finding 12); a rooted creation and "
           "non-creation commands ALLOW. "
-          "gatdis (gate_weakening) DENIES a --no-verify bypass and ALLOWS-WITH-NOTE a checker-shaped segment "
-          "whose failure is swallowed (|| true) or truncated (| head/tail) - the heuristic is too broad to "
-          "deny (finding 14). sectvl "
+          "gatdis (gate_weakening) DENIES a --no-verify bypass and a known verification run whose output reaches "
+          "a truncating sink on its allow-list (head or tail with one positive line count, grep -m N/-q/-c/-l/-L, "
+          "rg -q/-c/-l; cut, any other spelling and a sed or awk program only note), and "
+          "ALLOWS-WITH-NOTE every other checker-shaped segment whose failure is swallowed (|| true) or "
+          "truncated (| head/tail) - the broad heuristic is too broad to deny (finding 14). sectvl "
           "(commit_msg_subst) DENIES-and-educates a backtick or $( command substitution in a git commit "
           "argument (re-issue single-quoted, in ANSI-C $'...' quoting, escaped, or via -F <file>); a "
           "literal marker inside single-quoted or ANSI-C $'...' quoting is NOT a substitution and ALLOWS "

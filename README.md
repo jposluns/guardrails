@@ -18,6 +18,11 @@ The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
   setup doctor, and the enforcement controls that catch a violation as it happens arrive with the 1.1.0
   developer release - in development.
 
+## Requirements
+
+The pack's tools and hooks require Python 3.14 or newer. Using AIQT in a chat assistant needs no
+Python.
+
 ## What is inside
 
 - **The standard**: a full set of clear, single-behaviour rules across the four AIQT facets, plus a security

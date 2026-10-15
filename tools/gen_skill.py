@@ -57,6 +57,20 @@ repository mid-run, or a file moved onto this run's temporary name during the ru
   gen_skill.py --check    fail (exit 1) on drift; exit 2 on a malformed source or an unknown corpus-id
   gen_skill.py --self-test  prove the gate fails on drift, an unknown id, an orphan output, a bad target
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: gen_skill.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import errno
 import hashlib
 import io
@@ -64,14 +78,21 @@ import json
 import os
 import re
 import stat
-import sys
 import zipfile
 from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: gen_skill.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    import os
+    try:
+        sys.stderr.write(
+            "error: gen_skill.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, reconcile  # noqa: E402
@@ -836,10 +857,17 @@ def plugin_identity(root, root_fd=None):
     path = root.joinpath(*IDENTITY_MANIFEST_PARTS)
     try:
         data = tomllib.loads(_read_input(root_fd, root, IDENTITY_MANIFEST_PARTS))
-    except RecursionError as exc:
-        # tomllib raises RecursionError (a RuntimeError, not a ValueError) on a deeply nested array or inline
-        # table; map it into the ValueError family build_outputs surfaces as exit 2
-        # (F-TOML-BARE-VALUEERROR-CLASS).
+    except (ValueError, RecursionError, MemoryError) as exc:
+        # A ValueError (a TOMLDecodeError or an over-long integer literal) is already the family
+        # build_outputs surfaces as exit 2 and passes unchanged. tomllib raises RecursionError (a RuntimeError)
+        # on a deeply nested array or inline table and, from CPython 3.14.8, on a key of more than 1000 dotted
+        # parts, and MemoryError on a many-part key under a memory limit; map each into that family
+        # (F-TOML-BARE-VALUEERROR-CLASS). A MemoryError is named as the resource failure it is, never as
+        # nesting.
+        if isinstance(exc, ValueError):
+            raise
+        if isinstance(exc, MemoryError):
+            raise ValueError("{}: out of memory parsing TOML ({})".format(path, exc)) from exc
         raise ValueError("{}: TOML nesting is too deep to parse ({})".format(path, exc)) from exc
     plugin = data.get("plugin") if isinstance(data, dict) else None
     name = plugin.get("author-name") if isinstance(plugin, dict) else None
@@ -1269,25 +1297,58 @@ def self_test_main():
         return 2
     try:
         # 1. Well-formed source renders and round-trips clean.
-        # 0. F-TOML-BARE-VALUEERROR-CLASS: a 1200-deep nested array in the identity manifest makes tomllib
-        #    raise RecursionError (a RuntimeError, not a ValueError); plugin_identity must map it into the
-        #    ValueError family run_gen surfaces as exit 2. The recursion limit is pinned to the CPython
-        #    default 1000 (test-hermeticity) and restored in finally.
+        # 0. F-TOML-BARE-VALUEERROR-CLASS: a parser overflow in the identity manifest makes tomllib raise
+        #    RecursionError (a RuntimeError, not a ValueError); plugin_identity must map it into the ValueError
+        #    family run_gen surfaces as exit 2, carrying the overflow.
+        #    The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked,
+        #    otherwise valid input) rather than provoked by a deeply nested body: the depth at which tomllib
+        #    overflows is an interpreter limit, so a fixed body overflows under one recursion limit and parses
+        #    (or trips an unrelated refusal) under another.
         deep = tmp / "deep-identity"
         deep.joinpath(*IDENTITY_MANIFEST_PARTS[:-1]).mkdir(parents=True)
-        deep.joinpath(*IDENTITY_MANIFEST_PARTS).write_text("[plugin]\ndeep = " + "[" * 1200 + "]" * 1200 + "\n",
+        deep.joinpath(*IDENTITY_MANIFEST_PARTS).write_text("[plugin]\ndeep = 1  # injected-overflow\n",
                                                            encoding="utf-8")
-        prev_reclimit = sys.getrecursionlimit()
-        sys.setrecursionlimit(1000)
+        real_loads, real_load = tomllib.loads, tomllib.load
+
+        def overflowing_loads(text, **kwargs):
+            if "injected-overflow" in text:
+                raise RecursionError("injected parser overflow")
+            return real_loads(text, **kwargs)
+
+        tomllib.loads = overflowing_loads
+        tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
         try:
             plugin_identity(deep)
-            failures.append("a deeply nested identity manifest must fail closed (ValueError -> exit 2)")
-        except ValueError:
-            pass
+            failures.append("an identity manifest parser overflow must fail closed (ValueError -> exit 2)")
+        except ValueError as exc:
+            if "TOML nesting is too deep to parse (injected parser overflow)" not in str(exc):
+                failures.append("an identity manifest parser overflow failed without its finding ({})".format(exc))
         except RecursionError:
-            failures.append("a deeply nested identity manifest let a bare RecursionError escape plugin_identity")
+            failures.append("an identity manifest parser overflow let a bare RecursionError escape plugin_identity")
         finally:
-            sys.setrecursionlimit(prev_reclimit)
+            tomllib.loads, tomllib.load = real_loads, real_load
+
+        # F-TOML-BARE-VALUEERROR-CLASS, memory leg: an injected MemoryError at the parse maps into the same
+        # ValueError family but is named as a memory failure, never as nesting.
+        def oom_loads(text, **kwargs):
+            if "injected-overflow" in text:
+                raise MemoryError("injected memory exhaustion")
+            return real_loads(text, **kwargs)
+
+        tomllib.loads = oom_loads
+        tomllib.load = lambda fp, **kwargs: oom_loads(fp.read().decode("utf-8"), **kwargs)
+        try:
+            plugin_identity(deep)
+            failures.append("an identity manifest memory failure must fail closed (ValueError -> exit 2)")
+        except ValueError as exc:
+            if "out of memory parsing TOML (injected memory exhaustion)" not in str(exc):
+                failures.append(
+                    "an identity manifest memory failure must be named a memory failure, not nesting "
+                    "({})".format(exc))
+        except MemoryError:
+            failures.append("an identity manifest memory failure let a bare MemoryError escape plugin_identity")
+        finally:
+            tomllib.loads, tomllib.load = real_loads, real_load
 
         good = tmp / "good"
         good.mkdir()

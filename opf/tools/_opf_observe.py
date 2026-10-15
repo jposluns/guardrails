@@ -35,11 +35,16 @@ Stdlib only (`subprocess`, `tomllib`, `shutil`); imports `_opf_check` (for the p
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: _opf_observe.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: _opf_observe.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import os
 import shutil
@@ -824,7 +829,7 @@ def _show_toml(git, store_root, prefix, relpath, disp, notes):
         data = tomllib.loads(out.out.decode("utf-8"))
     # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply nested
     # array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError, RecursionError, MemoryError) as exc:
         notes.append("prior: {} at HEAD is not valid TOML ({}); the prior committed snapshot is "
                      "omitted".format(disp, exc))
         return None
@@ -1040,17 +1045,30 @@ def self_test_isolated():
         if not cond:
             failures.append(name)
 
-    # F-TOML-BARE-VALUEERROR-CLASS: a committed prior TOML carrying a 1200-deep nested array (tomllib raises
-    # RecursionError, not a ValueError) or an over-long integer literal (a BARE ValueError) is OMITTED with a
-    # note, never an escape. _run_git is substituted for the one call so the case needs no repository; the
-    # digit and recursion limits are pinned to the CPython defaults (test-hermeticity); both restored.
+    # F-TOML-BARE-VALUEERROR-CLASS: a committed prior TOML whose parse overflows (tomllib raises RecursionError,
+    # not a ValueError) or carrying an over-long integer literal (a BARE ValueError) is OMITTED with a note
+    # naming the parse failure, never an escape. _run_git is substituted for the one call so the case needs no
+    # repository; the digit limit is pinned to the CPython default (test-hermeticity); both restored.
+    # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked, otherwise valid
+    # input) rather than provoked by a deeply nested body: the depth at which tomllib overflows is an
+    # interpreter limit, so a fixed body overflows under one recursion limit and parses (or trips an unrelated
+    # refusal) under another.
     _saved_run_git = globals()["_run_git"]
-    _prev_digits, _prev_reclimit = sys.get_int_max_str_digits(), sys.getrecursionlimit()
+    _prev_digits = sys.get_int_max_str_digits()
     sys.set_int_max_str_digits(4300)
-    sys.setrecursionlimit(1000)
+    real_loads, real_load = tomllib.loads, tomllib.load
+
+    def overflowing_loads(text, **kwargs):
+        if "injected-overflow" in text:
+            raise RecursionError("injected parser overflow")
+        return real_loads(text, **kwargs)
+
+    tomllib.loads = overflowing_loads
+    tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
     try:
-        for tc_label, tc_body in (("deep-nesting", "deep = " + "[" * 1200 + "]" * 1200 + "\n"),
-                                  ("over-long-int", "big = " + "9" * 4400 + "\n")):
+        for tc_label, tc_body, tc_needle in (("parser-overflow", "deep = 1  # injected-overflow\n",
+                                              "not valid TOML (injected parser overflow)"),
+                                             ("over-long-int", "big = " + "9" * 4400 + "\n", "not valid TOML")):
             globals()["_run_git"] = lambda *_a, _b=tc_body, **_k: _GitOutcome(True, 0, _b.encode("utf-8"), "")
             tc_notes = []
             try:
@@ -1058,10 +1076,10 @@ def self_test_isolated():
             except (ValueError, RecursionError) as exc:
                 tc_got = "escaped " + type(exc).__name__
             check("toml-class/{}-omitted-with-note".format(tc_label),
-                  tc_got is None and any("not valid TOML" in n for n in tc_notes))
+                  tc_got is None and any(tc_needle in n for n in tc_notes))
     finally:
         globals()["_run_git"] = _saved_run_git
-        sys.setrecursionlimit(_prev_reclimit)
+        tomllib.loads, tomllib.load = real_loads, real_load
         sys.set_int_max_str_digits(_prev_digits)
 
     machine_rel = "{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)

@@ -14,7 +14,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   git_explicit_binding PreToolUse expbnd allow+note an ambient git target or broad scope before relocation/publish
   git_discard         PreToolUse  prsunc  allow / snapshot-then-allow / deny a git command that discards work
   branch_root         PreToolUse  brnrot  deny branch creation from an orphaned or unprovable start point
-  gate_weakening      PreToolUse  gatdis  deny a git hook bypass; deny a swallowed or truncated checker
+  gate_weakening      PreToolUse  gatdis  deny a git hook bypass and a verification run piped into a truncating sink; allow+note another swallowed or truncated checker
   commit_msg_subst    PreToolUse  sectvl  deny shell substitution in a git commit argument
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
   gensrc_guard        PreToolUse  gensrc  a Write/Edit/MultiEdit that hand-edits a registered generated artefact
@@ -25,7 +25,9 @@ as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
 "permissionDecisionReason": "..."}}; an allow decision is expressed as NO output (exit 0 silent), so
 the user's own permission flow is never bypassed, and a deny decision blocks the tool. exit 2 is a
 blocking error whose stderr is fed back to Claude. The Stop payload carries the final assistant text
-as last_assistant_message (there is NO stop_hook_active field in the current Stop payload).
+as last_assistant_message. The reference also documents a stop_hook_active field in the Stop input,
+true when Claude Code is already continuing as a result of a stop hook; in this file only _orch_build_ctx
+reads it.
 
 NO-ASK POSTURE (maintainer directive): these hooks NEVER return permissionDecision "ask". An unattended
 orchestrator must never stall waiting on a human, so there is no ask constructor at all and every decision
@@ -106,7 +108,7 @@ lexical scan never sees. An UNPARSEABLE command
 takes the recover-then-allow/deny resolution above (never a silent pass). WITHIN scope (a recognized lossy
 verb: checkout/switch/restore/reset/clean/stash/
 rm/branch) that resolution applies unless the command is a PRISTINE SINGLE BARE 'git <verb>' invocation AND
-the tree is provably clean (or the leading opt-out is set, or the form is genuinely non-destructive), in
+the tree is provably clean (or the form is genuinely non-destructive), in
 which case it ALLOWS. PRISTINE
 SINGLE BARE means, PURELY LEXICALLY (the bash grammar is never parsed): after optional leading KEY=value
 assignments the command is exactly 'git <args>' as ONE simple command, and the RAW string carries NO shell
@@ -128,8 +130,8 @@ entry (only an ignored '!!' entry counts as clean). A pristine bare whole-tree c
 checkout -f, switch --force/--discard-changes) on a probed-dirty tree DENIES; everything else in scope ASKS.
 No recognized lossy verb that would discard WORKING-TREE CONTENT is silently ALLOWED except a pristine bare
 'git <verb>' whose FORM is genuinely non-destructive (checkout -b, reset --soft, clean -n, which ALLOW even
-on a dirty tree), or on a provably-clean tree, or a pristine bare form carrying the leading
-GUARDRAIL_ALLOW_DISCARD=1 opt-out - worst case it ASKS, at the cost of more asks. This guarantee is bounded to
+on a dirty tree), or on a provably-clean tree - worst case it ASKS, at the cost of more asks. No in-band
+override exists (the operator channel is hook configuration). This guarantee is bounded to
 working-tree content: ref-level moves (reset --soft moving HEAD, a merged-branch delete) are reflog-
 recoverable, and the obfuscation/config residuals below are best-effort, not categorical. The HONEST RESIDUAL a lexical hook cannot catch: a git alias or shell
 function renaming git; deliberate token fragmentation or obfuscation of the COMMAND WORD 'git' ITSELF or of
@@ -150,9 +152,10 @@ read-only and offline; it never mutates the repo.
 Stop layer is a DELIBERATE exception, non-blocking by design (GD-24 tri-family QA, 2026-08-17,
 flagged for Architect review): it SURFACES a diff wall with a strong systemMessage and exits 0 (WARN),
 it does NOT hard-block. The wall has already rendered by Stop time, so blocking cannot unsend it; and
-because there is no stop_hook_active field and no documented built-in loop bound, a hard exit-2 Stop
-block could re-fire on the forced continuation and wedge the session. The hard PREVENTION for console
-diffs lives in the PreToolUse diff_source layer at the command source; the Stop layer only surfaces.
+because this layer keeps no loop bound of its own and does not read the stop_hook_active field of the
+Stop input, a hard exit-2 Stop block could re-fire on the forced continuation and wedge the session. The
+hard PREVENTION for console diffs lives in the PreToolUse diff_source layer at the command source; the
+Stop layer only surfaces.
 
 This is enforced at the DISPATCHER, not left to the handler alone: main() reads each handler's event
 class from HANDLER_EVENT (the argv mode, never the payload, which may be unreadable) and, for a
@@ -163,13 +166,82 @@ DELIBERATE decision where the platform documents exit 2 as the block (the orches
 manufactured wind-down that way, doc-confirmed 2026-08-29, bounded by its own loop bound so it cannot wedge
 the chain). Outside that deliberate deny, only a PreToolUse handler fails closed via exit 2, and only a
 genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on a bad invocation.
+
+These exits, and the floor guard's on an older interpreter that can start this file, hold even when a
+standard stream cannot be written or flushed (a closed descriptor, a full
+device, a broken pipe). Every stderr diagnostic goes through _stderr_note (write, then flush, every failure
+swallowed), every stdout emission is written and flushed inside a guard whose failure path keeps the MODE's
+posture (a fail-open mode returns 0 with its warning or note lost; a fail-closed mode returns 2, because an
+emission that never provably reached the platform may have been a deny, so a lost decision blocks rather
+than allows), and the entry line leaves through os._exit, which skips the interpreter-exit flush of the std
+streams. Before this hardening, a failing stderr write on a fail-closed path, or the interpreter-exit flush
+of a stream that had buffered one, ended the run with the interpreter's own status (1 or 120), which the
+platform treats as NON-blocking, so a PreToolUse fail-closed path let the call through unchecked; and a deny
+decision whose stdout write failed exited 0, which allows. The floor guard above carries the same
+write-flush-os._exit shape inline, since it runs before any helper exists.
+The PYTHON-FLOOR comment below gives the floor guard's exits and the exit of an interpreter that cannot
+start this file, which fails first with Python's own exit.
 """
+import sys
+
+# PYTHON-FLOOR guard (the hook form of tools/check_python_floor.py). It runs before HANDLER_EVENT exists, so
+# it carries its own literal of the fail-open modes, which selftest_aiqt_hooks.py holds equal to the
+# HANDLER_EVENT entries whose event is in FAIL_OPEN_EVENTS. On an older interpreter that can start this file
+# such a mode WARNS on exit 0 and never blocks (a Stop block here would re-fire with no cap); every other
+# mode, PreToolUse and an unknown mode alike, fails closed with exit 2, as main() does on its own error paths.
+# Both forms' exits hold under the output condition the module docstring states.
+# An older interpreter that cannot start this file never reaches the guard and fails with Python's own error
+# first, and that exit has the event's normal meaning: one that accepts -I but cannot compile this file
+# (Python 3.4 and 3.5 cannot: it uses underscores in numeric literals, and 3.4 also rejects its starred items
+# in list displays) stops with a SyntaxError and exits 1, a non-blocking error, so a PreToolUse call goes
+# ahead unchecked; one that predates the -I option every hook entry passes exits 2 on every event the plugin
+# hooks.json registers. That denies each PreToolUse call a registered matcher selects; blocks every
+# UserPromptSubmit prompt, which FAIL_OPEN_EVENTS below says an error must never do; blocks every Stop, with
+# no cap as above, and every TeammateIdle, the two FAIL_OPEN_EVENTS this file names exit 2 as the block for;
+# on PostToolUse its tool has already run but the recorder records nothing; and SessionStart cannot block at
+# all.
+# The guard's stderr refusal and its stdout warning are best-effort writes, each wrapped and flushed
+# so a stream failure cannot change the exit: with stderr unavailable (a closed descriptor 2 leaves
+# sys.stderr None) the deny path still exits 2 and a fail-open mode still exits 0, rather than
+# exiting 1 as an escaping write error once did, which on PreToolUse would let the call through
+# unchecked. Both paths exit through os._exit, which skips the interpreter-exit flush of the std
+# streams: with a sys.stderr whose write works but whose flush fails, `raise SystemExit` here ended
+# as the interpreter's own exit 120 instead of the refusal exit. Nothing runs before this guard, so
+# os._exit discards no other buffered output; the warning itself is flushed before the exit.
+FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_prompt_stamp", "orch_resume_audit",
+                         "orch_stop_guard", "orch_teammate_idle")
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    _floor_refusal = (
+        "error: aiqt_hooks.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    try:
+        sys.stderr.write(_floor_refusal)
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    if len(sys.argv) > 1 and sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
+        try:
+            import json
+            sys.stdout.write(json.dumps(dict(systemMessage=(
+                "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
+                "(non-blocking by design on this event)." % (sys.argv[1], _floor_refusal.strip())))) + "\n")
+            sys.stdout.flush()
+        except BaseException:
+            pass
+        os._exit(0)
+    os._exit(2)
+
 import collections
 import datetime
+import fnmatch
 import json
 import math
 import os
 import pathlib
+import posixpath
 import re
 import selectors
 import shlex
@@ -177,7 +249,6 @@ import signal
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
 import time
 
@@ -196,7 +267,7 @@ FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSub
 #
 # NOTE_CONSTRUCTORS is the declared set of note constructors and DENY_CONSTRUCTORS the declared set of
 # deny constructors (_deny, whose block result also carries a banner, and every helper that returns a
-# deny constructor's call). Only the single-return leaf constructors (_allow_note, _stop_warn,
+# deny constructor's call). Only the single-return leaf constructors (_allow_note, _context_note, _stop_warn,
 # _dispatcher_fail_open_warn and _deny) spell the {"systemMessage": ...} key; every other declared
 # constructor reaches a result only by returning another constructor's call. The hooks self-test
 # (tools/selftest_aiqt_hooks.py, _note_constructor_shape_failures) checks these shapes: a leaf builds its
@@ -217,14 +288,15 @@ FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSub
 # does not model (a note key assembled at run time, a lookup through getattr or globals(), or a patched
 # json.dumps, print or sys.stdout, for example) is outside it.
 NOTE_CONSTRUCTORS = (
-    "_allow_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
+    "_allow_note", "_context_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
     "_discard_recovery_result", "_expbnd_breadth_ask", "_expbnd_fallback", "_expbnd_target_ask",
-    "_gate_weakening_fallback", "_gensrc_fail_ask", "_git_discard_fallback", "_stash_drop_clear_outcome",
+    "_gate_weakening_fallback", "_gensrc_fail_ask", "_stash_drop_clear_outcome",
     "_orch_stop_family")
 DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
-    "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_protected_line_fallback",
+    "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_git_discard_fallback",
+    "_protected_line_fallback",
     "_wrtscp_deny")
 
 def _allow():
@@ -234,7 +306,8 @@ def _allow():
 
 
 def _deny(reason, banner):
-    """A PreToolUse block: permissionDecision deny on exit 0, honoured by the platform."""
+    """A PreToolUse block: permissionDecision deny on exit 0, honoured by the platform, under the output
+    condition the module docstring states."""
     return (0, {"hookSpecificOutput": {"hookEventName": PRETOOL,
                                        "permissionDecision": "deny",
                                        "permissionDecisionReason": reason},
@@ -252,6 +325,14 @@ def _allow_note(message):
     discard is snapshotted then allowed with this note. There is no ask constructor: the module cannot emit
     permissionDecision "ask" from any path."""
     return (0, {"systemMessage": message}, None)
+
+
+def _context_note(event, context, message):
+    """A clean pass that adds model context (hookSpecificOutput.additionalContext, for an event such as
+    UserPromptSubmit) and ALSO surfaces an informational systemMessage to the operator, who does not see that
+    context. Like _allow_note it carries no permissionDecision and never blocks."""
+    return (0, {"hookSpecificOutput": {"hookEventName": event, "additionalContext": context},
+                "systemMessage": message}, None)
 
 
 def _stop_warn(banner):
@@ -707,38 +788,6 @@ def _skip_heredoc_bodies(command, i, n, heredocs):
     return i
 
 
-def _strip_quoted_heredoc_bodies(command):
-    """ROUND-2 FINDING 17. Return `command` with the BODIES of QUOTED heredocs (<<'EOF'/<<"EOF"/<<\\EOF)
-    removed, so a RAW (regex) scan that runs unconditionally - e.g. git_discard's _raw_has_lossy_git - does
-    not match shell syntax quoted inside heredoc prose. Everything OUTSIDE the quoted-heredoc bodies is
-    preserved verbatim (a real 'git reset --hard <<'EOF'...' still scans as lossy). UNQUOTED heredoc bodies
-    interpolate and stay in scope. Best-effort and conservative: on any ambiguity the text is left in place
-    (the raw scan then over-matches, the safe direction), and multiple heredocs stacked on one line beyond
-    the first are a disclosed over-match residual, never an under-match."""
-    n = len(command)
-    out = []
-    i = 0
-    while i < n:
-        lt = command.find("<<", i)
-        if lt < 0:
-            out.append(command[i:])
-            break
-        parsed = _parse_heredoc_delim(command, lt + 2, n)
-        if parsed is None or not parsed[0]:
-            out.append(command[i:lt + 2])   # not a quoted heredoc: keep the '<<' and continue past it
-            i = lt + 2
-            continue
-        _q, delim, strip_tabs, next_i = parsed
-        nl = command.find("\n", next_i)
-        if nl < 0:
-            out.append(command[i:next_i])    # the opening line has no body yet (no newline): keep, done
-            i = next_i
-            continue
-        out.append(command[i:nl + 1])        # keep through the opening line's newline
-        i = _skip_heredoc_bodies(command, nl + 1, n, [(delim, strip_tabs)])  # drop the body region
-    return "".join(out)
-
-
 def _lex_command(command, partial=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
@@ -1125,8 +1174,9 @@ def detect_diff_wall(text):
 def diff_wall_stop(data):
     """cnsdif (trust/no-console-diff-dumps), Stop: SURFACE (non-blocking WARN) a final response that is
     a raw diff wall. This layer never blocks; see the module docstring's design note (the wall has
-    already rendered, and a hard Stop block could wedge the session with no documented loop bound). It
-    surfaces via systemMessage on exit 0; the PreToolUse diff_source layer is the hard prevention."""
+    already rendered, and because this layer keeps no loop bound of its own and does not read the
+    documented stop_hook_active field of the Stop input, a hard Stop block could wedge the session).
+    It surfaces via systemMessage on exit 0; the PreToolUse diff_source layer is the hard prevention."""
     if data.get("hook_event_name") not in STOP_EVENTS:
         # Even a mis-wired event only WARNS here: the diff-wall Stop layer is warn-only end to end (the
         # orchestration stop guard, a separate Stop handler, is the one that deliberately denies via exit
@@ -2249,15 +2299,14 @@ def bash_absolute_paths(data):
 # recoverable, else deny-and-educate". For a command that names any recognized lossy git verb (checkout incl
 # -B force-create, switch incl -C/--force-create, restore/reset/clean/stash drop-clear/rm/branch force
 # delete/move/copy/reset) the outcome is ASK(->recover-then-allow/deny) unless the command is a PRISTINE
-# SINGLE BARE 'git <verb>' invocation on a PROVABLY CLEAN tree (or, for that same pristine form, the LEADING
-# opt-out is set). Three outcomes:
+# SINGLE BARE 'git <verb>' invocation on a PROVABLY CLEAN tree. Three outcomes:
 #   ALLOW  exit 0 silent  - the true boundary (a non-git command, no recognized lossy verb, an
 #                           unparseable command with no lossy verb keyword); OR a PRISTINE SINGLE BARE
 #                           'git <verb>' whose FORM is genuinely non-destructive (a bare no-op, reset
 #                           --soft, an unforced branch-create, clean -n, stash push, branch -d); OR a
 #                           PRISTINE SINGLE BARE lossy 'git <verb>' on a PROVABLY CLEAN tree (the config-
 #                           forced porcelain probe reports no tracked change AND no untracked entry), so
-#                           there is nothing to discard; OR the LEADING opt-out on that same pristine form.
+#                           there is nothing to discard.
 #   DENY   permissionDecision deny - a PRISTINE SINGLE BARE WHOLE-TREE-clobbering verb (reset --hard,
 #                           checkout -f with no pathspec, switch --force/--discard-changes) on a tree the
 #                           probe confirms is dirty: the loss is certain.
@@ -2293,23 +2342,42 @@ def bash_absolute_paths(data):
 # Bash tool, or persistent shell/config state set in a prior turn; the recovery/snapshot layer backstops a
 # discard it CAN see, but cannot snapshot content the probe itself cannot see (assume-unchanged/skip-worktree
 # marks or submodule.<name>.ignore hide work from the probe) nor ignored files (git add --all excludes them).
-# An explicit GUARDRAIL_ALLOW_DISCARD truthy assignment LEADING a pristine bare git command opts out to ALLOW.
-# The value capture is `(.*)` (matches an EMPTY value, `GUARDRAIL_ALLOW_DISCARD=`), consulted with fullmatch, so
-# an exact leading assignment with an empty value updates the last-wins value to '' (bash: effective empty =
-# falsy), and `GUARDRAIL_ALLOW_DISCARD=1 GUARDRAIL_ALLOW_DISCARD= git ...` does NOT opt out (the empty final
-# assignment wins). A `(.+)` capture would ignore the empty final assignment and wrongly honour the earlier 1.
-_DISCARD_OPTOUT_RE = re.compile(r"^GUARDRAIL_ALLOW_DISCARD=(.*)$")
-_DISCARD_FALSY = frozenset(("", "0", "false", "no", "off"))  # value (case-insensitive) that is NOT truthy
-# Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct). We cannot
-# segment safely, so scan the RAW string for git AND a recognized work-losing verb: any of the
-# always-lossy verbs, or 'branch' in ANY form. On the raw path we do NOT parse branch flags: an unparseable
-# 'git branch -d -f topic <heredoc>' / '-df' / '--del --for' cannot be told from a create or a list, so ANY
-# raw 'git' + 'branch' is treated as lossy and ASKS regardless of a delete flag. This over-asks a benign
-# unparseable 'git branch --list' (rare, safe) and ends the raw-branch silent-allow gap.
-# A hit -> ASK (cannot prove safe); no hit -> ALLOW (the true boundary). Mirrors how diff_source/
-# commit_identity fall back to a conservative raw scan on a parse failure. The opt-out is NOT consulted on
-# this path: the guard cannot parse the command, so it cannot trust an opt-out-looking prefix inside it; an
-# unparseable in-scope command ALWAYS ASKS. The opt-out is honoured ONLY on a PARSEABLE pristine bare command.
+# REMOVED OVERRIDE: a leading GUARDRAIL_ALLOW_DISCARD assignment once short-circuited a pristine bare git
+# command to an unsnapshotted ALLOW. The guarded actor could type it into the very command under guard, so it
+# could not carry the operator-only authority it claimed; it is removed, no in-band override exists, and the
+# operator channel is hook configuration. The assignment is now an ordinary leading env assignment, and no
+# code reads its value to permit anything: only _segment_dir_simple (benign, it redirects nothing) and
+# _removed_prefix_note (reason text only) read the name. When the command without it already names a
+# recognized work-losing git verb and the prefixed command is pristine (it parses and _SHELL_META_RE finds
+# nothing in the raw string), the pristine path decides from the token list plus the raw-scan flag raw_lossy,
+# which the bare command already set (it names a work-losing verb), so the prefixed command gets the
+# decision of the command without it. Outside that bound the value is raw text the raw scans read: a
+# metacharacter, even quoted, makes the command non-pristine; an unbalanced quote makes it unparseable
+# (the fallback then denies every raw-flagged command); and _raw_has_lossy_git matches a lossy keyword
+# inside it, so the decision can differ from the bare one. Neither the non-pristine path nor the fallback
+# reads the name, so there it gets what FOO=<the same value> gets. The pattern accepts
+# both '=' and '+=' and a value spanning newlines (re.DOTALL, used with fullmatch), the token shapes
+# _ENV_ASSIGN_RE treats as a leading assignment; the value capture lets the migration note below see an
+# empty final assignment (bash last-wins) and fold a '+=' append.
+_REMOVED_DISCARD_PREFIX_RE = re.compile(r"GUARDRAIL_ALLOW_DISCARD(\+?)=(.*)", re.DOTALL)
+# MIGRATION (this release only; the next release deletes this sentence, _removed_prefix_note and its
+# self-test vectors rmo-4 and rmo-7; the git_discard residue records the same sunset): every reason the pristine path emits for a command whose leading
+# GUARDRAIL_ALLOW_DISCARD is truthy gains this sentence, so a stale runbook learns the route.
+_REMOVED_DISCARD_PREFIX_NOTE = (
+    " NOTE: the GUARDRAIL_ALLOW_DISCARD prefix no longer overrides this guard (it was removed because the "
+    "guarded assistant could set it itself); for an intentional discard, run 'git stash' (add -u for "
+    "untracked files) and then the discard.")
+# Raw-string probes used when the shared tokenizer cannot parse the command (an unbalanced quote or an
+# unsupported construct) and by the in-scope gate. We cannot segment safely, so scan the RAW string for
+# git AND a recognized work-losing verb: any of the always-lossy verbs, or 'branch' in ANY form. On the
+# raw path we do NOT parse branch flags: an unparseable 'git branch -d -f topic <heredoc>' / '-df' /
+# '--del --for' cannot be told from a create or a list, so ANY raw 'git' + 'branch' is treated as lossy
+# regardless of a delete flag. A hit on an unparseable command -> DENY (D-423-NARROW: the guard cannot
+# prove it safe and cannot establish a snapshot basis); no hit -> ALLOW (the true boundary). This
+# over-denies a benign unparseable 'git branch --list' (rare, safe), a disclosed fallback cost. No
+# override exists on this path (or any other): an unparseable in-scope command DENIES whatever prefix it
+# carries, and the removed-prefix migration note is not emitted here (the guard cannot parse the
+# command's leading assignments).
 _RAW_GIT_RE = re.compile(r"(?i)\bgit\b")
 _RAW_LOSSY_VERB_RE = re.compile(r"(?i)\b(?:checkout|switch|restore|reset|clean|rm|stash)\b")
 _RAW_BRANCH_RE = re.compile(r"(?i)\bbranch\b")
@@ -2332,50 +2400,27 @@ _SHELL_RESERVED_WORDS = frozenset((
     "if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done",
     "case", "esac", "function", "select", "in", "[[", "]]", "{", "}"))
 # The safe alternatives named in every DENY/ASK reason, so the actor is never left without a next step.
-# The opt-out guidance is PATH-AWARE and appended by the caller. The opt-out is honoured on the command AS
-# ISSUED whenever a leading GUARDRAIL_ALLOW_DISCARD=1 prefix short-circuits to ALLOW: on a pristine bare
-# command the leading prefix opts THIS command out (_OPTOUT_PRISTINE), and because that short-circuit fires
-# BEFORE the repository-view-redirect gate, a pristine repository-view-redirected form (a 'git -C <dir>
-# <verb>' or an ambient-GIT_* form that ASKS at that gate) is ALSO opted out by prefixing the command as
-# issued, keeping its -C (_OPTOUT_PRISTINE too). Only on a raw/unparseable or non-pristine command, where no
-# pristine bare form is present to carry the prefix, is the opt-out NOT honoured on the command as issued, so
-# the actor is told to RE-ISSUE the discard as a parseable pristine bare form carrying the prefix
-# (_OPTOUT_REISSUE).
 _DISCARD_ALTS = (
     "Safe alternatives: commit or 'git stash' your work first; scope the revert with an explicit "
     "'-- <paths>'; unstage without touching the worktree via 'git restore --staged' or 'git rm "
     "--cached'; change branch with 'git switch' (it carries non-conflicting changes and aborts rather than "
     "overwrite them).")
-# Opt-out guidance for a PRISTINE bare form, where the leading prefix opts THIS command out.
-_OPTOUT_PRISTINE = (
-    " Or, for a known-safe discard, prefix this command with GUARDRAIL_ALLOW_DISCARD=1 to override this "
-    "guard.")
-# Opt-out guidance for a raw/unparseable or non-pristine form, where the opt-out is NOT honoured on the
-# command as issued: re-issue it as a parseable pristine bare 'git <verb>' with the leading prefix. A
-# repository-view-redirected form does NOT use this: it is pristine-lexically, so its leading prefix opts it
-# out on the command as issued (_OPTOUT_PRISTINE, keeping its -C), short-circuiting before the redirect gate.
-_OPTOUT_REISSUE = (
-    " For a known-safe discard, re-issue it as a parseable pristine bare 'git <verb>' command carrying a "
-    "leading GUARDRAIL_ALLOW_DISCARD=1 prefix; the opt-out is honoured only on that pristine bare form, not "
-    "on the command as issued here.")
 
 
-def _segment_has_optout(tokens):
-    """True when THIS segment carries a truthy GUARDRAIL_ALLOW_DISCARD as a LEADING env-assignment (the
-    documented 'GUARDRAIL_ALLOW_DISCARD=1 git ...' prefix on the git command itself). Only the leading
-    assignment region (the tokens before this segment's command word) is inspected, so the same string
-    buried in an argument does NOT count. The caller consults this ONLY on a segment whose command word is
-    git (GD-41 blocker 4), so an opt-out leading a NON-git command ('GUARDRAIL_ALLOW_DISCARD=1 true; git
-    reset --hard') never disables the guard on the later git command. A value in {'', '0', 'false', 'no',
-    'off'} (case-insensitive) is NOT truthy. When the leading region repeats the assignment, bash last-wins
-    applies: only the LAST GUARDRAIL_ALLOW_DISCARD assignment's value is evaluated (=1 then =0 does NOT opt
-    out)."""
+def _removed_prefix_note(tokens):
+    """MIGRATION (this release only): _REMOVED_DISCARD_PREFIX_NOTE when THIS pristine git segment's leading
+    assignment region carries a truthy final GUARDRAIL_ALLOW_DISCARD value (bash last-wins; an empty value or
+    0, false, no or off, case-insensitive, is not truthy; a '+=' appends to the value an earlier assignment
+    in the same region set), else the empty string. It adds reason text only and changes no decision."""
     last = None
     for tok in tokens[:_command_word_index(tokens)]:
-        m = _DISCARD_OPTOUT_RE.fullmatch(tok)
+        m = _REMOVED_DISCARD_PREFIX_RE.fullmatch(tok)
         if m:
-            last = m.group(1)  # bash last-wins: keep the LAST leading assignment's value, evaluate only it
-    return last is not None and last.lower() not in _DISCARD_FALSY
+            # bash last-wins: keep the LAST leading assignment's value; '+=' appends to it
+            last = ((last or "") + m.group(2)) if m.group(1) else m.group(2)
+    if last is None or last.lower() in ("", "0", "false", "no", "off"):
+        return ""
+    return _REMOVED_DISCARD_PREFIX_NOTE
 
 
 def _raw_has_lossy_git(command):
@@ -3148,7 +3193,9 @@ def _checkout_role(args):
     merge option stays allow. The new-branch NAME of '-b'/'-B' is consumed as that option's ARGUMENT (attached '-bfoo' or
     separated '-b foo') and is NOT char-scanned as force flags, so '-bfoo'/'-bBranch' ALLOW and are never
     mis-read as carrying -f/-B (F-85; see _checkout_switch_parse_options). '-p'/'--patch' (prefix-matched)
-    interactively discards worktree hunks -> scoped. A forced
+    interactively discards worktree hunks -> scoped (R11 DECIDED item 4: git_discard DENIES every
+    -p/--patch spelling through _discard_patch_token before this role is consulted; the scoped
+    role remains the in-scope marker for the clean-parse lossy scan). A forced
     checkout that carries a BARE OPERAND ('checkout -f <operand>') is lexically ambiguous - the operand may
     be a branch (a whole-tree switch) OR a pathspec (a scoped path-restore), and it is no longer
     disambiguated by a rev-parse probe - so it is treated as -> scoped (which ASKS on a not-provably-clean
@@ -3435,29 +3482,12 @@ def _discard_role(sub, args):
 
 # --- outcome text ------------------------------------------------------------------------------------
 
-def _discard_ask_reason(kind, detail, optout=None):
-    """The (reason, banner) pair for an ASK. Stored by the handler and carried into the no-ask decision
-    the role dispatch determines (deny, allow-with-note, or snapshot-then-allow), so a confirmed loss
-    still wins over a recoverable discard; the "ASK" here is historical shorthand per the module's
-    READING KEY FOR "ASK"/"ASKS", not a live outcome. `optout` selects the PATH-AWARE
-    opt-out guidance folded into the reason and the banner: _OPTOUT_PRISTINE (the default) on a pristine
-    bare command, INCLUDING a pristine repository-view-redirected form (its leading GUARDRAIL_ALLOW_DISCARD=1
-    prefix opts THIS command out, short-circuiting even the redirect gate), or _OPTOUT_REISSUE on a
-    raw/unparseable or non-pristine command where no pristine bare form is present, so the opt-out is honoured
-    only on a re-issued pristine bare form, never on the command as issued."""
-    if optout is None:
-        optout = _OPTOUT_PRISTINE
-    reason = ("AIQT rule prsunc (preserve-uncommitted-work): {} {}. Confirm before proceeding, or commit "
-              "or stash your work first. {}{}".format(kind, detail, _DISCARD_ALTS, optout))
-    if optout is _OPTOUT_REISSUE:
-        banner = ("AIQT guardrail: {} - confirm this discard, or re-issue it as a parseable pristine bare "
-                  "'git <verb>' command carrying a leading GUARDRAIL_ALLOW_DISCARD=1 prefix to skip this "
-                  "prompt (the opt-out is not honoured on the command as issued) (rule prsunc)."
-                  .format(kind))
-    else:
-        banner = ("AIQT guardrail: {} - confirm this discard, or prefix GUARDRAIL_ALLOW_DISCARD=1 to skip "
-                  "this prompt (rule prsunc).".format(kind))
-    return (reason, banner)
+def _discard_ask_reason(kind, detail):
+    """The reason for an ASK, carried into the no-ask decision the role dispatch determines (here the deny
+    of _discard_recovery_result when no recovery snapshot could be made); the "ASK" here is historical
+    shorthand per the module's READING KEY FOR "ASK"/"ASKS", not a live outcome."""
+    return ("AIQT rule prsunc (preserve-uncommitted-work): {} {}. Confirm before proceeding, or commit "
+            "or stash your work first. {}".format(kind, detail, _DISCARD_ALTS))
 
 
 def _discard_deny(kind, recovery=""):
@@ -3467,10 +3497,10 @@ def _discard_deny(kind, recovery=""):
     appended to the reason as given (see _deny_with_recovery), so no caller edits a built deny result."""
     reason = ("AIQT rule prsunc (preserve-uncommitted-work): {} would overwrite the working tree, which "
               "currently holds uncommitted or untracked changes the command could destroy, discarding any "
-              "fix you have applied but not yet committed. {}{}"
-              .format(kind, _DISCARD_ALTS, _OPTOUT_PRISTINE)) + recovery
-    banner = ("AIQT guardrail: blocked a git command that would discard uncommitted work (rule prsunc). "
-              "Prefix GUARDRAIL_ALLOW_DISCARD=1 to override.")
+              "fix you have applied but not yet committed. {}"
+              .format(kind, _DISCARD_ALTS)) + recovery
+    banner = ("AIQT guardrail: blocked a git command that would discard uncommitted work (rule prsunc); "
+              "commit or stash first, then retry.")
     return _deny(reason, banner)
 
 
@@ -3538,7 +3568,8 @@ def _ambient_repo_view_override():
 
 def _segment_dir_simple(tokens):
     """True when a git segment names its worktree simply enough that the session dir IS the worktree the
-    command acts on: no leading env-assignment other than the opt-out (a GIT_DIR/GIT_WORK_TREE could
+    command acts on: no leading env-assignment other than the removed GUARDRAIL_ALLOW_DISCARD prefix ('=' or
+    '+=', any value), which redirects nothing (any other, such as a GIT_DIR/GIT_WORK_TREE, could
     redirect it), and no global option before the subcommand (a -C/--git-dir/--work-tree/-c, possibly
     abbreviated or attached, could redirect the worktree or change config). Anything else -> not simple ->
     the handler ASKS rather than trust a clean probe in the session dir. This is the coarse replacement
@@ -3546,8 +3577,8 @@ def _segment_dir_simple(tokens):
     repeatedly fooled into probing a clean dir and silently allowing - F-62/F-64/F-66)."""
     cw_idx = _command_word_index(tokens)
     for tok in tokens[:cw_idx]:
-        if _DISCARD_OPTOUT_RE.match(tok):
-            continue  # the opt-out assignment is benign and is handled separately
+        if _REMOVED_DISCARD_PREFIX_RE.fullmatch(tok):
+            continue  # the removed override's assignment is benign: it redirects nothing
         return False  # some other leading env-assignment: it may redirect the worktree or config
     i = cw_idx + 1  # the token after the 'git' command word
     if i < len(tokens) and tokens[i].startswith("-"):
@@ -3638,8 +3669,8 @@ def _segment_repo_dir(tokens, cwd):
                     redirect is present with NO -C, the session cwd (git discovers the repo from cwd; the
                     --work-tree only moves the worktree). Callers snapshot/probe THIS dir, never --work-tree.
       - None      : no dir-relocating redirect this helper resolves: a bare command, or one carrying only
-                    --git-dir/GIT_DIR (which names the repo directly, not a discoverable dir), -c, or a
-                    non-opt-out env assignment. The caller keeps its own conservative cannot-pin handling.
+                    --git-dir/GIT_DIR (which names the repo directly, not a discoverable dir), -c, or
+                    another leading env assignment. The caller keeps its own conservative cannot-pin handling.
       - "opaque"  : a -C redirect is present but unresolvable (value-less, or relative with no cwd to anchor).
     A --git-dir/GIT_DIR redirect returns None (the repo is named directly, left to the caller's cannot-pin
     path); a combined --git-dir + -C still returns None here, so the caller's --git-dir handling governs."""
@@ -3757,90 +3788,33 @@ def _worktree_within_repo(wt_dir, repo_probe):
     return w == t or w.startswith(t + os.sep)
 
 
-# ROUND-6 FINDING 4. Raw indicators, on the UNPARSEABLE fallback path only, that a lossy git command's
-# target is NOT the session cwd but a redirected worktree/repository the guard cannot resolve (it could not
-# even parse the command): a `git -C <dir>`, a --git-dir/--work-tree redirect, a leading/ambient
-# GIT_DIR=/GIT_WORK_TREE= assignment, or a cd/pushd in the chain. When any is present the session-cwd
-# cleanliness/snapshot basis is UNSOUND (a clean session cwd does not prove the redirected target clean, and
-# a session snapshot would not capture it), so the fallback DENIES-and-educates rather than allow on that
-# basis. Conservative and over-matching (a keyword in prose over-denies, the safe direction), mirroring the
-# other raw fallbacks; it is consulted only after _raw_has_lossy_git has already flagged the command in scope.
-_RAW_DISCARD_REDIRECT_RE = re.compile(
-    r"(?i)(?:^|[\s'\";&|()])(?:cd|pushd)(?=$|[\s'\";&|()])"
-    r"|(?:^|[\s'\";&|()])-C(?=[\s'\"=]|$)"
-    r"|--git-dir\b|--work-tree\b"
-    r"|(?:^|[\s'\";&|()])GIT_DIR="
-    r"|(?:^|[\s'\";&|()])GIT_WORK_TREE=")
-
-
-def _git_discard_fallback(command, cwd=None):
-    """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): we cannot
-    segment safely, so scan the RAW string. The opt-out is NOT consulted here: the guard cannot parse the
-    command, so it cannot soundly trust an opt-out-looking prefix inside it (a quoted-falsy `="0"`, an
-    interspersed `OTHER=x`, an opt-out on a DIFFERENT command `...=1 true; git`, a captured-truthy `0;` all
-    read as opt-outs to a raw scan), so an unparseable in-scope command ALWAYS ASKS regardless of any leading
-    opt-out-looking prefix. The opt-out is honoured ONLY on a PARSEABLE pristine bare command (see
-    _segment_has_optout). If git is present AND a recognized work-losing verb keyword is present (an
-    always-lossy verb, or 'branch' in any form) -> ASK (cannot prove safe); otherwise ALLOW (the true
-    boundary). Documented best-effort: a genuinely clean but unparseable command that merely mentions a lossy
-    verb keyword may ASK.
-
-    Class C: an unparseable command reaching an ASK is a NON-PRISTINE discard, so it gets the SAME
-    best-effort SESSION-CWD snapshot the non-pristine path takes (base resolvable + tree not provably
-    clean) BEFORE returning the ASK, so a discard that is asked-then-approved is still recoverable. Without
-    it, `git reset --hard <<'EOF'\\n'\\nEOF` (Bash-valid, a tokenizer ValueError) reached ASK with NO recovery
-    ref. The snapshot is decision-INDEPENDENT and best-effort against the session repo only (the verb is
-    unparseable, so the ledger label is a generic 'discard'); on snapshot fail the decision stays ASK with
-    the failure surfaced."""
+def _git_discard_fallback(command):
+    """D-423-NARROW fail-closed fallback when the shared tokenizer cannot parse the command (an unbalanced
+    quote or an unsupported construct): the closed allowlist grammar cannot be applied to a command that
+    cannot be segmented, so the ONLY allow is the true boundary - the raw scan, run on the FULL raw
+    command (ROUND 8: heredoc bodies are no longer stripped on this path; stripping removed text, so
+    it could only hide a real discard and widen acceptance, and the round-7 stripper did exactly that
+    on nested heredoc data), finds no git plus work-losing verb keyword. EVERYTHING that raw scan
+    flags is DENIED-and-educated, read-only commands included (the raw scan cannot tell a real discard
+    from prose or a read-only form), and NO session snapshot or stash preservation is attempted first:
+    a sound snapshot basis cannot be established for a command whose verb and target are unreadable, and
+    the removed best-effort session snapshot-then-allow let an unparseable discard run against a
+    redirected target the session snapshot does not contain. This fallback cost - every unparseable
+    command the raw scan flags is denied, read-only ones included - is disclosed in the manifest
+    residue. No override exists on this path (or any other): an unparseable in-scope command DENIES
+    whatever leading prefix it carries."""
     if not _raw_has_lossy_git(command):
-        return _allow()  # no git, or no recognized work-losing verb: the true boundary
-    if _RAW_DISCARD_REDIRECT_RE.search(command):
-        # ROUND-6 FINDING 4: the unparseable command carries a target redirect (a -C/--git-dir/--work-tree,
-        # a leading/ambient GIT_DIR=/GIT_WORK_TREE=, or a cd/pushd), so its discard target is NOT provably the
-        # session cwd. A clean session cwd cannot prove the redirected target clean and a session snapshot
-        # would not capture it, so it must NOT allow on that basis: DENY-and-educate. Re-issue it as a plain,
-        # parseable 'git <verb>' command run FROM the target repository, or commit or stash first.
-        return _deny(
-            "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell "
-            "lexer and it names a git work-losing verb together with a target redirect (a -C/--git-dir/"
-            "--work-tree, a GIT_DIR=/GIT_WORK_TREE= assignment, or a cd/pushd), so its discard targets a "
-            "worktree or repository this guard cannot resolve; a clean session directory does not prove that "
-            "target clean and a session snapshot would not capture it, so this discard could be "
-            "unrecoverable and is denied rather than run. Re-issue it as a plain, parseable 'git <verb>' "
-            "command from the target repository, or commit or stash your work first. {}".format(_DISCARD_ALTS),
-            "AIQT guardrail: denied an unparseable git discard carrying a target redirect this guard cannot "
-            "resolve to snapshot (rule prsunc); run it from the target repo, or commit or stash first.")
-    base = cwd if isinstance(cwd, str) and cwd else None
-    snap = None
-    if base is not None and _tree_is_clean(base) is not True:  # dirty or probe-uncertain: snapshot first
-        snap = _record_recovery(base, "discard")
-    # SNAPSHOT-THEN-ALLOW: a recoverable discard proceeds once its recovery point exists (hooks never ask).
-    if snap is not None and snap[0] == "ok":
-        return _allow_note(
-            "AIQT guardrail (rule prsunc, preserve-uncommitted-work): the command could not be parsed by the "
-            "shell lexer and it names a git work-losing verb this guard cannot prove safe. A pre-command "
-            "recovery snapshot was saved, so it is allowed. {}".format(_recovery_pointer(snap[1])))
-    if snap is not None and snap[0] == "fail":
-        # A warranted recovery point could NOT be created: an unrecoverable discard denies-and-educates.
-        return _deny(
-            "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell "
-            "lexer and it names a git work-losing verb on a tree that is not provably clean, and no "
-            "pre-command recovery snapshot could be created ({}), so this discard would be unrecoverable; "
-            "denied. Commit or stash your work first, then retry. {}".format(snap[1], _DISCARD_ALTS),
-            "AIQT guardrail: denied an unparseable, unrecoverable git discard (rule prsunc); commit or stash "
-            "first, then retry.")
-    if base is None:
-        # No session cwd, so no recovery snapshot could even be attempted for this unparseable lossy command.
-        return _deny(
-            "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell "
-            "lexer and it names a git work-losing verb, but no session working directory is available to "
-            "take a recovery snapshot, so this discard would be unrecoverable; denied. Re-issue it as a "
-            "parseable bare 'git <verb>' command from the target repository (a leading "
-            "GUARDRAIL_ALLOW_DISCARD=1 prefix then opts out), or commit or stash your work first. {}"
-            .format(_DISCARD_ALTS),
-            "AIQT guardrail: denied an unparseable git discard with no recoverable snapshot (rule prsunc).")
-    # base is set and the tree is provably clean: nothing to discard.
-    return _allow()
+        return _allow()  # no git + work-losing verb anywhere in the raw text: the true boundary
+    return _deny(
+        "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell lexer "
+        "(an unbalanced quote or an unsupported construct) and its raw text names git together with a "
+        "work-losing verb keyword, so this guard cannot establish what it would run or where; under the "
+        "closed allowlist grammar every such unparseable flagged command is denied, read-only ones "
+        "included (the raw scan cannot tell them apart), and no recovery snapshot is attempted (no sound "
+        "snapshot basis exists for an unreadable command). Re-issue it as a plain, parseable 'git <verb>' "
+        "command from the target repository, or commit or stash your work first. {}".format(_DISCARD_ALTS),
+        "AIQT guardrail: denied an unparseable command naming a git work-losing verb (rule prsunc); "
+        "re-issue it as a plain, parseable git command, or commit or stash first.")
 
 
 def _pristine_single_bare_git(command, segments):
@@ -3853,7 +3827,7 @@ def _pristine_single_bare_git(command, segments):
         redirect), and every command/process substitution ($( ), backtick, <( ), >( ));
       * no shell RESERVED-WORD token (if/then/for/while/case/[[/{/... a compound-command keyword);
       * exactly ONE operator-free command segment (guaranteed once no metacharacter is present, asserted);
-      * after optional leading KEY=value env/opt-out assignments, the sole command word is LITERALLY 'git'
+      * after optional leading KEY=value env assignments, the sole command word is LITERALLY 'git'
         (not a path like /usr/bin/git, and not a wrapper such as sudo/env/sh -c/... whose word is not 'git').
     Anything else - a compound, a wrapper/redirect/reserved-word, or a command word that is not literally
     'git' - returns None so the guard ASKS rather than trust the clean probe on a command it cannot read
@@ -3867,7 +3841,7 @@ def _pristine_single_bare_git(command, segments):
     tokens = populated[0][0]
     if any(t in _SHELL_RESERVED_WORDS for t in tokens):
         return None  # a shell reserved word: not a bare git invocation -> ASK
-    idx = _command_word_index(tokens)  # skip leading KEY=value assignments (incl. the opt-out)
+    idx = _command_word_index(tokens)  # skip leading KEY=value assignments
     if idx >= len(tokens) or tokens[idx] != "git":
         return None  # a wrapper, a pathed git, or no command word: not a bare 'git' -> ASK
     return tokens
@@ -4311,7 +4285,9 @@ def _record_stash_recovery(repo):
     """ROUND-2 FINDING 6. Preserve every stash entry under DURABLE refs/aiqt-recovery/ refs before a
     'git stash drop' / 'git stash clear', which is NOT reflog-recoverable after the fact (drop/clear delete
     the stash reflog entry, leaving the stash commit unreachable and GC-eligible). Returns:
-      - ('none', None)  : the repo has NO stash entries, so a drop/clear loses nothing (allow).
+      - ('none', None)  : CONFIRMED absence (the presence probe exited 1 with no output and no error
+                          text), so a drop/clear loses nothing (allow); a failed or malformed probe is
+                          NEVER read as 'none' - it returns ('fail') instead (round-4 codex finding 3).
       - ('ok', info)    : every stash entry was preserved under a durable ref; info = {refs, count}.
       - ('fail', reason): the repo/entries could not be enumerated, or a durable ref could not be written.
     Reads the stash reflog and writes only private refs (no working state) through the scrubbed _recovery_git
@@ -4322,18 +4298,33 @@ def _record_stash_recovery(repo):
         top = _recovery_toplevel(repo)
         if not top:
             return ("fail", "the repository toplevel could not be resolved (a bare or broken git dir)")
-        # `stash list` over the reflog: one line per entry. An absent refs/stash yields an empty list (no
-        # stashes), a genuine 'none'. A non-zero return is a fault -> fail (never a false 'none').
+        # The presence probe: `rev-parse --verify -q refs/stash`. CONFIRMED ABSENCE is exactly rc 1 with
+        # EMPTY stdout and EMPTY stderr (the -q contract for a missing ref): only that silent miss is a
+        # genuine 'none'. EVERY other outcome - rc 128, an I/O or ownership diagnostic, or rc 0 with no
+        # object id - is a FAILED or MALFORMED observation, not evidence of absence, so it is a
+        # preservation FAILURE (the caller denies) rather than a false 'none' that would let a drop/clear
+        # destroy a real stash unpreserved (PR #423 round-4, codex finding 3).
         verify = _recovery_git(repo, ["rev-parse", "--verify", "-q", "refs/stash"], timeout=5)
-        if verify.returncode != 0 or not verify.stdout.strip():
-            return ("none", None)                     # no stash ref at all: nothing to preserve
+        # codex round-5 MEDIUM: compare the ORIGINAL streams, TYPED, with the empty string.
+        _vout = verify.stdout
+        _verr = verify.stderr
+        if verify.returncode == 1 and _vout == "" and _verr == "":
+            return ("none", None)
+        if verify.returncode != 0 or not isinstance(_vout, str) or not _vout.strip():
+            return ("fail", "the stash presence probe failed (rc={}{}), so the stash entries could not be "
+                            "confirmed absent or preserved".format(
+                                verify.returncode,
+                                ": " + _verr.strip() if isinstance(_verr, str) and _verr.strip() else ""))
         listing = _recovery_git(repo, ["reflog", "show", "--no-abbrev", "--format=%H", "refs/stash"],
                                 timeout=10)
         if listing.returncode != 0:
             return ("fail", "the stash reflog could not be enumerated (rc={})".format(listing.returncode))
         shas = [ln.strip() for ln in listing.stdout.splitlines() if ln.strip()]
         if not shas:
-            return ("none", None)
+            # refs/stash was just verified to EXIST, so an empty reflog listing is a malformed observation
+            # (at least the top entry exists and would be lost): a preservation failure, never 'none'.
+            return ("fail", "refs/stash exists but its reflog listed no entries, so the stash entries "
+                            "could not be enumerated for preservation")
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         refs = []
         for idx, sha in enumerate(shas):
@@ -4349,39 +4340,43 @@ def _record_stash_recovery(repo):
     return ("ok", {"refs": refs, "count": len(refs)})
 
 
-def _discard_recovery_result(kind, detail, snap, optout=None):
+def _discard_recovery_result(kind, detail, snap, note=""):
     """The SNAPSHOT-THEN-ALLOW outcome for a recoverable-destructive discard (hooks never ask). snap is
     ('ok', info) (a recovery snapshot was saved), ('fail', reason) (a warranted snapshot could NOT be made),
     or None (no snapshot warranted: a ref-level move or a stash/branch asset a working-tree snapshot cannot
-    hold, which is typically reflog-recoverable). On 'ok' or None the discard is ALLOWED with an
+    hold; a ref/branch move is typically reflog-recoverable, while a resolved stash drop/clear is preserved
+    under durable refs by the caller first, or denied). On 'ok' or None the discard is ALLOWED with an
     informational note; on 'fail' the discard would be unrecoverable, so it is DENIED-and-educated (commit or
-    stash first). `optout` selects the path-aware opt-out guidance folded into the deny wording only (an
-    allow needs none)."""
+    stash first). `note` (the removed-prefix migration sentence, or empty) ends the reason or note."""
     if snap is not None and snap[0] == "fail":
-        reason, _banner = _discard_ask_reason(kind, detail, optout)
         return _deny(
-            reason + " NOTE: no pre-command recovery snapshot could be created ({}), so this discard would "
-                     "be unrecoverable; it is denied rather than run. Commit or stash your work first, then "
-                     "retry.".format(snap[1]),
+            _discard_ask_reason(kind, detail)
+            + " NOTE: no pre-command recovery snapshot could be created ({}), so this discard would "
+              "be unrecoverable; it is denied rather than run. Commit or stash your work first, then "
+              "retry.".format(snap[1]) + note,
             "AIQT guardrail: denied an unrecoverable git discard - no recovery snapshot could be created "
             "(rule prsunc); commit or stash first, then retry.")
     if snap is not None and snap[0] == "ok":
         return _allow_note(
             "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} {}. A pre-command recovery snapshot "
-            "was saved, so it is allowed. {}".format(kind, detail, _recovery_pointer(snap[1])))
+            "was saved, so it is allowed. {}".format(kind, detail, _recovery_pointer(snap[1])) + note)
     return _allow_note(
         "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} {}. This guard could not auto-snapshot "
-        "it (a ref-level or stash/branch asset a working-tree snapshot cannot capture, typically "
-        "reflog-recoverable), so it is allowed; ensure any work you need is saved.".format(kind, detail))
+        "it (a ref-level or branch asset a working-tree snapshot cannot capture, which is typically "
+        "reflog-recoverable; a resolved stash drop/clear is NOT reflog-recoverable afterwards and instead "
+        "has its entries preserved under durable refs first, stated in this note when it applies), so it "
+        "is allowed; ensure any work you need is saved.".format(kind, detail)
+        + note)
 
 
-def _stash_drop_clear_outcome(repo, stash_op):
+def _stash_drop_clear_outcome(repo, stash_op, note=""):
     """Preserve every stash entry of `repo` under durable refs/aiqt-recovery/ refs, then return the no-ask
     decision for a 'git stash drop'/'clear' (ROUND-2 FINDING 6, generalized in round-3 finding 2 to the
     -C/compound/redirected forms): 'none' -> ALLOW (no entries to lose), 'ok' -> ALLOW-WITH-NOTE (entries
     preserved under durable refs), 'fail' -> DENY (the entries could not be preserved, so the discard would
     be unrecoverable). The caller has already established `repo` is the repository the command will actually
-    clear (drop/clear is NOT reflog-recoverable afterwards, so a worktree snapshot cannot protect it)."""
+    clear (drop/clear is NOT reflog-recoverable afterwards, so a worktree snapshot cannot protect it).
+    `note` (the removed-prefix migration sentence, or empty) ends the reason or note."""
     st = _record_stash_recovery(repo)
     if st[0] == "none":
         return _allow()  # no stash entries: drop/clear loses nothing
@@ -4390,7 +4385,7 @@ def _stash_drop_clear_outcome(repo, stash_op):
             "AIQT rule prsunc (preserve-uncommitted-work): git stash {} discards saved stash entries and is "
             "NOT reflog-recoverable afterwards, and this guard could not preserve the stash entries under a "
             "recovery ref first ({}), so the discard would be unrecoverable; denied rather than run. Commit "
-            "or apply your stash first, then retry. {}".format(stash_op, st[1], _DISCARD_ALTS),
+            "or apply your stash first, then retry. {}".format(stash_op, st[1], _DISCARD_ALTS) + note,
             "AIQT guardrail: denied an unrecoverable git stash drop/clear - the stash entries could not be "
             "preserved (rule prsunc); apply or commit the stash first, then retry.")
     # ROUND-7 (codex finding 4): bind the advertised stash-recovery command to the TARGET repo with
@@ -4402,41 +4397,20 @@ def _stash_drop_clear_outcome(repo, stash_op):
         "(not reflog-recoverable afterwards). {} stash entr{} were first preserved under durable refs so they "
         "remain recoverable ({}); recover one with 'git -C {} stash apply <ref>'. It is allowed.".format(
             stash_op, st[1]["count"], "y" if st[1]["count"] == 1 else "ies", ", ".join(st[1]["refs"]),
-            shlex.quote(repo)))
+            shlex.quote(repo)) + note)
 
 
-def _deny_with_recovery(kind, snap):
+def _deny_with_recovery(kind, snap, note=""):
     """A DENY (a confirmed whole-tree clobber on a dirty tree) whose reason folds in the recovery outcome,
-    mirroring _discard_recovery_result. The recovery text goes in through _discard_deny's parameter: a
-    deny constructor's result is only ever returned, never unpacked and edited."""
+    mirroring _discard_recovery_result. The recovery text (then `note`, the removed-prefix migration
+    sentence or empty) goes in through _discard_deny's parameter: a deny constructor's result is only ever
+    returned, never unpacked and edited."""
     recovery = ""
     if snap is not None and snap[0] == "ok":
         recovery = " " + _recovery_pointer(snap[1])
     elif snap is not None and snap[0] == "fail":
         recovery = " NOTE: no pre-command recovery snapshot could be created ({}).".format(snap[1])
-    return _discard_deny(kind, recovery)
-
-
-def _cd_target_dir(tokens, cw, base):
-    """Resolve the destination directory of a top-level `cd`/`pushd` segment (`cw` is the command word),
-    against the current effective directory `base`. Returns an absolute-normalized directory path when it
-    can be resolved simply, or None when it cannot (a `popd`, a bare `cd`/`pushd` with no operand, a `cd -`,
-    a relative operand with no `base` to anchor it, or an operand this guard cannot treat as a literal path).
-    Only a single simple literal operand is honoured; anything else is unresolvable so the caller treats the
-    subsequent discard target as unresolved (round-3 finding 1: a discard after a cd it cannot resolve must
-    not be snapshotted against the wrong directory)."""
-    if cw == "popd":
-        return None                                   # returns to an unknowable dir off the pushd stack
-    cwidx = _command_word_index(tokens)
-    operands = [t for t in tokens[cwidx + 1:] if not t.startswith("-")]
-    if len(operands) != 1 or not operands[0] or operands[0] == "-":
-        return None                                   # no operand (HOME/rotate), 'cd -', or ambiguous
-    d = operands[0]
-    if os.path.isabs(d):
-        return os.path.normpath(d)
-    if base is None:
-        return None                                   # a relative cd with no cwd to anchor it
-    return os.path.normpath(os.path.join(base, d))
+    return _discard_deny(kind, recovery + note)
 
 
 def _segment_has_gitdir_redirect(tokens):
@@ -4528,198 +4502,1039 @@ def _gitdir_is_session_repo(tokens, cwd):
     return gd_c == sess_c
 
 
-def _wrapped_git_index(tokens):
-    """ROUND-6 FINDING 3. The index of the first STANDALONE 'git' command token (its basename is 'git') in a
-    segment whose own command word is NOT git, i.e. a WRAPPED git invocation (env/sudo/xargs/timeout/... git
-    <verb>), or None. Matches a real token equal to 'git' (or '/usr/bin/git'), so a 'git <verb>' buried inside
-    a single QUOTED argument ('sh -c "git reset --hard"', 'eval "git reset"') has no standalone git token and
-    is NOT matched here (that fragmented/quoted form stays the disclosed best-effort residual). Purely lexical."""
-    for i, tok in enumerate(tokens):
-        if tok.rsplit("/", 1)[-1] == "git":
-            return i
+# PR #423 D-423-NARROW ROUND 8: the POSITIVE LITERAL closed allowlist grammar for a NON-PRISTINE
+# in-scope command. The round-7 walk MODELLED shell behaviour (heredoc stripping, builtin
+# directory-neutrality, environment tracking) and each round left a sibling of a closed class accepted
+# (R7C blockers 1-4, majors 5-6). ROUND 8 stops modelling: the grammar RECOGNIZES a closed positive
+# language, judged directly on the RAW command string, and denies on the first byte, token, word or
+# shape outside it, so every shell construct the grammar does not spell out is unreachable by
+# construction. The language, exactly:
+#   characters: a token is a BARE word over the class [A-Za-z0-9_./@:=+,%-] or ONE single-quoted
+#     literal (no quote inside, no concatenation with anything adjacent); any other byte anywhere
+#     outside single quotes (a dollar sign, a backquote, a double quote, a backslash, a glob or brace
+#     character, a tilde, <, (, ), |, #, !, a stray ampersand, a carriage return or other control
+#     byte) denies, which by construction rules out every expansion, substitution, heredoc,
+#     here-string, process substitution, pipe, subshell, brace group, comment, background job and
+#     input redirect;
+#   command words, spelled bare and unquoted: git; cd (option flags -P and -L only, exactly ONE
+#     operand, an absolute literal path with no '..' component whose realpath equals its normpath);
+#     and true or : with no arguments. EVERY other command word (echo, printf, test, [, pwd, pushd,
+#     popd, export, eval, source, ., set, unset, alias, a wrapper, an interpreter, a pathed or quoted
+#     or concatenated spelling) and any assignment word (NAME=value) before or in the command-word
+#     position denies, so nothing accepted can change the shell environment, and the directory can
+#     change only through the one modelled cd;
+#   git shape: the only global option is -C <absolute literal path> (same path rules as cd; it may
+#     repeat, each absolute); any other global option (-c, --git-dir, --work-tree, --namespace,
+#     --no-pager, ...) denies, and a GIT_*= token ANYWHERE in the command denies; the bare literal
+#     subcommand is either on the explicit read-only allowlist below - carrying ONLY that
+#     subcommand's vetted option spellings (R9 DECIDED item 1 narrowed by R10,
+#     _DISCARD_READONLY_OPTS: exact value-less flags plus joined-only --opt=value forms, no
+#     abbreviations and no separated value words, each value shape-validated; an unvetted option
+#     denies naming itself, because a read-only subcommand's
+#     own options can run a program or write a file) - or a modelled lossy verb, which
+#     is then preserve-then-allowed exactly as before (stash preservation or a resolved-target
+#     snapshot first, plus the session catch-all snapshot); anything else denies;
+#   joins: the and-and operator, the semicolon and the newline only, each between two populated
+#     simple commands; a TRAILING semicolon and leading or trailing newlines are accepted (bash
+#     runs the same commands), while a trailing and-and and any doubled or misplaced operator
+#     denies; a cd is honoured for a later segment only across and-and joins (across a
+#     semicolon or a newline the cd may have failed with the next command still running, so the
+#     effective directory becomes unprovable and a later discard-capable git segment denies);
+#   redirects: stdout-to-/dev/null, stderr-to-/dev/null and stderr-to-stdout only (none writes a
+#     file); an accepted redirect may directly FOLLOW a completed bare or quoted word (the word
+#     ends at the operator, exactly as bash reads it), an ALL-DIGIT word standing immediately
+#     before '>' is an IO number of which only 2 is accepted (in the 2> forms), repeated accepted
+#     redirects are accepted, and every other redirect, input, read-write, append and clobber
+#     forms included, denies.
+# Accepting a vetted wrapper/interpreter/xargs form stays DEFERRED later work (manifest residue).
+_SAFE_STASH_OPS = frozenset(("list", "show", "apply", "pop", "push", "save", "branch", "create", "store"))
+# The EXPLICIT READ-ONLY git subcommand allowlist with each subcommand's VETTED option grammar
+# (R9 DECIDED item 1, narrowed by R10 DECIDED item 1): a read-only SUBCOMMAND is not a read-only
+# COMMAND LINE, because its own options can run a program (git grep --open-files-in-pager/-O runs
+# one per matching file; git ls-remote --upload-pack/-u runs an arbitrary command string, so
+# ls-remote is DELISTED outright - it also opens network access) or write a file (git log
+# --output=<path> truncates that file). R10 DELISTS the subcommands whose ACCEPTED command line can
+# run a configured program through git itself: help (it launches a man viewer or browser, and a
+# configured man.<tool>.cmd is shell-evaluated) and diff, show and blame (their patch output runs
+# configured textconv and external-diff drivers); -p/--patch is outside every closed option allowlist
+# for the same reason - removed from every option list here (cat-file -p, an object pretty-printer, goes under
+# the same literal rule: an over-deny - use -t/-s/-e or the positional object form) AND denied on
+# the modelled lossy verbs by _discard_patch_token (R11 DECIDED item 4: interactive patch mode
+# renders its hunks through the configured interactive.diffFilter program) - and for-each-ref's
+# --format AND --sort are delisted (R10 item 1 and R11 DECIDED item 2: the %(...) placeholders
+# and the sort atoms include signature fields that run the configured signature program). Each entry
+# maps the subcommand to (value-less flags, value-taking options with a value validator); only
+# these EXACT spellings are accepted - no abbreviation, although git itself accepts an unambiguous
+# long-option prefix - and a value-taking option is accepted ONLY as the joined --opt=value
+# spelling that git itself reads joined, NEVER with a separated value word: for git's optional-
+# value options a separated word is NOT the value but a token git reads in its own right (the R9
+# hole read 'log --pretty --output=<path>' as a vetted value while git read --output as an option
+# and truncated the path), and the short valued spellings (-n, -e, -A, -B, -C, -U, -L) are gone
+# with the separated form (the -<n> shorthand of log/rev-list/shortlog stays). '--' ends the
+# option region (everything after is a positional operand), and a non-option token is a positional
+# operand (a rev, path, pattern or object name): DATA passed to the subcommand, never 'inert' -
+# repository, global or system configuration can make even an accepted read-only command run a
+# configured program (core.fsmonitor on status, textconv drivers, pagers, signature programs; see
+# the residue), so this grammar bounds the COMMAND LINE, never configuration. 'reflog' and
+# 'config' are deliberately absent (reflog expire/delete and config set mutate); 'branch' and
+# 'stash' route through _discard_role/_stash_op_role instead, and an explicit 'stash list'
+# carries NO argument while an explicit 'stash show' carries at most ONE positional stash
+# reference and nothing else, '--' included (_discard_stash_ro_bad, R11 DECIDED items 3-4,
+# enforced on the grammar path AND the pristine single-command path: stash forwards list
+# arguments to git log and show arguments to git diff, where the class R10 delists would ride
+# through, and a retained '--' makes git stash show itself select patch output).
+_RO_INT = re.compile(r"[0-9]+")
+_RO_TEXT = re.compile(r"[^\x00-\x1f\x7f]*")  # free literal data (a pattern, author, date or sort
+# key) carried JOINED to the one vetted option that takes it; EVERY control byte (TAB and LF
+# included) and DEL is refused. The data is passed to the subcommand, never "inert" (see the
+# table comment below).
+# R10 (DECIDED item 1), narrowed by R11 (DECIDED item 1): a log --pretty/--format value is EXACTLY
+# one of the seven NAMED formats, or a format:/tformat:-PREFIXED string over literal text plus an
+# EXPLICIT placeholder allowlist (hash, tree, parent, author and committer fields, decoration,
+# subject, body, encoding, merge mark, %% and %n). EVERY OTHER value DENIES - an abbreviation, a
+# further built-in name (email, mboxrd) and any arbitrary name included - because git resolves an
+# unprefixed value as a format NAME: a built-in or a pretty.<name> CONFIGURATION alias, and a
+# configured alias can itself carry %G. EVERY %G signature placeholder is OUTSIDE the list (a %G
+# value makes the ACCEPTED command run the configured signature program), as are %(...)
+# extensions, %C colour, %x hex bytes and every other spelling.
+_RO_PRETTY = re.compile(
+    r"(?:oneline|short|medium|full|fuller|reference|raw|"
+    r"t?format:(?:[^%\x00-\x1f\x7f]|%(?:%|n|[HhTtPp]|[ac][neldrtiI]|[dDsfbBem]))*)")
+_DISCARD_READONLY_OPTS = {
+    "status": (frozenset(("-s", "--short", "-b", "--branch", "--porcelain", "--ignored")),
+               {"--porcelain": re.compile(r"v1|v2|1|2")}),  # R11: the four documented spellings
+    "log": (frozenset(("--oneline", "--graph", "--decorate", "--no-decorate", "--all", "--stat",
+                       "--numstat", "--shortstat", "--name-only", "--name-status", "--follow",
+                       "--reverse", "--first-parent", "--merges", "--no-merges", "--abbrev-commit",
+                       "--topo-order", "--date-order", "--no-patch", "--not")),
+            {"--max-count": _RO_INT, "--skip": _RO_INT, "--since": _RO_TEXT,
+             "--until": _RO_TEXT, "--author": _RO_TEXT, "--committer": _RO_TEXT,
+             "--grep": _RO_TEXT, "--pretty": _RO_PRETTY, "--format": _RO_PRETTY,
+             "--date": _RO_TEXT}),
+    "rev-parse": (frozenset(("--verify", "-q", "--quiet", "--short", "--abbrev-ref",
+                             "--symbolic-full-name", "--git-dir", "--absolute-git-dir",
+                             "--show-toplevel", "--show-prefix", "--is-inside-work-tree",
+                             "--is-bare-repository", "--is-shallow-repository")),
+                  {"--short": _RO_INT}),
+    "rev-list": (frozenset(("--count", "--all", "--objects", "--not", "--reverse",
+                            "--first-parent", "--topo-order", "--date-order")),
+                 {"--max-count": _RO_INT, "--skip": _RO_INT}),
+    "ls-files": (frozenset(("-s", "--stage", "-z", "-o", "--others", "-c", "--cached", "-d",
+                            "--deleted", "-m", "--modified", "--exclude-standard", "--full-name")),
+                 {}),
+    "ls-tree": (frozenset(("-r", "-t", "-z", "-l", "--long", "--name-only", "--full-tree",
+                           "--full-name")), {}),
+    "cat-file": (frozenset(("-t", "-s", "-e")), {}),
+    "grep": (frozenset(("-i", "-n", "-l", "-L", "-c", "-w", "-F", "-E", "-G", "-P", "-v", "-h",
+                        "-H", "--cached", "--untracked", "--no-index", "--line-number",
+                        "--name-only", "--files-with-matches", "--files-without-match", "--count",
+                        "--fixed-strings", "--extended-regexp", "--basic-regexp", "--perl-regexp",
+                        "--ignore-case", "--word-regexp", "--invert-match")),
+             {"--max-depth": _RO_INT, "--after-context": _RO_INT, "--before-context": _RO_INT,
+              "--context": _RO_INT}),
+    "describe": (frozenset(("--tags", "--all", "--always", "--long", "--dirty", "--exact-match",
+                            "--first-parent")),
+                 {"--abbrev": _RO_INT, "--candidates": _RO_INT, "--match": _RO_TEXT,
+                  "--exclude": _RO_TEXT}),
+    "shortlog": (frozenset(("-s", "--summary", "-n", "--numbered", "-e", "--email", "--all",
+                            "--no-merges", "--merges", "--first-parent")),
+                 {"--since": _RO_TEXT, "--until": _RO_TEXT}),
+    "name-rev": (frozenset(("--name-only", "--tags", "--all", "--always", "--no-undefined")),
+                 {"--refs": _RO_TEXT}),
+    "merge-base": (frozenset(("--all", "--is-ancestor", "--octopus", "--independent",
+                              "--fork-point")), {}),
+    "check-ignore": (frozenset(("-v", "--verbose", "-q", "--quiet", "-z", "--non-matching",
+                                "--no-index")), {}),
+    "check-attr": (frozenset(("-a", "--all", "-z")), {"--source": _RO_TEXT}),
+    "count-objects": (frozenset(("-v", "--verbose", "-H", "--human-readable")), {}),
+    "show-ref": (frozenset(("--head", "--heads", "--tags", "-d", "--dereference", "--verify",
+                            "-q", "--quiet", "--hash", "-s")),
+                 {"--hash": _RO_INT, "--abbrev": _RO_INT}),
+    "for-each-ref": (frozenset(),
+                     {"--count": _RO_INT,
+                      "--contains": _RO_TEXT, "--no-contains": _RO_TEXT, "--merged": _RO_TEXT,
+                      "--no-merged": _RO_TEXT, "--points-at": _RO_TEXT}),
+    "var": (frozenset(("-l",)), {}),
+    "version": (frozenset(("--build-options",)), {}),
+}
+# Derived from the table so the two can never disagree (an entry exists exactly per listed sub).
+_DISCARD_READONLY_SUBS = frozenset(_DISCARD_READONLY_OPTS)
+# log/rev-list/shortlog accept the -<n> max-count shorthand (an exact all-digit spelling).
+_RO_NUM_SHORTHAND_SUBS = frozenset(("log", "rev-list", "shortlog"))
+_RO_NUM_SHORTHAND_RE = re.compile(r"-[0-9]+")
+
+
+def _discard_readonly_args(sub, args):
+    """R9 DECIDED item 1, narrowed by R10 DECIDED item 1: vet every option-shaped argument of an
+    accepted read-only subcommand against that subcommand's exact allowlisted spellings
+    (_DISCARD_READONLY_OPTS, see its block comment). A value-taking option is accepted ONLY in its
+    joined --opt=value spelling: there is NO separated-value consumption, because consuming a
+    following word as a value is how R9 read 'log --pretty --output=<path>' as vetted while git
+    read --output as an option of its own and truncated the path. Returns None when every option
+    is vetted, else the offending spelling, which the caller denies naming it."""
+    flags, valued = _DISCARD_READONLY_OPTS[sub]
+    i = 0
+    n = len(args)
+    while i < n:
+        a = args[i]
+        if a == "--":
+            return None  # end of options: every later token is a positional operand
+        if not a.startswith("-") or a == "-":
+            i += 1  # a positional operand: data passed to the subcommand (see the table comment)
+            continue
+        if a in flags:
+            i += 1
+            continue
+        if a.startswith("--") and "=" in a:
+            name, val = a.split("=", 1)
+            v = valued.get(name)
+            if v is not None and v.fullmatch(val) is not None:
+                i += 1
+                continue
+        if sub in _RO_NUM_SHORTHAND_SUBS and _RO_NUM_SHORTHAND_RE.fullmatch(a) is not None:
+            i += 1
+            continue
+        return a
     return None
 
 
-def _segment_carries_target_redirect(tokens):
-    """ROUND-6 FINDING 3. True when a segment carries a git TARGET-redirect token: a '-C', a
-    --git-dir/--work-tree (bare or '='-attached), or a leading/inline GIT_DIR=/GIT_WORK_TREE= assignment. Used
-    only for a WRAPPED git discard the walk cannot resolve as a depth-0 literal-git segment: such a redirect
-    moves the discard OFF the session cwd, so the session-cwd best-effort snapshot cannot capture it and the
-    discard fails closed (DENY). A wrapped discard with NO redirect acts on the effective cwd, which that
-    best-effort snapshot covers, so it is not flagged here. Conservative token scan (over-detection only
-    over-denies)."""
-    for tok in tokens:
-        if tok == "-C" or tok.startswith("--git-dir") or tok.startswith("--work-tree"):
-            return True
-        if tok.startswith("GIT_DIR=") or tok.startswith("GIT_WORK_TREE="):
-            return True
-    return False
+# The closed positive character class of a BARE literal word (R8 DECIDED item 1) and the closed list
+# of accepted command words (item 2). The token-end set is what may follow a completed token: any
+# other adjacency (a quote starting mid-word, a denied byte) denies.
+_DISCARD_WORD_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./@:=+,%-")
+_DISCARD_TOKEN_END = frozenset((" ", "\t", "\n", ";", "&", ">", ""))
+_DISCARD_COMMAND_WORDS = frozenset(("git", "cd", "true", ":"))
+# R8 DECIDED item 3: a GIT_* assignment-shaped token ANYWHERE in the command denies (the accepted
+# words cannot export it, but the closed grammar refuses the spelling outright rather than reason
+# about where it is harmless).
+_DISCARD_GIT_ENV_RE = re.compile(r"GIT_[A-Za-z0-9_]*\+?=")
 
 
-def _nonpristine_discard_actions(segments, cwd):
-    """ROUND-3 FINDINGS 1 and 2. Walk a NON-PRISTINE in-scope command's segments and resolve, for each
-    VISIBLE git discard segment, the effective worktree/repository the discard ACTUALLY acts on, so the
-    recovery snapshot (a worktree discard) or the stash preservation (a `git stash drop`/`clear`) lands on
-    that target rather than blindly on the session cwd. The shell cwd is tracked across TOP-LEVEL `cd`/`pushd`
-    (a `&&`-gated cd applies to the next command with certainty; a `;`/`||`-sequenced one does NOT gate
-    success so the cwd becomes uncertain; a backgrounded `cd &` and a cd inside a subshell `( )` do NOT change
-    the foreground cwd), and each git segment's own -C/--work-tree/GIT_WORK_TREE= redirect is resolved against
-    that cwd. Returns a dict:
-      { 'snapshot_bases': [dir, ...]  # distinct worktree dirs a snappable destructive discard acts on
-        'stash_ops':      [(dir, op)] # each stash drop/clear paired with the repo dir it acts on
-        'unresolved':     bool        # a visible depth-0 discard whose target could NOT be resolved
-        'hidden':         bool        # ROUND-6 FINDING 3: a lossy discard the walk cannot resolve to a
-                                      #   snapshottable target - a git inside a subshell whose cwd a prior
-                                      #   internal cd moved, or a WRAPPED git (env/sudo/... git) carrying a
-                                      #   -C/--git-dir/--work-tree/GIT_DIR=/GIT_WORK_TREE= redirect - so its
-                                      #   target cannot be snapshotted with certainty
-        'saw_actionable': bool }      # any visible worktree-destructive or stash drop/clear discard
-    A caller with unresolved=True OR hidden=True DENIES (fail closed: it cannot snapshot/preserve the exact
-    target). Where a
-    destructive segment acts on the plain session cwd (no cd, no redirect) that cwd is added to
-    snapshot_bases so it is snapshotted through the same path; where no actionable discard is visible
-    (obfuscated verbs, soft/ref-level forms, or an unknown cwd) saw_actionable is False and the caller keeps
-    its existing best-effort session-cwd snapshot."""
-    depth = 0
-    session_cwd = cwd if isinstance(cwd, str) and cwd else None
-    eff = session_cwd
-    eff_certain = True
-    cd_happened = False
-    snapshot_bases = []
-    stash_ops = []
-    unresolved = False
-    saw_actionable = False
-    targets_session = False
-    hidden = False   # ROUND-6 FINDING 3: a lossy discard the walk cannot resolve as a depth-0 literal-git
-    # segment (a subshell-internal cd moved its target, or a WRAPPED git carries a target redirect) -> DENY.
-    subshell_cd_seen = False  # a cd/pushd occurred at depth>0 in the current subshell nesting: a git discard
-    # then running inside that subshell acts on a moved, un-modelled cwd. Reset when depth returns to 0.
+def _stash_op_role(op):
+    if op is None:
+        return "safe"
+    if op in ("drop", "clear"):
+        return "preserve"
+    if op == "export":
+        return "export"
+    if op in _SAFE_STASH_OPS:
+        return "safe"
+    return "deny"
 
-    def _add(seq, item):
-        if item not in seq:
-            seq.append(item)
 
-    for tokens, sep in segments:
-        cw = _command_word(tokens)
-        if cw == "git":
-            sub, args = _git_sub_and_args(tokens)
-            if sub is not None:
-                role, _kind = _discard_role(sub, args)
-                if role != "allow":
-                    if depth != 0 and subshell_cd_seen:
-                        # ROUND-6 FINDING 3: a lossy git discard inside a subshell '( ... )' where a cd/pushd
-                        # earlier in that subshell moved the cwd the walk does not model (e.g.
-                        # '(cd T && git restore -- f)'), so its target cannot be resolved and the session
-                        # snapshot would not capture it -> fail closed (the caller denies). A subshell/command
-                        # substitution with NO internal cd runs at the foreground cwd, so it falls through to
-                        # the normal resolution below and is snapshot-backed there (the C6 design).
-                        hidden = True
-                        saw_actionable = True
-                    elif sub in _SNAPSHOTTABLE_VERBS:
-                        saw_actionable = True
-                        if not eff_certain:
-                            unresolved = True
-                        elif _segment_has_worktree_redirect(tokens):
-                            # ROUND-7 (codex finding 1): --work-tree relocates ONLY the worktree, not the repo.
-                            # An INDEX/REF-only discard (restore --staged, mixed reset, rm --cached) acts on the
-                            # ambient (or -C) repo, so snapshot THAT via _segment_repo_dir (--work-tree ignored).
-                            # A WORKTREE-CONTENT discard destroys content in the --work-tree dir while the index/
-                            # refs stay in the ambient repo: the split cannot be captured by one snapshot, so it
-                            # is unresolved (the caller DENIES) rather than snapshotting the wrong --work-tree.
-                            if _discard_index_only(sub, args):
-                                rd = _segment_repo_dir(tokens, eff)
-                                if rd == "opaque":
-                                    unresolved = True
-                                elif isinstance(rd, str):
-                                    _add(snapshot_bases, rd)
-                                elif eff is None:
-                                    if cd_happened:
-                                        unresolved = True
-                                else:
-                                    _add(snapshot_bases, eff)
-                            else:
-                                unresolved = True
-                        else:
-                            wt = _segment_redirect_worktree(tokens, eff)
-                            if wt == "opaque":
-                                unresolved = True
-                            elif wt is not None:
-                                _add(snapshot_bases, wt)
-                            elif eff is None:
-                                if cd_happened:
-                                    unresolved = True     # a cd to an unresolvable dir preceded the discard
-                                # else: cwd unknown -> keep the best-effort session path (not unresolved)
-                            elif cd_happened:
-                                _add(snapshot_bases, eff)  # a cd'd-into concrete dir
-                            else:
-                                targets_session = True     # plain session cwd
-                    elif sub == "stash":
-                        stash_op = next((a for a in args if not a.startswith("-")), None)
-                        if stash_op in ("drop", "clear"):
-                            saw_actionable = True
-                            if not eff_certain or _segment_has_gitdir_redirect(tokens):
-                                unresolved = True
-                            else:
-                                # ROUND-7 (codex finding 1): stash is a REPO/ref op; its target repo is the
-                                # ambient (or -C) repo, NOT the --work-tree value, so resolve via
-                                # _segment_repo_dir (--work-tree ignored) and preserve THAT repo's stash.
-                                rd = _segment_repo_dir(tokens, eff)
-                                if rd == "opaque":
-                                    unresolved = True
-                                elif isinstance(rd, str):
-                                    _add(stash_ops, (rd, stash_op))
-                                elif eff is None:
-                                    if cd_happened:
-                                        unresolved = True
-                                    # else: cwd unknown -> best-effort session path
-                                else:
-                                    _add(stash_ops, (eff, stash_op))
-                    # a force branch delete/move/copy/reset or stash export is ref-level/reflog-recoverable:
-                    # a worktree snapshot cannot capture it, so no target is resolved here (the existing
-                    # allow-note covers it).
-        elif depth == 0 and cw in ("cd", "pushd", "popd"):
-            if sep == "&":
-                pass                                   # backgrounded: no foreground cwd change
-            elif sep in ("&&", ""):
-                nd = _cd_target_dir(tokens, cw, eff)
-                eff = nd                               # a resolvable dir, or None (subsequent target opaque)
-                cd_happened = True
-            else:                                      # ';' or '||': cd success does not gate the next
-                eff_certain = False
-        elif cw in ("cd", "pushd", "popd"):
-            # a cd/pushd at depth>0 (a subshell-internal cd, e.g. '(cd T && ...)'): the walk does not model
-            # the subshell's cwd, so note it, and a later same-subshell git discard fails closed (finding 3).
-            subshell_cd_seen = True
+def _discard_stash_op(args):
+    # R8 (codex 8) reworked by R9 (codex 2): git resolves the stash operation ONLY from the FIRST
+    # argument. A bare first word is the EXPLICIT operation (git errors on an unknown one, which
+    # _stash_op_role denies). Anything else - no argument, a leading '--', or a leading option of
+    # any spelling (-q, -m <msg>, an attached -m<msg>, --message=<msg>) - is a bare or IMPLICIT
+    # PUSH, in which NO later token is ever an operation: git reads it as a push option, as a
+    # pathspec after '--', or refuses the whole command ("subcommand wasn't specified; 'push'
+    # can't be assumed due to unexpected token ..."), so a stray token or pathspec named drop or
+    # clear can never steer this guard into a wrong op (the R8 skip-the-message walk read 'git
+    # stash -m msg drop' as a drop git never runs, and denied the stray pathspec of 'git stash -m
+    # msg file.txt' that git itself refuses). Returns the explicit op word, or None for a bare or
+    # implicit push (safe).
+    if not args or args[0] == "--" or args[0].startswith("-"):
+        return None
+    return args[0]
+
+
+def _discard_stash_ro_bad(args):
+    """R10 DECIDED item 1, widened by R11 (DECIDED items 3-4): the read-only stash LISTING forms
+    carry almost nothing, because git forwards their arguments to the delisted diff/log class. An
+    explicit 'stash list' carries NO further token (its arguments ride to git log around the
+    vetted log grammar), and an explicit 'stash show' carries AT MOST ONE positional stash
+    reference and nothing else: an option-shaped token rides to git diff (-p selects the patch
+    output whose textconv/external-diff drivers R10 delisted), and a retained '--' makes git stash
+    show itself select patch output, so '--', anything after it, an empty token and a second
+    positional all deny. Returns the offending-token description, or None. Applied by the grammar
+    path AND the pristine single-command path, so the bare single-command spelling cannot ride
+    around the compound rule."""
+    op = _discard_stash_op(args)
+    if op == "list" and len(args) > 1:
+        return "stash list {}".format(args[1])
+    if op == "show":
+        seen_ref = False
+        for tok in args[1:]:
+            if not tok or tok.startswith("-"):  # '-', '--', '-p', --opt=..., an empty quoted token
+                return "stash show {}".format(tok) if tok else "stash show (an empty token)"
+            if seen_ref:
+                return "stash show {}".format(tok)
+            seen_ref = True
+    return None
+
+
+# R11 DECIDED item 4, reworked by R12 DECIDED item 2 and R13 DECIDED item 1: the verbs on
+# which the -p/--patch spelling is DENIED outright (interactive patch mode is outside what this
+# guard can prove safe, because the hunks it renders pass through the operator-configurable
+# interactive.diffFilter setting, the same configuration class whose subcommands R10 delisted).
+# R13 DECIDED item 1: the scan NO LONGER keeps a private copy of the value-taking options (the
+# R12 copy omitted --pathspec-from-file and the --orphan/--conflict values, so the two tables
+# could disagree: a separated filename value spelled -p was read as a real patch flag, a false
+# deny, and a REAL -p standing behind a consumed separated value was never seen); it DERIVES
+# the arity from the SAME closed allowlists the option validator uses (_DISCARD_VERB_OPTS, and
+# _DISCARD_STASH_OP_OPTS for the resolved stash op) through _discard_valued_arity, so the two
+# can never disagree (ONE arity specification). In a short cluster git reads everything after a
+# value-taking letter as that option's attached VALUE ('checkout -bp' names the branch 'p'), so
+# the scan stops there and never reads a value's bytes as flags (the F-85 lesson), and a
+# SEPARATED value word is consumed by that arity BEFORE the scan looks for -p/--patch or a
+# terminator ('stash push -m -- -p' makes '--' the message and the later -p a REAL patch flag,
+# while 'stash push -m -p' makes -p the message itself: git's parser consumes the next word
+# unconditionally). Every OTHER cluster character is read as a FLAG, non-letters included: the
+# digit flags of checkout/restore mean git reads '-2p'/'-3p' as --ours/--theirs plus --patch and
+# enters patch mode, so the scan no longer stops at a non-letter (the old break silently allowed
+# those clusters).
+_DISCARD_PATCH_VERBS = frozenset(("checkout", "restore", "reset", "stash"))
+
+
+def _discard_valued_arity(valued):
+    """The (short option LETTERS, long option NAMES) arity view of the value-taking spellings
+    of one closed allowlist (R13 DECIDED item 1: _DISCARD_VERB_OPTS and _DISCARD_STASH_OP_OPTS
+    are the ONE arity specification; the -p/--patch scan derives its value consumption from
+    them, so the option validator and that scan can never disagree on which option takes a
+    value)."""
+    return ("".join(sorted(v[1] for v in valued if not v.startswith("--"))),
+            tuple(sorted(v[2:] for v in valued if v.startswith("--"))))
+
+
+def _discard_patch_token(sub, args):
+    """The -p/--patch spelling (a conservative '--patch' prefix abbreviation and a 'p' anywhere in
+    a flag cluster included) carried in `sub`'s option region, returned as the SPELLING TYPED,
+    op word included ('git stash push -p', 'git checkout -2p'), or None (R12 DECIDED item 4: the
+    deny names what was typed). For stash, only the push forms take -p (an explicit push or save,
+    or the bare/implicit push); list and show have their own rule (_discard_stash_ro_bad), and git
+    rejects -p on the remaining ops, which keep their existing outcome. A declared value-taking
+    option consumes its value FIRST - the rest of its cluster token when attached, the NEXT token
+    when separated ('--' and '-p' shapes included, exactly as git itself consumes them) - so a
+    value is never read as a flag or a terminator AND a real flag standing after a consumed '--'
+    is still seen; the declared value-taking options are DERIVED from the closed allowlist of the
+    verb (or of the resolved stash op), the same table the option validator reads (R13 DECIDED
+    item 1), never a second copy. Over-recognition is safe here - it denies, never silently
+    allows - mirroring _has_long_prefix, so an ambiguous '--p'/'--pa'/'--pat' prefix denies too,
+    and an unambiguous abbreviation of a declared long value option ('--mess') consumes like its
+    full spelling."""
+    if sub not in _DISCARD_PATCH_VERBS:
+        return None
+    op = None
+    if sub == "stash":
+        op = _discard_stash_op(args)
+        if op not in (None, "push", "save"):
+            return None
+        valued_set = _DISCARD_STASH_OP_OPTS["push" if op is None else op][1]
+        scan = args[1:] if op is not None else args
+    else:
+        valued_set = _DISCARD_VERB_OPTS[sub][1]
+        scan = args
+    valued, long_valued = _discard_valued_arity(valued_set)
+    label = "git {} {}".format(sub, op) if op is not None else "git {}".format(sub)
+    skip_value = False
+    for t in scan:
+        if skip_value:
+            skip_value = False
+            continue  # a prior option's SEPARATED value ('-m -p' is a message), never a flag
+        if t in _EOO_TOKENS:
+            break  # a genuine option terminator (one consumed as a value never reaches here)
+        if t.startswith("--"):
+            name = t.split("=", 1)[0][2:]
+            if name and "patch".startswith(name):
+                return "{} {}".format(label, t)
+            if name and "=" not in t and any(full.startswith(name) for full in long_valued):
+                skip_value = True  # a value-taking long option: the next token is its value
+            continue
+        if t.startswith("-") and t != "-":
+            for i, ch in enumerate(t[1:]):
+                if ch == "p":
+                    return "{} {}".format(label, t)
+                if ch in valued:
+                    if i == len(t) - 2:
+                        skip_value = True  # a bare '-m'/'-b': the value is the NEXT token
+                    break  # the rest of this token is the attached value, never flags
+    return None
+
+
+# R12 DECIDED item 1: the CLOSED per-verb option allowlists of the compound-grammar path. On that
+# path a recognized lossy verb's options were vetted only by the -p/--patch and stash rules, so an
+# accepted compound could carry an option that runs a configured program: git branch --sort and
+# --format take the same signature-bearing sort atoms and %(...) placeholders whose for-each-ref
+# spellings R11 delisted (--sort=signature:grade runs the configured signature program), and
+# --edit-description launches the configured editor. Enumerating bad options is the many-round
+# whack-a-mole; these tables instead enumerate what is ACCEPTED: each verb maps to (value-less
+# flags, value-taking options), EXACT spellings only - no git-accepted abbreviation and no flag
+# cluster ('-fd' is outside the table even where '-f' and '-d' are in it) - and a value-taking
+# option consumes its value by arity: attached ('-bfoo', '--opt=val') or separated ('-b foo',
+# '--opt val'), so a value is never read as an option and a real option is never swallowed as
+# data. ANY option outside the verb's table denies (kind "verbopt"); a non-option token is a
+# positional operand (a ref or pathspec), and '--' ends the option region. git branch deliberately
+# lists NO --sort, --format, --edit-description, --list, --show-current, --contains, --merged or
+# --points-at spelling: the listing/formatting family carries the signature atoms and free
+# placeholders, and the write forms below cover every modelled branch mutation. stash is vetted
+# PER OP by _discard_stash_opt_bad. The role helpers (_discard_role) still classify an accepted
+# option set; these tables only bound which spellings may appear. The pristine single-command
+# path keeps its role-based handling (R12 scope: the compound grammar).
+_DISCARD_VERB_OPTS = {
+    "checkout": (frozenset(("-q", "--quiet", "-f", "--force", "-m", "--merge", "--detach",
+                            "--ours", "--theirs", "-2", "-3", "--ignore-skip-worktree-bits")),
+                 frozenset(("-b", "-B", "--orphan", "--conflict", "--pathspec-from-file"))),
+    "switch": (frozenset(("-q", "--quiet", "-f", "--force", "--discard-changes", "-d", "--detach",
+                          "-m", "--merge", "--guess", "--no-guess", "--no-track")),
+               frozenset(("-c", "-C", "--orphan", "--conflict"))),
+    "restore": (frozenset(("-q", "--quiet", "-W", "--worktree", "-S", "--staged", "--ours",
+                           "--theirs", "--ignore-unmerged", "--ignore-skip-worktree-bits",
+                           "--overlay", "--no-overlay")),
+                frozenset(("-s", "--source", "--conflict", "--pathspec-from-file"))),
+    "reset": (frozenset(("-q", "--quiet", "--hard", "--soft", "--mixed", "--merge", "--keep",
+                         "-N", "--intent-to-add", "--no-refresh", "--refresh")),
+              frozenset(("--pathspec-from-file",))),
+    "rm": (frozenset(("-f", "--force", "-r", "-n", "--dry-run", "--cached", "-q", "--quiet",
+                      "--ignore-unmatch", "--sparse")),
+           frozenset(("--pathspec-from-file",))),
+    "clean": (frozenset(("-n", "--dry-run", "--no-dry-run", "-f", "--force", "-d", "-x", "-X",
+                         "-q", "--quiet")),
+              frozenset(("-e", "--exclude"))),
+    "branch": (frozenset(("-d", "-D", "--delete", "-f", "--force", "-m", "-M", "--move", "-c",
+                          "-C", "--copy", "-r", "--remotes", "-a", "--all", "-q", "--quiet",
+                          "-v", "-vv", "--verbose", "--unset-upstream")),
+               frozenset(("-u", "--set-upstream-to"))),
+}
+# The stash leg of the same R12 DECIDED item 1 rule, keyed by the RESOLVED op word (None, the
+# bare/implicit push, uses the push entry): only these exact spellings may appear after the op.
+# R14 DECIDED item 1: each entry is audited against the option listing of git itself for that
+# sub-command (the 'git stash <op> -h' output of the installed git 2.55.0; create prints none),
+# so a value-taking option is never listed as a flag: the save listing carries
+# "-m, --[no-]message <message>" and "-S, --[no-]staged" exactly as push does, so save carries
+# -m/--message in its VALUE set (the R13 entry listed an empty value set on the false premise
+# that save takes no -m) and the -p scan consumes a message value before it looks for a patch
+# flag. R15 DECIDED item 3: save also lists --no-include-untracked, as push does (both
+# listings carry "-u, --[no-]include-untracked"; the R14 save entry omitted it, an over-deny).
+# The other negated spellings the entries omit (--no-quiet, --no-staged, --no-all and
+# --no-message, for example), --[no-]auto-advance, push's --[no-]pathspec-file-nul and apply's
+# --[no-]label-* values stay unlisted, so the compound path denies them, an over-deny in the
+# safe direction. The numeric-valued -U/--unified and --inter-hunk-context spellings stay
+# unlisted: git refuses a non-numeric value, so a terminator consumed as such a value never
+# reaches patch mode, and the compound path denies the unlisted spelling outright (the safe
+# direction). list lists nothing here because it accepts NO further token, and show accepts
+# at most ONE positional stash reference (both vetted by _discard_stash_ro_bad); export keeps
+# its two documented spellings (the pristine path still treats every export form as not
+# provably safe).
+_DISCARD_STASH_OP_OPTS = {
+    "push": (frozenset(("-q", "--quiet", "-k", "--keep-index", "--no-keep-index", "-u",
+                        "--include-untracked", "--no-include-untracked", "-a", "--all",
+                        "-S", "--staged")),
+             frozenset(("-m", "--message", "--pathspec-from-file"))),
+    "save": (frozenset(("-q", "--quiet", "-k", "--keep-index", "--no-keep-index", "-u",
+                        "--include-untracked", "--no-include-untracked", "-a", "--all",
+                        "-S", "--staged")),
+             frozenset(("-m", "--message"))),
+    "apply": (frozenset(("-q", "--quiet", "--index")), frozenset()),
+    "pop": (frozenset(("-q", "--quiet", "--index")), frozenset()),
+    "drop": (frozenset(("-q", "--quiet")), frozenset()),
+    "clear": (frozenset(), frozenset()),
+    "branch": (frozenset(), frozenset()),
+    "create": (frozenset(), frozenset()),
+    "store": (frozenset(("-q", "--quiet")), frozenset(("-m", "--message"))),
+    "list": (frozenset(), frozenset()),
+    "show": (frozenset(), frozenset()),
+    "export": (frozenset(("--print",)), frozenset(("--to-ref",))),
+}
+
+
+def _discard_opt_scan(flags, valued, scan):
+    """The first option-shaped token in scan outside the closed (flags, valued) allowlist, or None
+    when every option is listed. EXACT spellings only; a listed value-taking option consumes its
+    value by arity (the joined '--opt=val', the attached '-bfoo', or the SEPARATED next token,
+    '--' and option shapes included, exactly as git consumes them); a '--' or --end-of-options
+    not consumed as a value ends the option region; a non-option token is a positional operand."""
+    skip_value = False
+    for a in scan:
+        if skip_value:
+            skip_value = False
+            continue  # a prior value-taking option's SEPARATED value, consumed by arity
+        if a in _EOO_TOKENS:
+            return None  # end of options: every later token is a positional operand
+        if not a.startswith("-") or a == "-":
+            continue  # a positional operand (a ref or pathspec): data, never an option
+        if a in flags:
+            continue
+        if a in valued:
+            skip_value = True  # its value is the next token, whatever its shape
+            continue
+        if a.startswith("--") and "=" in a and a.split("=", 1)[0] in valued:
+            continue  # the joined --opt=value spelling of a listed value option
+        if not a.startswith("--") and len(a) > 2 and a[:2] in valued:
+            continue  # the attached -b<value> spelling of a listed short value option
+        return a
+    return None
+
+
+def _discard_verb_opt_bad(sub, args):
+    """R12 DECIDED item 1: vet every option-shaped token of a recognized non-stash lossy verb on
+    the compound-grammar path against that verb's CLOSED allowlist (_DISCARD_VERB_OPTS, see its
+    block comment). Returns None when every option is listed, else the offending spelling, which
+    the caller denies naming it."""
+    flags, valued = _DISCARD_VERB_OPTS[sub]
+    return _discard_opt_scan(flags, valued, args)
+
+
+def _discard_stash_opt_bad(op, args):
+    """The stash leg of R12 DECIDED item 1: vet the tokens after a resolved stash op against that
+    op's closed allowlist (_DISCARD_STASH_OP_OPTS; a None op is the bare/implicit push and scans
+    every token). Returns None or the offending spelling."""
+    flags, valued = _DISCARD_STASH_OP_OPTS["push" if op is None else op]
+    return _discard_opt_scan(flags, valued, args if op is None else args[1:])
+
+
+def _discard_literal_abs_path(p):
+    """`p` normalized when it is an ABSOLUTE literal path with no '..' component whose realpath equals
+    its normpath (R8 DECIDED items 2-3: no symlink component, so the directory the kernel resolves IS
+    the directory this guard snapshots), else None."""
+    if not p or not os.path.isabs(p) or ".." in p.split("/"):
+        return None
+    norm = os.path.normpath(p)
+    try:
+        real = os.path.realpath(norm)
+    except (OSError, ValueError):
+        return None
+    if real != norm:
+        return None
+    return norm
+
+
+def _discard_lex_redirect(command, i, fd):
+    """Validate ONE redirect whose '>' sits at command[i-1]; `fd` is "2" for the 2> spelling, else
+    "1". The closed grammar accepts exactly >/dev/null, 2>/dev/null and 2>&1 (whitespace before the
+    /dev/null target allowed, and a further accepted redirect may follow directly), none of which
+    writes a file. Returns (next index, None) when accepted,
+    else (i, (kind, what))."""
+    n = len(command)
+    if command[i:i + 1] == ">":
+        return i, ("redir", ("2" if fd == "2" else "") + ">>")
+    if command[i:i + 1] == "&":
+        if fd == "2" and command[i + 1:i + 2] == "1" and command[i + 2:i + 3] in _DISCARD_TOKEN_END:
+            return i + 2, None
+        return i, ("redir", ("2" if fd == "2" else "") + ">&" + command[i + 1:i + 2])
+    j = i
+    while j < n and command[j] in " \t":
+        j += 1
+    k = j
+    while k < n and command[k] in _DISCARD_WORD_CHARS:
+        k += 1
+    target = command[j:k]
+    if target != "/dev/null" or command[k:k + 1] not in _DISCARD_TOKEN_END:
+        return i, ("redir", target or command[j:j + 1] or "(missing target)")
+    return k, None  # a further accepted redirect may follow directly; it is judged on its own
+
+
+def _discard_grammar_lex(command):
+    """Lex the RAW command string under the positive literal grammar. Returns (items, deny): items is
+    the ordered list of ("word", text, quoted) and ("sep", op) entries with op in ("&&", ";", "nl");
+    an ACCEPTED harmless redirect emits nothing (it writes no file), may directly follow a completed
+    bare or quoted word (the word ends at the operator, exactly as bash reads it; an ALL-DIGIT word
+    there is bash's IO number, of which only 2 is accepted), and may be repeated. deny is the first (kind, what)
+    outside the grammar, else None. Judging bytes on the raw string is what makes the grammar closed
+    BY CONSTRUCTION: no quote removal, expansion, heredoc or operator this lexer does not spell out
+    can reach an accepted command, so none needs to be modelled on this path."""
+    items = []
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if ch in " \t":
+            i += 1
+            continue
+        if ch == "\n":
+            items.append(("sep", "nl"))
+            i += 1
+            continue
+        if ch == ";":
+            items.append(("sep", ";"))
+            i += 1
+            continue
+        if ch == "&":
+            if command[i + 1:i + 2] == "&":
+                items.append(("sep", "&&"))
+                i += 2
+                continue
+            return items, ("sep", "&")
+        if ch == ">":
+            i, bad = _discard_lex_redirect(command, i + 1, "1")
+            if bad is not None:
+                return items, bad
+            continue
+        if ch == "'":
+            j = command.find("'", i + 1)
+            if j < 0:
+                return items, ("quote", "an unterminated single quote")
+            if command[j + 1:j + 2] not in _DISCARD_TOKEN_END:
+                return items, ("quote", "a single-quoted literal concatenated with adjacent text")
+            items.append(("word", command[i + 1:j], True))
+            i = j + 1
+            continue
+        if ch in _DISCARD_WORD_CHARS:
+            j = i
+            while j < n and command[j] in _DISCARD_WORD_CHARS:
+                j += 1
+            nxt = command[j:j + 1]
+            if nxt == ">":
+                word = command[i:j]
+                if word.isdigit():
+                    # R9 (codex 3): an ALL-DIGIT word standing immediately before '>' is bash's IO
+                    # number, not a word; only 2 is accepted (the 2> forms) and every other number
+                    # keeps its named rejection.
+                    if word == "2":
+                        i, bad = _discard_lex_redirect(command, j + 1, "2")
+                        if bad is not None:
+                            return items, bad
+                        continue
+                    return items, ("redir", word + ">")
+                # A non-digit word ends at the redirect operator, exactly as bash reads it; the '>'
+                # is then judged as its own stdout redirect on the next loop pass.
+                items.append(("word", word, False))
+                i = j
+                continue
+            if nxt == "'":
+                return items, ("quote", "a quote starting inside a word")
+            if nxt not in _DISCARD_TOKEN_END:
+                return items, ("char", nxt)
+            items.append(("word", command[i:j], False))
+            i = j
+            continue
+        return items, ("char", ch)
+    return items, None
+
+
+def _discard_grammar_segments(items):
+    """Fold the lexed item stream into (words, join_after) segments. Between two populated simple
+    commands exactly ONE join is accepted: one '&&' or one ';', either followed by newline
+    continuations, or bare newlines; anything else (a leading or doubled ';' or '&&', a ';' or '&&'
+    after a newline, a trailing '&&') is a bash syntax error or an empty command and denies (fail
+    closed, nothing guessed about what bash would then run). A TRAILING ';' (with trailing newlines)
+    and leading or trailing bare newlines ARE accepted: bash runs the same commands (R9: the stated
+    grammar now says so explicitly). join_after is "&&" or ";" (a bare
+    newline joins like ';': the previous command's success is not established), or None at the end.
+    Returns (segments, deny)."""
+    segments = []
+    cur = []
+    run = []
+
+    def _run_bad():
+        return ("sep", " ".join("<newline>" if s == "nl" else s for s in run))
+
+    for it in items:
+        if it[0] == "word":
+            if run:
+                if any(s != "nl" for s in run[1:]):
+                    return segments, _run_bad()
+                segments.append((cur, "&&" if run[0] == "&&" else ";"))
+                cur = []
+                run = []
+            cur.append((it[1], it[2]))
+        elif run:
+            run.append(it[1])
+        elif cur:
+            run = [it[1]]
+        elif it[1] != "nl":
+            return segments, ("sep", it[1])
+    if run and (run[0] == "&&" or any(s != "nl" for s in run[1:])):
+        return segments, _run_bad()  # a trailing '&&' (or a malformed trailing run) leaves bash waiting
+    if cur:
+        segments.append((cur, None))
+    return segments, None
+
+
+def _discard_cd_target(operands):
+    """The absolute destination of an accepted cd segment, or None when the segment is outside the
+    closed shape (R8 DECIDED item 2): bare option flags -P and -L only, exactly ONE operand, which
+    must be an absolute literal path with no '..' component whose realpath equals its normpath, so
+    the honoured directory IS the directory the shell would enter (no OLDPWD '-', no HOME default, no
+    CDPATH, no directory-stack selector, no symlink divergence). `operands` is the (text, quoted)
+    token list after the bare command word 'cd'."""
+    path = None
+    count = 0
+    for text, quoted in operands:
+        if not quoted and text in ("-P", "-L"):
+            continue
+        if not quoted and text.startswith("-"):
+            return None
+        count += 1
+        path = text
+    if count != 1:
+        return None
+    return _discard_literal_abs_path(path)
+
+
+def _discard_git_segment_grammar(words, eff):
+    """Validate ONE segment whose bare command word is 'git' against the positive grammar. `words` is
+    the full (text, quoted) token list (words[0] is 'git'); `eff` is the tracked effective directory,
+    or None when it is unprovable (a cd not followed through '&&' joins). Returns one of:
+      ("deny", kind, what)         - the segment is outside the grammar (kind names the violation
+                                     class: global/cdir/sub/roopt/stashop/stashro/patch/verbopt/
+                                     dir; what the offending token)
+      ("ok", action, base, label)  - accepted; action is None (a read-only subcommand or a read-only
+                                     stash list/show form, R13 DECIDED item 3: not a lossy
+                                     verb), "lossy" (a recognized lossy verb in a form with
+                                     nothing to preserve: an allow-role form, a safe or export
+                                     stash form, or a force-branch ref move a worktree snapshot
+                                     cannot capture anyway), "consume" (a stash pop or stash
+                                     branch, which APPLIES and then DROPS a stash entry: accepted
+                                     alone, denied by the caller in a compound with another lossy
+                                     verb, R12 DECIDED item 3), "snapshot" (a worktree discard:
+                                     snapshot `base` first) or "stash" (a stash removal: preserve
+                                     the stash of `base` first); label is the subcommand (or the
+                                     stash op word for "stash"/"consume")."""
+    seg_dir = eff
+    i = 1
+    n = len(words)
+    while i < n:
+        text, quoted = words[i]
+        if quoted or not text.startswith("-"):
+            break
+        if text == "-C":
+            val = words[i + 1][0] if i + 1 < n else None
+            nd = _discard_literal_abs_path(val) if val is not None else None
+            if nd is None:
+                return ("deny", "cdir", val if val is not None else "(missing value)")
+            seg_dir = nd
+            i += 2
+            continue
+        return ("deny", "global", text)
+    if i >= n:
+        return ("deny", "sub", "(none)")
+    sub, sub_quoted = words[i]
+    if sub_quoted:
+        return ("deny", "sub", sub)
+    args = [t for t, _q in words[i + 1:]]
+    if sub in _DISCARD_READONLY_SUBS:
+        ro_bad = _discard_readonly_args(sub, args)
+        if ro_bad is not None:
+            return ("deny", "roopt", ro_bad)
+        return ("ok", None, None, sub)
+    if sub not in _RECOGNIZED_VERBS:
+        return ("deny", "sub", sub)
+    if sub in _DISCARD_PATCH_VERBS:
+        p_bad = _discard_patch_token(sub, args)
+        if p_bad is not None:
+            # R11 DECIDED item 4: -p/--patch on a lossy verb selects interactive patch mode,
+            # whose rendered hunks pass through the operator-configurable interactive.diffFilter
+            # setting; deny, never snapshot-then-allow (see _discard_patch_token, which returns
+            # the spelling typed, op word included).
+            return ("deny", "patch", p_bad)
+    if sub == "stash":
+        op = _discard_stash_op(args)
+        srole = _stash_op_role(op)
+        if srole == "deny":
+            return ("deny", "stashop", op)
+        st_bad = _discard_stash_ro_bad(args)
+        if st_bad is not None:
+            # R10 DECIDED item 1, widened by R11 (DECIDED items 3-4): an explicit 'stash list'
+            # carries NO argument and an explicit 'stash show' at most ONE positional stash
+            # reference and nothing else ('--' included); see _discard_stash_ro_bad.
+            return ("deny", "stashro", st_bad)
+        so_bad = _discard_stash_opt_bad(op, args)
+        if so_bad is not None:
+            # R12 DECIDED item 1 (stash leg): only the resolved op's exact option spellings are
+            # accepted; see _DISCARD_STASH_OP_OPTS.
+            return ("deny", "verbopt", so_bad)
+        if op in ("list", "show"):
+            # R13 DECIDED item 3: the read-only stash LISTING forms (arguments already bounded
+            # by _discard_stash_ro_bad above) are NOT a lossy verb: they destroy nothing, so
+            # the stash-consume rule must not count them, and its deny text truthfully names
+            # only lossy verbs. R14 MINOR: this exemption covers list and show ONLY; every
+            # other non-consuming stash form (create, store, export --print; R15: store is not
+            # read-only, it adds an entry to refs/stash) still counts as a lossy segment and
+            # can over-deny a compound with pop or branch, the safe direction.
+            return ("ok", None, None, sub)
+        if srole == "preserve":
+            if seg_dir is None:
+                return ("deny", "dir", "git stash {}".format(op))
+            return ("ok", "stash", seg_dir, op)
+        if op in ("pop", "branch"):
+            # R12 DECIDED item 3: pop (and branch, which drops its source entry on success)
+            # CONSUMES a stash entry; the caller denies it in a compound with another lossy verb,
+            # because the following verb can destroy the just-applied content while the dropped
+            # entry is gone and the pre-command snapshot cannot contain it.
+            return ("ok", "consume", None, op)
+        return ("ok", "lossy", None, sub)  # a safe or export stash form discards no stash entry
+    vo_bad = _discard_verb_opt_bad(sub, args)
+    if vo_bad is not None:
+        # R12 DECIDED item 1: every recognized lossy verb's options are checked against a CLOSED
+        # per-verb allowlist of exact spellings with their arity; any option outside it denies
+        # (git branch --sort/--format carry the signature atoms R11 delisted on for-each-ref).
+        return ("deny", "verbopt", vo_bad)
+    role, _kind = _discard_role(sub, args)
+    if role == "allow":
+        return ("ok", "lossy", None, sub)  # a genuinely non-destructive form of a recognized verb
+    if sub in _SNAPSHOTTABLE_VERBS:
+        if seg_dir is None:
+            return ("deny", "dir", "git {}".format(sub))
+        return ("ok", "snapshot", seg_dir, sub)
+    return ("ok", "lossy", None, sub)  # a force-branch form: a reflog-recoverable ref asset, no snapshot
+
+
+def _discard_positive_grammar(command, cwd):
+    """Judge a NON-PRISTINE in-scope command against the positive literal grammar (D-423-NARROW
+    ROUND 8; see the block comment above _SAFE_STASH_OPS), directly on the RAW command string. `cwd`
+    is the session working directory (the caller already denied when none exists). The effective
+    directory for a git segment starts at `cwd` and changes ONLY through an accepted absolute-literal
+    cd, and only while every join from that cd to the git segment is '&&' (across ';' or a newline
+    the cd may have failed with the next command still running, so the directory becomes UNPROVABLE
+    and a later discard-capable git segment denies; a later accepted cd re-establishes it). R12
+    DECIDED item 3: a compound in which an accepted segment CONSUMES a stash entry (git stash pop,
+    git stash branch) together with ANOTHER segment resolving to a recognized lossy verb (any
+    form) denies outright, because a successful pop applies then drops the entry, so the other
+    verb can destroy the just-applied content while the dropped entry is gone and the pre-command
+    snapshot cannot contain it; a consuming segment alone (or joined only with read-only git
+    segments, stash list and show included (R13 DECIDED item 3),
+    cd, true or ':') keeps its existing handling. Returns a dict:
+      deny            - None, or (kind, what) naming the first grammar violation
+      snapshot_bases  - the resolved repo dir of every accepted worktree-discard segment
+      stash_ops       - (repo dir, op word) of every accepted stash drop/clear segment
+      subs            - the snapshottable subcommands seen (the recovery-ledger verb label)"""
+    out = {"deny": None, "snapshot_bases": [], "stash_ops": [], "subs": set()}
+    items, bad = _discard_grammar_lex(command)
+    if bad is None:
+        segments, bad = _discard_grammar_segments(items)
+    if bad is not None:
+        out["deny"] = bad
+        return out
+    eff = cwd
+    cd_seen = False
+    lossy_segs = 0    # git segments resolving to a recognized lossy verb, whatever their form
+    consume_ops = []  # the op word of every stash-entry-consuming segment (pop, branch)
+    for words, join_after in segments:
+        for text, _quoted in words:
+            if _DISCARD_GIT_ENV_RE.match(text):
+                out["deny"] = ("assign", text.split("=", 1)[0])
+                return out
+        head, head_quoted = words[0]
+        if head_quoted or head not in _DISCARD_COMMAND_WORDS:
+            if not head_quoted and _ENV_ASSIGN_RE.match(head):
+                out["deny"] = ("assign", head.split("=", 1)[0])
+            else:
+                out["deny"] = ("word", head)
+            return out
+        is_cd = False
+        if head in ("true", ":"):
+            if len(words) > 1:
+                out["deny"] = ("word", "{} with arguments".format(head))
+                return out
+        elif head == "cd":
+            nd = _discard_cd_target(words[1:])
+            if nd is None:
+                out["deny"] = ("cdir", " ".join(t for t, _q in words[1:]) or "(no operand)")
+                return out
+            is_cd = True
         else:
-            # ROUND-6 FINDING 3: a segment whose command word is neither git nor a cd-family builtin. A
-            # STANDALONE 'git' token here is a WRAPPED git discard (env/sudo/xargs/timeout/... git <verb>).
-            # When it carries a target redirect (-C/--git-dir/--work-tree/GIT_DIR=/GIT_WORK_TREE=), or runs
-            # inside a subshell whose cwd a prior internal cd moved, its target is off the session cwd (or
-            # unmodellable) and the session snapshot would not capture it, so it cannot be resolved+snapshotted
-            # -> fail closed. A wrapped discard with NO redirect and no moved-subshell-cwd acts on the effective
-            # cwd, which the best-effort session snapshot covers, so it is NOT flagged (e.g. 'env git reset
-            # --hard', or '$(echo git checkout -f)' which runs at the foreground cwd). A git verb
-            # fragmented/quoted into a single token (no standalone 'git') stays the disclosed best-effort residual.
-            gi = _wrapped_git_index(tokens)
-            if gi is not None:
-                wsub, wargs = _git_sub_and_args(tokens[gi:])
-                if wsub is not None:
-                    wrole, _wk = _discard_role(wsub, wargs)
-                    if wrole != "allow" and (_segment_carries_target_redirect(tokens)
-                                             or (depth != 0 and subshell_cd_seen)):
-                        hidden = True
-                        saw_actionable = True
-        if sep == "(":
-            depth += 1
-        elif sep == ")":
-            depth = max(0, depth - 1)
-            if depth == 0:
-                subshell_cd_seen = False   # left the subshell nesting: its internal cd no longer applies
+            res = _discard_git_segment_grammar(words, eff)
+            if res[0] == "deny":
+                out["deny"] = (res[1], res[2])
+                return out
+            _act, _base, _label = res[1], res[2], res[3]
+            if _act is not None:
+                lossy_segs += 1  # every action but None marks a recognized-lossy-verb segment
+            if _act == "snapshot":
+                if _base not in out["snapshot_bases"]:
+                    out["snapshot_bases"].append(_base)
+                out["subs"].add(_label)
+            elif _act == "stash":
+                if (_base, _label) not in out["stash_ops"]:
+                    out["stash_ops"].append((_base, _label))
+            elif _act == "consume":
+                consume_ops.append(_label)
+        if is_cd:
+            cd_seen = True
+            eff = nd if join_after == "&&" else None
+        elif join_after not in ("&&", None) and cd_seen:
+            eff = None
+    if consume_ops and lossy_segs > 1:
+        # R12 DECIDED item 3: a stash-entry-consuming segment (pop, branch) in a compound with
+        # another lossy verb denies BEFORE any preservation or snapshot (the walk is pure; the
+        # caller acts only on an accepted walk), naming the consuming op. A consuming segment
+        # alone keeps its existing handling.
+        out["deny"] = ("stashconsume", "git stash {}".format(consume_ops[0]))
+        return out
+    return out
 
-    if targets_session and session_cwd is not None:
-        _add(snapshot_bases, session_cwd)              # a plain session-cwd discard: snapshot the cwd too
-    return {"snapshot_bases": snapshot_bases, "stash_ops": stash_ops, "hidden": hidden,
-            "unresolved": unresolved, "saw_actionable": saw_actionable}
+
+# The deny texts for each positive-grammar violation class (D-423-NARROW ROUND 8). {0} is the
+# offending byte, token or form, {1} the safe-alternatives text. Every reason names the closed
+# allowlist grammar, so a denial is attributable to the grammar (not to a snapshot failure), and each
+# names the plain spelling that would be accepted. None steers toward a destructive spelling.
+_DISCARD_GRAMMAR_DENY_TEXTS = {
+    "char": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command carries the character "
+        "{0!r}, which is outside the closed allowlist grammar's positive literal character class "
+        "(letters, digits and _ . / @ : = + , % - in bare words, single-quoted literals, the joins "
+        "'&&', ';' and newline, and the redirections >/dev/null, 2>/dev/null and 2>&1). Such a "
+        "character can introduce an expansion, substitution, heredoc, pipe, subshell, brace group, "
+        "comment or redirect this guard does not model, so what the command would run or where cannot "
+        "be proven; denied rather than run on a possibly unrecoverable discard. Re-issue it as a "
+        "plain 'git <verb>' command with literal tokens only, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied an in-scope command carrying a character outside the discard guard's "
+        "closed allowlist grammar (rule prsunc); use plain literal tokens, or commit or stash first."),
+    "quote": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command carries {0}, which is "
+        "outside the closed allowlist grammar (accepted: a bare literal word, or ONE "
+        "single-quoted literal standing alone as a whole token; no double quotes, no concatenation, "
+        "no quote inside a quote). An unmodelled quoting form can change what the shell runs, so the "
+        "command cannot be proven; denied rather than run. Re-issue it with bare or simply "
+        "single-quoted literal tokens, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied an in-scope command carrying a quoting form outside the discard "
+        "guard's closed allowlist grammar (rule prsunc); use plain literal tokens, or commit or stash "
+        "first."),
+    "sep": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command joins its parts with "
+        "{0!r}, which is outside the closed allowlist grammar (accepted joins: '&&', ';' and a "
+        "newline, each between two complete simple commands). An unmodelled join can background, "
+        "pipe or misparse the command, so what would run cannot be proven; denied rather than run. "
+        "Re-issue it as plain commands joined by '&&' alone, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied an in-scope command joined outside the discard guard's closed "
+        "allowlist grammar (rule prsunc); join plain commands with '&&', or commit or stash first."),
+    "word": (
+        "AIQT rule prsunc (preserve-uncommitted-work): a segment of this in-scope command runs {0!r}, "
+        "which is outside the closed allowlist grammar's command words (accepted, spelled bare and "
+        "unquoted: 'git', a 'cd' to one absolute literal path with options -P/-L only, and 'true' or "
+        "':' with no arguments). Any other command word - a wrapper, an interpreter, eval, xargs, a "
+        "builtin that can change the environment or directory, a quoted or concatenated or pathed "
+        "spelling - could hide or redirect the discard, so the command cannot be proven; denied "
+        "rather than run. Re-issue the inner git command as a plain, unwrapped 'git <verb>' from the "
+        "target repository, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied an in-scope command whose command word is outside the discard "
+        "guard's closed allowlist grammar (rule prsunc); re-issue the inner git command plainly, or "
+        "commit or stash first."),
+    "assign": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command carries an assignment "
+        "word (NAME=value, or a GIT_* assignment-shaped token), which is outside the closed allowlist "
+        "grammar: no assignment is accepted anywhere on this path (the name is not echoed here), "
+        "because an assignment can redirect the repository view or what the shell resolves, so the "
+        "discard's target cannot be proven; denied rather than run. Re-issue it as a plain "
+        "'git <verb>' command without the assignment, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied a git command carrying an assignment outside the discard guard's "
+        "closed allowlist grammar (rule prsunc); drop the assignment, or commit or stash first."),
+    "global": (
+        "AIQT rule prsunc (preserve-uncommitted-work): a git segment of this in-scope command carries "
+        "the git global option {0!r}, which is outside the closed allowlist grammar (the only "
+        "accepted global option is -C with an absolute literal path): any other global can redirect "
+        "the repository, worktree, index or config view, so the discard's target cannot be proven; "
+        "denied rather than run. Re-issue it without that option, or commit or stash your work "
+        "first. {1}",
+        "AIQT guardrail: denied a git command carrying a global option outside the discard guard's "
+        "closed allowlist grammar (rule prsunc); drop the option, or commit or stash first."),
+    "cdir": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command changes or names a "
+        "directory through {0!r}, which is outside the closed allowlist grammar (accepted for cd and "
+        "git -C alike: exactly one ABSOLUTE literal path, no '..' component, whose realpath equals "
+        "its normpath, so no symlink component; cd additionally accepts only the flags -P and -L), "
+        "so the repository the command acts on cannot be resolved; denied rather than run. Re-issue "
+        "it with a literal absolute path, or run it from the target repository, or commit or stash "
+        "your work first. {1}",
+        "AIQT guardrail: denied a git discard whose directory operand is outside the discard guard's "
+        "closed allowlist grammar (rule prsunc); use a literal absolute path, or commit or stash "
+        "first."),
+    "sub": (
+        "AIQT rule prsunc (preserve-uncommitted-work): a git segment of this in-scope command "
+        "resolves to the git subcommand {0!r}, which is outside the closed allowlist grammar "
+        "(neither on the explicit read-only allowlist nor a lossy verb this guard models: checkout/"
+        "switch/restore/reset/rm/clean/stash/branch, each spelled bare), so it cannot be proven "
+        "non-destructive and cannot be snapshotted; denied rather than run. Re-issue it as a "
+        "recognized, provable form, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied a git command whose subcommand is outside the discard guard's closed "
+        "allowlist grammar (rule prsunc); re-issue a recognized form, or commit or stash first."),
+    "roopt": (
+        "AIQT rule prsunc (preserve-uncommitted-work): a read-only git segment of this in-scope "
+        "command carries the option {0!r}, which is outside the closed allowlist grammar's vetted "
+        "option list for that subcommand (exact value-less flags plus joined-only --opt=value "
+        "spellings, each value shape-validated; a git-accepted abbreviation and every separated "
+        "value word are not vetted). An unvetted option can make a read-only "
+        "subcommand run a program (git grep --open-files-in-pager/-O runs one per matching file; "
+        "the delisted git ls-remote --upload-pack/-u runs an arbitrary command string) or write a "
+        "file (the --output forms truncate their target), so the segment cannot be proven "
+        "read-only; denied rather than run. Re-issue it without that option or with a vetted exact "
+        "spelling, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied a git command whose read-only segment carries an option outside "
+        "the discard guard's vetted allowlist (rule prsunc); drop the option, or commit or stash "
+        "first."),
+    "stashop": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command names the git stash "
+        "operation {0!r}, which this guard cannot resolve to a modelled literal op word under the "
+        "closed allowlist grammar, so it cannot establish or preserve the stash entries the command "
+        "could affect; denied rather than run. Re-issue it as a plain, modelled git stash operation "
+        "spelled as its own bare word, or apply or commit the stash first. {1}",
+        "AIQT guardrail: denied a git stash command whose operation is outside the discard guard's "
+        "closed allowlist grammar (rule prsunc); re-issue it plainly, or apply or commit the stash "
+        "first."),
+    "stashro": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command carries {0!r}, which "
+        "is outside the closed allowlist grammar's stash rule: an explicit 'git stash list' "
+        "carries NO further token, and an explicit 'git stash show' carries at most ONE positional "
+        "stash reference and nothing else (no option-shaped token and no '--'). git forwards stash "
+        "list arguments to git log and stash show arguments to git diff, so an extra token rides "
+        "around the vetted read-only grammar and the delisted diff class (an --output value "
+        "truncates its target file; patch output runs configured textconv and external-diff "
+        "drivers, and a retained '--' makes stash show itself select patch output); denied rather "
+        "than run. Re-issue it as a bare 'git stash list' or a 'git stash show' with at most one "
+        "stash reference, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied a git stash list/show argument outside the discard guard's closed "
+        "allowlist grammar (rule prsunc); use a bare 'stash list' or 'stash show <stash>', or "
+        "commit or stash first."),
+    "verbopt": (
+        "AIQT rule prsunc (preserve-uncommitted-work): a lossy-verb git segment of this in-scope "
+        "command carries the option {0!r}, which is outside the closed allowlist grammar's "
+        "per-verb option list for that verb (exact spellings only, each value-taking option's "
+        "value consumed by its arity; no git-accepted abbreviation and no flag cluster is "
+        "listed). An unlisted option can make even a modelled lossy verb run a configured "
+        "program (git branch --sort and --format carry signature atoms and placeholders that "
+        "run the configured signature program, and --edit-description launches the editor), so "
+        "the segment cannot be proven to stay within what a recovery snapshot preserves; denied "
+        "rather than run. Re-issue it with listed exact option spellings, or commit or stash "
+        "your work first. {1}",
+        "AIQT guardrail: denied a git command whose lossy-verb segment carries an option outside "
+        "the discard guard's closed per-verb allowlist (rule prsunc); drop the option, or commit "
+        "or stash first."),
+    "stashconsume": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command runs {0} together "
+        "with another lossy git verb, which is outside the closed allowlist grammar: a successful "
+        "stash pop (or stash branch) APPLIES and then DROPS the stash entry, so the other lossy "
+        "verb can destroy the just-applied content while the dropped entry is no longer in the "
+        "stash, and a pre-command worktree snapshot cannot contain it; denied rather than run. "
+        "Run the stash-consuming command alone first (or use git stash apply, which keeps the "
+        "entry), then re-issue the second command. {1}",
+        "AIQT guardrail: denied a compound that consumes a stash entry together with another "
+        "lossy git verb (rule prsunc); run git stash pop or branch alone (or use stash apply), "
+        "then retry."),
+    "patch": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command carries {0!r}, and "
+        "-p/--patch (abbreviations, clustered spellings such as -2p, and a separated option "
+        "value hiding the flag included) is outside the closed allowlist grammar's per-verb "
+        "option allowlists on every modelled lossy verb: interactive patch mode renders its "
+        "hunks through the operator-configurable interactive.diffFilter setting, so even a "
+        "modelled lossy verb would run a configured program before any recovery snapshot could "
+        "matter; denied rather than run. Re-issue the command without -p/--patch (a "
+        "pathspec-scoped spelling), or commit or stash your work first. {1}",
+        "AIQT guardrail: denied a git -p/--patch form whose interactive patch mode runs the "
+        "configured interactive.diffFilter program (rule prsunc); re-issue it without -p/--patch, "
+        "or commit or stash first."),
+    "redir": (
+        "AIQT rule prsunc (preserve-uncommitted-work): a segment of this in-scope command carries "
+        "the redirection {0!r}, which is outside the closed allowlist grammar (accepted: >/dev/null, "
+        "2>/dev/null and 2>&1 only, none of which writes a file), so the redirect could read, "
+        "truncate or overwrite a file this guard cannot snapshot; denied rather than run. Re-issue "
+        "it without the redirection, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied a git discard carrying a redirection the discard guard cannot "
+        "preserve (rule prsunc); drop the redirection, or commit or stash first."),
+    "dir": (
+        "AIQT rule prsunc (preserve-uncommitted-work): {0} runs after a directory change the closed "
+        "allowlist grammar cannot follow through (a cd is honoured only while every join from it to "
+        "the discard is '&&'; across ';' or a newline the cd may have failed with the next command "
+        "still running), so its effective target directory is unprovable and can be neither proven "
+        "clean nor snapshotted; denied rather than run. Re-issue it as a plain 'git <verb>' command "
+        "run from the target repository, or join the chain with '&&' alone, or commit or stash your "
+        "work first. {1}",
+        "AIQT guardrail: denied a git discard whose directory the discard guard's closed allowlist "
+        "grammar cannot establish (rule prsunc); run it from the target repo, or commit or stash "
+        "first."),
+}
+
 
 
 def git_discard(data):
@@ -4736,21 +5551,49 @@ def git_discard(data):
     is a PRISTINE SINGLE BARE 'git <verb>' invocation (see _pristine_single_bare_git: no shell metacharacter
     anywhere even quoted, no reserved word, no wrapper/redirect/compound, and the sole command word literally
     'git') AND either its FORM is genuinely non-destructive, or the working tree is PROVABLY CLEAN (the
-    config-forced porcelain probe reports no tracked change AND no untracked entry), or the LEADING opt-out is
-    set - in which cases ALLOW. A pristine single bare WHOLE-TREE clobber (reset --hard, checkout -f with no
-    pathspec, switch --force/--discard-changes) on a probed-DIRTY tree DENIES. EVERYTHING ELSE in scope ASKS:
-    any shell structure at all (a metacharacter, wrapper, redirect, reserved word, or second segment), an
-    option the form-classifier cannot resolve, a worktree it cannot resolve to the session cwd, an incomplete
-    probe, or a softer/index-only discard. No recognized lossy command that would discard WORKING-TREE CONTENT
-    is silently ALLOWED unless it is a pristine
+    config-forced porcelain probe reports no tracked change AND no untracked entry) - in which cases ALLOW.
+    A pristine single bare WHOLE-TREE clobber (reset --hard, checkout -f with no pathspec, switch
+    --force/--discard-changes) on a probed-DIRTY tree DENIES. EVERYTHING ELSE in scope is judged by the
+    POSITIVE LITERAL closed allowlist grammar (D-423-NARROW ROUND 8, _discard_positive_grammar,
+    judged on the RAW command string): a non-pristine in-scope command is accepted ONLY when every
+    token is a bare literal word over the closed character class (letters, digits and
+    _ . / @ : = + , % -) or ONE standalone single-quoted literal; every command word, spelled bare,
+    is git, a cd to exactly one absolute literal '..'-free realpath-equals-normpath path (flags -P/-L
+    only), or true/':' with no arguments; no assignment word stands in or before a command-word
+    position and no GIT_* assignment-shaped token appears ANYWHERE; a git segment carries no global
+    option but -C <absolute literal path> and its bare subcommand is read-only-listed (carrying
+    ONLY that subcommand's vetted option spellings - R10/R11: value options joined-only; help,
+    diff, show, blame and for-each-ref --format/--sort delisted; -p/--patch outside every closed
+    option allowlist, the modelled lossy verbs included - because an unvetted read-only option
+    can run a program or write a file) or a modelled
+    lossy verb carrying ONLY that verb's closed option allowlist of exact spellings, each
+    value-taking option's value consumed by its arity, with a stash-entry-consuming op (pop,
+    branch) denied in a compound with another lossy verb (then preserve-then-allowed exactly as
+    before: stash preservation or a resolved-target
+    snapshot first, plus the session catch-all snapshot); joins are '&&', ';' and newline only (a
+    trailing ';' or newline is accepted), and
+    redirections >/dev/null, 2>/dev/null and 2>&1 only (each may directly follow a word, which ends
+    at the operator). ANY other byte, quoting form, word, join,
+    redirect or shape DENIES with the grammar reason - every wrapper, interpreter, eval, xargs,
+    find -exec, subshell, brace group, pipe, expansion, substitution, heredoc, builtin, assignment
+    word, unlisted global option or subcommand, unresolvable -C or cd or post-cd join, and every
+    unparseable flagged command (the fallback). No recognized lossy command that would discard
+    WORKING-TREE CONTENT is silently ALLOWED unless it is a pristine
     bare git whose FORM is genuinely non-destructive (checkout -b, reset --soft, clean -n, which ALLOW even on
-    a dirty tree), or on a provably-clean tree, or a pristine bare form carrying the leading
-    GUARDRAIL_ALLOW_DISCARD=1 opt-out - worst case it ASKS; the guarantee is bounded to working-tree content
-    (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are reflog-recoverable) and is
-    best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is reserved for the TRUE boundary
-    (a non-Bash or absent tool, a malformed or missing command it cannot read as a discard, a non-git command,
+    a dirty tree), or on a provably-clean tree; no in-band override exists (a leading
+    GUARDRAIL_ALLOW_DISCARD assignment, the removed override, is an ordinary assignment whose value no code
+    reads to permit anything: when the command without it names a recognized work-losing verb and the
+    prefixed command is pristine, it gets the decision of the command without it; otherwise its value is raw
+    text the raw scans read like any other: a metacharacter value takes the non-pristine grammar path and
+    an unbalanced quote takes the deny-on-flag fallback, each exactly as FOO=<the same value> would, while
+    a lossy keyword in the value brings a command into scope exactly as FOO=<the same value> does; the
+    non-pristine path and the unparseable fallback never read the name, so there the prefixed command gets
+    exactly what FOO=<the same value> gets); the guarantee is bounded to
+    working-tree content (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are
+    reflog-recoverable) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
+    reserved for the TRUE boundary (a non-Bash or absent tool, a malformed or missing command it cannot read as a discard, a non-git command,
     or no recognized lossy verb). A wrapper is in scope only while the raw scan still
-    sees a contiguous git verb keyword, so 'any wrapper ASKS' is NOT categorical: a wrapper that ALSO
+    sees a contiguous git verb keyword, so 'any wrapper DENIES' is NOT categorical: a wrapper that ALSO
     fragments the COMMAND WORD 'git' itself or the verb (env git re'set' --hard / eval git re'set' / command
     g'it' reset --hard, whose raw string carries no contiguous 'git'+'reset') reads as 'no recognized lossy
     verb' and is silently ALLOWED - a DISCLOSED best-effort residual, not chased. A real discard whose VERB is
@@ -4771,11 +5614,20 @@ def git_discard(data):
     skipped when no per-user location resolves, the path would land inside the repo, or the write fails), on
     the ALLOW and ASK paths alike (the hook fires once, with no post-approval callback). It NEVER mutates the real index, worktree, HEAD, or any
     branch. If a warranted snapshot cannot be made, a would-be ALLOW is downgraded to ASK ('no recovery point
-    could be created'); an already-ASK/DENY decision is left as-is with the failure surfaced. F-D EXPANSION: a
-    NON-PRISTINE in-scope ASK (a compound/wrapped/redirected snapshottable command) is ALSO snapshot-backed
-    BEST-EFFORT against the SESSION CWD repo (the redirected dir of a non-pristine command is not parsed, so a
-    command that changes into a DIFFERENT repo may be snapshotted at the session repo rather than the target;
-    a same-repo cd is still captured by the whole-tree add --all). See the recovery block comment above
+    could be created'); an already-ASK/DENY decision is left as-is with the failure surfaced. D-423-NARROW:
+    an ACCEPTED non-pristine in-scope command is snapshot-backed against EACH worktree the grammar
+    resolves (a plain git segment's own literal -C chain over the '&&'-followed literal cd chain) PLUS
+    the session cwd as a best-effort catch-all for EVERY in-scope command (a verb that actually acts on
+    the session repository stays recoverable even when no segment resolved it); a resolved plain stash
+    drop/clear first preserves its target repo's stash under durable refs or DENIES; a discard-capable
+    segment whose directory the grammar cannot establish DENIES; and with NO session cwd EVERY
+    non-pristine in-scope command DENIES (fail closed:
+    no catch-all snapshot is possible). That no-cwd deny is DELIBERATELY CONSERVATIVE and catches legitimate
+    workflows: with no session cwd, a compound or assignment-prefixed command whose visible form is
+    non-destructive or non-snapshottable ('git checkout -b nb && echo ok', 'git log | grep branch',
+    "FOO=';' git clean -n", "FOO=';' git reset --soft") is DENIED although its
+    bare single-command form allows - an accepted cost, because a raw-flagged verb the walk cannot see could
+    still act on the unknown cwd. See the recovery block comment above
     _SNAPSHOTTABLE_VERBS. The snapshot cannot capture what the probe cannot see (assume-unchanged/skip-worktree
     marks, submodule.<name>.ignore) or ignored files (git add --all excludes them), so a discard of that
     content is not recoverable here."""
@@ -4793,9 +5645,9 @@ def git_discard(data):
     try:
         segments = _segments(command)
     except ValueError:
-        # Conservative raw scan, not a silent allow. Pass cwd so an unparseable in-scope discard still gets
-        # a best-effort recovery snapshot before the ASK (Class C), mirroring the non-pristine path.
-        return _git_discard_fallback(command, data.get("cwd"))
+        # Conservative raw scan, not a silent allow (D-423-NARROW): an unparseable command the raw scan
+        # flags is denied outright; only a command the scan clears is allowed at the true boundary.
+        return _git_discard_fallback(command)
 
     # Precisely-identified lossy git segments (the clean-parse signal). A git command-word segment whose
     # verb-form is not "allow" is a real in-scope lossy form. Used for the in-scope decision on a
@@ -4817,87 +5669,53 @@ def git_discard(data):
     # setsid/eval defeated the list), so any raw 'git' + work-losing verb is in scope even when the precise
     # `lossy` list is empty (a wrapped or quoted git verb). A non-lossy git command still routes through the
     # pristine path below and allows. Residual: git renamed out of the string (alias/function) -> recovery layer.
-    # ROUND-2 FINDING 17: the unconditional raw scan runs on a copy with QUOTED-heredoc bodies stripped, so a
-    # lossy-verb keyword quoted inside heredoc prose (a 'git reset --hard' example in a here-doc) does not
-    # falsely route the harmless outer command (e.g. 'cat <<'EOF'...') into the discard machinery. A real
-    # lossy verb OUTSIDE the heredoc body is preserved and still caught.
-    raw_lossy = _raw_has_lossy_git(_strip_quoted_heredoc_bodies(command))
+    # ROUND 8 (the R7C BLOCKER-1 class): the unconditional raw scan reads the FULL raw command.
+    # Heredoc bodies are no longer stripped on this path: stripping removes text, so it can only hide
+    # a real discard and widen acceptance (the round-7 stripper erased a real 'git -C stash clear'
+    # behind nested heredoc data). The cost is disclosed: a lossy keyword quoted inside heredoc prose
+    # now brings the harmless outer command in scope, where the positive grammar denies the heredoc
+    # operator itself - an over-deny, the safe direction under D-423-NARROW.
+    raw_lossy = _raw_has_lossy_git(command)
     if not lossy and not raw_lossy:
         return _allow()  # boundary: no git + work-losing verb anywhere
 
     # In scope. Apply the ULTRA-CONSERVATIVE pristine gate: anything that is not a pristine single bare
-    # 'git <verb>' invocation ASKS, without ever consulting the probe (a safe over-ask).
+    # 'git <verb>' invocation is judged by the closed allowlist grammar below, without ever consulting
+    # the probe.
     pristine = _pristine_single_bare_git(command, segments)
     if pristine is None:
         kind = lossy[0][1] if lossy else "a git work-losing verb"
-        # F-D EXPAND (GD-41, Architect-approved): a non-pristine in-scope command still ASKS, but now gets a
-        # BEST-EFFORT recovery point first, so an asked-then-approved compound/wrapped discard is recoverable
-        # (the hook fires once, with no post-approval callback). This is BEST-EFFORT against the SESSION CWD
-        # repo only: we do NOT parse a non-pristine command's redirected dir, so a command that changes into a
-        # DIFFERENT repo may be snapshotted at the session repo rather than the target (a same-repo cd is
-        # still captured by the whole-tree add --all). The snapshot is decision-INDEPENDENT (same
-        # _record_recovery path); on snapshot fail the decision stays ASK with the failure surfaced (never
-        # allow).
-        np_subs = set()
-        for _role, _kind, _toks in lossy:
-            _s, _ = _git_sub_and_args(_toks)
-            if _s is not None:
-                np_subs.add(_s)
-        # This command is ALREADY IN SCOPE (a visible lossy token routed it here), so the snapshot is no
-        # longer gated on lexical snappable-detection: shell quoting/eval can hide WHICH snappable verb an
-        # in-scope command carries (a `re'set'` fragment assembles `reset` at runtime, so np_subs may miss
-        # it), so whenever the base resolves and the tree is NOT provably clean we take the inert best-effort
-        # snapshot regardless of which verb is (or is not) visible. A verb obfuscated so thoroughly that it
-        # evades even the raw scan (a standalone `eval git re'set'`, whose raw string has no contiguous
-        # `reset` for _raw_has_lossy_git to catch) never reaches here at all: it is ALLOWED at the in-scope
-        # boundary above, a DISCLOSED best-effort residual (the classifier's documented obfuscation residual),
-        # not something this snapshot closes. Over-snapshotting a pure stash/branch non-pristine command is an
-        # accepted inert cost (a worktree snapshot cannot capture their asset, but it is never an
-        # under-protection). The np_verb label is best-effort from any visible snappable sub.
+        # D-423-NARROW ROUND 8: a non-pristine in-scope command is accepted ONLY when its RAW text
+        # fits the positive literal grammar (_discard_positive_grammar); anything outside it DENIES with the
+        # grammar reason. An accepted command keeps the preserve-then-allow posture of the pin: every
+        # resolved stash drop/clear preserves its target repository's stash under durable refs first (or
+        # denies), every resolved worktree discard is snapshotted at its resolved target (or denies),
+        # and the SESSION CWD is always snapshotted as the best-effort catch-all for every in-scope
+        # command, so an in-scope verb that actually acts on the session repository stays recoverable
+        # even when no segment resolved it. With NO session cwd every non-pristine in-scope command
+        # DENIES (fail closed: the catch-all snapshot base cannot be resolved; ROUND-8).
         np_cwd = data.get("cwd")
         np_base = np_cwd if isinstance(np_cwd, str) and np_cwd else None
-        np_verb = next(iter(sorted(np_subs & _SNAPSHOTTABLE_VERBS)), "discard")
-        # ROUND-3 FINDINGS 1 and 2: resolve the effective worktree/repository EACH visible discard acts on
-        # (tracking top-level cd/pushd and each git segment's own -C/--work-tree/GIT_WORK_TREE= redirect), so
-        # the snapshot/stash-preservation lands on the repo the command will actually mutate, not blindly on
-        # the session cwd. A `git -C T restore ...; :` or `cd T && git restore ...` now snapshots T, and a
-        # `git -C T stash clear` or `git stash clear; :` now preserves the stash of the repo it clears. Where
-        # the effective target cannot be resolved with certainty (an unresolvable redirect/cd, a ;/||-gated
-        # cd whose success is not guaranteed, or a --git-dir/GIT_DIR-redirected stash), the discard DENIES
-        # (fail closed) rather than note a recovery that would not contain the discarded state.
-        actions = _nonpristine_discard_actions(segments, np_base)
-        if actions["unresolved"]:
+        if np_base is None:
             return _deny(
-                "AIQT rule prsunc (preserve-uncommitted-work): {} runs in a compound/redirected command "
-                "whose effective target worktree or repository this guard cannot resolve with certainty (an "
-                "unresolvable -C/--work-tree/GIT_WORK_TREE= or --git-dir/GIT_DIR redirect, or a cd/pushd "
-                "whose success does not gate the discard), so it cannot snapshot or preserve the exact target "
-                "the command will discard from; denied rather than run on a possibly unrecoverable discard. "
-                "Re-issue it as a plain 'git <verb>' command from the target repository, or commit or stash "
-                "your work first. {}".format(kind, _DISCARD_ALTS),
-                "AIQT guardrail: denied a compound/redirected git discard whose target this guard cannot "
-                "resolve to snapshot (rule prsunc); run it from the target repo, or commit or stash first.")
-        if actions["hidden"]:
-            # ROUND-6 FINDING 3: a lossy discard the walk could not resolve as a depth-0 literal-git segment
-            # (inside a subshell '( ... )', or a WRAPPED 'git' carrying a -C/--git-dir/--work-tree/GIT_DIR=/
-            # GIT_WORK_TREE= redirect off the session cwd). Its target cannot be snapshotted with certainty and
-            # the best-effort session-cwd snapshot would not capture it, so it fails closed: DENY-and-educate
-            # (re-issue it as a plain, unwrapped 'git <verb>' command from the target repository).
-            return _deny(
-                "AIQT rule prsunc (preserve-uncommitted-work): {} runs inside a subshell, or as a wrapped "
-                "'git' invocation (env/sudo/... git) carrying a -C/--git-dir/--work-tree/GIT_DIR=/"
-                "GIT_WORK_TREE= redirect, so its effective target worktree or repository is off the session "
-                "directory and this guard cannot resolve or snapshot it with certainty; denied rather than "
-                "run on a possibly unrecoverable discard. Re-issue it as a plain, unwrapped 'git <verb>' "
-                "command from the target repository, or commit or stash your work first. {}"
-                .format(kind, _DISCARD_ALTS),
-                "AIQT guardrail: denied a subshell/wrapped-and-redirected git discard whose target this guard "
-                "cannot resolve to snapshot (rule prsunc); run it unwrapped from the target repo, or commit or "
-                "stash first.")
-        # Preserve the stash of every RESOLVED stash drop/clear target repo first (fail closed on a repo whose
-        # stash cannot be preserved), so a `git -C T stash clear` / `git stash clear; :` no longer notes a
-        # recovery that omits the cleared stash (round-3 finding 2).
-        for _b, _op in actions["stash_ops"]:
+                "AIQT rule prsunc (preserve-uncommitted-work): {} runs in a compound/wrapped/redirected "
+                "command and no session working directory is available, so this guard can neither prove any "
+                "target tree clean nor take the session-directory recovery snapshot; denied rather than run "
+                "on a possibly unrecoverable discard. Re-issue it as a plain 'git <verb>' command from the "
+                "target repository, or commit or stash your work first. {}".format(kind, _DISCARD_ALTS),
+                "AIQT guardrail: denied a compound/wrapped/redirected git discard with no session directory "
+                "to snapshot (rule prsunc); run it from the target repo, or commit or stash first.")
+        walk = _discard_positive_grammar(command, np_base)
+        if walk["deny"] is not None:
+            g_kind, g_what = walk["deny"]
+            g_reason, g_banner = _DISCARD_GRAMMAR_DENY_TEXTS[g_kind]
+            return _deny(g_reason.format(g_what, _DISCARD_ALTS), g_banner)
+        np_verb = next(iter(sorted(walk["subs"])), "discard")
+        # Preserve the stash of every RESOLVED stash drop/clear target repo first (fail closed on a repo
+        # whose stash cannot be preserved), so a resolved stash removal never notes a recovery that omits
+        # the cleared stash.
+        _stash_preserved = []
+        for _b, _op in walk["stash_ops"]:
             _st = _record_stash_recovery(_b)
             if _st[0] == "fail":
                 return _deny(
@@ -4908,12 +5726,14 @@ def git_discard(data):
                     .format(_op, _b, _st[1], _DISCARD_ALTS),
                     "AIQT guardrail: denied an unrecoverable compound/redirected git stash drop/clear (rule "
                     "prsunc); apply or commit the stash first, then retry.")
-        # Snapshot every worktree the command discards from: each RESOLVED redirect/cd target (round-3 finding
-        # 1) PLUS the session cwd itself, which stays a best-effort catch-all because a snappable verb hidden
-        # by shell quoting/eval/substitution may still discard the cwd (the rec-c6 residual). Any warranted
-        # snapshot that FAILS denies (fail closed), never a note over a target with no recovery point.
-        _bases = list(actions["snapshot_bases"])
-        if np_base is not None and np_base not in _bases:
+            if _st[0] == "ok":
+                _stash_preserved.append("{} stash entr{} of {} under {}".format(
+                    _st[1]["count"], "y" if _st[1]["count"] == 1 else "ies", _b, ", ".join(_st[1]["refs"])))
+        # Snapshot every worktree the command discards from: each RESOLVED target the grammar accepted,
+        # PLUS the session cwd itself, which stays a best-effort catch-all. Any warranted snapshot that
+        # FAILS denies (fail closed), never a note over a target with no recovery point.
+        _bases = list(walk["snapshot_bases"])
+        if np_base not in _bases:
             _bases.append(np_base)
         np_snap = None
         for _b in _bases:
@@ -4930,20 +5750,46 @@ def git_discard(data):
                 if np_snap is None and _s[0] == "ok":
                     np_snap = _s
         return _discard_recovery_result(
-            kind, "is not a pristine single bare 'git <verb>' invocation (it carries a shell "
-                  "metacharacter, wrapper, redirect, reserved word, a second command, or a command word "
-                  "that is not literally 'git'); a recovery snapshot targets the effective worktree(s) it "
-                  "resolved plus the session directory before allowing", np_snap, _OPTOUT_REISSUE)
+            kind, "matches the closed allowlist grammar for a non-pristine command (bare literal "
+                  "tokens; command words git, cd to an absolute literal path, true and ':' only; "
+                  "joins '&&', ';' and newline; redirections to /dev/null and 2>&1 only); a "
+                  "recovery snapshot targets the worktree(s) it resolved plus the session directory "
+                  "before allowing"
+                  + ("; the stash entries it would discard were first preserved under durable refs "
+                     "(not reflog-recoverable otherwise): {}; recover an entry with git stash apply using "
+                     "one of the refs named above, run from its repository".format("; ".join(_stash_preserved))
+                     if _stash_preserved else ""), np_snap)
 
-    # A pristine single bare git command. Honour a truthy LEADING opt-out on it (an explicit override).
-    # This short-circuits BEFORE the recovery layer, so an opt-out discard is NOT snapshot-backed: the
-    # operator has explicitly taken responsibility for having saved the work.
-    if _segment_has_optout(pristine):
-        return _allow()
+    # A pristine single bare git command. No in-band override exists: below, only _segment_dir_simple (benign)
+    # and _removed_prefix_note (text) read a leading GUARDRAIL_ALLOW_DISCARD by name; the raw command string
+    # is read below only through raw_lossy, the scope flag a prefix value can only switch ON (routing to the
+    # F-97 denies), so the prefix's value can make the decision below stricter, never more permissive.
+    # MIGRATION (this release only): every
+    # reason this path emits ends with `note`, the removed-prefix sentence when that prefix is truthy (empty
+    # otherwise), through `alts` (the safe alternatives plus the note) or a helper's `note` parameter.
+    note = _removed_prefix_note(pristine)
+    alts = _DISCARD_ALTS + note
 
     # Re-derive the verb form from the sole pristine git command.
     sub, args = _git_sub_and_args(pristine)
     role, kind = _discard_role(sub, args) if sub is not None else ("allow", None)
+
+    # R11 (DECIDED items 3-4): the -p/--patch rule and the stash list/show argument rule hold on
+    # the PRISTINE single-command path exactly as on the grammar path, decided BEFORE the
+    # view-override and role logic below: a bare in-scope 'git stash list --output=<path>' or
+    # 'git checkout -p' must never ride the pristine allow (or snapshot-then-allow) around the
+    # compound rule. Both checks are purely lexical; the denied command runs nothing, so no
+    # snapshot is warranted.
+    if sub in _DISCARD_PATCH_VERBS:
+        p_bad = _discard_patch_token(sub, args)
+        if p_bad is not None:
+            p_reason, p_banner = _DISCARD_GRAMMAR_DENY_TEXTS["patch"]
+            return _deny(p_reason.format(p_bad, alts), p_banner)
+    if sub == "stash":
+        st_bad = _discard_stash_ro_bad(args)
+        if st_bad is not None:
+            st_reason, st_banner = _DISCARD_GRAMMAR_DENY_TEXTS["stashro"]
+            return _deny(st_reason.format(st_bad, alts), st_banner)
 
     # FAIL-SAFE (EN-6, structural completion): the command's repository view cannot be proven to be the
     # session cwd when EITHER cause is present. (1) A NON-COSMETIC ambient GIT_* var: the probe scrubs it,
@@ -4953,10 +5799,11 @@ def git_discard(data):
     # at a different worktree or config. In EITHER case ANY in-scope pristine form ASKS here - a destructive
     # form OR a genuinely non-destructive allow form (reset --soft, plain switch, clean -n, checkout -b) -
     # BEFORE the role/allow logic below that would otherwise let an allow form through and bypass the fail-
-    # safe. Only the explicit leading opt-out (short-circuited above) bypasses it. A best-effort snapshot of
+    # safe. Nothing bypasses it (no in-band override exists). A best-effort snapshot of
     # the SESSION CWD is still taken on a not-provably-clean snappable tree (the cwd is known even when the
     # target is not): it is inert and provides recovery IF the command acts on the cwd (the common benign
-    # non-redirecting case), but may NOT capture a redirected tree.
+    # non-redirecting case), but may NOT capture a redirected tree. With NO session cwd and no resolved -C
+    # target a DESTRUCTIVE form DENIES below (fail closed, ROUND-8): no base can be probed or snapshotted.
     ambient_override = _ambient_repo_view_override()
     if ambient_override or not _segment_dir_simple(pristine):
         ao_cwd = data.get("cwd")
@@ -4994,7 +5841,7 @@ def git_discard(data):
                 "-c or inline GIT_DIR=/GIT_WORK_TREE= assignment, e.g. an inline '-c alias.<name>=' or a "
                 "redirected 'checkout-index'/'read-tree'); this guard cannot prove it non-destructive and "
                 "cannot snapshot it, so it is denied rather than run on a possible discard. Re-issue as a "
-                "recognized, provable form, or commit or stash your work first. {}".format(sub, _DISCARD_ALTS),
+                "recognized, provable form, or commit or stash your work first. {}".format(sub, alts),
                 "AIQT guardrail: denied a redirected git command whose subcommand this guard cannot prove "
                 "non-destructive (rule prsunc); commit or stash first, or re-issue in a recognized form.")
         # ROUND-6 FINDING 5: a destructive discard carrying a --git-dir/GIT_DIR redirect (which does NOT move
@@ -5014,7 +5861,7 @@ def git_discard(data):
                     "session snapshot cannot capture that redirected index, so this discard could be "
                     "unrecoverable and is denied rather than run. Re-issue it as a plain 'git -C <repo> "
                     "<verb>' command run from the target repository, or commit or stash your work first. {}"
-                    .format(kind or "a git work-losing verb", _DISCARD_ALTS),
+                    .format(kind or "a git work-losing verb", alts),
                     "AIQT guardrail: denied a --git-dir/GIT_DIR-redirected git discard whose repository this "
                     "guard cannot resolve to snapshot (rule prsunc); run it from the target repo, or commit "
                     "or stash first.")
@@ -5039,7 +5886,7 @@ def git_discard(data):
                     "the exact content the command would discard and denies rather than run on a possibly "
                     "unrecoverable discard. Re-issue it as a plain 'git <verb>' command run FROM the target "
                     "working tree (without --work-tree), or commit or stash your work first. {}"
-                    .format(kind or "a git work-losing verb", _DISCARD_ALTS),
+                    .format(kind or "a git work-losing verb", alts),
                     "AIQT guardrail: denied a --work-tree-redirected worktree-content git discard whose split "
                     "index/worktree state this guard cannot snapshot (rule prsunc); run it from the target "
                     "worktree, or commit or stash first.")
@@ -5060,7 +5907,7 @@ def git_discard(data):
                         "cannot resolve, so it cannot preserve the stash the command will actually clear; "
                         "denied rather than run on an unrecoverable discard. Re-issue it as a plain git "
                         "command from the target repository, or apply or commit the stash first. {}"
-                        .format(stash_op, _DISCARD_ALTS),
+                        .format(stash_op, alts),
                         "AIQT guardrail: denied a redirected git stash drop/clear whose repository this guard "
                         "cannot resolve to preserve (rule prsunc); run it from the target repo, or apply or "
                         "commit the stash first.")
@@ -5073,10 +5920,10 @@ def git_discard(data):
                         "entries and is NOT reflog-recoverable afterwards, and no target repository could be "
                         "resolved to preserve them first; denied rather than run on an unrecoverable discard. "
                         "Re-issue it from the target repository, or leave the stash in place. {}"
-                        .format(stash_op, _DISCARD_ALTS),
+                        .format(stash_op, alts),
                         "AIQT guardrail: denied a git stash drop/clear with no resolvable repository to "
                         "preserve the stash first (rule prsunc).")
-                return _stash_drop_clear_outcome(stash_repo, stash_op)
+                return _stash_drop_clear_outcome(stash_repo, stash_op, note)
         if repo_dir == "opaque":
             if destructive:
                 return _deny(
@@ -5085,18 +5932,34 @@ def git_discard(data):
                     "cannot snapshot the repository the command will actually discard from; denied rather "
                     "than run on a possibly unrecoverable discard. Re-issue it as a plain git command from "
                     "the target repository, or commit or stash your work first. {}".format(
-                        kind or "a git work-losing verb", _DISCARD_ALTS),
+                        kind or "a git work-losing verb", alts),
                     "AIQT guardrail: denied a repository-redirected git discard whose target this guard cannot "
                     "resolve to snapshot (rule prsunc); run it from the target repo, or commit or stash first.")
             return _allow_note(
                 "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} carries a command-local "
                 "repository redirect this guard cannot resolve, but it is a non-destructive form, so it is "
-                "allowed.".format(kind or "a git command"))
+                "allowed.".format(kind or "a git command") + note)
         # ROUND-7 (codex findings 1/2): snapshot the REPO git acts on (repo_dir: a -C target, or the session
         # cwd when only --work-tree/--git-dir/-c is present), never the --work-tree value.
         target_base = repo_dir if isinstance(repo_dir, str) else cwd_base
         target_desc = ("the -C target ({})".format(repo_dir)
                        if isinstance(repo_dir, str) and repo_dir != cwd_base else "the session directory")
+        # ROUND-8 (class-width of the orchestrator-confirmed fail-open): a DESTRUCTIVE verb deciding on this
+        # view-override branch with NO resolvable base (no session cwd and no resolved -C target: a benign
+        # leading assignment such as FOO=1, a -c or other global option, or an ambient GIT_* override, each
+        # with no cwd) used to allow-note with NO snapshot, making the command MORE permissive than its bare
+        # form, which denies on an unresolvable worktree. It now DENIES (fail closed); a non-destructive
+        # form below keeps its ref-level allow-note, matching the bare command.
+        if destructive and target_base is None:
+            return _deny(
+                "AIQT rule prsunc (preserve-uncommitted-work): {} runs under a repository-view override or a "
+                "command-local redirect and no session working directory is available, so this guard can "
+                "neither prove the target tree clean nor take a recovery snapshot; denied rather than run on "
+                "a possibly unrecoverable discard. Re-issue it as a plain git command from the target "
+                "repository, or commit or stash your work first. {}"
+                .format(kind or "a git work-losing verb", alts),
+                "AIQT guardrail: denied a view-overridden git discard with no session directory to snapshot "
+                "(rule prsunc); run it from the target repo, or commit or stash first.")
         ao_snap = None
         if target_base is not None and destructive and _tree_is_clean(target_base) is not True:
             ao_snap = _record_recovery(target_base, sub)
@@ -5106,7 +5969,7 @@ def git_discard(data):
                     "guard could not snapshot ({}), so the discard would be unrecoverable; denied rather "
                     "than run. Re-issue it as a plain git command from the target repository, or commit or "
                     "stash your work first. {}".format(kind or "a git work-losing verb", target_desc,
-                                                       ao_snap[1], _DISCARD_ALTS),
+                                                       ao_snap[1], alts),
                     "AIQT guardrail: denied an unrecoverable worktree-redirected git discard (rule prsunc); "
                     "run it from the target repo, or commit or stash first.")
         return _discard_recovery_result(
@@ -5114,7 +5977,7 @@ def git_discard(data):
             "runs under a non-cosmetic ambient GIT_* variable or carries a command-local redirect "
             "(-C/--git-dir/--work-tree or an inline GIT_DIR=/GIT_WORK_TREE= assignment); the recovery "
             "snapshot targets {} (a --git-dir/GIT_DIR alone leaves the worktree at the session directory)"
-            .format(target_desc), ao_snap, _OPTOUT_PRISTINE)
+            .format(target_desc), ao_snap, note)
 
     if role == "allow" and any(t.lower().startswith(("alias.", "-calias.")) for t in pristine):
         return _deny(
@@ -5122,7 +5985,7 @@ def git_discard(data):
             "('-c alias.<name>=...') that may expand to a work-losing verb this guard cannot resolve or "
             "snapshot; denied rather than run on an unknown discard. Re-issue the command the alias expands "
             "to explicitly (without '-c alias.<name>='), so this guard can classify it, or commit or stash "
-            "your work first. {}".format(_DISCARD_ALTS),
+            "your work first. {}".format(alts),
             "AIQT guardrail: denied an unresolvable git inline alias that may discard work (rule prsunc); "
             "run the aliased command explicitly, or commit or stash first.")
 
@@ -5163,7 +6026,7 @@ def git_discard(data):
             "(checkout/switch/restore/reset/rm/clean/stash/branch); this guard cannot prove it "
             "non-destructive and cannot snapshot it, so it is denied rather than run on a possible discard. "
             "Re-issue as a recognized, provable form, or commit or stash your work first. {}"
-            .format(sub, _DISCARD_ALTS),
+            .format(sub, alts),
             "AIQT guardrail: denied a git command whose subcommand this guard cannot prove non-destructive "
             "(rule prsunc); commit or stash first, or re-issue in a recognized form.")
 
@@ -5177,7 +6040,7 @@ def git_discard(data):
                 "AIQT rule prsunc (preserve-uncommitted-work): {} would run on a working tree that is not "
                 "provably clean and no recovery point could be created ({}), so this discard would be "
                 "unrecoverable; denied rather than run. Commit or stash your work first, then retry. {}"
-                .format(kind or "a git work-losing verb", snap[1], _DISCARD_ALTS),
+                .format(kind or "a git work-losing verb", snap[1], alts),
                 "AIQT guardrail: denied an unrecoverable git discard - no recovery snapshot could be created "
                 "(rule prsunc); commit or stash first, then retry.")
         return _allow()
@@ -5198,12 +6061,12 @@ def git_discard(data):
                     "cannot resolve to the session directory with certainty, so it can neither prove the "
                     "tree clean nor take a recovery snapshot; denied rather than run on a possible "
                     "unrecoverable discard of untracked content. Re-issue it as a plain git command from the "
-                    "target repository, or commit or stash your work first. {}".format(kind, _DISCARD_ALTS),
+                    "target repository, or commit or stash your work first. {}".format(kind, alts),
                     "AIQT guardrail: denied a git clean whose working tree this guard cannot resolve to "
                     "snapshot (rule prsunc); re-issue from the target repo, or commit or stash first.")
             # resolvable + not provably clean: a snapshot was taken above; fold its outcome in (ok ->
             # allow-note, fail -> deny), so a clean with no recovery point never silently allows.
-            return _discard_recovery_result(kind, "removes untracked files, which cannot be recovered", snap)
+            return _discard_recovery_result(kind, "removes untracked files, which cannot be recovered", snap, note)
         if sub == "stash":
             # ROUND-2 FINDING 6: 'git stash drop'/'clear' is NOT reflog-recoverable after the fact (it deletes
             # the stash reflog entry, orphaning the stash commit), so a worktree snapshot cannot protect it.
@@ -5218,15 +6081,15 @@ def git_discard(data):
                         "entries and is NOT reflog-recoverable afterwards, and no session working directory "
                         "is available to preserve the stash entries first; denied rather than run on an "
                         "unrecoverable discard. Re-issue it from the target repository, or leave the stash "
-                        "in place. {}".format(stash_op, _DISCARD_ALTS),
+                        "in place. {}".format(stash_op, alts),
                         "AIQT guardrail: denied an unrecoverable git stash drop/clear with no session "
                         "directory to preserve the stash first (rule prsunc).")
-                return _stash_drop_clear_outcome(base, stash_op)
+                return _stash_drop_clear_outcome(base, stash_op, note)
             # stash export / other ask-classified stash forms discard no stash entry: keep the allow-note.
-            return _discard_recovery_result(kind, "cannot be proven safe offline", snap)
+            return _discard_recovery_result(kind, "cannot be proven safe offline", snap, note)
         # A force branch delete/move/copy/reset: a branch ref is a separate, reflog-recoverable asset a
         # worktree snapshot cannot capture, so it keeps the allow-note.
-        return _discard_recovery_result(kind, "cannot be proven safe offline", snap)
+        return _discard_recovery_result(kind, "cannot be proven safe offline", snap, note)
 
     # A scoped or clobber form (all snapshottable): gate on the clean probe, which must resolve to the
     # session worktree.
@@ -5236,7 +6099,7 @@ def git_discard(data):
             "resolve to the session directory with certainty, so it can neither prove the tree clean nor "
             "take a recovery snapshot; denied rather than run on a possible unrecoverable discard. Re-issue "
             "it as a plain git command from the target repository, or commit or stash your work first. {}"
-            .format(kind, _DISCARD_ALTS),
+            .format(kind, alts),
             "AIQT guardrail: denied a git discard whose working tree this guard cannot resolve to snapshot "
             "(rule prsunc); re-issue from the target repo, or commit or stash first.")
     if clean is True:
@@ -5245,11 +6108,11 @@ def git_discard(data):
         # probe-uncertain: a snapshot was attempted above (snap set); fold its outcome into the ASK reason.
         return _discard_recovery_result(
             kind, "targets a repository whose status probe did not complete, so this guard cannot prove "
-                  "the working tree clean", snap)
+                  "the working tree clean", snap, note)
     # clean is False: the tree holds uncommitted tracked changes or untracked files this verb could reach.
     if role == "clobber":
-        return _deny_with_recovery(kind, snap)  # a confirmed whole-tree loss, still recoverable if approved
-    return _discard_recovery_result(kind, "may discard uncommitted changes in the working tree", snap)
+        return _deny_with_recovery(kind, snap, note)  # a confirmed whole-tree loss, still recoverable if approved
+    return _discard_recovery_result(kind, "may discard uncommitted changes in the working tree", snap, note)
 
 
 _PROTECTED = frozenset(("main", "master"))  # the protected line(s); default {main, master}, source-level config
@@ -6338,7 +7201,12 @@ def _commit_denial(detail):
 def _protected_line_fallback(command):
     """Commit-free push fallback; commit syntax is checked before this path.
 
-    Retain conservative raw push coverage and quoted-heredoc stripping. Hidden
+    R10 (DECIDED item 3): the raw push scan reads the WHOLE command text, with no
+    heredoc stripping at all. Stripping removes text, so any stripping defect can
+    only HIDE a live push from this fail-safe scan (the stacked-heredoc and the
+    nested-quote command-substitution shapes each erased a real force-push from
+    the stripped scan). The disclosed cost is an over-deny: force-push-shaped
+    prose inside a QUOTED heredoc body now denies on this fallback path. Hidden
     commits are checked independently of other Git segments by the commit recognizer.
     """
     syntax = _commit_command_syntax(command)
@@ -6346,7 +7214,7 @@ def _protected_line_fallback(command):
         if syntax.status == "help":
             return _allow()
         return _commit_denial("apparent commit lacks complete proof: " + syntax.detail)
-    scan = _strip_quoted_heredoc_bodies(command)
+    scan = command  # R10: the fallback scans RAW text; no stripping may remove a line from it
     if _RAW_PUSH_RE.search(scan) and (_RAW_PUSH_FORCE_RE.search(scan)
                                       or _RAW_PUSH_DELETE_RE.search(scan)
                                       or _RAW_PUSH_MIRRORCFG_RE.search(scan)):
@@ -7058,8 +7926,10 @@ _GATE_LONG_ARG_OPTS = {
 # known checker COMMAND WORD; a command whose NAME PARTS (basename split on non-alphanumerics, exact
 # part match so 'latest' never trips a 'test' substring) contain a checker part; or a known RUNNER
 # whose non-option, non-assignment operand qualifies by either test ('make test', 'python -m pytest',
-# 'bash tools/run_all_checks.sh'). The lexicon is deliberately a heuristic: it routes to ASK only,
-# never a deny, so an over-match costs a prompt and an under-match is the disclosed residue.
+# 'bash tools/run_all_checks.sh'). The broad checker-shape test (_is_checker_segment) is deliberately a
+# heuristic: it feeds the allow-with-note tier only, so an over-match costs a note and an under-match is
+# the disclosed residue. The narrow deny tier (_is_verification_run) reuses these words, and a name part
+# only as a runner's exact target ('make test'), under a stricter run-mode grammar.
 _CHECKER_WORDS = frozenset((
     "pytest", "tox", "nox", "unittest", "mypy", "pyright", "ruff", "flake8", "pylint", "bandit",
     "eslint", "tsc", "jest", "vitest", "mocha", "rspec", "rubocop", "phpunit", "phpstan",
@@ -7068,16 +7938,19 @@ _CHECKER_WORDS = frozenset((
 _CHECKER_RUNNERS = frozenset((
     "make", "npm", "pnpm", "yarn", "npx", "node", "go", "cargo", "mvn", "mvnw", "gradle", "gradlew",
     "python", "python3", "py", "rake", "bundle", "poetry", "pipenv", "uv", "uvx",
-    "sh", "bash", "zsh", "dash"))
+    "sh", "bash", "zsh", "dash", "php", "rails", "mix", "dotnet", "swift", "bazel", "bazelisk", "ninja",
+    "just", "deno", "bun", "perl", "ruby"))
 _CHECKER_NAME_PARTS = frozenset((
     "test", "tests", "selftest", "selftests", "check", "checks", "checker", "lint", "linter",
     "verify", "validate", "audit", "conformance", "vet", "clippy", "gate", "gates"))
 _NAME_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 
-# The failure-discarding right-hand sides: an exit-status swallow after '||' (true or the ':' builtin),
-# and a truncating stdout sink after '|' that, under default pipeline semantics, replaces the checker
-# exit status with its own and can cut the failing tail of the output. tee/cat/less are NOT truncating
-# and never qualify.
+# The failure-discarding right-hand sides of the broad note tier: an exit-status swallow after '||' (true
+# or the ':' builtin), and a truncating stdout sink after '|' that may pass on only part of the output; under
+# default pipeline semantics a pipeline's exit status is that of its final stage, not the checker's. tee/cat/less
+# are NOT truncating and never qualify. The deny tier uses its own sink allow-list (_truncating_sink_kind:
+# head or tail with one positive line count, grep -m N/-q/-c/-l/-L, rg -q/-c/-l), and the note tier also counts
+# any other head, tail, cut or limiting grep spelling and any sed or awk program.
 _EXIT_SWALLOWS = frozenset(("true", ":"))
 _TRUNCATING_SINKS = frozenset(("head", "tail"))
 
@@ -7102,6 +7975,10 @@ _RAW_CHECKER_RE = re.compile(
     r"tests?|selftests?|checks?|checker|lint\w*|verify|validate|audit|conformance)\b")
 _RAW_SWALLOW_RE = re.compile(r"\|\|\s*(?:true|:)(?=\s|$)")
 _RAW_TRUNCATE_RE = re.compile(r"\|\s*(?:head|tail)\b")
+# A process substitution or here-string (the lexer cannot parse either) with a head, tail or cut word: the
+# checker's output may reach the sink through it, so the fallback notes it as it notes a raw '| head'.
+_RAW_FLOW_RE = re.compile(r"<<<|<\(|>\(")
+_RAW_SINK_WORD_RE = re.compile(r"\b(?:head|tail|cut)\b")
 _RAW_COMMIT_MSG_GIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
 _RAW_COMMIT_MSG_MARKER_RE = re.compile(r"`|\$\(")
 
@@ -7168,14 +8045,573 @@ def _is_checker_segment(tokens):
     lw = word.lower()
     if lw in _CHECKER_WORDS or _name_parts_hit(lw):
         return True
+    if lw in ("node", "nodejs") and "--test" in tokens:
+        return True   # the node built-in test runner
     if lw not in _CHECKER_RUNNERS:
         return False
+    operands_only = False   # after '--' every token is an operand ('python3 -- -c-check.py')
     for tok in tokens[_command_word_index(tokens) + 1:]:
-        if tok.startswith("-") or _ENV_ASSIGN_RE.match(tok):
+        if tok == "--":
+            operands_only = True
             continue
-        if tok.lower() in _CHECKER_WORDS or _name_parts_hit(tok):
+        if (tok.startswith("-") and not operands_only) or _ENV_ASSIGN_RE.match(tok):
+            continue
+        if tok.rsplit("/", 1)[-1].lower() in _CHECKER_WORDS or _name_parts_hit(tok):
             return True
     return False
+
+
+# --- gatdis deny tier: a VERIFICATION RUN piped straight into a truncating sink ----------------------------
+# The deny is held to ONE canonical shape, and both of its ends are ALLOW-LISTS, so a shape the lists do not
+# name costs the broad tier's note and never a false refusal: the first simple command of a pipeline (no
+# reserved word, no substitution, stdout not redirected; every earlier top-level segment known-benign,
+# _gate_benign_prefix, and the pipeline not joined to it by '||') is a run form listed in _GATE_VERIFY_RUNS
+# (_is_verification_run), and its stdout reaches, through zero or more plain pass-through stages
+# (_gate_plain_filter: cat, tee, tr, uniq), a sink on the sink allow-list (_truncating_sink_kind: head or tail
+# with one positive line count, or a grep-family stage with exactly one limiting flag and one pattern). Every
+# other shape (compound and grouped producers, substitutions, here-strings, process substitution, wrappers
+# beyond nice/timeout/time, a producer whose environment the command sets, an earlier command in the same line
+# that is not known-benign (export, set, typeset, an assignment, a redirection), an unlisted tool, subcommand,
+# operand or option, a sed, awk, sort or grep filter stage, a sink spelling off the list, cut) keeps the
+# note tier (_gate_flow_note). The PreToolUse hook sees only the command, so the run form is the lexical
+# stand-in for "its status is the verdict".
+_GATE_RESERVED = frozenset(("{", "}", "!", "if", "then", "else", "elif", "fi", "for", "while", "until",
+                            "do", "done", "case", "esac", "select", "function", "in", "[[", "]]", "coproc"))
+_GATE_PIPES = frozenset(("|", "|&"))
+_GATE_LIST_SEPS = frozenset(("", ";", "&&", "||", "&"))
+# The four plain wrappers the deny tier peels, each with its option grammar: (options that take a separate
+# value, options that take none). Any other option (env -S/--split-string re-splits a string into a
+# command) leaves the producer outside the canonical shape. command, type, which and hash are never peeled:
+# 'command -v pytest' only looks the name up.
+_GATE_WRAPPER_GRAMMAR = dict((
+    ("env", (frozenset(("-u", "--unset", "-C", "--chdir")),
+             frozenset(("-", "-i", "--ignore-environment", "-0", "--null", "-v", "--debug")))),
+    ("nice", (frozenset(("-n", "--adjustment")), frozenset())),
+    ("timeout", (frozenset(("-s", "--signal", "-k", "--kill-after")),
+                 frozenset(("--preserve-status", "--foreground", "-v", "--verbose", "-f")))),
+    ("time", (frozenset(("-o", "--output", "-f", "--format")),
+              frozenset(("-p", "--portability", "-a", "--append", "-v", "--verbose", "-q", "--quiet")))),
+))
+# Commands whose operands are text, a pattern or a name, never a check's options ('printf --verify',
+# 'rg -- --check FILE'): the note tier never reads a verify option on them as a check (_gate_verify_shaped).
+_GATE_TEXT_COMMANDS = frozenset((
+    "echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "ack", "sed", "gsed", "awk", "gawk", "mawk", "nawk",
+    "cat", "head", "tail", "less", "more", "man", "info", "which", "type", "hash", "command", "whereis",
+    "find", "xargs", "jq", "yq", "wc", "sort", "tee", "git", "test", "[", "[["))
+_GATE_VERIFY_FLAGS = frozenset(("--self-test", "--selftest", "--check", "--verify"))
+
+
+def _gate_form(sub=(), short="", short_values="", long=(), long_values=(), operands=False, required=None,
+               numeric="", refuse=(), valid=()):
+    """One run form of _GATE_VERIFY_RUNS: the subcommand words that must lead its operands, the short flag
+    letters, the short letters that take a value, the long (or single-dash multi-letter) flags and value
+    options, whether further positional operands are accepted, an option the form requires, the value
+    letters whose separated value is consumed only when it is all digits, (option, value) pairs that leave
+    the form ('go test -run ^$' runs no test), and (option, pattern) pairs whose value must match the pattern
+    in full ('go test -shuffle' takes off, on or an integer seed)."""
+    return (tuple(sub), short, short_values, frozenset(long), frozenset(long_values), operands, required,
+            numeric, frozenset(refuse), dict((name, re.compile(pattern)) for name, pattern in valid))
+
+
+# These options, which supply configuration on the command line, are never listed: pytest -o/--override-ini and
+# -c, ruff --config (which also takes inline TOML such as fix-only=true), mypy --config-file, eslint -c/--config
+# and tox -c. Each can set a mode the table excludes (pytest -o addopts=--collect-only). Other listed options also
+# select rules or name a configuration file (eslint --rule, ruff --select, pytest --cov-config); none of those is
+# known to change the run's mode. Neither is a leading VAR=value word, the env wrapper, a make VAR=value argument
+# (PYTEST_ADDOPTS, MAKEFLAGS=n) or an earlier command in the same line (_gate_benign_prefix).
+# eslint: the options eslint 6.4.0 --help lists (checked 2026-10-07); --no-config-lookup and
+# --no-error-on-unmatched-pattern are not among them (eslint 6.4.0 rejects both), so they are not listed.
+_GATE_PYTEST_FORM = _gate_form(
+    short="qvxsl", short_values="kmpnrW", operands=True,
+    long=("--quiet", "--verbose", "--exitfirst", "--lf", "--last-failed", "--ff", "--failed-first", "--sw",
+          "--stepwise", "--nf", "--new-first", "--showlocals", "--disable-warnings", "--disable-pytest-warnings",
+          "--strict-markers", "--strict-config", "--no-header", "--no-summary", "--runxfail", "--cache-clear",
+          "--pyargs", "--cov", "--cov-branch", "--doctest-modules"),
+    long_values=("--tb", "--maxfail", "--durations", "--durations-min", "--junitxml", "--junit-xml",
+                 "--cov-report", "--cov-fail-under", "--cov-config", "--rootdir", "--basetemp", "--import-mode",
+                 "--color", "--capture", "--timeout", "--deselect", "--ignore", "--ignore-glob",
+                 "--confcutdir", "--log-level", "--log-cli-level", "--numprocesses", "--dist",
+                 "--maxprocesses"))
+# ruff: quiet, silent, verbose and no-cache; its -e is --exit-zero and its -w is --watch, so neither is listed.
+_GATE_RUFF_SHORT = "qsvn"
+_GATE_RUFF_COMMON = ("--quiet", "--silent", "--verbose", "--no-cache", "--preview", "--no-preview", "--isolated",
+                     "--force-exclude")
+_GATE_RUFF_VALUES = ("--line-length", "--target-version", "--exclude", "--extend-exclude",
+                     "--cache-dir")
+# make: -s (--silent, --quiet), -k (--keep-going), -C (--directory), -f (--file, --makefile), -I
+# (--include-dir), -j (--jobs), -l (--load-average, --max-load) and --no-print-directory (GNU Make 4.4.1).
+_GATE_MAKE_FORM = dict(short="sk", short_values="CfIjl", numeric="jl",
+                       long=("--silent", "--quiet", "--keep-going", "--no-print-directory"),
+                       long_values=("--directory", "--file", "--makefile", "--jobs", "--include-dir",
+                                    "--load-average", "--max-load"))
+# The deny tier's PRODUCER ALLOW-LIST: the known verification invocations, each written as its tool and the
+# exact run forms it accepts (_gate_form). A subcommand, positional operand or option outside a form leaves
+# the run outside the deny tier (it only notes), so an information or maintenance mode (--help, --version,
+# --collect-only, --cache-show, a listing, a config dump, a dry run, a fixer, an installer) is never listed.
+# A python interpreter is judged by _gate_python_run; the nice, timeout and time wrappers are peeled first,
+# and a leading VAR=value word or the env wrapper leaves the run outside the table (_gate_peel).
+_GATE_VERIFY_RUNS = dict((
+    ("pytest", (_GATE_PYTEST_FORM,)),
+    ("mypy", (_gate_form(
+        short="v", short_values="pm", operands=True,
+        long=("--strict", "--ignore-missing-imports", "--pretty", "--show-error-codes", "--hide-error-codes",
+              "--no-error-summary", "--show-column-numbers", "--no-incremental", "--warn-unused-ignores",
+              "--check-untyped-defs", "--disallow-untyped-defs", "--show-traceback", "--no-color-output",
+              "--namespace-packages", "--explicit-package-bases", "--verbose", "--warn-unreachable"),
+        long_values=("--package", "--module", "--python-version", "--cache-dir", "--exclude",
+                     "--follow-imports", "--platform")),)),
+    ("eslint", (_gate_form(
+        short_values="f", operands=True,
+        long=("--quiet", "--cache", "--no-eslintrc", "--no-inline-config", "--report-unused-disable-directives",
+              "--color", "--no-color"),
+        long_values=("--max-warnings", "--format", "--ext", "--ignore-path", "--ignore-pattern",
+                     "--rule", "--parser", "--plugin", "--cache-location", "--env", "--global",
+                     "--resolve-plugins-relative-to")),)),
+    ("ruff", (_gate_form(sub=("check",), short=_GATE_RUFF_SHORT, operands=True,
+                         long=_GATE_RUFF_COMMON + ("--no-fix",),
+                         long_values=_GATE_RUFF_VALUES + ("--select", "--ignore", "--extend-select",
+                                                          "--extend-ignore", "--output-format",
+                                                          "--per-file-ignores", "--fixable", "--unfixable")),
+              _gate_form(sub=("format",), short=_GATE_RUFF_SHORT, operands=True, required="--check",
+                         long=_GATE_RUFF_COMMON + ("--check",), long_values=_GATE_RUFF_VALUES))),
+    ("make", tuple(_gate_form(sub=(target,), **_GATE_MAKE_FORM) for target in ("test", "check", "lint"))),
+    ("npm", (_gate_form(sub=("test",)), _gate_form(sub=("run", "test")), _gate_form(sub=("run", "lint")),
+             _gate_form(sub=("run", "check")))),
+    ("go", (_gate_form(
+        sub=("test",), operands=True, refuse=(("-run", "^$"),),
+        valid=(("-shuffle", r"(?:off|on|-?[0-9]+)\Z"), ("-mod", r"(?:readonly|vendor)\Z")),
+        long=("-v", "-race", "-short", "-failfast", "-cover", "-json"),
+        long_values=("-run", "-count", "-timeout", "-p", "-tags", "-coverprofile", "-covermode", "-coverpkg",
+                     "-cpu", "-skip", "-shuffle", "-mod")),)),
+    ("cargo", (_gate_form(
+        sub=("test",), short="qvr", short_values="pjF", operands=True,
+        long=("--release", "--all-targets", "--workspace", "--all", "--all-features", "--no-default-features",
+              "--lib", "--bins",
+              "--tests", "--doc", "--quiet", "--verbose", "--locked", "--frozen", "--offline", "--no-fail-fast"),
+        long_values=("--package", "--features", "--test", "--jobs", "--target", "--manifest-path", "--exclude",
+                     "--profile")),
+               _gate_form(sub=("fmt",), short="qv", required="--check",
+                          long=("--check", "--all", "--quiet", "--verbose"),
+                          long_values=("--package", "--manifest-path")))),
+    ("tox", tuple(_gate_form(sub=sub, short="rqv", short_values="e", long=("--recreate", "--quiet", "--verbose"))
+                  for sub in ((), ("run",)))),
+    ("nox", (_gate_form(
+        short="rRvx", short_values="sekptf",
+        long=("--reuse-existing-virtualenvs", "--no-reuse-existing-virtualenvs", "--verbose",
+              "--stop-on-first-error", "--error-on-missing-interpreters", "--no-error-on-missing-interpreters"),
+        long_values=("--session", "--sessions", "--keywords", "--python", "--tags", "--noxfile")),)),
+))
+_GATE_PYTHONS = frozenset(("python", "python3"))
+_GATE_PYTHON_FLAGS = frozenset(("-I", "-B", "-IB", "-BI"))
+# A python script (or a bash or sh script, 'bash tools/run_all_checks.sh') whose basename starts with one of
+# these runs as a check with no argument at all.
+_GATE_SCRIPT_PREFIXES = ("selftest", "check_", "run_all_checks")
+_GATE_SHELLS = frozenset(("bash", "sh"))
+
+
+def _gate_word(token):
+    """The lowercased basename of a command token, a literal alias-suppressing backslash stripped."""
+    return token.lstrip("\\").rsplit("/", 1)[-1].lower()
+
+
+def _gate_peel(argv, producer=False):
+    """The argv of the command a segment runs after leading VAR-assignment words and the env, nice, timeout
+    and time wrappers with their option grammar (_GATE_WRAPPER_GRAMMAR; timeout's duration operand too) are
+    peeled; [] when no command word remains; None when a wrapper carries an option outside that grammar. For
+    a PRODUCER (producer=True) a leading VAR=value word or an env wrapper is None too: the environment can
+    set the run's mode (PYTEST_ADDOPTS=--collect-only, MAKEFLAGS=n). Purely lexical."""
+    i = _command_word_index(argv)
+    if producer and i:
+        return None
+    n = len(argv)
+    while i < n:
+        word = _gate_word(argv[i])
+        grammar = _GATE_WRAPPER_GRAMMAR.get(word)
+        if grammar is None:
+            return argv[i:]
+        if producer and word == "env":
+            return None
+        value_opts, flag_opts = grammar
+        i += 1
+        while i < n:
+            tok = argv[i]
+            if word == "env" and _ENV_ASSIGN_RE.match(tok):
+                i += 1
+                continue
+            if tok == "--":
+                i += 1
+                break
+            if not tok.startswith("-") or (tok == "-" and word != "env"):
+                break
+            if tok in value_opts:
+                i += 2
+            elif (tok in flag_opts or tok.split("=", 1)[0] in value_opts
+                  or (not tok.startswith("--") and tok[:2] in value_opts)
+                  or (word == "nice" and tok[1:].isdigit())):
+                i += 1
+            else:
+                return None
+        if word == "timeout":
+            i += 1   # the duration operand
+    return []
+
+
+def _gate_form_matches(form, args):
+    """True when args are exactly one run of the _gate_form: every option is a listed flag or value option
+    (a separated value never starts with '-', which may be an option the form does not list), the positional
+    operands start with the form's subcommand words, with further operands only where the form takes them,
+    its required option is present, no refused (option, value) pair appears, and every value a pattern
+    checks matches it. '--', a VAR=value operand and anything unlisted leave the form."""
+    sub, short, short_values, long, long_values, operands, required, numeric, refuse, valid = form
+    positional = []
+    seen = set()
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        i += 1
+        if not tok.startswith("-") or tok == "-":
+            positional.append(tok)
+            continue
+        name, eq, value = tok.partition("=")
+        if name in long or name in long_values:
+            if name in long_values and not eq:
+                if i >= len(args) or args[i].startswith("-"):
+                    return False
+                value = args[i]
+                i += 1
+            if (name, value) in refuse or (name in valid and not valid[name].match(value)):
+                return False
+            seen.add(name)
+            continue
+        body = tok[1:]   # an unlisted long option or '--' fails here too: '-' is never a listed letter
+        for k, ch in enumerate(body):
+            if ch in short_values:
+                attached = body[k + 1:]
+                if ch in numeric:
+                    if attached and not attached.isdigit():
+                        return False
+                    if not attached and i < len(args) and args[i].isdigit():
+                        i += 1   # an optional all-digit value ('make -j 4 test'; a bare 'make -j test' runs test)
+                elif not attached:
+                    if i >= len(args) or args[i].startswith("-"):
+                        return False
+                    i += 1
+                break
+            if ch not in short:
+                return False
+    return (positional[:len(sub)] == list(sub) and (operands or len(positional) == len(sub))
+            and (required is None or required in seen))
+
+
+def _gate_python_run(args):
+    """True when a python interpreter's args, after any -I and -B, run a listed check: '-m pytest' (or
+    '-mpytest') with a pytest run form, a script whose basename starts with selftest, check_ or run_all_checks with no argument,
+    or any .py script whose ONLY argument is one exact --self-test, --selftest, --check or --verify."""
+    i = 0
+    while i < len(args) and args[i] in _GATE_PYTHON_FLAGS:
+        i += 1
+    rest = args[i:]
+    if rest[:1] == ["-mpytest"]:
+        rest = ["-m", "pytest"] + rest[1:]
+    if rest[:2] == ["-m", "pytest"]:
+        return _gate_form_matches(_GATE_PYTEST_FORM, rest[2:])
+    if not rest or rest[0].startswith("-"):
+        return False
+    script, extra = _gate_word(rest[0]), rest[1:]
+    if not extra:
+        return script.startswith(_GATE_SCRIPT_PREFIXES)
+    return script.endswith(".py") and len(extra) == 1 and extra[0] in _GATE_VERIFY_FLAGS
+
+
+def _is_verification_run(tokens):
+    """gatdis deny tier: True when a command is a KNOWN VERIFICATION INVOCATION (the producer allow-list). The
+    command is the argv after _gate_peel; its word is a python interpreter judged by _gate_python_run, bash or
+    sh running a _GATE_SCRIPT_PREFIXES script with no option or argument, or a tool in _GATE_VERIFY_RUNS whose args match one of its run forms (_gate_form_matches). Anything else,
+    including every information, maintenance or listing mode of a listed tool, is not a verification run
+    here; the broad _is_checker_segment heuristic and _gate_verify_shaped still feed the note tier. A run
+    whose environment the command sets (a leading VAR=value word or the env wrapper) is not one either."""
+    argv = _gate_peel(tokens, producer=True)
+    if not argv:
+        return False
+    word = _gate_word(argv[0])
+    args = argv[1:]
+    if word in _GATE_PYTHONS:
+        return _gate_python_run(args)
+    if word in _GATE_SHELLS:
+        return len(args) == 1 and _gate_word(args[0]).startswith(_GATE_SCRIPT_PREFIXES)
+    return any(_gate_form_matches(form, args) for form in _GATE_VERIFY_RUNS.get(word, ()))
+
+
+def _gate_verify_shaped(argv):
+    """The note tier's view of a verify option: True when a command that is not a text or lookup command
+    (_GATE_TEXT_COMMANDS) carries an exact --self-test, --selftest, --check or --verify argument (alone or
+    with an attached value). Over-matching by design: it costs a note, never a refusal."""
+    argv = argv[_command_word_index(argv):]
+    return (bool(argv) and _gate_word(argv[0]) not in _GATE_TEXT_COMMANDS
+            and any(tok.split("=", 1)[0] in _GATE_VERIFY_FLAGS for tok in argv[1:]))
+
+
+def _gate_simple(seg):
+    """True when a lexed segment is a simple command: a command word that is not a reserved word, no
+    command substitution or backquote in its raw text, and not ended by a '(' or ')' separator."""
+    return (bool(seg.argv) and seg.argv[0] not in _GATE_RESERVED and "$(" not in seg.raw and "`" not in seg.raw
+            and seg.sep_after not in ("(", ")"))
+
+
+def _gate_stdout_redirected(seg):
+    """True when any redirection of the segment touches its stdout ('>', '>>', '&>', '1>', '>&2')."""
+    return any(r.stdout_effect for r in seg.redirects)
+
+
+def _gate_stdin_redirected(seg):
+    """True when the segment's stdin comes from a redirection rather than the pipe."""
+    return any(r.op in ("<", "<>", "<&") and r.src_fd == 0 for r in seg.redirects)
+
+
+def _gate_tee_file(argv):
+    """The first real-file operand of a tee stage (not a /dev/ path), or None."""
+    if _gate_word(argv[0]) != "tee":
+        return None
+    for tok in argv[1:]:
+        if not tok.startswith("-"):
+            return None if tok.startswith("/dev/") else tok
+    return None
+
+
+# The deny tier's PASS-THROUGH ALLOW-LIST: the stages a verification run's output may cross on its way to a
+# sink, each reading its stdin and writing what it read (or a transform of it) to its stdout. The value is the
+# set of option tokens the stage may carry and whether it takes operands (tee's output files, tr's sets).
+_GATE_PLAIN_FILTERS = dict((
+    ("cat", (frozenset(("-",)), False)),
+    ("tee", (frozenset(("-a", "--append", "-i", "--ignore-interrupts")), True)),
+    ("tr", (frozenset(("-c", "-C", "-d", "-s", "-t", "-cd", "-ds", "-cs", "--complement", "--delete",
+                       "--squeeze-repeats", "--truncate-set1")), True)),
+    ("uniq", (frozenset(), False)),
+))
+
+
+def _gate_plain_filter(argv):
+    """True when a pipeline stage (VAR assignments aside, no wrapper) is a _GATE_PLAIN_FILTERS stage: plain
+    cat (no operand but '-'), tee with only its append and ignore-interrupts options and output files, tr
+    with only its own options, or uniq with no option or operand. Any other stage (a grep, sed, awk or sort
+    filter, an option outside the list) leaves the canonical shape, so the pipeline only notes."""
+    argv = argv[_command_word_index(argv):]
+    if not argv:
+        return False
+    spec = _GATE_PLAIN_FILTERS.get(_gate_word(argv[0]))
+    if spec is None:
+        return False
+    options, operands = spec
+    return all(tok in options or (operands and not tok.startswith("-")) for tok in argv[1:])
+
+
+def _gate_case_depths(records):
+    """The number of case compounds open at each segment (a segment opens one when 'case' follows only
+    reserved words, and one starting with 'esac' closes one). Inside a case its pattern words and the ')'
+    and '|' between them lex as commands and separators, so no pipeline there is canonical."""
+    depths = []
+    depth = 0
+    for seg in records:
+        if seg.argv and seg.argv[0] == "esac" and depth:
+            depth -= 1
+        depths.append(depth)
+        for word in seg.argv:
+            if word == "case":
+                depth += 1
+            if word not in _GATE_RESERVED:
+                break
+    return depths
+
+
+# The commands that may come before the producer pipeline in the same command while the deny tier still holds,
+# each in one exact shape: cd with one directory operand, echo whose every argument is a plain literal word
+# (_GATE_PLAIN_WORD_RE, with no '$', backslash or quote anywhere in the segment's raw text, so no ANSI-C or
+# quoted spelling hides an option), and true, ':' or pwd alone. printf is never benign: a format can assign a
+# variable ('printf %n PATH' sets PATH to 0, and -v can be spelled $'\x2dv'). Any other earlier command (an
+# assignment, export, declare or typeset, set, source or '.', alias, unset, a function definition, a
+# redirection, anything else) can change the run's environment, options or configuration (export
+# PYTEST_ADDOPTS=--collect-only, set -a, echo addopts > pytest.ini), so the pipeline notes. A pipeline joined
+# by '&&' to a known-benign command runs whenever that command succeeds, and the deny text holds whenever it
+# runs, so it denies as after ';'. A pipeline joined by '||' notes (_gate_conditional_run): it runs only when
+# the command before it fails, and after 'true ||' it never runs.
+_GATE_BENIGN_ALONE = frozenset(("true", ":", "pwd"))
+_GATE_PLAIN_WORD_RE = re.compile(r"[A-Za-z0-9_./:,@%+=][A-Za-z0-9_./:,@%+=-]*\Z")
+
+
+def _gate_benign_prefix(seg):
+    """True when a segment before the producer pipeline is known-benign: an empty newline segment, or a simple
+    command (_gate_simple) with no redirection and no '${' or '$[' in its raw text (either can assign a variable,
+    as ${X:=v} does), ended by ';', '&&', '||', '&' or a newline (never a pipe), that is 'cd DIR' (one operand
+    that does not start with '-'), echo whose raw text has no '$', backslash or quote and whose every argument is
+    a plain literal word (_GATE_PLAIN_WORD_RE: no leading '-', no glob or brace), or true, ':' or pwd with no
+    argument. printf is never benign."""
+    if seg.redirects or seg.sep_after not in _GATE_LIST_SEPS:
+        return False
+    if not seg.argv:
+        return True
+    if not _gate_simple(seg) or "${" in seg.raw or "$[" in seg.raw:
+        return False
+    word, args = seg.argv[0], seg.argv[1:]
+    if word == "cd":
+        return len(args) == 1 and not args[0].startswith("-")
+    if word == "echo":
+        return not any(ch in seg.raw for ch in "$\\'\"") and all(_GATE_PLAIN_WORD_RE.match(tok) for tok in args)
+    return word in _GATE_BENIGN_ALONE and not args
+
+
+def _gate_conditional_run(records, i):
+    """True when the pipeline whose first command is records[i] is joined to the command before it by '||'
+    (empty newline segments between them skipped, as bash continues the list after it): it runs only when that
+    command fails, or never ('true || pytest | head'). A join by '&&' is False: every earlier segment is
+    _gate_benign_prefix by then (_verification_sink), so the pipeline runs whenever they succeed, and the deny
+    text holds whenever it runs ('cd /x && pytest | head' denies as 'cd /x; pytest | head' does)."""
+    for seg in reversed(records[:i]):
+        if seg.argv or seg.redirects or seg.sep_after:
+            return seg.sep_after == "||"
+    return False
+
+
+def _verification_sink(records):
+    """gatdis deny tier: (producer word, sink kind, tee file or None, filtered before the tee) for the first
+    canonical verification pipeline, or None. Canonical: every segment before the producer is
+    _gate_benign_prefix, the producer is outside every case compound
+    (_gate_case_depths), the first command of its pipeline (start of the command or after ';', '&&', '&' or a
+    newline; a pipeline joined by '||' to the command before it only notes, _gate_conditional_run), _gate_simple,
+    stdout not redirected, ending in '|' or '|&', and a listed run form
+    (_is_verification_run); each later stage (an empty newline segment after a pipe is skipped, as bash
+    continues the pipeline) is _gate_simple with its stdin not redirected; the first stage
+    _truncating_sink_kind matches is the sink; every stage before it is a pass-through stage
+    (_gate_plain_filter) with stdout not redirected, ending in '|' or '|&'. A real-file tee stage does NOT
+    exempt the pipeline (by default the status is still the final stage's); it is returned so the message can
+    say what the file holds, and a tr or uniq stage before it marks that file as filtered."""
+    case_depths = _gate_case_depths(records)
+    n = len(records)
+    for i, seg in enumerate(records):
+        if i and not _gate_benign_prefix(records[i - 1]):
+            return None   # an earlier command may set the run's environment or configuration: it only notes
+        if (seg.sep_after not in _GATE_PIPES
+                or case_depths[i] or not _gate_simple(seg) or _gate_stdout_redirected(seg) or not _is_verification_run(seg.argv)):
+            continue
+        if _gate_conditional_run(records, i):
+            return None   # a pipeline run only when an earlier command fails, or never: it only notes
+        tee, filtered = None, False
+        for j in range(i + 1, n):
+            stage = records[j]
+            if not stage.argv and not stage.sep_after and not stage.redirects:
+                continue
+            if not _gate_simple(stage) or _gate_stdin_redirected(stage):
+                break
+            kind = _truncating_sink_kind(stage.argv)
+            if kind is not None:
+                return _gate_word(_gate_peel(seg.argv, producer=True)[0]), kind, tee, filtered
+            if (stage.sep_after not in _GATE_PIPES or _gate_stdout_redirected(stage)
+                    or not _gate_plain_filter(stage.argv)):
+                break
+            if tee is None:
+                tee = _gate_tee_file(stage.argv)
+                filtered = filtered or _gate_word(stage.argv[_command_word_index(stage.argv)]) in ("tr", "uniq")
+    return None
+
+
+def _verification_sink_message(hit):
+    """The (reason, banner) of the deny-and-educate decision for a _verification_sink hit. It claims only the
+    allow-listed shape: a known verification invocation whose output reaches a sink on the allow-list, and
+    it says what that sink passes on (_truncating_sink_kind) and that a pipeline's status is its final stage's
+    (the sink need not be the final stage). The
+    suggested capture runs the check alone with no pipe after it, to a file at an ABSOLUTE path
+    (bash_absolute_paths denies a relative truncating redirect target), and the message never suggests an
+    exit-status echo trailer (the rule's propagation clause). A tee file is never called the full output
+    when a filter stage precedes the tee."""
+    word, (label, effect), tee, filtered = hit
+    if tee is None:
+        held = ""
+    elif filtered:
+        held = ("The tee stage writes '{}', but only what passed the filter stages before it, and by default the "
+                "pipeline's status is still not the check's. ".format(tee))
+    else:
+        held = "The tee stage writes '{}', but by default the pipeline's status is still not the check's. ".format(tee)
+    return (
+        "AIQT rule gatdis (gate-discipline): this '{}' command is on the hook's list of known verification "
+        "runs, and its output is piped into '{}', {}. The rule: no piping a check to a "
+        "truncating sink. The sink can cut the lines that explain a failure, and by default a pipeline's exit "
+        "status is that of its final stage, not the check's, so a failing check can read as a pass ('set -o "
+        "pipefail' makes the pipeline fail when any stage fails, though not always with the check's own status, "
+        "and the output is still cut). {}Run the check alone with its full output in a file at an absolute path and "
+        "no pipe after it, for example `<command> > /abs/path/check.log 2>&1`, take the verdict from that "
+        "command's own exit status, then read the file in a separate step.".format(word, label, effect, held),
+        "AIQT guardrail: denied a known verification run piped into a truncating sink ({}) (rule gatdis); "
+        "write the full output to a file and read it.".format(label))
+
+
+# The note tier's view of a checker or a sink the canonical deny cannot prove: wrappers beyond the four the
+# deny peels, a checker word right inside a command substitution, a sink anywhere after a later pipe.
+_GATE_NOTE_WRAPPERS = frozenset((
+    "env", "nice", "timeout", "time", "command", "builtin", "exec", "nohup", "stdbuf", "sudo", "doas",
+    "ionice", "chrt", "taskset", "xvfb-run", "unbuffer", "script", "watch", "busybox", "setsid", "flock",
+    "strace", "ltrace"))
+_GATE_SUBST_WORD_RE = re.compile(r"(?:\$\(|`)\s*([^\s()`|;&<>]+)")
+
+
+def _gate_suffixes(argv):
+    """The argv suffixes the note tier judges as a command: after any leading reserved words, the command
+    itself, and, when its word is a wrapper (_GATE_NOTE_WRAPPERS), every later suffix too."""
+    k = 0
+    while k < len(argv) and argv[k] in _GATE_RESERVED:
+        k += 1
+    if k >= len(argv):
+        return []
+    if _gate_word(argv[k]) not in _GATE_NOTE_WRAPPERS:
+        return [argv[k:]]
+    return [argv[m:] for m in range(k, len(argv))]
+
+
+# A '|' that is not part of '||', then head or tail, in the raw text: the substitution note's trigger.
+_GATE_SUBST_PIPE_RE = re.compile(r"(?<!\|)\|&?\s*(?:head|tail)\b")
+_GATE_NOTE_ADVICE = (" If the check gates this work, run it alone with its full output in a file at an absolute path "
+                     "and read the file, so its failure signal is not cut; if this is only an output glance, this is "
+                     "allowed.")
+_GATE_NOTE_TAIL = (" The hook does not prove that this stage receives the check's output or that it drops any of "
+                   "it, so this is a note, not a refusal." + _GATE_NOTE_ADVICE)
+_GATE_SUBST_TEXT = ("AIQT guardrail (rule gatdis, gate-discipline): the text of this command appears to contain a "
+                    "command substitution whose first word looks like a check")
+
+
+def _gate_flow_note(records, command):
+    """gatdis note tier, for a command the canonical deny does not prove: the note text, or None. It notes
+    when the raw text holds a checker word right inside a $( or backquote substitution and a '| head' or
+    '| tail' (_GATE_SUBST_PIPE_RE; '||' is not a pipe), and when a checker-shaped command (_is_checker_segment or
+    _gate_verify_shaped on a _gate_suffixes suffix) is followed by a pipe and, after that pipe, by a stage that
+    may pass on only part of its input (_gate_note_sink_kind on a suffix); with no such command, a raw-text
+    substitution and any lexed pipe followed by such a stage. Each text claims only what its reason proves:
+    raw-text evidence may be quoted text, so the substitution texts say 'appears' and assert neither that the
+    substitution runs nor where it sits. Over-matching by design: it costs a note, never a refusal."""
+    subst = any(_is_checker_segment([w]) for w in _GATE_SUBST_WORD_RE.findall(command))
+    if subst and _GATE_SUBST_PIPE_RE.search(command):
+        return (_GATE_SUBST_TEXT + ", and appears to pipe into 'head' or 'tail'. The hook reads both from the raw "
+                "text, where either may be quoted text, so it does not prove that the substitution runs, that the "
+                "pipe exists, or that any output is dropped; this is a note, not a refusal." + _GATE_NOTE_ADVICE)
+    first = next((i for i, seg in enumerate(records)
+                  if any(_is_checker_segment(s) or _gate_verify_shaped(s) for s in _gate_suffixes(seg.argv))), None)
+    by_subst = first is None and subst
+    if by_subst:
+        first = 0
+    if first is None:
+        return None
+    pipe = next((p for p in range(first, len(records)) if records[p].sep_after in _GATE_PIPES), None)
+    if pipe is None:
+        return None
+    kind = next((k for k in (_gate_note_sink_kind(s) for seg in records[pipe + 1:]
+                             for s in _gate_suffixes(seg.argv)) if k is not None), None)
+    if kind is None:
+        return None
+    if by_subst:
+        return (_GATE_SUBST_TEXT + ", and the command has a pipe followed, later, by a stage that may pass on only "
+                "part of what it reads ('{}'). The hook reads the substitution from the raw text, where it may be "
+                "quoted text, so it does not prove that the substitution runs, that this stage receives its output, "
+                "or that the stage drops any of it; this is a note, not a refusal.".format(kind) + _GATE_NOTE_ADVICE)
+    return ("AIQT guardrail (rule gatdis, gate-discipline): a command that looks like a check is followed by a "
+            "pipe and, later in this command, by a stage that may pass on only part of what it reads ('{}')."
+            .format(kind) + _GATE_NOTE_TAIL)
 
 
 def _gate_weakening_fallback(command):
@@ -7203,14 +8639,17 @@ def _gate_weakening_fallback(command):
             "AIQT guardrail: denied an unparseable git commit/am that appears to carry -n (--no-verify) "
             "(rule gatdis, fail-safe); run the hooks, do not bypass them.")
     if _RAW_CHECKER_RE.search(command) and (
-            _RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)):
+            _RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
+            or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command))):
         # ROUND-2 FINDING 14: the swallow/truncate checker-shape heuristic is too broad (a benign optional
-        # probe is common), so even on the unparseable fallback it ALLOWS-WITH-NOTE rather than denying; only
-        # the --no-verify bypass spellings above (a deliberate, unambiguous gate bypass) still deny fail-safe.
+        # probe is common), so on the unparseable fallback it ALLOWS-WITH-NOTE rather than denying; the
+        # --no-verify bypass spellings above still deny fail-safe, and the caller first denies a verification
+        # run piped into a truncating sink that the partially lexed prefix proves (the gatdis deny tier).
         return _allow_note(
             "AIQT guardrail (rule gatdis, gate-discipline): the command could not be parsed by the shell "
             "lexer (likely unbalanced quotes) and it appears to swallow or truncate a checker's failure "
-            "signal ('|| true', '|| :', '| head', '| tail'). If it gates this work, run the checker bare and "
+            "signal ('|| true', '|| :', '| head', '| tail', or a head/tail/cut fed by a process substitution or "
+            "here-string). If it gates this work, run the checker bare and "
             "let its exit status stand (redirect output to a file if you need to page it), rather than "
             "discarding its failure signal; if it is a benign optional probe, this is allowed.")
     return _allow()
@@ -7221,12 +8660,31 @@ def gate_weakening(data):
     verification hooks: a --no-verify spelling (exact or conservative long prefix) on a subcommand
     that accepts it (commit, merge, push, pull, rebase, am), or the short -n on the two verbs where
     -n IS --no-verify (commit, am; on push -n is --dry-run and on merge/pull it is --no-stat, so it
-    is deliberately not flagged there). ROUND-2 FINDING 14: the checker-shape HEURISTIC (a checker-shaped
-    segment whose failure signal is swallowed by a following '|| true'/'|| :', or piped into a truncating
-    sink head/tail) is too broad - a benign optional probe ('test -d /cache || true', 'pytest || true' while
-    iterating) is common and is not a gate bypass - so it ALLOWS-WITH-NOTE (educating to run the gate bare if
-    it genuinely gates the work), not deny. Only the CONFIRMED --no-verify bypass, a deliberate and
-    unambiguous gate bypass, still DENIES (certain, returned immediately)."""
+    is deliberately not flagged there); the CONFIRMED --no-verify bypass DENIES (certain, returned
+    immediately). The checker-output check has TWO TIERS. DENY tier, held to one canonical shape whose two
+    ends are ALLOW-LISTS (_verification_sink): the first simple command of a pipeline is a KNOWN VERIFICATION
+    INVOCATION (_is_verification_run: a run form in _GATE_VERIFY_RUNS, or a python script form) and pipes
+    through pass-through stages (_gate_plain_filter: cat, tee, tr, uniq) into a sink on the sink allow-list
+    (_truncating_sink_kind: head or tail with no option or one positive line count, grep, egrep or fgrep
+    with exactly one of -m N/-q/-c/-l/-L and one pattern, rg with one of -q/-c/-l) DENIES-and-educates, naming
+    the fix (run the check alone with its full output in a file at an absolute path and read it). The rule
+    forbids piping a check to a truncating sink without conditions, and 'set -o pipefail' gives no exemption
+    (it makes the pipeline fail when any stage fails, though not always with the check's own status, and the
+    output is still cut). The deny is held until the segment loop ends so a
+    --no-verify deny keeps its own message, and it suppresses the note. NOTE tier (ROUND-2 FINDING 14): every
+    other checker-shaped segment (the broad heuristic) whose failure signal is swallowed by a following
+    '|| true'/'|| :', or piped into an adjacent head/tail, ALLOWS-WITH-NOTE, and so does a shape outside the
+    canonical deny that _gate_flow_note sees (an unlisted tool, mode or option, a compound or grouped stage,
+    a substitution, a wrapper beyond nice/timeout/time, a producer whose environment the command sets, a producer
+    pipeline after an earlier command in the same line that is not known-benign (_gate_benign_prefix) or joined
+    to one by '||' (_gate_conditional_run), a sed,
+    awk, sort or grep stage, a sink spelling off the list or cut, a checker-shaped or verify-option command
+    followed by a pipe and later a stage that may pass on only part of its input). On a parse error
+    the partially lexed complete segments are judged for the deny tier first (DENY outranks the parse error);
+    otherwise the raw fallback stands. Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
+    xargs body; R2 an alias or shell function; R3 a gate whose name and options carry no checker part
+    (tools/doctor.py, sha256sum -c, a build); R4 a plain '| grep PATTERN' filter or '| wc', which are not
+    counted as truncating sinks."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: gate_weakening wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -7242,9 +8700,21 @@ def gate_weakening(data):
             "so the gate-weakening check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule gatdis, fail-closed).")
     try:
-        segments = _segments(command)
+        records = _lex_command(command)
     except ValueError:
+        # DENY outranks the parse error (the branch_root precedent): the COMPLETE segments recovered before
+        # the unparseable construct are judged first for a verification run piped into a truncating sink;
+        # otherwise the raw fallback stands. The in-progress segment the lexer was inside is dropped, since
+        # its unseen tokens could change it.
+        recovered, complete = _lex_command(command, partial=True)
+        if not complete:
+            recovered = recovered[:-1]
+        hit = _verification_sink(recovered)
+        if hit is not None:
+            reason, banner = _verification_sink_message(hit)
+            return _deny(reason, banner)
         return _gate_weakening_fallback(command)
+    segments = [(seg.argv, seg.sep_after) for seg in records]
     pending_note = None  # the first heuristic gate-weakening allow-note; a certain --no-verify deny wins first
     for index, (tokens, sep_after) in enumerate(segments):
         if _command_word(tokens) == "git" and not _has_info_flag(tokens):
@@ -7269,11 +8739,11 @@ def gate_weakening(data):
         while nxt_index < len(segments) and not segments[nxt_index][0]:
             nxt_index += 1
         nxt = segments[nxt_index][0] if nxt_index < len(segments) else []
-        # ROUND-2 FINDING 14: the checker-shape swallow ('|| true'/'|| :') and truncating-pipe ('| head/tail')
-        # HEURISTIC is too broad - a benign optional probe ('test -d /cache || true', 'pytest || true' while
-        # iterating, 'make | head' to glance at output) is common and is not a gate bypass - so it becomes an
-        # ALLOW-WITH-NOTE, not a deny. Only the CONFIRMED --no-verify bypass above (a deliberate, unambiguous
-        # gate bypass) still DENIES.
+        # ROUND-2 FINDING 14: the broad checker-shape swallow ('|| true'/'|| :') and truncating-pipe
+        # ('| head/tail') HEURISTIC is too broad - a benign optional probe ('test -d /cache || true', 'pytest
+        # || true' while iterating, 'make | head' to glance at output) is common and is not a gate bypass - so
+        # it stays an ALLOW-WITH-NOTE. The narrow deny tier (a verification run whose output reaches a
+        # truncating sink, _verification_sink below) and the CONFIRMED --no-verify bypass above DENY.
         if sep_after == "||" and _command_word(nxt) in _EXIT_SWALLOWS:
             if pending_note is None:
                 pending_note = (
@@ -7286,12 +8756,22 @@ def gate_weakening(data):
             if pending_note is None:
                 pending_note = (
                     "AIQT guardrail (rule gatdis, gate-discipline): {!r} looks like a verification gate and "
-                    "is piped into '{}', a truncating sink whose exit status replaces the checker's under "
-                    "default pipeline semantics. If it gates this work, run it bare (or redirect the output "
-                    "to a file and read that) so its failure signal is not discarded; if it is only a benign "
-                    "output glance, this is allowed.".format(_command_word(tokens), _command_word(nxt)))
+                    "is piped into '{}', which may pass on only part of its output, and under default pipeline "
+                    "semantics a pipeline's exit status is that of its final stage, not the checker's. If it gates "
+                    "this work, run it bare (or redirect the output to a file and read that) so its failure signal "
+                    "is not discarded; if it is only a benign output glance, this is allowed."
+                    .format(_command_word(tokens), _command_word(nxt)))
+    # The deny tier is held until the loop ends, so a --no-verify deny anywhere in the command returns first
+    # with its own message; a verification-sink deny then outranks (and suppresses) the broad-tier note.
+    hit = _verification_sink(records)
+    if hit is not None:
+        reason, banner = _verification_sink_message(hit)
+        return _deny(reason, banner)
     if pending_note is not None:
         return _allow_note(pending_note)
+    flow_note = _gate_flow_note(records, command)
+    if flow_note is not None:
+        return _allow_note(flow_note)
     return _allow()
 
 
@@ -7996,9 +9476,24 @@ def gensrc_guard(data):
 
 # --- the orchestrator-integrity suite ----------------------------------------------------------
 # One registry, one state directory, one PURE decision core (decide_yield), one delivery substrate; the
-# six components are thin bindings over them. The whole suite is REGISTRY-SCOPED: with no
-# .aiqt/orchestration.local.json or .aiqt/orchestration.json at the session repo root it is inert (the
-# gensrc.json precedent), and the backlog guards additionally require a live orchestrator lease or a
+# six components are thin bindings over them. The whole suite is REGISTRY-SCOPED: BY DEFAULT, with no
+# .aiqt/orchestration.local.json or .aiqt/orchestration.json at the session cwd's git-resolved toplevel
+# (_orch_root, the scope every component except orch_truncation_guard uses) it is inert (the gensrc.json
+# precedent), with two disclosed exceptions, both in orch_truncation_guard. First, that guard's scope is
+# not the session repo root alone but the UNION of the cwd's physical ancestor chain and any git-resolved
+# toplevel (_orch_registry_walk, _orch_git_toplevel_has_registry), and its pre-scope denies (a malformed
+# tool_name, a Bash call's malformed cwd, an unwalkable cwd) apply before that scope in every session,
+# registry or not; a malformed tool_input is checked only after the scope (inert with no registry). Second, in the opt-in
+# registry-required mode (AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit off value,
+# _orch_registry_required) that guard is NOT inert with no registry: a Bash call that passes its pre-scope
+# checks with no registry on that chain or at a git-resolved toplevel is DENIED, and so is one whose nearest
+# registry entry the discovery probe cannot confirm (_ORCH_REG_CANNOT_EVALUATE: a discovery fault is not a
+# registry). No other suite component reads that variable, so strict mode changes no other component's
+# outcome. Outside the suite, the write-scope guard locates its declaration through this registry and is
+# NOT inert on an absent one: _load_write_scope falls back to the XDG default state directory, and a
+# declaration there arms slice confinement (see _orch_registry for every caller's reading of 'absent'). The
+# backlog guards
+# additionally require a live orchestrator lease or a
 # declared mode record, so bounded workers and plain sessions never inherit the global backlog. The
 # stop path fails OPEN on a guard's own error (which can never wedge a session) but DENIES on a backlog
 # cannot-evaluate (ignorance refuses the wind-down); the schedule path fails CLOSED on
@@ -8029,6 +9524,7 @@ _ORCH_MODE_ATTENDED_RE = re.compile(r"attended(\b|$)")
 # and their compound forms, are recognized); a present value outside that family is unrecognized and fails
 # closed to this posture rather than silently disarming.
 _ORCH_MODE_ARMED = "unattended"
+_ORCH_MODE_MAX_BYTES = 1 << 20  # _orch_mode_read reads at most this many bytes; a larger mode file fails closed
 _ORCH_ESCAPE_NAME = "ESCAPE-ALLOW-YIELD"
 _ORCH_QUIET_CLAIM_RE = re.compile(r"(\d+(?:\.\d+)?)\s*min(?:ute)?s?\b")  # minutes number; the "quiet" gate is applied separately
 # A human-decision blocker ref must look like a decision id (uppercase-prefixed, for example XY-12),
@@ -8071,15 +9567,360 @@ def _orch_root(data):
     return _recovery_toplevel(cwd)
 
 
-def _orch_registry(root):
+# Orchestration-scope discovery (round 4): the truncation guard decides scope by the UNION of two legs.
+# Leg one walks the session cwd's PHYSICAL ancestor chain directly with no-follow, descriptor-anchored
+# lookups and needs no git at all, so a git discovery failure alone (no git binary on PATH, a
+# dubious-ownership refusal, a broken config, a bare repository, a cwd inside a .git directory, a timeout)
+# never denies an ordinary session BY DEFAULT: with no registry on the walk and none at a git-resolved
+# toplevel the session is out of scope (denied instead in the opt-in registry-required mode,
+# _orch_registry_required), while the same session inside an orchestrated tree still finds the registry on
+# the walk and keeps the guard active. Leg two (restored from the rev-parse scoping after the round-4
+# finding) applies where git DOES resolve a toplevel for the cwd: core.worktree (set in a repository
+# config or a gitfile's gitdir target) can point the work tree OFF the cwd's physical ancestor chain,
+# where the walk alone would never visit its registry, so that toplevel's registry is consulted as well
+# (_orch_git_toplevel_has_registry). BY DEFAULT git success can only ADD a deny and a git failure alone
+# never denies; in registry-required mode a git failure where the registry is reachable only through the
+# git toplevel reads as ABSENT and is denied, and git success can then remove that deny. The sibling orchestration guards still root via the scrubbed rev-parse primitive (_orch_root).
+_ORCH_WALK_BOUND = 4096  # ancestor-chain safety bound; a deeper chain is a walk failure, never an allow
+# O_PATH (Linux): a walk step then needs only SEARCH permission on the chain, exactly as path resolution
+# itself does, so a search-only (execute-only) ancestor such as a shared parent directory does not fail the
+# walk; where O_PATH is unavailable the O_RDONLY fallback additionally requires read permission on each
+# ancestor, an over-DENY in the fail direction (never an allow) on such platforms.
+_ORCH_O_WALK = getattr(os, "O_PATH", os.O_RDONLY)
+
+
+# The registry probe's THIRD value (round 5): a registry entry the no-follow lookups can neither cleanly rule
+# out nor confirm as a regular registry file. It is a non-empty string, so it is TRUTHY: every boolean
+# reading of the probe (the walk's stop test, the default-mode scope decision, and every caller outside the
+# truncation guard's registry-required branch) treats it as PRESENT exactly as before round 5, the deny-safe
+# direction there. Only orch_truncation_guard's registry-required mode tells it apart from a confirmed
+# registry, and DENIES it: a discovery fault never satisfies that mode.
+_ORCH_REG_CANNOT_EVALUATE = "cannot-evaluate"
+# The union leg's own fault value (round 6): git names a toplevel for the cwd but this process cannot open
+# it as a directory, so its registry entry is never reached. Truthy like _ORCH_REG_CANNOT_EVALUATE (IN
+# SCOPE by default, deny-safe) and denied in registry-required mode, with a reason naming the toplevel
+# rather than a .aiqt entry.
+_ORCH_REG_TOPLEVEL_UNOPENABLE = "toplevel-unopenable"
+
+
+def _orch_dirfd_has_registry(dirfd):
+    """Whether the directory open at dirfd carries an orchestration registry entry, judged with NO-FOLLOW,
+    DESCRIPTOR-ANCHORED lookups (openat semantics, so a path component swapped mid-walk cannot redirect the
+    probe). THREE-VALUED (round 5). Returns False ONLY on a clean not-present: the `.aiqt` entry, or both
+    registry names inside a real `.aiqt` directory, raise FileNotFoundError. Returns True (a CONFIRMED
+    registry) when the first registry name present inside a real `.aiqt` directory (the local name first,
+    the whole-file precedence _orch_registry applies) is a regular file under a no-follow stat (presence,
+    not validity, decides scope: a present-but-unreadable or malformed regular registry has always kept the
+    guard ACTIVE, never inert). EVERY other outcome returns _ORCH_REG_CANNOT_EVALUATE: a `.aiqt` entry these
+    lookups cannot cleanly rule out (a symlink the O_NOFOLLOW open refuses, a regular file, or any other
+    fault), or a first present registry name that is not a regular file (a directory, a symlink, a FIFO, a
+    socket, a device) or whose no-follow stat faults. For a real `.aiqt` directory the deciding permission
+    is SEARCH (execute) on it, not read: the O_PATH open needs none, and each registry name is examined by
+    a no-follow stat relative to it, which needs search permission only. So, where _ORCH_O_WALK is O_PATH, a
+    `.aiqt` of mode 0o100 evaluates normally for its owner (no read bit needed; a process that is not the
+    owner and that the mode bits bind has no search bit there either, so for it the stat faults and the
+    value is _ORCH_REG_CANNOT_EVALUATE, while a process the mode bits do not bind, such as root or one
+    holding CAP_DAC_READ_SEARCH or CAP_DAC_OVERRIDE, evaluates it normally), and one of mode 0o600 or 0o000
+    (no search bit, so the stat faults with EACCES) is _ORCH_REG_CANNOT_EVALUATE for a process those modes
+    bind. Where O_PATH is unavailable the O_RDONLY fallback open of `.aiqt` also needs read permission, so
+    there a mode 0o100 `.aiqt` is _ORCH_REG_CANNOT_EVALUATE too for a process the mode bits bind, its owner
+    included (an over-deny, never an allow). That value is TRUTHY,
+    so every boolean caller reads it as PRESENT in the deny-safe direction it always had (it must never
+    read as absent - that would silently disarm an orchestrated tree), while the truncation guard's
+    registry-required mode denies it rather than counting a discovery fault as a registry."""
+    try:
+        aiqt_fd = os.open(".aiqt", _ORCH_O_WALK | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dirfd)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return _ORCH_REG_CANNOT_EVALUATE  # a .aiqt entry this walk cannot examine: not absent, not confirmed
+    try:
+        for rel in _ORCH_REGISTRY_FILES:
+            name = rel.rsplit("/", 1)[-1]
+            try:
+                st = os.stat(name, dir_fd=aiqt_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue  # this registry name is cleanly not present: try the next one
+            except OSError:
+                return _ORCH_REG_CANNOT_EVALUATE  # a name these lookups cannot stat: not absent, not confirmed
+            # The first present name decides (whole-file precedence): a regular file is a confirmed
+            # registry; any other file type is present but unconfirmable.
+            return True if stat.S_ISREG(st.st_mode) else _ORCH_REG_CANNOT_EVALUATE
+        return False
+    finally:
+        os.close(aiqt_fd)
+
+
+def _orch_probe_scope(probe):
+    """Map a registry-probe result to a walk scope: 'cannot-evaluate' for _ORCH_REG_CANNOT_EVALUATE, else
+    'found' (called only on a truthy probe)."""
+    return "cannot-evaluate" if probe == _ORCH_REG_CANNOT_EVALUATE else "found"
+
+
+def _orch_registry_walk(cwd):
+    """Locate the truncation guard's registry scope for a non-empty string cwd WITHOUT consulting git: walk
+    cwd's PHYSICAL ancestor chain (an O_PATH|O_DIRECTORY descriptor stepped with openat(fd, ".."), so no
+    component is ever re-resolved by name, a symlinked cwd path cannot alias the chain, and each step needs
+    only the SEARCH permission path resolution itself needs; ".." is never a symlink) looking for a
+    directory that carries an orchestration registry (_orch_dirfd_has_registry). The walk ends only where
+    parent and child share one dev/ino AND that identity is the filesystem root's own: a non-root dev/ino
+    repeat (a directory bind-mounted onto its own child makes the mount root and its ".." parent one
+    identity) is stepped THROUGH rather than misread as the root, so a registry above such a mount point
+    is still reached (verified by simulation; these test hosts cannot create mounts, and the path-anchored
+    recheck below independently re-probes the textual chain, so an fd-walk miss at a mount edge surfaces
+    as a found or a deny, never an allow). The walk stops at the FIRST chain directory whose probe is not a
+    clean not-present and returns ('found', None) when that probe confirms a registry, or
+    ('cannot-evaluate', None) when it returns _ORCH_REG_CANNOT_EVALUATE (an entry the no-follow lookups can
+    neither rule out nor confirm; the default mode reads it exactly as 'found', the deny-safe direction,
+    and registry-required mode denies it without consulting the chain above it or the git toplevel);
+    ('none', None) only when the walk
+    reaches the root with every lookup a clean not-present AND the post-walk recheck agrees
+    (_orch_walk_recheck, the round-4 concurrent-move detection: descriptor anchoring preserves each opened
+    directory's identity, not its parent relationship, so a mid-walk rename of an ancestor can redirect
+    this walk past a continuously present registry; the recheck re-resolves and re-probes the chain BY
+    PATH, scopes the session IN when it finds a registry, and FAILS the walk on a chain mismatch, never
+    allowing); ('fail', (detail, fix)) when the walk cannot be carried out - a NUL in the path, a path
+    that cannot be stat'ed or is not a directory, a directory this process cannot read and enter, an
+    ancestor directory the walk cannot open or examine, a chain past _ORCH_WALK_BOUND, or the recheck
+    mismatch above - where detail completes "this Bash call's cwd ..." and fix names the action that
+    repairs it. AGREEMENT with the git path (_orch_root/_recovery_toplevel, which the sibling
+    orchestration guards still use) is NOT assumed: core.worktree can point a git-resolvable toplevel OFF
+    this chain, which is why the truncation guard UNIONS this walk with _orch_git_toplevel_has_registry;
+    the walk additionally reaches a registry above a nested repository or a filesystem boundary (git
+    discovery stops at a mount point; this walk does not) and decides scope even where git cannot run or
+    answer, which the rev-parse scoping turned into a blanket deny (the round-3 lockout, withdrawn). The
+    walk-and-recheck is not atomic, neither with itself nor with the Bash call it gates, and two windows
+    stay out of view (disclosed in the residue, see _orch_walk_recheck): a concurrent rename of an
+    ancestor directory timed against BOTH the walk and the recheck can hide a registry, and any change
+    after the recheck returns is unseen. Both lie outside this guard's threat model, which is ACCIDENTAL
+    truncation in an orchestrated tree, not a party able to rename this host's ancestor directories
+    concurrently with the hook."""
+    if "\x00" in cwd:
+        return ("fail", ("contains a NUL character",
+                         "Re-issue the call with a cwd carrying no control characters."))
+    try:
+        st = os.stat(cwd)
+    except (OSError, ValueError) as exc:
+        return ("fail", ("is not an existing path ({})".format(type(exc).__name__),
+                         "Re-issue the call from an existing directory."))
+    if not stat.S_ISDIR(st.st_mode):
+        return ("fail", ("is not a directory",
+                         "Re-issue the call with a directory, not a file, as the cwd."))
+    if not os.access(cwd, os.R_OK | os.X_OK):
+        return ("fail", ("is a directory this process cannot read and enter",
+                         "Grant this process read and search permission on it, or re-issue the call from "
+                         "a readable directory."))
+    try:
+        root_st = os.stat(os.sep)
+        root_id = (root_st.st_dev, root_st.st_ino)
+    except OSError:
+        # With the root identity unknowable, a parent/child dev/ino repeat is never read as the root:
+        # the walk runs to its depth bound and FAILS (a deny), never misreading a mount edge as the top.
+        root_id = None
+    try:
+        fd = os.open(cwd, _ORCH_O_WALK | os.O_DIRECTORY)
+    except OSError as exc:
+        return ("fail", ("could not be opened for the registry walk ({})".format(type(exc).__name__),
+                         "Re-issue the call from a directory this process can open."))
+    try:
+        cur = os.fstat(fd)
+        chain = [(cur.st_dev, cur.st_ino)]
+        for _ in range(_ORCH_WALK_BOUND):
+            probe = _orch_dirfd_has_registry(fd)
+            if probe:
+                return (_orch_probe_scope(probe), None)
+            try:
+                parent = os.open("..", _ORCH_O_WALK | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except OSError as exc:
+                return ("fail", ("has an ancestor directory this walk cannot open ({})"
+                                 .format(type(exc).__name__),
+                                 "Grant this process search permission on every ancestor directory of "
+                                 "the cwd, or re-issue the call from a directory whose ancestors it can "
+                                 "search."))
+            try:
+                pst = os.fstat(parent)
+            except OSError as exc:
+                os.close(parent)
+                return ("fail", ("has an ancestor directory this walk cannot examine ({})"
+                                 .format(type(exc).__name__),
+                                 "Re-issue the call from a directory whose ancestors this process can "
+                                 "read."))
+            if (pst.st_dev == cur.st_dev and pst.st_ino == cur.st_ino
+                    and (pst.st_dev, pst.st_ino) == root_id):
+                os.close(parent)
+                # The filesystem root with every lookup a clean not-present: confirm with the path-anchored
+                # recheck before reporting no registry on the chain ('none'; the git-toplevel union and the
+                # registry-required mode then decide the outcome). A dev/ino repeat that is NOT the root
+                # (a directory bind-mounted onto its own child) falls through and is stepped through below.
+                return _orch_walk_recheck(cwd, chain)
+            os.close(fd)
+            fd, cur = parent, pst
+            chain.append((pst.st_dev, pst.st_ino))
+        return ("fail", ("sits deeper than this walk's {}-directory ancestor bound"
+                         .format(_ORCH_WALK_BOUND),
+                         "Re-issue the call from a directory at an ordinary filesystem depth."))
+    finally:
+        os.close(fd)
+
+
+def _orch_walk_recheck(cwd, chain):
+    """CONFIRM a registry walk that found nothing (round-4 concurrent-move detection): re-resolve cwd's
+    physical ancestor chain BY PATH (os.path.realpath, then each textual parent), re-probe every chain
+    directory with the same registry probe the walk uses (_orch_dirfd_has_registry, so the deny-safe
+    crafted-entry reads and the self-test ceiling apply identically), and compare the re-resolved
+    (st_dev, st_ino) sequence against `chain`, the dev/ino sequence the descriptor walk actually visited.
+    A registry found on this second, path-anchored pass scopes the session IN (('found', None), or
+    ('cannot-evaluate', None) when the probe returns _ORCH_REG_CANNOT_EVALUATE there): that is
+    the mid-walk-rename case, where the descriptor chain was redirected past a continuously present
+    registry, and equally a registry that appeared while the walk ran. A sequence mismatch means an
+    ancestor moved while the walk read the chain, so the clean not-present result cannot be trusted:
+    ('fail', (detail, fix)), a deny, never an allow; a recheck step that cannot be carried out fails the
+    same way (deny-safe). Only when every probe stays a clean not-present AND the two independently
+    resolved chains agree does ('none', None) stand. RACE LIMIT (disclosed in the residue): the recheck is
+    NOT a point-in-time read but a sequence of lookups, as the walk is, so agreement means only that the
+    two sequences of observations matched. (1) A concurrent rename of an ancestor directory timed against
+    the walk AND the recheck can hide a registry: a registry relocated within the chain so it is never
+    where either pass probes, or a sibling directory swapped in under a textual chain path during the
+    recheck so it reports the same dev/ino the redirected walk recorded, leaves every probe a clean
+    not-present with the chains agreeing, and the call is allowed (denied under registry-required
+    mode). (2) Any change AFTER the recheck
+    returns, including a registry that appears only then, is out of view (the inherent pre-execution
+    TOCTOU bound). Both are outside this guard's threat model: it stops ACCIDENTAL truncation in an
+    orchestrated tree, and a party able to rename this host's ancestor directories concurrently with the
+    hook is not that case. A mid-walk rename that is not also timed against the recheck is caught (a
+    found or a deny, pinned by the raced-ancestor rows); no further race machinery is added."""
+    try:
+        path = os.path.realpath(cwd)
+    except (OSError, ValueError):
+        return ("fail", ("could not be re-resolved after the registry walk",
+                         "Re-issue the call from a stable directory."))
+    seen = []
+    for _ in range(_ORCH_WALK_BOUND + 1):
+        try:
+            fd = os.open(path, _ORCH_O_WALK | os.O_DIRECTORY)
+        except OSError as exc:
+            return ("fail", ("has an ancestor chain this walk's recheck cannot re-resolve ({})"
+                             .format(type(exc).__name__),
+                             "Re-issue the call once the cwd's directory tree is stable."))
+        try:
+            try:
+                rst = os.fstat(fd)
+            except OSError as exc:
+                return ("fail", ("has an ancestor chain this walk's recheck cannot examine ({})"
+                                 .format(type(exc).__name__),
+                                 "Re-issue the call once the cwd's directory tree is stable."))
+            seen.append((rst.st_dev, rst.st_ino))
+            probe = _orch_dirfd_has_registry(fd)
+            if probe:
+                return (_orch_probe_scope(probe), None)
+        finally:
+            os.close(fd)
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    else:
+        return ("fail", ("sits deeper than this walk's {}-directory ancestor bound"
+                         .format(_ORCH_WALK_BOUND),
+                         "Re-issue the call from a directory at an ordinary filesystem depth."))
+    if seen != chain:
+        return ("fail", ("changed its ancestor chain while the registry walk read it (a concurrent "
+                         "rename or mount moved an ancestor directory mid-walk, so the walk's clean "
+                         "not-present result cannot be trusted)",
+                         "Re-issue the call once the cwd's directory tree is stable."))
+    return ("none", None)
+
+
+def _orch_git_toplevel_has_registry(cwd):
+    """The UNION leg of the truncation guard's registry scope (round 4): where git DOES resolve a toplevel
+    for the session cwd (the scrubbed _recovery_toplevel primitive, exactly the rooting the old rev-parse
+    scoping and the sibling orchestration guards use), that toplevel's registry is consulted IN ADDITION
+    to the ancestor walk, because core.worktree (set in a repository config or a gitfile's gitdir target)
+    can point the work tree OFF the cwd's physical ancestor chain: from inside such a repository's
+    metadata directory the old scoping read the external work tree's registry and denied, and the walk
+    alone never visits it (the round-4 finding). FOUR-VALUED (round 6; the registry probe it reuses is
+    three-valued): returns True (IN SCOPE) when git resolves a toplevel and the same no-follow registry
+    probe the walk uses (_orch_dirfd_has_registry, so the self-test ceiling masks this leg identically) confirms a registry
+    there; returns _ORCH_REG_CANNOT_EVALUATE (truthy, so IN SCOPE by default, deny-safe; denied in
+    registry-required mode) when that probe neither rules a registry out nor confirms one, and
+    _ORCH_REG_TOPLEVEL_UNOPENABLE (truthy and denied in that mode the same way, with its own reason) when
+    opening the resolved toplevel as a directory fails with any error other than FileNotFoundError (it is
+    present but not a directory, or this process may not reach it: a toplevel git can name but this probe
+    cannot examine is not cleanly registry-free, matching the old scoping's present-but-unreadable read).
+    Returns False when git cannot resolve a toplevel at all (BY DEFAULT git success can only ADD a deny
+    and a git failure alone never denies; in registry-required mode a False here with nothing on the walk
+    is the ABSENT registry the caller denies, so a git failure where the registry is reachable only
+    through the git toplevel is denied, and git success can then remove that deny), when its registry
+    probe is a clean not-present, and when the resolved toplevel DOES NOT EXIST (FileNotFoundError, e.g.
+    core.worktree naming a removed directory). That last case is deliberate (round 8): a directory that
+    does not exist holds no registry, exactly as the walk reads a missing `.aiqt` entry as a clean
+    not-present, so there is no fault to report. It still fails closed where that matters: with nothing
+    on the walk the scope is then ('none', None), which registry-required mode DENIES as an absent
+    registry, and the default mode is inert there exactly as for any other absent registry."""
+    top = _recovery_toplevel(cwd)
+    if top is None:
+        return False
+    try:
+        fd = os.open(top, _ORCH_O_WALK | os.O_DIRECTORY)
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return _ORCH_REG_TOPLEVEL_UNOPENABLE
+    try:
+        probe = _orch_dirfd_has_registry(fd)
+        return _ORCH_REG_CANNOT_EVALUATE if probe == _ORCH_REG_CANNOT_EVALUATE else bool(probe)
+    finally:
+        os.close(fd)
+
+
+def _orch_truncation_scope(cwd):
+    """The truncation guard's registry scope for a non-empty string cwd (round 6: shared with
+    tools/orch_doctor.py so the doctor reports exactly what the guard decides): the ancestor walk
+    (_orch_registry_walk) and, only when the walk finds nothing on the chain, the git-toplevel union leg
+    (_orch_git_toplevel_has_registry). Returns the walk's ('fail', (detail, fix)), ('found', None) or
+    ('cannot-evaluate', None) as is; on a walk 'none' returns ('none', None) when the union leg is False,
+    ('cannot-evaluate', None) when it returns _ORCH_REG_CANNOT_EVALUATE, ('toplevel-unopenable', None)
+    when it returns _ORCH_REG_TOPLEVEL_UNOPENABLE, and ('found', None) when it confirms a registry. The
+    NEAREST non-absent entry decides: a walk 'found' or 'cannot-evaluate' never consults the chain above it
+    or the git toplevel."""
+    scope, found = _orch_registry_walk(cwd)
+    if scope != "none":
+        return scope, found
+    top_probe = _orch_git_toplevel_has_registry(cwd)
+    if not top_probe:
+        return ("none", None)
+    if top_probe == _ORCH_REG_CANNOT_EVALUATE:
+        return ("cannot-evaluate", None)
+    if top_probe == _ORCH_REG_TOPLEVEL_UNOPENABLE:
+        return ("toplevel-unopenable", None)
+    return ("found", None)
+
+
+def _orch_registry(root, nofollow=False, files=_ORCH_REGISTRY_FILES):
     """Load the orchestration registry: ('absent', None) only when a registry file is genuinely NOT PRESENT
-    (a clean lstat FileNotFoundError; the suite is inert by design), ('ok', dict) on a schema-valid
+    (a clean lstat FileNotFoundError), ('ok', dict) on a schema-valid
     registry, ('bad', detail) otherwise. A present-but-unreadable registry is a cannot-evaluate returned as
-    bad, never absent: an lstat FAULT (a permission or I/O error), a read/parse error, or a non-version-1
-    object all fail closed rather than silently disarming a caller that locates confinement through it. The
+    bad, never absent: an lstat FAULT (a permission or I/O error), a read/parse error, a file that is not a
+    regular file, or a non-version-1 object all fail closed rather than silently disarming a caller that
+    locates confinement through it. The file is opened non-blocking and its type is checked on the open
+    descriptor, so a FIFO or device registry is bad at once rather than blocking the hook; with nofollow a
+    symlinked registry is bad too (the review dispatch pin reads it that way). The
     machine-local .aiqt/orchestration.local.json takes WHOLE-FILE precedence over the committed
-    .aiqt/orchestration.json; there is no merge, so precedence is never ambiguous."""
-    for rel in _ORCH_REGISTRY_FILES:
+    .aiqt/orchestration.json; there is no merge, so precedence is never ambiguous. files narrows the read
+    to the named registry files (the review dispatch pin reads each file on its own).
+
+    WHAT 'absent' MEANS TO EACH CALLER (it is NOT inert everywhere): orch_stop_guard and
+    orch_teammate_idle (via _orch_stop_family), orch_yield_tool, orch_ask_guard, orch_untracked_wait_loop,
+    orch_dispatch_ledger, orch_prompt_stamp, orch_resume_audit and orch_resume_barrier ALLOW (inert);
+    _orch_state_dir_for_root resolves the XDG default state directory; _load_write_scope ALSO falls back
+    to that XDG default and reads the write-scope declaration there, so a declaration present at the XDG
+    default ARMS slice confinement on an ABSENT registry (by design: the harness writes the declaration);
+    _companion_stores yields no stores, so cross-repo writes deny exactly as with no stores declared.
+    orch_truncation_guard does not scope through this loader (its own ancestor walk unioned with the git
+    toplevel decides its scope, and its opt-in registry-required mode denies an absent registry).
+    review_dispatch_pin (_rdp_scope) reads each registry file on its own and skips an absent one, so its
+    search for a binding goes on."""
+    for rel in files:
         path = os.path.join(root, *rel.split("/"))
         try:
             os.lstat(path)
@@ -8091,10 +9932,27 @@ def _orch_registry(root):
             # back to XDG and disarming confinement. Surface it as bad so it denies instead.
             return ("bad", "{}: cannot stat registry path ({}); a cannot-evaluate denies rather than "
                            "disarming confinement".format(rel, exc))
+        flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0)
         try:
-            with open(path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
+            fd = os.open(path, flags | (os.O_NOFOLLOW if nofollow else 0))
         except (OSError, ValueError) as exc:
+            return ("bad", "{}: {}".format(rel, exc))
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return ("bad", "{}: not a regular file".format(rel))
+            chunks = []
+            while True:
+                chunk = os.read(fd, 1 << 20)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        except OSError as exc:
+            return ("bad", "{}: {}".format(rel, exc))
+        finally:
+            os.close(fd)
+        try:
+            data = json.loads(b"".join(chunks).decode("utf-8"))
+        except ValueError as exc:
             return ("bad", "{}: {}".format(rel, exc))
         if not isinstance(data, dict) or type(data.get("version")) is not int \
                 or data.get("version") != 1:
@@ -8186,19 +10044,95 @@ def _orch_write_json(path, obj):
 
 
 def _orch_write_json_atomic(path, obj):
-    """Crash-safe JSON overwrite: write a sibling temp then os.replace (an atomic rename on the same
-    filesystem), so a crash mid-write never leaves a truncated file a reader would treat as malformed.
-    Same best-effort contract as _orch_write_json (returns True on success; the caller decides what a
-    failure means)."""
+    """Crash-safe JSON overwrite, the one writer of turn-state.json, backlog-checkpoint.json,
+    checkpoint-init.marker, attestations-validated.json and forced-exit-surfaced.json. Returns None on success,
+    else a short failure detail the caller names in its output (the caller decides what a failure means).
+    It serializes obj first (a value json cannot encode fails before any file is created), creates the
+    parent directory and opens it ONCE (os.open _ORCH_O_WALK|O_DIRECTORY|O_CLOEXEC: where O_PATH exists the
+    open needs no permission on that directory itself, only search permission on its ancestors, while the
+    later lstat, create, replace and cleanup unlink need search permission on it, the last three write
+    permission too, so a write-and-search-only (0300) state directory saves; where O_PATH
+    is absent the O_RDONLY fallback also needs READ permission on that directory, so there such a directory
+    fails every save, named with its error); every later step is bound to that directory descriptor through
+    dir_fd, so a parent path swapped for a symlink or another directory after the open cannot redirect the
+    save: the prior target's lstat (follow_symlinks=False), the create of the temporary file, the replace and
+    the cleanup unlink all act in the directory opened, and the descriptor is closed exactly once on every
+    path. It creates a temporary file of its own beside the target with
+    os.open(O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW) under a random name, so a symlink or any other
+    file already at a temporary-like name is never opened, written or removed (an existing name fails the
+    create, and the save fails). It sets that file's permission bits to the existing target's (a regular
+    file at the target), else to 0600, then writes, fsyncs and closes it through that descriptor only and
+    os.replace()s it onto the target, so the target is swapped whole: a reader sees the previous file or the
+    new one, never a part of either. The new file is owned by the writing uid; a symlink at the target is
+    replaced, not followed. On any failure after the create it unlinks only its own temporary file; an
+    unlink that fails leaves that file beside the target, and the returned detail names it by the parent
+    path as given (which, after a swap, may no longer lead to it). A process killed between the create and
+    the replace (a hook timeout, for example) leaves its temporary file, and nothing removes it. Not bound
+    here: the parent path itself is resolved once, at the directory open (a symlink in it at that moment is
+    followed), and a directory moved after the open still receives the save under its new name. Concurrent
+    saves never share a temporary file, so one save cannot write into or remove another's; the last replace
+    wins, so where callers read, modify and save the same file at the same time one update can be lost
+    (read-modify-write is not serialized). The writing uid can itself replace any of these files, so this is
+    crash and collision safety, not a boundary against that uid."""
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(obj, fh, sort_keys=True)
-        os.replace(tmp, path)
-        return True
-    except (OSError, ValueError):
-        return False
+        blob = json.dumps(obj, sort_keys=True).encode("utf-8")
+        directory, name = os.path.split(path)
+        os.makedirs(directory, exist_ok=True)
+        dirfd = os.open(directory, _ORCH_O_WALK | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+    except (OSError, TypeError, ValueError) as exc:
+        return type(exc).__name__
+    try:
+        return _orch_write_json_at(dirfd, directory, name, blob)
+    finally:
+        try:
+            os.close(dirfd)  # once: after a failed close the descriptor number may already be reused
+        except OSError:
+            pass  # a lookup-only directory descriptor: the save's outcome is settled already
+
+
+def _orch_write_json_at(dirfd, directory, name, blob):
+    """The save of _orch_write_json_atomic (see there), every step bound to the open directory dirfd:
+    None on success, else the failure detail. directory is the parent path as given, used only to name a
+    temporary file left behind."""
+    try:
+        try:
+            prior = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+            mode = stat.S_IMODE(prior.st_mode) & 0o777 if stat.S_ISREG(prior.st_mode) else 0o600
+        except FileNotFoundError:
+            mode = 0o600
+        tmp = "{}.{}.tmp".format(name, os.urandom(8).hex())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                     0o600, dir_fd=dirfd)
+    except (OSError, TypeError, ValueError, NotImplementedError) as exc:
+        return type(exc).__name__
+    failure = None
+    try:
+        os.fchmod(fd, mode)
+        view = memoryview(blob)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    except (OSError, ValueError) as exc:
+        failure = type(exc).__name__
+    finally:
+        try:
+            os.close(fd)  # once: after a failed close the descriptor number may already be reused
+        except OSError as exc:
+            failure = failure or type(exc).__name__
+    if failure is None:
+        try:
+            os.replace(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+            return None
+        except (OSError, ValueError, NotImplementedError) as exc:
+            failure = type(exc).__name__
+    try:
+        os.unlink(tmp, dir_fd=dirfd)
+    except FileNotFoundError:
+        pass
+    except (OSError, NotImplementedError) as exc:
+        failure += "; removing its temporary file {} failed with {}, so remove it by hand".format(
+            os.path.join(directory, tmp), type(exc).__name__)
+    return failure
 
 
 def _orch_guard_event(root, kind, decision, detail):
@@ -8211,9 +10145,37 @@ def _orch_guard_event(root, kind, decision, detail):
                                "decision": decision, "detail": detail})
 
 
+def _orch_event_warn(root, kind, decision, detail):
+    """_orch_guard_event for a path that must not lose its row silently (a deny, an allow with findings,
+    or a recorded fact): returns '' when the append succeeded, else the short recording-failure warning
+    the caller appends to its output (the block reason of a denied Stop or TeammateIdle, else the
+    banner, and the deny reason too on a PreToolUse deny). The decision is never changed here."""
+    if _orch_guard_event(root, kind, decision, detail):
+        return ""
+    return ("Additionally, the guard-events row for this {} ({}) could not be written; record it "
+            "manually (nocncl).".format(decision, kind))
+
+
+def _orch_escape_event_warn(root, kind, reason):
+    """The guard-events row of an operator-escape ALLOW, the only record that the override was used:
+    returns '' when the append succeeded, else the warning the caller appends to its output (the ALLOW
+    stands)."""
+    if _orch_guard_event(root, kind, "allow", reason):
+        return ""
+    return ("Additionally, the guard-events row recording this operator-escape release ({}) could not be "
+            "written, so the override's use is unrecorded; record it manually (nocncl).".format(kind))
+
+
+def _orch_warn_tail(*warns):
+    """The recording-failure warnings of one hook call, each preceded by a space ('' when none)."""
+    return "".join(" " + w for w in warns if w)
+
+
 def _orch_turn_state(root):
     """The turn-state dict, or None on an unreadable/malformed file (the loop guard treats None as
-    bound-reached, the fail-open direction: an unreadable counter can never license unbounded denies)."""
+    bound-reached, the fail-open direction: an unreadable counter can never license unbounded denies).
+    In a state directory the hook cannot search, os.path.lexists reports False (EACCES), so the file reads
+    as absent and the result is {} (a fresh turn-state): a counter recorded there is not seen."""
     path = os.path.join(_orch_state_dir_for_root(root), "turn-state.json")
     try:
         if not os.path.lexists(path):
@@ -8226,14 +10188,15 @@ def _orch_turn_state(root):
 
 
 def _orch_save_turn_state(root, state):
-    sd = _orch_state_dir_for_root(root)
-    try:
-        os.makedirs(sd, exist_ok=True)
-        with open(os.path.join(sd, "turn-state.json"), "w", encoding="utf-8") as fh:
-            json.dump(state, fh, sort_keys=True)
-        return True
-    except (OSError, ValueError):
-        return False
+    """Save turn-state.json through _orch_write_json_atomic: None on success, else the failure detail the
+    caller names in its output (the caller decides what a failure means). A failed save, mid-write
+    included, leaves the previous turn-state.json (or its absence) in place unchanged, and a reader sees
+    the previous file or the new one, never a part of either. The save needs a writable and searchable
+    state directory (its temporary file is created there), so a writable turn-state.json in a directory
+    the hook cannot write is not saved; where O_PATH is absent the directory must also be readable (see
+    _orch_write_json_atomic). Two saves at once are both published whole, the later replacing the earlier,
+    so one update can be lost (the read-modify-write is not serialized)."""
+    return _orch_write_json_atomic(os.path.join(_orch_state_dir_for_root(root), "turn-state.json"), state)
 
 
 def _orch_mode_classify(value):
@@ -8264,17 +10227,85 @@ def _orch_reject_duplicate_keys(pairs):
     return seen
 
 
+def _orch_mode_read(path):
+    """Read the mode file at path without waiting for a FIFO writer and without reading past the bound:
+    ('absent', None) when the open reports not found, ('ok', text) for a regular file of at most
+    _ORCH_MODE_MAX_BYTES bytes that decodes as strict UTF-8, else ('bad', reason) for every other outcome.
+    The path must encode as strict UTF-8, before any open: a path that is not (a lone surrogate, which is
+    also how a surrogate-escaped non-UTF-8 name arrives) is refused as bad, fail-closed, even where the OS
+    could open it, and so is a path with a NUL character. The open is os.open(O_RDONLY | O_NONBLOCK |
+    O_NOCTTY | O_CLOEXEC), so a FIFO with no writer opens at once instead of waiting. A socket is refused
+    at that open (it reports ENXIO on Linux, so the reason is the open's OSError), and so is any node the
+    open itself fails on (a regular file without read permission, /dev/tty with no controlling terminal);
+    after a successful open the descriptor is fstat'ed and anything not a regular file (a FIFO, a device such
+    as /dev/zero, a directory) is bad without a read. The read asks for at most
+    _ORCH_MODE_MAX_BYTES + 1 bytes in all and a longer file is bad. Any exception on the way (an OSError,
+    a decode error, any other) is bad, named by its type, and the descriptor is closed exactly once. Not
+    bounded here: the path lookup can stall on a hung mount, a regular file on a stalled filesystem can
+    stall the read, and what opening a device node does is up to its driver; the hook timeout bounds each
+    such stall."""
+    try:
+        if "\x00" in path:
+            return ("bad", "the mode path contains a NUL character")
+        path.encode("utf-8")
+    except UnicodeEncodeError:
+        return ("bad", "the mode path is not strict UTF-8 (a lone surrogate or a surrogate-escaped "
+                       "non-UTF-8 byte), so it is refused, fail-closed, even where the OS could open it")
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+                     | getattr(os, "O_CLOEXEC", 0))
+    except FileNotFoundError:
+        return ("absent", None)
+    except Exception as exc:
+        return ("bad", "the mode file cannot be opened ({})".format(type(exc).__name__))
+    chunks, total, result = [], 0, None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            result = ("bad", "the mode file is not a regular file")
+        else:
+            while total <= _ORCH_MODE_MAX_BYTES:
+                chunk = os.read(fd, _ORCH_MODE_MAX_BYTES + 1 - total)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            if total > _ORCH_MODE_MAX_BYTES:
+                result = ("bad", "the mode file is larger than the {}-byte bound".format(_ORCH_MODE_MAX_BYTES))
+    except Exception as exc:
+        result = ("bad", "the mode file cannot be read ({})".format(type(exc).__name__))
+    finally:
+        try:
+            os.close(fd)  # once: after a failed close the descriptor number may already be reused
+        except OSError as exc:
+            result = result or ("bad", "the mode file cannot be closed ({})".format(type(exc).__name__))
+    if result is not None:
+        return result
+    try:
+        return ("ok", b"".join(chunks).decode("utf-8"))  # strict decode
+    except UnicodeDecodeError:
+        return ("bad", "the mode file is not valid UTF-8")
+
+
 def _orch_mode(reg, root):
-    """The operating-mode token from the declared mode record, parsed by ONE sound reader (never an
-    incremental regex-plus-substring scan). The mode file is a SHARED text file: either a state-record file
-    carrying an `Operating-mode:` line amid prose, or a peer JSON mode file. Contract:
+    """The operating-mode token of _orch_mode_detail (see there), without the read-failure reason."""
+    return _orch_mode_detail(reg, root)[0]
+
+
+def _orch_mode_detail(reg, root):
+    """(mode, reason): the operating-mode token, and the reason the mode file could not be read where it
+    fails closed for that (else None). The token comes from the declared mode record, parsed by ONE sound
+    reader (never an incremental regex-plus-substring scan). The mode file is a SHARED text file: either a
+    state-record file carrying an `Operating-mode:` line amid prose, or a peer JSON mode file. Contract:
       - None when NO marker is present, preserving the fail-open answer for the ask blocker (the file is
         shared, so prose must NOT arm): an undeclared mode path, a genuinely absent file (FileNotFoundError),
         an empty or whitespace-only file, or prose with no `Operating-mode:` declaration line and no JSON
         marker (including a sentence that merely mentions attended or unattended);
       - _ORCH_MODE_ARMED (the guards-armed `unattended` posture) when a marker IS present but cannot yield a
-        recognized value, so the guard fails CLOSED rather than silently disarming: a present-but-unreadable
-        file (an OSError other than FileNotFoundError) or one whose bytes are not valid UTF-8 (strict decode);
+        recognized value, so the guard fails CLOSED rather than silently disarming: every outcome of
+        _orch_mode_read other than not found or a read text (a path with a NUL character or one that is
+        not strict UTF-8, a file that cannot be opened or read (a socket included), one that is not a
+        regular file, one larger than the bound, or one whose bytes are not valid UTF-8), which also returns
+        the reason;
         a present `Operating-mode:` declaration line whose value is empty or does not begin with attended or
         unattended; or, when no declaration line is present, a JSON-shaped marker (the content begins with
         `{`, `[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, or duplicate
@@ -8297,14 +10328,17 @@ def _orch_mode(reg, root):
     path = _orch_path(root, (reg.get("mode") or {}).get("path") if isinstance(
         reg.get("mode"), dict) else None)
     if not path:
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            text = fh.read()               # strict decode: invalid UTF-8 raises UnicodeDecodeError
-    except FileNotFoundError:
-        return None                       # no marker file present: unchanged no-marker default (fail open)
-    except (OSError, UnicodeDecodeError):
-        return _ORCH_MODE_ARMED           # present but unreadable or non-UTF-8: fail closed to guards-armed
+        return (None, None)
+    status, text = _orch_mode_read(path)
+    if status == "absent":
+        return (None, None)               # no marker file present: unchanged no-marker default (fail open)
+    if status != "ok":
+        return (_ORCH_MODE_ARMED, text)   # any other read outcome fails closed to guards-armed, with a reason
+    return (_orch_mode_classify_text(text), None)
+
+
+def _orch_mode_classify_text(text):
+    """The mode token of a mode file's decoded text, by the soundness rules of _orch_mode_detail."""
     text = text.lstrip("\ufeff")          # strip a leading byte-order mark ONCE, before every subsequent check
     # DECLARATION (line form): parse each PHYSICAL line so the value never crosses a newline. The FIRST line
     # that matches is the declaration; a present declaration never falls through to the no-marker None (an
@@ -8320,10 +10354,11 @@ def _orch_mode(reg, root):
         return None                       # empty/whitespace-only: no marker present, unchanged (fail open)
     try:
         obj = json.loads(stripped, object_pairs_hook=_orch_reject_duplicate_keys)
-    except ValueError:
-        # Unparseable (malformed, trailing garbage, or duplicate keys): a JSON-SHAPED marker attempt (the
-        # content begins with `{`, `[`, or `"`) fails CLOSED; anything else is ordinary prose with no
-        # declaration and no JSON, the no-marker None (fail open, because the file is shared).
+    except (ValueError, RecursionError):
+        # Unparseable (malformed, trailing garbage, duplicate keys, or nesting too deep to parse, which only
+        # content beginning with `{` or `[` can reach): a JSON-SHAPED marker attempt (the content begins with
+        # `{`, `[`, or `"`) fails CLOSED; anything else is ordinary prose with no declaration and no JSON, the
+        # no-marker None (fail open, because the file is shared).
         return _ORCH_MODE_ARMED if stripped[:1] in ("{", "[", '"') else None
     if isinstance(obj, dict) and set(obj) == {"mode"} and isinstance(obj["mode"], str):
         classified = _orch_mode_classify(obj["mode"])
@@ -8886,10 +10921,10 @@ def _orch_token_present(needle, hay):
     return re.search(r"(?<![A-Za-z0-9_-]){}(?![A-Za-z0-9_-])".format(re.escape(needle)), hay) is not None
 
 
-_ORCH_CHECKPOINT_MAX = 4096  # ids the C.3 checkpoint retains; a bound-forced drop is logged, never silent
+_ORCH_CHECKPOINT_MAX = 4096  # ids the C.3 checkpoint retains; a bound-forced drop is logged or warned about
 
 
-def _orch_checkpoint_union(root, payload, record=True):
+def _orch_checkpoint_union(root, payload, record=True, warnings=None):
     """C.3 anti-shrinkage checkpoint union, run only after a status-ok enumeration. Compares the
     persisted checkpoint (<state_dir>/backlog-checkpoint.json) against the FULL validated payload
     (closed rows included: a closed row is the receipt that lets an id leave the checkpoint) and
@@ -8905,7 +10940,12 @@ def _orch_checkpoint_union(root, payload, record=True):
 
     record=False is the PREVIEW posture (tools/orch_preflight.py): the vanished-id injections are still
     COMPUTED for display, but NO checkpoint rewrite, init-marker write, or guard-event is emitted, so a
-    preview makes no state change.
+    preview makes no state change. A checkpoint or init marker that cannot be written adds a warning naming
+    that write to the caller's warnings list whether or not its guard-events row is written, and each
+    guard-events append made here (a bound-forced drop, an unwritable checkpoint, an unwritable init marker)
+    that fails adds its recording-failure warning too; the hook surfaces the list in its output (the deny
+    reason and banner, the block reason, or a note), so neither failed write nor any of the three rows is
+    lost silently.
 
     FIX 4: an absent checkpoint is a legitimate FIRST window only when no prior window was ever
     initialised. When the durable init marker shows a prior window but the checkpoint is now gone, that
@@ -8960,31 +11000,50 @@ def _orch_checkpoint_union(root, payload, record=True):
     for it in payload:
         if it["state"] != "closed":
             union[it["id"]] = current[it["id"]]
+    events = []
     if len(union) > _ORCH_CHECKPOINT_MAX:
         dropped = sorted(union)[_ORCH_CHECKPOINT_MAX:]
         union = {iid: union[iid] for iid in sorted(union)[:_ORCH_CHECKPOINT_MAX]}
-        if record:
-            _orch_guard_event(root, "checkpoint-bound", "dropped",
-                              "{} id(s) past the {} bound: {}".format(
-                                  len(dropped), _ORCH_CHECKPOINT_MAX, ", ".join(dropped[:10])))
+        events.append(("checkpoint-bound", "dropped",
+                       "{} id(s) past the {} bound: {}".format(
+                           len(dropped), _ORCH_CHECKPOINT_MAX, ", ".join(dropped[:10]))))
     if record:
-        if not _orch_write_json_atomic(path, {"version": 1, "ts": _orch_now().isoformat(),
-                                              "ids": union}):
-            _orch_guard_event(root, "checkpoint-unwritable", "recorded",
-                              "the checkpoint could not be rewritten; the next window compares "
-                              "against the prior state")
+        # the failed write itself is reported in the hook's output; its guard-events row is a second record
+        # that can succeed or fail on its own, so the warning never depends on that append failing too
+        failed = []
+        unsaved = _orch_write_json_atomic(path, {"version": 1, "ts": _orch_now().isoformat(),
+                                                 "ids": union})
+        if unsaved is not None:
+            events.append(("checkpoint-unwritable", "recorded",
+                           "the checkpoint could not be rewritten; the next window compares "
+                           "against the prior state"))
+            failed.append("Additionally, the anti-shrinkage checkpoint backlog-checkpoint.json could not be "
+                          "written ({}), so it does not record this window's items: an item that leaves the "
+                          "enumeration, or is demoted, before a later checkpoint write succeeds is not held "
+                          "as vanished or demoted unless an earlier checkpoint already records it; record "
+                          "this window's items manually (nocncl).".format(unsaved))
         elif not os.path.lexists(marker):
             # FIX 4: record that a window has now been initialised, so a later deletion is detectable.
             # FIX C: a failed marker write leaves no init marker, so a later checkpoint deletion would
             # go undetected; record it as a fact (fail-loud) and HOLD this window (cannot-evaluate),
             # never a silent gap, consistent with the other recorders.
-            if not _orch_write_json_atomic(marker, {"version": 1, "ts": _orch_now().isoformat()}):
-                _orch_guard_event(root, "checkpoint-marker-unwritable", "recorded",
-                                  "the checkpoint-init marker could not be written; a later "
-                                  "checkpoint deletion would be undetectable this window")
+            unsaved = _orch_write_json_atomic(marker, {"version": 1, "ts": _orch_now().isoformat()})
+            if unsaved is not None:
+                events.append(("checkpoint-marker-unwritable", "recorded",
+                               "the checkpoint-init marker could not be written; a later "
+                               "checkpoint deletion would be undetectable this window"))
                 injected.append(("backlog-checkpoint", "cannot-evaluate",
                                  "checkpoint-init marker unwritable; a later deletion would go "
                                  "undetected"))
+                failed.append("Additionally, the checkpoint-init marker checkpoint-init.marker could not be "
+                              "written ({}), so this window is held as cannot-evaluate and a later deletion of "
+                              "the checkpoint would go undetected; record it manually (nocncl).".format(unsaved))
+        for ev_kind, ev_decision, ev_detail in events:
+            warn = _orch_event_warn(root, ev_kind, ev_decision, ev_detail)
+            if warn and warnings is not None:
+                warnings.append(warn)
+        if warnings is not None:
+            warnings.extend(failed)
     return injected
 
 
@@ -8992,7 +11051,8 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
     """Assemble the decide_yield context from live state (the bindings' I/O half). Returns
     (ctx, turn_state_or_None, basis). The C.1 escape unpack, the C.2 attestation threading, and the
     C.3 checkpoint injection all land HERE, never in decide_yield: the decision core's verdict
-    lattice is untouched, and ctx["escape_spoof"] is a recorder-only key decide_yield never reads."""
+    lattice is untouched, and ctx["escape_spoof"] and ctx["record_warn"] (the checkpoint's recording-failure
+    warnings, '' when none) are recorder-only keys decide_yield never reads."""
     staleness = _orch_validate("staleness", reg.get("staleness"))[1]
     task_hours = staleness["task_hours"]
     ts = _orch_turn_state(root)
@@ -9002,6 +11062,7 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
     counter = tstate["stop_denials"] if tstate["stop_denials"] is not None else _ORCH_LOOP_BOUND
     schedule_denials = tstate["schedule_denials"] if tstate["schedule_denials"] is not None else 0
     status, payload = _orch_enumerate(reg, root)
+    record_warn = []
     if status == "ok":
         live_ids, ledger_readable, _detail = _orch_live_ledger_ids(root, task_hours)
         classes = classify_backlog(payload, live_ids, ledger_readable,
@@ -9011,7 +11072,7 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
         # with no closed receipt is held (cannot-evaluate); the injected ids enter the class-tagged
         # basis below, so under D12 a shrink is a CHANGED basis, never premature cap relief.
         classes["cannot_evaluate"].extend(
-            _orch_checkpoint_union(root, payload, record=record_checkpoint))
+            _orch_checkpoint_union(root, payload, record=record_checkpoint, warnings=record_warn))
         enum_detail = ""
         # D12: tag each id with its class so an item flipping between classes reads as a CHANGED basis (an
         # untagged merge let such a flip collide to the same basis and skip fresh handling). CONV4-CX2 +
@@ -9036,6 +11097,7 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
     basis_unchanged = tstate["schedule_basis"] == basis
     escape_active, escape_spoof = _orch_escape_active(reg, root)
     ctx = {"kind": kind, "escape": escape_active, "escape_spoof": escape_spoof,
+           "record_warn": " ".join(record_warn),
            "loop_signal": data.get("stop_hook_active") is True,  # strict bool; a "false" string is not a signal
            "counter": counter, "enum_status": status, "enum_detail": enum_detail,
            "actionable": classes["actionable"], "waiting": classes["waiting"],
@@ -9047,10 +11109,10 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
 
 
 def _orch_record_denial(root, ts, kind, basis):
-    """Persist the deny counters (the guard-owned loop bound; platform-independent). Returns True on a
-    successful persist. The increment base is sanitized so a tampered non-int counter cannot raise here;
-    a STOP-path caller that gets False must fail OPEN, since an un-persistable counter never reaches the
-    loop bound and would otherwise re-deny forever."""
+    """Persist the deny counters (the guard-owned loop bound; platform-independent). Returns None on a
+    successful persist, else the failure detail of _orch_save_turn_state. The increment base is sanitized
+    so a tampered non-int counter cannot raise here; a STOP-path caller that gets a failure must fail OPEN,
+    since an un-persistable counter never reaches the loop bound and would otherwise re-deny forever."""
     state = dict(ts or {})
     if kind == "schedule_idle":
         prior = _v_exact_int(state.get("schedule_denials"), 0, _ORCH_COUNTER_MAX)
@@ -9069,10 +11131,14 @@ def _orch_record_escape_spoof(root, detail):
     """C.1 recorder: an ignored (foreign, symlinked, hardlinked, actor-owned, or writable) escape
     sentinel is a recorded fact, never a verdict input: the decision already proceeded exactly as with
     no sentinel. Appends a guard-events row and writes <state_dir>/escape-spoof.json so the next resume
-    audit surfaces it once. FIX 6: the recording is FAIL-LOUD: returns '' on success, else the warning
-    text the caller MUST append to its banner, so an ignored sentinel that could not be recorded is
-    never silently dropped (which would contradict the always-recorded-and-surfaced claim, and leave
-    the resume audit nothing to surface when both writes failed)."""
+    audit raises it: normally once, again at each later audit while its rename fails, and never where a
+    later sentinel overwrote escape-spoof.json before that audit (only the later one is raised from it;
+    the earlier one keeps only its guard-events row, where that append succeeded). FIX 6: the recording
+    is FAIL-LOUD: returns '' on success, else the warning text the caller MUST append to its output (its
+    banner, or the block reason of a denied Stop or TeammateIdle, which has no banner; a PreToolUse deny
+    carries it in both its reason and its banner), so an ignored sentinel whose guard-events row or
+    escape-spoof.json could not be written is never silently dropped: the warning names the failed write
+    and asks for a manual record (when both writes fail, the resume audit has nothing to raise)."""
     ok_event = _orch_guard_event(root, "escape-spoof", "recorded", detail)
     ok_file = _orch_write_json(os.path.join(_orch_state_dir_for_root(root), "escape-spoof.json"),
                                {"ts": _orch_now().isoformat(), "detail": detail})
@@ -9100,11 +11166,11 @@ def _orch_record_forced_exit(root, event_name, ctx, reason):
     """C.4 recorder: a bound- or cap-released ALLOW_WITH_FINDINGS past any non-closed disposition is
     marked forced_unresolved so the next resume audit surfaces it for triage. FIX 5: the record is
     APPEND-ONLY and uniquely keyed (<state_dir>/forced-exit.jsonl, one row per forced exit with a
-    unique key), so two forced exits before a resume are BOTH kept and each surfaced exactly once,
-    never clobbered into a single fixed file. No register row, attestation, or escape-adjacent artefact
-    ever suppresses this record. Returns '' on success, else the failure text the caller MUST append to
-    its banner (the one record this design leans on can never fail silently). The verdict is never
-    changed here."""
+    unique key), so two forced exits before a resume are BOTH kept and each normally raised once (at
+    least once if recording that it was raised fails), never clobbered into a single fixed file. No
+    register row, attestation, or escape-adjacent artefact ever suppresses this record. Returns '' on
+    success, else the failure text the caller MUST append to its banner (the one record this design
+    leans on can never fail silently). The verdict is never changed here."""
     open_ids = _orch_open_dispositions(ctx)
     enum_ok = ctx.get("enum_status") == "ok"
     key = _orch_now().isoformat() + "-" + os.urandom(6).hex()
@@ -9145,29 +11211,40 @@ def _orch_stop_family(data, event_name, kind):
                   if ctx.get("escape_spoof") else "")
     verdict, reason, disposition = decide_yield(ctx)
     if verdict == "DENY":
-        if not _orch_record_denial(root, ts, kind, basis):
-            warn = ("the denial counter could not be persisted, so the loop bound cannot advance; "
-                    "failing OPEN with findings rather than re-denying. Underlying: " + reason)
-            _orch_guard_event(root, event_name, "allow_unpersistable", warn)
+        unsaved = _orch_record_denial(root, ts, kind, basis)
+        if unsaved is not None:
+            warn = ("the denial counter could not be persisted ({}), so the loop bound cannot advance; "
+                    "failing OPEN with findings rather than re-denying. Underlying: ".format(unsaved) + reason)
+            ev = _orch_event_warn(root, event_name, "allow_unpersistable", warn)
             return _stop_warn("AIQT guardrail ({}): {}{}".format(
-                event_name, warn, " " + spoof_warn if spoof_warn else ""))
-        _orch_guard_event(root, event_name, "deny", reason)
-        # a DENY blocks (exit 2); if the spoof record itself failed, surface it on the block reason too
-        return (2, None, reason + (" " + spoof_warn if spoof_warn else ""))
-    _orch_guard_event(root, event_name, verdict.lower(), reason)
+                event_name, warn, _orch_warn_tail(ev, spoof_warn, ctx["record_warn"])))
+        ev = _orch_event_warn(root, event_name, "deny", reason)
+        # a DENY blocks (exit 2) and carries no banner, so every recording-failure warning (the deny's own
+        # guard-events row, the spoof record, the checkpoint rows) goes on the block reason
+        return (2, None, reason + _orch_warn_tail(ev, spoof_warn, ctx["record_warn"]))
     if verdict == "ALLOW_WITH_FINDINGS":
+        ev = _orch_event_warn(root, event_name, verdict.lower(), reason)
         extra = ""
         if (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]) \
                 and (_orch_open_dispositions(ctx) or ctx["enum_status"] != "ok"):
             # C.4: the bound released this exit past open work; mark it forced_unresolved for the
             # next resume audit's triage. The fail-open verdict itself is unchanged.
             extra = _orch_record_forced_exit(root, event_name, ctx, reason)
-        tail = " ".join(x for x in (extra, spoof_warn) if x)
         return _stop_warn("AIQT guardrail ({}): {}{}".format(
-            event_name, reason, " " + tail if tail else ""))
-    if spoof_warn:
-        # a clean ALLOW whose spoof record FAILED still surfaces the failure (never a silent None)
-        return _stop_warn("AIQT guardrail ({}): {}".format(event_name, spoof_warn))
+            event_name, reason, _orch_warn_tail(extra, ev, spoof_warn, ctx["record_warn"])))
+    if ctx["escape"]:
+        # the operator-escape ALLOW: its guard-events row is the only record that the override was used,
+        # so a failed append is surfaced (the ALLOW stands)
+        tail = _orch_warn_tail(_orch_escape_event_warn(root, event_name, reason), spoof_warn,
+                               ctx["record_warn"])
+    else:
+        # a clean ALLOW with no escape: its row is the over-fire metric only, best effort, a failed append
+        # is not surfaced
+        _orch_guard_event(root, event_name, verdict.lower(), reason)
+        tail = _orch_warn_tail(spoof_warn, ctx["record_warn"])
+    if tail:
+        # a clean ALLOW whose spoof or checkpoint record FAILED still surfaces it (never a silent None)
+        return _stop_warn("AIQT guardrail ({}):{}".format(event_name, tail))
     return _allow()
 
 
@@ -9188,16 +11265,25 @@ def _orch_register_wake(root, ts, prompt):
     """Record the sha256 of an ALLOWED wake's prompt into turn-state wake_digests (bounded), so the
     returning UserPromptSubmit is recognised as timer-originated by orch_prompt_stamp and does not reset
     the loop-guard counters or stamp a false genuine-human-input time (G1: the classifier was dead
-    because nothing ever wrote wake_digests)."""
+    because nothing ever wrote wake_digests). Returns '' when the digest was written or there is no prompt
+    to register, else the warning the caller appends to its output (the ALLOW stands). The save is atomic, so
+    a failed one leaves the previous turn-state unchanged; the warning still promises no classification of
+    the returning prompt, which reads as timer-originated where turn-state holds a matching digest (an
+    earlier identical wake's) when it arrives, and as genuine human input otherwise."""
     if not isinstance(prompt, str) or not prompt:
-        return
+        return ""
     digest = __import__("hashlib").sha256(prompt.encode("utf-8", "replace")).hexdigest()
     state = dict(ts or {})
     wd = state.get("wake_digests")
     wd = [d for d in wd if isinstance(d, str)] if isinstance(wd, list) else []
     wd.append(digest)  # a multiset: two identical wakes register two tokens, each consumed once (CX-M6)
     state["wake_digests"] = wd[-64:]  # bounded so the list cannot grow without limit
-    _orch_save_turn_state(root, state)
+    unsaved = _orch_save_turn_state(root, state)
+    if unsaved is None:
+        return ""
+    return ("Additionally, this wake's prompt digest could not be written to turn-state.json ({}), so how the "
+            "prompt it returns with is classified is uncertain: it may read as genuine human input or as "
+            "timer-originated; record the wake manually (nocncl).".format(unsaved))
 
 
 def orch_yield_tool(data):
@@ -9244,23 +11330,44 @@ def orch_yield_tool(data):
                   "Re-issue without the unmeasured claim.".format(claim.group(1), measured_min))
         # The quiet-claim DENY has a trivial legit exit (re-issue without the claim), so it does NOT
         # consume the schedule cap (CX-M2: repeated quiet-claim denials could otherwise farm the cap
-        # into an ALLOW_WITH_FINDINGS that parks genuinely actionable work).
-        _orch_guard_event(root, "yield-tool", "deny", reason)
-        return _deny(reason + (" " + spoof_warn if spoof_warn else ""),
+        # into an ALLOW_WITH_FINDINGS that parks genuinely actionable work). A recording-failure warning
+        # goes on both the deny reason and the banner.
+        tail = _orch_warn_tail(_orch_event_warn(root, "yield-tool", "deny", reason), spoof_warn,
+                               ctx["record_warn"])
+        return _deny(reason + tail,
                      "AIQT guardrail: denied a scheduling call whose quiet-duration claim "
-                     "contradicts the measured figure.")
+                     "contradicts the measured figure." + tail)
     verdict, reason, _disposition = decide_yield(ctx)
     if verdict == "DENY":
-        _orch_record_denial(root, ts, kind, basis)
-        _orch_guard_event(root, "yield-tool", "deny", reason)
-        return _deny(reason + (" " + spoof_warn if spoof_warn else ""),
-                     "AIQT guardrail: denied a {} call past the enumerated backlog.".format(tool))
-    if kind == "schedule_idle":
-        # G1: register the ALLOWED wake's prompt digest so its returning UserPromptSubmit is classified
-        # timer-originated (not genuine human input), preserving the loop-guard counters across the wake.
-        _orch_register_wake(root, ts, tool_input.get("prompt"))
-    _orch_guard_event(root, "yield-tool", verdict.lower(), reason)
+        # a counter that cannot be saved leaves this deny uncounted; relief on a later call comes only from
+        # what that call reads (its turn-state count, see _orch_build_ctx, or a stop_hook_active field set to
+        # true in its payload, documented in the Stop input and not in the PreToolUse input) or, for a Stop,
+        # from its own deny failing to save, never from this deny. The deny stands and the failure is
+        # reported on it
+        unsaved = _orch_record_denial(root, ts, kind, basis)
+        counter_warn = "" if unsaved is None else (
+            "Additionally, the denial counter could not be written to turn-state.json, so this deny does not "
+            "count toward the {} ({}); {}; record it manually (nocncl).".format(
+                "scheduling cap" if kind == "schedule_idle" else "loop bound", unsaved,
+                "a later call is relieved only when the count it reads from turn-state.json is at or above the "
+                "cap on an unchanged basis, which needs a state directory it can search and a turn-state.json "
+                "it can read" if kind == "schedule_idle" else
+                "a later stop=true call or Stop takes the loop-bound exit only when the count it reads from "
+                "turn-state.json is at or above the bound, that file cannot be read as a JSON object or its "
+                "stop_denials value is malformed (each of which needs a state directory it can search), or that "
+                "call's payload carries stop_hook_active set to true (a field the Claude Code hooks reference "
+                "documents in the Stop input and does not list in the PreToolUse input), and a later Stop the "
+                "decision core denies also allows with findings when its own denial counter cannot be saved"))
+        tail = _orch_warn_tail(_orch_event_warn(root, "yield-tool", "deny", reason), counter_warn,
+                               spoof_warn, ctx["record_warn"])
+        return _deny(reason + tail,
+                     "AIQT guardrail: denied a {} call past the enumerated backlog.{}".format(tool, tail))
+    # G1: register the ALLOWED wake's prompt digest so its returning UserPromptSubmit is classified
+    # timer-originated (not genuine human input), preserving the loop-guard counters across the wake; a
+    # failed write is reported on every allow path below (the ALLOW stands)
+    wake_warn = _orch_register_wake(root, ts, tool_input.get("prompt")) if kind == "schedule_idle" else ""
     if verdict == "ALLOW_WITH_FINDINGS":
+        ev = _orch_event_warn(root, "yield-tool", verdict.lower(), reason)
         msg = "AIQT guardrail: {}".format(reason)
         forced = ((kind == "stop" and (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]))
                   or (kind == "schedule_idle" and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP
@@ -9272,11 +11379,21 @@ def orch_yield_tool(data):
             extra = _orch_record_forced_exit(root, "yield-tool", ctx, reason)
             if extra:
                 msg += " " + extra
-        if spoof_warn:
-            msg += " " + spoof_warn
-        return _allow_note(msg)
-    if spoof_warn:
-        return _allow_note("AIQT guardrail: {}".format(spoof_warn))
+        return _allow_note(msg + _orch_warn_tail(ev, wake_warn, spoof_warn, ctx["record_warn"]))
+    if ctx["escape"]:
+        # the operator-escape ALLOW: its guard-events row is the only record that the override was used,
+        # so a failed append is surfaced (the ALLOW stands)
+        tail = _orch_warn_tail(_orch_escape_event_warn(root, "yield-tool", reason), wake_warn, spoof_warn,
+                               ctx["record_warn"])
+    else:
+        # a clean ALLOW with no escape: its row is the over-fire metric only, best effort, a failed append
+        # is not surfaced
+        _orch_guard_event(root, "yield-tool", verdict.lower(), reason)
+        tail = _orch_warn_tail(wake_warn, spoof_warn, ctx["record_warn"])
+    if tail:
+        # a clean ALLOW whose wake digest, spoof or checkpoint record FAILED still surfaces it (never a
+        # silent None)
+        return _allow_note("AIQT guardrail:" + tail)
     return _allow()
 
 
@@ -9287,8 +11404,11 @@ def orch_ask_guard(data):
     declaration is parsed on its own PHYSICAL line (its value must begin with attended or unattended, compound
     annotations allowed, never a substring, or it fails closed); a JSON marker must be exactly
     {"mode": "<attended|unattended...>"} with no extra or duplicate keys or it fails closed. A mode marker that
-    is present but unreadable, non-UTF-8, a present-but-unrecognized `Operating-mode:` declaration (empty, or not
-    beginning with attended/unattended), a present JSON value that parses but is not exactly a single string
+    is present but unreadable (a socket, refused at the open, included), not a regular file (a FIFO or a
+    device included, opened without waiting), larger than _ORCH_MODE_MAX_BYTES, or non-UTF-8, a mode path
+    holding a NUL or not strict UTF-8 (each such
+    read outcome names its reason in the deny), a present-but-unrecognized `Operating-mode:` declaration
+    (empty, or not beginning with attended/unattended), a present JSON value that parses but is not exactly a single string
     "mode" key (a scalar, an array, an object with extra keys, or an object without a string "mode"), or, with no
     declaration line present, a JSON-shaped marker (content beginning with `{`, `[`, or `"`) that is malformed
     (an unterminated string, trailing garbage, or duplicate keys) fails CLOSED to the guards-armed (unattended)
@@ -9305,11 +11425,15 @@ def orch_ask_guard(data):
     status, reg = _orch_registry(root)
     if status != "ok":
         return _allow()  # absent OR unreadable registry: fail open, this control is advisory-shaped
-    mode = _orch_mode(reg, root)
+    mode, unread = _orch_mode_detail(reg, root)
     if mode is None or "unattended" not in mode:
-        if mode is None:
-            _orch_guard_event(root, "ask-guard", "fail-open",
-                              "mode record absent, empty, or prose with no declaration or JSON marker")
+        if mode is None and not _orch_guard_event(
+                root, "ask-guard", "fail-open",
+                "mode record absent, empty, or prose with no declaration or JSON marker"):
+            # the fail-open stands; only the failed guard-events row is surfaced, never a silent loss
+            return _allow_note("AIQT guardrail: the ask guard failed open (no operating-mode record it "
+                               "could read as a declaration), and the guard-events row recording that "
+                               "fail-open could not be written; record it manually (nocncl).")
         return _allow()
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     questions = tool_input.get("questions") if isinstance(tool_input.get("questions"), list) else []
@@ -9331,12 +11455,15 @@ def orch_ask_guard(data):
               "outward-facing), record it and HOLD that item; the hold never licenses acting without "
               "the answer. If the maintainer is in fact present, set an attended operating-mode in "
               "the mode record first, then re-issue.")
-    _orch_guard_event(root, "ask-guard", "deny",
-                      "pending key {}{}".format(key, "" if recorded else " (NOT persisted)"))
+    if unread:
+        # a mode file the reader cannot read as text fails closed to unattended; the deny names why
+        reason += " The mode record reads as unattended because {} (it fails closed).".format(unread)
+    tail = _orch_warn_tail(_orch_event_warn(
+        root, "ask-guard", "deny", "pending key {}{}".format(key, "" if recorded else " (NOT persisted)")))
     banner = ("AIQT guardrail: denied a blocking question in unattended mode; recorded pending."
               if recorded else "AIQT guardrail: denied a blocking question in unattended mode, but the "
               "pending row could NOT be persisted; record the decision manually (nocncl).")
-    return _deny(reason, banner)
+    return _deny(reason + tail, banner + tail)
 
 
 _ORCH_PLAIN_COMMAND_RE = re.compile(r"[A-Za-z0-9_ \t./=:@,+%-]+")
@@ -9349,34 +11476,22 @@ _ORCH_SHELL_KEYWORDS = frozenset((
     "do", "done", "in", "function", "time", "coproc"))
 
 
-def _orch_foreground_detach(command):
-    """True when a foreground command carries an executable, unquoted, unescaped bare `&` control operator
-    that detaches a child, launching asynchronous work the foreground tool call does not track. The bare
-    detach `&` is distinguished from the shell forms that also carry an ampersand but do NOT detach: the
-    `&&` logical-AND, the `&>` and `&>>` redirects, the `<&`, `>&`, and `|&` descriptor-duplication and
-    pipe-stderr operators, any single-quoted, double-quoted, or backslash-escaped ampersand, and an `&`
-    inside an unquoted, word-start `#` comment (comment text, not an operator). A dedicated quote- and
-    escape-tracking scan is used, NOT _segments: that helper strips quote and escape provenance and
-    classifies both `echo "&"` and `echo \\&` as an `&` separator, which would over-fire. It also drops a
-    word-start `#` comment so a commented-out `&` does not prompt, but only to the END OF THAT LINE: a
-    comment never suppresses a later line, so a real bare `&` on a subsequent line of a multi-line command
-    is still caught rather than smuggled past.
+# Bash's own word-start rule for a `#` comment: a `#` opens a comment only at the start of a word, and bash
+# delimits words with its blanks (space, tab) and newline and with its metacharacters (; & | ( ) < >). Other
+# characters that Python's str.isspace() accepts (carriage return, vertical tab, form feed, no-break space,
+# the 0x1c-0x1f separators, NEL, and the Unicode spaces) are ordinary word characters to bash.
+_ORCH_BASH_WORD_BREAKS = frozenset(" \t\n;&|()<>")
 
-    AMBIGUOUS QUOTING FAILS TOWARD ASK, never toward a silent allow: a scan that ends still inside an
-    unbalanced single or double quote cannot prove that a later `&` is quoted rather than an operator (an
-    unbalanced quote, or a construct this scan does not model such as ANSI-C `$'...'` or locale `$"..."`
-    quoting, can leave the scan `inside quotes` and skip a real trailing `&`), so it reports a detach
-    (True -> ASK) rather than allowing. A genuinely balanced, quoted `&` is literal and correctly ignored.
 
-    NARROW BY CONSTRUCTION: this scans for the accidental bare-operator case only. Grammar it does not
-    model (a here-document body, a nested shell string, an alias or function that renames a detacher, and
-    runtime detachers such as nohup/setsid/disown/coproc) is a disclosed residual; where such a construct
-    still leaves an unquoted bare `&`, or leaves the scan inside an unbalanced quote, it errs toward the
-    ASK, but a detacher that carries no bare `&` (setsid worker, a nested `bash -c '... &'`) is NOT caught
-    here and is a silent-allow residual disclosed in the manifest."""
+def _orch_foreground_scan(command, bash_word_starts):
+    """One quote- and escape-tracking pass over a foreground command: "detach" when it meets an executable,
+    unquoted, unescaped bare `&` control operator, "unbalanced" when it ends still inside a single or double
+    quote, None otherwise. bash_word_starts selects where a `#` opens a comment: False keeps the historical
+    rule (after any str.isspace() character), True uses bash's rule (_ORCH_BASH_WORD_BREAKS). The guard runs
+    BOTH and denies when either reports, so the bash rule can only ADD denies to the historical one."""
     in_single = in_double = escaped = False
     prev_dup = False  # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
-    word_start = True  # the next unquoted char begins a word (start of string, or after unquoted whitespace)
+    word_start = True  # the next unquoted char begins a word (start of string, or after a word break)
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
@@ -9409,7 +11524,7 @@ def _orch_foreground_detach(command):
             i = nl  # resume at the newline; the whitespace branch consumes it and begins a new line/word
             continue
         if ch.isspace():
-            prev_dup, word_start = False, True
+            prev_dup, word_start = False, (ch in _ORCH_BASH_WORD_BREAKS) if bash_word_starts else True
             i += 1
             continue
         if ch == "\\":
@@ -9427,23 +11542,94 @@ def _orch_foreground_detach(command):
         if ch == "&":
             nxt = command[i + 1] if i + 1 < n else ""
             if nxt == "&":  # `&&` logical AND: not a detach
-                prev_dup, word_start = False, False
+                prev_dup, word_start = False, bash_word_starts
                 i += 2
                 continue
             if nxt == ">":  # `&>` / `&>>` redirect: not a detach
-                prev_dup, word_start = False, False
+                prev_dup, word_start = False, bash_word_starts
                 i += 1
                 continue
             if prev_dup:  # `>&` / `<&` / `|&` descriptor-dup or pipe-stderr: not a detach
-                prev_dup, word_start = False, False
+                prev_dup, word_start = False, bash_word_starts
                 i += 1
                 continue
-            return True  # an executable bare `&` control operator: a foreground detach
-        prev_dup, word_start = ch in (">", "<", "|"), False
+            return "detach"  # an executable bare `&` control operator: a foreground detach
+        prev_dup = ch in (">", "<", "|")
+        word_start = bash_word_starts and ch in _ORCH_BASH_WORD_BREAKS
         i += 1
-    # A scan that ended still inside an unbalanced quote could not prove a later `&` was quoted; fail
-    # toward ASK rather than silently allow a possibly-real detach it could not see.
-    return in_single or in_double
+    # A scan that ended still inside an unbalanced quote could not prove a later `&` was quoted; it fails
+    # toward the DENY (with its own reason) rather than silently allowing a possibly-real detach.
+    return "unbalanced" if in_single or in_double else None
+
+
+def _orch_foreground_detach_kind(command):
+    """"detach" when either scan rule meets a bare `&`, else "unbalanced" when either ends inside a quote,
+    else None. The historical rule and bash's `#` word-start rule are both run so that the bash rule only
+    ADDS denies: a `#` after a character bash does not treat as a word break (a carriage return, a
+    no-break space, a 0x1c separator, any other non-blank str.isspace() character) is not a comment to
+    bash, so an `&` after it is scanned; a `#` after a metacharacter (`;#`) IS a comment to bash, so a
+    quote in that comment no longer shifts the scan past a real `&` on the next line."""
+    kinds = (_orch_foreground_scan(command, False), _orch_foreground_scan(command, True))
+    if "detach" in kinds:
+        return "detach"
+    return "unbalanced" if "unbalanced" in kinds else None
+
+
+def _orch_foreground_detach(command):
+    """True when a foreground command carries an executable, unquoted, unescaped bare `&` control operator
+    that detaches a child, launching asynchronous work the foreground tool call does not track. The bare
+    detach `&` is distinguished from the shell forms that also carry an ampersand but do NOT detach: the
+    `&&` logical-AND, the `&>` and `&>>` redirects, the `<&`, `>&`, and `|&` descriptor-duplication and
+    pipe-stderr operators, any single-quoted, double-quoted, or backslash-escaped ampersand, and an `&`
+    inside an unquoted, word-start `#` comment (comment text, not an operator). A dedicated quote- and
+    escape-tracking scan is used, NOT _segments: that helper strips quote and escape provenance and
+    classifies both `echo "&"` and `echo \\&` as an `&` separator, which would over-fire. It also drops a
+    word-start `#` comment so a commented-out `&` does not prompt, but only to the END OF THAT LINE: a
+    comment never suppresses a later line, so a real bare `&` on a subsequent line of a multi-line command
+    is still caught rather than smuggled past. Where a `#` starts a comment is read under two rules, the
+    historical one (after any str.isspace() character) and bash's (after a space, tab, newline, or
+    metacharacter), and either rule's detach denies (_orch_foreground_detach_kind).
+
+    A SCAN THAT ENDS INSIDE A QUOTE FAILS TOWARD DENY: a scan that ends still inside an unbalanced single
+    or double quote cannot prove that a later `&` is quoted rather than an operator (an unbalanced quote,
+    or a construct this scan does not model such as ANSI-C `$'...'` or locale `$"..."` quoting, can leave
+    the scan `inside quotes` and skip a real trailing `&`), so it reports a detach (True -> DENY, with an
+    unbalanced-quote reason) rather than allowing. This covers only a quote the scan still sees as open at
+    the END: a quote it misreads in mid-string can leave it balanced but misaligned, which silently allows
+    (the false-allow residual below). A genuinely balanced, quoted `&` is literal and correctly ignored.
+
+    NARROW BY CONSTRUCTION: this scans for the accidental bare-operator case only, as its own quote
+    tracking reads the outer level. Grammar it does not model (a here-document body, a nested shell string,
+    an alias or function that renames a detacher, and runtime detachers such as nohup/setsid/disown/coproc)
+    is a disclosed residual; where such a construct still leaves an unquoted bare `&`, or leaves the scan
+    inside an unbalanced quote at the end, it errs toward the DENY, but a detacher that carries no bare `&`
+    (setsid worker, a nested `bash -c '... &'`) is NOT caught here and is a silent-allow residual disclosed
+    in the manifest.
+
+    OVER-REFUSAL RESIDUAL (disclosed): a here-document body is scanned as CODE, not data, even under a
+    quoted delimiter (<<'EOF'). A safe here-document whose body carries an unquoted `&` (`cat > f <<'EOF'`
+    then `Fix A & B`) or an unbalanced apostrophe (`the user's file`) is therefore DENIED although nothing
+    detaches. In the commit-message form wrapped in double quotes ("$(cat <<'EOF' ... EOF)") the body is
+    read as double-quoted text, and each double quote in the body toggles that reading, so whether a body
+    `&` is denied depends on where it falls relative to those quotes (`say "a & b"` is denied, `say "hi" &
+    bye` is allowed). The remedy is to write the text to a file and pass the file. This misreading is NOT
+    only in the safe direction: the same body quotes cause the quote-shift false-allow below.
+
+    KNOWN FALSE-ALLOW RESIDUAL (confirmed against real bash, disclosed in the manifest, which lists the same
+    cases): the scan reads only the outer quoting level, and its quote and comment tracking can diverge from
+    bash's in further ways than those listed here, so this list is NOT complete. Known cases include a real
+    detach that is NOT seen (1) when its `&` sits inside a command substitution or backtick wrapped in
+    double quotes (echo "$(job &)"); (2) inside a string that eval or quote removal re-reads as code
+    (e'v'al 'job &', {eval,} 'job &', \\eval 'job &'); (3) after an ANSI-C $'...' quote with an escaped
+    quote that leaves the scan balanced but misaligned; (4) inside an arithmetic subscript that runs a
+    substitution; (5) QUOTE SHIFT: after a quote character that bash reads as data but the scan reads as a
+    quote, above all an apostrophe or double quote in a here-document body (quoted delimiter or not,
+    including the double-quoted commit-message form), which flips the scan's quote state so that a LATER
+    real bare `&` (between two here-documents, or before a second stray quote that rebalances the scan)
+    reads as quoted text and is allowed; and (6) COMMENT SHIFT: after a `#` that follows a blank inside an unquoted ${...} parameter expansion,
+    which bash reads as expansion text but the scan reads as a comment start, so a real bare `&` later on
+    that line is skipped (echo ${x:- #} & job, echo ${line%% #*} & job)."""
+    return _orch_foreground_detach_kind(command) is not None
 
 
 # ROUND-2 FINDING 9: sinks that TRUNCATE their input, so a producer piped into one loses both its full
@@ -9466,18 +11652,9 @@ _ORCH_WRAPPER_SEP_VALUE_OPTS = {
 }
 
 
-def _orch_effective_sink_word(argv):
-    """ROUND-7 (codex finding 5). The EFFECTIVE command word of a pipeline stage, resolved THROUGH leading
-    shell command-modifier wrappers (command/env/builtin/exec/nice/nohup/stdbuf/time and a literal '\\'
-    alias-suppression escape) so a truncating sink hidden behind one ('command head', 'env head',
-    'nice -n0 head', 'stdbuf -oL tail') is still matched against _ORCH_TRUNCATING_SINKS. Leading
-    env-assignments (FOO=bar) are skipped first, as _command_word does. For each recognized wrapper word the
-    wrapper is peeled; then its OWN leading option/assignment tokens are skipped - env VAR=val assignments, a
-    '--' end-of-options marker, and any '-'-led option (the known value-taking separated options of that
-    wrapper skip their value too). Resolution STOPS, returning the current word's basename, at the first
-    token that is neither a wrapper nor a skippable option/assignment, so an unmodelled option grammar
-    degrades to the un-resolved word (a disclosed under-match residual, in the safe direction for a DENY
-    guard - it never invents a false head/tail match on a non-sink command). Purely lexical."""
+def _orch_effective_word_index(argv):
+    """The INDEX in argv of the effective command word that _orch_effective_sink_word resolves (the same
+    wrapper peeling, shared with the review dispatch pin), or None when there is no command word."""
     idx = _command_word_index(argv)   # skip leading env-assignments (FOO=bar)
     n = len(argv)
     guard = 0
@@ -9485,7 +11662,7 @@ def _orch_effective_sink_word(argv):
         guard += 1
         word = argv[idx].lstrip("\\").rsplit("/", 1)[-1]
         if word not in _ORCH_SINK_WRAPPERS:
-            return word
+            return idx
         sep_value_opts = _ORCH_WRAPPER_SEP_VALUE_OPTS.get(word, frozenset())
         j = idx + 1
         while j < n:
@@ -9502,9 +11679,463 @@ def _orch_effective_sink_word(argv):
                 continue
             break                                        # the wrapped command word (or another wrapper)
         if j >= n:
-            return ""                                    # the wrapper consumed every token: no sink word
+            return None                                  # the wrapper consumed every token: no command word
         idx = j
-    return argv[idx].lstrip("\\").rsplit("/", 1)[-1] if idx < n else ""
+    return idx if idx < n else None
+
+
+def _orch_effective_sink_word(argv):
+    """ROUND-7 (codex finding 5). The EFFECTIVE command word of a pipeline stage, resolved THROUGH leading
+    shell command-modifier wrappers (command/env/builtin/exec/nice/nohup/stdbuf/time and a literal '\\'
+    alias-suppression escape) so a truncating sink hidden behind one ('command head', 'env head',
+    'nice -n0 head', 'stdbuf -oL tail') is still matched against _ORCH_TRUNCATING_SINKS. Leading
+    env-assignments (FOO=bar) are skipped first, as _command_word does. For each recognized wrapper word the
+    wrapper is peeled; then its OWN leading option/assignment tokens are skipped - env VAR=val assignments, a
+    '--' end-of-options marker, and any '-'-led option (the known value-taking separated options of that
+    wrapper skip their value too). Resolution STOPS, returning the current word's basename, at the first
+    token that is neither a wrapper nor a skippable option/assignment, so an unmodelled option grammar
+    degrades to the un-resolved word (a disclosed under-match residual, in the safe direction for a DENY
+    guard - it never invents a false head/tail match on a non-sink command). Purely lexical."""
+    idx = _orch_effective_word_index(argv)
+    return "" if idx is None else argv[idx].lstrip("\\").rsplit("/", 1)[-1]
+
+
+# gatdis deny tier (gate_weakening): the SINK ALLOW-LIST, the exact pipeline stages proved to pass on only
+# part of a verification run's output (_truncating_sink_kind). This list is the gate-discipline guard's own,
+# kept apart from _ORCH_TRUNCATING_SINKS so orch_truncation_guard's behaviour is unchanged. It is a closed list
+# of shapes, not of words: head or tail with no option or with exactly one of -n N, -nN, --lines=N or -N (N a
+# positive decimal integer with no sign; tail +N, head -n -N, -c, -f and every other option keep the whole input
+# or are not modelled); grep, egrep or fgrep with exactly one limiting flag (-m N with N >= 1, -q, -c, -l or -L)
+# and otherwise one pattern; rg with exactly one of -q, -c or -l and otherwise one pattern. rg -m is not on the
+# list: an rg configuration file named by RIPGREP_CONFIG_PATH can add --passthru, and rg 15.1.0 then passes every
+# line on under -m 1 (checked 2026-10-07); the hook cannot see that file. cut is never a deny sink ('cut -c1-'
+# keeps every byte). Every other spelling of these words, and any sed or awk program (the hook parses no
+# program), may cut its input or may not, so it only notes (_gate_note_sink_kind). A plain filter ('grep FAIL',
+# 'wc') is a sink in neither tier (residual R4).
+_GATE_CUTTING_WORDS = frozenset(("head", "tail", "cut"))
+_GATE_COUNT_RE = re.compile(r"[0-9]+\Z")
+_GATE_GREP_SINKS = frozenset(("grep", "egrep", "fgrep", "rg"))
+_GATE_PROGRAM_FILTERS = frozenset(("sed", "gsed", "awk", "gawk", "mawk", "nawk"))
+_GATE_GREP_TRUNC_SHORT = frozenset("mqclL")
+_GATE_GREP_VALUE_SHORT = frozenset("efABCdD")   # a short cluster stops at a value letter (its value follows)
+# ripgrep shares -m, -q, -c and -l, but its -L is --follow (not files-without-match) and its value letters
+# differ (-E, -j, -g, -t, -T, -M, -r take a value; rg 15.1.0 -h, checked 2026-10-07).
+_GATE_RG_TRUNC_SHORT = frozenset("mqcl")
+_GATE_RG_VALUE_SHORT = frozenset("efEjgdtTABCMr")
+_GATE_GREP_TRUNC_LONG = ("--max-count", "--quiet", "--silent", "--count", "--files-with")
+_GATE_GREP_VALUE_LONG = frozenset(("--regexp", "--file"))
+# Which sink stages read their STDIN (the pipe) rather than a named file: word -> (short letters that take a
+# value, short letters that take none, long options that take a value, long options that take none or only an
+# attached '=' value, pattern operands before the input files, options that supply that pattern instead). A stage
+# reads its stdin when it has no input operand, recursive or not, or when any input operand, or the value of a file
+# option such as a -f pattern file (_GATE_STDIN_FILE_OPTIONS), names the stdin (_gate_stdin_name), even beside other
+# files or under -r. GNU grep 3.12 with -r, -R, --recursive, --dereference-recursive or -d/--directories recurse and
+# no input operand reads the working directory and not its stdin, unless a later -d/--directories read or skip sets
+# the mode back, when it reads its stdin (checked 2026-10-08), but a grep word may run another grep: the ugrep a shell
+# function may run as grep reads its stdin under -r too (checked 2026-10-08), so a recursive grep-family stage with
+# no input operand may read its stdin. The same ugrep reads a GNU grep operand list differently in two shapes it may
+# read its stdin through, so a grep word may read its stdin in each (reported 2026-10-08; ugrep was not installed
+# where this was written): a first operand '-' (GNU grep: the pattern; ugrep: the stdin, the next operand being the
+# pattern) and an operand before an -f/--file (GNU grep: an input file; ugrep: the pattern, so only later operands
+# are input; an operand between two -f is read so too, conservatively, as ugrep's reading of it was not reported). Each grammar is the option list of the installed
+# tool's --help (checked 2026-10-07): GNU grep 3.12 (/usr/bin/grep; -NUM is a context count, so the digits are
+# flags), ripgrep 15.1.0 (with the negations and alternative spellings its --help names, such as --no-heading and
+# --maxdepth; the --print0 it names is find's) and uutils coreutils 0.8.0 head, tail and cut. An option outside
+# its grammar (an unknown one, an abbreviated long one such as grep --max=5, an option of another grep such as
+# ugrep) has an arity the hook does not know, so the stage may read its stdin (_gate_reads_stdin). So may a
+# stage with a -d/--directories value GNU grep rejects (attached, separated or '='; a value abbreviated as grep's
+# argmatch accepts is a mode) or an option left without its value at the end (grep -d, cut log.txt -f),
+# conservatively: GNU grep exits on either, though an earlier '-f -' pattern file is read from its stdin first
+# (grep -f - -d waits for its stdin, checked 2026-10-08). A stage that may read its stdin notes when it is a head,
+# tail or cut, or a grep-family stage that also carries a limiting option (_gate_note_sink_kind), rather than
+# allowing silently. Not resolved: any other path
+# to the stdin (a symlink to it or a path through one, such as /dev/fd/../../self/fd/0, /proc/PID/fd/0 for a
+# literal PID, a relative path).
+_GATE_GREP_STDIN = (
+    "efmABCdD", "EFGPiwxzsvVbnHhoqaIrRLlcTZU0123456789",
+    frozenset(("--regexp", "--file", "--max-count", "--label", "--binary-files", "--directories", "--devices",
+               "--include", "--exclude", "--exclude-from", "--exclude-dir", "--before-context", "--after-context",
+               "--context", "--group-separator")),
+    frozenset(("--extended-regexp", "--fixed-strings", "--basic-regexp", "--perl-regexp", "--ignore-case",
+               "--no-ignore-case", "--word-regexp", "--line-regexp", "--null-data", "--no-messages",
+               "--invert-match", "--version", "--help", "--byte-offset", "--line-number", "--line-buffered",
+               "--with-filename", "--no-filename", "--only-matching", "--quiet", "--silent", "--text", "--recursive",
+               "--dereference-recursive", "--files-without-match", "--files-with-matches", "--count", "--initial-tab",
+               "--null", "--no-group-separator", "--color", "--colour", "--binary")),
+    1, ("-e", "-f", "--regexp", "--file"))
+_GATE_STDIN_GRAMMAR = dict((
+    ("head", ("nc", "qvzhV0123456789", frozenset(("--lines", "--bytes")),
+              frozenset(("--quiet", "--silent", "--verbose", "--zero-terminated", "--help", "--version")), 0, ())),
+    ("tail", ("ncs", "fFqvzhV0123456789",
+              frozenset(("--lines", "--bytes", "--pid", "--sleep-interval", "--max-unchanged-stats")),
+              frozenset(("--follow", "--quiet", "--silent", "--verbose", "--zero-terminated", "--use-polling",
+                         "--retry", "--debug", "--help", "--version")), 0, ())),
+    ("cut", ("bcdf", "wsznhV", frozenset(("--bytes", "--characters", "--delimiter", "--fields", "--output-delimiter")),
+             frozenset(("--complement", "--only-delimited", "--zero-terminated", "--help", "--version")), 0, ())),
+    ("grep", _GATE_GREP_STDIN), ("egrep", _GATE_GREP_STDIN), ("fgrep", _GATE_GREP_STDIN),
+    ("rg", ("efEmjgdtTABCMr", ".0FHILNPSUVabchilnopqsuvwxz",
+            frozenset(("--regexp", "--file", "--encoding", "--max-count", "--threads", "--glob", "--max-depth",
+                       "--maxdepth",
+                       "--type", "--type-not", "--after-context", "--before-context", "--context", "--max-columns",
+                       "--replace", "--pre", "--pre-glob", "--dfa-size-limit", "--engine", "--regex-size-limit",
+                       "--iglob", "--ignore-file", "--max-filesize", "--type-add", "--type-clear", "--color",
+                       "--colors", "--context-separator", "--field-context-separator", "--field-match-separator",
+                       "--hostname-bin", "--hyperlink-format", "--path-separator", "--sort", "--sortr",
+                       "--generate")),
+            frozenset(("--search-zip", "--case-sensitive", "--crlf", "--fixed-strings", "--ignore-case",
+                       "--invert-match", "--line-regexp", "--mmap", "--multiline", "--multiline-dotall",
+                       "--no-unicode", "--null-data", "--pcre2", "--smart-case", "--stop-on-nonmatch", "--text",
+                       "--word-regexp", "--auto-hybrid-regex", "--no-pcre2-unicode", "--binary", "--follow",
+                       "--glob-case-insensitive", "--ignore-file-case-insensitive", "--no-ignore", "--no-ignore-dot",
+                       "--no-ignore-exclude", "--no-ignore-files", "--no-ignore-global", "--no-ignore-parent",
+                       "--no-ignore-vcs", "--no-require-git", "--one-file-system", "--unrestricted",
+                       "--block-buffered", "--byte-offset", "--column", "--heading", "--help", "--include-zero",
+                       "--line-buffered", "--line-number", "--no-line-number", "--max-columns-preview", "--null",
+                       "--only-matching", "--passthru", "--pretty", "--quiet", "--trim", "--vimgrep",
+                       "--with-filename", "--no-filename", "--sort-files", "--count", "--count-matches",
+                       "--files-with-matches", "--files-without-match", "--json", "--debug", "--no-ignore-messages",
+                       "--no-messages", "--stats", "--trace", "--files", "--no-config", "--pcre2-version",
+                       "--type-list", "--version", "--hidden", "--no-context-separator", "--passthrough",
+                       "--ignore", "--ignore-dot", "--ignore-exclude", "--ignore-files", "--ignore-global",
+                       "--ignore-messages", "--ignore-parent", "--ignore-vcs", "--messages", "--no-auto-hybrid-regex",
+                       "--no-binary", "--no-block-buffered", "--no-byte-offset", "--no-column", "--no-crlf",
+                       "--no-encoding", "--no-fixed-strings", "--no-follow", "--no-glob-case-insensitive",
+                       "--no-heading", "--no-hidden", "--no-ignore-file-case-insensitive", "--no-include-zero",
+                       "--no-invert-match", "--no-json", "--no-line-buffered", "--no-max-columns-preview",
+                       "--no-mmap", "--no-multiline", "--no-multiline-dotall", "--no-one-file-system", "--no-pcre2",
+                       "--no-pre", "--no-search-zip", "--no-sort-files", "--no-stats", "--no-text", "--no-trim",
+                       "--pcre2-unicode", "--require-git", "--unicode")),
+            1, ("-e", "-f", "--regexp", "--file"))),
+))
+
+
+# The operands that name a stage's stdin: '-' (GNU grep: "When FILE is '-', read standard input"; rg, head, tail
+# and cut alike) and the fixed device paths of the stdin, an absolute path compared after its repeated slashes
+# are collapsed and its '.' and '..' are resolved lexically (_gate_stdin_name: GNU grep 3.12 reads its stdin
+# through //dev/stdin, /dev/./stdin, /dev/../dev/stdin and /proc/thread-self/fd/0, checked 2026-10-08). The
+# file options whose value can name it too: a pattern file (grep and rg -f/--file) and GNU grep's
+# --exclude-from list (grep 3.12 reads '-' there from its stdin, checked 2026-10-08); rg --ignore-file was not
+# probed.
+_GATE_STDIN_PATHS = frozenset(("/dev/stdin", "/dev/fd/0", "/proc/self/fd/0", "/proc/thread-self/fd/0"))
+_GATE_GREP_STDIN_FILES = ("-f", "--file", "--exclude-from")
+_GATE_STDIN_FILE_OPTIONS = dict((("grep", _GATE_GREP_STDIN_FILES), ("egrep", _GATE_GREP_STDIN_FILES),
+                                 ("fgrep", _GATE_GREP_STDIN_FILES), ("rg", ("-f", "--file"))))
+_GATE_GREP_DIRECTORIES = ("read", "recurse", "skip")
+
+
+def _gate_stdin_name(tok):
+    """True when an operand or file-option value names the stdin: '-', or an absolute path that is one of
+    _GATE_STDIN_PATHS once its repeated slashes are collapsed and posixpath.normpath has resolved its '.' and
+    '..' (lexically: a symlink or a literal PID is not followed)."""
+    if tok == "-":
+        return True
+    return tok.startswith("/") and posixpath.normpath(re.sub("/+", "/", tok)) in _GATE_STDIN_PATHS
+
+
+def _gate_grep_directories(value):
+    """The GNU grep directory mode a -d/--directories value selects ('read', 'recurse' or 'skip'; an
+    unambiguous prefix is accepted, as grep's argmatch does), or None for a value grep rejects ('r', '')."""
+    modes = [mode for mode in _GATE_GREP_DIRECTORIES if mode.startswith(value)]
+    return modes[0] if value and len(modes) == 1 else None
+
+
+def _gate_reads_stdin(word, args):
+    """True when a sink stage may read its stdin rather than a named file (_GATE_STDIN_GRAMMAR). The operands are
+    resolved first: the stage reads its stdin when an input operand or a _GATE_STDIN_FILE_OPTIONS value names
+    it (_gate_stdin_name; even beside other files or under -r), or when there is no input operand, recursive or
+    not (GNU grep -r then reads the working directory, unless a later -d read or skip sets the mode back, but a
+    grep word may run another grep, such as the ugrep that reads its stdin under -r too). For a grep word it is
+    True as well when the first operand is '-' or an operand comes before an -f/--file with no later operand or
+    a later one naming the stdin: ugrep reads that '-' as its stdin and that operand as the pattern,
+    where GNU grep reads them as the pattern and an input file. An option outside the stage's grammar leaves open
+    whether the stage reads its stdin, so it is True too; so are a -d/--directories value grep rejects
+    (_gate_grep_directories) and an option left without its value at the end, conservatively: GNU grep exits on
+    either, though only after reading an earlier '-f -' pattern file from its stdin. True makes a head, tail or cut
+    stage note, and a grep-family stage note when it also carries a limiting option (_gate_note_sink_kind), rather
+    than allowing silently. An unknown word is False."""
+    grammar = _GATE_STDIN_GRAMMAR.get(word)
+    if grammar is None:
+        return False
+    value_short, flag_short, value_long, flag_long, program, explicit = grammar
+    stdin_files = _GATE_STDIN_FILE_OPTIONS.get(word, ())
+    grep = word in ("grep", "egrep", "fgrep")
+    operands = []
+    pending = None   # the option whose value is the next token
+    opts_done = False
+    file_at = None   # for a grep word, how many operands came before its last -f/--file
+    for tok in args:
+        if pending is not None:
+            if pending in stdin_files and _gate_stdin_name(tok):
+                return True
+            if grep and pending in ("-d", "--directories") and _gate_grep_directories(tok) is None:
+                return True   # grep rejects the value: True, conservatively
+            pending = None
+        elif opts_done or tok == "-" or not (tok.startswith("-") or (word == "tail" and tok.startswith("+"))):
+            operands.append(tok)
+        elif tok == "--":
+            opts_done = True
+        elif tok.startswith("--"):
+            name, eq, value = tok.partition("=")
+            if name in explicit:
+                program = 0
+            if grep and name == "--file":
+                file_at = len(operands)
+            if name in value_long:
+                if not eq:
+                    pending = name
+                elif name in stdin_files and _gate_stdin_name(value):
+                    return True
+                elif grep and name == "--directories" and _gate_grep_directories(value) is None:
+                    return True   # grep rejects the value: True, conservatively
+            elif name not in flag_long:
+                return True   # an unknown or abbreviated long option: its arity is unknown
+        else:
+            for k, ch in enumerate(tok[1:]):
+                if "-" + ch in explicit:
+                    program = 0
+                if grep and ch == "f":
+                    file_at = len(operands)
+                if ch in value_short:
+                    value = tok[k + 2:]
+                    if not value:
+                        pending = "-" + ch   # a bare value letter: its value is the next token
+                    elif "-" + ch in stdin_files and _gate_stdin_name(value):
+                        return True
+                    elif grep and ch == "d" and _gate_grep_directories(value) is None:
+                        return True   # grep rejects the value: True, conservatively
+                    break
+                if ch not in flag_short:
+                    return True   # an unknown short letter: its arity is unknown
+    if pending is not None:
+        return True   # an option left without its value at the end (grep -d, cut log.txt -f)
+    if grep and operands and operands[0] == "-":
+        return True   # another grep (ugrep) reads a first operand '-' as its stdin, not as the pattern
+    if grep and file_at and len(operands) == 1:
+        return True   # another grep (ugrep) reads an operand before -f as the pattern, leaving no input operand
+    inputs = operands[program:]
+    return not inputs or any(_gate_stdin_name(op) for op in inputs)
+
+
+def _grep_truncation(word, args):
+    """gatdis note tier. The limiting option a grep-family stage may carry, or None: -m/-q/-c/-l/-L anywhere
+    in a short cluster (the scan of a cluster stops at a value letter e/f/A/B/C/d/D, whose value is the rest
+    of the token or the next token), or a --max-count/--quiet/--silent/--count/--files-with(out)-match(es)
+    long option, or an abbreviation of one ('--m 1', '--max=1', '--q'; GNU grep resolves a long name that is no
+    exact option as a prefix, as getopt does, so a name that is no exact option of the stage's _GATE_STDIN_GRAMMAR
+    and starts one of those options, at any length, is read as it, and an ambiguous one such as '--c' that could
+    be one notes too: '--file' stays the pattern-file option). For rg the short letters are -m/-q/-c/-l (rg -L is
+    --follow) and its own value letters stop the scan. Scanning stops at '--'. It models only a few value
+    options, so it can read an option's value as a flag ('grep --label -m .'): over-matching by design, it only
+    ever costs a note."""
+    trunc_short, value_short = ((_GATE_RG_TRUNC_SHORT, _GATE_RG_VALUE_SHORT) if word == "rg"
+                                else (_GATE_GREP_TRUNC_SHORT, _GATE_GREP_VALUE_SHORT))
+    grammar = _GATE_STDIN_GRAMMAR[word]
+    exact = grammar[2] | grammar[3]
+    skip = False
+    for tok in args:
+        if skip:
+            skip = False
+            continue
+        if tok == "--":
+            break
+        if tok.startswith("--"):
+            name = tok.split("=", 1)[0]
+            abbrev = name not in exact
+            if any(name.startswith(opt) or (abbrev and opt.startswith(name)) for opt in _GATE_GREP_TRUNC_LONG):
+                return "{} {}".format(word, name)
+            if name in _GATE_GREP_VALUE_LONG and "=" not in tok:
+                skip = True
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            body = tok[1:]
+            for i, ch in enumerate(body):
+                if ch in trunc_short:
+                    return "{} -{}".format(word, ch)
+                if ch in value_short:
+                    skip = i == len(body) - 1   # a bare value letter: its value is the next token
+                    break
+    return None
+
+
+def _gate_count(text):
+    """True when text is a positive decimal integer with no sign: ASCII digits only, at least one of them not 0.
+    Decided lexically, so no count of any length reaches int() (Python refuses to convert over 4,300 digits)."""
+    return bool(_GATE_COUNT_RE.match(text)) and bool(text.lstrip("0"))
+
+
+def _gate_line_count(args):
+    """The line count of a head or tail stage on the sink allow-list, as text, or None: '10' for no argument
+    at all, else N for exactly one of '-n N', '-nN', '--lines=N' or '-N' where N is _gate_count. Any other
+    argument list (tail +N, head -n -N, a byte count, an option or operand outside those) is None."""
+    if not args:
+        return "10"
+    if len(args) == 2 and args[0] == "-n":
+        count = args[1]
+    elif len(args) != 1 or not args[0].startswith("-"):
+        return None
+    elif args[0].startswith("--lines="):
+        count = args[0][len("--lines="):]
+    else:
+        count = args[0][2:] if args[0].startswith("-n") else args[0][1:]
+    return count if _gate_count(count) else None
+
+
+def _gate_grep_limit(word, args):
+    """The limiting flag of a grep-family stage on the sink allow-list ('-q', '-m 5', ...), or None: exactly
+    one limiting flag, each its own word (grep, egrep and fgrep: -m N with N a _gate_count, -q, -c, -l or -L;
+    rg: -q, -c or -l), and otherwise exactly one pattern, either one '-e PATTERN' or a positional operand that
+    is the last word. A second limiting flag or pattern, a cluster, a long option, any other option, a '--'
+    or an input operand leaves the stage off the list."""
+    limits = "qcl" if word == "rg" else "mqclL"
+    flag = None
+    patterns = 0
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        i += 1
+        if tok == "-e" and i < len(args):
+            patterns += 1
+            i += 1
+        elif len(tok) == 2 and tok[0] == "-" and tok[1] in limits and flag is None:
+            flag = tok
+            if tok == "-m":
+                if i >= len(args) or not _gate_count(args[i]):
+                    return None
+                flag = "-m " + args[i]
+                i += 1
+        elif not tok.startswith("-") and i == len(args) and not patterns:
+            patterns = 1
+        else:
+            return None
+    return flag if patterns == 1 else None
+
+
+# What each sink on the allow-list does to its input, for the deny message (a limiting flag's letter keys it; a
+# count is named with its leading zeros stripped). GNU grep 3.12 reads no configuration file and ignores
+# GREP_OPTIONS (checked 2026-10-07). rg reads the configuration file RIPGREP_CONFIG_PATH names, which the hook
+# cannot see, so its texts say "normally" and name an option that changes them (ripgrep 15.1.0, checked
+# 2026-10-07: under --stats, rg -q, -c and -l add statistics; under --invert-match, -c counts and -l names by
+# the lines that do not match; no configuration option tried made them pass the input on).
+_GATE_GREP_EFFECTS = dict((
+    ("m", "which passes on only the first {}"),
+    ("q", "which prints nothing at all"),
+    ("c", "which prints only a count of the lines that match its pattern"),
+    ("l", "which prints only a name when a line matches its pattern"),
+    ("L", "which prints only a name when no line matches its pattern"),
+))
+_GATE_RG_CONFIG = (" (an rg configuration file named by RIPGREP_CONFIG_PATH can add an option that changes this, as "
+                   "{} does)")
+_GATE_RG_EFFECTS = dict((
+    ("q", "which normally prints nothing at all" + _GATE_RG_CONFIG.format("--stats")),
+    ("c", "which normally prints only a count of the lines that match its pattern"
+          + _GATE_RG_CONFIG.format("--stats or --invert-match")),
+    ("l", "which normally prints only a name when a line matches its pattern"
+          + _GATE_RG_CONFIG.format("--stats or --invert-match")),
+))
+
+
+def _truncating_sink_kind(argv):
+    """gatdis deny tier. (label, effect) of one pipeline stage on the sink allow-list, or None: head or tail
+    with a _gate_line_count, or a grep-family stage with a _gate_grep_limit (the comment above
+    _GATE_CUTTING_WORDS gives the list). The label is the stage as typed, its wrappers aside ('tail -20', and for a
+    grep-family stage its word and limiting flag, 'grep -m 007'); the effect says what the stage passes on, naming
+    a count with its leading zeros stripped. The stage's command word is resolved through the four
+    plain wrappers by _gate_peel ('| env head', '| timeout 5 head', an alias-suppressing '| \\tail'); a
+    stage behind any other wrapper ('| command tail', '| sudo head', '| busybox tail') is not matched here
+    and only notes. Every other stage, cut included, is None. Purely lexical."""
+    argv = _gate_peel(argv)
+    if not argv:
+        return None
+    word = _gate_word(argv[0])
+    args = argv[1:]
+    if word in ("head", "tail"):
+        count = _gate_line_count(args)
+        if count is None:
+            return None
+        count = count.lstrip("0")
+        return " ".join(argv), "which passes on only the {} {} of its input".format(
+            "first" if word == "head" else "last", "line" if count == "1" else count + " lines")
+    if word in _GATE_GREP_SINKS:
+        flag = _gate_grep_limit(word, args)
+        if flag is None:
+            return None
+        effects = _GATE_RG_EFFECTS if word == "rg" else _GATE_GREP_EFFECTS
+        count = flag[3:].lstrip("0")
+        return "{} {}".format(argv[0], flag), effects[flag[1]].format(
+            "line that matches its pattern" if count == "1" else count + " lines that match its pattern")
+    return None
+
+
+def _gate_note_sink_kind(argv):
+    """gatdis note tier. The kind of a stage that may pass on only part of its input, or None: a deny-tier
+    sink (_truncating_sink_kind), a head, tail or cut that reads its stdin with any arguments
+    (_gate_reads_stdin), a grep-family stage reading its stdin with a limiting option the broad scan
+    (_grep_truncation) sees, or any sed or awk program (_GATE_PROGRAM_FILTERS), which the hook does not
+    parse; each through the four plain wrappers. Over-matching by design: it costs a note, never a refusal."""
+    kind = _truncating_sink_kind(argv)
+    if kind is not None:
+        return kind[0]
+    argv = _gate_peel(argv)
+    if not argv:
+        return None
+    word = _gate_word(argv[0])
+    args = argv[1:]
+    if word in _GATE_PROGRAM_FILTERS:
+        return "{} program".format(word)
+    if not _gate_reads_stdin(word, args):
+        return None
+    if word in _GATE_CUTTING_WORDS:
+        return word
+    if word in _GATE_GREP_SINKS:
+        return _grep_truncation(word, args)
+    return None
+
+
+def _orch_json_kind(value):
+    """A short JSON type phrase for a malformed-input deny message ('null', 'a string', 'an array')."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, str):
+        return "a string"
+    if isinstance(value, list):
+        return "an array"
+    return "an object" if isinstance(value, dict) else "a " + type(value).__name__
+
+
+_ORCH_REQUIRE_REGISTRY_ENV = "AIQT_ORCH_REQUIRE_REGISTRY"
+_ORCH_REQUIRE_REGISTRY_OFF_VALUES = ("", "0", "false", "no", "off")
+
+
+def _orch_registry_required():
+    """True when the adopter opted this session into REGISTRY-REQUIRED mode: the environment variable
+    AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit off value ("", "0", "false", "no", "off",
+    case-insensitive in ASCII letters only; unset is off). The value is compared EXACTLY as set, with
+    nothing stripped, so an off word with any added character (a space, tab, newline, or no-break space
+    around it) is not an off value and reads as ON. Under it, an ABSENT orchestration registry DENIES every
+    Bash call that passes the pre-scope checks instead of leaving orch_truncation_guard inert, and ABSENT
+    includes a registry reachable only through a git-resolved toplevel (core.worktree) when git fails, so
+    there a git failure alone denies; a registry entry the discovery probe cannot confirm
+    (_ORCH_REG_CANNOT_EVALUATE: a `.aiqt` that is a regular file, a symlink, or a directory this process
+    lacks search (execute) permission on, such as mode 0o600 or 0o000 for a process those modes bind (where
+    O_PATH exists, mode 0o100 evaluates normally for its owner and for a process the mode bits do not bind,
+    such as root, and cannot be evaluated by any other process; where O_PATH is unavailable, the O_RDONLY
+    fallback open also needs read permission, so mode 0o100 cannot be evaluated by any process the mode bits
+    bind, its owner included), or a
+    first present registry name that is not a regular file or cannot be stat'ed) is not a registry
+    either and denies the same way; the default (variable unset) is unchanged. An environment variable, not a pack config key, because every pack config
+    surface (.aiqt/orchestration.local.json, .aiqt/orchestration.json, .aiqt/gensrc.json) is a per-repo file
+    located by the same cwd-anchored lookup whose EMPTY result this mode exists to fail closed on, so a
+    file-based key can never speak exactly when it is needed; the hook execution environment is the one
+    channel independent of that lookup. A garbled or padded value reads as ON, the deny-safe direction for
+    an explicitly configured strict mode."""
+    value = os.environ.get(_ORCH_REQUIRE_REGISTRY_ENV)
+    if value is None:
+        return False
+    return not (value.isascii() and value.lower() in _ORCH_REQUIRE_REGISTRY_OFF_VALUES)
 
 
 def orch_truncation_guard(data):
@@ -9524,33 +12155,209 @@ def orch_truncation_guard(data):
     that DETACHES a child with a bare `&` launches asynchronous work the foreground tool call does not track,
     and a bare-& detach is never the right way to launch tracked work, so a readable foreground command
     carrying such an operator DENIES-and-educates (use the tracked background dispatch, or keep it foreground
-    and wait); every other foreground call remains out of scope (the harness returns its output directly)."""
-    if data.get("tool_name") != "Bash":
+    and wait); every other foreground call in registry scope remains out of scope (the harness returns its
+    output directly; in registry-required mode a cwd with no registry is denied before this point).
+
+    MALFORMED INPUT FAILS CLOSED (check-fails-closed-on-unreadable): a tool_input that is missing, null, or
+    not a JSON object, a run_in_background that is present but not a real boolean (the string "true" is
+    malformed, never read as foreground), and a command that is not a string are each DENIED with a
+    reason naming the defect, never silently allowed. REGISTRY SCOPE (a disclosed residual, not a
+    fail-closed case): the registry is this suite's scope declaration, located by the UNION of a walk of
+    the cwd's physical ancestor chain with no-follow, descriptor-anchored lookups (_orch_registry_walk,
+    with its post-walk concurrent-move recheck) and, where git resolves a toplevel for the cwd, that
+    toplevel's registry too (_orch_git_toplevel_has_registry: core.worktree can point the work tree off
+    the ancestor chain; by default a git discovery failure alone - no git binary, a dubious-ownership
+    refusal, a broken config, a bare repository - still never denies, while in registry-required mode one
+    that hides a registry reachable only through the git toplevel reads as absent and denies), so with NO registry entry on that chain and
+    none at a git-resolved toplevel the guard is, by default, inert and allows every Bash call that
+    passes the pre-scope checks below, while a chain or toplevel directory whose registry entry is present,
+    unreadable, or invalid keeps it active. REGISTRY-REQUIRED MODE (opt-in, default
+    unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit
+    off value ('', '0', 'false', 'no', 'off', ASCII case-insensitive, matched exactly with nothing
+    stripped, so a padded off word reads as ON), an ABSENT registry DENIES instead of
+    leaving the guard inert (_orch_registry_required), and so does a registry discovery that cannot be
+    evaluated (round 5): the nearest non-absent chain entry, or with none on the chain the git-resolved
+    toplevel's entry, that the probe returns as _ORCH_REG_CANNOT_EVALUATE (a `.aiqt` that is a regular
+    file, a symlink, or a directory without search (execute) permission, such as mode 0o600 or 0o000 for a
+    process those modes bind, while mode 0o100 evaluates normally for its owner where O_PATH exists and for
+    a process the mode bits do not bind, and cannot be evaluated by any other process (see
+    _orch_dirfd_has_registry); a first present registry name that is not a regular file or
+    whose no-follow stat faults) DENIES in that mode, never read as a registry, and so does a git
+    toplevel that exists but cannot be opened as a directory (_ORCH_REG_TOPLEVEL_UNOPENABLE, round 6,
+    with its own reason naming the toplevel), while by default each keeps the guard ACTIVE exactly as a
+    present registry does (a git toplevel that does not exist is absent: inert by default, denied as an
+    absent registry in that mode). PRE-SCOPE DENIES, checked BEFORE the
+    registry scope and so in every session, orchestrated or not: a tool_name that is missing, null, empty,
+    not a string, or carrying a NUL or any other control character; a cwd that is missing, null, empty, or
+    not a string; and a string cwd whose registry walk cannot be carried out (a NUL in the path, a path
+    that is not an existing directory this process can read and enter, an ancestor directory the walk
+    cannot open or examine, or an ancestor chain that changed while the walk read it:
+    _orch_registry_walk), each deny naming the defect and an action that repairs it. Only a plain
+    non-Bash string tool_name, and a cwd whose completed walk and git-toplevel union find no registry,
+    are out of scope (allow; in registry-required mode that cwd is denied instead)."""
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("trkasy")
+    if not isinstance(tool_name, str) or not tool_name:
+        # A present but empty or non-string tool_name cannot be matched, so it is not read as a non-Bash
+        # tool (the wrtscp precedent): it is denied, never allowed out of scope.
+        return _deny(
+            "AIQT rule trkasy (track-launched-work) (fail-closed): malformed payload: tool_name is {}, not a "
+            "non-empty string, so this guard cannot tell whether the call is a Bash call; it is denied "
+            "rather than allowed unread (check-fails-closed-on-unreadable)."
+            .format("empty" if tool_name == "" else _orch_json_kind(tool_name)),
+            "AIQT guardrail: denied a PreToolUse call with an unreadable tool_name (rule trkasy, "
+            "fail-closed).")
+    if any(ord(ch) < 0x20 or 0x7f <= ord(ch) <= 0x9f for ch in tool_name):
+        # A NUL or any other control character (C0, DEL, C1) never appears in a real tool name, so such a
+        # name must not read as an ordinary non-Bash tool and take the out-of-scope allow unread (the
+        # round-3 finding: a tool_name of "Bash" plus a NUL was allowed silently); it denies pre-scope.
+        return _deny(
+            "AIQT rule trkasy (track-launched-work) (fail-closed): malformed payload: tool_name contains a "
+            "NUL or another control character, so it is not a real tool name and this guard cannot tell "
+            "whether the call is a Bash call; it is denied rather than allowed out of scope "
+            "(check-fails-closed-on-unreadable). Re-issue the call with the plain tool name.",
+            "AIQT guardrail: denied a PreToolUse call whose tool_name carries a control character (rule "
+            "trkasy, fail-closed).")
+    if tool_name != "Bash":
         return _allow()
-    root = _orch_root(data)
-    if root is None:
-        return _allow()
-    status, _reg = _orch_registry(root)
-    if status == "absent":
-        return _allow()
-    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    cwd = data.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        kind = "missing" if "cwd" not in data else ("empty" if cwd == "" else _orch_json_kind(cwd))
+        return _deny(
+            "AIQT rule trkasy (track-launched-work) (fail-closed): this Bash call's cwd is {}, not a "
+            "non-empty string, so this guard cannot locate the session repository or its orchestration "
+            "registry; it is denied rather than allowed unread (check-fails-closed-on-unreadable). Re-issue "
+            "the call with a string cwd.".format(kind),
+            "AIQT guardrail: denied a Bash call with no readable cwd (rule trkasy, fail-closed).")
+    scope, found = _orch_truncation_scope(cwd)
+    if scope == "fail":
+        detail, fix = found
+        return _deny(
+            "AIQT rule trkasy (track-launched-work) (fail-closed): this Bash call's cwd {}, so this guard "
+            "cannot walk the cwd's ancestor directories for the orchestration registry that scopes it; it "
+            "is denied rather than read as out of scope (check-fails-closed-on-unreadable). {}"
+            .format(detail, fix),
+            "AIQT guardrail: denied a Bash call whose cwd could not be walked for an orchestration "
+            "registry (rule trkasy, fail-closed).")
+    if scope == "none":
+        # No registry on the cwd's ancestor chain and none at a git-resolved toplevel (the UNION, round 4:
+        # core.worktree can point the work tree and its registry off the ancestor chain, so
+        # _orch_truncation_scope consults that toplevel too). BY DEFAULT git success can only add a deny
+        # and a git failure alone never denies (the union leg reads False and the allow stands); in
+        # registry-required mode that False is an ABSENT registry, so a git failure hiding a registry
+        # reachable only through the git toplevel is denied below, and git success removes that deny.
+        if _orch_registry_required():
+            # REGISTRY-REQUIRED MODE (opt-in): the adopter set AIQT_ORCH_REQUIRE_REGISTRY, so an
+            # absent registry fails closed instead of leaving the guard inert. Default unchanged.
+            return _deny(
+                "AIQT rule trkasy (track-launched-work) (registry-required mode): "
+                "AIQT_ORCH_REQUIRE_REGISTRY is set, so an absent orchestration registry fails closed "
+                "instead of leaving this guard inert, and no .aiqt/orchestration.local.json or "
+                ".aiqt/orchestration.json was found on this cwd's ancestor chain or at a git-resolved "
+                "toplevel. Commit the orchestration registry at the repository root, run from a "
+                "directory under the orchestrated tree, or unset AIQT_ORCH_REQUIRE_REGISTRY to "
+                "restore the default scoping (inert allow with no registry).",
+                "AIQT guardrail: denied a Bash call in registry-required mode with no orchestration "
+                "registry found (rule trkasy, fail-closed).")
+        return _allow()  # not an orchestrated session: no registry on the chain or at a git toplevel
+    if scope == "cannot-evaluate" and _orch_registry_required():
+        # REGISTRY-REQUIRED MODE, round 5: the discovery found an entry it can neither rule out nor confirm
+        # as a registry. By default that keeps the guard ACTIVE (deny-safe); in this mode a discovery fault
+        # must not satisfy the registry requirement, so it denies. Default unchanged.
+        return _deny(
+            "AIQT rule trkasy (track-launched-work) (registry-required mode): "
+            "AIQT_ORCH_REQUIRE_REGISTRY is set, so this guard must confirm an orchestration registry, and "
+            "the candidate that decided could not be confirmed as one. That candidate is EITHER the nearest "
+            "directory on this cwd's ancestor chain whose registry probe is not a clean not-present, OR, "
+            "only when every directory on that chain probes as a clean not-present, the toplevel git "
+            "resolves for this cwd, which can lie off the chain (core.worktree): so when every directory "
+            "on the chain probes as a clean not-present (no .aiqt entry, or a real .aiqt directory this "
+            "process can search holding neither registry name), the fault is at the git toplevel. At that candidate, its .aiqt is not a directory this process can "
+            "open without following a symlink and search, or its first present registry name "
+            "(orchestration.local.json, then orchestration.json) is not a regular file or cannot be "
+            "examined. A registry this guard cannot evaluate is not a registry, so the call is denied "
+            "rather than read as registry-present (check-fails-closed-on-unreadable). Make that .aiqt a "
+            "real directory with search (execute) permission holding a regular registry file, remove the "
+            "stray .aiqt entry, or unset "
+            "AIQT_ORCH_REQUIRE_REGISTRY to restore the default scoping (where such an entry keeps this "
+            "guard active).",
+            "AIQT guardrail: denied a Bash call in registry-required mode whose orchestration registry "
+            "could not be evaluated (rule trkasy, fail-closed).")
+    if scope == "toplevel-unopenable" and _orch_registry_required():
+        # REGISTRY-REQUIRED MODE, round 6: git names a toplevel for this cwd but this process cannot open it
+        # as a directory, so its registry entry is never reached. That is a fault in the toplevel itself,
+        # not in a .aiqt entry, so it carries its own reason and repair. Default unchanged (in scope).
+        return _deny(
+            "AIQT rule trkasy (track-launched-work) (registry-required mode): "
+            "AIQT_ORCH_REQUIRE_REGISTRY is set, so this guard must confirm an orchestration registry; none "
+            "is on this cwd's ancestor chain, and the toplevel git resolves for this cwd could not be "
+            "opened as a directory, so its registry could not be looked up. A registry this guard cannot "
+            "reach is not a registry, so the call is denied rather than read as registry-present "
+            "(check-fails-closed-on-unreadable). Make the git toplevel (core.worktree) an existing "
+            "directory this process can open, run from a directory under the orchestrated tree, or unset "
+            "AIQT_ORCH_REQUIRE_REGISTRY to restore the default scoping (where such a toplevel keeps this "
+            "guard active).",
+            "AIQT guardrail: denied a Bash call in registry-required mode whose git toplevel could not be "
+            "opened for the orchestration registry (rule trkasy, fail-closed).")
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        kind = "missing" if "tool_input" not in data else _orch_json_kind(tool_input)
+        return _deny(
+            "AIQT rule trkasy (track-launched-work): this Bash call's tool_input is {}, not a JSON object, "
+            "so this guard cannot read its command or its run_in_background flag. A check that cannot read "
+            "its input fails closed (check-fails-closed-on-unreadable): it is denied rather than allowed "
+            "unread. Re-issue the call with a tool_input object carrying a string command.".format(kind),
+            "AIQT guardrail: denied a Bash call whose tool_input is {}, not an object "
+            "(fail-closed).".format(kind))
     command = tool_input.get("command")
-    rib = tool_input.get("run_in_background") is True
+    rib = tool_input.get("run_in_background", False)
+    if not isinstance(rib, bool):
+        return _deny(
+            "AIQT rule trkasy (track-launched-work): this Bash call's run_in_background is {} ({}), not a "
+            "boolean, so this guard cannot tell a background dispatch from a foreground call; it is denied "
+            "rather than read as foreground (check-fails-closed-on-unreadable). Re-issue with "
+            "run_in_background true or false, or omit it for a foreground call."
+            .format(_orch_json_kind(rib), json.dumps(rib, default=str)[:40]),
+            "AIQT guardrail: denied a Bash call whose run_in_background is not a boolean (fail-closed).")
     if not rib:
         # Foreground scope is narrow: a plain foreground call returns its output directly and is out of
         # scope, but a bare `&` detaches a child into untracked asynchronous work whose result and failure
         # are then lost. A bare-& detach is never the right way to launch tracked work (the tracked
         # background dispatch is), so it DENIES-and-educates: the caller self-corrects to run_in_background
-        # (or waits in the foreground), which is what lets the dispatch ledger record it. An unreadable or
-        # non-detaching foreground command stays out of scope (ALLOW).
-        if isinstance(command, str) and _orch_foreground_detach(command):
+        # (or waits in the foreground), which is what lets the dispatch ledger record it. An unreadable
+        # (non-string) command fails closed; a non-detaching foreground command is out of scope (ALLOW).
+        if not isinstance(command, str):
+            return _deny(
+                "AIQT rule trkasy (track-launched-work): this foreground Bash call's command is {}, not a "
+                "string, so this guard cannot scan it for a bare '&' detach; it is denied rather than "
+                "allowed unread (check-fails-closed-on-unreadable). Re-issue with a string command."
+                .format("missing" if "command" not in tool_input else _orch_json_kind(command)),
+                "AIQT guardrail: denied a foreground Bash call with no readable command string "
+                "(fail-closed).")
+        detach_kind = _orch_foreground_detach_kind(command)
+        if detach_kind == "unbalanced":
+            return _deny(
+                "AIQT rule trkasy (track-launched-work): this foreground command ends with a single or "
+                "double quote still open as this guard's scan reads it, so the scan cannot prove that a "
+                "later '&' is quoted text rather than a bare detach; it is denied rather than allowed "
+                "unread (check-fails-closed-on-unreadable). The open quote may be a real unbalanced quote, "
+                "or one the scan misreads: an apostrophe or double quote in a here-document body (scanned "
+                "as code even under a quoted delimiter) or an ANSI-C $'...' quote. Balance the quoting, or "
+                "write the text to a file and pass the file.",
+                "AIQT guardrail: denied a foreground command whose quoting this guard could not read to the "
+                "end (rule trkasy, fail-closed).")
+        if detach_kind == "detach":
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this foreground command detaches a child with a "
                 "bare '&', launching asynchronous work this tool call does not track, so its result and "
                 "failure would be lost; it is denied. Use the platform's tracked background dispatch "
                 "(run_in_background) and collect its completion, or keep the command in the foreground and "
                 "wait for it. If the detached result and completion are genuinely not needed, drop the '&' "
-                "and run it foreground.",
+                "and run it foreground. If this '&' is not a detach at all (for example a bitwise AND in an "
+                "arithmetic expansion, or an '&' in a here-document body, which this scan reads as code "
+                "even under a quoted delimiter), write the text to a file and pass the file instead; the "
+                "background-dispatch advice applies only to a real detach.",
                 "AIQT guardrail: denied a foreground bare-& detach (untracked asynchronous work, rule "
                 "trkasy); use the tracked background dispatch or run it in the foreground.")
         return _allow()  # foreground without a bare-& detach operator is out of scope by design
@@ -9588,7 +12395,8 @@ def orch_truncation_guard(data):
                     "full output AND its exit status are discarded - the completion signal would bind to the "
                     "truncated output and a failing producer would read as a clean, finished run. It is "
                     "denied. Capture the producer's FULL output durably instead: redirect its own stdout to a "
-                    "real file (producer > out.log) and read the file, or run it in the foreground and wait; "
+                    "real file at an absolute path (producer > /abs/path/out.log) and read the file, or run it "
+                    "in the foreground and wait; "
                     "never bind a tracked dispatch's completion to a head/tail-truncated view.".format(_cw),
                     "AIQT guardrail: denied a background dispatch piped into a truncating sink ({}) that "
                     "discards the producer's output and failure (rules trkasy/vrfdlv); capture the full "
@@ -9610,7 +12418,8 @@ _ORCH_POLL_PROBE_CMDS = frozenset(("gh", "curl"))
 
 # Reserved words that make a loop span un-attributable to the single canonical poll shape: a conditional
 # reserved word or a '!' negation, and brace grouping. Any of these appearing raw-unquoted in the loop span
-# routes to 'indeterminate' (defer to the ASK) rather than a match the walk cannot soundly justify.
+# routes to 'indeterminate' (defer to the truncation guard's generic bare-& deny) rather than a match the walk
+# cannot soundly justify.
 _ORCH_POLL_FORBIDDEN = frozenset((
     "if", "then", "elif", "else", "fi", "case", "esac", "!", "{", "}"))
 
@@ -9748,7 +12557,8 @@ def _orch_bg_poll_loop(command):
     disclosed heuristic, not exhaustive). 'none' on a full parse that is simply not that shape and carries no
     ambiguity to defer: no bare `&`; a bare `&` that does not close a raw-unquoted `done` terminator; or a
     clean single loop that lacks the sleep or the probe. 'indeterminate' whenever the structure cannot be
-    soundly attributed to one canonical loop, so the guard defers to the ASK rather than risk a false deny:
+    soundly attributed to one canonical loop, so the guard defers to the truncation guard's generic bare-`&`
+    DENY-and-educate rather than risk a false match:
     an unparseable construct, subshell or C-style `(( ))` grouping, more than one bare `&`, a command
     trailing the bare-`&` `done`, a nested or extra loop keyword, a conditional reserved word, or brace
     grouping.
@@ -9760,8 +12570,8 @@ def _orch_bg_poll_loop(command):
     still counted (forcing 'indeterminate').
 
     The conservative posture is deliberate for a BLOCK guard: a false 'match' strands a session, whereas a
-    'none'/'indeterminate' emits nothing and defers to orch_truncation_guard's generic bare-`&` ASK on the
-    same event. Residuals are disclosed in the manifest."""
+    'none'/'indeterminate' emits nothing and defers to orch_truncation_guard's generic bare-`&`
+    DENY-and-educate on the same event. Residuals are disclosed in the manifest."""
     try:
         segments = _lex_command(command)
     except ValueError:
@@ -9784,13 +12594,24 @@ def _orch_bg_poll_loop(command):
 def orch_untracked_wait_loop(data):
     """trkasy, PreToolUse Bash: DENY a command that backgrounds a status-polling loop with a bare `&`. A
     detached child is not a harness-tracked task, so its completion cannot notify this session and the result
-    is stranded while the session goes dark waiting on it. Registry-gated exactly like orch_truncation_guard
-    (inert with no orchestration registry present) but NOT lease-gated: a bounded worker building a
-    fire-and-forget poll is equally wrong. Fail-open (silent allow) on a non-Bash or absent tool, an absent
-    registry, or a non-string/empty command; a NUL, heredoc, unbalanced quote, or subshell-grouped detach
-    classifies 'indeterminate' and emits nothing, deferring to the generic bare-`&` ASK of the truncation
-    guard. Only a positive 'match' DENIES. This is a deny-side companion to that ASK-side guard, defence in
-    depth on the same event: the ASK catches a generic detach, this DENIES the specific untracked poll loop."""
+    is stranded while the session goes dark waiting on it. Registry-gated, but with a NARROWER scope than
+    orch_truncation_guard: it roots via _orch_root (the session cwd's git-resolved toplevel ONLY, no
+    ancestor walk and no union) and loads the registry there (_orch_registry), so it is inert where git
+    resolves no toplevel or that toplevel has no registry, even where the truncation guard's ancestor walk
+    finds one above or beside it. It never reads AIQT_ORCH_REQUIRE_REGISTRY, so registry-required mode does
+    not change it: it stays inert wherever _orch_registry reports no registry at the git toplevel, in either
+    mode. The truncation guard in that mode denies every call only where its own scope (the ancestor walk
+    unioned with the git toplevel, _orch_truncation_scope) finds no registry or cannot confirm one, or where
+    its pre-scope checks or its walk fail (those deny in every mode); where that walk finds
+    a registry ABOVE a nested repository whose toplevel has none, the guard stays active (a plain call
+    allows, a bare-& detach denies) while this component stays inert. NOT lease-gated: a
+    bounded worker building a fire-and-forget poll is equally wrong. Fail-open (silent allow) on a non-Bash
+    or absent tool, no git toplevel, an absent registry, or a non-string/empty command; a NUL, heredoc,
+    unbalanced quote, or subshell-grouped detach classifies 'indeterminate' and emits nothing, deferring to
+    the truncation guard's generic bare-`&` DENY-and-educate (or its open-quote deny) on the same event.
+    Only a positive 'match' DENIES here. This is a specific companion to that generic deny, defence in
+    depth on the same event: the truncation guard denies any bare-`&` detach it can read, this denies the
+    specific untracked poll loop with a reason about the stranded poll."""
     if data.get("tool_name") != "Bash":
         return _allow()
     root = _orch_root(data)
@@ -9798,7 +12619,7 @@ def orch_untracked_wait_loop(data):
         return _allow()
     status, _reg = _orch_registry(root)
     if status == "absent":
-        return _allow()                     # genuinely no orchestration registry: inert, as the sibling is
+        return _allow()                     # no registry at the git toplevel: inert (the truncation guard's walk may still find one above)
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     command = tool_input.get("command")
     if not isinstance(command, str) or not command:
@@ -9877,6 +12698,2281 @@ def orch_dispatch_ledger(data):
     return _allow()
 
 
+# --- review dispatch pin (vfxcmt) --------------------------------------------------------------------
+# PreToolUse Bash, registry scoped. Inert unless the orchestration registry declares a `review_dispatch`
+# binding (ORCHESTRATION.md, "The review dispatch binding"). A Bash call that names a declared dispatch
+# command must be a provably plain dispatch (_rdp_plain_words), or it is UNVERIFIABLE. For a plain dispatch it
+# reads the brief file passed as that command's one brief argument and reconciles the brief's column-0 labels against the repository BEFORE the
+# command runs: an explicit review target; for a revision review, a full-length pin that resolves to exactly
+# that commit and equals the authoritative task revision the adopter's authority command prints; the
+# declared review paths equal to the pin's changed set (base derived from the commit's raw parent headers);
+# and no uncommitted state over any declared path, except edits inside a checked-out submodule whose HEAD is
+# at the pinned gitlink, which are not read. A refusal is a deny naming its reason; a cannot-evaluate
+# is a deny prefixed UNVERIFIABLE: so it stays distinct. Every git probe runs through _review_git, which
+# neutralizes replacement refs, grafts, pathspec magic and the commit-graph cache.
+_RDP_KEYS = frozenset(("commands", "brief_option", "labels", "authority", "max_brief_bytes"))
+_RDP_REQUIRED_KEYS = frozenset(("commands", "brief_option", "labels", "authority"))
+_RDP_LABEL_KEYS = frozenset(("target", "revision", "path", "repo", "branch"))
+_RDP_AUTHORITY_KEYS = frozenset(("argv", "timeout"))
+_RDP_TARGETS = frozenset(("revision", "working-tree", "not-a-review"))
+# Line boundaries to Unicode that are not physical newlines (VT, FF, FS, GS, RS, NEL, LINE and PARAGRAPH
+# SEPARATOR): a brief carrying one is a cannot-evaluate, because it could hide a label inside another line.
+_RDP_NONPHYSICAL = ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
+_RDP_DEFAULT_MAX_BRIEF = 1048576
+# The whole decision runs inside one deadline that stays under the platform hook timeout (gen_hooks TIMEOUT,
+# 10 seconds), so a slow authority or git probe ends in an UNVERIFIABLE deny, never in a killed hook.
+_RDP_BUDGET = 8.0
+_RDP_DEFAULT_AUTH_TIMEOUT = 5
+_RDP_MAX_AUTH_TIMEOUT = 8
+_RDP_GIT_TIMEOUT = 5
+_RDP_JOIN_GRACE = 0.25   # how long past the deadline the caller waits for the worker's own verdict
+_RDP_DEADLINE = [None]   # the monotonic deadline of the decision in progress, set by _rdp_decide
+# Every file the hook reads is opened non-blocking (a FIFO or device returns at once and fails the regular
+# file check made on the open descriptor) and never becomes a controlling terminal.
+_RDP_OPEN_FLAGS = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0)
+_RDP_MAX_LISTED = 20
+_RDP_OID_LEN = {"sha1": 40, "sha256": 64}
+# The ambient variables that move the repository, index, object store or history git reads. The hook's own
+# git probes and the authority scrub every GIT_* variable; a dispatch inherits the session's environment,
+# so with any of these set the verifier may read another revision than the one reconciled.
+_RDP_AMBIENT_GIT = frozenset((
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_QUARANTINE_PATH", "GIT_NAMESPACE", "GIT_REPLACE_REF_BASE",
+    "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE"))
+
+
+def _rdp_overdue():
+    """Whether the decision in progress has run past its deadline."""
+    return _RDP_DEADLINE[0] is not None and time.monotonic() >= _RDP_DEADLINE[0]
+
+
+def _rdp_check_deadline():
+    """Raise TimeoutError (an OSError, so every read's handler reports a cannot-evaluate) once the decision
+    in progress has run past its deadline. Called before each content read, so a slow or large file ends
+    in an UNVERIFIABLE deny, never in an allow given after the budget."""
+    if _rdp_overdue():
+        raise TimeoutError("the check ran out of its {} second budget while reading".format(_RDP_BUDGET))
+
+
+def _rdp_time_left(cap):
+    """The seconds a subprocess of the decision in progress may take: cap, cut to what is left of the
+    decision's deadline; None when the deadline has passed (the caller's cannot-evaluate)."""
+    if _RDP_DEADLINE[0] is None:
+        return cap
+    left = _RDP_DEADLINE[0] - time.monotonic()
+    return min(cap, left) if left > 0.05 else None
+
+
+def _review_git(repo, *args, stdin=None):
+    """One isolated git probe for the review dispatch pin: the _isolate_git_env scrub plus no optional
+    locks, replacement refs and grafts disabled (so a `git replace --graft` or an info/grafts file cannot
+    change the parents the base is derived from), literal pathspecs (a declared path is matched as a literal
+    path, never as glob or magic), the commit-graph cache off, and the repository configuration that runs a
+    program or caches working-tree state switched off on the command line (core.fsmonitor and
+    core.untrackedCache), and the submodule settings that would hide a submodule change or recurse into
+    one (diff.ignoreSubmodules, submodule.recurse; a .gitmodules `ignore` value is overridden by each
+    diff read's own --ignore-submodules=none). Bytes in and out. Returns the CompletedProcess, or None when git could not be run,
+    timed out, or the decision's deadline has passed (the caller's cannot-evaluate)."""
+    timeout = _rdp_time_left(_RDP_GIT_TIMEOUT)
+    if timeout is None:
+        return None
+    env = _isolate_git_env(dict(os.environ))
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_GRAFT_FILE"] = os.devnull
+    env["GIT_LITERAL_PATHSPECS"] = "1"
+    try:
+        return subprocess.run(["git", "-C", repo, "-c", "core.commitGraph=false", "-c", "core.fsmonitor=false",
+                               "-c", "core.untrackedCache=false", "-c", "diff.ignoreSubmodules=none",
+                               "-c", "submodule.recurse=false", *args], input=stdin,
+                              capture_output=True, timeout=timeout, env=env)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+
+
+def _rdp_binding(reg):
+    """The registry's review dispatch binding: (None, None) when undeclared, ("ok", cfg) when well formed,
+    ("bad", detail) otherwise. Strict: an unknown key, a missing required key, or a wrong type is malformed."""
+    if "review_dispatch" not in reg:
+        return (None, None)
+    raw = reg.get("review_dispatch")
+    if not isinstance(raw, dict):
+        return ("bad", "review_dispatch is {}, not an object".format(_orch_json_kind(raw)))
+    unknown = sorted(set(raw) - _RDP_KEYS)
+    if unknown:
+        return ("bad", "review_dispatch has unknown keys {}".format(unknown))
+    missing = sorted(_RDP_REQUIRED_KEYS - set(raw))
+    if missing:
+        return ("bad", "review_dispatch is missing {}".format(missing))
+    commands = raw["commands"]
+    if not isinstance(commands, list) or not commands or not all(
+            isinstance(c, str) and c and "/" not in c and c.strip() == c for c in commands):
+        return ("bad", "review_dispatch.commands is not a non-empty list of command basenames")
+    option = raw["brief_option"]
+    if not isinstance(option, str) or not option.startswith("-") or len(option) < 2 \
+            or any(ch.isspace() or ch == "=" for ch in option):
+        return ("bad", "review_dispatch.brief_option is not a single option word")
+    labels = raw["labels"]
+    if not isinstance(labels, dict) or set(labels) != _RDP_LABEL_KEYS:
+        return ("bad", "review_dispatch.labels must declare exactly {}".format(sorted(_RDP_LABEL_KEYS)))
+    values = list(labels.values())
+    if not all(isinstance(v, str) and v and v.strip() == v and "\n" not in v and "\r" not in v
+               for v in values):
+        return ("bad", "review_dispatch.labels values must be non-empty single-line strings")
+    if len(set(values)) != len(values) or any(
+            a != b and a.startswith(b + " ") for a in values for b in values):
+        return ("bad", "review_dispatch.labels values must be distinct")
+    authority = raw["authority"]
+    if not isinstance(authority, dict) or set(authority) - _RDP_AUTHORITY_KEYS or "argv" not in authority:
+        return ("bad", "review_dispatch.authority must be an object with argv and an optional timeout")
+    argv = authority["argv"]
+    if not isinstance(argv, list) or not argv or not all(isinstance(a, str) and a for a in argv):
+        return ("bad", "review_dispatch.authority.argv is not a non-empty list of non-empty strings")
+    timeout = authority.get("timeout", _RDP_DEFAULT_AUTH_TIMEOUT)
+    if type(timeout) is not int or not 0 < timeout <= _RDP_MAX_AUTH_TIMEOUT:
+        return ("bad", "review_dispatch.authority.timeout is not an integer from 1 to {}".format(
+            _RDP_MAX_AUTH_TIMEOUT))
+    max_bytes = raw.get("max_brief_bytes", _RDP_DEFAULT_MAX_BRIEF)
+    if type(max_bytes) is not int or not 0 < max_bytes <= 16 * _RDP_DEFAULT_MAX_BRIEF:
+        return ("bad", "review_dispatch.max_brief_bytes is not an integer from 1 to {}".format(
+            16 * _RDP_DEFAULT_MAX_BRIEF))
+    return ("ok", {"commands": frozenset(commands), "brief_option": option, "labels": dict(labels),
+                   "argv": list(argv), "timeout": timeout, "max_brief_bytes": max_bytes})
+
+
+def _rdp_brief_args(args, option):
+    """The brief values in a dispatch's arguments: each value after a separate `option` word (None when it
+    is the last word) and each `option=VALUE`. A long option also matches each abbreviation of it that a
+    parser accepting abbreviations reads as it (`--brie` for `--brief`), and a short option also matches
+    its attached form (`-bPATH`), so a second brief written that way is counted, never passed over."""
+    names = {option}
+    if option.startswith("--"):
+        names.update(option[:k] for k in range(3, len(option)))
+    out = []
+    for k, tok in enumerate(args):
+        head, eq, _value = tok.partition("=")
+        if tok in names:
+            out.append(args[k + 1] if k + 1 < len(args) else None)
+        elif eq and head in names:
+            out.append(tok[len(head) + 1:])
+        elif len(option) == 2 and tok.startswith(option) and len(tok) > 2:
+            out.append(tok[2:])
+    return out
+
+
+def _rdp_read_fd(fd, limit):
+    """At most limit bytes read from fd, to end of file; TimeoutError once the decision's deadline has
+    passed."""
+    chunks = []
+    size = 0
+    while size < limit:
+        _rdp_check_deadline()
+        chunk = os.read(fd, min(limit - size, 1 << 20))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks)
+
+
+def _rdp_read_brief(path, max_bytes):
+    """(text, None) for a readable brief, or (None, reason) for a cannot-evaluate: missing, a symlink, not a
+    regular file, an I/O or permission error, over max_bytes, invalid UTF-8, a NUL, or a non-physical line
+    boundary. One leading byte-order mark is dropped, so a brief saved with one still shows its first
+    label at column 0. The brief is opened ONCE, non-blocking and without following a final symlink, and the type
+    is checked on that open descriptor, so no swap can land between a check and the open, and a FIFO or
+    device never blocks the hook."""
+    try:
+        fd = os.open(path, _RDP_OPEN_FLAGS | os.O_NOFOLLOW)
+    except (OSError, ValueError) as exc:
+        return (None, "the brief {} cannot be opened ({})".format(path, exc))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return (None, "the brief {} is not a regular file".format(path))
+        blob = _rdp_read_fd(fd, max_bytes + 1)
+    except OSError as exc:
+        return (None, "the brief {} cannot be read ({})".format(path, exc))
+    finally:
+        os.close(fd)
+    if len(blob) > max_bytes:
+        return (None, "the brief {} is larger than max_brief_bytes ({})".format(path, max_bytes))
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return (None, "the brief {} is not valid UTF-8 ({})".format(path, exc))
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    if "\x00" in text:
+        return (None, "the brief {} contains a NUL".format(path))
+    if any(ch in text for ch in _RDP_NONPHYSICAL):
+        return (None, "the brief {} contains a line boundary that is not a physical newline".format(path))
+    return (text, None)
+
+
+def _rdp_labels(text, labels):
+    """Map each label key to the list of its values: a label matches only at column 0, as the exact label
+    followed by one space, and its value is the rest of that physical line."""
+    found = {key: [] for key in labels}
+    for line in text.splitlines():
+        for key, label in labels.items():
+            if line.startswith(label + " "):
+                found[key].append(line[len(label) + 1:])
+    return found
+
+
+def _rdp_listing(items):
+    """A capped, readable listing of paths for a deny message."""
+    shown = [repr(p) for p in items[:_RDP_MAX_LISTED]]
+    more = len(items) - len(shown)
+    return ", ".join(shown) + (" and {} more".format(more) if more > 0 else "")
+
+
+def _rdp_git_records(repo, *args):
+    """The NUL-separated byte records of a git probe, or None on a failed or timed-out probe."""
+    p = _review_git(repo, *args)
+    if p is None or p.returncode != 0:
+        return None
+    return [rec for rec in p.stdout.split(b"\0") if rec]
+
+
+def _rdp_resolve(repo, name):
+    """The commit id name resolves to in repo, or None."""
+    p = _review_git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options", name + "^{commit}")
+    if p is None or p.returncode != 0:
+        return None
+    return p.stdout.decode("ascii", "replace").strip() or None
+
+
+def _rdp_blob_id(fmt, header_size, fd):
+    """The git object id of a blob whose content is read from fd: header_size bytes exactly, or OSError
+    (TimeoutError once the decision's deadline has passed)."""
+    h = __import__("hashlib").new(fmt)
+    h.update(b"blob %d\0" % header_size)
+    size = 0
+    while True:
+        _rdp_check_deadline()
+        chunk = os.read(fd, 1 << 20)
+        if not chunk:
+            break
+        size += len(chunk)
+        h.update(chunk)
+    if size != header_size:
+        raise OSError("the file changed size while it was read")
+    return h.hexdigest()
+
+
+def _rdp_worktree_entry(repo, relpath, fmt):
+    """The (mode, object id) git would record for the working-tree entry at relpath (bytes, slash
+    separated) under repo, computed here from the raw bytes, so no index flag (assume-unchanged,
+    skip-worktree), stat cache, fsmonitor or configured filter takes part. None when nothing git would
+    record is there (missing, or under a symlinked or non-directory component); ("dir", "") for a
+    directory; ("other", "") for a FIFO, device or socket. Raises OSError when it cannot be read."""
+    errno = __import__("errno")
+    parts = relpath.split(b"/")
+    _rdp_check_deadline()
+    dirfd = os.open(repo, _ORCH_O_WALK | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
+    try:
+        for name in parts[:-1]:
+            try:
+                sub = os.open(name, _ORCH_O_WALK | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                              dir_fd=dirfd)
+            except OSError as exc:
+                if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                    return None
+                raise
+            os.close(dirfd)
+            dirfd = sub
+        try:
+            st = os.stat(parts[-1], dir_fd=dirfd, follow_symlinks=False)
+        except OSError as exc:
+            if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+                return None
+            raise
+        if stat.S_ISLNK(st.st_mode):
+            target = os.readlink(parts[-1], dir_fd=dirfd)
+            h = __import__("hashlib").new(fmt)
+            h.update(b"blob %d\0" % len(target) + target)
+            return ("120000", h.hexdigest())
+        if stat.S_ISDIR(st.st_mode):
+            return ("dir", "")
+        if not stat.S_ISREG(st.st_mode):
+            return ("other", "")
+        fd = os.open(parts[-1], _RDP_OPEN_FLAGS | os.O_NOFOLLOW, dir_fd=dirfd)
+        try:
+            fst = os.fstat(fd)
+            if not stat.S_ISREG(fst.st_mode):
+                return ("other", "")
+            return ("100755" if fst.st_mode & stat.S_IXUSR else "100644", _rdp_blob_id(fmt, fst.st_size, fd))
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dirfd)
+
+
+def _rdp_gitlink_entry(repo, relpath, want):
+    """The working-tree state of a declared submodule path whose pinned entry is the gitlink want: want
+    itself when the submodule is checked out at that commit or not checked out at all (an empty
+    directory, which git also reads as unchanged), otherwise ("other", ""). None when git cannot say."""
+    path = os.path.join(repo, os.fsdecode(relpath))
+    try:
+        if not os.listdir(path):
+            return want
+    except OSError:
+        return ("other", "")
+    p = _review_git(path, "rev-parse", "--show-toplevel", "HEAD")
+    if p is None:
+        return None
+    lines = p.stdout.decode("utf-8", "surrogateescape").split("\n")
+    if p.returncode != 0 or len(lines) < 2 or os.path.realpath(lines[0]) != os.path.realpath(path):
+        return ("other", "")
+    return ("160000", lines[1]) if lines[1] == want[1] else ("other", "")
+
+
+def _rdp_reconcile(cfg, found, root, brief, repo_default, auth_dir=None):
+    """Reconcile a revision-target brief against the repository: ("allow"|"note"|"deny"|"unverifiable",
+    message). repo_default is the top level of the repository the dispatch runs in, used when the brief
+    names no repository. The authority runs from auth_dir, the top level of the worktree whose registry
+    binds the dispatch (root when None), so a relative authority argv is the registry's own, never a copy a
+    linked or nested worktree supplies. The checks run in a fixed order and the first failure decides."""
+    labels = cfg["labels"]
+    pins = found["revision"]
+    if not pins:
+        return ("deny", "the brief targets a revision but has no {!r} line; a branch name or a "
+                "description is not a pin, so add the full commit id under review".format(labels["revision"]))
+    for key in ("revision", "repo", "branch"):
+        if len(found[key]) > 1:
+            return ("unverifiable", "the brief has {} {!r} lines; at most one is allowed".format(
+                len(found[key]), labels[key]))
+    pin = pins[0].strip()
+    repo = repo_default
+    if found["repo"]:
+        repo = found["repo"][0].strip()
+        if not os.path.isabs(repo):
+            return ("unverifiable", "the {!r} value {!r} is not an absolute path".format(
+                labels["repo"], repo))
+        p = _review_git(repo, "rev-parse", "--show-toplevel")
+        top = p.stdout[:-1].decode("utf-8", "surrogateescape") if p is not None and p.returncode == 0 \
+            and p.stdout.endswith(b"\n") else None
+        if not top or os.path.realpath(top) != os.path.realpath(repo):
+            return ("unverifiable", "the {!r} value {!r} is not a repository top level".format(
+                labels["repo"], repo))
+    p = _review_git(repo, "rev-parse", "--show-object-format")
+    fmt = p.stdout.decode("ascii", "replace").strip() if p is not None and p.returncode == 0 else None
+    if fmt not in _RDP_OID_LEN:
+        return ("unverifiable", "the object format of {} cannot be read".format(repo))
+    width = _RDP_OID_LEN[fmt]
+    if len(pin) != width or any(ch not in "0123456789abcdef" for ch in pin):
+        return ("deny", "the pin {!r} is not a full {}-character lowercase {} commit id; a short "
+                "id, a branch name or HEAD is not accepted".format(pin, width, fmt))
+    if _rdp_resolve(repo, pin) != pin:
+        return ("unverifiable", "the pin {} does not resolve to that commit in {}".format(pin, repo))
+    auth_timeout = _rdp_time_left(cfg["timeout"])
+    if auth_timeout is None:
+        return ("unverifiable", "the check ran out of its {} second budget before the authority "
+                "command".format(_RDP_BUDGET))
+    try:
+        # The _isolate_git_env scrub, as for every git probe: an ambient GIT_DIR or GIT_WORK_TREE cannot
+        # point the authority at another repository.
+        auth = subprocess.run(cfg["argv"] + [brief], capture_output=True, text=True, timeout=auth_timeout,
+                              cwd=auth_dir or root, env=_isolate_git_env(dict(os.environ)))
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        return ("unverifiable", "the authority command failed to run ({})".format(exc))
+    if auth.returncode != 0:
+        return ("unverifiable", "the authority command exited {}".format(auth.returncode))
+    out = auth.stdout or ""
+    auth_lines = (out[:-1] if out.endswith("\n") else out).split("\n")
+    if len(auth_lines) != 1 or len(auth_lines[0]) != width \
+            or any(ch not in "0123456789abcdef" for ch in auth_lines[0]):
+        return ("unverifiable", "the authority command did not print exactly one full commit id line")
+    if auth_lines[0] != pin:
+        return ("deny", "the pin {} is not the authoritative task revision ({})".format(
+            pin, auth_lines[0]))
+    p = _review_git(repo, "cat-file", "commit", pin)
+    if p is None or p.returncode != 0:
+        return ("unverifiable", "the raw commit {} cannot be read".format(pin))
+    parents = []
+    for line in p.stdout.split(b"\n"):
+        if not line:
+            break
+        if line.startswith(b"parent "):
+            parents.append(line[len(b"parent "):].decode("ascii", "replace"))
+    for parent in parents:
+        q = _review_git(repo, "cat-file", "-e", parent)
+        if q is None or q.returncode != 0:
+            return ("unverifiable", "the parent {} of {} is not in the repository (a shallow or "
+                    "partial clone), so the base cannot be derived".format(parent, pin))
+    if parents:
+        base = parents[0]
+    else:
+        q = _review_git(repo, "hash-object", "-t", "tree", "--stdin", stdin=b"")
+        base = q.stdout.decode("ascii", "replace").strip() if q is not None and q.returncode == 0 else ""
+        if len(base) != width:
+            return ("unverifiable", "the empty tree id cannot be computed in {}".format(repo))
+    changed = _rdp_git_records(repo, "diff-tree", "-r", "-z", "--name-only", "--no-renames",
+                               "--ignore-submodules=none", "--no-ext-diff", "--no-textconv", base, pin)
+    if changed is None:
+        return ("unverifiable", "the changed set of {} cannot be read".format(pin))
+    declared = found["path"]
+    if not declared:
+        return ("deny", "the brief declares no {!r} line; list every path the review covers".format(
+            labels["path"]))
+    if not all(declared):
+        return ("unverifiable", "the brief has an empty {!r} value".format(labels["path"]))
+    declared_b = set(d.encode("utf-8") for d in declared)
+    changed_b = set(changed)
+    if declared_b != changed_b:
+        parts = []
+        missing = sorted(c.decode("utf-8", "replace") for c in changed_b - declared_b)
+        extra = sorted(d.decode("utf-8", "replace") for d in declared_b - changed_b)
+        if missing:
+            parts.append("changed by {} but not declared: {}".format(pin, _rdp_listing(missing)))
+        if extra:
+            parts.append("declared but not changed by {}: {}".format(pin, _rdp_listing(extra)))
+        return ("deny", "the declared review paths do not match the commit's changed set ({})".format(
+            "; ".join(parts)))
+    paths = sorted(declared)
+    staged = _rdp_git_records(repo, "diff-index", "--cached", "-z", "--name-only", "--ignore-submodules=none",
+                              pin, "--", *paths)
+    if staged is None:
+        return ("unverifiable", "the staged state of the declared paths cannot be read")
+    if staged:
+        return ("deny", "declared path {} is staged against the pin (checked in {}); commit it, or set {!r} "
+                "to a worktree checked out at the pin".format(
+                    _rdp_listing(sorted(d.decode("utf-8", "replace") for d in staged)), repo, labels["repo"]))
+    # The working tree is compared with the pin BY CONTENT: each declared path's bytes (or symlink target)
+    # are hashed here and compared with the pin's tree entry, so an assume-unchanged or skip-worktree flag,
+    # core.ignoreStat, a stat cache, an fsmonitor answer or a configured filter cannot report a changed
+    # file as clean. A path the pin deletes must be absent.
+    tree = _rdp_git_records(repo, "ls-tree", "-r", "-z", "--full-tree", pin)
+    if tree is None:
+        return ("unverifiable", "the tree of {} cannot be read".format(pin))
+    entries = {}
+    for rec in tree:
+        meta, tab, name = rec.partition(b"\t")
+        fields = meta.split(b" ")
+        if not tab or len(fields) != 3:
+            return ("unverifiable", "the tree of {} cannot be parsed".format(pin))
+        entries[name] = (fields[0].decode("ascii", "replace"), fields[2].decode("ascii", "replace"))
+    # With core.fileMode false git itself ignores the executable bit of a working-tree file, so a file
+    # whose content matches the pin and whose mode differs only in that bit is clean, as git status says.
+    p = _review_git(repo, "config", "--bool", "core.fileMode")
+    exec_bit_ignored = p is not None and p.returncode == 0 and p.stdout.strip() == b"false"
+    differ = []
+    for path in paths:
+        key = path.encode("utf-8")
+        want = entries.get(key)
+        try:
+            got = _rdp_worktree_entry(repo, key, fmt)
+            if want is not None and want[0] == "160000" and got == ("dir", ""):
+                got = _rdp_gitlink_entry(repo, key, want)
+                if got is None:
+                    return ("unverifiable", "the submodule at declared path {!r} cannot be read".format(path))
+            elif want is None and got == ("dir", "") and any(name.startswith(key + b"/") for name in entries):
+                # A file the pin replaces with a directory of its own entries: the path holds no file, as
+                # the pin says; the entries under it are compared as declared paths of their own.
+                got = None
+        except (OSError, ValueError) as exc:
+            return ("unverifiable", "the working-tree entry of declared path {!r} cannot be read ({})".format(
+                path, exc))
+        if exec_bit_ignored and want is not None and got is not None and want[1] == got[1] \
+                and {want[0], got[0]} == {"100644", "100755"}:
+            got = want
+        if got != want:
+            differ.append(path)
+    if differ:
+        return ("deny", "declared path {} differs from the pin in the working tree (compared by content in "
+                "{}); commit it, or set {!r} to a worktree checked out at the pin".format(
+                    _rdp_listing(differ), repo, labels["repo"]))
+    if found["branch"]:
+        branch = found["branch"][0].strip()
+        tip = _rdp_resolve(repo, branch) if branch else None
+        if tip != pin:
+            return ("note", "AIQT rule vfxcmt: the review dispatch is pinned to {}, but the declared "
+                    "branch {!r} {}; the review covers the pin, not the branch".format(
+                        pin, branch, "resolves to {}".format(tip) if tip else "does not resolve"))
+    return ("allow", "")
+
+
+# The shared "provably plain" command specification, decided on the raw characters before any lexing. A
+# command is provably plain only when ALL hold: (1) every character is printable ASCII, space to tilde (no
+# tab, newline, carriage return, NUL or non-ASCII character, so no Unicode digit, homoglyph or invisible
+# character); (2) no character of _RDP_PLAIN_FORBIDDEN appears outside a single-quoted segment; (3) a
+# single-quoted segment is literal, a double-quoted segment holds no character of _RDP_PLAIN_FORBIDDEN, and
+# an unterminated quote is not plain; (4) words are separated by spaces only, and the first word, the
+# command, is a bare name of _RDP_COMMAND_WORD_CHARS (so it is unquoted and no assignment leads), or an
+# absolute path whose directory is one of _RDP_PLAIN_DIRS, naming a program of the allowlist
+# _RDP_PLAIN_COMMANDS (or, for this hook, a declared dispatch command, which the pin check judges). Rules 1
+# and 2 exclude every expansion, substitution, glob, redirection, operator, comment and escape, so a plain
+# command is exactly one simple command whose words are its literal text.
+_RDP_PLAIN_FORBIDDEN = frozenset("$`\\;&|<>(){}[]*?!#~")
+_RDP_COMMAND_WORD_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./-")
+# Rule 4's allowlist of command words, compared exactly: git and opf, which can run other programs and so
+# are judged by each hook's own semantic check, and programs that cannot run another program. A list of
+# the programs that do run others was bypassed by a versioned interpreter path, so every other command
+# word (a shell, an interpreter at any version, awk, sed, find, xargs, env, tar, make, sort, whose
+# --compress-program runs a program, an editor, a wrapper) is not plain. Membership never makes a command
+# safe by itself.
+_RDP_PLAIN_COMMANDS = frozenset((
+    "git", "opf", "ls", "cat", "echo", "printf", "pwd", "true", "false", "test", "head", "tail", "wc", "grep",
+    "egrep", "fgrep", "diff", "cmp", "stat", "du", "df", "date", "basename", "dirname", "realpath", "readlink",
+    "uniq", "cut", "tr", "mkdir", "rmdir", "touch", "cp", "mv", "rm", "ln", "chmod"))
+# The only directories a command word written as a path may name; any other path (relative, ./ls,
+# /tmp/x/ls) is not plain.
+_RDP_PLAIN_DIRS = frozenset(("/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin"))
+# The shared vector table every implementation of the specification carries as self-test rows: (command,
+# whether it is provably plain). `git log --output=f` is plain: an output option is each hook's own
+# semantic check, not lexing.
+_RDP_PLAIN_VECTORS = (
+    ("git status", True), ("git commit -m 'fix: a; b'", True), ("ls -la docs/x.md", True),
+    ("opf record --type finding", True), ("git log --output=f", True),
+    ("git status; rm x", False), ("git $'re\\x00set'", False), ('git commit -m "$(id)"', False),
+    ("python3 -c 'print(1)'", False), ("env GIT_DIR=x git log", False), ("GIT_DIR=x git log", False),
+    ("git st*", False), ("git log \\\n", False), ("git log \u0661", False), ("bash -c 'x'", False),
+    ("xargs git reset", False), ("/usr/bin/python3.14 -c 'x'", False), ("python3.14 -c 'x'", False),
+    ("awk -f p", False), ("sed -n p f", False), ("find . -delete", False), ("tar -xf a", False),
+    ("sort -S 4K --compress-program=bash f", False), ("./ls", False), ("/tmp/x/ls", False),
+    ("nodejs -e x", False), ("/usr/bin/ls docs", True), ("rm notes.txt", True))
+
+
+def _rdp_basename(word):
+    """The command name a literal command word runs: its last path component."""
+    return word.rsplit("/", 1)[-1]
+
+
+def _rdp_plain_command(word, declared=()):
+    """Whether the command word word is plain under rule 4: a bare name, or a path whose directory is one of
+    _RDP_PLAIN_DIRS, naming a program of _RDP_PLAIN_COMMANDS (compared exactly) or one of the dispatch
+    commands declared (compared without regard to case)."""
+    directory, slash, name = word.rpartition("/")
+    if slash and directory not in _RDP_PLAIN_DIRS:
+        return False
+    return name in _RDP_PLAIN_COMMANDS or name.casefold() in {d.casefold() for d in declared}
+
+
+def _rdp_plain_words(command, declared=()):
+    """(words, None) when command is provably plain under the shared specification above, words being the
+    literal word values with the quotes removed; otherwise (None, reason). The verdict is taken on the raw
+    characters: nothing is decoded and no escape or expansion is interpreted, and anything the
+    specification does not name as plain is not plain. declared names the dispatch commands this hook
+    also admits as command words, since the pin check is their semantic check."""
+    if not isinstance(command, str):
+        return (None, "the command is not a string")
+    for ch in command:
+        if not " " <= ch <= "~":
+            return (None, "the character {!r} is not printable ASCII".format(ch))
+    words = []
+    word = None
+    i = 0
+    n = len(command)
+    while i < n:
+        c = command[i]
+        if c == " ":
+            if word is not None:
+                words.append(word)
+                word = None
+            i += 1
+            continue
+        if c in "'\"":
+            j = command.find(c, i + 1)
+            if j < 0:
+                return (None, "an unterminated quote")
+            body = command[i + 1:j]
+            bad = [ch for ch in body if ch in _RDP_PLAIN_FORBIDDEN]
+            if c == '"' and bad:
+                return (None, "a double-quoted segment holding {!r}".format(bad[0]))
+            word = (word or "") + body
+            i = j + 1
+            continue
+        if c in _RDP_PLAIN_FORBIDDEN:
+            return (None, "the character {!r}".format(c))
+        word = (word or "") + c
+        i += 1
+    if word is not None:
+        words.append(word)
+    head = command.lstrip(" ").split(" ", 1)[0]
+    if not head or any(ch not in _RDP_COMMAND_WORD_CHARS for ch in head):
+        return (None, "a command word that is not a bare name or path")
+    if not _rdp_plain_command(head, declared):
+        return (None, "the command word {!r} is not on the allowlist of plain programs".format(head))
+    return (words, None)
+
+
+def _rdp_mentions(command, commands):
+    """The declared commands a command could name once bash removes its quoting, compared without regard to
+    case: each name found in the raw text, or in the raw text with every quote, backslash, line
+    continuation, dollar sign, brace and comma deleted (so a quote-split name, a brace list holding the
+    name, and a variable set to the name and expanded all name it). Character deletions only: no quoting
+    is decoded. An over-approximation: a mention in prose is found too."""
+    flat = command.replace("\\\n", "")
+    for ch in "'\"\\$,{}":
+        flat = flat.replace(ch, "")
+    texts = (command.casefold(), flat.casefold())
+    return sorted(name for name in commands if any(name.casefold() in t for t in texts))
+
+
+def _rdp_registry_dir(cwd):
+    """Every directory carrying a registry on cwd's ancestors, nearest first (the resolved path, then the
+    path as written, so a cwd that no longer exists still finds a registry above it), found with the
+    truncation guard's no-follow registry probe: ("found", [dir, ...]), the list empty when no ancestor
+    carries one, or ("fail", detail) when the walk cannot be made. Every registry is listed, not only the
+    nearest, so a registry without a binding cannot hide one above it."""
+    if not isinstance(cwd, str) or not os.path.isabs(cwd) or "\x00" in cwd:
+        return ("fail", "the session cwd {!r} is not an absolute path".format(cwd))
+    chains = []
+    for start in (os.path.realpath(cwd), os.path.normpath(cwd)):
+        chain = [start]
+        while os.path.dirname(chain[-1]) != chain[-1]:
+            chain.append(os.path.dirname(chain[-1]))
+        if chain not in chains:
+            chains.append(chain)
+    found = []
+    for chain in chains:
+        for path in chain:
+            if path in found:
+                continue
+            try:
+                fd = os.open(path, _ORCH_O_WALK | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except OSError as exc:
+                return ("fail", "the ancestor {} cannot be opened ({})".format(path, exc))
+            try:
+                if _orch_dirfd_has_registry(fd):
+                    found.append(path)
+            finally:
+                os.close(fd)
+    return ("found", found)
+
+
+def _rdp_withhold(tool_input, detail):
+    """The policy for a registry state that cannot say which commands dispatch (a malformed registry or
+    binding, a registry or main worktree that cannot be read or located): every Bash call, foreground or
+    background, is withheld as UNVERIFIABLE, since any of them may be a dispatch. The registry is frozen
+    against the assistant's own file tools too, so an operator repairs it."""
+    return ("unverifiable", "{}; every Bash call is withheld until an operator repairs it".format(detail))
+
+
+def _rdp_decide(data):
+    """The review dispatch decision for one Bash payload: ("allow"|"note"|"deny"|"unverifiable", message).
+    The whole decision runs inside the _RDP_BUDGET deadline, and in a worker thread the caller waits for
+    only until that deadline: a read or probe blocked in the kernel (a slow or hung filesystem, a git or
+    authority child) cannot hold the hook past it, and the decision is then UNVERIFIABLE. Each read also
+    checks the deadline itself, and the worker stamps the moment it finished, so a decision that finishes
+    late never allows, even one that finished after this caller cleared the shared deadline. A crash in the
+    worker is raised here, so it still reaches main's fail-closed exit."""
+    box = []
+    clock = time.monotonic
+
+    def _work():
+        try:
+            out = (True, _rdp_decide_within(data))
+        except BaseException as exc:   # handed to the caller, which raises it
+            out = (False, exc)
+        box.append(out + (clock(),))
+    deadline = clock() + _RDP_BUDGET
+    _RDP_DEADLINE[0] = deadline
+    try:
+        worker = __import__("threading").Thread(target=_work, name="review-dispatch-pin", daemon=True)
+        worker.start()
+        worker.join(max(0.0, deadline - clock()) + _RDP_JOIN_GRACE)
+    finally:
+        _RDP_DEADLINE[0] = None
+    if not box:
+        return ("unverifiable", "the check did not finish within its {} second budget".format(_RDP_BUDGET))
+    ok, value, finished = box[0]
+    if not ok:
+        raise value
+    if value[0] in ("allow", "note") and finished >= deadline:
+        return ("unverifiable", "the check finished past its {} second budget, so its result is not "
+                "used".format(_RDP_BUDGET))
+    return value
+
+
+def _rdp_common_main(common):
+    """For a linked worktree whose common git directory is common (an absolute path): (the main worktree's
+    top level, None); (None, None) when common is a bare repository (core.bare true and no core.worktree),
+    which has no main worktree and so no registry the search could miss; (None, detail) when the main
+    worktree cannot be located (a separate git directory whose configuration names no core.worktree, or a
+    configuration git cannot read)."""
+    if os.path.basename(common) == ".git":
+        return (os.path.dirname(common), None)
+    config = os.path.join(common, "config")
+    q = _review_git(common, "config", "--file", config, "--get", "core.worktree")
+    if q is not None and q.returncode == 0:
+        top = q.stdout.decode("utf-8", "surrogateescape").rstrip("\n")
+        if top:
+            return (os.path.normpath(os.path.join(common, top)), None)
+    q = _review_git(common, "config", "--file", config, "--bool", "--get", "core.bare")
+    if q is not None and q.returncode == 0 and q.stdout.strip() == b"true":
+        return (None, None)
+    return (None, "the session is a linked worktree of the git directory {}, whose main worktree cannot be "
+            "located".format(common))
+
+
+def _rdp_main_worktree(root):
+    """For a linked worktree at root: (the main worktree's top level, None), or (None, detail) when root is
+    a linked worktree whose main worktree cannot be located (_rdp_common_main). (None, None) when root is
+    not a linked worktree, or is one of a bare repository. Raises OSError when git cannot say. The paths
+    are asked for without --path-format (git before 2.31 does not know it and echoes it back as if it were
+    a path) and resolved against root, the directory the probe runs in."""
+    p = _review_git(root, "rev-parse", "--git-common-dir", "--git-dir")
+    if p is None or p.returncode != 0:
+        raise OSError("git cannot read the common git directory of {}".format(root))
+    lines = p.stdout.decode("utf-8", "surrogateescape").split("\n")
+    if len(lines) < 3 or not all(line and not line.startswith("-") for line in lines[:2]):
+        raise OSError("git printed no common git directory for {}".format(root))
+    common = os.path.normpath(os.path.join(root, lines[0]))
+    if os.path.realpath(common) == os.path.realpath(os.path.join(root, lines[1])):
+        return (None, None)
+    return _rdp_common_main(common)
+
+
+def _rdp_read_small(path):
+    """The text of a small regular file read without following a final symlink and without blocking, or
+    None when it is absent, not a regular file, unreadable or over 4096 bytes."""
+    try:
+        fd = os.open(path, _RDP_OPEN_FLAGS | os.O_NOFOLLOW)
+    except (OSError, ValueError):
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        blob = _rdp_read_fd(fd, 4097)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(blob) > 4096:
+        return None
+    return blob.decode("utf-8", "surrogateescape")
+
+
+def _rdp_gitfile_main(cwd):
+    """Where git cannot be run or answer (a broken shared configuration, a failed or timed-out probe): the
+    main worktree of the linked worktree holding cwd, read from the raw files git itself reads (the
+    worktree's .git file names its git directory, whose commondir file names the common directory).
+    (top, None) for a linked worktree whose main worktree is located; (None, None) when cwd is not in a
+    linked worktree (the nearest .git is a directory, or a .git file whose git directory has no commondir,
+    as a submodule's has not, or there is no .git at all) or is in one of a bare repository; (None, detail)
+    when the raw files cannot say (an unreadable .git or commondir file, or a common directory whose main
+    worktree cannot be located), which the caller withholds as a cannot-evaluate. A git directory that is
+    gone but whose path is a main worktree's .git/worktrees/NAME still names that main worktree."""
+    path = os.path.realpath(cwd)
+    while True:
+        dotgit = os.path.join(path, ".git")
+        try:
+            st = os.lstat(dotgit)
+        except (FileNotFoundError, NotADirectoryError):
+            st = None
+        except OSError as exc:
+            return (None, "the git metadata {} cannot be examined ({})".format(dotgit, exc))
+        if st is not None:
+            if stat.S_ISDIR(st.st_mode):
+                return (None, None)
+            text = _rdp_read_small(dotgit) if stat.S_ISREG(st.st_mode) else None
+            if text is None or not text.startswith("gitdir: ") or not text[len("gitdir: "):].strip():
+                return (None, "the git file {} cannot be read as a gitdir pointer".format(dotgit))
+            gitdir = os.path.normpath(os.path.join(path, text[len("gitdir: "):].strip()))
+            holder = os.path.dirname(gitdir)
+            named = os.path.dirname(holder) if os.path.basename(holder) == "worktrees" and \
+                os.path.basename(os.path.dirname(holder)) == ".git" else None
+            try:
+                os.lstat(os.path.join(gitdir, "commondir"))
+            except (FileNotFoundError, NotADirectoryError):
+                return (os.path.dirname(named), None) if named else (None, None)
+            except OSError as exc:
+                return (None, "the git directory {} cannot be examined ({})".format(gitdir, exc))
+            common = _rdp_read_small(os.path.join(gitdir, "commondir"))
+            if common is None or not common.strip():
+                return (None, "the commondir file of {} cannot be read".format(gitdir))
+            return _rdp_common_main(os.path.normpath(os.path.join(gitdir, common.strip())))
+        parent = os.path.dirname(path)
+        if parent == path:
+            return (None, None)
+        path = parent
+
+
+def _rdp_raw_common(cwd):
+    """Where git cannot resolve the session repository: the git directory a bound session protects
+    (_rdp_names_common_dir), read from the raw files git itself reads on cwd's ancestors (the nearest .git
+    directory, or the git directory a .git file names, or the common directory its commondir file names).
+    (common, None) with common resolved; (None, None) when no ancestor carries .git, so there is no
+    repository to protect; (None, detail) when the raw files cannot say, which refuses every command but a
+    read."""
+    if not isinstance(cwd, str) or not os.path.isabs(cwd) or "\x00" in cwd:
+        return (None, "the session cwd {!r} is not an absolute path".format(cwd))
+    path = os.path.realpath(cwd)
+    while True:
+        dotgit = os.path.join(path, ".git")
+        try:
+            st = os.lstat(dotgit)
+        except (FileNotFoundError, NotADirectoryError):
+            st = None
+        except OSError as exc:
+            return (None, "the git metadata {} cannot be examined ({})".format(dotgit, exc))
+        if st is not None:
+            if stat.S_ISDIR(st.st_mode):
+                return (os.path.realpath(dotgit), None)
+            text = _rdp_read_small(dotgit) if stat.S_ISREG(st.st_mode) else None
+            if text is None or not text.startswith("gitdir: ") or not text[len("gitdir: "):].strip():
+                return (None, "the git file {} cannot be read as a gitdir pointer".format(dotgit))
+            gitdir = os.path.normpath(os.path.join(path, text[len("gitdir: "):].strip()))
+            common = _rdp_read_small(os.path.join(gitdir, "commondir"))
+            if common is not None and common.strip():
+                gitdir = os.path.normpath(os.path.join(gitdir, common.strip()))
+            return (os.path.realpath(gitdir), None)
+        parent = os.path.dirname(path)
+        if parent == path:
+            return (None, None)
+        path = parent
+
+
+def _rdp_decide_within(data):
+    """_rdp_decide's body, run with the deadline set. The scope is the UNION of every way to the registry:
+    the git-resolved top level, the main worktree of a linked worktree (through git, or through the raw
+    .git and commondir files where git cannot run), and the cwd's ancestors. Git success can only ADD a
+    binding, never remove one, so a repository configuration (core.worktree, a separate git directory) or a
+    broken shared configuration cannot turn the check off, and a registry WITHOUT a binding never ends the
+    search: every registry of the session repository and its main worktree is read, then every registry on
+    the cwd's ancestors, nearest first. A binding found anywhere but the session repository's own registry
+    (or its main worktree's) is FOREIGN: a dispatch under it is a cannot-evaluate, since the nested or
+    redirected repository it would be checked in is not the one the registry binds. The registries on the
+    cwd's ancestors are always read: where they bind and the git-resolved registries bind too, from a
+    different directory (core.worktree moved the top level onto another bound tree, say), the cwd's binding
+    still governs and the conflict is a cannot-evaluate: every command either binding would dispatch is
+    withheld, never checked against the other repository, and every other command is judged under both.
+    Each registry is read ONCE per check (one snapshot): the record comparison and the enforcement use that
+    same read, and where an own registry has a record, the recorded binding is the one enforced."""
+    cwd = data.get("cwd")
+    tool_input = data.get("tool_input")
+    root = _orch_root(data)
+    withheld = None
+    own = []
+    snapshot = {}
+
+    def scope(reg_dir):
+        # The check's single read of the registries at reg_dir: a registry removed or rewritten after it
+        # was compared with its record cannot change the binding this check enforces.
+        if reg_dir not in snapshot:
+            snapshot[reg_dir] = _rdp_scope(reg_dir)
+        return snapshot[reg_dir]
+    if root is not None:
+        # The common git directory is resolved once: it holds the binding records and is the directory a
+        # bound session protects. Where git cannot name it, no record can be read, so every Bash call is
+        # withheld rather than judged as if the registry had never been bound.
+        common, identity, why_common = _rdp_record_home(root)
+        if common is None:
+            return _rdp_withhold(tool_input, "{}, so the review dispatch binding record kept there cannot be "
+                                 "read and a registry removed since it was recorded could not be seen".format(
+                                     why_common))
+        guard = (common, None)
+        own.append(root)
+        try:
+            main_top, why = _rdp_main_worktree(root)
+        except OSError as exc:
+            # A failed or timed-out probe: the raw .git and commondir files still name the main worktree
+            # of a linked worktree, or show root is not one; only where they cannot say is the scope unknown.
+            main_top, why = _rdp_gitfile_main(root)
+            why = "{}, and {}".format(exc, why) if why else None
+        if main_top is not None:
+            own.append(main_top)
+        withheld = why
+    elif isinstance(cwd, str) and os.path.isabs(cwd):
+        # git cannot resolve the session repository: a linked worktree whose main worktree the raw files
+        # cannot locate is a scope that cannot be known, withheld as a failed probe is.
+        main_top, withheld = _rdp_gitfile_main(cwd)
+        if main_top is not None:
+            own.append(main_top)
+    if root is None:
+        # No record is read where git cannot resolve the session repository; the git directory the raw
+        # files name is still protected, and one they cannot locate refuses every command but a read.
+        guard = _rdp_raw_common(cwd)
+    # Each own registry's binding is compared with its record (a binding seen first is recorded), so a
+    # registry removed or rewritten since withholds every dispatch instead of switching the check off. The
+    # main worktree's registry is keyed as the main worktree's own top level, so every worktree shares it.
+    keyed = [(reg_dir, identity if reg_dir == root else ".", ".") for reg_dir in own]
+    drift, recorded = (None, []) if root is None else _rdp_record_check(
+        os.path.join(common, *_RDP_RECORD_DIR), keyed, scope)
+    if drift == "withhold":
+        return _rdp_withhold(tool_input, recorded)
+    resolved = None
+    for reg_dir in own:
+        # A recorded binding is the one enforced; it matches the snapshot here, since a difference is a drift.
+        rcfg = [c for c, d in recorded if d == reg_dir]
+        binding, cfg = ("ok", rcfg[0]) if rcfg else scope(reg_dir)
+        if binding is not None:
+            resolved = (binding, cfg, reg_dir)
+            break
+    # The registries on cwd's ancestors are read whatever git resolved: git cannot resolve the session's top
+    # level (no repository, a broken configuration, a refused ownership check, a deleted cwd), or resolves
+    # one without a binding (a worktree or repository nested inside an orchestrated tree, or a top level
+    # moved off the cwd's ancestors by core.worktree), or resolves one whose binding is not the cwd's own
+    # (a top level moved onto another bound tree). None of these is proof of the session's scope: the
+    # nearest binding on the cwd's ancestors governs.
+    where, found = _rdp_registry_dir(cwd)
+    if where == "fail":
+        return _rdp_withhold(tool_input, "the session repository cannot be discovered and " + found)
+    near = None
+    for found_dir in found:
+        binding, cfg = scope(found_dir)
+        if binding is not None:
+            near = (binding, cfg, found_dir)
+            break
+    if drift:
+        # A registry changed since its binding was recorded: every dispatch a recorded or a live binding
+        # declares is withheld, naming the change, and every other command is judged under each binding.
+        judged = [("ok", rcfg, rdir) for rcfg, rdir in recorded] + [b for b in (near, resolved) if b is not None]
+        for binding, cfg, reg_dir in judged:
+            result = _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, drift, guard)
+            if result[0] != "allow":
+                return result
+        return ("allow", "")
+    if near is not None and resolved is not None and \
+            os.path.realpath(near[2]) != os.path.realpath(resolved[2]):
+        conflict = ("the registry above the session cwd ({}) and the registry of the repository git resolves "
+                    "({}) both bind review dispatch and are not the same registry, so the binding that governs "
+                    "this dispatch, and the repository it is checked in, cannot be known".format(
+                        near[2], resolved[2]))
+        for binding, cfg, reg_dir in (near, resolved):
+            result = _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, conflict, guard)
+            if result[0] != "allow":
+                return result
+        return ("allow", "")
+    if resolved is not None:
+        return _rdp_bound(data, tool_input, resolved[0], resolved[1], root, resolved[2], False, guard)
+    if near is not None:
+        foreign = root is not None and os.path.realpath(near[2]) != os.path.realpath(root)
+        return _rdp_bound(data, tool_input, near[0], near[1], root, near[2], foreign, guard)
+    if withheld:
+        return _rdp_withhold(tool_input, withheld)
+    return ("allow", "")
+
+
+def _rdp_scope(reg_dir):
+    """The binding of the registries at reg_dir as _rdp_binding gives it: (None, None) when there is no
+    registry or none declares a binding, so the search goes on; ("bad", detail) for a registry that cannot
+    be read or parsed; ("ok", cfg) for a well-formed binding. Each registry file is read on its own, the
+    local one first, so a local registry WITHOUT a binding cannot hide the committed one's binding, as its
+    whole-file precedence would for the other orchestration hooks."""
+    for rel in _ORCH_REGISTRY_FILES:
+        status, reg = _orch_registry(reg_dir, nofollow=True, files=(rel,))
+        if status == "absent":
+            continue
+        if status != "ok":
+            return ("bad", reg)
+        binding, cfg = _rdp_binding(reg)
+        if binding is not None:
+            return (binding, cfg)
+    return (None, None)
+
+
+# The binding record. Predicting what a git command or a script does to the registry does not converge, so
+# the defence is inverted: when the hook first sees a registry of the session repository (its top level, or
+# its main worktree's) bind review dispatch, it records the binding in hook-owned state outside the work
+# tree, in the repository's resolved common git directory (GIT_COMMON_DIR/aiqt/review-dispatch-binding/
+# KEY.json, KEY the sha256 of the worktree's identity and the registry's path relative to its top level, so
+# the record depends on no absolute path and moves with the repository; mode 0600, written without following
+# a symbolic link). No git subcommand on the allowlist writes there (they write the work tree, the index,
+# refs, the object store and fixed files), and a plain command whose operand resolves to that directory,
+# inside it or (for a program other than git) to a directory holding it is refused in a bound session,
+# whatever its spelling (_rdp_names_common_dir). From then on a registry that is missing, unreadable, without a binding, or binding
+# differently from its record withholds every dispatch as UNVERIFIABLE until an operator restores the
+# recorded binding or removes the record, so removing or rewriting the registry can never switch the check
+# off; it can only block dispatch.
+_RDP_RECORD_DIR = ("aiqt", "review-dispatch-binding")
+_RDP_RECORD_MAX = 65536
+_RDP_RECORD_VERSION = 2
+
+
+def _rdp_binding_doc(cfg):
+    """A well-formed binding (_rdp_binding's cfg) as the registry spells it, every default made explicit:
+    the form a record stores, which _rdp_binding reads back to the same cfg."""
+    return dict(commands=sorted(cfg["commands"]), brief_option=cfg["brief_option"],
+                labels=dict(sorted(cfg["labels"].items())),
+                authority=dict(argv=list(cfg["argv"]), timeout=cfg["timeout"]),
+                max_brief_bytes=cfg["max_brief_bytes"])
+
+
+def _rdp_binding_digest(cfg):
+    """The sha256 of a binding's canonical JSON form (_rdp_binding_doc), so two registries spelling the same
+    binding differently (key order, a default left out) have one digest."""
+    blob = json.dumps(_rdp_binding_doc(cfg), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return __import__("hashlib").sha256(blob.encode("ascii")).hexdigest()
+
+
+def _rdp_record_home(root):
+    """The repository at root as its binding records know it: (common, identity, None), common the RESOLVED
+    common git directory (every symbolic link followed; it holds the records and is the directory a bound
+    session protects, _rdp_names_common_dir) and identity the worktree's git directory relative to it ("."
+    for the main worktree, worktrees/NAME for a linked one); (None, None, detail) when git cannot name
+    them, which the caller withholds, since a record it cannot find cannot be compared. Asked once per
+    check, without --path-format (git before 2.31 does not know it) and resolved against root; git before
+    2.5 echoes the --git-common-dir it does not know, and has no linked worktree, so its git directory is
+    the common one."""
+    p = _review_git(root, "rev-parse", "--git-common-dir", "--git-dir")
+    if p is None or p.returncode != 0:
+        return (None, None, "git cannot name the common git directory of {}".format(root))
+    lines = p.stdout.decode("utf-8", "surrogateescape").split("\n")
+    if len(lines) >= 2 and lines[0] == "--git-common-dir":
+        lines = lines[1:2] + lines[1:]
+    if len(lines) < 3 or not all(line and not line.startswith("-") for line in lines[:2]):
+        return (None, None, "git printed no common git directory for {}".format(root))
+    try:
+        common = os.path.realpath(os.path.join(root, lines[0]))
+        identity = os.path.relpath(os.path.realpath(os.path.join(root, lines[1])), common)
+    except (OSError, ValueError) as exc:
+        return (None, None, "the common git directory of {} cannot be resolved ({})".format(root, exc))
+    if identity == ".." or identity.startswith("../"):
+        return (None, None, "the git directory of {} lies outside its common git directory {}".format(
+            root, common))
+    return (common, identity, None)
+
+
+def _rdp_record_path(home, identity, rel):
+    """The record of the registry at rel, its path relative to the top level of the worktree whose identity
+    is identity (_rdp_record_home), in home: a file named by the sha256 of that pair alone, so the record
+    depends on no absolute path and moves with the repository (a renamed or moved repository keeps it)."""
+    key = __import__("hashlib").sha256(json.dumps([identity, rel]).encode("utf-8", "surrogateescape"))
+    return os.path.join(home, key.hexdigest() + ".json")
+
+
+def _rdp_record_read(path):
+    """The binding record at path, read without following a symbolic link and without blocking: (None, None)
+    when there is none; ("ok", (digest, cfg)) when it is well formed (its binding valid by _rdp_binding and
+    its digest that binding's); ("bad", detail) otherwise."""
+    try:
+        fd = os.open(path, _RDP_OPEN_FLAGS | os.O_NOFOLLOW)
+    except (FileNotFoundError, NotADirectoryError):
+        return (None, None)
+    except (OSError, ValueError) as exc:
+        return ("bad", "it cannot be opened ({})".format(exc))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ("bad", "it is not a regular file")
+        blob = _rdp_read_fd(fd, _RDP_RECORD_MAX + 1)
+    except OSError as exc:
+        return ("bad", "it cannot be read ({})".format(exc))
+    finally:
+        os.close(fd)
+    if len(blob) > _RDP_RECORD_MAX:
+        return ("bad", "it is over {} bytes".format(_RDP_RECORD_MAX))
+    try:
+        doc = json.loads(blob.decode("utf-8"))
+    except ValueError as exc:
+        return ("bad", "it is not JSON ({})".format(exc))
+    if not isinstance(doc, dict) or doc.get("version") != _RDP_RECORD_VERSION or \
+            not isinstance(doc.get("digest"), str):
+        return ("bad", "it is not a version {} binding record".format(_RDP_RECORD_VERSION))
+    kind, cfg = _rdp_binding(dict(review_dispatch=doc.get("binding")))
+    if kind != "ok":
+        return ("bad", "its binding is malformed ({})".format(cfg))
+    if _rdp_binding_digest(cfg) != doc["digest"]:
+        return ("bad", "its digest is not its binding's")
+    return ("ok", (doc["digest"], cfg))
+
+
+def _rdp_record_write(home, path, identity, rel, cfg):
+    """Record cfg as the binding of the registry at rel in the worktree identity, at path in home, unless a record is there
+    already (a concurrent check wrote one first; the caller reads it back and compares). Each directory is
+    made with mode 0700 and must be a directory, not a link to one; the record is written to a fresh
+    temporary file (O_EXCL, O_NOFOLLOW, mode 0600) and linked into place, so a reader never sees a part of
+    it. None when it is recorded, or the detail of the failure."""
+    doc = dict(version=_RDP_RECORD_VERSION, worktree=identity, registry_path=rel,
+               registry_files=list(_ORCH_REGISTRY_FILES), digest=_rdp_binding_digest(cfg),
+               binding=_rdp_binding_doc(cfg))
+    blob = (json.dumps(doc, sort_keys=True, indent=1, ensure_ascii=True) + "\n").encode("ascii")
+    tmp = "{}.{}.tmp".format(path, os.urandom(8).hex())
+    try:
+        for folder in (os.path.dirname(home), home):
+            try:
+                os.mkdir(folder, 0o700)
+            except FileExistsError:
+                pass
+            if not stat.S_ISDIR(os.lstat(folder).st_mode):
+                return "{} is not a directory".format(folder)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                     0o600)
+        try:
+            view = memoryview(blob)
+            while view:
+                view = view[os.write(fd, view):]
+        finally:
+            os.close(fd)
+        try:
+            os.link(tmp, path, follow_symlinks=False)
+        except FileExistsError:
+            pass
+        finally:
+            os.unlink(tmp)
+    except (OSError, ValueError) as exc:
+        return "it cannot be written ({})".format(exc)
+    return None
+
+
+def _rdp_record_check(home, own, scope):
+    """The binding record check for the session repository, whose records are in home and whose own
+    registries are own, (reg_dir, identity, rel) for each (the session worktree's top level, and its main
+    worktree's): ("withhold", detail) when a record cannot be read, which leaves the recorded dispatch
+    commands unknown; otherwise (drift, recorded), recorded a (cfg, reg_dir) pair for each record found,
+    drift None when each own registry's live binding matches its record, or the text naming the change and
+    the operator action when one does not. Each live binding is read through scope, the check's single
+    snapshot of each registry, so the comparison and the enforcement see the same read. A binding seen with
+    no record is recorded here (its first observation); one that cannot be recorded is a drift too, so a
+    binding the hook cannot record never leaves the registry unguarded."""
+    drifts, recorded, seen = [], [], set()
+    for reg_dir, identity, rel in own:
+        path = _rdp_record_path(home, identity, rel)
+        if path in seen:
+            continue
+        seen.add(path)
+        binding, cfg = scope(reg_dir)
+        kind, rec = _rdp_record_read(path)
+        if kind is None and binding == "ok":
+            failed = _rdp_record_write(home, path, identity, rel, cfg)
+            if failed is not None:
+                drifts.append("the review_dispatch binding of the registry at {} cannot be recorded in "
+                              "the binding record {}: {}; an operator makes that directory "
+                              "writable".format(reg_dir, path, failed))
+                continue
+            kind, rec = _rdp_record_read(path)
+        if kind is None:
+            continue
+        if kind == "bad":
+            return ("withhold", "the review dispatch binding record {} of the registry at {} cannot "
+                    "be used: {}; an operator removes it outside the session (rm {}), and the next "
+                    "check records the binding then in force".format(path, reg_dir, rec, path))
+        digest, rcfg = rec
+        recorded.append((rcfg, reg_dir))
+        if binding is None:
+            change = "is missing or carries no review_dispatch binding"
+        elif binding != "ok":
+            change = "cannot be read or its binding is malformed ({})".format(cfg)
+        elif _rdp_binding_digest(cfg) != digest:
+            change = "binds review dispatch differently (digest {}) from the binding recorded (digest " \
+                "{})".format(_rdp_binding_digest(cfg)[:12], digest[:12])
+        else:
+            continue
+        drifts.append("the orchestration registry at {} {} since its binding was recorded in the "
+                      "binding record {}, so a command may have removed or rewritten it; an operator "
+                      "restores the recorded binding, or removes the record outside the session (rm {}) "
+                      "so the next check records the binding then in force".format(reg_dir, change, path, path))
+    return ("; ".join(drifts) or None, recorded)
+
+
+def _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, foreign, guard):
+    """The decision in a session scoped by the binding of the registry at reg_dir. foreign is False, True
+    (the registry is not the session repository's own), or the text of a conflict between registries;
+    guard is the session repository's git directory to protect (_rdp_names_common_dir)."""
+    if binding == "bad":
+        # A malformed binding cannot say which commands dispatch.
+        return _rdp_withhold(tool_input, "the orchestration registry or its review_dispatch binding is "
+                             "malformed ({})".format(cfg))
+    result = _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=foreign, guard=guard)
+    if result[0] in ("allow", "note") and _rdp_overdue():
+        # A read or probe that overran the deadline leaves a result that was not reached within the
+        # budget: a cannot-evaluate, never an allow.
+        return ("unverifiable", "the check ran past its {} second budget, so its result is not "
+                "used".format(_RDP_BUDGET))
+    return result
+
+
+# The commands a plain call may run on a registry file or the .aiqt directory, because they only read
+# (no option of theirs writes a file): programs of rule 4's allowlist (_RDP_PLAIN_COMMANDS), named by the
+# command word's last component.
+_RDP_REGISTRY_READERS = frozenset(("cat", "head", "tail", "wc", "ls", "stat", "grep", "cmp", "diff"))
+
+
+def _rdp_word_values(folded):
+    """The texts a casefolded plain word may hand a program as a path: the word itself, what follows each
+    =, : or ) in it (an option value, a git pathspec after its magic), and, for a word of short options
+    (one leading dash), what follows each of its letters (a value glued to -t, -C or a group such as -rt)."""
+    values = {folded}
+    values.update(folded[i + 1:] for i, ch in enumerate(folded) if ch in "=:)")
+    if folded.startswith("-") and not folded.startswith("--"):
+        values.update(folded[k:] for k in range(2, len(folded)))
+    return [value for value in values if value]
+
+
+def _rdp_component_names(component, names):
+    """Whether one path component names one of names (casefolded): equal to it, or, holding a glob
+    character (a quoted glob git or another program expands itself), matching it."""
+    if any(ch in component for ch in "*?["):
+        return any(fnmatch.fnmatchcase(name, component) for name in names)
+    return component in names
+
+
+def _rdp_names_registry(words, cwd=None):
+    """The first word of a plain command that names an orchestration registry file (its file name anywhere
+    in the word, without regard to case) or the .aiqt directory holding it; None when no word does, or the
+    command only reads (_RDP_REGISTRY_READERS). The .aiqt directory is named by a value of the word
+    (_rdp_word_values) whose last component, once normalized, or once resolved against the session cwd,
+    is .aiqt or a glob matching it or a registry file; and by a word entering a .aiqt directory (-C
+    .aiqt/core) in a command that also climbs with .., which can then reach it. A Bash call that writes,
+    moves or removes the registry would switch the hook off for every later call."""
+    if _rdp_basename(words[0]) in _RDP_REGISTRY_READERS:
+        return None
+    names = tuple(rel.rsplit("/", 1)[-1].casefold() for rel in _ORCH_REGISTRY_FILES)
+    targets = names + (".aiqt",)
+    bases = []
+    if isinstance(cwd, str) and os.path.isabs(cwd):
+        bases = [os.path.normpath(cwd), os.path.realpath(cwd)]
+    enters = climbs = None
+    for word in words[1:]:
+        folded = word.casefold()
+        if any(name in folded for name in names):
+            return word
+        for value in _rdp_word_values(folded):
+            forms = [os.path.normpath(value)] + [os.path.normpath(os.path.join(b, value)) for b in bases]
+            if any(_rdp_component_names(os.path.basename(form).casefold(), targets) for form in forms):
+                return word
+            parts = value.split("/")
+            if ".." in parts:
+                climbs = climbs or word
+            if any(_rdp_component_names(part, (".aiqt",)) for part in parts):
+                enters = enters or word
+    if enters is not None and climbs is not None:
+        return climbs
+    return None
+
+
+# The git configuration a plain git command may not change in a bound session: it moves the work tree
+# (core.worktree), makes the repository bare (core.bare), or includes another configuration file that may
+# set either. A separated git directory (--separate-git-dir) moves the repository the same way. Each would
+# point git's top level away from the registry that binds the session.
+_RDP_REPOSITORY_KEYS = ("core.worktree", "core.bare", "include.path", "includeif.", "--separate-git-dir")
+# The git subcommands that only read: a plain git command running one of them (matched exactly, as git runs
+# a built-in only under its exact name and an alias never hides one) treats every word as data, so neither
+# a registry name nor a repository key in it is refused (git log -S core.worktree, git ls-files '*').
+_RDP_GIT_READS = frozenset(("status", "log", "diff", "show", "rev-parse", "ls-files", "blame", "grep",
+                            "cat-file"))
+# git's global options before the subcommand: those taking the next word as their value (or, written
+# long, a value after =), and those taking none. Any other leaves the subcommand unknown.
+_RDP_GIT_GLOBAL_VALUED = frozenset(("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"))
+_RDP_GIT_GLOBAL_FLAGS = frozenset(("-p", "--paginate", "-P", "--no-pager", "--no-replace-objects", "--bare",
+                                   "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
+                                   "--icase-pathspecs", "--no-optional-locks"))
+# The git subcommands a plain git command may run in a bound session, each matched exactly (git runs a
+# built-in only under its exact name, and an alias never hides one). Every other subcommand (instaweb,
+# difftool, mergetool, send-email, filter-branch, bisect, submodule, daemon, web--browse, the credential
+# commands, help, an alias, an external git-NAME program found on PATH, and one behind a global option this
+# hook does not know) is refused: no option table over git's open set of subcommands closes the programs
+# they run (instaweb --httpd names its server's command). _RDP_GIT_INFO_OPTIONS are the global options
+# that, as the only word after git, print a fact and run nothing.
+_RDP_GIT_ALLOWED = frozenset((
+    "status", "log", "diff", "show", "rev-parse", "ls-files", "ls-tree", "cat-file", "blame", "grep",
+    "describe", "shortlog", "merge-base", "rev-list", "for-each-ref", "show-ref", "branch", "tag", "remote",
+    "config", "add", "rm", "mv", "commit", "push", "fetch", "stash", "switch", "checkout", "restore", "reset",
+    "merge", "rebase", "cherry-pick", "revert", "worktree", "clone"))
+_RDP_GIT_INFO_OPTIONS = frozenset(("--version", "--exec-path", "--html-path", "--man-path", "--info-path"))
+# The options that make a git command run a program, named in it or configured, whatever its subcommand
+# (each matched abbreviated or not): an external diff (diff.external, a diff driver's command), a textconv
+# filter, a signature check running gpg.program, grep's pager on the matches, rebase's exec lines,
+# difftool's command, the upload, receive and archive programs of a remote, send-email's commands and
+# server, and the global --exec-path=DIR, from which git runs its own programs (a bare --exec-path only
+# prints it). A word naming an option of its own that shares a prefix with one of them (--text, --to,
+# --cc, --filter) is not one. _RDP_GIT_SUB_PROGRAM_OPTIONS holds those of one subcommand only, read from
+# git SUB -h (git 2.53) for each allowlisted subcommand: cat-file's smudge and clean filters (its --filter
+# is an object filter); clone's --config, which sets configuration in the new repository; signing and
+# signature verification, which run gpg.program (commit, merge, rebase, cherry-pick and revert --gpg-sign,
+# tag --sign, --local-user and --verify, merge --verify-signatures, push --signed); a merge strategy, which
+# may name a git-merge-NAME program on PATH (merge, rebase, cherry-pick and revert --strategy); patch and
+# interactive modes, which run interactive.diffFilter (add, commit, checkout, restore, reset and stash
+# --patch, add and commit --interactive); and commit and tag --trailer, which run trailer commands. The
+# other allowlisted subcommands have no such option of their own (status, log, diff, show, rev-parse,
+# ls-files, ls-tree, blame, grep, describe, shortlog, merge-base, rev-list, for-each-ref, show-ref, branch,
+# remote, config, rm, mv, fetch, switch, worktree). Whether or not a subcommand has one, an option's value
+# can also run gpg.program: a signature placeholder or atom in a format (--format, --pretty, shortlog
+# --group) or a sort key (the --sort of for-each-ref, branch and tag), judged by _rdp_git_signature_value.
+# git runs the editor by default (git commit without -m, git revert), so an option asking for it is not
+# counted, as configuration is not.
+_RDP_GIT_PROGRAM_OPTIONS = ("--ext-diff", "--textconv", "--show-signature", "--open-files-in-pager", "--exec",
+                            "--extcmd", "--upload-pack", "--receive-pack", "--exec-path", "--sendmail-cmd",
+                            "--to-cmd", "--cc-cmd", "--header-cmd", "--smtp-server")
+_RDP_GIT_SUB_PROGRAM_OPTIONS = {
+    "cat-file": ("--filters",), "clone": ("--config",), "commit": ("--gpg-sign", "--patch", "--interactive",
+    "--trailer"), "tag": ("--sign", "--local-user", "--verify", "--trailer"), "merge": ("--gpg-sign",
+    "--verify-signatures", "--strategy"), "rebase": ("--gpg-sign", "--strategy"), "cherry-pick": ("--gpg-sign",
+    "--strategy"), "revert": ("--gpg-sign", "--strategy"), "push": ("--signed",), "add": ("--patch",
+    "--interactive"), "checkout": ("--patch",), "restore": ("--patch",), "reset": ("--patch",),
+    "stash": ("--patch",)}
+_RDP_GIT_NOT_PROGRAM_OPTIONS = frozenset(("--text", "--filter", "--to", "--cc"))
+# The subcommands whose grammar ends their options at a -- ([--] [<pathspec>...]), so a word after it is a
+# path, never an option: on git 2.53, git SUB -- --bogus and git SUB WORD -- --bogus take --bogus as a
+# path or revision for each of them (no unknown-option error), and git diff, log -p and show run no
+# diff.external for -- --ext-diff while they do for --ext-diff. log, show, diff, rev-list and shortlog end
+# at the first -- whatever comes before it (git log --grep -- x lacks a --grep value); the others end at a
+# -- not taken as an option's value. The -- is read as ending them when the one scan over the words reaches
+# it surely free: not taken by the word before it as a value (_rdp_git_takes_next, _rdp_git_takes_dashdash),
+# unless that word was itself surely an option's value; a TRANSPORT::ADDRESS after it is still judged. Any
+# other subcommand (stash, whose show passes its words to a diff, config, remote, worktree, cat-file, mv,
+# cherry-pick, revert, merge-base and the rest) judges a word after -- as before, which only refuses.
+_RDP_GIT_DASHDASH_ENDS = frozenset(("status", "log", "diff", "show", "rev-list", "shortlog", "ls-files",
+                                    "blame", "grep", "add", "rm", "commit", "checkout", "restore", "reset"))
+# The subcommands that run a command given as their words: bisect run, submodule foreach (also through
+# submodule--helper) and filter-branch, whose filters and setup are shell text.
+_RDP_GIT_PROGRAM_SUBCOMMANDS = {"bisect": "run", "submodule": "foreach", "submodule--helper": "foreach",
+                                "filter-branch": None}
+# For log, show and diff, an option asking for patch output, to which a textconv filter configured before
+# the session applies: such a read gets the full checks.
+_RDP_GIT_PATCH_OPTIONS = ("--patch", "--patch-with-raw", "--patch-with-stat", "--unified", "--cc", "--dd",
+                          "--combined-all-paths", "--remerge-diff", "--diff-merges", "--word-diff",
+                          "--word-diff-regex", "--color-words", "--function-context", "--binary")
+# The short options of log, show and diff that ask for patch output (-p, -u, -U, -c, -m, -W, -L), found
+# in a word of short options before any letter that takes a value: the rest of the word after one of
+# _RDP_GIT_DIFF_VALUED is its value (-Sconfig searches for config), and after one of _RDP_GIT_DIFF_NEXT
+# with nothing glued, so is the next word (-S -p searches for -p). _RDP_GIT_DIFF_NEXT_LONG holds the long
+# options that take the next word when written without = (--grep -c, --author -p).
+_RDP_GIT_PATCH_LETTERS = "pucmUWL"
+_RDP_GIT_DIFF_VALUED = "SGOIlnMCBX"
+_RDP_GIT_DIFF_NEXT = "SGOIln"
+_RDP_GIT_DIFF_NEXT_LONG = frozenset((
+    "--grep", "--author", "--committer", "--since", "--until", "--after", "--before", "--max-count", "--skip",
+    "--min-age", "--max-age", "--exclude", "--glob", "--encoding", "--date", "--src-prefix", "--dst-prefix",
+    "--line-prefix", "--diff-filter", "--find-object", "--ignore-matching-lines", "--anchored", "--skip-to",
+    "--rotate-to", "--diff-algorithm", "--inter-hunk-context", "--ws-error-highlight"))
+# The git config read actions, each with the least and most operands it takes; the options that may
+# precede one, or a key read alone, without changing what it does; and those of them taking a value, glued
+# after = or as the next word (--file PATH, --type bool).
+# The short options of each subcommand, from git SUB -h (git 2.53): (the letters that run a program, the
+# letters taking a value, after which the rest of the word is that value, and those of them taking the
+# next word when nothing is glued to them), so -eOops is a pattern but -iO runs the pager, and git grep
+# -e -O searches for -O; and the long options taking the next word when written without =, so git log
+# --grep --ext-diff searches for --ext-diff. Only an option whose value git requires is listed: a word
+# taken as a value is not judged, while a word wrongly judged only refuses. A subcommand not listed has
+# no short option that runs a program or takes the next word. For blame and shortlog the letters taking the
+# next word are those git 2.53 refused when given last for want of a value (_RDP_GIT_DASHDASH_TAKES reads
+# them from here), and the letters taking the rest of the word add those whose value git takes only glued,
+# found by git 2.53 reading blame -CS f and -MS f as a score and the file f, and refusing shortlog -wG.
+_RDP_GIT_PROGRAM_LETTERS = {
+    "grep": ("O", "efABCm", "efABCm"), "rebase": ("xsS", "CX", "CX"), "difftool": ("x", "t", ""),
+    "clone": ("uc", "job", "job"), "tag": ("suv", "mF", "mF"), "commit": ("Sp", "FmcCtU", "FmcCtU"),
+    "merge": ("sS", "XmF", "XmF"), "cherry-pick": ("S", "mX", "mX"), "revert": ("S", "mX", "mX"),
+    "add": ("pi", "U", "U"), "checkout": ("p", "bBU", "bBU"), "restore": ("p", "sU", "sU"),
+    "reset": ("p", "U", "U"), "stash": ("p", "", ""), "switch": ("", "cC", "cC"), "push": ("", "o", "o"),
+    "fetch": ("", "jo", "jo"), "branch": ("", "u", "u"), "ls-files": ("", "xX", "xX"),
+    "blame": ("", "GILOSCM", "GILOS"), "shortlog": ("", "GIOSlw", "GIOSl"),
+    "log": ("", _RDP_GIT_DIFF_VALUED + "L", _RDP_GIT_DIFF_NEXT + "L"),
+    "show": ("", _RDP_GIT_DIFF_VALUED + "L", _RDP_GIT_DIFF_NEXT + "L"),
+    "diff": ("", _RDP_GIT_DIFF_VALUED, _RDP_GIT_DIFF_NEXT),
+    "rev-list": ("", _RDP_GIT_DIFF_VALUED, _RDP_GIT_DIFF_NEXT)}
+_RDP_GIT_NEXT_LONG = {
+    "log": _RDP_GIT_DIFF_NEXT_LONG | frozenset(("--decorate-refs", "--decorate-refs-exclude")),
+    "show": _RDP_GIT_DIFF_NEXT_LONG | frozenset(("--decorate-refs", "--decorate-refs-exclude")),
+    "diff": _RDP_GIT_DIFF_NEXT_LONG, "rev-list": _RDP_GIT_DIFF_NEXT_LONG,
+    "shortlog": (_RDP_GIT_DIFF_NEXT_LONG - frozenset(("--committer",))) | frozenset(("--group",)),
+    "ls-files": frozenset(("--exclude", "--exclude-from", "--exclude-per-directory", "--with-tree", "--format")),
+    "ls-tree": frozenset(("--format",)), "cat-file": frozenset(("--path", "--filter")),
+    "blame": frozenset(("--diff-algorithm", "--ignore-rev", "--ignore-revs-file", "--contents")),
+    "grep": frozenset(("--max-depth", "--context", "--before-context", "--after-context", "--threads",
+                       "--max-count")),
+    "describe": frozenset(("--candidates", "--match", "--exclude")),
+    "for-each-ref": frozenset(("--count", "--format", "--start-after", "--exclude", "--sort", "--points-at",
+                               "--merged", "--no-merged", "--contains", "--no-contains")),
+    "branch": frozenset(("--set-upstream-to", "--contains", "--no-contains", "--merged", "--no-merged", "--sort",
+                         "--points-at", "--format")),
+    "tag": frozenset(("--message", "--file", "--cleanup", "--contains", "--no-contains", "--merged",
+                      "--no-merged", "--sort", "--points-at", "--format")),
+    "add": frozenset(("--unified", "--inter-hunk-context", "--chmod", "--pathspec-from-file")),
+    "commit": frozenset(("--file", "--author", "--date", "--message", "--reedit-message", "--reuse-message",
+                         "--fixup", "--squash", "--template", "--cleanup", "--unified", "--inter-hunk-context",
+                         "--pathspec-from-file")),
+    "push": frozenset(("--repo", "--recurse-submodules", "--push-option")),
+    "fetch": frozenset(("--jobs", "--depth", "--shallow-since", "--shallow-exclude", "--deepen", "--refmap",
+                        "--server-option", "--negotiation-tip", "--filter")),
+    "switch": frozenset(("--create", "--force-create", "--conflict", "--orphan")),
+    "checkout": frozenset(("--conflict", "--orphan", "--unified", "--inter-hunk-context", "--pathspec-from-file")),
+    "restore": frozenset(("--source", "--conflict", "--unified", "--inter-hunk-context", "--pathspec-from-file")),
+    "reset": frozenset(("--unified", "--inter-hunk-context", "--pathspec-from-file")),
+    "merge": frozenset(("--cleanup", "--strategy-option", "--message", "--file", "--into-name")),
+    "rebase": frozenset(("--onto", "--whitespace", "--empty", "--strategy-option")),
+    "cherry-pick": frozenset(("--cleanup", "--mainline", "--strategy-option", "--empty")),
+    "revert": frozenset(("--cleanup", "--mainline", "--strategy-option")),
+    "clone": frozenset(("--jobs", "--template", "--reference", "--reference-if-able", "--origin", "--branch",
+                        "--revision", "--depth", "--shallow-since", "--shallow-exclude", "--separate-git-dir",
+                        "--ref-format", "--server-option", "--filter", "--bundle-uri")),
+    "rm": frozenset(("--pathspec-from-file",))}
+# For each subcommand of _RDP_GIT_DASHDASH_ENDS, its options that take a value git requires, which it reads
+# from the next word when none is written with the option: (the long options, the short letters). Read
+# from git SUB --help-all (git 2.53), which lists the hidden options too, for status (none), ls-files,
+# grep, add, rm, commit, checkout, restore and reset, and for blame and shortlog, whose words git passes
+# to the revision options when they are not their own, joined with those of log (their short letters are
+# their own, not those of log: blame takes -L and -S by git blame -h and -G, -I and -O through the revision
+# options, shortlog -G, -I, -O, -S and -l through the revision options, each found by git 2.53 refusing the
+# letter given last for want of a value; blame -n and -l and shortlog -n take none, as shortlog --committer
+# does); for log, show, diff and
+# rev-list (whose -h lists no option) the git-log, git-show, git-diff and git-rev-list documentation
+# pages, as _RDP_GIT_NEXT_LONG and the next-word letters of _RDP_GIT_PROGRAM_LETTERS hold them.
+_RDP_GIT_REV_TAKES = (_RDP_GIT_NEXT_LONG["log"], _RDP_GIT_PROGRAM_LETTERS["log"][2])
+_RDP_GIT_DASHDASH_TAKES = {
+    "status": (frozenset(), ""), "log": _RDP_GIT_REV_TAKES,
+    "show": (_RDP_GIT_NEXT_LONG["show"], _RDP_GIT_PROGRAM_LETTERS["show"][2]),
+    "diff": (_RDP_GIT_NEXT_LONG["diff"], _RDP_GIT_PROGRAM_LETTERS["diff"][2]),
+    "rev-list": (_RDP_GIT_NEXT_LONG["rev-list"], _RDP_GIT_PROGRAM_LETTERS["rev-list"][2]),
+    "shortlog": ((_RDP_GIT_REV_TAKES[0] - frozenset(("--committer",))) | frozenset(("--group",)),
+                 _RDP_GIT_PROGRAM_LETTERS["shortlog"][2]),
+    "ls-files": (frozenset(("--exclude", "--exclude-from", "--exclude-per-directory", "--format",
+                            "--with-tree")), "xX"),
+    "blame": (_RDP_GIT_REV_TAKES[0] | frozenset(("--contents", "--diff-algorithm", "--ignore-rev",
+                                                 "--ignore-revs-file")), _RDP_GIT_PROGRAM_LETTERS["blame"][2]),
+    "grep": (frozenset(("--after-context", "--before-context", "--context", "--max-count", "--max-depth",
+                        "--threads")), "ABCefm"),
+    "add": (frozenset(("--chmod", "--inter-hunk-context", "--pathspec-from-file", "--unified")), "U"),
+    "rm": (frozenset(("--pathspec-from-file",)), ""),
+    "commit": (frozenset(("--author", "--cleanup", "--date", "--file", "--fixup", "--inter-hunk-context",
+                          "--message", "--pathspec-from-file", "--reedit-message", "--reuse-message", "--squash",
+                          "--template", "--trailer", "--unified")), "CFUcmt"),
+    "checkout": (frozenset(("--conflict", "--inter-hunk-context", "--orphan", "--pathspec-from-file",
+                            "--unified")), "BUb"),
+    "restore": (frozenset(("--conflict", "--inter-hunk-context", "--pathspec-from-file", "--source",
+                           "--unified")), "Us"),
+    "reset": (frozenset(("--inter-hunk-context", "--pathspec-from-file", "--unified")), "U")}
+# For each subcommand of _RDP_GIT_DASHDASH_TAKES, its options taking no value, or one only glued after =,
+# that git 2.53 reads from a word naming (or abbreviating) one of its value-taking long options: git log
+# --decorate is no --decorate-refs, git shortlog --summary and blame --root no revision option. Every
+# other long word a value-taking option of the set begins with takes the next word or stops git with an
+# error (an unknown or ambiguous option, or one missing its value), found by giving git 2.53 each such word
+# last.
+_RDP_GIT_DASHDASH_FREE = {
+    "log": ("--decorate",), "show": ("--decorate",), "shortlog": ("--email", "--summary"),
+    "blame": ("--abbrev", "--incremental", "--line-porcelain", "--minimal", "--root")}
+# The long options, written whole, that take no value (or one only glued after =) for every subcommand of
+# _RDP_GIT_DASHDASH_TAKES that accepts them: git 2.53 refused, as an unknown option, a word given after
+# each (git log --stat --bogus), or, for diff, rev-list, shortlog and blame, which do not name the word they
+# refuse, ran with the option alone and refused the word after it. Every other long option word written
+# without = may take the next word as its value (_rdp_git_may_take): an option missing from the value tables
+# (git 2.53 log, show, diff, rev-list, shortlog and blame take the next word for --word-diff-regex,
+# --default, --output and --since-as-filter, among others), an abbreviation or a misspelling.
+_RDP_GIT_FREE_LONG = frozenset((
+    "--abbrev-commit", "--all-match", "--allow-empty", "--amend", "--binary", "--boundary", "--branch", "--cached",
+    "--check", "--cherry-pick", "--color-words", "--count", "--date-order", "--decorate", "--deleted", "--detach",
+    "--dry-run", "--email", "--exit-code", "--extended-regexp", "--files-with-matches", "--first-parent",
+    "--fixed-strings", "--force", "--full-history", "--full-index", "--hard", "--ignore-all-space", "--ignore-case",
+    "--ignore-space-change", "--ignored", "--intent-to-add", "--keep", "--left-right", "--line-number",
+    "--merge-base", "--merges", "--minimal", "--mixed", "--modified", "--name-only", "--name-status",
+    "--no-decorate", "--no-edit", "--no-ext-diff", "--no-index", "--no-merges", "--no-patch", "--no-renames",
+    "--no-textconv", "--no-verify", "--no-walk", "--numbered", "--numstat", "--oneline", "--others", "--ours",
+    "--patch", "--porcelain", "--quiet", "--raw", "--recursive", "--reverse", "--root", "--short", "--shortstat",
+    "--show-email", "--show-stash", "--signoff", "--soft", "--staged", "--stat", "--summary", "--text", "--theirs",
+    "--topo-order", "--update", "--verbose", "--word-diff", "--worktree"))
+# The subcommands that reach a remote, where a URL written TRANSPORT::ADDRESS runs the remote helper
+# git-remote-TRANSPORT found on PATH.
+_RDP_GIT_TRANSPORTS = frozenset(("fetch", "push", "clone", "remote"))
+_RDP_GIT_CONFIG_READS = {"--get": (1, 2), "--get-all": (1, 2), "--get-regexp": (1, 2), "--list": (0, 0),
+                         "-l": (0, 0)}
+_RDP_GIT_CONFIG_MODIFIERS = frozenset(("--local", "--global", "--system", "--worktree", "--show-origin",
+                                       "--show-scope", "-z", "--null", "--name-only", "--includes",
+                                       "--no-includes", "--bool", "--int", "--bool-or-int", "--path",
+                                       "--expiry-date", "--fixed-value", "--no-type"))
+_RDP_GIT_CONFIG_VALUED = frozenset(("--file", "-f", "--blob", "--type", "--default"))
+
+
+def _rdp_git_subcommand(words):
+    """(index, configured) for a plain git command: the index in words of its subcommand, None when a
+    global option this hook does not know comes first or no subcommand follows; and whether a global
+    option sets configuration for the call (-c, --config-env), which can make any subcommand run a
+    program."""
+    configured = False
+    i = 1
+    while i < len(words):
+        word = words[i]
+        if not word.startswith("-"):
+            return (i, configured)
+        name = word.split("=", 1)[0]
+        configured = configured or name in ("-c", "--config-env")
+        if word in _RDP_GIT_GLOBAL_VALUED:
+            i += 2
+        elif word in _RDP_GIT_GLOBAL_FLAGS or (name in _RDP_GIT_GLOBAL_VALUED and name.startswith("--") and
+                                               name != word):
+            i += 1
+        else:
+            return (None, configured)
+    return (None, configured)
+
+
+def _rdp_long_option(name, options):
+    """Whether the option name (the part of a word before any =) is one of options or an abbreviation git
+    may expand to one (--text is an option of its own, not --textconv)."""
+    return len(name) > 2 and name.startswith("--") and name != "--text" and \
+        any(option.startswith(name) for option in options)
+
+
+def _rdp_git_takes_dashdash(sub, word):
+    """Whether the option word, just before a -- given to the git subcommand sub, may take that -- as its
+    value (_RDP_GIT_DASHDASH_TAKES): a long option written without = that is one of its value-taking options
+    or an abbreviation of one, or a word of short options whose first value-taking letter ends it. A
+    --opt=value word, a short letter with its value glued (-n5, -U3), a count (-1) and an option taking no
+    value never take it; a word that is no option takes nothing, and an option of a subcommand without a
+    set may take it."""
+    if not word.startswith("-") or word == "-":
+        return False
+    if sub not in _RDP_GIT_DASHDASH_TAKES:
+        return True
+    longs, letters = _RDP_GIT_DASHDASH_TAKES[sub]
+    if word.startswith("--"):
+        return "=" not in word and any(option.startswith(word) for option in longs)
+    for k, ch in enumerate(word[1:], 1):
+        if ch in letters:
+            return k == len(word) - 1
+    return False
+
+
+def _rdp_git_waits(sub, word):
+    """Whether the long option word, given to the git subcommand sub, surely takes the next word as its
+    value or stops git: written without = and beginning one of the value-taking long options of
+    _RDP_GIT_DASHDASH_TAKES, it is none of the options taking no value that begin with it
+    (_RDP_GIT_DASHDASH_FREE), so git either takes the next word (git commit --mess) or refuses the word."""
+    return word.startswith("--") and sub in _RDP_GIT_DASHDASH_TAKES and _rdp_git_takes_dashdash(sub, word) and \
+        not any(option.startswith(word) for option in _RDP_GIT_DASHDASH_FREE.get(sub, ()))
+
+
+def _rdp_git_takes_next(sub, word):
+    """Whether the option word surely takes the next word as its value when given to the git subcommand
+    sub, by the tables the scan reads operands with: a long option of _RDP_GIT_NEXT_LONG written whole, or
+    a word of short options whose first value-taking letter (_RDP_GIT_PROGRAM_LETTERS) takes the next word
+    and ends it (git grep -e, git log -S); the rest of a word after any other value-taking letter is its
+    value (-eOops, -n5)."""
+    if word in _RDP_GIT_NEXT_LONG.get(sub, frozenset()):
+        return True
+    _letters, valued, nexts = _RDP_GIT_PROGRAM_LETTERS.get(sub, ("", "", ""))
+    if len(word) > 1 and word.startswith("-") and not word.startswith("--"):
+        for k, ch in enumerate(word[1:], 1):
+            if ch in valued:
+                return ch in nexts and k == len(word) - 1
+    return False
+
+
+def _rdp_git_may_take(sub, word):
+    """Whether the option word may take the next word as its value when given to the git subcommand sub:
+    it surely does (_rdp_git_takes_next), it may take a -- (_rdp_git_takes_dashdash), or, for a subcommand
+    of _RDP_GIT_DASHDASH_TAKES, it is a long option written without = other than one of
+    _RDP_GIT_FREE_LONG (git show --word-diff-regex --grep gives --grep as the regex)."""
+    return _rdp_git_takes_next(sub, word) or _rdp_git_takes_dashdash(sub, word) or (
+        sub in _RDP_GIT_DASHDASH_TAKES and word.startswith("--") and "=" not in word and
+        word not in _RDP_GIT_FREE_LONG)
+
+
+# A pretty-format signature placeholder (%G?, %GG, %GS, %GK, %GF, %GP, %GT), also with git's one modifier
+# character between % and it (%+G?, %-GG, % GK; a padding or wrapping placeholder such as %<(5) or %w(9) is a
+# placeholder of its own, so the signature one keeps its %), or a ref-filter signature atom, also of the
+# commit a tag points to (%(signature), %(*signature:grade)): each makes git run gpg.program.
+_RDP_GIT_SIGNATURE_FORMAT = re.compile(r"%[-+ ]?G|%\(\*?signature")
+# A ref-filter sort key naming the signature atom, which git computes to sort by, running gpg.program:
+# signature with git's prefixes (a leading - reverses, version: or v: sorts as versions, * reads the commit a
+# tag points to) and modifiers (signature:grade, -v:*signature:signer). It is matched anywhere in the key, so
+# a key only holding the word (contents:signature, which runs none) is refused too.
+_RDP_GIT_SIGNATURE_SORT = re.compile(r"signature")
+# The options, beyond --format and --pretty (a pretty format for log, show, rev-list, shortlog, blame and
+# stash list, a ref-filter format for for-each-ref, branch and tag), whose value git reads as a format or a
+# sort key, by subcommand, each with the pattern a value running gpg.program matches: the --sort of
+# for-each-ref, branch and tag (a ref-filter sort key, given once per key), and shortlog --group, whose
+# value git reads as a pretty format when it holds a % (also written format:FORMAT). Read from git SUB -h
+# (git 2.53) for every allowlisted subcommand (log, show, diff and rev-list list none there; their format
+# options are the revision options --format and --pretty) and run on git 2.53 with a gpg.program leaving a
+# marker: the other format options take formats with no signature placeholder or atom. ls-files and
+# ls-tree --format refuse a %G placeholder (exit 128, "element 'GG' does not start with '('") and
+# %(signature); cat-file --batch, --batch-check and --batch-command refuse %(signature), and only they print
+# %G as written. log --date=format: is a strftime format, and clone --ref-format names a ref storage format.
+_RDP_GIT_SIGNATURE_VALUES = {
+    "for-each-ref": (("--sort",), _RDP_GIT_SIGNATURE_SORT), "branch": (("--sort",), _RDP_GIT_SIGNATURE_SORT),
+    "tag": (("--sort",), _RDP_GIT_SIGNATURE_SORT), "shortlog": (("--group",), _RDP_GIT_SIGNATURE_FORMAT)}
+
+
+def _rdp_git_signature_value(sub, name):
+    """The pattern a value of the option name (the part of a word before any =, abbreviated or not) given to
+    the git subcommand sub matches when it makes git run gpg.program: _RDP_GIT_SIGNATURE_FORMAT for --format,
+    --pretty and shortlog --group, _RDP_GIT_SIGNATURE_SORT for a --sort of _RDP_GIT_SIGNATURE_VALUES; None
+    when the option takes no value covered here that can run gpg.program (git may still read its value as a
+    format: cat-file --batch-check takes one, with no signature placeholder or atom)."""
+    if _rdp_long_option(name, ("--format", "--pretty")):
+        return _RDP_GIT_SIGNATURE_FORMAT
+    options, pattern = _RDP_GIT_SIGNATURE_VALUES.get(sub, ((), None))
+    return pattern if _rdp_long_option(name, options) else None
+
+
+def _rdp_git_program_under(sub, before, after):
+    """The first word that runs a program when the git subcommand sub is called with the words after,
+    after the global options before; None when none does (_rdp_git_runs_program)."""
+    for word in before:
+        if word in ("-p", "--paginate"):
+            return word
+    run = _RDP_GIT_PROGRAM_SUBCOMMANDS.get(sub, False)
+    if run is None or (run and run in after):
+        return sub if run is None else run
+    owned = _RDP_GIT_SUB_PROGRAM_OPTIONS.get(sub, ())
+    letters, valued, _nexts = _RDP_GIT_PROGRAM_LETTERS.get(sub, ("", "", ""))
+    # held: the word may be an option's value; data: it surely is one (the word before it, itself surely
+    # free, surely takes it or stops git, _rdp_git_waits). A -- ends the options only when reached neither.
+    # form: the pattern a word matches when, as the value of the format or sort option before it
+    # (_rdp_git_signature_value), it runs gpg.program; judged before the word is skipped as that value.
+    skip = ended = held = data = False
+    form = None
+    for word in after:
+        if form is not None and form.search(word):
+            return word
+        name = word.split("=", 1)[0]
+        if sub in _RDP_GIT_TRANSPORTS and _rdp_git_helper_url(word):
+            return word
+        if ended:
+            continue
+        if word == "--" and not skip and not held and sub in _RDP_GIT_DASHDASH_ENDS:
+            # The end of the options (_RDP_GIT_DASHDASH_ENDS): every word after it is a path.
+            ended = True
+            continue
+        # The next word: free after a value; surely a value after a surely free word that surely takes one,
+        # an abbreviation of a value-taking option included (git commit --mess --mess -- -S gives the second
+        # --mess as the message, and -- ends the options); possibly one after any word that may take one (a
+        # word naming both a value-taking option and one taking none, an option of a word that may itself be
+        # a value, a long option missing from the value tables: git show --word-diff-regex --grep --ext-diff
+        # gives --grep as the regex and runs diff.external, _rdp_git_may_take). Only a word surely a value is
+        # skipped unjudged (git commit --mess --gpg-sign gives --gpg-sign as the message); a word possibly
+        # one is still judged, which only refuses.
+        takes = _rdp_git_takes_next(sub, word)
+        held, data = (False, False) if data else (
+            _rdp_git_may_take(sub, word), (takes or _rdp_git_waits(sub, word)) and not held)
+        if skip:
+            # An option's operand is data, a format-looking one included (git log --grep --format=%G
+            # searches for --format=%G); a URL operand was judged above, since git still reaches it.
+            skip = False
+            form = None
+            continue
+        form = _rdp_git_signature_value(sub, name)
+        if form is not None and form.search(word):
+            return word
+        form = form if name == word else None
+        if word == "--help":
+            return word
+        if name.startswith("--") and name not in _RDP_GIT_NOT_PROGRAM_OPTIONS and word != "--exec-path" and (
+                _rdp_long_option(name, _RDP_GIT_PROGRAM_OPTIONS + owned)):
+            return word
+        skip = data
+        if len(word) > 1 and word.startswith("-") and not word.startswith("--"):
+            for ch in word[1:]:
+                if ch in letters:
+                    return word
+                if ch in valued:
+                    break
+    return None
+
+
+def _rdp_git_helper_url(word):
+    """Whether a word (or the value of an option word, after =) is a URL written TRANSPORT::ADDRESS, for
+    which git runs the remote helper git-remote-TRANSPORT found on PATH."""
+    value = word.split("=", 1)[-1] if word.startswith("-") else word
+    head, sep, _rest = value.partition("::")
+    return bool(sep) and head != "" and all(ch.isascii() and (ch.isalnum() or ch in "+.-") for ch in head)
+
+
+def _rdp_git_off_allowlist(words):
+    """The word of a plain git command that names a subcommand off _RDP_GIT_ALLOWED (matched exactly), or
+    the global option this hook does not know that hides the subcommand; None when the command is no git
+    command, runs an allowlisted subcommand, or is git alone or with one of _RDP_GIT_INFO_OPTIONS only."""
+    if _rdp_basename(words[0]).casefold() != "git":
+        return None
+    if len(words) == 1 or (len(words) == 2 and words[1] in _RDP_GIT_INFO_OPTIONS):
+        return None
+    at, _configured = _rdp_git_subcommand(words)
+    if at is None:
+        return next((word for word in words[1:] if word.startswith("-") and word not in _RDP_GIT_GLOBAL_VALUED
+                     and word not in _RDP_GIT_GLOBAL_FLAGS and not (
+                         word.startswith("--") and word.split("=", 1)[0] in _RDP_GIT_GLOBAL_VALUED)), words[-1])
+    return None if words[at] in _RDP_GIT_ALLOWED else words[at]
+
+
+def _rdp_git_runs_program(words):
+    """The first word of a plain git command that makes it run a program, named in it or configured; None when
+    the command is no git command or runs none that way: a global -p or --paginate (the pager), an option of
+    _RDP_GIT_PROGRAM_OPTIONS or of the subcommand's _RDP_GIT_SUB_PROGRAM_OPTIONS (abbreviated or not), a
+    signature placeholder or atom in a --format, --pretty or shortlog --group value
+    (_RDP_GIT_SIGNATURE_FORMAT) or a signature sort key in a for-each-ref, branch or tag --sort value
+    (_RDP_GIT_SIGNATURE_SORT), each running gpg.program, a short option of _RDP_GIT_PROGRAM_LETTERS (grep -O,
+    rebase and difftool -x, clone -u and -c, commit -S and -p, tag -s, -u and -v), a --help after the
+    subcommand (git help's viewer), a TRANSPORT::ADDRESS URL for a subcommand of _RDP_GIT_TRANSPORTS, or a
+    subcommand of _RDP_GIT_PROGRAM_SUBCOMMANDS. Options are read with their operands first: a word taken as
+    the value of an option before it (attached, or the next word after one of _RDP_GIT_PROGRAM_LETTERS or
+    _RDP_GIT_NEXT_LONG) is no option, so git log --grep --ext-diff searches for --ext-diff. Every other word
+    is judged up to a -- ending the options of a subcommand of _RDP_GIT_DASHDASH_ENDS, one the scan reaches
+    surely free (the word before it may not take it as a value, or is surely a value itself:
+    git grep -e -e -- -O), after which a word is a path (git diff --cached -- --ext-diff); for any other
+    subcommand, a word after -- is judged too. Behind a global option this hook does not know, every word that
+    may be the subcommand is tried."""
+    if _rdp_basename(words[0]).casefold() != "git":
+        return None
+    at, _configured = _rdp_git_subcommand(words)
+    candidates = [at] if at is not None else [j for j in range(1, len(words)) if not words[j].startswith("-")]
+    for j in candidates:
+        found = _rdp_git_program_under(words[j].casefold(), words[1:j], words[j + 1:])
+        if found is not None:
+            return found
+    if at is None:
+        return _rdp_git_program_under("", (), words[1:])
+    return None
+
+
+def _rdp_git_reads(words):
+    """Whether a plain command is a git command that only reads: its subcommand is on _RDP_GIT_READS, or is
+    config in a read form (_rdp_git_config_reads); no global option sets configuration, no word is an
+    --output option (abbreviated or not), which writes a file, and the command runs no program by its
+    options (_rdp_git_runs_program); and, for log, show and diff, no option asks for patch output
+    (_RDP_GIT_PATCH_OPTIONS, or _RDP_GIT_PATCH_LETTERS in a word of short options, each option taken with
+    its value, attached or the next word, so -Sconfig and --grep -p ask for none), up to the -- ending
+    the options. Configuration set before the session can still make such a read run a program (git diff
+    runs diff.external and textconv filters by default); see the residue."""
+    if _rdp_basename(words[0]) != "git":
+        return False
+    at, configured = _rdp_git_subcommand(words)
+    if at is None or configured or _rdp_git_runs_program(words) is not None:
+        return False
+    sub = words[at]
+    if sub == "config":
+        return _rdp_git_config_reads(words[at + 1:])
+    if sub not in _RDP_GIT_READS:
+        return False
+    for word in words[at + 1:]:
+        name = word.split("=", 1)[0]
+        if len(name) > 2 and "--output".startswith(name):
+            return False
+    if sub not in ("log", "show", "diff"):
+        return True
+    # A word is skipped as a value only after an option surely taking it that no word before may take
+    # (git log --default --grep -p asks for patch output, its --grep the value of --default), and a -- ends
+    # the options only when no word before may take it (_rdp_git_may_take).
+    skip = held = False
+    for word in words[at + 1:]:
+        if skip:
+            skip = held = False
+            continue
+        if word == "--" and not held:
+            break
+        prev, held = held, _rdp_git_may_take(sub, word)
+        name = word.split("=", 1)[0]
+        if name.startswith("--"):
+            if _rdp_long_option(name, _RDP_GIT_PATCH_OPTIONS):
+                return False
+            skip = name in _RDP_GIT_DIFF_NEXT_LONG and name == word and not prev
+            continue
+        if not word.startswith("-"):
+            continue
+        for k, ch in enumerate(word[1:], 1):
+            if ch in _RDP_GIT_PATCH_LETTERS:
+                return False
+            if ch in _RDP_GIT_DIFF_VALUED:
+                skip = ch in _RDP_GIT_DIFF_NEXT and k == len(word) - 1 and not prev
+                break
+    return True
+
+
+def _rdp_git_config_reads(args):
+    """Whether the words after git config only read, judged by position: modifiers only
+    (_RDP_GIT_CONFIG_MODIFIERS, --type=TYPE, and _RDP_GIT_CONFIG_VALUED with their value, glued after = or
+    the next word), then exactly one key (no option, and holding a dot, so no subcommand such as edit), the
+    implicit read; or a read action of _RDP_GIT_CONFIG_READS followed by the number of operands it takes,
+    none an option. Every other form may write: git config stops reading options at its first operand, so
+    a trailing word is a value there (git config core.worktree get, and git config core.bare --local, set
+    the key)."""
+    i = 0
+    while i < len(args):
+        name = args[i].split("=", 1)[0]
+        if args[i] in _RDP_GIT_CONFIG_MODIFIERS or (name in _RDP_GIT_CONFIG_VALUED and name != args[i] and
+                                                    name.startswith("--")):
+            i += 1
+        elif args[i] in _RDP_GIT_CONFIG_VALUED:
+            i += 2
+        else:
+            break
+    if i >= len(args):
+        return False
+    if len(args) == i + 1 and not args[i].startswith("-"):
+        return "." in args[i]
+    if args[i] not in _RDP_GIT_CONFIG_READS:
+        return False
+    least, most = _RDP_GIT_CONFIG_READS[args[i]]
+    operands = args[i + 1:]
+    return least <= len(operands) <= most and not any(word.startswith("-") for word in operands)
+
+
+def _rdp_git_configures(words):
+    """The first word of a plain git command that sets git configuration; None when the command is no git
+    command or sets none. Configuration can make any git command, a read among them, run a program
+    (diff.external, a diff driver's command or textconv, core.pager and pager.*, core.editor,
+    core.fsmonitor, core.hooksPath, an alias, a filter or merge driver, credential.helper, gpg.program), so
+    no key list closes it: a -c or --config-env global, and a git config call in any form but a read
+    (_rdp_git_config_reads), whatever its key, sets it. Behind a global option this hook does not know, a
+    config, -c or --config-env word anywhere does."""
+    if _rdp_basename(words[0]).casefold() != "git":
+        return None
+    at, _configured = _rdp_git_subcommand(words)
+    if at is None:
+        return next((word for word in words[1:] if word.casefold() == "config" or
+                     word.split("=", 1)[0] in ("-c", "--config-env")), None)
+    for word in words[1:at]:
+        if word.split("=", 1)[0] in ("-c", "--config-env"):
+            return word
+    if words[at].casefold() == "config" and not _rdp_git_config_reads(words[at + 1:]):
+        return words[at]
+    return None
+
+
+def _rdp_moves_repository(words):
+    """The first word of a plain git command that may change where the repository or its work tree is; None
+    when the command is no git command or changes neither: a word naming a key or option of
+    _RDP_REPOSITORY_KEYS (compared without regard to case, anywhere in the word, so --separate-git-dir=PATH
+    is found). A git config read changes nothing, and every other config call, like every -c or
+    --config-env global, is refused before this (_rdp_git_configures). A git command that only reads
+    (_rdp_git_reads) is not judged here."""
+    if _rdp_basename(words[0]).casefold() != "git":
+        return None
+    at, _configured = _rdp_git_subcommand(words)
+    if at is not None and words[at].casefold() == "config":
+        return None
+    for word in words[1:]:
+        if any(key in word.casefold() for key in _RDP_REPOSITORY_KEYS):
+            return word
+    return None
+
+
+# The programs of rule 4's allowlist that write no file, so they may name a git directory or a git
+# configuration file: the registry readers and programs that only print or test.
+_RDP_GIT_DIR_READERS = _RDP_REGISTRY_READERS | frozenset((
+    "echo", "printf", "test", "pwd", "true", "false", "date", "basename", "dirname", "realpath", "readlink",
+    "du", "df"))
+# The last components of git's global and system configuration files (~/.gitconfig, /etc/gitconfig).
+_RDP_GIT_CONFIG_FILES = (".gitconfig", "gitconfig")
+
+
+def _rdp_names_git_dir(words, cwd=None):
+    """The first word of a plain command that may write git configuration or hooks by path; None when no
+    word does, or the command only reads (_RDP_GIT_DIR_READERS, or a git read, judged by the caller). A
+    word does when a value of it (_rdp_word_values) holds a .git component (.git/config, .git/hooks,
+    -C .git, a quoted glob matching it), ends in a global or system configuration file
+    (_RDP_GIT_CONFIG_FILES) or holds git/config (the XDG file), or, from a cwd inside a .git directory, is
+    relative; and a git --template option, which copies hooks into the git directory. A configuration
+    file or hook copied, linked or moved into place would make a later git command, a read among them,
+    run a program."""
+    if _rdp_basename(words[0]) in _RDP_GIT_DIR_READERS:
+        return None
+    inside = False
+    if isinstance(cwd, str) and os.path.isabs(cwd):
+        inside = any(part.casefold() == ".git" for form in (os.path.normpath(cwd), os.path.realpath(cwd))
+                     for part in form.split("/"))
+    git = _rdp_basename(words[0]).casefold() == "git"
+    for word in words[1:]:
+        folded = word.casefold()
+        if git and folded.split("=", 1)[0].startswith("--template"):
+            return word
+        for value in _rdp_word_values(folded):
+            if inside and not os.path.isabs(value):
+                return word
+            parts = [part for part in os.path.normpath(value).split("/") if part]
+            if any(_rdp_component_names(part, (".git",)) for part in parts):
+                return word
+            if parts and _rdp_component_names(parts[-1], _RDP_GIT_CONFIG_FILES):
+                return word
+            if any(parts[k:k + 2] == ["git", "config"] for k in range(len(parts))):
+                return word
+    return None
+
+
+# The writers of rule 4's allowlist that never recurse into, move or remove a directory named as an
+# operand, so a directory holding the common git directory may be one of their operands: touch sets its
+# times, mkdir leaves an existing directory as it is (its -m applies only to a directory it makes), uniq
+# writes one output file, and cut, tr, egrep and fgrep write only their standard output.
+_RDP_HOLDER_SAFE = frozenset(("touch", "mkdir", "uniq", "cut", "tr", "egrep", "fgrep"))
+# The options of the writers whose effect on a directory holding the common git directory depends on them
+# (cp, mv and rm of GNU coreutils 9.7; ln of GNU coreutils and of the Rust coreutils a host may install;
+# rmdir), read from each --help: a short option is LETTER, LETTER/NAME (no value) or LETTER:NAME (a value,
+# glued or the next word); a long option is NAME, NAME: (a value, after = or the next word) or NAME= (a
+# value only after =). A long option may be abbreviated to a unique prefix. A word that is no option of
+# the table leaves the command unmodelled, and every directory holding the git directory among its words
+# is refused.
+_RDP_WRITER_OPTIONS = dict((
+    ("cp", ("a/archive b d f H i l L n P p r/recursive R/recursive s S:suffix t:target-directory "
+            "T/no-target-directory u v x Z",
+            "archive attributes-only backup= copy-contents debug force interactive link dereference no-clobber "
+            "no-dereference preserve= no-preserve: parents recursive reflink= remove-destination sparse: "
+            "strip-trailing-slashes symbolic-link suffix: target-directory: no-target-directory update= "
+            "verbose keep-directory-symlink one-file-system context= help version")),
+    ("mv", ("b f i n u v Z S:suffix t:target-directory T/no-target-directory",
+            "backup= debug exchange force interactive no-clobber no-copy strip-trailing-slashes suffix: "
+            "target-directory: no-target-directory update= verbose context= help version")),
+    ("ln", ("b d F f i L n P r s v h V S:suffix t:target-directory T/no-target-directory",
+            "backup= directory force interactive logical no-dereference physical relative symbolic suffix: "
+            "target-directory: no-target-directory verbose help version")),
+    ("rm", ("f i I r/recursive R/recursive d/dir v",
+            "force interactive= one-file-system no-preserve-root preserve-root= recursive dir verbose help "
+            "version")),
+    ("rmdir", ("p v h V", "ignore-fail-on-non-empty parents verbose help version"))))
+
+
+def _rdp_writer_parse(name, args):
+    """The words args of the writer name (_RDP_WRITER_OPTIONS) as its option parser reads them, options and
+    operands in any order until --: (options, operands, targets, values), options the long names given,
+    targets the -t values, values the (name, value) pairs of every other option given a value; None when
+    the program is not in the table or a word is no option of it (an unknown, ambiguous or misused one)."""
+    spec = _RDP_WRITER_OPTIONS.get(name)
+    if spec is None:
+        return None
+    short = dict((token[0], (token[2:] or token[0], token[1:2] == ":")) for token in spec[0].split())
+    longs = dict((token.rstrip(":="), token[-1] if token[-1] in ":=" else "") for token in spec[1].split())
+    options, operands, targets, values = set(), [], [], []
+    i, ended = 0, False
+    while i < len(args):
+        word = args[i]
+        i += 1
+        if ended or word == "-" or not word.startswith("-"):
+            operands.append(word)
+            continue
+        if word == "--":
+            ended = True
+            continue
+        if word.startswith("--"):
+            key, eq, value = word[2:].partition("=")
+            matches = [n for n in longs if n == key] or [n for n in longs if n.startswith(key)]
+            if len(matches) != 1 or (eq and not longs[matches[0]]):
+                return None
+            key = matches[0]
+            if longs[key] == ":" and not eq:
+                if i >= len(args):
+                    return None
+                value, eq = args[i], "="
+                i += 1
+            options.add(key)
+            if eq:
+                (targets if key == "target-directory" else values).append((key, value))
+            continue
+        for k in range(1, len(word)):
+            if word[k] not in short:
+                return None
+            key, valued = short[word[k]]
+            options.add(key)
+            if valued:
+                value = word[k + 1:]
+                if not value:
+                    if i >= len(args):
+                        return None
+                    value = args[i]
+                    i += 1
+                (targets if key == "target-directory" else values).append((key, value))
+                break
+    return (options, operands, [value for _key, value in targets], values)
+
+
+def _rdp_writer_reaches(name, parsed, words, relation):
+    """The first word of the parsed (_rdp_writer_parse) cp, mv, ln, rm or rmdir command that can delete,
+    move or recursively rewrite the common git directory, or write a path that is it or lies inside it;
+    None when it cannot. relation(path) says whether path is the git directory or inside it ("inside"),
+    a directory holding it ("holds"), or neither (None). A holding directory (an ancestor) is reached only
+    by rm with -r, -R or -d (--recursive, --dir), rmdir of it, mv of it as a source (or as the destination
+    of --exchange, which swaps the two), and cp of it as a source with -r, -R or -a (a copy elsewhere, from
+    which a later copy back, or a hard link made with -l, would rewrite the git directory). Every path cp,
+    mv and ln write (the destination itself under -T, else the destination joined to each source's last
+    component, or to the whole source under cp --parents, and the working directory for ln with one
+    operand) may be neither the git directory, inside it, nor a holding directory (x/. merges into the
+    destination itself). ln never recurses (its -r is --relative), so its sources may hold the git
+    directory. A word whose value is not modelled (a holding directory spelled as an option, which a
+    POSIXLY_CORRECT parser reads as an operand, or a backup suffix holding a slash) is refused."""
+    options, operands, targets, values = parsed
+    for word in words[1:]:
+        if word.startswith("-") and word not in operands and word not in targets and relation(word):
+            return word
+    for key, value in values:
+        if relation(value) or (key == "suffix" and "/" in value):
+            return value
+    if name == "rmdir" or (name == "rm" and options & frozenset(("recursive", "dir"))):
+        return next((word for word in operands if relation(word)), None)
+    if name == "rm":
+        return None
+    if targets:
+        dests, sources = targets, operands
+    elif len(operands) >= 2:
+        dests, sources = operands[-1:], operands[:-1]
+    else:
+        dests, sources = (["."], operands) if name == "ln" else ([], operands)
+    if name == "mv" or (name == "cp" and options & frozenset(("recursive", "archive"))):
+        hit = next((word for word in sources if relation(word)), None)
+        if hit is not None:
+            return hit
+    if name == "mv" and "exchange" in options:
+        hit = next((word for word in dests if relation(word)), None)
+        if hit is not None:
+            return hit
+    for dest in dests:
+        for source in sources:
+            if "no-target-directory" in options:
+                result = dest
+            elif "parents" in options:
+                result = os.path.join(dest, source.lstrip("/"))
+            else:
+                result = os.path.join(dest, os.path.basename(source.rstrip("/")))
+            if relation(result):
+                return source
+    return None
+
+
+def _rdp_names_common_dir(words, cwd, guard, dispatch=False):
+    """The first word (with the reason, where it is not a path) of a plain command that may write, move or
+    remove the session repository's common git directory, which holds the binding record, judged by where
+    its words RESOLVE, whatever their spelling (a separated git directory not named .git, a symbolic link, a
+    relative path); None when the command only reads (_RDP_GIT_DIR_READERS, or a git read, judged by the
+    caller) or no word does. guard is (common, failure): common the resolved common git directory, or None
+    when there is no repository to protect; failure the detail when it cannot be located, which refuses
+    every command but a read. A word does when a value of it (_rdp_word_values), joined to the session cwd
+    and taken both as written and with every symbolic link followed, compared without regard to case, is
+    the common git directory or lies inside it. A directory HOLDING it is refused only where the program
+    can delete, move or recursively rewrite it (_rdp_writer_reaches, for cp, mv, ln, rm and rmdir); a
+    program of _RDP_HOLDER_SAFE never can, so writing a new file or directory into it (touch ./f, mkdir d,
+    cp x .) is not refused, and any other program but git (chmod, whose mode alone can cut every path to
+    the git directory, opf) is refused whenever a value of a word holds it. Git writes its own directory
+    through no pathspec, so a git pathspec may name a parent (git add .), and a declared dispatch command
+    (dispatch true) writes no git directory, so its words may name a holding directory (--workdir . or the
+    repository root); a word that is the git directory or lies inside it is refused to both."""
+    if _rdp_basename(words[0]) in _RDP_GIT_DIR_READERS:
+        return None
+    common, failure = guard
+    if failure:
+        return "{}: {}".format(words[0], failure)
+    if common is None:
+        return None
+    if not isinstance(cwd, str) or not os.path.isabs(cwd):
+        return "{}: the session cwd {!r} is not an absolute path, so its words cannot be resolved".format(
+            words[0], cwd)
+    name = _rdp_basename(words[0])
+    git = name.casefold() == "git"
+    held = common.casefold().rstrip("/") + "/"
+
+    def relation(value):
+        joined = os.path.join(cwd, value)
+        found = None
+        for form in (os.path.normpath(joined), os.path.realpath(joined)):
+            folded = form.casefold().rstrip("/") + "/"
+            if folded.startswith(held):
+                return "inside"
+            if held.startswith(folded):
+                found = "holds"
+        return found
+    holds = None
+    for word in words[1:]:
+        for value in _rdp_word_values(word):
+            try:
+                found = relation(value)
+            except (OSError, ValueError) as exc:
+                return "{}: it cannot be resolved ({})".format(word, exc)
+            if found == "inside":
+                return word
+            if found == "holds" and holds is None:
+                holds = word
+    if git or dispatch or name in _RDP_HOLDER_SAFE:
+        return None
+    parsed = _rdp_writer_parse(name, words[1:])
+    if parsed is None:
+        return holds
+    try:
+        return _rdp_writer_reaches(name, parsed, words, relation)
+    except (OSError, ValueError) as exc:
+        return "{}: a path it writes cannot be resolved ({})".format(words[0], exc)
+
+
+def _rdp_not_plain(cfg, names, why):
+    """The UNVERIFIABLE message for a command that is not a provably plain command, or a plain command that
+    names a declared dispatch command other than as its command word."""
+    name = names[0] if names else sorted(cfg["commands"])[0]
+    return ("unverifiable", "the command {} ({}), so the hook cannot tell whether it runs a review dispatch, "
+            "which brief it reads or where; in a session whose registry binds review dispatch, every Bash "
+            "call must be one plain command: a command word on the allowlist of plain programs, literal "
+            "printable ASCII words only (a single-quoted segment, or a double-quoted one holding no shell "
+            "character, may appear inside a word), no variable, glob, operator, redirection or second "
+            "command; split the work into plain calls, and "
+            "write a dispatch as {} [OPTIONS] {} PATH with the brief option last".format(
+                "names the declared dispatch command " + name + " other than as a plain dispatch" if names
+                else "is not plain", why, name, cfg["brief_option"]))
+
+
+def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False, guard=(None, None)):
+    """The decision for a Bash payload in a session with a well-formed binding. Every command that is not
+    provably plain (_rdp_plain_words) is UNVERIFIABLE, whatever it names: a name assembled at run time
+    (a variable joined to text, a glob, command output) cannot be seen in the raw text. A provably plain
+    command whose command word is a declared command gets the pin check; a plain command that names a
+    declared command elsewhere (_rdp_mentions) is UNVERIFIABLE, and one that names none is allowed. Names
+    are compared without regard to case, since a case-insensitive filesystem runs ORCH-DISPATCH as
+    orch-dispatch."""
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return ("unverifiable", "the Bash tool_input carries no command string")
+    commands = cfg["commands"]
+    words, why = _rdp_plain_words(command, commands)
+    if words is None:
+        return _rdp_not_plain(cfg, _rdp_mentions(command, commands), why)
+    # A git command that runs a program by its options or subcommand can run any shell text, which no word
+    # check sees (.aiqt inside a pager command), so it is refused whatever it names.
+    program = _rdp_git_runs_program(words)
+    if program is not None:
+        return ("deny", "the git command runs a program ({}): an option or subcommand that runs a program "
+                "named in it or configured (the pager of -p, --paginate or grep -O, an external diff, a "
+                "textconv or smudge filter, a signature check, rebase or difftool -x, an upload, receive or "
+                "archive program, an exec path, a signing or signature program, a merge strategy, a patch "
+                "mode's diff filter, a trailer command, a remote helper, git help's viewer, bisect run, "
+                "submodule foreach, filter-branch) can run shell "
+                "text that writes, moves or removes the registry, so in a session whose registry binds "
+                "review dispatch it is refused whatever it names, and an operator runs it outside the "
+                "session".format(program))
+    # A git subcommand off the allowlist may run a program by an option no table here holds (instaweb
+    # --httpd), so it is refused whatever it names.
+    off = _rdp_git_off_allowlist(words)
+    if off is not None:
+        return ("deny", "the git command runs no subcommand on the allowlist ({}): in a session whose "
+                "registry binds review dispatch a git command may run only {}, since any other subcommand "
+                "(instaweb, difftool, mergetool, send-email, filter-branch, bisect, submodule, daemon, "
+                "web--browse, the credential commands, help, an alias, an external git-NAME program, or one "
+                "behind a global option this hook does not know) can run a program whose shell text writes, "
+                "moves or removes the registry, and an operator runs it outside the session".format(
+                    off, ", ".join(sorted(_RDP_GIT_ALLOWED))))
+    # A git command that only reads treats every word as data: it neither writes the registry nor moves
+    # the repository, whatever its words name.
+    reads = _rdp_git_reads(words)
+    touched = None if reads else _rdp_names_registry(words, data.get("cwd"))
+    if touched is not None:
+        return ("deny", "the command names the orchestration registry ({}) that binds review dispatch in "
+                "this session; a Bash call that may write, move or remove it would switch this check off, so "
+                "only a read ({}) may name it, and an operator changes the registry outside the "
+                "session".format(touched, ", ".join(sorted(_RDP_REGISTRY_READERS))))
+    configures = _rdp_git_configures(words)
+    if configures is not None:
+        return ("deny", "the git command sets git configuration ({}); configuration can make any git "
+                "command, a read among them, run a program (diff.external, a textconv or filter driver, "
+                "core.pager, core.fsmonitor, core.hooksPath, an alias), so in a session whose registry binds "
+                "review dispatch every git config write, whatever the key, and every -c or --config-env "
+                "global is refused, and an operator changes git configuration outside the "
+                "session".format(configures))
+    gitdir = None if reads else _rdp_names_git_dir(words, data.get("cwd"))
+    if gitdir is not None:
+        return ("deny", "the command names a git directory, a git configuration file or a hook template "
+                "({}); a configuration file or hook written there can make any git command, a read among "
+                "them, run a program, so in a session whose registry binds review dispatch only a read may "
+                "name one, and an operator changes them outside the session".format(gitdir))
+    dispatch = _rdp_basename(words[0]).casefold() in {name.casefold() for name in commands}
+    common = None if reads else _rdp_names_common_dir(words, data.get("cwd"), guard, dispatch)
+    if common is not None:
+        return ("deny", "the command may write, move or remove the repository's common git directory {} "
+                "({}), which holds the review dispatch binding record; in a session whose registry binds "
+                "review dispatch only a read may name it or a path inside it, and a directory holding "
+                "it only a command that cannot delete, move or recursively rewrite that directory, however "
+                "the path is spelled; an operator changes it outside the session".format(
+                    guard[0] or "(which cannot be located)", common))
+    moved = None if reads else _rdp_moves_repository(words)
+    if moved is not None:
+        return ("deny", "the git command changes where the repository or its work tree is ({}); in a session "
+                "whose registry binds review dispatch, a moved top level would be checked against another "
+                "registry, so an operator changes core.worktree, core.bare, configuration includes and "
+                "separated git directories outside the session".format(moved))
+    word = _rdp_basename(words[0])
+    if word.casefold() not in {name.casefold() for name in commands}:
+        # The one dispatch's own arguments may mention a declared name (in a brief path, say); a plain
+        # command that is no dispatch may not, since it could run one (a find -exec, say).
+        named = _rdp_mentions(" ".join(words), commands)
+        if named:
+            return _rdp_not_plain(cfg, named, "it names {} other than as the command word of a "
+                                  "dispatch".format(named[0]))
+        return ("allow", "")
+    args = words[1:]
+    option = cfg["brief_option"]
+    if len(option) == 2 and any(a.startswith(option + "=") for a in args):
+        return ("deny", "the {} dispatch writes the short brief option as {}=PATH, which a getopt parser "
+                "reads as a value starting with an equals sign; write {} PATH".format(word, option, option))
+    briefs = _rdp_brief_args(args, option)
+    if len(briefs) != 1 or not briefs[0] or briefs[0] == "-":
+        return ("deny", "the {} dispatch must pass exactly one brief file as {} PATH (found "
+                "{})".format(word, option, len(briefs)))
+    last = (len(args) >= 2 and args[-2] == option) or (len(option) > 2 and args[-1].startswith(option + "=")) \
+        or (len(option) == 2 and args[-1].startswith(option) and args[-1] != option)
+    if not last or "--" in args[:-1]:
+        # A parser this hook does not know may take the brief from an alias or a grouped short option
+        # (`-b`, `-xb`); given last, the declared option is the one a last-wins parser keeps.
+        return ("deny", "the {} dispatch must give its brief last, as {} PATH with no word "
+                "after it and no -- before it, so no other option word can replace it".format(word, option))
+    cwd = data.get("cwd")
+    if root is None:
+        return ("unverifiable", "git cannot resolve the session repository from the cwd {!r}, so the "
+                "{} dispatch cannot be checked".format(cwd, word))
+    if isinstance(foreign, str):
+        return ("unverifiable", "{}; the {} dispatch is withheld".format(foreign, word))
+    if foreign:
+        return ("unverifiable", "the session repository {} is not the repository of the registry that "
+                "binds the {} dispatch ({}): a nested repository, or a top level moved by core.worktree, "
+                "would supply its own commit and authority".format(root, word, reg_dir))
+    if not isinstance(cwd, str) or not os.path.isabs(cwd):
+        return ("unverifiable", "the session cwd {!r} is not an absolute path, so the directory the "
+                "{} dispatch runs in cannot be resolved".format(cwd, word))
+    brief = briefs[0] if os.path.isabs(briefs[0]) else os.path.join(cwd, briefs[0])
+    for form in (os.path.normpath(brief), os.path.realpath(brief)):
+        if form.startswith(("/proc/", "/dev/")) or form in ("/proc", "/dev"):
+            return ("unverifiable", "the brief {} is under /proc or /dev, which name a different file in "
+                    "this hook's process than in the dispatcher's".format(brief))
+    text, why = _rdp_read_brief(brief, cfg["max_brief_bytes"])
+    if text is None:
+        return ("unverifiable", why)
+    found = _rdp_labels(text, cfg["labels"])
+    targets = found["target"]
+    if not targets:
+        return ("deny", "the brief {} has no {!r} line; declare revision, working-tree or "
+                "not-a-review".format(brief, cfg["labels"]["target"]))
+    if len(targets) > 1:
+        return ("unverifiable", "the brief {} has {} {!r} lines".format(
+            brief, len(targets), cfg["labels"]["target"]))
+    target = targets[0].strip()
+    if target not in _RDP_TARGETS:
+        return ("deny", "the brief {} declares the unknown target {!r}; use revision, "
+                "working-tree or not-a-review".format(brief, target))
+    if target != "revision":
+        # the guard-events row is the only record of this departure from revision reconciliation, so a failed
+        # append is reported on the note (the allow stands)
+        warn = _orch_event_warn(reg_dir, "review-dispatch-pin", "allow-declared-target",
+                                "{}: {}".format(brief, target))
+        return ("note", "AIQT rule vfxcmt: the brief {} declares target {}, so no revision was "
+                "reconciled; a review of committed work must pin it.{}".format(brief, target,
+                                                                            _orch_warn_tail(warn)))
+    ambient = sorted(k for k in os.environ if k in _RDP_AMBIENT_GIT)
+    if ambient:
+        return ("unverifiable", "the environment sets {}, which moves the repository, index, object store "
+                "or history git reads; the {} dispatch runs with it, so the revision it reviews is not the "
+                "one this hook reconciles in {}; unset it and dispatch again".format(
+                    ", ".join(ambient), word, root))
+    return _rdp_reconcile(cfg, found, root, brief, root, reg_dir)
+
+
+def review_dispatch_pin(data):
+    """vfxcmt, PreToolUse Bash: a review dispatch made through a registry-declared command pins an
+    immutable, authoritative revision whose changed set is the declared review set and whose declared
+    paths carry no uncommitted state (a checked-out submodule is compared by its HEAD only), BEFORE the
+    dispatch runs. Inert without a review_dispatch binding; in a session a binding scopes, a Bash call that
+    is not one provably plain command (its command word on the allowlist, or a declared dispatch command)
+    is withheld, a plain one naming the registry is refused unless it only reads, a plain git command that
+    sets configuration (every git config write, every -c or --config-env global) or may move the
+    repository is refused, as is a plain command that may write into a git directory or a git
+    configuration file (a read-only git subcommand's words taken as data, unless it carries an option that
+    runs a program), and a malformed registry or binding, or a linked worktree whose main worktree cannot be located,
+    withholds every Bash call.
+    A refusal denies and names its reason; a cannot-evaluate denies with an UNVERIFIABLE: prefix; a
+    declared non-revision target, or a branch label that does not resolve to the pin, is allowed with a
+    note. A crash reaches main's PreToolUse fail-closed exit 2.
+    Residual (disclosed in the manifest residue): a git command whose operand is spelled like an option
+    after option-value consumption may be falsely denied (git stash push -m --patch, whose message --patch
+    is judged as the patch option); a fail-safe refusal of a harmless form, never an allow.
+    Hookless dispatchers run it as a preflight: `aiqt_hooks.py review_dispatch_pin` with the payload on
+    stdin."""
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("vfxcmt")
+    if tool_name != "Bash":
+        return _allow()
+    kind, message = _rdp_decide(data)
+    if kind in ("deny", "unverifiable"):
+        prefix = "UNVERIFIABLE: " if kind == "unverifiable" else ""
+        return _deny("{}AIQT rule vfxcmt: review dispatch withheld: {}.".format(prefix, message),
+                     "AIQT guardrail: {}review dispatch withheld (rule vfxcmt).".format(prefix))
+    if kind == "note":
+        return _allow_note(message)
+    return _allow()
+
+
 def orch_prompt_stamp(data):
     """tstamp/estsep, UserPromptSubmit (recorder, never blocks): stamp genuine human input from the
     clock, classify a prompt matching a registered wake as timer-originated, and inject the measured
@@ -9902,23 +14998,110 @@ def orch_prompt_stamp(data):
         ts["stop_denials"] = 0
         ts["schedule_denials"] = 0
         ts.pop("schedule_basis", None)
-        _orch_save_turn_state(root, ts)
-        return _allow()
+        unsaved = _orch_save_turn_state(root, ts)
+        if unsaved is None:
+            return _allow()
+        # the stamp is this recorder's record; the prompt proceeds and the unwritten stamp is noted
+        return _allow_note("AIQT guardrail: this prompt was read as genuine human input, but turn-state.json "
+                           "could not be written ({}), so its time was not stamped and the denial counters were "
+                           "not reset; record it manually (nocncl).".format(unsaved))
     # one-shot: consume the matched wake digest so a later prompt with identical text (including genuine
     # human input) is not perpetually misclassified as timer-originated (R2-CM4/CX-M7).
     wd = list(ts.get("wake_digests") or [])
     if digest in wd:
         wd.remove(digest)  # consume exactly ONE token, so a second identical wake is still recognized
     ts["wake_digests"] = wd
-    _orch_save_turn_state(root, ts)
+    unsaved = _orch_save_turn_state(root, ts)
     gap = "unknown (no prior stamp; an unknown duration authorizes nothing)"
     if prev is not None:
         gap = "{:.1f} minutes".format((_orch_now() - prev).total_seconds() / 60.0)
+    context = ("[aiqt-orch] This prompt is TIMER-ORIGINATED (a registered wake), not human input. Measured "
+               "gap since the last genuine human input: {}.".format(gap))
+    if unsaved is not None:
+        # the model reads the context line and the operator the systemMessage; neither promises how a later
+        # prompt with the same text is classified
+        warn = ("turn-state.json could not be written ({}), so consuming this wake's digest failed and how a "
+                "later prompt with the same text is classified is uncertain: it may read as timer-originated "
+                "or as genuine human input; record it manually (nocncl).".format(unsaved))
+        return _context_note("UserPromptSubmit", context + " Additionally, " + warn,
+                             "AIQT guardrail: this prompt was read as timer-originated, but " + warn)
     return (0, {"hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
-        "additionalContext": "[aiqt-orch] This prompt is TIMER-ORIGINATED (a registered wake), not "
-                             "human input. Measured gap since the last genuine human input: {}."
-                             .format(gap)}}, None)
+        "additionalContext": context}}, None)
+
+
+# The truncation guard's registry-required deny reasons for each scope it denies, as tools/orch_doctor.py
+# and the resume audit report them (_orch_truncation_scope decides the scope exactly as the guard does).
+_ORCH_STRICT_SCOPE_FINDINGS = dict((
+    ("none", "no orchestration registry on this repository root's ancestor chain or at its git "
+             "toplevel"),
+    ("cannot-evaluate", "the candidate that decided cannot be confirmed as a registry; it is EITHER the "
+                        "nearest directory on this repository root's ancestor chain whose registry probe "
+                        "is not a clean not-present, OR, only when every directory on that chain probes as "
+                        "a clean not-present, the root's git toplevel, which can lie off the chain "
+                        "(core.worktree), so when every directory on the chain probes as a clean not-present "
+                        "(no .aiqt entry, or a real .aiqt directory this process can search holding neither "
+                        "registry name) the fault is at the git toplevel: at that "
+                        "candidate, its .aiqt is not a directory openable without following a symlink and "
+                        "searchable (execute permission) by this process, or its first present registry name "
+                        "(orchestration.local.json, then orchestration.json) is not a regular file (a "
+                        "symlinked registry file included) or cannot be examined"),
+    ("toplevel-unopenable", "no registry on this repository root's ancestor chain, and its git toplevel "
+                            "cannot be opened as a directory (it is present but not an openable "
+                            "directory; a toplevel that does not exist reads as no registry there)"),
+))
+
+
+def _orch_guard_scope_report(root):
+    """What orch_truncation_guard decides at its scope check for a Bash call whose cwd is the repository
+    root, in the CURRENT mode: (report lines, denies). A cwd the walk cannot carry out denies in every mode;
+    an absent or unconfirmable registry denies only in registry-required mode. Shared by
+    tools/orch_doctor.py and _orch_resume_audit_findings, so both resume-barrier writers read one scope."""
+    scope, found = _orch_truncation_scope(root)
+    env = _ORCH_REQUIRE_REGISTRY_ENV
+    if scope == "fail":
+        return (["truncation guard: a Bash call from the repository root is denied in every mode: its "
+                 "cwd %s" % found[0]], True)
+    if _orch_registry_required() and scope in _ORCH_STRICT_SCOPE_FINDINGS:
+        return (["truncation guard (registry-required mode, %s set to a value other than an off value): "
+                 "a Bash call from the repository root is DENIED: %s"
+                 % (env, _ORCH_STRICT_SCOPE_FINDINGS[scope])], True)
+    if scope == "none":
+        return (["truncation guard: inert for a Bash call from the repository root (no registry on its "
+                 "ancestor chain or at its git toplevel; with registry-required mode enabled, %s set to a "
+                 "value other than an off value, such as 1, it denies instead)" % env], False)
+    if scope in _ORCH_STRICT_SCOPE_FINDINGS:
+        # Default mode reads a discovery fault as present (the deny-safe direction): the guard is active
+        # without a confirmed registry, which is reported as the fault it is, not as a registry found.
+        return (["truncation guard: ACTIVE for a Bash call from the repository root because its registry "
+                 "discovery hit a fault it reads as present, not because a registry was confirmed: %s "
+                 "(with registry-required mode enabled, %s set to a value other than an off value, such as "
+                 "1, it denies instead)" % (_ORCH_STRICT_SCOPE_FINDINGS[scope], env)], False)
+    return (["truncation guard: ACTIVE for a Bash call from the repository root (a registry entry was "
+             "found on its ancestor chain, which can lie above this repository, or at its git "
+             "toplevel)"], False)
+
+
+def _orch_resume_audit_findings(status, reg, root):
+    """The ONE resume-audit finding list both resume-barrier writers (orch_resume_audit at SessionStart and
+    tools/orch_doctor.py --resume-audit) arm or clear resume-barrier.json from (round 8), so neither clears
+    a barrier the other armed for a condition that still holds, PROVIDED both run in the same mode: a
+    registry the loader reports bad, the truncation guard's deny at its scope check for a Bash call from the
+    root (_orch_guard_scope_report), then the resume probes (over an empty registry when it is bad). Empty
+    means clean. The scope deny depends on the CURRENT process's AIQT_ORCH_REQUIRE_REGISTRY (a walk failure
+    denies in every mode; an absent or unconfirmable registry scope only in registry-required mode), and
+    the barrier does not record the mode, so a doctor run without the variable can clear a barrier a
+    registry-required SessionStart armed for a scope deny. Clearing it does not allow any Bash call: the
+    barrier only warns (stage BAKE) and the guard denies on its own scope check regardless."""
+    findings = []
+    if status == "bad":
+        findings.append("the orchestration registry could not be read ({})".format(reg))
+        reg = {}
+    scope_lines, scope_denies = _orch_guard_scope_report(root)
+    if scope_denies:
+        findings.extend(scope_lines)
+    findings.extend(_orch_resume_probes(reg, root))
+    return findings
 
 
 def _orch_resume_probes(reg, root):
@@ -10240,9 +15423,10 @@ def _orch_validate_attestations(reg, root):
                 os.remove(snap_path)
             except OSError:
                 pass
-        if not _orch_write_json_atomic(snap_path, snap):
-            findings.append("the attestation snapshot could not be written; invalidating any prior "
-                            "snapshot so the yield-time reader holds (never a stale clean pass)")
+        unsaved = _orch_write_json_atomic(snap_path, snap)
+        if unsaved is not None:
+            findings.append("the attestation snapshot could not be written ({}); invalidating any prior "
+                            "snapshot so the yield-time reader holds (never a stale clean pass)".format(unsaved))
             try:
                 os.remove(snap_path)  # a failed OK write must not leave a prior snapshot usable either
             except OSError:
@@ -10268,7 +15452,7 @@ def _orch_validate_attestations(reg, root):
 
 
 def _orch_forced_exit_findings(sd):
-    """C.4/FIX 5: surface EACH append-only forced-exit.jsonl row exactly once. A companion
+    """C.4/FIX 5: surface EACH append-only forced-exit.jsonl row normally once. A companion
     forced-exit-surfaced.json records the keys already raised; a row whose key is not yet recorded
     becomes a finding, and the surfaced set advances only on a successful write. An unreadable log, a
     malformed line, or an unreadable/unwritable surfaced set re-fires next resume rather than losing
@@ -10304,15 +15488,24 @@ def _orch_forced_exit_findings(sd):
                             ", ".join(str(i) for i in ids[:10]) or "unrecorded"))
     if fresh:
         all_keys = sorted({r.get("key") for r in rows if isinstance(r.get("key"), str)})
-        _orch_write_json_atomic(surfaced_path, {"keys": all_keys})  # at-least-once: a failed advance re-fires
+        # at-least-once: a failed advance re-fires these rows at the next audit, so its failure detail (a
+        # temporary file left by a failed cleanup included) is not reported here
+        _orch_write_json_atomic(surfaced_path, {"keys": all_keys})
     return findings
 
 
 def _orch_pending_artefact_findings(root):
-    """C.1/C.4 resume probes. escape-spoof.json is a single-shot artefact: raised once and renamed with
-    a .surfaced suffix, staying in the record; an unreadable one re-fires (chkfcl). Forced exits are an
-    append-only log surfaced via _orch_forced_exit_findings so multiple exits are each raised exactly
-    once and never clobbered."""
+    """C.1/C.4 resume probes. escape-spoof.json is a single-shot artefact: raised, then renamed to
+    escape-spoof.json.surfaced, which replaces any earlier .surfaced file, so that file holds only the
+    latest sentinel whose rename succeeded; a failed rename leaves it at escape-spoof.json, raised again
+    next resume, as an unreadable one is (chkfcl). A second sentinel recorded before this probe runs
+    overwrites escape-spoof.json, so only the later one is raised from it. The lasting record of each
+    ignored sentinel is its append-only guard-events.jsonl row of kind escape-spoof
+    (_orch_record_escape_spoof) only where that append succeeded: a failed append was warned about in the
+    output of the hook that ignored the sentinel (its banner, or the block reason of a denied Stop or
+    TeammateIdle), which asks for a manual record, and no row exists for it. Forced exits are an
+    append-only log surfaced via _orch_forced_exit_findings so multiple exits are each normally raised
+    once (at least once if recording that one was raised fails) and never clobbered."""
     findings = []
     sd = _orch_state_dir_for_root(root)
     path = os.path.join(sd, "escape-spoof.json")
@@ -10335,10 +15528,86 @@ def _orch_pending_artefact_findings(root):
     return findings
 
 
+def _orch_barrier_write(path, obj):
+    """Replace the resume barrier file atomically; the one writer of resume-barrier.json (orch_resume_audit,
+    orch_resume_barrier's warned flag, and tools/orch_doctor.py --resume-audit). It creates the state
+    directory, creates a temporary file beside the barrier with O_CREAT|O_EXCL (open mode "x": mode 0o666
+    less the umask, as open(path, "w") creates the barrier), writes the JSON, flushes and fsyncs it, closes
+    it, then os.replace()s it onto the barrier path. It records whether this call created the temporary
+    file: on any failure after that (the write, flush, fsync, the close at the end of the with block, or
+    the replace) it unlinks the temporary file (an unlink that itself fails leaves it beside the barrier,
+    never in its place), and it never unlinks a temporary name it did not create (an "x" open of a name
+    that already exists raises FileExistsError first); then it re-raises, so the previous barrier file,
+    armed or clear, or its absence, is left byte-identical; the caller decides what the error means. A
+    process killed between the create and the replace (a hook timeout, for example) leaves its temporary
+    file beside the barrier, and nothing removes it. A directory at the barrier path cannot be replaced:
+    the replace raises IsADirectoryError and the directory stays until someone removes it. What it writes
+    always fits the reader's bound (_orch_barrier_fit): a finding list too long for it is stored as its
+    first findings plus one line counting the rest, and an object that still cannot fit raises ValueError
+    before any file is created."""
+    obj = _orch_barrier_fit(obj, os.path.dirname(path))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = "{}.{}.{}.tmp".format(path, os.getpid(), os.urandom(8).hex())
+    created = False
+    try:
+        with open(tmp, "x", encoding="utf-8") as fh:
+            created = True
+            json.dump(obj, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        if created:
+            _orch_unlink_quiet(tmp)
+        raise
+
+
+def _orch_unlink_quiet(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 def orch_resume_audit(data):
     """sesres/recncl/cnclse, SessionStart (warn: the platform cannot block this event): reconcile the
     durable record against observed reality and ARM the resume barrier on divergence; a clean audit
-    clears it. Registry-scoped; silent with no registry."""
+    clears it. Arming and clearing are best-effort and atomic (_orch_barrier_write: a temporary file
+    beside the barrier, flushed and fsynced, then os.replace): where the barrier cannot be written (its
+    state directory cannot be created, the temporary file cannot be created or written, or the replace
+    fails, for example XDG_STATE_HOME naming a regular file, or a full disk), the error is swallowed so
+    SessionStart never wedges, the temporary file is removed, the previous barrier file (armed or clear)
+    or its absence is left byte-identical, and an audit with findings still returns its warning naming
+    them, which then says the barrier was not persisted (this audit did not arm it) and asks for a manual
+    record instead of saying a re-run clears the barrier; a clean audit's failed clear adds no warning,
+    since the PreToolUse barrier reads a barrier left armed as armed (noted once per arming where its warned
+    flag can be written, otherwise on each mutation outside the record surfaces: one whose warned flag is
+    already set stays armed and silent) and a directory in its place as armed, noted on each such mutation (where opening the forced-exit log fails other
+    than as not-found, because the state directory cannot be searched or is not a directory, as with that
+    regular file, the forced-exit probe adds its cannot-evaluate finding). The PreToolUse barrier (orch_resume_barrier) reads the file only where
+    _orch_registry reads ok; tools/orch_doctor.py --resume-audit writes it through the same helper and
+    does not swallow the error (its run ends with it, the previous barrier unchanged). Registry-scoped:
+    silent where _orch_registry reads the root's registry as absent; a root it cannot examine reads bad, not absent (below). With a registry
+    present it also arms on the truncation guard's deny at its scope check for a Bash call from the root
+    (_orch_resume_audit_findings), so it is mode-sensitive: a root git resolves but the walk cannot carry
+    out (one this process can enter but not read, for example) arms it in EVERY mode, and an absent or unconfirmable registry scope (a
+    symlinked registry, for example) arms it in registry-required mode. Where _orch_root returns None
+    (`if root is None: return _allow()`), this audit returns before it reads the registry, so it stays
+    silent in both modes. _orch_root returns None for a session cwd that is missing, empty or not a string,
+    without calling git, and wherever _recovery_toplevel returns None: git cannot run or exits non-zero (an
+    unreadable or broken config, a dangling gitfile, a dubious-ownership refusal, no git binary, a timeout,
+    or a cwd this process cannot enter), or its output cannot be decoded, is empty, or is not an absolute
+    path. The truncation guard denies a Bash call whose cwd is missing, empty or not a string in every
+    mode, before its scope check. For a Bash call from a non-empty string cwd where git resolves nothing,
+    whether its scope check denies depends only on its own ancestor walk of that cwd and the mode (its git
+    leg resolves nothing either); its other checks still read the call's tool_name, tool_input and command.
+    Git can still resolve a toplevel this process cannot enter (core.worktree read from a session cwd
+    inside the repository's git directory). Where that toplevel exists without search permission for this
+    process, or is not a directory, _orch_registry's lstat of a registry path under it raises an OSError
+    other than FileNotFoundError and returns bad, so this audit warns and (best-effort) arms the barrier in
+    both modes, as it does for a regular file named .aiqt at any root; where that toplevel does not
+    exist, the lstat raises FileNotFoundError for each registry name, _orch_registry
+    returns absent (`if status == "absent": return _allow()`), and this audit stays silent in both modes."""
     root = _orch_root(data)
     if root is None:
         return _allow()
@@ -10348,30 +15617,247 @@ def orch_resume_audit(data):
     barrier_path = os.path.join(_orch_state_dir_for_root(root), "resume-barrier.json")
     if status == "bad":
         _orch_append_jsonl(barrier_path + ".unused", {})  # no-op path probe; keep posture simple
-        findings = ["the orchestration registry could not be read ({})".format(reg)]
-    else:
-        findings = _orch_resume_probes(reg, root)
+    # The same finding list tools/orch_doctor.py --resume-audit writes (round 8: one barrier truth), so a
+    # SessionStart run in the same mode never clears a barrier the doctor armed for a scope deny that still
+    # holds; the barrier does not record the mode, so a run in the other mode can (_orch_resume_audit_findings).
+    findings = _orch_resume_audit_findings(status, reg, root)
+    unwritten = None
     try:
-        os.makedirs(os.path.dirname(barrier_path), exist_ok=True)
-        with open(barrier_path, "w", encoding="utf-8") as fh:
-            json.dump({"active": bool(findings), "findings": findings,
-                       "ts": _orch_now().isoformat(), "warned": False}, fh)
-    except OSError:
-        pass  # a barrier that cannot arm still surfaces below; never wedge SessionStart
+        _orch_barrier_write(barrier_path, {"active": bool(findings), "findings": findings,
+                                           "ts": _orch_now().isoformat(), "warned": False})
+    except (OSError, ValueError) as exc:
+        # never wedge SessionStart: the previous barrier file (or its absence) is left unchanged. A failed
+        # ARM is named in the warning below; a clean audit's failed CLEAR stays silent here, because the
+        # PreToolUse barrier reads a barrier still armed as armed (noted once per arming where its warned flag
+        # can be written, otherwise on each mutation; one already warned about stays silent) and a directory
+        # in its place as armed (noted on each mutation)
+        unwritten = type(exc).__name__
     if findings:
-        _orch_guard_event(root, "resume-audit", "findings", "; ".join(findings)[:1000])
+        tail = _orch_warn_tail(_orch_event_warn(root, "resume-audit", "findings",
+                                                "; ".join(findings)[:1000]))
+        if unwritten is None:
+            nxt = ("then re-run 'python3 tools/orch_doctor.py --resume-audit' to clear the barrier; "
+                   "acknowledgement alone does not clear it.")
+        else:
+            # a directory at the barrier path cannot be replaced by either audit, so it must be removed;
+            # any other failure needs a state directory that can be created and written
+            remedy = ("remove the directory at the barrier path {} (neither audit can replace a directory), "
+                      "then re-run 'python3 tools/orch_doctor.py --resume-audit'".format(barrier_path)
+                      if unwritten == "IsADirectoryError" else
+                      "re-run 'python3 tools/orch_doctor.py --resume-audit' once the state directory can be "
+                      "created and written")
+            nxt = ("then {}. Additionally, the resume barrier could not be written ({}), so it was "
+                   "not persisted: this audit did not arm it (any earlier barrier file is left unchanged); "
+                   "record these findings manually (nocncl).".format(remedy, unwritten))
         return _stop_warn("AIQT guardrail (resume audit): the recorded state diverges from "
-                          "observed reality: {}. Correct the record, then re-run "
-                          "'python3 tools/orch_doctor.py --resume-audit' to clear the barrier; "
-                          "acknowledgement alone does not clear it.".format("; ".join(findings)))
+                          "observed reality: {}. Correct the record, or for a truncation guard finding "
+                          "the condition it names (for example a directory's permissions, or the "
+                          "registry's file type), {}{}".format("; ".join(findings), nxt, tail))
     return _allow()
+
+
+_ORCH_BARRIER_KEYS = frozenset(("active", "findings", "warned", "ts"))
+
+
+def _orch_barrier_well_formed(barrier):
+    """True only for the documented barrier shape: a JSON object with a boolean "active" and a list of
+    string "findings" (both required; a missing "findings" is malformed, never an empty list), an optional
+    boolean "warned" and an optional string "ts", and no other key."""
+    if not isinstance(barrier, dict) or not set(barrier) <= _ORCH_BARRIER_KEYS:
+        return False
+    if not isinstance(barrier.get("active"), bool) or "findings" not in barrier:
+        return False
+    found = barrier["findings"]
+    if not (isinstance(found, list) and all(isinstance(f, str) for f in found)):
+        return False
+    if "warned" in barrier and not isinstance(barrier["warned"], bool):
+        return False
+    return "ts" not in barrier or isinstance(barrier["ts"], str)
+
+
+_ORCH_BARRIER_MAX_BYTES = 64 * 1024  # _orch_barrier_write never stores more (_orch_barrier_fit); a larger file reads as armed
+_ORCH_BARRIER_FINDING_CHARS = 4000  # a stored finding is cut here, so the first one always fits the bound
+
+
+_ORCH_BARRIER_REST_RE = re.compile(
+    r"([0-9]+) more finding\(s\) not stored here \(the barrier file is bounded")
+
+
+def _orch_barrier_rest(count, sd):
+    """The last line _orch_barrier_fit stores in place of the findings that do not fit (sd is the state
+    directory holding the barrier). It points only at evidence that outlives the audit. A forced-exit
+    finding is normally raised once (at least once: _orch_forced_exit_findings advances its surfaced set
+    only where that write succeeds), so a later audit, the doctor's included, does not list it again once
+    that write has succeeded (a failed write leaves it to be listed again); the line names
+    forced-exit.jsonl, the append-only log that keeps every forced-exit record in full. An ignored escape
+    sentinel is raised from escape-spoof.json, which _orch_pending_artefact_findings then renames to
+    escape-spoof.json.surfaced: each later rename replaces that file, so it holds only the
+    latest sentinel whose rename succeeded, and a failed rename leaves the sentinel at escape-spoof.json,
+    where the next audit raises it again. So the line names guard-events.jsonl, whose append-only rows of
+    kind escape-spoof (_orch_record_escape_spoof) are the lasting record of each sentinel whose row was
+    written (a row that could not be written was warned about when the sentinel was ignored, with a
+    request to record it manually, and no row exists for it), and says what the .surfaced file and
+    escape-spoof.json hold. Every other finding is recomputed from the record by each audit, so
+    'python3 tools/orch_doctor.py --resume-audit' prints it again while its condition holds."""
+    return ("{} more finding(s) not stored here (the barrier file is bounded at {} bytes). A forced-exit "
+            "finding is normally raised once (at least once if recording that it was raised fails): read "
+            "every forced-exit record in full in {} (an ignored escape sentinel is likewise normally raised "
+            "once; its lasting record is its row of kind escape-spoof in {} where that row was written, "
+            "and a row that could not be written was warned about when the sentinel was ignored, with a "
+            "request to record it manually; {} holds only the latest sentinel whose rename succeeded, and "
+            "a failed rename leaves it at {}, where the next audit raises it again). Every other finding "
+            "still present is printed again by 'python3 tools/orch_doctor.py --resume-audit'".format(
+                count, _ORCH_BARRIER_MAX_BYTES, os.path.join(sd, "forced-exit.jsonl"),
+                os.path.join(sd, "guard-events.jsonl"), os.path.join(sd, "escape-spoof.json.surfaced"),
+                os.path.join(sd, "escape-spoof.json")))
+
+
+def _orch_barrier_fit(obj, sd):
+    """The object _orch_barrier_write stores, so that its JSON (json.dumps, ASCII) never exceeds
+    _ORCH_BARRIER_MAX_BYTES, the bound _orch_barrier_read refuses past. An object that already fits is
+    returned unchanged. Otherwise, for a dict whose "findings" is a list of strings, a copy keeps the
+    leading findings (each cut to _ORCH_BARRIER_FINDING_CHARS characters, marked " (cut)") that fit
+    together with one last line counting the findings not stored (_orch_barrier_rest), so the barrier
+    stays armed, well-formed and readable and its warned flag can be recorded. A list that already ends
+    with such a count line (one this function stored earlier; matched by _ORCH_BARRIER_REST_RE) is re-fit
+    without it and its count is carried forward, so the new line counts every finding not stored, never
+    the old line as one. Anything else that does not fit (another shape, or other keys too large on their
+    own) raises ValueError."""
+    if len(json.dumps(obj)) <= _ORCH_BARRIER_MAX_BYTES:
+        return obj
+    found = obj.get("findings") if isinstance(obj, dict) else None
+    if not (isinstance(found, list) and all(isinstance(f, str) for f in found)):
+        raise ValueError("the resume barrier does not fit its {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES))
+    carried = 0
+    prior = _ORCH_BARRIER_REST_RE.match(found[-1]) if found else None
+    if prior:
+        carried, found = int(prior.group(1)), found[:-1]
+    cut = [f if len(f) <= _ORCH_BARRIER_FINDING_CHARS else f[:_ORCH_BARRIER_FINDING_CHARS] + " (cut)"
+           for f in found]
+    # With k findings the list encodes as the empty object's size plus each finding's encoding plus two
+    # bytes (", ") per separator; the rest line is reserved at its largest (no finding stored).
+    size = len(json.dumps(dict(obj, findings=[]))) + len(json.dumps(_orch_barrier_rest(len(found) + carried,
+                                                                                         sd)))
+    kept = []
+    for f in cut:
+        size += len(json.dumps(f)) + 2
+        if size > _ORCH_BARRIER_MAX_BYTES:
+            break
+        kept.append(f)
+    rest = len(found) - len(kept) + carried
+    fitted = dict(obj, findings=kept + ([_orch_barrier_rest(rest, sd)] if rest else []))
+    if len(json.dumps(fitted)) > _ORCH_BARRIER_MAX_BYTES:
+        raise ValueError("the resume barrier does not fit its {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES))
+    return fitted
+_ORCH_BARRIER_DIRECTORY = "not a regular file: a directory"
+
+
+def _orch_barrier_nonregular(path, opened=None):
+    """The detail for a barrier path that opened as something other than a regular file:
+    _ORCH_BARRIER_DIRECTORY only where os.lstat shows the entry itself is a directory (no audit can
+    replace that) and, where the caller passes the fstat result of the opened descriptor (opened), that
+    directory has the opened file's st_dev and st_ino (an entry swapped between the open and the lstat is
+    never named a directory); otherwise "not a regular file" (a FIFO, a device, or a symlink to either or
+    to a directory, which the writer's os.replace does replace, leaving the target intact). A UNIX socket
+    never reaches here: its open fails with ENXIO, which _orch_barrier_read reads as ('bad', 'OSError')."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return "not a regular file"
+    if stat.S_ISDIR(st.st_mode) and (opened is None
+                                     or (st.st_dev, st.st_ino) == (opened.st_dev, opened.st_ino)):
+        return _ORCH_BARRIER_DIRECTORY
+    return "not a regular file"
+
+
+def _orch_barrier_read(path):
+    """Read the resume barrier without waiting for a FIFO writer and without reading past the bound:
+    ('absent', None), ('ok', the parsed JSON value) or ('bad', detail). The open is
+    os.open(O_RDONLY | O_NONBLOCK | O_CLOEXEC), so a FIFO with no writer opens at once instead of waiting
+    for one. It follows a symlink: a symlink to a regular file reads as that file (the writer's os.replace
+    later replaces the link, not its target). A FileNotFoundError or NotADirectoryError from the open (a
+    missing file, a dangling symlink, a state directory path through a regular file) is absent. A UNIX
+    socket fails the open with ENXIO and is ('bad', 'OSError'). The opened descriptor is fstat'ed and
+    anything not a regular file is bad without a read (_orch_barrier_nonregular names it). The read asks
+    for at most _ORCH_BARRIER_MAX_BYTES + 1 bytes in all (65537: the 65536-byte bound plus one byte that
+    detects a longer file) and a longer file is bad. The descriptor is closed exactly once on every path
+    and never retried; a close that fails is bad, named by its type, so a close error never escapes to
+    the dispatcher (which would fail closed). Any other exception (an OSError, a decode or JSON error, a
+    RecursionError from deep nesting) is bad, named by its type. Not bounded here: the path lookup of the
+    os.open (and of the os.lstat in _orch_barrier_nonregular) can stall on a hung mount for any file
+    type, a regular file on a stalled filesystem can stall the read, and what opening a device node does
+    is up to its driver; the hook timeout (10 seconds in hooks.json) bounds each such stall."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+    except (FileNotFoundError, NotADirectoryError):
+        return ("absent", None)
+    except IsADirectoryError:
+        return ("bad", _orch_barrier_nonregular(path))  # a platform whose open refuses a directory
+    except Exception as exc:
+        return ("bad", type(exc).__name__)
+    chunks, total, early, close_error = [], 0, None, None
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            early = ("bad", _orch_barrier_nonregular(path, opened))
+        else:
+            while total <= _ORCH_BARRIER_MAX_BYTES:
+                chunk = os.read(fd, _ORCH_BARRIER_MAX_BYTES + 1 - total)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+    except Exception as exc:
+        early = ("bad", type(exc).__name__)
+    finally:
+        try:
+            os.close(fd)  # once: after a failed close the descriptor number may already be reused
+        except OSError as exc:
+            close_error = ("bad", type(exc).__name__)
+    if early is not None:
+        return early
+    if close_error is not None:
+        return close_error
+    if total > _ORCH_BARRIER_MAX_BYTES:
+        return ("bad", "larger than the {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES))
+    try:
+        return ("ok", json.loads(b"".join(chunks).decode("utf-8")))
+    except Exception as exc:  # any decode or parse failure (RecursionError from deep nesting too) is bad
+        return ("bad", type(exc).__name__)
 
 
 def orch_resume_barrier(data):
     """sesres/recncl, PreToolUse (stage BAKE: warn-first, blocks nothing yet): while the barrier is
     armed, surface the first mutation outside the allowlist. The record surfaces, the registry files,
     and the suite's own state directory stay writable, so the only exit, correcting the record, is
-    never obstructed."""
+    never obstructed. The barrier is read by _orch_barrier_read: a non-blocking open (a FIFO with no
+    writer does not wait for one), an fstat that refuses anything not a regular file before any read (so
+    a FIFO or a device such as /dev/zero is never read), and a read of at most _ORCH_BARRIER_MAX_BYTES + 1
+    bytes (65537: the bound plus one byte that detects a longer file); a close error is a bad result too.
+    A barrier file that is absent (its open raises FileNotFoundError
+    or NotADirectoryError, a dangling symlink included) reads as clear; a symlink to a regular file reads
+    as that file. A barrier is well-formed only when it is a JSON object whose keys are "active"
+    (required, a boolean), "findings" (required, never defaulted, a list of strings), and optionally
+    "warned" (a boolean) and "ts" (a string), and no other key. One that exists but is not a regular file
+    (a FIFO, a device such as /dev/zero, a directory, or a symlink to any of these; a UNIX socket, whose
+    open fails with ENXIO, reads as OSError), is larger than the bound, cannot be read, closed or parsed
+    for any reason (an OSError, a decode or JSON error, a
+    RecursionError from deep nesting, or any other exception the parse raises), or is not well-formed (a
+    truncated or partial write by an earlier writer, for example), reads as ARMED: every mutation outside
+    the allowlist surfaces a note naming the file as unreadable or malformed with the reason (there is no
+    readable "warned" flag to record, so it is not once per arming), and in BAKE that note blocks
+    nothing, and a mutation on the allowlist is allowed after the same read. Not bounded by the reader:
+    path lookup on a hung mount can stall its os.open (and the lstat naming a non-regular file, and the
+    os.path.realpath calls below) for any file type, a regular file on a stalled filesystem can stall the
+    read, and opening a device node does whatever its driver does; the hook timeout (10 seconds) bounds
+    each such stall. It clears where 'python3
+    tools/orch_doctor.py --resume-audit' or the next SessionStart audit replaces the file
+    (_orch_barrier_write, whose os.replace replaces a FIFO, a socket, a device node or a symlink at the
+    path and leaves a symlink's target intact), or where the user corrects or removes it (the state
+    directory is on the allowlist); where the state directory cannot be searched, that replace fails as
+    well, and the note persists until its permissions are restored. A directory at the barrier path
+    itself (os.lstat shows a directory) cannot be replaced by either audit, so its note says to remove
+    the directory; a symlink to a directory gets the generic note, since the audit replaces the link."""
     root = _orch_root(data)
     if root is None:
         return _allow()
@@ -10380,12 +15866,15 @@ def orch_resume_barrier(data):
         return _allow()
     sd = _orch_state_dir_for_root(root)
     barrier_path = os.path.join(sd, "resume-barrier.json")
-    try:
-        with open(barrier_path, "r", encoding="utf-8") as fh:
-            barrier = json.load(fh)
-    except (OSError, ValueError):
+    status, barrier = _orch_barrier_read(barrier_path)
+    if status == "absent":
         return _allow()
-    if not isinstance(barrier, dict) or not barrier.get("active"):
+    unreadable = None
+    if status == "bad":  # not a regular file, oversized, unreadable or unparseable: armed
+        barrier, unreadable = {}, barrier
+    elif not _orch_barrier_well_formed(barrier):
+        barrier, unreadable = {}, "not a well-formed barrier object"
+    elif not barrier["active"]:
         return _allow()
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     file_path = tool_input.get("file_path")
@@ -10403,14 +15892,28 @@ def orch_resume_barrier(data):
             rp = os.path.realpath(p)
             if target == rp or target.startswith(rp.rstrip(os.sep) + os.sep):
                 return _allow()  # the exit path (fixing the record) is always writable
+    if unreadable == _ORCH_BARRIER_DIRECTORY:
+        return _allow_note(
+            "AIQT guardrail (resume barrier, BAKE posture: surfacing, not blocking): the resume "
+            "barrier file {} is unreadable or malformed (not a regular file: it is a directory), so it is "
+            "read as armed and this mutation is outside the record surfaces. Neither 'python3 "
+            "tools/orch_doctor.py --resume-audit' nor the SessionStart audit can replace a directory: "
+            "remove the directory, then re-run 'python3 tools/orch_doctor.py --resume-audit'."
+            .format(barrier_path))
+    if unreadable is not None:
+        return _allow_note(
+            "AIQT guardrail (resume barrier, BAKE posture: surfacing, not blocking): the resume "
+            "barrier file {} is unreadable or malformed ({}), so it is read as armed and this mutation "
+            "is outside the record surfaces. Re-run 'python3 tools/orch_doctor.py --resume-audit' to "
+            "replace it (a clean audit clears it), or correct or remove the file."
+            .format(barrier_path, unreadable))
     if barrier.get("warned"):
         return _allow()  # surface once per arming, never a nag wall
     barrier["warned"] = True
     try:
-        with open(barrier_path, "w", encoding="utf-8") as fh:
-            json.dump(barrier, fh)
-    except OSError:
-        pass
+        _orch_barrier_write(barrier_path, barrier)
+    except (OSError, ValueError):
+        pass  # the previous barrier is left unchanged; it surfaces again on the next mutation
     return _allow_note(
         "AIQT guardrail (resume barrier, BAKE posture: surfacing, not blocking): the resume "
         "audit found divergence ({}) and this mutation is outside the record surfaces. Correct the "
@@ -10786,13 +16289,12 @@ def _wrtscp_target_companion_store(target, stores):
 
 
 def _wrtscp_deny(root, detail, reason, banner):
-    """A write-scope DENY that also makes a BEST-EFFORT guard-events append (the over-fire metric) when root
-    is resolvable. The append is best-effort: _orch_guard_event may return False and this ignores it, so a
-    failed append neither blocks nor alters the denial and the over-fire metric may be lost for that event."""
-    if root is not None:
-        _orch_guard_event(root, "wrtscp", "deny", detail)
-    return _deny("AIQT rule wrtscp (write-scope): {}".format(reason),
-                 "AIQT guardrail: {} (rule wrtscp).".format(banner))
+    """A write-scope DENY that also appends a guard-events row (the over-fire metric) when root is
+    resolvable. A failed append adds the recording-failure warning to the deny reason and the banner and
+    never alters the denial; with no resolvable root no row is attempted."""
+    tail = _orch_warn_tail(_orch_event_warn(root, "wrtscp", "deny", detail) if root is not None else "")
+    return _deny("AIQT rule wrtscp (write-scope): {}{}".format(reason, tail),
+                 "AIQT guardrail: {} (rule wrtscp).{}".format(banner, tail))
 
 
 def write_scope_guard(data):
@@ -10837,7 +16339,8 @@ def write_scope_guard(data):
     an un-armed session with a genuinely-absent floor leaves the frozen layer inert, so the frozen denial is
     not unconditionally always-on. Slice confinement is fail-open on a missing declaration; the principled
     fail-open is genuine ABSENCE (of a declaration or floor: no confinement in effect, the same inert
-    boundary gensrc and the orchestration suite use). A cannot-evaluate FAULT is not absence: a resolution
+    boundary gensrc and, by default, the orchestration suite use; its truncation guard denies an absent
+    registry in the opt-in registry-required mode). A cannot-evaluate FAULT is not absence: a resolution
     or probe ERROR (an unresolvable session root, a root or target canonicalization fault, a containment
     fault, or a nested-repo probe fault) on a covered write DENIES whether or not the session is armed, and
     never allows an unverified write; and once armed every cannot-evaluate resolves to DENY. Out-of-scope is a DENY, never an ASK:
@@ -11103,9 +16606,13 @@ def write_scope_guard(data):
                                     "orchestration-registry surface instead.".format(target),
                                     "denied a {} to a declared companion store's frozen orchestration "
                                     "registry file".format(tool_name))
-            _orch_guard_event(root, "wrtscp", "allow",
-                              "companion-store write to the declared store {} (target {})"
-                              .format(store, target))
+            ev = _orch_event_warn(root, "wrtscp", "allow",
+                                  "companion-store write to the declared store {} (target {})"
+                                  .format(store, target))
+            if ev:
+                # the allow stands; its unwritten audit row is surfaced, never lost silently
+                return _allow_note("AIQT guardrail: allowed a {} to the declared companion store {} "
+                                   "(rule wrtscp). {}".format(tool_name, store, ev))
             return _allow()                                                                   # companion store
         return _wrtscp_deny(root, "outside toplevel",
                             "the write target resolves OUTSIDE this repository ({}); a guarded-tool write "
@@ -11187,6 +16694,7 @@ HANDLERS = {
     "orch_truncation_guard": orch_truncation_guard,
     "orch_untracked_wait_loop": orch_untracked_wait_loop,
     "orch_dispatch_ledger": orch_dispatch_ledger,
+    "review_dispatch_pin": review_dispatch_pin,
     "orch_prompt_stamp": orch_prompt_stamp,
     "orch_resume_audit": orch_resume_audit,
     "orch_resume_barrier": orch_resume_barrier,
@@ -11195,11 +16703,11 @@ HANDLERS = {
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
 # without reading the (possibly unreadable) payload. This is the load-bearing half of the fail-closed
 # design: a Stop/SubagentStop handler must NEVER exit 2 ON AN ERROR PATH, because a hard Stop block could
-# re-fire on the forced continuation and wedge the session (no stop_hook_active field, no documented loop
-# bound), so on ANY error (unreadable stdin, JSON parse failure, non-dict payload, or a handler crash) it
-# emits a non-blocking systemMessage warning and exits 0. A DELIBERATE backlog-deny is the intended
-# exception (the documented Stop block mechanism, bounded by the loop cap); only a PreToolUse handler
-# fails closed via exit 2 on error.
+# re-fire on the forced continuation and wedge the session (an error path keeps no loop bound and never
+# consults the stop_hook_active field of the payload), so on ANY error (unreadable stdin, JSON parse
+# failure, non-dict payload, or a handler crash) it emits a non-blocking systemMessage warning and exits 0.
+# A DELIBERATE backlog-deny is the intended exception (the documented Stop block mechanism, bounded by the
+# loop cap); only a PreToolUse handler fails closed via exit 2 on error.
 HANDLER_EVENT = {
     "diff_wall_stop": "Stop",
     "diff_source_pretool": PRETOOL,
@@ -11223,6 +16731,7 @@ HANDLER_EVENT = {
     "orch_truncation_guard": PRETOOL,
     "orch_untracked_wait_loop": PRETOOL,
     "orch_dispatch_ledger": "PostToolUse",
+    "review_dispatch_pin": PRETOOL,
     "orch_prompt_stamp": "UserPromptSubmit",
     "orch_resume_audit": "SessionStart",
     "orch_resume_barrier": PRETOOL,
@@ -11232,13 +16741,32 @@ HANDLER_EVENT = {
 def _dispatcher_fail_open_warn(handler_name, detail):
     """A fail-open dispatcher-level error for a Stop/SubagentStop/SessionStart/TeammateIdle/
     UserPromptSubmit/PostToolUse handler: a non-blocking systemMessage on exit 0, so no error on
-    these paths can wedge a session, trap a teammate, or block a human prompt. It prints the note and
-    returns the exit code 0, so main returns it directly (a note constructor's call is only ever the
-    direct value of a return)."""
+    these paths can wedge a session, trap a teammate, or block a human prompt. It prints and flushes
+    the note and returns the exit code 0, so main returns it directly (a note constructor's call is
+    only ever the direct value of a return). The flush keeps the note out of the buffer os._exit at the
+    entry line would discard. A print or flush failure RAISES out of this leaf (the note-shape scan
+    refuses a try statement in a leaf constructor's body, so no guard can live here); each fail-open
+    call site in main catches it and returns 0, so a stdout that cannot be written or flushed loses the
+    warning and keeps the non-blocking exit 0, never the interpreter's own exit-time status."""
     print(json.dumps({"systemMessage": (
         "AIQT guardrail: the {} check could not run ({}); surfacing a warning rather than blocking "
         "(non-blocking by design on this event).".format(handler_name, detail))}))
+    sys.stdout.flush()
     return 0
+
+
+def _stderr_note(line):
+    """Best-effort stderr diagnostic: write the line and flush, swallowing every failure (a closed
+    descriptor 2 leaves sys.stderr None; a full device or a broken pipe raises OSError), so the EXIT
+    CODE, never this line, carries the dispatcher's decision. Before this helper, a fail-closed path's
+    own print to sys.stderr could raise on the write, or buffer the line and fail the interpreter-exit
+    flush, ending the run with the interpreter's status 1 or 120; the platform treats any status other
+    than 2 as non-blocking, so the guarded PreToolUse call went ahead unchecked."""
+    try:
+        sys.stderr.write(line + "\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
 
 
 def main(argv):
@@ -11246,13 +16774,12 @@ def main(argv):
     # A genuinely unknown mode is not identifiable as Stop and is a broken install, so it fails closed
     # via exit 2. But a KNOWN handler invoked with the wrong argv count must NOT reach exit 2 when it is
     # a Stop/SubagentStop handler: a hard exit-2 Stop path could re-fire on the forced continuation and
-    # wedge the session (no stop_hook_active field, no documented loop bound), so a bad-argv Stop
-    # invocation WARNS on exit 0 like every other Stop error path (FIX 2). A bad-argv PreToolUse handler
-    # still fails closed (exit 2).
+    # wedge the session (an error path keeps no loop bound and never consults the stop_hook_active
+    # field of the payload), so a bad-argv Stop invocation WARNS on exit 0 like every other Stop error
+    # path (FIX 2). A bad-argv PreToolUse handler still fails closed (exit 2).
     mode = argv[0] if argv else None
     if mode not in HANDLERS:
-        print("aiqt_hooks: usage: aiqt_hooks.py <{}>".format("|".join(sorted(HANDLERS))),
-              file=sys.stderr)
+        _stderr_note("aiqt_hooks: usage: aiqt_hooks.py <{}>".format("|".join(sorted(HANDLERS))))
         return 2
     handler_name = mode
     is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS
@@ -11260,41 +16787,77 @@ def main(argv):
         detail = "expected exactly one mode argument, got {}".format(len(argv))
         if is_fail_open:
             # A Stop handler's ERROR path never exits 2 (a deliberate deny does, via the orchestration
-            # stop guard), not even on a malformed invocation: WARN and exit 0.
-            return _dispatcher_fail_open_warn(handler_name, "bad invocation: {}".format(detail))
-        print("aiqt_hooks: {} ({}); failing closed".format(handler_name, detail), file=sys.stderr)
+            # stop guard), not even on a malformed invocation: WARN and exit 0. The warn print raising
+            # (a stdout that cannot be written or flushed) loses the warning and keeps the 0.
+            try:
+                return _dispatcher_fail_open_warn(handler_name, "bad invocation: {}".format(detail))
+            except BaseException:
+                return 0
+        _stderr_note("aiqt_hooks: {} ({}); failing closed".format(handler_name, detail))
         return 2
     try:
         data = json.loads(sys.stdin.read())
         if not isinstance(data, dict):
             raise ValueError("payload is not a JSON object")
-    except (ValueError, UnicodeDecodeError, OSError) as exc:
-        # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload.
+    except Exception as exc:  # any failure to read the payload is an unreadable payload
+        # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload, and ALSO a
+        # RecursionError (deeply nested JSON) or a MemoryError: the old narrow except let those escape as a
+        # traceback with exit 1, which the platform treats as non-blocking. Every exception is named.
+        detail = "{}: {}".format(type(exc).__name__, exc)
         if is_fail_open:
             # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so no Stop
-            # payload (including a bare '{' or any garbage) can ever wedge the session.
-            return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(exc))
+            # payload (including a bare '{' or any garbage) can ever wedge the session. The warn print
+            # raising (a stdout that cannot be written or flushed) loses the warning and keeps the 0.
+            try:
+                return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(detail))
+            except BaseException:
+                return 0
         # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
         # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
-        print("aiqt_hooks: unreadable hook payload ({}); failing closed".format(exc), file=sys.stderr)
+        _stderr_note("aiqt_hooks: unreadable hook payload ({}); failing closed".format(detail))
         return 2
     try:
         code, stdout_obj, stderr_text = HANDLERS[handler_name](data)
     except Exception as exc:  # a handler crash is an unreadable result
         if is_fail_open:
             # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws on a
-            # pathological message): WARN and exit 0, never exit 2.
-            return _dispatcher_fail_open_warn(handler_name, "handler crash: {}".format(exc))
+            # pathological message): WARN and exit 0, never exit 2. The warn print raising (a stdout
+            # that cannot be written or flushed) loses the warning and keeps the 0.
+            try:
+                return _dispatcher_fail_open_warn(
+                    handler_name, "handler crash: {}: {}".format(type(exc).__name__, exc))
+            except BaseException:
+                return 0
         # A PreToolUse handler crash fails closed (block), not pass.
-        print("aiqt_hooks: handler {} failed ({}); failing closed".format(handler_name, exc),
-              file=sys.stderr)
+        _stderr_note("aiqt_hooks: handler {} failed ({}: {}); failing closed".format(
+            handler_name, type(exc).__name__, exc))
         return 2
     if stdout_obj is not None:
-        print(json.dumps(stdout_obj))
+        try:
+            print(json.dumps(stdout_obj))
+            sys.stdout.flush()
+        except BaseException as exc:
+            # The handler's structured output never provably reached the platform (a full device, a
+            # broken pipe, a serialization fault). The posture comes from the MODE, exactly as on the
+            # error paths above: a fail-open mode loses its warning or note and keeps the non-blocking
+            # exit 0; a fail-closed (PreToolUse) mode fails CLOSED, because the lost object may have
+            # been a deny and this block cannot inspect it (the note-shape rules in
+            # tools/selftest_aiqt_hooks.py forbid any use of the bound result beyond the print above),
+            # so a lost decision blocks rather than allows.
+            if is_fail_open:
+                return 0
+            _stderr_note("aiqt_hooks: {}: the decision could not be written to stdout ({}: {}); "
+                         "failing closed".format(handler_name, type(exc).__name__, exc))
+            return 2
     if stderr_text:
-        print(stderr_text, file=sys.stderr)
+        _stderr_note(stderr_text)
     return code
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    # os._exit, not sys.exit: main() has already written and flushed its output best-effort, so the
+    # interpreter-exit flush of the std streams could only hurt here (a stream that buffered a failed
+    # write raises again in that flush and the interpreter exits 120, a status the platform treats as
+    # NON-blocking, which would turn a fail-closed exit 2 into an allow). Nothing after main() holds
+    # unflushed output, so os._exit discards nothing.
+    os._exit(main(sys.argv[1:]))

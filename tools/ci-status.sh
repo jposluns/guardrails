@@ -15,41 +15,286 @@
 # 2026-08-08 against commit 7666cff, whose Quality run had concluded `success`.
 # Anything treating it as the green signal hangs; anything inverting it merges on a lie.
 #
-# This reads every paginated run from `actions/runs?head_sha=`, which needs only Actions: Read.
+# This reads every paginated run from `actions/runs?head_sha=` AND the newest pages of the unfiltered
+# `actions/runs` listing back to a lower bound derived from the commit's committer date, keeping the
+# runs whose head_sha is exactly this commit. Both need only Actions: Read.
 #
 # Usage:
-#   tools/ci-status.sh                 # current HEAD, report once
-#   tools/ci-status.sh <sha>           # a given commit, report once
-#   tools/ci-status.sh <sha> --wait    # poll until terminal, bounded and fail-loud
+#   tools/ci-status.sh                              # current HEAD, report once
+#   tools/ci-status.sh <sha>                        # a given commit, report once
+#   tools/ci-status.sh <sha> --wait                 # poll until terminal, bounded and fail-loud
+#   tools/ci-status.sh <sha> --require-base main    # additionally trust only pull_request runs
+#                                                   # recorded against base main, and require a
+#                                                   # conforming completed successful run of the
+#                                                   # workflow file .github/workflows/quality.yml (see
+#                                                   # THE BASE-BRANCH REQUIREMENT below)
+#   ... --require-base main --require-workflow PATH # the same, requiring the workflow whose file
+#                                                   # is PATH instead of the default quality.yml
 #
-# Exit codes: 0 success, 1 failed / timed out / not-yet-terminal on a one-shot check,
-# 2 no run found or API error. Report-once (no --wait) never returns 0 for a non-terminal run.
+# Exit codes: 0 success, 1 failed / timed out / not-yet-terminal on a one-shot check, a run that
+# does not satisfy --require-base, or no conforming completed successful run of the required
+# workflow file under --require-base (report-once refuses at once; --wait refuses after its
+# settle window), 2 no run found, API error, a malformed run record (in one-shot
+# and --wait mode alike), a missing, unusable or repeated --require-base or --require-workflow
+# value, or the repository cannot be determined (see THE REPOSITORY IS THE CHECKOUT'S OWN below).
+# Report-once (no --wait) never returns 0 for a non-terminal run.
 set -uo pipefail
 
-REPO="${CI_STATUS_REPO:-jposluns/guardrails}"
 # Resolve whatever rev was given (short SHA, branch, tag, HEAD~1) to a FULL 40-character
 # SHA. The `head_sha=` filter matches only on the full SHA, so a short one silently returns
 # zero runs and this script then reports "no workflow run registered" for a commit whose run
 # actually succeeded. That fails closed, blocking a merge rather than permitting one, but it
 # is still a misreport, so resolve the input rather than trusting it. Fail loudly when the
 # rev does not resolve, because an unresolvable rev is an error, not an absent run.
-# Accept the flag in any position, so `ci-status.sh --wait` means "HEAD, and wait" rather
-# than treating the flag as a rev. The first non-flag argument is the rev; anything starting
-# with a hyphen is a flag.
+# Accept the flags in any position, so `ci-status.sh --wait` means "HEAD, and wait" rather
+# than treating the flag as a rev. The one non-flag argument is the rev; a second non-flag
+# argument is refused (exit 2), never read last-wins, because a stray positional that resolves
+# (a branch name) would silently change which commit is checked. Anything starting
+# with a hyphen is a flag, except the one argument that follows --require-base or
+# --require-workflow, which is its value. Each value is validated AS IT IS CONSUMED, before any
+# git or API read: a missing, empty, whitespace-only or hyphen-led value is refused (exit 2),
+# because an empty or whitespace-only value would silently mean "no requirement", the exact
+# fail-open these options exist to prevent, and a hyphen-led one is a swallowed flag, not a
+# name. A repeated --require-base or --require-workflow is also refused (exit 2), never read
+# last-wins: under last-wins a forgotten earlier value would silently replace the requirement
+# the caller believes is in force. --require-workflow without --require-base is refused too,
+# because alone it would be a silent no-op.
 SHA_IN="HEAD"
+SHA_IN_SET=0
 WAIT=""
+REQUIRE_BASE=""
+REQUIRE_BASE_SET=0
+# The workflow FILE whose conforming completed successful run --require-base additionally
+# demands, matched against each run's recorded workflow path (the runs API's .path), never its
+# display name: any workflow can carry name: Quality, so a name match would let a same-named
+# run from another file stand in. quality.yml is this repository's aggregated workflow, the one
+# required status the merge lane reads.
+REQUIRE_WORKFLOW=".github/workflows/quality.yml"
+REQUIRE_WORKFLOW_SET=0
+EXPECT_VALUE=""
 for arg in "$@"; do
+  if [ -n "$EXPECT_VALUE" ]; then
+    option="$EXPECT_VALUE"
+    EXPECT_VALUE=""
+    label="branch name"
+    [ "$option" = "--require-workflow" ] && label="workflow path"
+    case "$arg" in
+      -*)
+        printf 'ERROR: %s needs a %s; a hyphen-led value is refused (a swallowed flag, not a name).\n' "$option" "$label" >&2
+        exit 2
+        ;;
+      *[![:space:]]*) ;;
+      *)
+        printf 'ERROR: %s needs a %s; an empty or whitespace-only value is refused.\n' "$option" "$label" >&2
+        exit 2
+        ;;
+    esac
+    if [ "$option" = "--require-base" ]; then
+      if [ "$REQUIRE_BASE_SET" -eq 1 ]; then
+        printf 'ERROR: --require-base is given more than once; a repeated option is refused rather than read last-wins.\n' >&2
+        exit 2
+      fi
+      REQUIRE_BASE="$arg"
+      REQUIRE_BASE_SET=1
+    else
+      if [ "$REQUIRE_WORKFLOW_SET" -eq 1 ]; then
+        printf 'ERROR: --require-workflow is given more than once; a repeated option is refused rather than read last-wins.\n' >&2
+        exit 2
+      fi
+      REQUIRE_WORKFLOW="$arg"
+      REQUIRE_WORKFLOW_SET=1
+    fi
+    continue
+  fi
   case "$arg" in
     --wait) WAIT="--wait" ;;
-    -*) printf 'ERROR: unknown option %s (only --wait is supported).\n' "$arg" >&2; exit 2 ;;
-    *) SHA_IN="$arg" ;;
+    --require-base) EXPECT_VALUE="--require-base" ;;
+    --require-workflow) EXPECT_VALUE="--require-workflow" ;;
+    -*) printf 'ERROR: unknown option %s (only --wait, --require-base BRANCH and --require-workflow PATH are supported).\n' "$arg" >&2; exit 2 ;;
+    *)
+      if [ "$SHA_IN_SET" -eq 1 ]; then
+        printf 'ERROR: more than one rev was given; a repeated rev is refused rather than read last-wins.\n' >&2
+        exit 2
+      fi
+      SHA_IN="$arg"
+      SHA_IN_SET=1
+      ;;
   esac
 done
+if [ -n "$EXPECT_VALUE" ]; then
+  label="branch name"
+  [ "$EXPECT_VALUE" = "--require-workflow" ] && label="workflow path"
+  printf 'ERROR: %s needs a %s and none was given.\n' "$EXPECT_VALUE" "$label" >&2
+  exit 2
+fi
+if [ "$REQUIRE_WORKFLOW_SET" -eq 1 ] && [ "$REQUIRE_BASE_SET" -ne 1 ]; then
+  printf 'ERROR: --require-workflow is read only under --require-base; alone it would be a silent no-op.\n' >&2
+  exit 2
+fi
 if ! SHA="$(git rev-parse --verify --quiet "${SHA_IN}^{commit}")"; then
   printf 'ERROR: %s does not resolve to a commit in this repository.\n' "${SHA_IN}" >&2
   exit 2
 fi
-DEADLINE=$(( $(date +%s) + ${CI_STATUS_TIMEOUT:-900} ))
+if ! COMMIT_TIME="$(git log -1 --no-show-signature --format=%ct "$SHA" --)" ||
+    ! [[ "$COMMIT_TIME" =~ ^[0-9]+$ ]]; then
+  printf 'ERROR: cannot read the committer date of %s.\n' "$SHA" >&2
+  exit 2
+fi
+
+# THE REPOSITORY IS THE CHECKOUT'S OWN. The runs read are those of the repository this checkout's origin
+# remote names, never a built-in name: a copied, forked, or adopter checkout that read a fixed repository
+# would report another repository's CI runs as its own. The origin URL is read with
+# `git remote get-url --all origin` (so url.<base>.insteadOf rewriting applies, as it does to a fetch) and
+# must match one of these forms exactly, with no other host, port, user name, credentials, path segment,
+# or trailing slash:
+#   https://github.com/OWNER/REPO    ssh://git@github.com/OWNER/REPO    git@github.com:OWNER/REPO
+# each optionally ending in .git. OWNER is 1 to 39 ASCII letters, digits, and hyphens, starting and ending
+# with a letter or digit; REPO is 1 to 100 ASCII letters, digits, '.', '_', and '-', other than '.' and
+# '..'. git's output is read byte for byte: command substitution strips every trailing line feed, which
+# would turn a URL ending in a line feed, or a valid URL followed by a newline-only URL, into one
+# apparently valid URL, so a sentinel follows the output, git's exit status is kept, and exactly one
+# final line feed (the last URL's record delimiter) is removed before validation. An origin that is absent or has no
+# URL, that git cannot read (get-url exits other than 0 or 2), that has more than one URL or a URL holding
+# a line feed (git's output cannot tell these two apart), or that does not match is cannot-evaluate (exit
+# 2, before any API call), never a fallback; the message names which, and does not echo the URL, which may
+# carry credentials. CI_STATUS_REPO, when set and nonempty, only confirms: it must equal the derived
+# OWNER/REPO exactly (case included), or the script refuses with exit 2. That refusal names only the
+# derived OWNER/REPO and never echoes CI_STATUS_REPO, which is unvalidated and may carry credentials or
+# line breaks.
+# WHAT THIS DOES NOT CLOSE. No variable of this script selects another repository, but the read follows
+# the origin as git config resolves it: a url.<base>.insteadOf rewrite from any configuration git reads
+# (system, global, repository, or worktree files, their includes, and the GIT_CONFIG_* environment
+# variables such as GIT_CONFIG_COUNT, GIT_CONFIG_KEY_<n>, and GIT_CONFIG_VALUE_<n>) can map the origin to
+# another accepted URL, whose repository's runs are then read. Whoever controls this checkout's git
+# configuration or its environment holds that power, as they do over a fetch. RESIDUAL (disclosed, not
+# closed): gh, not this script, picks the API host. No --hostname is passed, so GH_HOST or gh's own
+# configuration may send the same OWNER/REPO request to another host (gh's behaviour, not verified here).
+# AVAILABILITY COST (disclosed, accepted): a real checkout whose origin names this repository in a form
+# the strict match refuses exits 2 and cannot use this script. Refused real-world forms include
+# credential-bearing https (a token added by an insteadOf rewrite included), an ssh host alias
+# (git@ALIAS:OWNER/REPO), ssh://git@ssh.github.com:443/OWNER/REPO, git://github.com/OWNER/REPO, and any
+# GitHub Enterprise host.
+# The character classes are spelled out, never ranges, so the match does not depend on the locale.
+GITHUB_NAME_ALNUM='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+GITHUB_OWNER_RE="^[${GITHUB_NAME_ALNUM}]([${GITHUB_NAME_ALNUM}-]{0,37}[${GITHUB_NAME_ALNUM}])?\$"
+GITHUB_REPO_RE="^[${GITHUB_NAME_ALNUM}._-]{1,100}\$"
+# Print OWNER/REPO for an accepted origin URL; return 1, printing nothing, for any other string.
+github_repo_from_url() {
+  local url="$1" path owner name
+  case "$url" in
+    https://github.com/*) path="${url#https://github.com/}" ;;
+    ssh://git@github.com/*) path="${url#ssh://git@github.com/}" ;;
+    git@github.com:*) path="${url#git@github.com:}" ;;
+    *) return 1 ;;
+  esac
+  path="${path%.git}"
+  [[ "$path" == */* ]] || return 1
+  owner="${path%%/*}"
+  name="${path#*/}"
+  [[ "$owner" =~ $GITHUB_OWNER_RE ]] || return 1
+  [[ "$name" =~ $GITHUB_REPO_RE ]] || return 1
+  [ "$name" != "." ] && [ "$name" != ".." ] || return 1
+  printf '%s/%s\n' "$owner" "$name"
+}
+# Byte for byte, as stated above: the sentinel '.' keeps git's trailing line feeds through the command
+# substitution, which exits with git's own status; then the sentinel and one final line feed are removed.
+ORIGIN_URLS="$(git remote get-url --all origin; origin_rc=$?; printf '.'; exit "$origin_rc")"
+origin_rc=$?
+ORIGIN_URLS="${ORIGIN_URLS%.}"
+ORIGIN_URLS="${ORIGIN_URLS%$'\n'}"
+if [ "$origin_rc" -eq 2 ] || { [ "$origin_rc" -eq 0 ] && [ -z "$ORIGIN_URLS" ]; }; then
+  printf 'ERROR: cannot evaluate: this checkout has no origin remote, or its origin remote has no URL, so the repository whose CI runs to read is unknown (no default repository is assumed).\n' >&2
+  exit 2
+elif [ "$origin_rc" -ne 0 ]; then
+  printf 'ERROR: cannot evaluate: git could not read the origin remote URL (git remote get-url exited %s).\n' "$origin_rc" >&2
+  exit 2
+elif [[ "$ORIGIN_URLS" == *$'\n'* ]]; then
+  printf 'ERROR: cannot evaluate: the origin remote has more than one URL, or a URL containing a line break, so the repository whose CI runs to read is ambiguous.\n' >&2
+  exit 2
+fi
+if ! REPO="$(github_repo_from_url "$ORIGIN_URLS")"; then
+  printf 'ERROR: cannot evaluate: the origin remote URL is not one of https://github.com/OWNER/REPO, ssh://git@github.com/OWNER/REPO or git@github.com:OWNER/REPO (each optionally ending in .git), so the repository whose CI runs to read is unknown.\n' >&2
+  exit 2
+fi
+if [ -n "${CI_STATUS_REPO:-}" ] && [ "$CI_STATUS_REPO" != "$REPO" ]; then
+  # CI_STATUS_REPO is unvalidated (it may carry credentials or line breaks): print only the validated REPO.
+  printf "ERROR: CI_STATUS_REPO is set but does not equal %s, the repository this checkout's origin remote names (its value is not echoed); refusing to read another repository's CI runs.\n" "$REPO" >&2
+  exit 2
+fi
+NOW="$(date +%s)"
+DEADLINE=$(( NOW + ${CI_STATUS_TIMEOUT:-900} ))
+
+# BOUNDED SCAN. The unfiltered listing is read newest first, one page per request, and paging stops at
+# the first page that is short (the end of the listing) or holds only runs created before LOWER_BOUND.
+# A run for this commit is created after the commit is pushed, so after the commit object exists; its
+# created_at (GitHub's clock) can precede the committer date only when the committer's clock ran ahead.
+# LOWER_BOUND is therefore min(committer date, now) minus SCAN_MARGIN_SECONDS. The clamp to now
+# neutralises a committer date in the future; it can only lower the bound, so the clamp never raises the
+# bound above the committer-date bound; its effect depends on the checking machine's clock, which, if
+# ahead, can leave a future committer date unclamped. WHAT THE 24-HOUR MARGIN COVERS: a committer clock
+# ahead of GitHub's by at most 24 hours, whatever the cause. A clock behind is always covered, since it
+# only lowers the bound. A wrong time zone setting on a clock showing the right local time shifts the
+# committer date by the difference of two UTC offsets, which span UTC-12 to UTC+14, so up to 26 hours
+# either way: an error of up to 24 hours ahead is covered, one of 24 to 26 hours ahead is NOT. ORDERING
+# JITTER: the stop rule ends the scan at a page whose runs were ALL created before LOWER_BOUND, so a run
+# of this commit is missed only if the listing places it after a full page of 100 runs each created
+# before LOWER_BOUND; with an accurate committer clock each of those runs was created at least 24 hours
+# before it (at least 24 hours minus the clock error when the clock is ahead). Jitter on that scale is
+# NOT covered. RESIDUAL (disclosed, not closed): a committer clock ahead by more than 24 hours (including
+# the 24 to 26 hour wrong time zone case), still ahead when the commit was made, can place this commit's
+# runs below LOWER_BOUND; they are then visible only to the head_sha query, which is exactly the parent
+# script's coverage. ASSUMPTION: the listing is ordered newest first by creation, so a new run enters at
+# the head and no run moves within it (observed GitHub behaviour, not a documented contract; RESIDUAL at
+# RETRY_SECONDS states what a moving run costs). Cost scales with the runs created
+# since LOWER_BOUND: one request for the head_sha query plus one per page, typically one or two pages for
+# a recent commit; a scan that has not reached the bound within SCAN_MAX_PAGES pages (5,000 runs) is an
+# API error, never a verdict.
+SCAN_MARGIN_SECONDS=86400
+SCAN_MAX_PAGES=50
+SCAN_FROM="$COMMIT_TIME"
+[ "$NOW" -lt "$SCAN_FROM" ] && SCAN_FROM="$NOW"
+LOWER_BOUND=$(( SCAN_FROM - SCAN_MARGIN_SECONDS ))
+# One-shot mode re-reads once, after RETRY_SECONDS, when the sources disagree about a run, the
+# listing shrank between pages, one source listed a run ID twice in any shape other than the page shift
+# merged below, or an all-success read merged a page shift (each is the signature of a run changing
+# state, being deleted, being created, or moving between requests). A disagreement that persists, or an
+# all-success re-read that merged a page shift again, is reported as an API error (exit 2).
+# PAGE SHIFT (merged, never a pass): a run created between two page reads of the unfiltered listing pushes
+# every older run down one position, so the next page repeats the previous page's last run (page 1 holds
+# runs[0:100] with total_count 150, page 2 holds runs[99:150] with total_count 151). That repeat is merged
+# as one run when the repeated rows are the LEADING rows of the later page, identical in every field to
+# the TRAILING rows of the page before it, and no more in number than the rise in total_count between
+# those two reads. A repeat larger than the rise, a repeat in any other shape (within one page, or not
+# leading and trailing), or a repeated row that differs in any field (status, conclusion, head SHA, name,
+# URL, or creation time) stays an API error. WHY A MERGED READ NEVER PASSES: between two reads the rows
+# shift down by the runs created, minus the runs deleted above the page boundary, plus the runs moved
+# from below the boundary to above it, minus the runs moved from above it to below it; total_count rises
+# by the runs created minus every run deleted. The repeat count minus the rise is therefore the runs
+# moved up, minus the runs moved down, plus the runs deleted below the boundary. A run that moves up
+# across the boundary is a run the scan skips. Under the ordering ASSUMPTION no run moves and a repeat
+# within the rise skips none, but one run moving down offsets one moving up: the repeat then stays within
+# the rise while the run that moved up goes unseen, and nothing in the listing tells the two cases apart.
+# So a read that merged any repeat is INCOMPLETE. It still reports a failed or not-terminal run of this
+# commit (exit 1: every run it shows was read), but it never exits 0. One-shot mode re-reads an
+# all-success merged read once; under --wait such a read resets the settle count, as an API error does,
+# and the poll continues. A pass therefore needs a read with no repeated row, which the script before the
+# merge would also have passed: the merge adds no way to pass. A run created after the earlier page was
+# read sits on a page already read and is not seen, as it would not be had it been created just after
+# the scan.
+# RESIDUAL (disclosed, not closed; it predates the merge): the counts see runs created and deleted, never
+# runs moved. Between two page reads, a run that moves up across a page boundary is skipped, and a run
+# that moves from above the boundary to below the last row the scan reads makes the scan skip the run
+# then first below the boundary. When the moves and creations in that interval leave no repeated row (for
+# example, a run moving up offset by one moving down, with no run created), every count reconciles and
+# the read can pass with a run of this commit unseen. One-shot mode reads such a snapshot once; under
+# --wait, the five settle observations narrow the residual but cannot close it.
+# AVAILABILITY COST (disclosed, accepted): an all-success one-shot check whose read and re-read both merge
+# a page shift exits 2 although nothing may have been lost (run it again, or use --wait); a run deleted
+# below the boundary while another is created also makes the repeat exceed the rise, and is rejected
+# although nothing was lost; the shift check trusts each page's total_count as the count at that read,
+# the assumption stated at DELETION DURING THE SCAN below. The head_sha-filtered source is not merged: a
+# repeat there stays an API error.
+RETRY_SECONDS=5
 
 POLL_SECONDS=15
 SETTLE_OBSERVATIONS=5
@@ -66,70 +311,305 @@ SETTLE_OBSERVATIONS=5
 # payload plus a complete GitHub workflow YAML, event-filter, and glob implementation; the SHA and
 # repository files alone cannot answer that question for pull_request base branches or paths.
 
-query() {
-  # Status and conclusion come FIRST in every TSV row. jq's @tsv escaping keeps tabs, newlines, and
-  # backslashes in display fields from becoming record delimiters, so a workflow name cannot move either
-  # gating field. Name and URL remain display-only.
-  # The no-run case (empty array) gets an explicit sentinel rather than a rendered "null", because
-  # a real run's .status is nullable in the schema and must not be mistaken for "no run yet".
-  # Pagination is part of the verdict: reject non-identical records sharing a run ID, collapse only
-  # identical duplicates, then reconcile the unique count with the reported total_count. This detects
-  # count changes and conflicting duplicates, but cannot detect the same-count replacement race
-  # described above.
-  {
-    gh api "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" --paginate --slurp |
-      jq --arg requested_sha "$SHA" -r '
-      . as $pages
-      | if (($pages | type) != "array") or (($pages | length) == 0) then
-          error("malformed workflow-runs response")
-        elif any($pages[];
-            (type != "object")
-            or ((.total_count | type) != "number")
-            or (.total_count < 0)
-            or ((.total_count | floor) != .total_count)
-            or ((.workflow_runs | type) != "array")
-            or ((.workflow_runs | length) > 100)) then
-          error("malformed workflow-runs response")
+# THE BASE-BRANCH REQUIREMENT (--require-base BRANCH). The merge lane trusts
+# a green run for a merge into BRANCH only when that run evaluated its pull request against BRANCH: a
+# run that passed while the PR targeted another branch says nothing about a merge into BRANCH, and
+# quality.yml no longer carries `edited`, so a base retarget alone schedules no fresh run. Under this
+# option a run counts only when its event is pull_request AND the pull request GitHub recorded ON THE
+# RUN names BRANCH as its base (the runs API's pull_requests[].base.ref). That stored record, not the
+# PR's current base read from the pulls API for the run's head SHA, is the authoritative source:
+# GitHub fills workflow_run.pull_requests when the run is created and does not rewrite it on later PR
+# edits (observed behaviour: a run created before its PR opens keeps an empty array forever, which a
+# matched-by-head recomputation would backfill), so it names the base the run actually evaluated (its
+# GITHUB_BASE_REF), while the PR's current base reflects a retarget made AFTER the run and would
+# accept exactly the stale pre-retarget run this option exists to refuse. EVERY run of the commit
+# must satisfy the requirement, not just one: skipping nonconforming runs instead would let a
+# conforming green sibling (for example the msg-leaks.yml run a retarget does re-trigger) stand in
+# for the missing pre-retarget Quality run. AND a conforming run set alone is not enough: after a
+# retarget to main the only run on the head can be that msg-leaks.yml run (quality.yml filters
+# pull_request on branches: [main] and does not list edited, so the retarget schedules no fresh
+# Quality run), and that lone conforming sibling would otherwise read green with no Quality
+# evidence at all. The option therefore ALSO requires at least one completed, successful,
+# conforming run whose workflow FILE is the one --require-workflow names (default
+# .github/workflows/quality.yml, the aggregated workflow whose status the merge lane reads),
+# matched by the run's recorded workflow path (the runs API's .path), never by its display
+# name: any workflow can carry name: Quality, so a name match would let a same-named run from
+# another file stand in; absent such a run the result is unmet (exit 1, naming the missing
+# workflow file): report-once refuses on its single snapshot, and --wait keeps polling within
+# the settle window first, because a qualifying run can still be registered late on this head
+# (a reopen schedules one). A run recorded against another
+# base (a pre-retarget run), a run of another event (a push run), and a run whose base cannot be
+# established (an empty pull_requests array, or an entry naming no base branch, which GitHub also
+# leaves for a run created before its PR) are each reported by name and end the check with exit 1,
+# in one-shot and --wait mode alike: a run's recorded base never changes, so no amount of waiting
+# turns that read green. RECOVERY: when a nonconforming run (a pre-retarget run) is RETAINED
+# on this head, a reopen does add a conforming run on the same head, but the retained run still fails the
+# every-run rule, so only a refresh push, which moves the head SHA this script pins, earns a
+# run set this option trusts; a MISSING run of the required workflow file beside an otherwise
+# conforming set needs no new head: a qualifying run on this same head (which a reopen
+# schedules) satisfies it. A record of this commit that under this option lacks a usable
+# event, pull_requests or path field entirely is a malformed run record (exit 2, API error),
+# in one-shot and --wait mode alike:
+# malformed evidence is a property of the stored record, which polling re-reads unchanged, not a
+# retryable API condition.
+# RESIDUAL (disclosed, not closed): that the stored array is never rewritten is observed GitHub
+# behaviour, not a documented contract; if GitHub recomputed it from the PR's current state, a
+# pre-retarget run could read as conforming. Server-side branch protection remains the backstop.
+# RESIDUAL (disclosed, not closed): the required-workflow match reads the runs API's .path as the
+# BARE repository-relative workflow file path (observed live 2026-10-13 on this repository's runs:
+# exactly .github/workflows/quality.yml, with no ref suffix); that format is observed GitHub
+# behaviour, not a documented contract. Should GitHub ever return another format (an @ref suffix,
+# say), the exact raw-JSON comparison fails for every run, so every --require-base check exits 1
+# and the merge lane is blocked: fail closed, never a pass.
+# NOT CHECKED (disclosed): only each recorded entry's base.ref is read, never its base.repo or its
+# head.sha, so an entry naming the required branch of another repository reads as conforming;
+# whether GitHub ever records such an entry on a pull_request run is unverified. AVAILABILITY COST
+# (disclosed, unverified): GitHub can leave pull_requests empty for a run created from a fork PR;
+# such a run never satisfies the requirement, so under this option a fork PR may always be refused
+# (exit 1). CALLER (disclosed): no production caller in this repository passes --require-base (its
+# behaviour self-test exercises the option); the merge-lane
+# invocation lives in the merge lane's own tooling, outside this tree.
+#
+# One jq program, two modes. "step" validates ONE raw page of the unfiltered listing, prints "stop" or
+# "more", then the page reduced to the fields used here as one compact JSON line. "verdict" receives the
+# head_sha query's pages and the reduced scan pages, re-checks every completeness condition, and emits
+# the run rows. Status, conclusion, the base-requirement verdict (a fixed token: "-", "met" or
+# "unmet") and the required-workflow verdict (a fixed token: "-", "match" or "other") come FIRST
+# in every TSV row, then the base verdict's display detail, then the run's recorded workflow path
+# (display-only; anything but a nonempty string reads as "-", so an empty or non-string path in
+# plain mode can neither shift later columns nor abort the row), then id, name and URL.
+# The required-workflow match is computed INSIDE jq, on the run's raw JSON .path
+# against the required path passed in as --arg require_workflow, and only the fixed token reaches
+# Bash. An earlier revision compared Bash's @tsv-escaped path column with the unescaped required
+# path, so two different paths that escape alike (a recorded real tab versus a requested literal
+# backslash-t) read as equal, and identical paths holding a tab, newline, carriage return or
+# backslash never matched. jq's @tsv escaping keeps tabs,
+# newlines, and backslashes in display fields from becoming record delimiters, so a workflow name cannot
+# move the gating fields. Name, URL and the path column remain display-only. The no-run case gets an explicit sentinel
+# rather than a rendered "null", because a real run's .status is nullable in the schema and must not be
+# mistaken for "no run yet".
+#
+# TWO SOURCES. The server-side head_sha filter alone is not a complete answer: on 2026-10-06 it returned
+# zero runs for commit 0a0c0ca3 while the repository's run listing showed run 37498869615 for that exact
+# head_sha as completed/success, an hour after the same filtered query had listed that run as
+# in_progress. A failed run dropping out the same way would leave only its green siblings, so the scan
+# runs on EVERY query, whatever the filtered query returned, and the two sources are merged by run ID.
+# When the scan merged a page shift (see RETRY_SECONDS), the run rows are preceded by a "__SHIFTED__"
+# line, which can never equal a run row because every run row holds tab separators.
+#
+# Fail closed (API error, never "no run" and never a verdict) when: either source fails; a page or any
+# record in either source is malformed (every scan record's id, head_sha, and created_at are validated
+# before it counts toward completeness or results, created_at must be a calendar-valid UTC time that
+# formats back to the same string, and a matching scan record is validated as fully as a filtered one);
+# the scan did not end on a terminal page within SCAN_MAX_PAGES; a page other than the last is not full;
+# any scan page's total_count is below the number of records up to and including that page, whether the
+# page is full or short and whatever ended the scan; the listing's total_count fell between two pages;
+# the sources, or two pages, disagree about a run ID's head_sha (checked across ALL records, BEFORE
+# selecting this commit's runs); two records of this commit's run disagree about status, conclusion,
+# name, or URL; the head_sha-filtered source lists a run ID twice; the unfiltered listing repeats a run
+# ID in any shape other than the page shift merged at RETRY_SECONDS (offset pagination shifted between
+# page reads in a way the rise in total_count does not explain, so some run may have gone unseen; a merged
+# shift is never a pass either, as stated there); a
+# scan that reached the end of the listing (a short last page) read a number of rows, merged repeats
+# included, other than that page's total_count (each merged repeat stands for one run created at the
+# head after the earlier page was read); or the filtered source's unique count differs from its
+# total_count.
+#
+# DELETION DURING THE SCAN. Offset pagination skips a run only when the runs ahead of the page boundary
+# shift up, which needs more deletions ahead of the boundary than insertions; new runs enter at the
+# head, so every skip makes total_count fall between the two page reads. Rejecting a falling
+# total_count therefore closes that skip, ASSUMING each page's total_count is the untruncated count of
+# the listing at that read (unverified live; GitHub documents a 1,000-result cap only for filtered
+# listings). A total_count that is itself truncated would defeat this check and the short-last-page
+# check alike. A same-count replacement within the filtered source, described above, stays open.
+CI_STATUS_JQ='
+def malformed_page:
+  (type != "object")
+  or ((.total_count | type) != "number")
+  or (.total_count < 0)
+  or ((.total_count | floor) != .total_count)
+  or ((.workflow_runs | type) != "array")
+  or ((.workflow_runs | length) > 100);
+def malformed_pages:
+  (type != "array") or (length == 0) or any(.[]; malformed_page);
+def malformed_id:
+  (type != "object")
+  or ((.id | type) != "number")
+  or (.id <= 0)
+  or ((.id | floor) != .id)
+  or ((.head_sha | type) != "string")
+  or ((.head_sha | test("^([0-9a-f]{40}|[0-9a-f]{64})$")) | not);
+def malformed_scan_record:
+  malformed_id
+  or ((.created_at | type) != "string")
+  or ((.created_at | try (fromdateiso8601 | todateiso8601) catch null) != .created_at);
+def malformed_run:
+  malformed_id
+  or (.head_sha != $requested_sha)
+  or ((.status != null)
+      and (((.status | type) != "string") or ((.status | length) == 0)))
+  or ((.conclusion != null)
+      and (((.conclusion | type) != "string") or ((.conclusion | length) == 0)))
+  or ((.name | type) != "string")
+  or ((.name | length) == 0)
+  or ((.html_url | type) != "string")
+  or ((.html_url | length) == 0)
+  or (($require_base != "")
+      and (((.event | type) != "string")
+           or ((.event | length) == 0)
+           or ((.path | type) != "string")
+           or ((.path | length) == 0)
+           or ((.pull_requests | type) != "array")
+           or any(.pull_requests[]; (type != "object") or ((.base | type) != "object"))));
+def terminal_page:
+  ((.workflow_runs | length) < 100)
+  or all(.workflow_runs[]; (.created_at | fromdateiso8601) < $lower_bound);
+def unique_id_count: map(.id) | unique | length;
+def shift_repeat_count($previous):
+  [.workflow_runs[] | .id as $id | select(any($previous.workflow_runs[]; .id == $id))] | length;
+def explained_shift($previous):
+  shift_repeat_count($previous) as $repeats
+  | ($repeats == 0)
+    or (($repeats <= (.total_count - $previous.total_count))
+        and (.workflow_runs[:$repeats] == $previous.workflow_runs[-$repeats:]));
+def scan_page_overrun($index):
+  .total_count < (100 * $index + (.workflow_runs | length));
+def projection:
+  [.head_sha, .status, .conclusion, .name, .html_url]
+  + (if $require_base == "" then [] else [.event, .path, [.pull_requests[] | .base.ref]] end);
+def base_requirement:
+  if $require_base == "" then ["-", "-"]
+  elif .event != "pull_request" then
+    ["unmet", "its event is " + (.event | tojson) + ", not pull_request"]
+  elif (.pull_requests | length) == 0 then
+    ["unmet", "no pull request is recorded on the run, so its base cannot be established"]
+  elif any(.pull_requests[]; ((.base.ref | type) != "string") or ((.base.ref | length) == 0)) then
+    ["unmet", "a pull request recorded on the run names no base branch, so its base cannot be established"]
+  elif all(.pull_requests[]; .base.ref == $require_base) then
+    ["met", "-"]
+  else
+    ["unmet", "its recorded base is " + ([.pull_requests[].base.ref] | unique | join(", "))]
+  end;
+def workflow_requirement:
+  if $require_base == "" then "-"
+  elif .path == $require_workflow then "match"
+  else "other" end;
+def display_path:
+  if ((.path | type) == "string") and ((.path | length) > 0) then .path else "-" end;
+if $mode == "step" then
+  if (length != 1) or (.[0] | malformed_page) then
+    error("malformed workflow-runs response")
+  elif any(.[0].workflow_runs[]; malformed_scan_record) then
+    error("malformed workflow run record")
+  else
+    .[0]
+    | (if terminal_page then "stop" else "more" end),
+      ({total_count,
+        workflow_runs: [.workflow_runs[]
+                        | {id, head_sha, status, conclusion, name, html_url, created_at}
+                          + (if $require_base == "" then {} else {event, path, pull_requests} end)]}
+       | tojson)
+  end
+elif $mode != "verdict" then
+  error("unknown mode")
+elif (length != 2) then
+  error("malformed workflow-runs response")
+else
+  .[0] as $filtered_pages
+  | .[1] as $scan_pages
+  | if ($filtered_pages | malformed_pages) or ($scan_pages | malformed_pages) then
+      error("malformed workflow-runs response")
+    else
+      ([$filtered_pages[] | .workflow_runs[]]) as $filtered_all
+      | ([$scan_pages[] | .workflow_runs[]]) as $scan_all
+      | ($scan_pages | length) as $page_count
+      | ($scan_pages[-1]) as $last
+      | if any($filtered_all[]; malformed_run)
+          or any($scan_all[]; malformed_scan_record)
+          or any($scan_all[]; (.head_sha == $requested_sha) and malformed_run) then
+          error("malformed workflow run record")
+        elif $page_count > $max_pages then
+          error("unfiltered workflow-runs listing not bounded within the page limit")
+        elif any($scan_pages[:-1][]; (.workflow_runs | length) != 100)
+          or (($last | terminal_page) | not)
+          or any(range(0; $page_count); . as $index | $scan_pages[$index] | scan_page_overrun($index)) then
+          error("incomplete unfiltered workflow-runs listing")
+        elif any(range(1; $page_count);
+            $scan_pages[.].total_count < $scan_pages[. - 1].total_count) then
+          error("workflow-runs listing shrank during the scan")
         else
-          ([$pages[] | .workflow_runs[]]) as $all_runs
-          | if any($all_runs[];
-              ((.id | type) != "number")
-              or (.id <= 0)
-              or ((.id | floor) != .id)
-              or ((.head_sha | type) != "string")
-              or (.head_sha != $requested_sha)
-              or ((.status != null)
-                  and (((.status | type) != "string") or ((.status | length) == 0)))
-              or ((.conclusion != null)
-                  and (((.conclusion | type) != "string") or ((.conclusion | length) == 0)))
-              or ((.name | type) != "string")
-              or ((.name | length) == 0)
-              or ((.html_url | type) != "string")
-              or ((.html_url | length) == 0)) then
-              error("malformed workflow run record")
+          ([$scan_pages[0].workflow_runs[]]
+           + [range(1; $page_count) as $index
+              | $scan_pages[$index]
+              | shift_repeat_count($scan_pages[$index - 1]) as $repeats
+              | .workflow_runs[$repeats:][]]) as $scan_kept
+          | (($filtered_all + $scan_all) | sort_by(.id) | group_by(.id)) as $by_id
+          | if any($by_id[]; (([.[].head_sha] | unique | length) > 1)) then
+              error("conflicting duplicate workflow-run records")
             else
-              ([$pages[].total_count] | unique) as $totals
-              | ($all_runs | sort_by(.id) | group_by(.id)) as $run_groups
-              | if any($run_groups[];
-                  (([.[].status] | unique | length) > 1)
-                  or (([.[].conclusion] | unique | length) > 1)) then
+              [$by_id[] | select(.[0].head_sha == $requested_sha)] as $runs
+              | ([$filtered_pages[].total_count] | unique) as $totals
+              | if any($runs[]; ((map(projection) | unique | length) > 1)) then
                   error("conflicting duplicate workflow-run records")
-                elif any($run_groups[]; ((unique | length) > 1)) then
-                  error("non-identical duplicate workflow-run records")
-                else
-                  ($run_groups | map(.[0]) | sort_by(.id)) as $runs
-                  | if (($totals | length) != 1) or (($runs | length) != $totals[0]) then
-                    error("inconsistent paginated workflow-runs snapshot")
+                elif ($filtered_all | unique_id_count) != ($filtered_all | length) then
+                  error("duplicate run id within the head_sha-filtered listing")
+                elif any(range(1; $page_count);
+                    . as $index | $scan_pages[$index] | explained_shift($scan_pages[$index - 1]) | not)
+                  or (($scan_kept | unique_id_count) != ($scan_kept | length)) then
+                  error("duplicate run id within the unfiltered listing")
+                elif (($last.workflow_runs | length) < 100)
+                  and ($last.total_count != ($scan_all | length)) then
+                  error("incomplete unfiltered workflow-runs listing")
+                elif (($totals | length) != 1)
+                  or (($filtered_all | unique_id_count) != $totals[0]) then
+                  error("inconsistent paginated workflow-runs snapshot")
                 elif ($runs | length) == 0 then
                   "__NORUN__"
                 else
-                  $runs[]
-                  | [(.status // "-"), (.conclusion // "-"), (.id | tostring), .name, .html_url]
-                  | @tsv
-                  end
+                  (if ($scan_kept | length) < ($scan_all | length) then "__SHIFTED__" else empty end),
+                  ($runs[]
+                   | .[0]
+                   | [(.status // "-"), (.conclusion // "-")]
+                     + base_requirement
+                     + [workflow_requirement, display_path,
+                        (.id | tostring), .name, .html_url]
+                   | @tsv)
                 end
             end
-        end'
+        end
+    end
+end'
+
+ci_jq() {
+  jq -s -r --arg mode "$1" --arg requested_sha "$SHA" --argjson lower_bound "$LOWER_BOUND" \
+    --argjson max_pages "$SCAN_MAX_PAGES" --arg require_base "$REQUIRE_BASE" \
+    --arg require_workflow "$REQUIRE_WORKFLOW" "$CI_STATUS_JQ"
+}
+
+query() {
+  local filtered raw step decision view page_no=1 scan_json=""
+  {
+    filtered="$(gh api "repos/$REPO/actions/runs?head_sha=$SHA&per_page=100" --paginate --slurp)" ||
+      return 1
+    while :; do
+      if [ "$page_no" -gt "$SCAN_MAX_PAGES" ]; then
+        echo "unfiltered workflow-runs listing not bounded within $SCAN_MAX_PAGES pages"
+        return 1
+      fi
+      raw="$(gh api "repos/$REPO/actions/runs?per_page=100&page=$page_no")" || return 1
+      step="$(printf '%s\n' "$raw" | ci_jq step)" || return 1
+      decision="$(printf '%s\n' "$step" | sed -n 1p)"
+      view="$(printf '%s\n' "$step" | sed -n 2p)"
+      # Each view is one compact object from jq, so joining views with commas stays one JSON array.
+      [ -n "$scan_json" ] && scan_json+=","
+      scan_json+="$view"
+      case "$decision" in
+        stop) break ;;
+        more) page_no=$((page_no + 1)) ;;
+        *) echo "unexpected scan step output"; return 1 ;;
+      esac
+    done
+    printf '%s\n[%s]\n' "$filtered" "$scan_json" | ci_jq verdict
   } 2>&1
 }
 
@@ -142,14 +622,28 @@ report() {
 SETTLE_FINGERPRINT=""
 SETTLE_COUNT=0
 last_summary="no workflow run registered"
+RETRIED=0
 
 while :; do
   lines="$(query)"
   query_rc=$?
   # A failed query is an API error even if its output resembles a valid sentinel or run row.
-  # Report-once fails with exit 2. Under --wait, ride through a transient query failure until the
-  # deadline, keeping API diagnostics separate from display fields in successful run rows.
+  # Report-once fails with exit 2. Under --wait, ride through a TRANSIENT query failure until the
+  # deadline, keeping API diagnostics separate from display fields in successful run rows; a
+  # malformed run record or response is not transient and exits 2 in both modes (see below).
   if [ "$query_rc" -ne 0 ] || [ -z "$lines" ]; then
+    case "$lines" in
+      *"conflicting duplicate workflow-run records"*|*"workflow-runs listing shrank during the scan"*|\
+      *"duplicate run id within the"*)
+        if [ "$WAIT" != "--wait" ] && [ "$RETRIED" -eq 0 ]; then
+          RETRIED=1
+          echo "NOTE: workflow-run records changed between requests; re-reading once."
+          echo "  raw: $lines"
+          sleep "$RETRY_SECONDS"
+          continue
+        fi
+        ;;
+    esac
     SETTLE_FINGERPRINT=""
     SETTLE_COUNT=0
     last_summary="workflow-runs API query failed"
@@ -157,6 +651,12 @@ while :; do
     echo "  raw: ${lines}"
     case "$lines" in
       *"Resource not accessible"*|*"Not Found"*|*"404"*) exit 2 ;;
+      # Malformed evidence (the jq program's own error()s) is a property of the stored record, not
+      # a retryable API condition: polling re-reads the same record, so under --wait it exits 2
+      # here too, instead of polling to a timeout that misreports malformed evidence as a
+      # not-yet-terminal verdict. The conflicting/shrank/duplicate signatures above stay retryable:
+      # each is the signature of the listing changing between requests, which a re-read can settle.
+      *"malformed workflow run record"*|*"malformed workflow-runs response"*) exit 2 ;;
     esac
     [ "$WAIT" != "--wait" ] && exit 2
     if [ "$(date +%s)" -ge "$DEADLINE" ]; then
@@ -185,15 +685,38 @@ while :; do
     continue
   fi
 
+  # A read that merged a page shift may still report a failed or not-terminal run, but it is never a pass.
+  shifted=0
+  if [ "$(printf '%s\n' "$lines" | sed -n 1p)" = "__SHIFTED__" ]; then
+    shifted=1
+    lines="$(printf '%s\n' "$lines" | sed 1d)"
+  fi
+
   settled=0
+  require_workflow_met=0
   run_ids=()
   failure_names=()
   failure_conclusions=()
   nonterminal_names=()
   unknown_statuses=()
-  while IFS=$'\t' read -r status concl id name url; do
+  base_unmet=()
+  while IFS=$'\t' read -r status concl base_state base_detail wf_state path id name url; do
     report "$status" "$concl" "$name" "$url"
     run_ids+=("$id")
+    # The gating tokens come from the jq program's fixed sets ("-", "met", "unmet" for the base
+    # requirement; "-", "match", "other" for the required workflow), never from a display field;
+    # under the requirement anything other than "met" or "match" fails closed, so an unexpected
+    # token never passes. base_detail is display-only (@tsv-escaped); path is display-only too:
+    # the required-workflow match is wf_state, computed in jq on the run's raw JSON
+    # .path (validated nonempty under the requirement), never on this escaped column; name stays
+    # display-only.
+    if [ -n "$REQUIRE_BASE" ] && [ "$base_state" != "met" ]; then
+      base_unmet+=("${name}: ${base_detail}")
+    fi
+    if [ -n "$REQUIRE_BASE" ] && [ "$base_state" = "met" ] && [ "$status" = "completed" ] \
+        && [ "$concl" = "success" ] && [ "$wf_state" = "match" ]; then
+      require_workflow_met=1
+    fi
     case "$status" in
       completed)
         if [ "$concl" != "success" ]; then
@@ -218,6 +741,18 @@ while :; do
     exit 1
   fi
 
+  # THE BASE-BRANCH REQUIREMENT (see above): an unmet run is refused by name with exit 1 in both
+  # modes, because a run's recorded base never changes: this RETAINED nonconforming run fails the
+  # every-run rule on this head forever, so only a refresh push, under a NEW head SHA, escapes it
+  # (a reopen adds runs on the same head but cannot remove this one).
+  if [ "${#base_unmet[@]}" -ne 0 ]; then
+    echo "RESULT: run(s) do not satisfy --require-base ${REQUIRE_BASE} (a run counts only when its event is pull_request and the pull request recorded on the run names ${REQUIRE_BASE} as its base):"
+    for item in "${base_unmet[@]}"; do
+      printf '  %s\n' "$item"
+    done
+    exit 1
+  fi
+
   if [ "${#unknown_statuses[@]}" -ne 0 ]; then
     SETTLE_FINGERPRINT=""
     SETTLE_COUNT=0
@@ -238,8 +773,39 @@ while :; do
       echo "RESULT: ${#nonterminal_names[@]} workflow run(s) not terminal; use --wait to gate on completion."
       exit 1
     fi
-  else
+  elif [ "$shifted" -eq 1 ]; then
+    SETTLE_FINGERPRINT=""
+    SETTLE_COUNT=0
+    last_summary="the unfiltered listing shifted between page reads, so this all-success read is incomplete"
     if [ "$WAIT" != "--wait" ]; then
+      if [ "$RETRIED" -eq 0 ]; then
+        RETRIED=1
+        echo "NOTE: ${last_summary}; re-reading once."
+        sleep "$RETRY_SECONDS"
+        continue
+      fi
+      echo "ERROR: ${last_summary} for ${SHA} in ${REPO}"
+      exit 2
+    fi
+    echo "RESULT: ${last_summary}; reading again."
+  else
+    # THE BASE-BRANCH REQUIREMENT (see above): a conforming run set without a completed successful
+    # run of the required workflow file is unmet (exit 1), but the two modes refuse at different
+    # times. Report-once refuses on its single snapshot. Under --wait a qualifying run can still
+    # be REGISTERED LATE on this same head (a reopen schedules one, and registration also lags
+    # the event), so the poll keeps watching and refuses only once the run set has been stable
+    # for the whole settle window and still holds no qualifying run. Only a RETAINED
+    # nonconforming run (the base_unmet refusal above) needs a NEW head SHA to recover.
+    missing_required=0
+    if [ -n "$REQUIRE_BASE" ] && [ "$require_workflow_met" -ne 1 ]; then
+      missing_required=1
+    fi
+    missing_message="RESULT: no completed successful run of the workflow file ${REQUIRE_WORKFLOW} satisfies --require-base ${REQUIRE_BASE}; a conforming run of that workflow file on this head is required for a green verdict (a reopen schedules one on the same head; a refresh push under a new head SHA also earns one)."
+    if [ "$WAIT" != "--wait" ]; then
+      if [ "$missing_required" -eq 1 ]; then
+        echo "$missing_message"
+        exit 1
+      fi
       exit 0
     fi
     fingerprint="$(IFS=,; printf '%s' "${run_ids[*]}")"
@@ -250,7 +816,14 @@ while :; do
       SETTLE_COUNT=1
     fi
     last_summary="all ${#run_ids[@]} observed workflow run(s) successful; settle observation ${SETTLE_COUNT}/${SETTLE_OBSERVATIONS}"
+    if [ "$missing_required" -eq 1 ]; then
+      last_summary+=" (no completed successful run of the workflow file ${REQUIRE_WORKFLOW} yet)"
+    fi
     if [ "$SETTLE_COUNT" -ge "$SETTLE_OBSERVATIONS" ]; then
+      if [ "$missing_required" -eq 1 ]; then
+        echo "$missing_message"
+        exit 1
+      fi
       settled=1
     else
       echo "RESULT: ${last_summary}; waiting for late-created runs."

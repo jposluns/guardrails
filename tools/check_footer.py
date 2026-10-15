@@ -33,6 +33,19 @@ an allowlisted page that is missing, or that starts carrying the link, is allowl
 Exit 0 clean, 1 on any coverage finding, 2 on a missing/unreadable/empty required input (fail-closed).
 """
 import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_footer.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import os
 import stat
 from html.parser import HTMLParser
@@ -274,17 +287,26 @@ def _close_vectors(base):
 
 def _close_vectors_guarded(base):
     """`_close_vectors(base)` with everything it runs in this process guarded: the lazy _close_selftest
-    import, the later calls into it and the reverted body. A process-ending exit or a fault there
-    (SystemExit 0 or None, GeneratorExit, any other BaseException or Exception) is reported and returns None,
-    which _self_test makes CANNOT-EVALUATE (exit 2), never the vectors' own status. A KeyboardInterrupt of
+    import, the later calls into it and the reverted body. A descriptor census that cannot read a
+    descriptor (the sibling's _StCensusError, matched by the except clause alone) is reported as a
+    SELF-TEST ERROR carrying the census message and returns None. A process-ending exit or any other fault
+    there (SystemExit 0 or None, GeneratorExit, any other BaseException or Exception, a fault while the
+    census message is formatted included) is reported and returns None. _self_test makes None
+    CANNOT-EVALUATE (exit 2), never the vectors' own status. A KeyboardInterrupt of
     exactly that class propagates unchanged, so an operator's Ctrl-C stops the run; a subclass, which only
-    loaded code raises, is cannot-evaluate too and is never re-raised. The message is fixed by the except clause
-    that caught the exception and never inspects or formats the escaping object (no isinstance, attribute,
-    repr or str of it), so a hostile exception (one whose __class__ property raises SystemExit 0, for
-    example) cannot run code from the handler (other hostile objects: the one residual in the _opf_views
-    class disclosure)."""
+    loaded code raises, is cannot-evaluate too and is never re-raised. Outside the census clause the message
+    is fixed by the except clause that caught the exception and never inspects or formats the escaping
+    object (no isinstance, attribute, repr or str of it), so a hostile exception (one whose __class__
+    property raises SystemExit 0, for example) cannot run code from the handler (other hostile objects: the
+    one residual in the _opf_views class disclosure)."""
     try:
-        return _close_vectors(base)
+        import _close_selftest
+        census_error = _close_selftest._StCensusError
+        try:
+            return _close_vectors(base)
+        except census_error as exc:  # the descriptor census cannot read one: cannot-evaluate
+            print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
+            return None
     except KeyboardInterrupt as exc:
         if type(exc) is KeyboardInterrupt:
             raise
@@ -496,13 +518,21 @@ def _poisoned_close_outcome(base, tag, body):
 def _close_guard_vectors(base):
     """The vectors for _close_vectors_guarded: a _close_selftest sibling that ends the process or faults at
     import or in a later call returns None (cannot-evaluate), an exception whose __class__ property raises
-    SystemExit(0) included, and the sibling's own KeyboardInterrupt propagates. Only that KeyboardInterrupt
+    SystemExit(0) included, a census error (one whose __str__ raises SystemExit(0) included) and a sibling
+    without a census error class return None too, and the sibling's own KeyboardInterrupt propagates. Only that KeyboardInterrupt
     (carrying CLOSE_POISON_INTERRUPT) is recorded; any other, such as an operator's real Ctrl-C landing in this
     window, propagates, at import and in a later call. Red if the guard is removed, red if it inspects the
     caught instance, and red if the recorder records another KeyboardInterrupt. Returns (failures, cases)."""
     sent = CLOSE_POISON_INTERRUPT
-    later = "class _StSentinel(Exception):\n    pass\n\n\ndef _st_helper_vectors(ns):\n    {}\n"
-    cases = (("import SystemExit(0)", "raise SystemExit(0)\n", None),
+    later = ("class _StSentinel(Exception):\n    pass\n\n\nclass _StCensusError(RuntimeError):\n    pass\n\n\n"
+             "def _st_helper_vectors(ns):\n    {}\n")
+    census_str_exits = ("\n\nclass _CensusStrExits(_StCensusError):\n    def __str__(self):\n"
+                        "        raise SystemExit(0)\n")
+    cases = (("later call census error", later.format("raise _StCensusError('census')"), None),
+             ("later call census error whose __str__ exits 0",
+              later.format("raise _CensusStrExits()") + census_str_exits, None),
+             ("import without a census error class", "class _StSentinel(Exception):\n    pass\n", None),
+             ("import SystemExit(0)", "raise SystemExit(0)\n", None),
              ("import SystemExit(None)", "raise SystemExit\n", None),
              ("import GeneratorExit", "raise GeneratorExit\n", None),
              ("import ValueError", "raise ValueError('poisoned')\n", None),

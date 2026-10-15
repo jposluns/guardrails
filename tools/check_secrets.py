@@ -61,9 +61,22 @@ complete):
      to a GENERIC credential component (a bare `client`/`key`/`auth`) can over-fire: safe-direction NOISE (a
      false positive, never a miss), parity-preserving, no live-repo instance; the 40-char floor damps it.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_secrets.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import math
 import re
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -588,14 +601,20 @@ def _self_test() -> int:
             failures.append("_shannon_entropy({!r}): want {}, got {}".format(value, want, got))
 
     # GD-121 (codex r3): the invariant rejects a boolean control (bool is an int subclass in Python), so a
-    # bad hand-edit like ENTROPY_MIN_LEN = True cannot silently disable or invert the guard.
-    import builtins as _b
-    for _name in ("ENTROPY_MIN_LEN", "ENTROPY_MAX_LEN", "ENTROPY_THRESHOLD"):
-        _saved = globals()[_name]
-        globals()[_name] = True
-        if _validate_entropy_constants() is None:
-            failures.append("entropy invariant must reject a boolean {}".format(_name))
-        globals()[_name] = _saved
+    # bad hand-edit like ENTROPY_MIN_LEN = True cannot silently disable or invert the guard. Each constant
+    # is swapped by a direct global assignment, never a computed globals() key, which the reserved-name
+    # scan in tools/gen_renderers.py reports as an unfoldable module-namespace key.
+    global ENTROPY_MIN_LEN, ENTROPY_MAX_LEN, ENTROPY_THRESHOLD
+    _entropy_saved = (ENTROPY_MIN_LEN, ENTROPY_MAX_LEN, ENTROPY_THRESHOLD)
+    try:
+        for _index, _name in enumerate(("ENTROPY_MIN_LEN", "ENTROPY_MAX_LEN", "ENTROPY_THRESHOLD")):
+            _swapped = list(_entropy_saved)
+            _swapped[_index] = True
+            ENTROPY_MIN_LEN, ENTROPY_MAX_LEN, ENTROPY_THRESHOLD = _swapped
+            if _validate_entropy_constants() is None:
+                failures.append("entropy invariant must reject a boolean {}".format(_name))
+    finally:
+        ENTROPY_MIN_LEN, ENTROPY_MAX_LEN, ENTROPY_THRESHOLD = _entropy_saved
 
     if failures:
         print("SELF-TEST FAIL:")

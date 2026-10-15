@@ -1,15 +1,37 @@
 """Shared helpers for the single-source generators (roadmap, changelog). Stdlib only.
 
-Requires Python 3.11+ for tomllib; CI pins 3.14. The hooks self-test (tools/selftest_aiqt_hooks.py)
-needs 3.12+ for sys.monitoring. run_all_checks.sh runs these locally.
+Requires Python 3.14 or newer, the floor in .aiqt/core/python-floor.toml, which CI pins.
+run_all_checks.sh runs these locally.
 """
 import os
 import sys
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: the roadmap/changelog generators require Python 3.11+ (tomllib).")
+except ModuleNotFoundError:
+    import os
+    if tuple(sys.version_info[:2]) < (3, 14):
+        # Reached only through an importer that carries no floor guard yet (every guarded
+        # entrypoint refuses an older Python that can start it first; one that cannot start
+        # it fails with Python's own error before reaching here): the version is the
+        # problem, so say so. The message is a literal, as the fallback grammar in
+        # tools/check_python_floor.py requires (it admits no call), so it names no version.
+        try:
+            sys.stderr.write(
+                "error: the roadmap/changelog generators require Python 3.14 or newer, and this "
+                "interpreter is older. Nothing was run (cannot evaluate).\n")
+            sys.stderr.flush()
+        except BaseException:
+            pass
+    else:  # every Python 3.14 ships tomllib, so this installation is incomplete
+        try:
+            sys.stderr.write(
+                "error: the roadmap/changelog generators cannot import tomllib, part of the Python "
+                "standard library; this installation is incomplete. Nothing was run (cannot evaluate).\n")
+            sys.stderr.flush()
+        except BaseException:
+            pass
+    os._exit(2)
 
 from pathlib import Path
 from urllib.parse import urlparse
@@ -69,10 +91,18 @@ def load_toml(path):
     with open(path, "rb") as handle:
         try:
             return tomllib.load(handle)
-        except RecursionError as exc:
-            # Callers fail closed on the ValueError family by contract, but tomllib raises RecursionError (a
-            # RuntimeError) on a deeply nested array or inline table; map it into that family here, at the
-            # parse locus, so no caller's ValueError handler is bypassed (F-TOML-BARE-VALUEERROR-CLASS).
+        except (ValueError, RecursionError, MemoryError) as exc:
+            # Callers fail closed on the ValueError family by contract, so a ValueError (a TOMLDecodeError or
+            # an over-long integer literal) passes to them unchanged. tomllib raises RecursionError (a
+            # RuntimeError) on a deeply nested array or inline table and, from CPython 3.14.8, on a key of more
+            # than 1000 dotted parts, and MemoryError on a many-part key under a memory limit; map each into
+            # that family here, at the parse locus, so no caller's ValueError handler is bypassed
+            # (F-TOML-BARE-VALUEERROR-CLASS). A MemoryError is named as the resource failure it is, never
+            # as nesting.
+            if isinstance(exc, ValueError):
+                raise
+            if isinstance(exc, MemoryError):
+                raise ValueError("{}: out of memory parsing TOML ({})".format(path, exc)) from exc
             raise ValueError("{}: TOML nesting is too deep to parse ({})".format(path, exc)) from exc
 
 

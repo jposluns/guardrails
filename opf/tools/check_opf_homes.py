@@ -10,30 +10,245 @@ text, a pinned sentence neutralized by appended text included, stays green under
 entry alone; the self-test's per-section tiling equality turns red on any addition inside a
 tiled section. The live residuals are additions to untiled sections (for example 8.7, 9.1, 10
 and 13), a default-gate run without the self-test, and an addition landed together with a
-matching registry edit, which review of registry changes catches. Section 9.1 stays untiled
+matching registry edit, which review of registry changes catches. One addition is red under the
+default entry alone: a retired homes-migration fragment (_RETIRED) restored in its own section,
+since homes 2 has no homes migration (spec 4.2). Each fragment names homes or legacy journal
+transport, so a sentence on another upgrade, such as a future worklog-generation upgrade, matches
+none. A retired sentence is quoted, to say it no longer applies, in one exact form, a retired-text
+quotation block: a block quote whose first line is exactly "> Retired text, quoted and not in
+force:", with no line directly above it that opens with ">" after at most three spaces (a
+block-quote line, which the lead-in would continue), followed by at least one more line that
+opens with ">"; the block ends at the first line that does not open with ">". That first line
+must be rendered text: CommonMark opens a paragraph there (as the informative guard's block
+reading below finds it), so it is not in fenced or indented code or a lazy continuation of an
+earlier quote, and no line that the informative guard reports as raw HTML opens above it, since
+an HTML comment can hide it (the guard reports every line that may open an HTML block, a URI
+autolink included, so this over-fires and fails closed). The
+retired-text check and the pins read a section without these blocks, so a quotation neither
+restores a fragment nor stands in for a pin; each fails closed on text split around a block, which
+the retired-text check reads as joined and the pins read as apart (a pin holding the marker the
+pins read in a block's place is missing). The registry tiles a block through its own marker (_Q),
+an entry that holds the block as written and matches only one of its section's blocks, so the
+quoted text stays tiled, never satisfies a pin and is not keyword-linted. Everything else is
+operative text, which the retired-text check reads as written and with each line's leading
+block-quote markers removed, each once more with backslash escapes and hard line breaks read as
+CommonMark renders them (a backslash before ASCII punctuation as that character, a backslash
+ending a line as a line break), so a sentence wrapped across ">" lines is read joined: a different,
+indented or inline lead-in, a lead-in with text after it, a lead-in inside an earlier block quote
+(indented or not), in code or below a raw HTML block, a line after the block (which CommonMark may
+render inside the quote as a lazy continuation), and a sentence that negates the quotation are all
+read, and a fragment there, on one line, wrapped, broken by a backslash hard line break or holding
+a backslash escape, is red. Residual: the check removes no other markup, so a fragment broken by
+emphasis, a link, a character reference or inline HTML is not found there, and it reads a
+backslash in a code span as an escape too, an over-fire; and the check is section-scoped, so a
+fragment planted in another section is caught only by the self-test's tiling of a tiled section.
+Section 9.1 stays untiled
 over its lowercase-may profile rule, but its implementation-class paragraph is pinned sentence
 by sentence (_PINNED), so deleting or rewording a pinned sentence there turns the gate red;
-the rest of 9.1, and additions to it, stay unprotected. The quickstart's implementation-class
+the rest of 9.1, and additions to it, stay unprotected. Appendix E stays untiled too, and its
+sentences that state what section 16.1 makes of its probes are pinned the same way; the rest of
+Appendix E, and additions to it, stay unprotected here. The quickstart's implementation-class
 sentences and the opfiles.ai disclosure page's fresh-only item are pinned the same way over
 tag-stripped text (_SURFACE), outside the keyword lint; the rest of those files, and additions
 to them, stay unprotected.
 
 The default entry also runs a section 2 keyword lint over every registered pin: a pin without
-MUST, MUST NOT, SHOULD or MAY is red unless the registry marks it descriptive (_D). Residual:
+MUST, MUST NOT, SHOULD or MAY is red unless the registry marks it descriptive (_D), and a
+retired-text quotation entry (_Q) is not linted, since quoted text is not in force and the entry
+matches only a quotation block. Residual:
 the lint reads the registry marker, not the meaning, so a requirement wrongly marked descriptive
 stays green; review of registry changes catches that.
+
+The default entry also guards the informative sections: a heading whose title or body holds
+"(informative)" or the declaration ("This appendix is informative", or section or subsection,
+as Appendix E does), or whose title sets the word off as a label (below), and every
+descendant heading beneath it at any level, is red where its title or its body carries an
+uppercase requirement keyword (MUST, SHALL, REQUIRED, SHOULD, MAY, RECOMMENDED, OPTIONAL)
+outside the one exempt quotation form, a code span holding exactly the keyword preceded by
+"the keyword" or "the term"; a keyword in any other form there, a bare code span or a fenced
+block included, is a finding (the guard fails closed). A keyword is
+read where no letter, digit or underscore adjoins it, or where an underscore run adjoins it with
+no letter or digit beyond the run, as CommonMark requires before an underscore can open or close
+emphasis: _MUST_ and __MUST__ are read, MUST_DO and x_MUST_y (rendered as written) are not, and
+an unpaired run (_MUST alone) is read, an over-fire. It is read again with character references
+decoded, and in two normalized forms. Joined: plain link and image targets removed (below), each
+underscore run CommonMark could read as emphasis removed, and each emphasis, strikethrough,
+code-span, bracket and backslash character removed. Kept: the same underscore runs and each
+emphasis, strikethrough and code-span character removed, with brackets, targets and backslashes
+kept, since a "](" or "][" that opens no link shows its text. Each normalized form then has its
+character references decoded, its invisible characters dropped (format, nonspacing and enclosing
+marks, unassigned, private-use, surrogate, control characters other than whitespace, and the
+Hangul fillers) and its compatibility forms folded (NFKC), once as it stands and once with each
+superscript, subscript or circled form read as a space, since a footnote mark ends a word. So
+MU**ST**, [MU](/u)ST, [MU][r]ST, x](M**U**ST), [x][M**U**ST], &#77;UST, M&shy;UST, MU with a
+combining grapheme joiner before ST, MUST followed by a superscript 1, and fullwidth or
+mathematical MUST are read too; a removed character that renders visibly (MU!ST) over-fires.
+An informative marker is read the same way, in plain text alone, in any ASCII letter case
+and with any whitespace run, a line break included, read as one space; a URI autolink is
+read once more as its URI, the text CommonMark shows for it. A heading title and a body are
+each read for both marker forms: "(informative)" (spaces allowed inside the parentheses)
+and the declaration. So a title that states the declaration (## This section is
+informative, its setext form, ## Z: this section is informative) and a body that holds
+"(informative)" mark their sections. A title is also read for the word set off as a label:
+"informative" between two edges, an edge being the title's start or end or a character
+other than a letter, digit, underscore or whitespace, with only whitespace between the word
+and each edge (Z - Informative, Informative: Z, and "(informative)" as one case). The word
+among other words of a title (Informative references, Z (see the informative note)) marks
+nothing, and a body is not read for the label. A body is read as written and as the text of
+each of its paragraphs with the container markers of its lines removed (a block quote's ">"
+on every line, nested ones included); every paragraph is read, none is skipped, so a
+near-duplicate of a quoted declaration elsewhere in its section skips nothing. So Z
+(&#105;nformative), Z (Informative), Z (informa**tive**) and a declaration split across
+lines or across block-quoted lines mark their sections; reading more forms only marks more
+sections informative, so the guard scans more. Each marker is read wherever it stands, so a
+sentence that denies the declaration (Nothing in this section is informative.), a body that
+names another section's marker (see Appendix E (informative)), a marker inside an HTML
+attribute or comment read as text, or one inside a fenced or indented code block (the body
+is also read as written) marks its section informative too, over-fires. The guard reads no
+inline HTML tag and no character reference it does not decode; it finds every text that
+could show a marker from its letters, and holds that text to plain prose. A candidate's
+plain text is read for the markers above and nothing more, so a candidate that holds no
+marker marks nothing (a title Z (informed by the informative note) is a candidate and marks
+nothing). A heading title anywhere, or any paragraph in any section, block-quoted or not,
+is a declaration candidate where the letters of "informative" can be assembled, in order,
+from the letter runs of its normalized text: character references decoded, invisible
+characters dropped (as above, the Hangul fillers included), compatibility forms folded
+(NFKC) and ASCII letters lowercased, in that order, before any letter is compared. A letter
+run is a run of characters Python reads as letters or as numerics other than decimal
+digits, and each non-ASCII character left in a run after that normalization stands for any
+letter of the word (a non-ASCII letter, or a numeric that is no decimal digit, such as
+U+3007): a run inside the word used whole, runs between the pieces skipped, and the first
+and last pieces a suffix and a prefix of their runs. The wildcard sees only what
+normalization leaves: a compatibility form NFKC folds to ASCII letters is compared as those
+letters, the letters it shows (fullwidth A as "a"; the st ligature U+FB06 as "st", so
+"informa", U+FB06, "ive" spells "informastive" and is no candidate), and a dropped
+invisible character stands for no letter and splits no run, so eleven fullwidth A's, eleven
+Hangul fillers or eleven U+FB06 ligatures make no candidate. Candidacy and the declaration
+reader share one case fold (_fold_case): ASCII letters lowercased and every other character
+kept, so it maps each character to one and never expands one. No non-ASCII letter is
+folded, since a Unicode fold can expand one out of the reader's view (str.casefold reads
+the dotted capital I, U+0130, as "i" and a combining dot, so a plain declaration spelled
+with it was neither read nor refused); a non-ASCII letter instead stands for any letter in
+candidacy and is refused inside a candidate (below), so no fold is needed to find or refuse
+it. A candidate is held to plain prose: every character of it must be an ASCII
+letter, an ASCII digit, a space or the line feed joining a paragraph's lines, or one of
+. , ; : ' " ( ) - ? ! / (sentence punctuation, the marker's own parentheses, the hyphen of
+compound words, the slash of either/or phrasing; a bare "!" is plain, and the image form
+"![" is refused through its "["). Every other character in a candidate is a finding naming
+the character and its code point, at its first occurrence, whatever the section's
+classification and however it would render: every markup lead-in ("<" and ">", "[" and "]",
+the backtick, "*", "_", "~", a backslash, "&"), every control or format character (it
+renders invisibly or not at all, so it could split or hide the word unseen), every other
+ASCII character (a "#" or "="), and every non-ASCII character, letters included (another
+script's punctuation, space, digits or letters, a symbol): a letter a Unicode case fold
+expands (U+0130, sharp s U+00DF, a ligature such as U+FB01), one a reader takes for an ASCII
+letter (dotless i U+0131, an accented letter, a look-alike letter of another script such as
+a Cyrillic i), and the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0), letters that render
+as blank space and that the reading forms drop, so one could stand unseen for the space
+between two words of the declaration. An allowlist decides that, not a list of markup forms,
+so no markup form is left to enumerate: every inline construct that can hide, replace or
+reorder text (an HTML tag or comment, a link, an image, an autolink, a code span, emphasis
+or strikethrough, a backslash escape, a character reference) opens with a character outside
+the set (each of QA rounds 4 to 8 found one more form a per-form list missed; the allowlist
+refuses the class at the character), with one exception the guard refuses by shape: a
+GitHub emoji shortcode (infor:m:ative shows an emoji for :m:) opens with an allowed colon,
+so a candidate also refuses each colon, one or more ASCII letters, digits or hyphens, and a
+colon, as an emoji shortcode (a "+" or "_" in a shortcode name is refused as a character
+already); a time or ratio of that shape (10:30:00) in a candidate is refused too, an
+over-fire. Every other construct that opens with an allowed character hides no text: a GFM
+extended autolink (www.example.org) shows its text as written, a list marker, setext
+underline or thematic break is block structure the block scan reads, and a two-space hard
+break is spaces and a line feed. A refused candidate is never silently skipped: each
+refused character is a finding. Its plain reading forms are still read over the text, so it
+can also mark its section informative, which only scans more; the refusal, not the reading,
+is what the gate relies on. Named over-fires of the refusal, each in a candidate alone:
+markup whose text CommonMark shows is refused even though the reading forms read it
+([informa](/u)tive and informa**tive** are still read as declarations and are findings too,
+as are a code span, a backslash, a decoded character reference and a plain ampersand, AT&T);
+plain text shaped like markup (informa<b holding no tag) is refused; a visible character
+outside the set (informa=tive, a superscript footnote mark, a non-ASCII space or digit, an
+accented letter in a name or loanword) is refused; ordinary words that never show the word
+can assemble it from pieces (in / form / at / i / v / e), so a paragraph holding no
+declaration can be held to plain prose; and since each non-ASCII letter stands for any
+letter of the word, text in another script is a candidate wherever its letters can assemble
+the word (any run of eleven non-ASCII letters left after normalization does), so a paragraph or
+heading title written in another script is refused, each of its distinct letters named. A
+candidate heading title is held to the same set by the same scan, each finding naming the title
+line holding the character, since a refused character could hide an "(informative)" marker. A
+heading title or paragraph that is no candidate is not refused for any character, however it
+renders: its letter runs hold no assembly of the word, so no removal or hiding of characters
+leaves the word shown; what a renderer adds beyond the source text is a residual, below.
+An informative section also fails closed, with a finding that names the form and asks for
+plain text or a move out of the section, on inline syntax it does not read: a "](" or "]["
+that opens no plain target (a destination with no space, parenthesis, quote, angle bracket
+or backslash, optionally a title in double or single quotes holding no quote, parenthesis or
+backslash, spaces and angle brackets allowed; or a reference label with no bracket or
+backslash), so nested or escaped parentheses and quoted parentheses are findings; a "<"
+followed by a letter, "/", "!" or "?" other than a URI autolink, since inline HTML can hide
+or reorder text, in a code span or fenced block too; and a character reference the guard
+does not decode, in a code span or fenced block too. That finding names a "<" that may open
+inline HTML, since plain text of that shape (a<b, a code span holding Vec<u8>, an email
+autolink) is refused too, an over-fire. Residuals: a keyword spelt with look-alike letters
+of another script (Cyrillic or Greek) is not read (an informative marker or declaration
+spelt so is not read either, but its text is a candidate and the look-alike letter is
+refused); a keyword adjoined by a letter or digit in another compatibility form is read as
+one word with it; a declaration spelled without the letters "informative" in their order,
+each non-ASCII letter counted as any letter, is no candidate, is not found and marks
+nothing, however it renders: one spelt in other words, one with a non-letter or another
+ASCII letter standing for a letter of the word (an inverted exclamation mark, U+00A1, or a
+digit 1 for the i), and one whose letters a renderer reorders (text written reversed under a
+direction-changing tag, style or override character); a renderer can generate text that
+stands in no letter run of the source, so a text that is no candidate can still show a
+declaration or a keyword on the page (an iframe srcdoc attribute a browser decodes a second
+time, a CSS content rule, an image of text; the raw-HTML-block and candidate refusals catch
+such carriers only where they open a block or stand in a candidate); and a heading that
+renders invisibly or empty (inline HTML in a non-candidate title, a comment as the whole
+title, an empty ATX heading) bounds a section here while a reader sees no boundary, so text
+below it can read on the page as part of the informative section above it; review catches
+those.
+
+Headings are read by CommonMark's block algorithm over block quotes and list items; lines end
+at LF, CR LF or CR only, and a tab advances to the next multiple of 4 columns. A block quote
+takes 0 to 3 columns, ">" and one space after it. A list item's marker is "-", "+", "*", or 1
+to 9 ASCII digits 0-9 then "." or ")"; its content column is the marker's end plus the 1 to 4
+columns after it (plus one where 5 or more follow or the item opens blank), and a list item
+interrupts a paragraph only where it holds content and, when ordered, starts at 1, so any other
+list-shaped line continues the paragraph, into a setext heading included. An ATX heading takes
+0 to 3 columns of indentation and a space or tab after its hashes; a setext heading underlines a
+paragraph in its own container, never a lazy line; a line of 4 or more columns past its
+container is indented code or a paragraph continuation, never a heading. A fenced line, in any
+container, never bounds a section: a fence opens on 0 to 3 columns and three or more tildes, or
+three or more backticks whose info string holds no backtick, and closes on 0 to 3 columns, a
+run of the opening character at least as long, and nothing after it but spaces or tabs, or
+where its container ends. A heading in no container bounds a section; one inside a list item or
+block quote bounds nothing but marks one informative where its title says so. Anywhere in the
+document the guard fails closed, with a finding that names the line and the form, where it reads
+no further or where Markdown renderers differ: a raw HTML block (read broadly: any line whose
+content opens with "<" and a letter, "/", "!" or "?", outside fenced and indented code), a
+paragraph that opens like a link reference definition, a lazy continuation line at 4 or more
+columns that would otherwise open a block, a ">" at 4 or more columns where a block quote is
+open, a list marker with a decimal digit other than ASCII 0-9, and a non-blank line inside or
+opening a block quote or list item with a tab before its content (fenced lines included, an
+over-fire). The gate is red where Appendix E loses that marking.
 """
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: check_opf_homes.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_opf_homes.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
+import html
 import re
 import tempfile
+import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -54,6 +269,19 @@ class _Descriptive(str):
 
 
 _D = _Descriptive
+
+
+class _Quoted(str):
+    """Pin marker: a retired-text quotation block (module docstring) as written, normalized like
+    a pin, its lead-in and ">" markers included. The pin check matches it against the section's
+    quotation blocks alone, never against operative text, so it is missing wherever its block is
+    not read as a quotation, and no other pin reads the quoted text. Tiling reads it like any pin,
+    so the quoted text stays tiled. The section 2 keyword lint skips it: quoted text is not in
+    force."""
+    __slots__ = ()
+
+
+_Q = _Quoted
 # Section 2 keywords, case-sensitive and whole-word: a lowercase "must" is not a keyword.
 _KEYWORD = re.compile(r"\b(?:MUST|SHOULD|MAY)\b")
 # Scope each wording check to its operative section, never a whole-document negative scan.
@@ -67,7 +295,7 @@ _CONTRACT = {
         _D('Public brand: OPFiles (opfiles.ai).'),
         _D('Base discovery token: opf.'),
         _D('Status: draft (specification only; schemas and the reference tooling, the scaffolder opf init, the adopter opf adopt, the post-adoption importer opf import, the validator opf doctor, the renderer opf render, the relocator opf migrate, the synchronizer opf sync, the schema-upgrader opf upgrade, the absorber opf absorb, and the record author opf record, ship in later releases).'),
-        _D('Date: 2026-10-03 (UTC).'),
+        _D('Date: 2026-10-05 (UTC).'),
         _D('OPFiles is a neutral, self-contained operational-files standard published under the Apache License 2.0 (except vendored third-party material, which remains under its own terms).'),
         _D('AIQT and AIQT Guardrails are trademarks (registration pending); AIQT is a brand, not a legal entity, and the standard is authored and maintained by its lead maintainer.'),
         _D('A project conforms to OPFiles with this specification and its own checks; the AIQT Guardrails pack is the reference enforcement suite and a consumer of the standard, not its definition.'),
@@ -96,15 +324,20 @@ _CONTRACT = {
         _D('Homes 2 is a separate, later activation.'),
         _D('The homes-2 contract below is for spec_version = "2.0.0" and [opf].homes = 2.'),
         _D('The current reference tooling reserves these names and implements their homes-2 boundary checks.'),
-        _D('It still supports 1.2.0 and initializes legacy homes (generation 1, with no homes key); writers retain their legacy paths until homes 2 is activated, which requires the homes migration (opf upgrade) to be available.'),
+        _D('It still supports 1.2.0 and initializes legacy homes (generation 1, with no homes key); writers retain their legacy paths until homes 2 is activated.'),
+        'Homes 2 has no homes migration: a store is at homes 2 only when it is created there, no homes-1 store is migrated to homes 2, and once homes 2 is activated opf upgrade MUST refuse a homes-1 store by name rather than migrate it.',
         _D('The section 9 manifest example describes the 1.3.0 target on legacy homes.'),
-        _D('The homes-2 requirements in sections 4.2, 9.2, 12, 14.1, 14.2, and 15 describe the target contract, not an activated runtime guarantee.'),
+        _D('The homes-2 requirements in sections 4.2, 12, 14.1, 14.2, and 15, and the section 9.2 refusal of a homes-1 store, describe the target contract, not an activated runtime guarantee.'),
         _D('<product repository root>/ .opf.toml # committed store pointer (section 4.3) CHANGELOG.md # curated public changelog (deliverable; section 6.3) VERSION # deterministic render from version.toml (deliverable) .working/ # the store; present here under the default in-repo configuration <store repository root>/ # the product repository itself, by default .working/ README.md # ownership and regeneration note (deliverable) WORKLOG.md # deterministic render of worklog.toml VERSION.md # optional human view of version.toml TODO.md BACKLOG.md PIPELINE.md DONE.md FINDINGS.md DECISIONS.md BLOCKS.md HANDOFF.md REFERENCES.md CONTRIBUTIONS.md DECISIONS.toml # machine projection (deterministic; section 10.5) <TYPE>-INDEX.md ...'),
-        _D('# optional 1:1 index mirrors (section 10.1) IMPORT-REPORT.md # legacy import report (pre-1.3.0 runs only; section 14.1) toml/ manifest.toml # store manifest and discovery marker (section 9) counters.toml # per-namespace ID high-water marks (section 8.2) version.toml # version and release ledger (section 6.1) worklog.toml # durable operational record (section 6.2) <type>.imported.index.toml # separate imported records of each enabled type (section 8.3) worklog.imported.toml # imported worklog, on its own ID number line lease.toml # single-writer lease, present only while held (section 5.7) init.toml # bootstrap provenance of a coupled init (section 9.2), if present backlog_item.index.toml # typed record files (section 8) done.index.toml finding.index.toml pending_decision.index.toml autonomous_decision.index.toml block.index.toml handoff.index.toml reference.index.toml contribution.index.toml maintainer_decision.index.toml preference_pattern.index.toml archive/ 2026/ archive.toml # enumerates rotated IDs and spans (section 12) done.index.toml worklog.toml archive/ moved/<source-path> # default Move destinations (section 14.2) adoption/<run-id>/ # retire preimages and archived occupying sources (section 14.2) imported/<kind>/<run-id>/ # durable originals, inventories, approvals and receipts (section 14) staging/<kind>/<run-id>/ # short-lived staging, evidence-gated reclamation (section 14.1) journals/<kind>/ # reserved recovery state, never a view or ordinary op target journal/ # crash-durable frames runs/<run-id>/transaction.toml # gate-readable projections allocations/<run-id>.toml # irrevocable ID reservations (section 8.2) When the store has been relocated, the .working/ tree lives at the store repository root exactly as drawn, and the product repository keeps only the pointer and the public deliverables.'),
+        _D('# optional 1:1 index mirrors (section 10.1) IMPORT-REPORT.md # legacy import report (pre-1.3.0 runs only; section 14.1) toml/ manifest.toml # store manifest and discovery marker (section 9) counters.toml # per-namespace ID high-water marks (section 8.2) version.toml # version and release ledger (section 6.1) worklog.toml # durable operational record (section 6.2) <type>.imported.index.toml # imported records per enabled type except LF (section 8.3) worklog.imported.toml # imported worklog, on its own ID number line lease.toml # single-writer lease, present only while held (section 5.7) init.toml # bootstrap provenance of a coupled init (section 9.2), if present backlog_item.index.toml # typed record files (section 8) done.index.toml finding.index.toml pending_decision.index.toml autonomous_decision.index.toml block.index.toml handoff.index.toml reference.index.toml contribution.index.toml maintainer_decision.index.toml preference_pattern.index.toml archive/ 2026/ archive.toml # enumerates rotated IDs and spans (section 12) done.index.toml worklog.toml archive/ moved/<source-path> # default Move destinations (section 14.2) adoption/<run-id>/ # retire preimages and archived occupying sources (section 14.2) imported/<kind>/<run-id>/ # durable originals, inventories, approvals and receipts (section 14) staging/<kind>/<run-id>/ # short-lived staging, evidence-gated reclamation (section 14.1) journals/<kind>/ # reserved recovery state, never a view or ordinary op target journal/ # crash-durable frames runs/<run-id>/transaction.toml # gate-readable projections allocations/<run-id>.toml # irrevocable ID reservations (section 8.2) When the store has been relocated, the .working/ tree lives at the store repository root exactly as drawn, and the product repository keeps only the pointer and the public deliverables.'),
         _D('The per-record layout (section 9) additionally places one file per record under .working/toml/<type>/, with each <type>.index.toml acting as the registry.'),
-        _D('The imported files are registered managed leaves beside the clean-series files, using the same enabled-type roster; worklog uses worklog.imported.toml instead of an imported index.'),
+        _D('The imported files are registered managed leaves beside the clean-series files, using the same enabled-type roster except legacy_fragment; worklog uses worklog.imported.toml instead of an imported index.'),
         'Their manifest, emitter, upgrade and containment registrations MUST agree.',
-        'A 1.3.0 opf init and the section 9.2 upgrade MUST create the imported leaves for every enabled type, create-only and empty; enabling a further type or module later MUST create its imported leaf in the same act as its clean index.',
+        'A 1.3.0 opf init and the section 9.2 upgrade MUST create the imported leaves for every enabled type except legacy_fragment, create-only and empty; in a store that declares spec_version 1.3.0 or later, enabling a further type or module other than legacy_fragment later MUST create its imported leaf in the same act as its clean index.',
+        _D('legacy_fragment has no imported leaf and no imported counter row, since the imported series refuses the LF namespace (section 8.2).'),
+        'A 1.3.0 opf init MUST write at zero the imported counter row of each type that has an imported leaf (section 8.2).',
+        'In a store that declares spec_version 1.3.0 or later, enabling a further type or module other than legacy_fragment MUST also add its imported counter row in the same act as its clean index, at zero only where no imported ancestry exists, as in the section 9.2 upgrade.',
+        _D('Both counter-row duties follow from the section 8.2 rule that requires the imported counter rows once the store declares spec_version 1.3.0 or later.'),
         _D('They are machine records, distinct from the original-source evidence under .working/imported/.'),
         'The first imported-series release MUST keep these files inline in either store layout and MUST NOT provide views over imported data; assistants read the TOML.',
         _D('Historical releases remain in version.toml (section 14.3); there is no version.imported.toml or CHANGELOG.toml.'),
@@ -117,7 +350,7 @@ _CONTRACT = {
         _D('Record reserves record- with the same suffix; it is a journal-only kind that names just its journal home, journals/record/, never a staging or imported home.'),
         _D('Here hash16 is 16 lowercase hexadecimal characters; constructors check lexical shape, not calendar validity or filesystem safety.'),
         'File operands MUST use canonical contained relative paths: no empty, dot, or parent components, absolute/drive/backslash forms, control characters, or line separators.',
-        'Homes-2 init and upgrade MUST render this managed block into .working/.gitignore from the topology constants; the reference tooling provides the renderer and drift gate but installs no block: gitignore # >>> opf-managed >>> /journals/ /staging/ # <<< opf-managed <<< Durable imported/ and archive/ evidence MUST stay tracked.',
+        'Homes-2 init, and any upgrade of a store already at homes 2, MUST render this managed block into .working/.gitignore from the topology constants; the reference tooling provides the renderer and drift gate but installs no block: gitignore # >>> opf-managed >>> /journals/ /staging/ # <<< opf-managed <<< Durable imported/ and archive/ evidence MUST stay tracked.',
         'Installation MUST inspect effective ignore rules and the index first; tracked staging or journals MUST require an explicit reviewed untracking change, never silent index mutation.',
         _D('The block travels with the store and joins the indexed-ignore candidate set.'),
         _D('Gitignore is not access control: git add -f can stage ignored state.'),
@@ -131,7 +364,7 @@ _CONTRACT = {
         _D('Each evidence bundle .working/imported/<kind>/<run-id>/ carries its own inventories at its root: inventory.toml, plus a new inventory-<phase>.toml for each later phase, where <phase> is a lowercase letter followed by up to 31 lowercase letters or digits.'),
         _D('Each holds exactly format = "opf.evidence.inventory/v1" and a file array whose rows have exactly path (a canonical store-relative file path spelled from .working/), size (a nonnegative integer), and sha256 (64 lowercase hex digits).'),
         _D('A row may name a member of its own bundle other than a bundle-root inventory, a default Move destination under .working/archive/moved/, or, for an adoption bundle, a preserved file of the same run, a retire preimage or an archived occupying source, under .working/archive/adoption/<run-id>/.'),
-        "The owning writer or migration MUST derive each inventory from the run's transaction record or receipt and MUST publish it exclusively with the retained bytes.",
+        "The owning writer MUST derive each inventory from the run's transaction record or receipt and MUST publish it exclusively with the retained bytes.",
         'An inventory MUST NOT be rewritten, so a bundle stays immutable and an evidence commit changes only its bundle folder.',
         _D('An inventory is not a journal projection and remains available in a clone without journals.'),
         'A phase inventory MAY be published in the same transaction as the base inventory to claim the promotion receipt without creating a receipt/inventory digest cycle.',
@@ -151,7 +384,8 @@ _CONTRACT = {
         'Doctor MUST NOT consult a journal to decide partial status and makes no claim that a staged plan has a recoverable transaction.',
         "In homes 2, ordinary transaction operands, including those of an open transaction being recovered, MUST NOT equal, descend from, or contain journals/; a legacy store's transactions and recovery keep their legacy operand handling, and no shipped writer targets that home.",
         'Capability-bound journal APIs MUST derive their destinations from kind and run identity.',
-        "Legacy journal transport MUST preserve bytes through the migration's receipt binding.",
+        'An ID reservation under allocations/ MUST be created exclusively and create-only, made durable before it is relied on and never rewritten, so an interrupted publication leaves no reservation or the complete one (section 8.2).',
+        _D('Homes 2 has no legacy journal transport: no homes-1 journal is carried into journals/, and a homes-2 store is never recovered from one (section 15).'),
         _D('These comparisons are byte-exact: on a case-insensitive or normalizing filesystem, a differently cased or composed spelling can alias a reserved home and is not caught.'),
         'Discovery precedes the manifest, so it cannot know the generation: it MUST examine manifest.toml in every immediate subdirectory, including journals/, MUST fail closed on a reserved-name match or ambiguity, and MUST NOT read deeper there.',
     ),
@@ -248,7 +482,7 @@ _CONTRACT = {
         'New imports MUST use the imported series and verbatim unparsed text (section 8.3), not LF quarantine.',
         'LF MUST NOT be scaffolded.',
         'A fresh-only implementation (section 16.1) provides no legacy LF validation and MUST refuse a store that declares the legacy_fragment type or holds an LF record.',
-        _D('- Imported history uses the same enabled types in a separate series, not additional record types.'),
+        _D('- Imported history uses the same enabled types except legacy_fragment (section 8.2) in a separate series, not additional record types.'),
         _D('Reserved namespaces remain reserved.'),
         _D('Imported states describe history and confer no current authority (section 8.6).'),
         '- done is a durable completion receipt linked one-to-one to a backlog item reaching ratified done; a standalone receipt MUST be imported history with provenance.',
@@ -266,13 +500,18 @@ _CONTRACT = {
         _D('Clean record IDs have the form <NS>-<n>; imported IDs have the form imported:<NS>-<n>, for example imported:BI-7.'),
         "The complete lexical grammar is ^(?:imported:)?[A-Z]{2}-[1-9][0-9]*$, and the namespace MUST additionally name the record's enabled type in section 8.1.",
         _D('Namespaces map one-to-one to types within each series.'),
-        'counters.toml MUST hold independent monotonic high-water values per series and namespace: BI for clean backlog items and the quoted TOML key "imported:BI" for imported backlog items.',
+        'The imported series MUST refuse the LF namespace, since new imports do not use LF quarantine (section 8.1).',
+        'counters.toml MUST hold independent monotonic high-water values per series and namespace, BI for clean backlog items and the quoted TOML key "imported:BI" for imported backlog items, with the imported series\' rows required once the store declares spec_version 1.3.0 or later, one for each enabled type except legacy_fragment, since the imported series refuses LF and so has no "imported:LF" row.',
         'The same rule includes "imported:WL"; clean release spans MUST tile only the clean WL number line.',
+        'The doctor MUST require the imported counter rows once the store declares spec_version 1.3.0 or later, whether a 1.3.0 opf init or the section 9.2 upgrade created them.',
         "Uniqueness, counter high-water, contiguity and no-deletion checks MUST evaluate each series independently; allocation MUST increment its counter under the store's lock as one atomic claim, so no gap between choosing and reserving can double-allocate.",
         'Counters MUST NOT be reset and IDs MUST NOT be reused, even when a record is superseded, refuted, or its work reverted.',
         'Rotation, index rewrites, and store relocation MUST NOT touch counters.toml.',
         'Re-adoption MUST seed both series from a pinned ancestral snapshot and MUST refuse a missing required namespace; it MUST NOT zero-seed prior ancestry.',
         'Only a genuinely first adoption MAY start its counters at zero.',
+        'At homes 2 the claim additionally begins with one irrevocable reservation, journals/<kind>/allocations/<run-id>.toml (sections 4.2 and 8.8), which MUST hold exactly format = "opf.journal.allocation/v1", the run\'s kind, run_id and operation_id, and a non-empty [claims] table mapping each claimed counter key, a record namespace or, for a run of the import engine, a quoted imported-series "imported:<NS>" key, to that run\'s new high-water value, an integer of at least 1 and at most 2**63 - 1 so every conforming TOML reader can parse it.',
+        "A reservation MUST NOT be rewritten, and a reservation request finding an existing entry for the same run MUST be refused unless the entry reads back byte-identical to the exact payload the request would publish, in which case the request MUST re-establish the entry's durability before relying on it; a refusal is not evidence that the run holds its numbers.",
+        'The next-ID derivation applies per series key: at homes 2 the next ID under a counter key, the clean <NS> and quoted "imported:<NS>" number lines independently, is one more than the maximum of the counters.toml high-water and every reservation\'s [claims] value for that counter key, so recovery MUST treat a reserved number as issued even where no published record carries it.',
     ),
     "8.3": (
         _D('Clean records carry the envelope below; the imported envelope follows it.'),
@@ -288,10 +527,13 @@ _CONTRACT = {
         _D('Standalone imported done receipts are legal history.'),
         "Historical created_at, updated_at, date and decided_at are optional; when present they MUST be valid RFC 3339 UTC and no later than the writer's import clock instant.",
         'Import time MUST NOT stand in for event time.',
-        'Other historical type fields MUST NOT be absent without an explicit missingness row.',
+        "An imported record MUST give a missingness row in unrecorded = [{field, reason}] to each field of its type's schema that it omits, including optional type fields and each historical timestamp above that its type's schema carries.",
+        _D("The only exempt fields are proposed_from, summary, links, refs and registered x-<vendor> tables, which the envelope table above marks optional, each where the type's own schema does not require it; an imported record never carries proposed_from, since its status never takes /proposed."),
+        _D("An imported worklog row's summary is therefore never exempt, since the worklog schema requires it (section 6.2)."),
+        'unrecorded MUST hold exactly one row for each omitted field that is not exempt, and no row that repeats a field or claims a supplied field absent.',
         'Supplied fields MUST retain their declared value types and vocabularies; unknown keys still fail.',
-        'Missing historical timestamps and type fields MUST be accounted for in unrecorded = [{field, reason}], with one row per absent field, no duplicate fields and no row claiming a supplied field absent.',
         "field MUST name a field in that type's schema.",
+        "A missingness row whose field names an omitted exempt envelope field, one of the optional envelope fields proposed_from, summary, links, refs and registered x-<vendor> tables where the type's own schema does not require it, MUST be refused.",
         _D('The closed reasons are not_recorded_in_source, unparsed, ambiguous, conflicting, and not_applicable.'),
         _D('The first means "never recorded historically in the supplied source", not a claim about all history.'),
         'The required imported envelope and provenance fields MUST NOT be waived through missingness.',
@@ -301,6 +543,8 @@ _CONTRACT = {
         'Optional import.history retains verbatim source-precision values that cannot be losslessly normalized, such as a date-only string; a UTC midnight MUST NOT be fabricated.',
         _D('Optional import.unparsed holds verbatim source text that cannot be mapped.'),
         'The assistant MUST retain such text rather than drop it.',
+        'When present, import.span MUST be an array of two integers, import.history an array of tables, and import.unparsed an array of strings.',
+        "Each import.history table MUST hold exactly two keys, field (a field named in the type's schema) and value (its verbatim source value as a string).",
         _D('The writer performs no byte-tiling or leftover accounting: byte-level coverage and semantic fidelity are not machine-proven.'),
         _D('Preserved originals remain the restoration authority.'),
         'Imported records and their worklog entries MUST be immutable after publication; corrections MUST be a fresh import run retaining the old evidence.',
@@ -439,7 +683,8 @@ _CONTRACT = {
         'worklog-append MUST refuse a detail that opens with that lifecycle grammar.',
         'Every subcommand runs one operation sequence, and an implementation of the verb MUST preserve its guarantees: 1.',
         "Resolve the store, then any interrupted authoring transaction MUST be reconciled first.",
-        'Reconciliation writes the store, so it MUST run only under the single-writer lease that publication uses: a held lease MUST refuse before any recovery write and MUST NOT be seized.',
+        'Reconciliation writes the store, so it MUST run only under the single-writer lease that publication uses: a lease held by a live or possibly-live holder MUST refuse before any recovery write and MUST NOT be seized, and a leftover lease from a confirmed-dead run of the same verb MAY be released through this reconciliation itself, as the section 5.7 live-holder rule grants.',
+        'Any other present lease, a confirmed-dead leftover of another verb included, MUST refuse before any recovery write and MUST NOT be released by this reconciliation.',
         'An operand changed since the interruption, to bytes that are neither its journaled prestate nor its planned poststate nor a write of either torn by the interruption, MUST be reported and refused, never overwritten.',
         'A reconciled interruption MUST refuse the new operation, so the operator inspects it before anything new is written.',
         _D('A fresh-only implementation (section 16.1) performs that reconciliation only after its section 16.1 read-only pre-scan and within the section 16.1 recovery bound, and runs its admission check after it.'),
@@ -497,25 +742,24 @@ _CONTRACT = {
         'The ledgers are exempt from the per-record layout: version.toml and worklog.toml MUST always be single files, written under the store lock (allocation of WL IDs still goes through counters.toml atomically).',
     ),
     "9.2": (
-        _D('The homes-generation upgrade targets spec_version = "2.0.0" with required integer [opf].homes = 2.'),
-        'Absent or 1 denotes legacy homes for migration; unknown future generations MUST be refused.',
-        _D('The homes-generation target does not itself change the runtime supported version or init format.'),
-        'The migration MUST refuse a store resolved outside the product root until a multi-root coordinator exists.',
+        _D('The homes-2 generation is declared by spec_version = "2.0.0" with required integer [opf].homes = 2, and a store is at homes 2 only when it is created there (section 4.2).'),
+        'Absent or 1 denotes legacy homes; unknown future generations MUST be refused.',
+        _D('The homes-2 declaration does not itself change the runtime supported version or init format.'),
+        'This section defines no homes-generation upgrade: no homes-1 store is migrated to homes 2 and no OPF control area is relocated for the homes generation, and once homes 2 is activated opf upgrade MUST refuse a homes-1 store by name rather than migrate it (section 4.2).',
         'Unproven legacy .archive/ entries MUST remain in place with a standing finding until dispositioned.',
         "A base-schema version bump MUST ship a tested, in-place store-schema upgrade (opf upgrade) in at least one published upgrade-capable implementation (section 16.1), the reference tooling, so that a store below the new version has an upgrade path once that upgrade activates; the path holds only within this section's preconditions and refusals and that implementation's disclosed residuals.",
+        _D('The bump to the homes-2 declaration (spec_version = "2.0.0" with [opf].homes = 2) is the one exception: it ships no upgrade, and a store below it has no upgrade path into homes 2 (section 4.2).'),
         'Every requirement of this section on an upgrade, its deltas, preconditions, report, refusals, and remedies binds an upgrade-capable implementation; a fresh-only implementation implements none of them and MUST instead refuse under section 16.1.',
         "Every implementation class MUST apply the version ceiling's refusal at the end of this section, a fresh-only implementation at its section 16.1 admission check; a fresh-only implementation that supports a version below the reserved homes-2 declaration (section 4.2) MUST NOT apply the ceiling's homes-2 recognition and MUST refuse that declaration under section 16.1.",
         'The upgrade MUST be idempotent.',
-        'A purely schema-level bump MUST be additive, using atomic replacement of existing files, create-only writes for new index files, and regeneration of declared views through exclusively created temporary files followed by atomic rename.',
+        'A schema-level bump MUST be additive, using atomic replacement of existing files, create-only writes for new index files, and regeneration of declared views through exclusively created temporary files followed by atomic rename.',
         _D('These writes are sequential, with recovery scope held in memory, not a durable transaction journal.'),
-        'A homes-generation bump MUST additionally relocate OPF control areas as a versioned, journaled, fail-closed relocation.',
-        'Every destination MUST be digest-verified before its source is removed.',
-        'Both kinds of upgrade MUST run under the store consistency contract and the single-writer lease (section 5.7).',
+        'The upgrade MUST run under the store consistency contract and the single-writer lease (section 5.7).',
         'It MUST fail closed on an unresolvable store, a declared spec_version ABOVE the tooling, a divergence, a held lease, or any populated state that contradicts its preconditions; it MUST NOT lower the fail-closed floor.',
         'Before any write it MUST enforce two fail-closed preconditions: it claims the single-writer lease (section 5.7) and holds it across the whole mutation, and it verifies the working tree is clean, including ignored files, over the planned schema and render destinations (store and product roots) and the index collision candidates, so the committed HEAD is a verified restore path for that scope; a held lease or a dirty store refuses, and a dirty store is asked to commit its own changes, never restored by the tool.',
         "After applying the schema delta, it MUST regenerate the declared views and MUST require a full doctor VALID before offering the uncommitted change for the adopter's own branch-and-merge.",
         'It MUST NOT stage or commit the change.',
-        "Both upgrade kinds, on the schema-level path and the homes-generation relocation path, the homes-2 path included, alike, MUST NOT write the adoption archive and MUST NOT overwrite, relocate or remove a plan-enumerated frozen source (section 14.2); a frozen source sits outside the planned schema and render destinations, so the clean-tree precondition does not read it, and the required doctor VALID grades it under the section 11 bounded treatment.",
+        "The upgrade MUST NOT write the adoption archive and MUST NOT overwrite, relocate or remove a plan-enumerated frozen source (section 14.2); a frozen source sits outside the planned schema and render destinations, so the clean-tree precondition does not read it, and the required doctor VALID grades it under the section 11 bounded treatment.",
         "An upgrade delta or manifest change that would declare a new view or managed store path at a registered [unmanaged] path or at a plan-enumerated frozen source MUST refuse, naming the collision; the remedy is the adopter's own fresh plan re-dispositioning that file (section 14.2).",
         'The manifest and counters rewrite MUST be a model regeneration through the canonical new-document emitter, never a textual round-trip edit, bounded by two guards: a precondition that re-emitting the UNCHANGED parsed model reproduces the on-disk bytes exactly (proving the file is canonical and comment-free, so nothing can be lost), failing closed otherwise; and a postcondition that the model diff equals exactly the allowed delta, failing closed otherwise.',
         _D('The allowed delta is expressed as ensure-present and ensure-absent over the whole 1.0.0 origin family, so a governance-enabled, a decision_support-enabled, a bare, and a view-omitting 1.0.0 store all migrate under one rule and the normative text cannot diverge from the tooling.'),
@@ -526,7 +770,8 @@ _CONTRACT = {
         'For the 1.1.0 to 1.2.0 upgrade the allowed schema delta is the spec_version bump alone: no other manifest field, schema file, or counter changes, and the upgrade MUST NOT create provenance for an existing store (none is ever fabricated).',
         _D('Declared views are then regenerated, so a stale committed view can change.'),
         _D('A 1.0.0 store takes the 1.0.0 delta above directly to 1.2.0.'),
-        _D('For the 1.2.0 to 1.3.0 upgrade, the allowed schema delta is the version bump, registration and create-only initialization of missing imported managed leaves for enabled types, and addition of missing imported counter rows at zero only where no imported ancestry exists.'),
+        _D('For the 1.2.0 to 1.3.0 upgrade, the allowed schema delta is the version bump, registration and create-only initialization of missing imported managed leaves for enabled types other than legacy_fragment, and addition of missing imported counter rows at zero only where no imported ancestry exists, never an "imported:LF" row.'),
+        'Where imported ancestry exists in a namespace, the imported counter row added for it MUST hold the highest imported ID number in that namespace, the largest <n> of its imported:<NS>-<n> IDs.',
         'Existing records, evidence, clean counters and imported high-water values MUST be preserved; a populated collision, missing ancestral counter or unprovable prestate refuses.',
         "The upgrade MUST refuse before any write a store whose [unmanaged] entry equals or contains a discovery candidate (section 14.2), which an earlier store can carry, naming the entry and the candidate; the remedy is the adopter's own fresh plan re-dispositioning that candidate (section 14.2), recorded before the upgrade is retried.",
         'The upgrade MUST NOT create historical records, adoption approval or provenance, MUST NOT change posture or import status, and MUST NOT add imported views.',
@@ -727,7 +972,7 @@ _CONTRACT = {
         _D('The location patterns of section 5.3 are described generically; no pattern names a real repository, host account, or internal system.'),
         "Import and adoption provenance, including originals under imported/ and retired files under archive/, MUST stay inside the adopter's own repositories.",
         _D('In homes 2, .aiqt/ is AIQT-owned material, not an OPF state home; OPF operates without it.'),
-        'Only homes migration MAY read explicitly inventoried OPF artefacts from former .aiqt/ locations, without touching unrelated AIQT material.',
+        'On a homes-2 store, OPF MUST NOT read OPF artefacts from former .aiqt/ locations or touch unrelated AIQT material, since homes 2 has no homes migration (section 4.2).',
         _D('A no-follow existence probe of a former .aiqt/ location, used only to refuse an operation, is not a read of that material.'),
         'Experimental fields MUST ride registered x-<vendor> tables only, within the limits of section 8.7.',
         _D("The base standard's required schema vocabulary names no adopter, operator, or profile by definition; a conforming store's own data legitimately may (an operator via actor.id, a profile via a [profiles.<name>] table the adopter chose)."),
@@ -751,9 +996,55 @@ _CONTRACT = {
         _D('An upgrade-capable implementation meets every section 9.2 requirement for each earlier base version and generation and grades legacy state under sections 8.1, 8.6, 11, and 14.1.'),
         _D("The reference tooling targets the upgrade-capable class: its opf upgrade, in the repository's reference code, carries a store from base 1.0.0 or 1.1.0 to base 1.2.0, within its disclosed residuals, and its upgrade into base 1.3.0 remains a target contract (section 9.2)."),
         _D('A fresh-only implementation supports exactly one base spec_version, one homes generation, and one worklog storage generation, initializes stores directly at them, and implements no section 9.2 upgrade and no legacy-state grading.'),
-        'An implementation MUST declare, in the documentation of each release and in every conformance report it emits, its release identity, its class, and its supported spec_version, homes generation, and worklog storage generation.',
-        'An implementation that declares no class MUST be treated as upgrade-capable, and every upgrade requirement binds it.',
+        'An implementation MUST declare, in the documentation of each release and in every report its emitter writes, its release identity, its class, and its supported spec_version, homes generation, and worklog storage generation.',
+        'Each release MUST ship that declaration as one file, the declaration file.',
+        _D("A runtime check is the step of the implementation that, in a run, reads the declaration and gates that run's store operations, the emitter is the step of the implementation that writes the conformance reports section 16 describes, never a store-file emitter such as the canonical new-document emitter, and a documented run of the runtime check and the emitter need not resolve a store."),
+        _D("Whether a run authorized store operations is an observable of that run: it authorized them exactly where it performed one, a write within a store that run resolved or to that store's lease, as the checker observes the run's writes, and an authorization no performed operation shows is not compared."),
+        _D('A write this section or section 5.7 itself requires is not a store operation under this section, for the runtime-result comparison and the store part below alike: the claim of the single-writer lease a command takes, its release, the session_lease record of that claim and of that release, and the lease reconciliation and recovery writes sections 5.7, 8.8, 14.1, and 14.2 require, so a run that stops as cannot-evaluate and writes nothing but what section 5.7 requires to end its own claim performed no store operation.'),
+        'A runtime check MUST read the declaration from the copy of that file installed with the implementation (the installed copy) alone, never from the documentation of the release or from any report.',
+        "Each release MUST also carry, in the implementation and apart from that file, the SHA-256 digest of that file's bytes as the release ships them (the shipped-file digest), and the documentation of each release MUST state where the implementation carries it.",
+        'A release that carries no such digest, or whose documentation states no such place, does not conform to this section, and a conformance claim MUST NOT be made for it.',
+        "A runtime check MUST compare the installed copy's bytes with the shipped-file digest before it reads any field, and an installed copy that is absent or unreadable, or whose bytes differ from that digest, MUST yield cannot-evaluate and MUST NOT authorize any store operation.",
+        _D('That comparison detects an edit of the installed copy alone; section 17 discloses that residual and the others these rules leave.'),
+        'Every report the emitter of a release writes MUST carry the four parts compared in every report, exactly these: the restatement of the declaration, the shipped-file digest the implementation carries, the installed-copy digest, and the runtime result.',
+        "The installed-copy digest is the SHA-256 digest of the installed copy's bytes that the runtime check read, or the token not-read where that check read none because the installed copy is absent or unreadable, and a report MUST NOT carry not-read with any runtime result other than cannot_evaluate.",
+        "Each digest in a report MUST be written as 64 lowercase hexadecimal digits, and the runtime result MUST be written as one of the tokens of the three-valued gate_run verdict field (section 8.5): cannot_evaluate where that run's runtime check yielded cannot-evaluate or another rule of this section made that run yield cannot-evaluate, the admission check over the store that run resolved included, and otherwise pass where it authorized store operations and fail where it did not.",
+        _D('Section 8.5 fixes those tokens, not their meaning here: under this section pass and fail read observably, over performed store operations, so a documented run that resolves no store, and one whose only writes are the exempt writes above, each authorized none and, where no rule yields cannot-evaluate, write fail.'),
+        _D("A restatement differs from that file's declaration where it gives a different value for any field the file carries, omits such a field, or states a field the file does not carry."),
+        "The documentation of each release MUST restate that file's declaration without differing from it.",
+        _D("The expected report of a release is fixed by the bytes the release ships alone, apart from the runtime result, the one part also coupled to the run it concerns: its restatement is the declaration of that file as the release ships it, each of its digests equals the SHA-256 digest of that file's bytes as the release ships them, and its runtime result is cannot_evaluate exactly where a rule of this section makes those bytes, or the store that run resolved as the checker observes it, yield cannot-evaluate, and otherwise pass or fail, between which this section, as it now stands, sets no rule."),
+        _D('A report deviates from the expected report where any of the four compared parts is omitted, written in another form, or holds another value; no other content of a report is compared, the base result of a report a reference run emits over a store its admission check refuses (the base-result part below) apart.'),
+        _D("The runtime-result part also deviates where its token disagrees with whether that run authorized store operations, the performed operations the checker observes; this comparison reads the run's writes, the store-coupled cannot-evaluate rule above reads the store that run resolved, and together they make the runtime result the only part of the expected report not fixed by the shipped bytes alone."),
+        _D('A pass token beside no performed store operation, a fail token beside one, and a cannot_evaluate token beside one each disagree that way, whatever the expected result, since a run that yields cannot-evaluate authorizes no store operation.'),
+        "The behaviour-coupled comparisons are exactly two, the token comparison above and the store part below, and they read only the writes the checker observed: a run for which the checker cannot determine whether it observed every write gives it no evidence under either comparison, so a result-part or store-part failure that only those two comparisons of such runs could show MUST be reported as unresolved, never as established, a residual section 17 discloses; the rest of the expected-report comparison, the store-coupled cannot-evaluate expected result included, reads such a run's report as any other, over the store that run resolved as the checker observes it.",
+        _D("An execution environment is unaltered where it is a stock install of a platform and version within what the documentation of the release names or, where that documentation names none, of the platform the checker uses, as that platform's own installer leaves it, changed only as that documentation directs and in this closed operational list, and in nothing else: the account name, administrative privilege only where that documentation directs it, the working and temporary locations, and the clock."),
+        _D("Every default of that stock install that the documentation does not exclude, by directing that it be changed or by naming a platform that lacks it, is part of an unaltered execution environment, so meeting it is the release's, whichever platform and version within that naming a checker uses."),
+        _D('An attempt is the documented installation of a release, made by one checker in an unaltered execution environment, from the bytes the release ships and, for each installed file the release does not ship, from the source its documentation directs, followed by two successive documented runs of the runtime check and the emitter over that installation.'),
+        _D("A reference run of a release is a run of an attempt whose installed copy holds that file's bytes as the release ships them and is readable when the run starts."),
+        _D("The installation or the execution environment is altered where any byte, file, or setting of either differs from what the stock install's defaults, the changes the closed operational list above permits, the documented steps, the release's own code, and code those steps install from a source the documentation of the release directs left it; the working and temporary locations the checker chose are the checker's own, and what sits there alters neither, the installation apart: the installed files, the installed copy included, and the files a documented step or the release's own code wrote belong to the installation wherever they sit, those locations included, so an edit of any of them alters the installation there as anywhere."),
+        _D('An attempt whose installation or execution environment anything else altered is not an attempt and establishes nothing.'),
+        "A verdict under this section is decided from the checker's own observations, given its detection of alterations (section 17), and an attempt whose eligibility under this rule the checker cannot determine establishes nothing for that checker: a failure that only such attempts show MUST be reported as unresolved, never as established.",
+        "A release MUST be available: every attempt MUST complete the documented installation and yield two reference runs, so an installer that rewrites that file's bytes, by converting its line endings or otherwise, an installed copy a documented run cannot read, an installation step an attempt cannot complete, and a first run whose writes leave the second run with an installed copy that no longer holds the shipped bytes are each a failure of this rule.",
+        'A reference run of a release MUST NOT emit a report that deviates from the expected report, and its runtime check MUST NOT authorize any store operation where the expected runtime result is cannot_evaluate or where its admission check, the pre-scan included, refused the store that run resolved.',
+        "Only a checker's own attempts and reference runs are evidence under the two rules above: a report of any other run or installation, altered or not, MUST NOT be presented as establishing or countering conformance of any release, and whether a release conforms to this section is judged only from the bytes the release ships, the implementation and the installer included, inspected, from the documentation of the release, and from the checker's own attempts and reference runs.",
+        _D('A failure of either rule is shown for a checker where one of its own attempts or reference runs shows it, and established for that checker where a second of its own attempts or reference runs, made on the same platform and version, shows a failure of the same rule and, under the reference-run rule, in the same part, the four compared parts of the report and the store and base-result parts below each one part; attempts and reference runs that show no failure, however many there are, never counter a shown or established failure.'),
+        "The two rules above are the one path from attempts and reference runs to a verdict: a breach of any requirement of this section that an attempt or a reference run shows in what those rules compare, the four compared parts of a report, not-read beside another runtime result, a run's cannot-evaluate and the store operations it performs, a restatement a report states, and the store and base-result parts below included, MUST be judged solely as a failure of the availability rule or of the reference-run rule, shown and established only as those rules provide, never as nonconformance on one showing; only what a checker inspects in the bytes the release ships or reads in the documentation of the release decides a verdict under this section without that procedure.",
+        _D("Every requirement of this section that those rules do not compare is a requirement on the bytes the release ships, on the documentation of the release, or on a checker's own conduct and reporting: in particular, a requirement on the conduct of the implementation's commands outside what the parts above read, the fresh-only admission, lease, recovery, and sync conduct below included, is a property of the bytes the release ships, and a breach of it is judged by that inspection alone, never by this procedure."),
+        _D("A run that is no reference run and belongs to none of the checker's attempts, a run of another command over a store the checker made and the Appendix E scratch-copy probe over an edited installed copy included, is an observation of the implementation's behaviour, never an inspection of the bytes the release ships or a reading of the documentation of the release: however often it is repeated, it is no evidence under the two rules above, it shows and establishes nothing there, and it decides no verdict under this section, on one showing or many, since only those two rules, that inspection, and that reading decide; it can only direct the checker to what an inspection of the bytes the release ships then finds, and section 17 discloses what every inspection and such an observation rest on."),
+        _D('An availability failure is shown by a failed attempt and established by a second failed attempt of the same checker on the same platform and version; it has no part, so the same-part condition does not apply to it.'),
+        _D("Under the reference-run rule the same-part condition applies to every failure, a store operation performed where the expected runtime result is cannot_evaluate or where that run's admission check, the pre-scan included, refused the store that run resolved included: that operation is a failure in a part of its own, the store part, shown and reproduced only by a run that performs such an operation, never by a deviating report."),
+        _D('A report a reference run emits over a store its admission check refuses is compared in one more part of its own, the base-result part: it deviates there where that report breaches the refusal-report rule below, by a base result other than indeterminate or by not naming what that rule has it name, and such a breach in such a report is judged only there, under the reference-run rule and the same-part condition, never as a direct verdict.'),
+        "The showing and the reproducing evidence MAY be any two of the checker's own reference runs on the same platform and version, the two runs of one attempt included.",
+        'A checker that reports on a shown failure MUST report it as established or, where its own evidence has shown it and not reproduced it, as unresolved, MUST name the platform, the version, and its own attempts and reference runs behind that state, and MUST NOT report an unresolved failure, or the absence of a shown one, as conformance of the release.',
+        "A release for which a checker's own evidence establishes a failure of either rule does not conform to this section, and that checker MUST NOT make a conformance claim for it; a conformance claim under this section MUST name the attempts and reference runs it rests on.",
+        'Each such failure is a release nonconformance, never a runtime state of the declaration: it MUST NOT be treated as making the declaration malformed or contradictory, and it does not change what a runtime check of an installed copy yields.',
+        'An implementation whose declaration lacks only its class MUST be treated as upgrade-capable, and every upgrade requirement binds it.',
         'An unreadable, malformed, or contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation.',
+        'A declaration that is absent, or that omits its release identity, its spec_version, its homes generation, or its worklog storage generation, is malformed rather than one that declares no class: it MUST yield cannot-evaluate and MUST NOT authorize any store operation.',
+        'A declaration that carries its release identity, its spec_version, its homes generation, and its worklog storage generation, and omits only its class, declares no class: it MUST NOT be treated as malformed for that omission, and the implementation that ships it MUST be treated as upgrade-capable unless the declaration is malformed or contradictory on other grounds.',
+        'The rules on an absent, unreadable, malformed, contradictory, or classless declaration govern the file alone: a runtime check MUST apply them to the installed copy as it stands, a check of the documentation or of the reports MUST apply them to that file as the release ships it, and each check MUST NOT take a class or any other field from the documentation of the release or from any report.',
+        "Where that documentation states a class that the file omits, the release does not conform to this section and a conformance claim MUST NOT be made for it, because the documentation's restatement states a field the file does not carry; where a report a reference run of that release emits states such a class, that report's restatement differs from the file's declaration the same way, a deviation of the restatement part judged under the reference-run rule like any other, never a direct verdict.",
+        'The file declares no class only where it omits its class and no other field: a file that is absent, or that also omits its release identity, its spec_version, its homes generation, or its worklog storage generation, is malformed and MUST yield cannot-evaluate.',
         'A fresh-only implementation MUST run an admission check in every command that resolves a store, at every posture, before any other grading and before any write, the claim of the single-writer lease (section 5.7) included, apart from the lease reconciliation and recovery that the recovery bound below leaves to sections 5.7, 8.8, 14.1, and 14.2, which the read-only pre-scan below precedes.',
         "The check MUST run after any section 5.7 comparison against the sync target that the command performs, over the state that comparison found, and a fresh-only implementation's opf sync MUST NOT bring in, by a fast-forward, a state that the check, run first over the fetched target state, refuses or cannot evaluate, nor send, by a push of pending local commits (section 5.7), a state that the check, run first over the local state it would push, refuses or cannot evaluate.",
         'A command that writes, and does not already hold the lease from the recovery below, MUST, after admission, take the lease.toml that section 5.7 has it take in the machine store and make it observable at the sync target where the store has one (section 5.7) before any other write, the session_lease record that section 5.7 has it record for that lease where the concurrent-operation module is enabled included.',
@@ -807,6 +1098,7 @@ _CONTRACT = {
         'A fresh-only implementation that provides an upgrade command MUST refuse an older store with the same finding and MUST NOT report a successful upgrade; it MAY report a no-op on a supported store only after full doctor VALID.',
         'Admission MUST NOT substitute for any other applicable check.',
         'For a store its admission check refuses, a report MUST give the base result as indeterminate, naming the class, the supported version and generations, and the finding; it MUST NOT give conformant_for_declared_scope, nor nonconformant on that refusal alone.',
+        _D('That sentence is the refusal-report rule the base-result part above compares, so in a report a reference run emits, a breach of it deviates there, never as a direct verdict.'),
         'A claim of the fresh-only class MUST cite refusal evidence: for each finding above and each legacy-state item, a fixture that every store-resolving command refuses with that finding, asserting each seeded legacy-state item by its path, with both trees byte-identical; for the section 9.2 ceiling, whose finding carries no token in this specification, the fixture asserts an INVALID finding that names the declared and supported versions and the tooling-upgrade remedy.',
         "The importer-authored clean-series item's fixtures MUST include five separate fixtures that each seed exactly one importer-authored clean record, one an entry in the active worklog.toml ledger, one an entry in an archived worklog ledger, one an active typed record in its <type>.index.toml, one an active typed record in a per-record file under a <type>/ directory (section 9), and one an archived typed record, and the import_status item's fixtures MUST include one whose .working/imported/adoption/ holds no file, refused with that item's finding, and one whose .working/imported/adoption/<run-id>/ holds a file at no adoption receipt path of the implementation's own writer and no candidate adoption receipt, which every store-resolving command MUST report as cannot-evaluate, never as unsupported-legacy-state and never as admission, with both trees byte-identical.",
         "The recovery bound's fixtures MUST include, for each kind of recovery journal the implementation's own writers keep, the section 8.8 journal and the section 14.2 apply journal included: one whose candidate is torn under such a journal within the bound, which a command that performs that recovery recovers and then admits, the section 14.2 one interrupted after apply removed an occupying manifest.toml; one whose journal names a path-defined legacy-state item as an operand and one whose journal does not parse in its writer's format, each of which every store-resolving command MUST report as cannot-evaluate, never as admission, with both trees byte-identical; and one at the supported version that holds such a journal, whose operands all parse, and a listed legacy-state item that is no operand of it, which every store-resolving command MUST refuse with that item's finding, with both trees byte-identical.",
@@ -832,6 +1124,9 @@ _CONTRACT = {
         "The local-only pattern in particular places durability wholly on the adopter's own backup, which is why choosing it SHOULD be a recorded decision (section 5.3).",
         _D('- The single-writer lease has a propagation window: between a lease being taken and its becoming observable at the sync target, two systems can both begin.'),
         _D("The consistency contract's divergence check is the overlapping control that catches that collision after the fact; the two layers together, not the lease alone, are the guarantee (section 5.7)."),
+        _D("- The dead-run lease release of sections 5.7 and 8.8 proves holder death by a process probe on the probing host, serialized by a lock on the lease's directory so concurrent recoveries whose locks one kernel arbitrates never race it: a live holder in another PID namespace that shares the store and this hostname can read as dead there and lose its lease, and a dead holder whose pid a live process reused reads as possibly-live and keeps refusing until the operator reconciles."),
+        _D('The probe errs toward refusal, and the journal-lock owner model shares the same residual where no process start time is recorded.'),
+        _D("That serialization holds only within one kernel: where the store sits on NFS or another filesystem whose flock is local to each client kernel, two hosts that share the store under one hostname can both take the lock and race the release, and where flock is unsupported or fails, every dead-run release refuses, naming the lock failure, and stays the operator's reconciliation step."),
         _D("- A host provider's create and auth conveniences call the external API of the host the target names."),
         _D("The egress bound is that named host and nothing else; the standard cannot vouch for the host's own behaviour beyond that bound."),
         _D("- Public deliverables reach the product repository through opf render under the product repository's normal review flow (section 5.8); the quality of that review flow is the adopter's own discipline, which this standard requires to exist but does not itself gate."),
@@ -841,33 +1136,93 @@ _CONTRACT = {
         _D('- The base discovery token opf is a single exact string carried in every adopter manifest.'),
         _D('A mistyped or altered token makes the store undiscoverable, which resolves to cannot-evaluate (fail-closed), never to a silent empty store.'),
         "The token is stable within a base-schema major line; a store-breaking rename MUST ship only with the tested opf upgrade migration (section 9.2), which rewrites the base table and token in place so no existing adopter's manifest is stranded.",
+        _D('That in-place rewrite covers only a bump that ships an upgrade.'),
+        _D('The bump to the homes-2 declaration ships none (section 9.2), so no store-breaking rename can ship with it: a homes-2 manifest keeps the [opf] base table name and the opf discovery token, and the bump leaves unchanged the manifest of a homes-1 store, which homes 2 does not migrate (section 4.2).'),
         _D('The retired 1.0.0 token devprocess is recognized by opf upgrade, purely to carry a legacy store forward, and by a fresh-only implementation (section 16.1), purely to refuse that store by name.'),
         _D('- A fresh-only implementation (section 16.1) proves tested admission and refusal behaviour, not authenticated history: a version declaration and the absence of listed legacy state cannot prove that a store was never upgraded or hand-rewritten, and the closed legacy-state list catches only what it lists.'),
         _D('It does not list a legacy staging run under .working/staging/import/ or .working/staging/ingest/ that carries no legacy-format inventory, a legacy .archive/ entry that section 9.2 leaves in place with a standing finding, or a legacy run archive outside .working/, which only the import_status item reaches.'),
-        _D("Admission parses only the section 16.1 candidates and a recovery journal of the implementation's own writer (sections 8.8, 14.1, and 14.2), and never reads beneath a path registered under [unmanaged] that section 14.2 permits, so a listed item kept outside those candidates, such as a legacy-format inventory kept under such a path or anywhere but the root of a staging or evidence run folder, goes undetected; an [unmanaged] entry that section 14.2 forbids is a cannot-evaluate input, never a reason to leave a path unsearched."),
+        _D("Admission parses only the section 16.1 candidates and a recovery journal of the implementation's own writer (sections 8.8, 14.1, and 14.2), and never reads beneath a path registered under [unmanaged] that section 14.2 permits, so a listed item defined by file content and kept outside those candidates, such as a legacy-format inventory kept under such a path or anywhere but the root of a staging or evidence run folder, goes undetected; an [unmanaged] entry that section 14.2 forbids is a cannot-evaluate input, never a reason to leave a path unsearched."),
         _D("Admission recognizes only the adoption receipts of the implementation's own section 14 adoption writer, so where another implementation's writer placed a store's adoption receipt under .working/imported/adoption/ at another path or in another format, and that area holds no adoption receipt of the implementation's own writer, the check cannot establish whether that store holds an adoption receipt, and a partial or complete import_status there is cannot-evaluate: never refused as legacy, but not admitted either, even where a current-format adoption set that status."),
-        _D("An adoption receipt kept outside .working/imported/adoption/, which section 14.2 does not permit, decides nothing, so where that area holds no file, its store's partial or complete import_status is refused as unsupported-legacy-state."),
+        _D("An adoption receipt kept outside .working/imported/adoption/, which section 14.2 does not permit, decides nothing, so where that area holds no file, a store at the supported version whose import_status is partial or complete is refused as unsupported-legacy-state."),
         _D('A refusal at its pre-scan leaves a store unchanged, and no refusal offers preservation, repair, or continuity; an adopter whose store holds legacy state, an upgraded store with pre-1.3.0 import history included, needs an upgrade-capable implementation for that store.'),
         _D('The lease and recovery steps of sections 5.7, 8.8, 14.1, and 14.2 run after a read-only pre-scan and before the admission check that follows them (section 16.1).'),
-        _D("The pre-scan refuses, before any write, a store whose manifest declares a version or generation that the check refuses or that shows a listed legacy-state item, the live bytes of an operand of an interrupted transaction included, and defers only the cannot-evaluate classification of an unreadable, malformed, contradictory, or absent operand of such a transaction within the recovery bound, so a store that only the later check refuses or cannot evaluate, as where such an operand stays contradictory after recovery or the recovery's own result meets a refusal, or where something that does not take the lease changed the store between the pre-scan and the recovery, may carry the effects of a completed recovery of the implementation's own interrupted transaction, within the section 16.1 recovery bound, and of the section 5.7 reconciliation of a dead run's leftover lease."),
-        _D("A command that writes and takes its lease after admission rechecks admission once that lease is taken and observable and before any other write; a stop there writes nothing but what section 5.7 requires to end the command's own claim: it releases a lease.toml that carries its own claim and leaves untouched one that carries another holder's claim."),
+        _D("The pre-scan refuses, before any write, a store whose manifest declares a version or generation that the check refuses or that shows a listed legacy-state item, the live bytes of an operand of an interrupted transaction included, and defers only the cannot-evaluate classification of an unreadable, malformed, contradictory, or absent operand of such a transaction within the recovery bound, together with a discovery outcome that such an operand alone decides, so a store that only the later check refuses or cannot evaluate, as where such an operand stays contradictory after recovery or the recovery's own result meets a refusal, or where something that does not take the lease changed the store between the pre-scan and the recovery, may carry the effects of a completed recovery of the implementation's own interrupted transaction, within the section 16.1 recovery bound, and of the section 5.7 reconciliation of a dead run's leftover lease."),
+        _D("A command that writes and takes its lease after admission confirms, once that lease is taken and observable and before any other write, that the lease.toml carries its own claim and that every directory listing, existence-probe result, and candidate the admission check read is unchanged apart from exactly the bytes its own claim of the lease wrote; a stop at that recheck writes nothing but what section 5.7 requires to end the command's own claim: it releases a lease.toml that carries its own claim and leaves untouched one that does not."),
         _D("That stop restores nothing else, so a change that another process made and the recheck detected stays in the tree; where the store has a sync target, that target's history can keep the lease's claim and release, and where the concurrent-operation module is enabled the session_lease record of that claim and its release remain."),
-        _D("Within the section 16.1 recovery bound, a fresh-only implementation trusts its own writer's recovery journal, as section 8.8, 14.1, or 14.2 recovery does, to complete or roll back an interrupted transaction before admission runs; a command that performs no such recovery, a read-only command included, reports a store with a torn candidate as cannot-evaluate until a recovering command recovers it, and a clone without the journal (section 4.2) stays cannot-evaluate."),
-        _D('Only the transactions section 16.1 lists are recovered that way: a candidate torn by any other write, such as a section 12 rotation or a non-green outcome event appended to an adoption receipt, is classed like any other candidate even where the implementation journals that write, so one left unparseable stays cannot-evaluate for every command of a fresh-only implementation, its own writers included, until it is repaired by hand, and one left parseable is not recognized as torn.'),
-        _D("A section 14.1 restore after a committed apply is new approved work, not recovery, and the section 16.1 rule that keeps a first adoption's store manifest apart from a foreign source at a candidate path binds only that first adoption, so a restore that copies archived bytes to a candidate path, such as an importer-authored worklog.toml restored over the live one, leaves a store that every command of a fresh-only implementation, its own writers included, then refuses as unsupported-legacy-state where those bytes show a listed item, or reports as cannot-evaluate where it classes them unreadable, malformed, or contradictory."),
+        _D("Within the section 16.1 recovery bound, a fresh-only implementation trusts its own writer's recovery journal, as section 8.8, 14.1, or 14.2 recovery does, to complete or roll back an interrupted transaction before the admission check that follows recovery runs; a command that performs no such recovery, a read-only command included, reports a store with a candidate that an interruption left unreadable, malformed, or contradictory as cannot-evaluate until a recovering command recovers it, and a clone without the journal (section 4.2) stays cannot-evaluate."),
+        _D('Only the transactions section 16.1 lists are recovered that way: a candidate torn by any other write, such as a section 12 rotation or a non-green outcome event appended to an adoption receipt, is classed like any other candidate even where the implementation journals that write, so one left unparseable stays cannot-evaluate for every command of a fresh-only implementation, its own writers included, until something outside that implementation, such as a hand edit, repairs it, and one left parseable is not recognized as torn.'),
+        _D("A section 14.1 restore after a committed apply is new approved work, not recovery, and the section 16.1 rule that keeps a first adoption's store manifest apart from a foreign source at a candidate path binds only that first adoption, so a restore that copies archived bytes to a candidate path, such as an importer-authored worklog.toml restored over the live one, leaves a store that every command of a fresh-only implementation, its own writers included, then refuses where those bytes show a listed item, as unsupported-legacy-state where the store stays at the supported version, or reports as cannot-evaluate where it classes them unreadable, malformed, or contradictory."),
         _D('A change made after the recheck by anything that does not take the lease, such as a hand edit or a branch switch, is outside admission.'),
         _D('Until validation tooling ships, a class claim is self-asserted (section 16).'),
+        _D("- The section 16.1 runtime check compares the installed copy of a release's declaration file with the shipped-file digest the implementation carries, so it detects an edit of that copy alone, which yields cannot-evaluate; it does not detect a co-edit that changes both the installed copy and the digest the implementation carries to match it, or one that changes the installed copy together with the implementation's comparison code so that the comparison no longer refuses that copy, and an anchor outside the installation, such as a signature over that file that the implementation verifies, is the stronger option only against an edit that does not also change the implementation's verification key or its anchor check; section 16.1 does not require one."),
+        _D("Whether a release's runtime check compares the installed copy's bytes with the digest the implementation carries at all, and whether that digest sits at the place the documentation states, are established only by an inspection of the implementation, never by a reference run: every reference run's installed copy holds the shipped bytes, over which a runtime check that skips that comparison and one that makes it can yield the same report."),
+        _D("Section 16.1 verdicts are observer-local: each rests on a checker's own knowledge of its stock baseline and of what it changed, so an alteration the checker did not detect, such as an organization-wide package-manager configuration file taken for part of the stock install, can mislead that checker."),
+        _D("Another checker contests a claim only with its own evidence: under the section 16.1 availability and reference-run rules, with its own attempts and reference runs alone, and otherwise with what it finds by inspecting the bytes the release ships or by reading the documentation of the release, such as that the release carries no shipped-file digest or that its documentation states no place for it."),
+        _D("Honest checkers can reach different verdicts on stock installs of different platforms or versions, each within what the documentation of the release names or, where that documentation names none, the platform the checker in question uses, since section 16.1 makes every default of each such install that the documentation does not exclude, by directing that it be changed or by naming a platform that lacks it, the release's to meet."),
+        _D("They can also reach different verdicts on one platform and version, where the changes the section 16.1 closed operational list permits, such as the account name or the clock, differ between their attempts, or where one checker's own attempts and reference runs show a failure of one rule twice, under the reference-run rule in the same part both times, and another checker's show it once or never."),
+        _D("The same residual covers the section 16.1 rule that an attempt whose installation or execution environment differs from what the stock install's defaults, the changes the closed operational list permits, the documented steps, the release's own code, and code those steps install from a source the documentation of the release directs left it is not an attempt and establishes nothing: only a checker that detects the alteration can know to set that attempt aside, and section 16.1 has a checker that cannot determine an attempt's eligibility report what only such attempts show as unresolved, never established."),
+        _D("It covers whether a checker observed every write of a run the same way: the section 16.1 runtime-result token comparison and store part read the writes the checker observed, so a write a checker missed could make an honest token read as disagreeing, or hide a disagreeing token or a store-part failure that the run's writes show, and a checker that cannot determine whether it observed every write of a run reports what only the behaviour-coupled comparisons of such runs show as unresolved, never established."),
+        _D("The working and temporary locations a checker chose are its own, and what sits there alters nothing, the installation apart: the installed files, the installed copy included, and the files a documented step or the release's own code wrote stay part of the installation wherever they sit, so the Appendix E scratch-copy probe, which edits an installed copy, alters the installation it probes."),
+        _D("That probe, like every run outside the checker's own attempts and reference runs, is an observation of the implementation's behaviour, never an attempt, a reference run, or an inspection of the bytes the release ships: it establishes nothing under the section 16.1 rules however often it is repeated, it decides no verdict of its own, and it informs only the section 16.1 inspection of the implementation, which rests on the same observer-local attribution."),
+        _D("A requirement of section 16.1 on the conduct of the implementation's commands that its two rules do not compare, the fresh-only admission, lease, recovery, and sync conduct included, is judged only by that inspection, so a conduct breach a checker cannot attribute to the bytes the release ships decides nothing for that checker, and one it can attribute is decided by what that inspection finds in those bytes, never by the observed run itself on any number of showings."),
+        _D('A failure that a checker cannot show twice in its own attempts and reference runs, on the same platform and version and, under the reference-run rule, in the same part, stays unresolved, however many other checkers each show it once, and an unresolved failure neither establishes nor counters any conformance or nonconformance of the release.'),
+        _D("Where the documentation of a release directs that a file the release does not ship be installed and does not pin its bytes, attempts made at different times can differ as the bytes the directed source serves differ, a residual of the release's own documentation."),
+        _D('Appendix E gives informative guidance for checking release conformance: a record of attempts, redaction of secrets, sharing and repetition, corroboration across checkers, a consistency probe over third-party reports, scratch-copy probes of the byte comparison, and an optional content-addressed reference environment.'),
     ),
 }
 # Sentence pins in sections the registry does not tile: substring-checked and keyword-linted
 # like _CONTRACT pins, each proven unique and deletion-red by the self-test, but with no
 # per-section tiling equality, so additions there stay green. Section 9.1 stays untiled because
-# its profile rule uses a lowercase "may", which section 2 reads as descriptive.
+# its profile rule uses a lowercase "may", which section 2 reads as descriptive. Appendix E is
+# informative and stays untiled; its pins are the sentences that state what section 16.1 makes of
+# its probes, so reverting one of them turns the gate red.
 _PINNED = {
     "9.1": (
         _D('Implementation conformance classes (section 16.1) are defined by the base, not by profiles.'),
         'A profile MAY require an upgrade-capable implementation, because that adds a requirement.',
         "A profile, a store manifest field, or a command-line request MUST NOT declare, grant, or relax an implementation's class.",
+    ),
+    "E": (
+        _D('This appendix is informative: it recommends practice for checkers and releases working under section 16.1, it adds no requirement, and section 16.1 alone decides what a failure, a verdict, or a conformance claim is.'),
+        _D("A shared record informs another checker's work and never substitutes for that checker's own attempts and reference runs."),
+        _D('Corroborate across checkers: where two checkers each show the same failure once, on the same platform and version, that agreement is a strong reason to keep attempting, though under section 16.1 the failure stays unresolved for each checker until its own attempts or reference runs show it twice, on the same platform and version and, under the reference-run rule, in the same part.'),
+        _D("Where its installed-copy digest is 64 lowercase hexadecimal digits other than the SHA-256 digest of the shipped file's bytes and its runtime result is other than cannot_evaluate, the report is inconsistent with a run whose runtime check compared the installed copy's bytes with that digest before reading any field and, on finding them different, yielded cannot-evaluate as section 16.1 requires, whose emitter reported that run truthfully, and whose report no one altered after the emitter wrote it."),
+        _D('It does not show that no comparison ran: a co-edit that also changed the digest the implementation carries (section 17), a comparison that is skipped, defective, or made without refusing a mismatch, an emitter that misreports, and a report altered after it was written each explain it, and the report does not tell which.'),
+        _D('It establishes nothing under section 16.1.'),
+        _D("This observes the implementation's behaviour over bytes the release did not ship; section 17 discloses that no reference run can show whether that comparison is made."),
+        _D('An edited installed copy is an altered installation under section 16.1 wherever it sits, a disposable location included, so a probe run is no attempt and no reference run and, however often it is repeated, establishes nothing under the section 16.1 availability and reference-run rules.'),
+        _D('It is an observation, never an inspection of the bytes the release ships, and it decides no verdict: it can only direct the checker to what an inspection of those bytes then finds.'),
+    ),
+}
+
+# Homes 2 has no homes migration (spec 4.2 and 9.2): a store is at homes 2 only when it is created
+# there, no OPF control area is relocated for the homes generation, and no legacy journal is
+# transported. These fragments of the retired homes-migration text are the one negative check, scoped
+# to their own sections: the default entry is red where one reappears there, outside a retired-text
+# quotation block, on one line or wrapped across quoted lines, so restoring one does not wait for the
+# self-test's tiling equality. Each fragment
+# names homes or legacy journal transport. Retired sentences that name neither are not fragments,
+# since a future worklog-generation upgrade could state them again: "The owning writer or migration
+# MUST derive each inventory" (4.2), "The migration MUST refuse a store resolved outside the product
+# root", "Every destination MUST be digest-verified before its source is removed." and "Both kinds of
+# upgrade MUST run" (9.2). Restored in place of the current text they stay red through the pins they
+# displace (the no-homes-migration vectors below); restored beside it, through the tiling equality.
+_RETIRED = {
+    "4.2": (
+        "which requires the homes migration (opf upgrade) to be available.",
+        "The homes-2 requirements in sections 4.2, 9.2, 12, 14.1, 14.2, and 15 describe the target contract",
+        "Homes-2 init and upgrade MUST render this managed block",
+        "Legacy journal transport MUST preserve bytes through the migration's receipt binding.",
+    ),
+    "9.2": (
+        "The homes-generation upgrade targets spec_version",
+        "denotes legacy homes for migration",
+        "The homes-generation target does not itself change",
+        "A homes-generation bump MUST additionally relocate OPF control areas",
+        "the homes-generation relocation path, the homes-2 path included",
+    ),
+    "15": (
+        "Only homes migration MAY read explicitly inventoried OPF artefacts from former .aiqt/ locations",
     ),
 }
 
@@ -907,29 +1262,116 @@ def surface_findings(texts=None):
     return findings
 
 
-def _sections(text):
+def _section_spans(text):
     # Every heading bounds a section, so a numbered section never swallows an appendix; the
-    # preamble before the first heading is registered as section "0".
+    # preamble before the first heading is registered as section "0", and an appendix under its
+    # letter ("E" for Appendix E). Each body is a (start, end) span of text.
     bounds = list(re.finditer(r"^#{2,3} .*$", text, re.MULTILINE))
-    sections = dict()
+    spans = dict()
     if bounds:
-        sections["0"] = text[:bounds[0].start()]
+        spans["0"] = (0, bounds[0].start())
     for i, m in enumerate(bounds):
-        number = re.match(r"^#{2,3} ([0-9]+(?:\.[0-9]+)?)\.? ", m.group(0))
+        number = re.match(r"^#{2,3} (?:([0-9]+(?:\.[0-9]+)?)\.?|Appendix ([A-Z]):) ", m.group(0))
         if number:
             end = bounds[i + 1].start() if i + 1 < len(bounds) else len(text)
-            sections[number.group(1)] = text[m.end():end]
-    return sections
+            spans[number.group(1) or number.group(2)] = (m.end(), end)
+    return spans
+
+
+def _sections(text):
+    return {section: text[start:end] for section, (start, end) in _section_spans(text).items()}
+
+
+# The exact first line of a retired-text quotation block (module docstring).
+_RETIRED_QUOTATION = "> Retired text, quoted and not in force:"
+# What the pins read in place of a quotation block; a pin holding it is missing, so no pin spans one.
+_QUOTATION_JOINT = "[retired-text quotation]"
+# A line's leading block-quote markers, nested ones included. The retired-text check also reads
+# operative text with them removed, so a sentence wrapped across ">" lines is read joined.
+_QUOTE_MARKERS = re.compile(r"^(?:[ \t]*>)+", re.MULTILINE)
+# A block-quote line: ">" after at most three spaces (CommonMark), so a lead-in below one continues
+# that quote.
+_QUOTE_LINE = re.compile(r" {0,3}>")
+# A backslash escape (a backslash before ASCII punctuation) or hard line break (a backslash ending a
+# line). The retired-text check also reads operative text with each read as CommonMark renders it,
+# the escaped character or a line break, so a fragment holding one is read as rendered.
+_BACKSLASH = re.compile(r"\\([!-/:-@\[-`{-~]|\n)")
+
+
+def _normalized(text):
+    return " ".join(text.replace("`", "").split())
+
+
+def _rendered_lines(text):
+    # The offsets of the lines at which CommonMark opens a paragraph (_heading_bounds) with no line
+    # that the informative guard reports as raw HTML on an earlier line, so a lead-in there is
+    # rendered text: never code, a lazy continuation, or a line an HTML comment or another raw HTML
+    # block may hide. The guard reports every line that may open an HTML block, a URI autolink
+    # included, so this over-fires and fails closed. A text that holds no lead-in is not parsed.
+    if _RETIRED_QUOTATION not in text:
+        return frozenset()
+    _headings, html_lines, _unread, _titles, paragraphs = _heading_bounds(text)
+    first_html = min(html_lines, default=None)
+    return frozenset(start for start, _texts, number in paragraphs
+                     if first_html is None or number < first_html)
+
+
+def _read_section(body, rendered):
+    # A section body's readings, each normalized: the pins' (each retired-text quotation block
+    # replaced by _QUOTATION_JOINT), the retired-text check's (each block removed, then read as
+    # written and with _QUOTE_MARKERS removed, each once more with _BACKSLASH read as rendered) and
+    # each block's. rendered holds the body offsets of the lines _rendered_lines admits. Each check
+    # fails closed: a pin split around a block is missing, and a fragment split around one is read
+    # joined.
+    lines = body.split("\n")
+    kept, blocks = [], []
+    i = at = 0
+    while i < len(lines):
+        if (lines[i] == _RETIRED_QUOTATION and at in rendered
+                and (i == 0 or not _QUOTE_LINE.match(lines[i - 1]))
+                and i + 1 < len(lines) and lines[i + 1].startswith(">")):
+            j = i + 1
+            while j < len(lines) and lines[j].startswith(">"):
+                j += 1
+            blocks.append(_normalized("\n".join(lines[i:j])))
+            kept.append(None)
+            at += sum(len(line) + 1 for line in lines[i:j])
+            i = j
+            continue
+        kept.append(lines[i])
+        at += len(lines[i]) + 1
+        i += 1
+    written = "\n".join("" if line is None else line for line in kept)
+    pins = _normalized("\n".join(_QUOTATION_JOINT if line is None else line for line in kept))
+    retired = tuple(_normalized(form) for reading in (written, _QUOTE_MARKERS.sub("", written))
+                    for form in (reading, _BACKSLASH.sub(r"\1", reading)))
+    return pins, retired, tuple(blocks)
+
+
+def _readings(text):
+    # Each section's readings (_read_section), keyed like _sections.
+    rendered = _rendered_lines(text)
+    return {section: _read_section(text[start:end], {at - start for at in rendered if start <= at < end})
+            for section, (start, end) in _section_spans(text).items()}
 
 
 def contract_findings(text):
     sections = _sections(text)
+    readings = _readings(text)
     findings = []
     for section, fragments in list(_CONTRACT.items()) + list(_PINNED.items()):
-        body = " ".join(sections.get(section, "").replace("`", "").split())
+        pins, _retired, blocks = readings.get(section, _read_section("", ()))
         for fragment in fragments:
-            if fragment not in body:
+            if isinstance(fragment, _Quoted):
+                if fragment not in blocks:
+                    findings.append("spec {} missing retired-text quotation: {}".format(section, fragment))
+            elif fragment not in pins or _QUOTATION_JOINT in fragment:
                 findings.append("spec {} missing contract: {}".format(section, fragment))
+    for section, fragments in _RETIRED.items():
+        _pins, retired, _blocks = readings.get(section, _read_section("", ()))
+        for fragment in fragments:
+            if any(fragment in reading for reading in retired):
+                findings.append("spec {} restores retired homes-migration text: {}".format(section, fragment))
     layout = sections.get("4.2", "")
     reservation = sections.get("4.4", "")
     for name in store.RESERVED_MACHINE_SUBDIRS:
@@ -957,6 +1399,8 @@ def keyword_findings(contract=None):
     findings = []
     for section, fragments in contract.items():
         for fragment in fragments:
+            if isinstance(fragment, _Quoted):
+                continue  # quoted text is not in force; the pin check matches it to its block
             keyword = _KEYWORD.search(fragment) is not None
             if isinstance(fragment, _Descriptive):
                 if keyword:
@@ -968,11 +1412,677 @@ def keyword_findings(contract=None):
     return findings
 
 
+# Whole-word where a letter, digit or underscore bounds it, read through an underscore run
+# only where no letter or digit lies beyond the run, as CommonMark requires before an
+# underscore can open or close emphasis: _MUST_ and __MUST__ are read, while MUST_DO and
+# x_MUST_y, which CommonMark renders as written, are not. A run with no partner (_MUST alone)
+# is read too, an over-fire.
+_INFORMATIVE_KEYWORD = re.compile(
+    r"(?<!\w)_*(MUST|SHALL|REQUIRED|SHOULD|MAY|RECOMMENDED|OPTIONAL)_*(?!\w)")
+# An informative marker, matched in each reading form of a heading title (_INFORMATIVE_TITLE)
+# or a body (_INFORMATIVE_MARK), each form folded by the one case fold candidacy shares
+# (_fold_case), so any ASCII letter case is read; any whitespace run (a line break
+# included) reads as one space (_says_informative); a body is also read as its paragraphs'
+# text with their container markers removed (_informative_sections). A title and a body are
+# each read for both marker forms, the parenthesized marker (_INFORMATIVE_PARENTHESIZED) and
+# the declaration (_INFORMATIVE_DECLARATION), so neither form escapes by standing in the
+# other place (PR #481 QA round 10: a title "This section is informative" and a body
+# holding "(informative)" each marked nothing). A title is also read for the word set off as
+# a label (_INFORMATIVE_LABEL): "informative" between two edges, an edge being the title's
+# start or end or a character other than a letter, digit, underscore or whitespace, with only
+# whitespace between the word and each edge (Z - Informative, Informative: Z, and the
+# parenthesized marker as one case); the word among other words of a title (Informative
+# references) marks nothing, and a body is not read for the label, since prose sets the
+# word off by punctuation (a list, a clause) without marking anything. Each marker matches
+# wherever it stands, so a sentence that denies the declaration, or a body naming another
+# section's "(informative)", marks its section too, a disclosed over-fire.
+_INFORMATIVE_PARENTHESIZED = r"\(\s*informative\s*\)"
+_INFORMATIVE_DECLARATION = r"\bthis\s+(?:appendix|section|subsection)\s+is\s+informative\b"
+_INFORMATIVE_LABEL = r"(?:\A|[^\w\s])\s*informative\s*(?:[^\w\s]|\Z)"
+_INFORMATIVE_TITLE = re.compile(_INFORMATIVE_LABEL + "|" + _INFORMATIVE_DECLARATION)
+_INFORMATIVE_MARK = re.compile(_INFORMATIVE_PARENTHESIZED + "|" + _INFORMATIVE_DECLARATION)
+# The one exempt quotation form: a code span holding exactly one keyword, preceded by
+# "the keyword" or "the term" (sentence case allowed). Every other uppercase occurrence in an
+# informative section, inside any other code span or a fenced block included, is a finding.
+_INFORMATIVE_QUOTED = re.compile(
+    r"\b[Tt]he (?:keyword|term) `(?:MUST(?: NOT)?|SHALL(?: NOT)?|SHOULD(?: NOT)?|MAY"
+    r"|REQUIRED|RECOMMENDED|NOT RECOMMENDED|OPTIONAL)`")
+# Inline markup that can split a keyword's letters while it renders as one word: an underscore
+# run CommonMark could read as emphasis (no letter or digit on one side of it), a link or image
+# target in its plain form, then each emphasis, strikethrough, code-span, bracket and
+# backslash character. A plain target is "](", a destination with no space, parenthesis,
+# quote, angle bracket or backslash, optionally a title in double or single quotes holding no
+# quote, parenthesis or backslash (spaces and angle brackets allowed), then ")"; or "][", a
+# reference label with no bracket or backslash, then "]". Every other "](" or "][" in an
+# informative section is a finding (_LINK_SYNTAX), as is a "<" that may open inline HTML
+# other than a URI autolink (_AUTOLINK), since a tag can hide or reorder text; a declaration
+# candidate refuses every "[", "]" and "<" outright (_plain_prose). The kept form removes
+# only the emphasis, strikethrough and code-span characters (_INLINE_EMPHASIS), since a "](" or
+# "][" that opens no link shows its text, target included.
+_INLINE_TARGET = re.compile(
+    r"\]\(\s*[^\s()<>\"'\\]*(?:\s+(?:\"[^\"'()\\]*\"|'[^\"'()\\]*'))?\s*\)|\]\[[^\[\]\\]*\]")
+_LINK_SYNTAX = re.compile(r"\][(\[]")
+_AUTOLINK = re.compile(r"<[A-Za-z][A-Za-z0-9+.\-]{1,31}:[^\s<>]*>")
+_INLINE_UNDERSCORE = re.compile(r"(?<!\w)_+|_+(?!\w)")
+_INLINE_MARKUP = re.compile(r"[*~`\[\]!\\]")
+_INLINE_EMPHASIS = re.compile(r"[*~`]")
+# A character reference in its CommonMark shape; one the guard does not decode (html.unescape
+# leaves it unchanged) is refused wherever it stands in an informative section, since a
+# renderer that reads it could show text the guard did not (_inline_unread_at); a
+# declaration candidate refuses every "&" outright (_plain_prose). The guard reads no
+# inline HTML tag anywhere: a "<" that may open one is refused the same way, so no tag
+# form needs enumerating.
+_REFERENCE_SHAPE = re.compile(r"&(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);")
+# Characters that render invisibly or only modify the character before them: format,
+# nonspacing and enclosing marks, unassigned, private-use and surrogate code points, control
+# characters other than whitespace, and the Hangul fillers.
+_INVISIBLE_CATEGORIES = frozenset(("Cf", "Mn", "Me", "Cn", "Co", "Cs"))
+_INVISIBLE_FILLERS = "\u115f\u1160\u3164\uffa0"
+_ASCII_CONTROL = re.compile(r"[\x00-\x08\x0e-\x1f\x7f]")
+# Compatibility forms read as a space in the split fold (_folded): a footnote mark ends a word.
+_WORD_ENDING_FORMS = ("<super>", "<sub>", "<circle>")
+
+
+def _visible(text):
+    if text.isascii():
+        return _ASCII_CONTROL.sub("", text)
+    return "".join(ch for ch in text if not (
+        unicodedata.category(ch) in _INVISIBLE_CATEGORIES or ch in _INVISIBLE_FILLERS
+        or (unicodedata.category(ch) == "Cc" and ch not in "\t\n\r\x0b\x0c")))
+
+
+def _folded(text):
+    # text with its character references decoded and invisible characters dropped, then
+    # folded (NFKC) twice: as it stands, and split, with each superscript, subscript or circled
+    # form read as a space (_WORD_ENDING_FORMS), so MUST followed by a footnote mark is read.
+    text = _visible(html.unescape(text))
+    split = text if text.isascii() else "".join(
+        " " if unicodedata.decomposition(ch).startswith(_WORD_ENDING_FORMS) else ch for ch in text)
+    return [_visible(unicodedata.normalize("NFKC", form)) for form in (text, split)]
+
+
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def _fold_case(text):
+    # The one case fold candidacy (_declaration_candidate) and the declaration reader
+    # (_says_informative) share: ASCII letters lowercased, every other character kept, so
+    # it maps each character to one and never expands or drops one. A Unicode fold can:
+    # str.casefold reads U+0130 (dotted capital I) as "i" and a combining dot, which kept a
+    # plain declaration from being read while nothing refused it (PR #481 QA round 9). No
+    # non-ASCII letter is folded: candidacy reads each as any letter of the word
+    # (_runs_show_word) and a candidate refuses each (_plain_prose), so no fold is needed
+    # to find or refuse a declaration that holds one.
+    return text.translate(_ASCII_LOWER)
+
+
+def _reading_forms(text):
+    # The forms of text the guard reads: as written, with its character references decoded,
+    # and two normalized forms, each folded (_folded). joined: its plain link targets and
+    # inline markup removed (_INLINE_UNDERSCORE judged on the text as written, then
+    # _INLINE_TARGET and _INLINE_MARKUP). kept: the same underscore runs and only the
+    # emphasis, strikethrough and code-span characters removed (_INLINE_EMPHASIS), brackets,
+    # link targets and backslashes kept, since a "](" or "][" that opens no link shows them.
+    # A URI autolink shows its URI as its text, so the same forms are read once more with
+    # each autolink replaced by its URI; reading more forms only adds findings.
+    bases = [text]
+    if "<" in text:
+        unlinked = _AUTOLINK.sub(lambda m: m.group(0)[1:-1], text)
+        if unlinked != text:
+            bases.append(unlinked)
+    forms = []
+    for base in bases:
+        plain = _INLINE_UNDERSCORE.sub("", base)
+        joined = _INLINE_MARKUP.sub("", _INLINE_TARGET.sub("", plain))
+        forms += [base, html.unescape(base)] + _folded(joined) + _folded(
+            _INLINE_EMPHASIS.sub("", plain))
+    return list(dict.fromkeys(forms))
+
+
+def _informative_keywords(text):
+    # The keywords text carries in any of its reading forms (_reading_forms). Reading more
+    # forms only adds findings; the forms the guard cannot read are findings of their own
+    # (informative_findings).
+    return {word for form in _reading_forms(text) for word in _INFORMATIVE_KEYWORD.findall(form)}
+
+
+def _says_informative(text, mark):
+    # Whether text marks itself informative (mark is _INFORMATIVE_TITLE for a heading title:
+    # the label form, "(informative)" included, or the declaration; _INFORMATIVE_MARK for a
+    # body: "(informative)" or the declaration): in any plain reading form (_reading_forms),
+    # each form folded by the one case fold candidacy uses too (_fold_case). So a marker
+    # written in any ASCII letter case, with decoded character references, split by markup
+    # the forms remove, by invisible characters or by a line break, in compatibility forms,
+    # or shown by a URI autolink is read as the page shows it; reading more forms only
+    # marks more sections informative, so the guard scans more. The plain forms are
+    # complete for plain text and read no inline HTML tag and no undecoded reference: a
+    # declaration candidate holding any character outside plain prose is refused where it
+    # stands (_unread_markup_at), never silently skipped, so an unreadable declaration is a
+    # finding, not a silent skip.
+    return any(mark.search(_fold_case(form)) for form in _reading_forms(text))
+
+
+def _inline_unread(text):
+    # The inline syntax in text that the guard does not read: each "](" or "][" that opens no
+    # plain link target, each "<" that may open inline HTML (a letter, "/", "!" or "?"
+    # after it) other than a URI autolink, even in a code span or fenced block, and each
+    # character reference the guard does not decode; plain text shaped like a tag (a<b) or
+    # like such a reference is named the same way, an over-fire.
+    return [form for _at, form in _inline_unread_at(text)]
+
+
+def _shown(text, at):
+    # The start of text at offset at, for a finding that names a construct.
+    return repr(text[at:].split("\n", 1)[0][:40])
+
+
+def _inline_unread_at(text):
+    # (offset, form) for each form _inline_unread names, in the same order.
+    out = [(m.start(), "a link or image target " + _shown(text, m.start()))
+           for m in _LINK_SYNTAX.finditer(text) if not _INLINE_TARGET.match(text, m.start())]
+    out.extend((m.start(), 'a "<" that may open inline HTML ' + _shown(text, m.start()))
+               for m in _HTML_START.finditer(text)
+               if not _AUTOLINK.match(text, m.start()))
+    out.extend((m.start(), "a character reference the guard does not decode "
+                + _shown(text, m.start()))
+               for m in _REFERENCE_SHAPE.finditer(text)
+               if html.unescape(m.group()) == m.group())
+    return out
+
+
+# A declaration candidate is found from its letters: the letters of "informative" can be
+# assembled, in order, from the letter runs of the text in a folded reading form (_folded:
+# character references decoded, invisible characters dropped, compatibility forms folded),
+# case folded by the shared fold (_fold_case), each non-ASCII letter standing for any
+# letter of the word (a reader may take it for one: a dotted or dotless i, an accented
+# letter, a look-alike of another script). Rendering deletes or hides only regions
+# delimited by non-letter characters (a tag or comment between "<" and ">", a code-span
+# or emphasis delimiter, a link target behind "](" or "][", an autolink's angle
+# brackets, a backslash), decodes character references, and drops invisible characters, so
+# whatever markup a renderer removes around or inside the word, the letters a reader would
+# see stand in the raw text as such runs, and the text is a candidate; a text that is no
+# candidate holds no assembly of the word and is never scanned (_unread_markup_at runs on
+# candidates alone); what a renderer generates beyond the source text is a named residual
+# (module docstring).
+_CANDIDATE_WORD = "informative"
+_LETTER_RUN = re.compile(r"[^\W\d_]+")
+
+
+def _spells(piece, part):
+    # Whether piece (a letter run or a slice of one) spells part (a slice of the word):
+    # the same length, each ASCII letter equal and each non-ASCII letter standing for any
+    # letter, so a letter no fold reads as one of the word's still spells it.
+    if piece.isascii():
+        return piece == part
+    return len(piece) == len(part) and all(
+        mine == theirs or not mine.isascii() for mine, theirs in zip(piece, part))
+
+
+def _runs_show_word(runs, word):
+    # Whether word can be assembled, in order, from runs (_spells): a run inside the word
+    # used whole, runs between the pieces skipped, the first piece a suffix and the last a
+    # prefix of their runs (the word inside one run included). reached holds each offset
+    # into word that some assembly of the runs so far has spelled.
+    reached = set()
+    width = len(word)
+    for run in runs:
+        if (word in run) if run.isascii() else any(
+                _spells(run[at:at + width], word) for at in range(len(run) - width + 1)):
+            return True
+        grown = set()
+        for at in reached:
+            rest = word[at:]
+            if _spells(run[:len(rest)], rest):
+                return True
+            if _spells(run, rest[:len(run)]):
+                grown.add(at + len(run))
+        grown.update(length for length in range(1, min(len(run), width - 1) + 1)
+                     if _spells(run[-length:], word[:length]))
+        reached |= grown
+    return False
+
+
+def _declaration_candidate(text):
+    # Whether text (a heading title or a paragraph) could show "informative" after a
+    # renderer removes markup the guard does not parse: its letters hold the word's letters
+    # as runs in order (_runs_show_word), in either folded form, case folded by the fold the
+    # declaration reader uses (_fold_case), so what is read plain is a candidate when split,
+    # and each non-ASCII letter stands for any letter of the word, so no letter a reader
+    # takes for one of the word's keeps the text from being a candidate. The split fold only
+    # cuts runs at a superscript, subscript or circled form, so reading it too only widens
+    # candidacy; widening only refuses more, never hides.
+    return any(_runs_show_word(_LETTER_RUN.findall(_fold_case(form)), _CANDIDATE_WORD)
+               for form in _folded(text))
+
+
+# The plain prose a declaration candidate may hold: ASCII letters, ASCII digits, the space
+# and the line feed that joins a paragraph's lines, and the sentence marks below (the
+# marker's own parentheses and the punctuation the spec's declaration paragraphs use; a
+# bare "!" is plain, and the image form "![" is refused through its "["). Every other
+# character is refused (_unread_markup_at): each markup lead-in ("<", ">", "[", "]", the
+# backtick, "*", "_", "~", a backslash, "&"), each control or format character (it
+# renders invisibly or not at all, so it could split or hide the word unseen), each other
+# ASCII mark, and every non-ASCII character, letters included: a letter a Unicode case
+# fold expands (U+0130, sharp s U+00DF, a ligature such as U+FB01), one a reader takes
+# for an ASCII letter (dotless i, an accented letter, a look-alike of another script),
+# and the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0), letters that render as blank
+# space and that the reading forms drop, so one could stand unseen for the space between
+# two words of the declaration. An allowlist, not a list of markup forms, decides it, so
+# no markup form is left to enumerate: every inline construct that can hide, replace or
+# reorder text opens with a character outside the set, except a GitHub emoji shortcode
+# (:m: shows an emoji), which opens with an allowed colon and is refused by its shape
+# (_SHORTCODE); a time or ratio of that shape (10:30:00) is refused too, an over-fire.
+_PLAIN_PROSE_MARKS = " \n.,;:'\"()-?!/"
+_SHORTCODE = re.compile(r":[A-Za-z0-9-]+:")
+
+
+def _plain_prose(ch):
+    # Whether a declaration candidate may hold ch (the allowlist above): ASCII alone, so
+    # no non-ASCII letter is admitted.
+    return ch.isascii() and (ch.isalnum() or ch in _PLAIN_PROSE_MARKS)
+
+
+def _char_label(ch):
+    # The refused character, named with its code point so an invisible or look-alike
+    # character is identifiable from the finding text alone.
+    return "the character {!r} (U+{:04X})".format(ch, ord(ch))
+
+
+def _unread_markup_at(text):
+    # (offset, name) for each distinct character of a declaration candidate outside the
+    # plain-prose allowlist (_plain_prose), each named at its first occurrence, in text
+    # order, with nothing masked: no code span, autolink or link target shields a character
+    # from the scan, so no pairing or matching divergence from a Markdown renderer can hide
+    # one construct behind another, and paragraphs and heading titles (title_forms) are
+    # held to the same set by this one scan. Each distinct emoji shortcode (_SHORTCODE),
+    # the one replacing construct built from allowed characters, is named the same way.
+    first = {}
+    for at, ch in enumerate(text):
+        if ch not in first and not _plain_prose(ch):
+            first[ch] = at
+    shortcodes = {}
+    for match in _SHORTCODE.finditer(text):
+        shortcodes.setdefault(match.group(), match.start())
+    return sorted([(at, _char_label(ch) + " " + _shown(text, at)) for ch, at in first.items()]
+                  + [(at, "an emoji shortcode " + _shown(text, at))
+                     for at in shortcodes.values()])
+
+
+# Block structure as CommonMark reads it, for the informative guard alone. Lines end at LF,
+# CR LF or CR only; a tab advances to the next multiple of four columns.
+_ATX = re.compile(r"(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*\Z")
+_SETEXT = re.compile(r"(=+|-+)[ \t]*\Z")
+_THEMATIC = re.compile(r"(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})\Z")
+_FENCE_OPEN = re.compile(r"(`{3,})[^`]*\Z|(~{3,})")
+_LIST_MARK = re.compile(r"(?:[-+*]|([0-9]{1,9})[.)])(?=[ \t]|\Z)")
+# A list marker numbered with at least one decimal digit other than ASCII 0-9 (\d is Unicode
+# here on purpose): CommonMark reads it as text, a renderer that reads \d as a digit opens a
+# list.
+_OTHER_DIGIT_MARK = re.compile(r"\d*(?![0-9])\d\d*[.)](?=[ \t]|\Z)")
+# Why a line is not read (_heading_bounds); each finding names the form and its fix.
+_UNREAD_QUOTE = 'a ">" at 4 or more columns inside a block quote; indent it 0 to 3 columns'
+_UNREAD_LAZY = ("a lazy continuation at 4 or more columns shaped like a block; indent it under"
+                " its container or put a blank line before it")
+_UNREAD_REFERENCE = "a paragraph that opens like a link reference definition; reword its start"
+_UNREAD_DIGIT = "a list marker with digits other than ASCII 0-9; number it with 0-9 or reword it"
+_UNREAD_TAB = "a tab before the content of a block quote or list item line; indent with spaces"
+# A line that may open a link reference definition: a label (escapes allowed) closed by "]:",
+# or left open at the line end, since a label may run onto the next line.
+_REFERENCE_DEF = re.compile(r"\[(?:[^\]\\]|\\.)*(?:\]:|\\?\Z)")
+# Read broadly, so every CommonMark HTML block type is caught however its tag ends (a quoted
+# attribute may hold ">"): content opening with "<" then a letter, "/", "!" or "?".
+_HTML_START = re.compile(r"<[A-Za-z/!?]")
+
+
+def _expand(line):
+    # The line with each tab replaced by the spaces up to the next multiple of four columns.
+    if "\t" not in line:
+        return line
+    out, col = [], 0
+    for ch in line:
+        piece = " " * (4 - col % 4) if ch == "\t" else ch
+        out.append(piece)
+        col += len(piece)
+    return "".join(out)
+
+
+def _indent(line, pos):
+    # The columns of space at pos (tabs already expanded).
+    return len(line) - pos - len(line[pos:].lstrip(" "))
+
+
+def _tab_before(raw, col):
+    # Whether the unexpanded line holds a tab that starts before expanded column col.
+    for at, ch in enumerate(raw):
+        if at >= col:
+            return False
+        if ch == "\t":
+            return True
+    return False
+
+
+def _atx_title(m):
+    return (m.group(2) or "").strip()
+
+
+def _heading_bounds(text):
+    # Headings at every level as CommonMark reads them, and the lines that open a raw HTML
+    # block, by CommonMark's block algorithm over block quotes and list items. A line first
+    # continues the open containers in order: a block quote takes 0 to 3 columns, ">" and one
+    # space after it; a list item takes its content column, or a blank line unless it opened
+    # blank and holds nothing yet. A fully continued fenced code block takes the line (it
+    # closes on 0 to 3 columns, a run of its character at least as long, then spaces or tabs
+    # alone); a fence in an unmatched container closes with it.
+    # Block starts are then read in the innermost continued container: block quote, ATX
+    # heading, fence (three or more tildes, or backticks with no backtick in the info string),
+    # setext underline (under that container's own paragraph alone, never a lazy line),
+    # thematic break, list item (ASCII digits 0-9 alone when ordered, interrupting a paragraph
+    # only where it holds content and, when ordered, starts at 1), then indented code (4 or more
+    # columns, never inside a paragraph; each such line opens or continues it, so no state is
+    # kept). A list item's content column is its marker's end plus the 1 to 4 columns
+    # after it, or plus one where 5 or more follow or the item opens blank. A line that starts
+    # no block continues the open paragraph (lazily where containers stay unmatched) or opens
+    # one. A heading in no container bounds a section; one inside a list item or block quote,
+    # or a setext heading under a paragraph that opens like a reference definition, bounds
+    # nothing and is kept only where its title says "(informative)" (_says_informative). A line
+    # Markdown renderers read differently is not read: a ">" at 4 or more columns inside a
+    # block quote, a lazy block-shaped line at 4 or more columns, a paragraph opening like a
+    # reference definition, a list marker with digits other than ASCII 0-9, and a non-blank
+    # line inside or opening a block quote or list item with a tab before its content. Every
+    # heading title that is a declaration candidate (_declaration_candidate) and holds a
+    # character outside plain prose (_unread_markup_at) is listed too, at the title line
+    # holding it, since such a character could hide an "(informative)" marker; a title
+    # that is no candidate holds no assembly of the word and is not scanned. Each paragraph
+    # is kept as its lines' text with their container markers removed (a block quote's ">"
+    # on every line, nested ones included), so a declaration continued across quoted lines
+    # is read (_informative_sections).
+    headings = []
+    html_lines = []
+    unread = []  # (line, reason) for each line that Markdown renderers read differently
+    titles = []  # (line, name) for each refused character in a candidate heading title
+    paragraphs = []  # [start, texts, first line] of each paragraph, in source order
+    containers = []  # open block quotes (None) and list items ([content column, holds a block])
+    para = None  # [start, texts, first line] of the innermost container's open paragraph
+    fence = None  # (delimiter character, opening run length) of the innermost open fence
+
+    def not_read(number, reason):
+        if (number, reason) not in unread:
+            unread.append((number, reason))
+
+    def title_forms(title, first, texts):
+        # Each refused character in a candidate title (_declaration_candidate,
+        # _unread_markup_at) joined by spaces from texts (one per line, the first at line
+        # first), at the line holding it; a title that is no candidate holds no assembly of
+        # the word and is not scanned.
+        if not _declaration_candidate(title):
+            return
+        bounds, at = [], 0
+        for piece in texts:
+            bounds.append(at)
+            at += len(piece) + 1
+        titles.extend((first + sum(1 for b in bounds[1:] if b <= offset), form)
+                      for offset, form in _unread_markup_at(title))
+
+    def marked(end, level, title, start, first, texts):
+        title_forms(title, first, texts)
+        if _says_informative(title, _INFORMATIVE_TITLE):
+            headings.append((end, level, title, start))
+
+    def heading(end, level, title, start, first, texts):
+        if containers:
+            marked(end, level, title, start, first, texts)
+        else:
+            title_forms(title, first, texts)
+            headings.append((end, level, title, start))
+
+    def holds(matched):
+        # Close the unmatched containers; the innermost one left receives a block.
+        del containers[matched:]
+        if containers and containers[-1] is not None:
+            containers[-1][1] = True
+
+    lines = re.finditer(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+", text)
+    for number, found in enumerate(lines, 1):
+        start = found.start()
+        raw = found.group().rstrip("\r\n")
+        end = start + len(raw)
+        line = _expand(raw)
+        pos = matched = 0
+        for container in containers:
+            indent = _indent(line, pos)
+            if container is None:
+                if indent > 3 or not line.startswith(">", pos + indent):
+                    if line.startswith(">", pos + indent):
+                        # CommonMark ends the quote here; some renderers continue it.
+                        not_read(number, _UNREAD_QUOTE)
+                    break
+                pos += indent + 1
+                pos += line.startswith(" ", pos)
+            elif pos + indent == len(line):
+                if not container[1]:
+                    break
+                pos = len(line)
+            elif indent >= container[0]:
+                pos += container[0]
+            else:
+                break
+            matched += 1
+        if containers and raw.strip(" \t") and _tab_before(raw, pos + _indent(line, pos)):
+            # Renderers place a tab inside container indentation differently.
+            not_read(number, _UNREAD_TAB)
+        if matched < len(containers):
+            fence = None
+        elif fence is not None:
+            indent = _indent(line, pos)
+            if indent <= 3 and re.fullmatch(
+                    re.escape(fence[0]) + "{%d,} *" % fence[1], line[pos + indent:]):
+                fence = None
+            continue
+        # The line meets the open paragraph in that paragraph's own container.
+        interrupts = para is not None and matched == len(containers)
+        consumed = False
+        while True:
+            indent = _indent(line, pos)
+            rest = line[pos + indent:]
+            if not rest:
+                break
+            if indent >= 4:
+                if para is None:
+                    holds(matched)
+                    consumed = True
+                elif matched < len(containers) and (rest.startswith(">") or any(
+                        p.match(rest) for p in (_ATX, _FENCE_OPEN, _HTML_START, _THEMATIC,
+                                                _LIST_MARK))):
+                    # CommonMark continues the paragraph lazily here; some renderers close
+                    # the container and open the block instead, so the line is not read.
+                    not_read(number, _UNREAD_LAZY)
+                break
+            if rest.startswith(">"):
+                holds(matched)
+                containers.append(None)
+                matched = len(containers)
+                para, interrupts = None, False
+                pos += indent + 1
+                pos += line.startswith(" ", pos)
+                if _tab_before(raw, pos + _indent(line, pos)):
+                    not_read(number, _UNREAD_TAB)
+                continue
+            m = _ATX.match(rest)
+            if m:
+                holds(matched)
+                para = None
+                title = _atx_title(m)
+                heading(end, len(m.group(1)), title, start, number, [title])
+                consumed = True
+                break
+            m = _FENCE_OPEN.match(rest)
+            if m:
+                holds(matched)
+                para = None
+                fence = (rest[0], len(m.group(1) or m.group(2)))
+                consumed = True
+                break
+            if _HTML_START.match(rest):
+                html_lines.append(number)
+            m = _SETEXT.match(rest) if interrupts else None
+            if m:
+                level = 1 if m.group(1)[0] == "=" else 2
+                title = " ".join(para[1]).strip()
+                if _REFERENCE_DEF.match(para[1][0]):
+                    marked(end, level, title, para[0], para[2], para[1])
+                else:
+                    heading(end, level, title, para[0], para[2], para[1])
+                para = None
+                consumed = True
+                break
+            if _THEMATIC.match(rest):
+                holds(matched)
+                para = None
+                consumed = True
+                break
+            m = _LIST_MARK.match(rest)
+            if m is None:
+                if _OTHER_DIGIT_MARK.match(rest):
+                    not_read(number, _UNREAD_DIGIT)
+                break
+            after = rest[m.end():]
+            gap = _indent(after, 0)
+            empty = gap == len(after)
+            if interrupts and (empty or (m.group(1) is not None and int(m.group(1)) != 1)):
+                break
+            holds(matched)
+            width = 1 if empty or gap >= 5 else gap
+            containers.append([indent + m.end() + width, not empty])
+            matched = len(containers)
+            para, interrupts = None, False
+            pos += indent + m.end() + (gap if empty else width)
+            if _tab_before(raw, pos + _indent(line, pos)):
+                not_read(number, _UNREAD_TAB)
+        if consumed:
+            continue
+        rest = line[pos:].lstrip(" ")
+        if not rest:
+            del containers[matched:]
+            para = None
+        elif para is not None:
+            para[1].append(rest)
+        else:
+            holds(matched)
+            para = [start, [rest], number]
+            paragraphs.append(para)
+            if _REFERENCE_DEF.match(rest):
+                # Renderers differ on the lines after a reference definition, so it is not read.
+                not_read(number, _UNREAD_REFERENCE)
+    return headings, html_lines, unread, titles, paragraphs
+
+
+def _informative_sections(text):
+    # A heading is informative where its title holds a title marker (_INFORMATIVE_TITLE: the
+    # word set off as a label, "(informative)" included, or the declaration) or its own body
+    # (to the next heading at any level) holds a body marker (_INFORMATIVE_MARK:
+    # "(informative)" or the declaration), the body read as written and as the text of each
+    # of its paragraphs with their container markers removed (_heading_bounds), so a quote
+    # marker cannot hide a marker; every own paragraph
+    # is read, none is skipped, each after the normalization the keyword scan uses
+    # (_says_informative), and informative status is inherited by every descendant heading at
+    # any deeper level, until the next heading at the same or a shallower level. Returns
+    # (title, own body) pairs; the guard scans the title with the body, so a keyword in a
+    # heading cannot hide.
+    headings, _html, _unread, _titles, paragraphs = _heading_bounds(text)
+    out = []
+    informative_level = None
+    for i, (end, level, title, _start) in enumerate(headings):
+        body_end = headings[i + 1][3] if i + 1 < len(headings) else len(text)
+        body = text[end:body_end]
+        if informative_level is not None and level <= informative_level:
+            informative_level = None
+        own_paragraphs = ("\n".join(texts) for start, texts, _first in paragraphs
+                          if end <= start < body_end)
+        own = (_says_informative(title, _INFORMATIVE_TITLE)
+               or _says_informative(body, _INFORMATIVE_MARK)
+               or any(_says_informative(paragraph, _INFORMATIVE_MARK)
+                      for paragraph in own_paragraphs))
+        if own and informative_level is None:
+            informative_level = level
+        if own or informative_level is not None:
+            out.append((title, body))
+    return out
+
+
+def informative_findings(text):
+    # An informative section adds no requirement (Appendix E says so itself), so a section 2
+    # requirement keyword there, or SHALL, REQUIRED, RECOMMENDED or OPTIONAL read as one, is
+    # drift: a removed MUST could regain force there unnoticed. The one exempt form is the
+    # quotation _INFORMATIVE_QUOTED names; every other uppercase occurrence, in a bare code
+    # span or a fenced block included, is a finding, so an operative keyword cannot hide in
+    # markup or in a heading title (the guard fails closed on quoting in any other form; the
+    # title of every informative heading is scanned like its body). Residual: the guard reads
+    # uppercase keywords, so a lowercase restatement that a reader takes as binding stays
+    # green; review catches that.
+    # A raw HTML block is a finding wherever it opens outside fenced or indented code: the guard
+    # reads no HTML (a heading there, or a section boundary it hides, stays unseen), so it fails
+    # closed; so is each line that Markdown renderers read differently (_heading_bounds), each
+    # candidate heading title holding a character outside plain prose, which could hide an
+    # "(informative)" marker, each declaration-candidate paragraph holding one (below), and,
+    # in an informative section, each link target, "<" that may open inline
+    # HTML or undecoded character reference it does not read (_inline_unread).
+    headings, html_lines, unread, titles, paragraphs = _heading_bounds(text)
+    findings = ["spec informative guard: raw HTML block at line {} is not read".format(n)
+                for n in html_lines]
+    findings.extend("spec informative guard: line {} is read differently by Markdown "
+                    "renderers and is not read: {}".format(n, why) for n, why in unread)
+    findings.extend("spec informative guard: heading at line {} carries {}, which the guard does"
+                    " not read and which could hide an \"(informative)\" marker; write the title"
+                    " plainly".format(n, form) for n, form in titles)
+    # Every declaration candidate is held to plain prose or refused: a paragraph
+    # (block-quoted or not, in any section) whose letters hold the letters of "informative"
+    # as runs in order (_declaration_candidate) is scanned with nothing masked, and each
+    # character in it outside the plain-prose allowlist, and each emoji shortcode
+    # (_unread_markup_at), is a finding naming the section and the form, whatever the
+    # section's classification, so no markup form, named or not, can hide a marker by making
+    # it unreadable; a paragraph that is no candidate holds no assembly of the word and is
+    # not scanned; heading titles are held to the same set through the title findings above
+    # (title_forms shares the scan). Holding a candidate to plain prose reads no marker: what
+    # marks a section is read separately (_informative_sections), a title for the label
+    # form ("(informative)" included) or the declaration (_INFORMATIVE_TITLE), a body and
+    # each of its paragraphs for "(informative)" or the declaration (_INFORMATIVE_MARK), so
+    # a plain candidate that holds no marker (Z (informed by the informative note)) marks
+    # nothing.
+    for start, texts, first in paragraphs:
+        joined = "\n".join(texts)
+        if not _declaration_candidate(joined):
+            continue
+        section = "(preamble)"
+        for _end, _level, heading_title, heading_start in headings:
+            if heading_start > start:
+                break
+            section = heading_title
+        for at, form in _unread_markup_at(joined):
+            findings.append(
+                "spec informative guard: section {} paragraph at line {} carries {}, which the"
+                " guard does not read and which could hide an informative declaration; write"
+                " it plainly".format(section, first + joined.count("\n", 0, at), form))
+    sections = _informative_sections(text)
+    if not any(title.startswith("Appendix E") for title, _ in sections):
+        findings.append("spec informative guard: Appendix E not marked informative")
+    for title, body in sections:
+        scanned = _INFORMATIVE_QUOTED.sub(" ", title + "\n" + body)
+        for form in _inline_unread(scanned):
+            findings.append("spec informative section {} carries {}, which the guard does not"
+                            " read; write the text and any keyword plainly or move it out of"
+                            " the informative section".format(title, form))
+        for word in sorted(_informative_keywords(scanned)):
+            findings.append("spec informative section {} carries requirement keyword {}".format(
+                title, word))
+    return findings
+
+
 def boundary_self_test():
     """Exercise the read-only boundaries with explicit in-memory filesystem observations."""
     import contextlib
     import copy
     import hashlib
+    import inspect
     from types import SimpleNamespace
     from unittest.mock import patch
     import _journal as journal
@@ -1593,10 +2703,11 @@ def boundary_self_test():
                 patch.object(store, "validate_manifest", return_value=store.ManifestValidation(store.VALID)), \
                 patch.object(store._journal, "_open_parent", side_effect=FileNotFoundError), \
                 patch.object(adopt, "validate_plan", wraps=adopt.validate_plan) as frozen:
-            # Every planned creation needs observed absence, so the root-level ones are declared targets; the
-            # enforcement members are installed by the pack row the frozen plan ties them to.
+            # Every planned creation needs observed absence, so the root-level ones and the opf/ mirror are
+            # declared targets; the enforcement members are installed by the pack row the frozen plan ties
+            # them to.
             bindings = adopt.canonical_plan_bindings()
-            targets = ["notes.txt", ".opf/hooks/pre-commit"]
+            targets = ["notes.txt", adopt.PACK_MIRROR_ROOT]
             observed = planning.investigate(Path("/store"), sources=[], targets=targets)
             result = planning.plan(
                 Path("/store"), sources=[], targets=targets, product="opf", decisions=[],
@@ -1782,9 +2893,14 @@ def boundary_self_test():
         with patch.object(journal, "_read_contained", return_value=(b"corrupt", None)):
             check("internal-projection-conflict-refused", lambda: refuses(
                 lambda: home_journal._project(100, 103, Path("/unused") / run, "import", run)))
-        with patch.object(journal, "_read_contained", return_value=(payload, None)):
+        with patch.object(journal, "_read_contained", return_value=(payload, None)), \
+                patch.object(home_journal.os, "fsync") as flushed:
             check("internal-projection-idempotent", lambda: home_journal._project(
                 100, 103, Path("/unused") / run, "import", run) is None and publish.call_count == 1)
+            # Fix round 2 (codex MEDIUM): accepting the byte-equal projection re-establishes the
+            # containing directory's durability through the parent handle _open_parent returned.
+            check("internal-projection-idempotent-flushes-parent",
+                  lambda: flushed.call_args.args == (104,))
 
     # PR B (maintainer ruling): shared native-journal validation is kind-generic; adoption identities
     # validate through the same pure validators the adoption executor will bind to.
@@ -1841,6 +2957,106 @@ def boundary_self_test():
                 ("record", lambda: home_journal.projection_record(bad_kind, bad_run, "complete", "op")),
                 ("payload", lambda: home_journal.projection_payload(bad_kind, bad_run, "complete", "op"))):
             check("internal-identity-{}-{}".format(label, validator), lambda: journal_refuses(call))
+
+    # PR-3: the irrevocable ID reservation (spec 4.2/8.2). Pure shape, identity and claims here,
+    # then the derived destination and publication order on one shared recorded trace with
+    # filesystem writes denied by mocks; real exclusivity, crash states, the durable publication
+    # order and the on-disk refusals run in _self_test_vectors.
+    record_run = "record-20260917T120000Z-0123456789abcdef"
+    reservation_rel = ".working/journals/record/allocations/" + record_run + ".toml"
+    # Regression pins (fix round 1, claude MINOR-3): allocation_record and require_ordinary_target
+    # predate PR-3; these three pin the base behaviour the reservation writer builds on.
+    check("reservation-path-derived", lambda: store.allocation_record("record", record_run) == reservation_rel)
+    check("reservation-ordinary-target-refused", lambda: refuses(
+        lambda: store.require_ordinary_target(reservation_rel)))
+    with patch.object(home_journal, "_opened", side_effect=AssertionError("opened the store journal")):
+        check("reservation-operand-refused", lambda: "journal home" in (refusal(
+            lambda: home_journal.run_transaction(object(), "record", record_run,
+                                                 [dict(op="create", path=reservation_rel)],
+                                                 lambda _name: b"")) or ""))
+    check("reservation-no-caller-path", lambda: list(inspect.signature(
+        home_journal.reserve_allocation).parameters) == ["cap", "kind", "run_id", "claims"])
+    check("reservation-typed-record", lambda: tomllib.loads(home_journal.reservation_payload(
+        "record", record_run, "held-operation", {"WL": 12, "BI": 7}).decode()) == {
+        "format": "opf.journal.allocation/v1", "kind": "record", "run_id": record_run,
+        "operation_id": "held-operation", "claims": {"BI": 7, "WL": 12}})
+    # The claims grammar is the store's counter-key grammar for the reserving kind (spec 8.2,
+    # _opf_schema._is_counter_key): every record namespace for every kind, the quoted
+    # imported-series keys only for an import-engine kind, and a value inside TOML's integer
+    # range, each bound tested just inside, at, and just outside it.
+    for bad in (None, {}, [("BI", 1)], {"BI": 0}, {"BI": -1}, {"BI": True}, {"bi": 1}, {"BIX": 1},
+                {7: 1}, {"BI": "7"}, {"ZZ": 1}, {"TX": 1}, {"imported:BI": 1}, {"BI": 2 ** 63}):
+        check("reservation-claims-refused-{!r}".format(bad), lambda b=bad: journal_refuses(
+            lambda: home_journal.reservation_payload("record", record_run, "op", b)))
+    for bad in ({"imported:LF": 1}, {"imported:bi": 1}, {"imported:BIX": 1}, {"imported:BI": 0},
+                {"imported:BI": 2 ** 63}):
+        check("reservation-import-claims-refused-{!r}".format(bad), lambda b=bad: journal_refuses(
+            lambda: home_journal.reservation_payload("import", run, "op", b)))
+    check("reservation-claims-value-bounds", lambda: not journal_refuses(
+        lambda: home_journal.reservation_payload("record", record_run, "op",
+                                                 {"BI": 1, "WL": 2 ** 63 - 2, "MD": 2 ** 63 - 1})))
+    check("reservation-import-series-claims", lambda: tomllib.loads(home_journal.reservation_payload(
+        "import", run, "op", {"imported:BI": 3, "BI": 2}).decode())["claims"] ==
+        {"BI": 2, "imported:BI": 3})
+    check("reservation-operation-id-refused", lambda: journal_refuses(
+        lambda: home_journal.reservation_payload("record", record_run, "", {"BI": 1})))
+    # The invalid-identity (and claims) refusal precedes ANY capability use: _held_root is
+    # replaced by a sentinel that fails the vector if it is ever reached, so a capability refusal
+    # cannot stand in for the identity one (fix round 1, codex MEDIUM; claude MINOR-2).
+    with patch.object(home_journal, "_held_root",
+                      side_effect=AssertionError("capability used before identity validation")):
+        for label, bad_kind, bad_run in (("traversal", "record", "../escape"), ("kind", "bogus", record_run),
+                                         ("foreign-run", "record", run)):
+            check("reservation-identity-" + label, lambda k=bad_kind, r=bad_run: journal_refuses(
+                lambda: home_journal.reserve_allocation(object(), k, r, {"BI": 1})))
+        check("reservation-claims-before-capability", lambda: "claims" in (refusal(
+            lambda: home_journal.reserve_allocation(object(), "record", record_run, {})) or ""))
+    check("reservation-capability-required", lambda: journal_refuses(
+        lambda: home_journal.reserve_allocation(object(), "record", record_run, {"BI": 1})))
+
+    @contextlib.contextmanager
+    def held_root(_cap):
+        yield 100
+
+    held = SimpleNamespace(op_id="held-operation")
+    trace = []
+    with patch.object(home_journal, "_held_root", held_root), \
+            patch.object(journal, "ensure_journal_dirs") as mkdirs, \
+            patch.object(journal, "_open_parent", return_value=(106, record_run + ".toml")) as parent, \
+            patch.object(journal, "_lstat_at",
+                         side_effect=lambda *args: trace.append("existence")) as prior, \
+            patch.object(journal, "_close_fd_quietly"), \
+            patch.object(oplock, "_remove_staging_garbage",
+                         side_effect=lambda *args: trace.append("garbage")) as garbage, \
+            patch.object(oplock, "_create_control_file",
+                         side_effect=lambda *args: (trace.append("publish"), (107, (1, 107)))[1]) as reserved, \
+            patch.object(home_journal.os, "close"):
+        reserved_payload = home_journal.reserve_allocation(held, "record", record_run, {"BI": 7})
+        check("reservation-derived-parent", lambda: mkdirs.call_args.args ==
+              (100, ".working/journals/record/allocations"))
+        check("reservation-derived-destination", lambda: parent.call_args.args == (100, reservation_rel))
+        # The order is judged on the one recorded trace: garbage retired, THEN the final name
+        # judged, THEN publication; call arguments alone cannot show it (fix round 1, codex
+        # MEDIUM; claude MINOR-1).
+        check("reservation-garbage-removed-first", lambda: trace == ["garbage", "existence", "publish"]
+              and garbage.call_args.args == (106, record_run + ".toml", "id reservation"))
+        check("reservation-published-exact-payload", lambda: reserved.call_args.args ==
+              (106, record_run + ".toml", reserved_payload, "id reservation") and reserved_payload ==
+              home_journal.reservation_payload("record", record_run, "held-operation", {"BI": 7}))
+        # An existing entry is judged by _existing_reservation's read-back, never republished
+        # and never blindly refused as already-held (fix round 1, claude MEDIUM-1; codex MINOR).
+        prior.side_effect = lambda *args: trace.append("existence") or object()
+        with patch.object(home_journal, "_existing_reservation",
+                          side_effect=journal.JournalError("existing id reservation differs")) as judged:
+            check("reservation-existing-judged", lambda: "differs" in (refusal(
+                lambda: home_journal.reserve_allocation(held, "record", record_run, {"BI": 7})) or "")
+                and reserved.call_count == 1 and judged.call_args.args ==
+                (106, record_run + ".toml", "record", record_run, reserved_payload))
+        with patch.object(home_journal, "_existing_reservation",
+                          return_value=reserved_payload):
+            check("reservation-existing-idempotent", lambda: home_journal.reserve_allocation(
+                held, "record", record_run, {"BI": 7}) == reserved_payload
+                and reserved.call_count == 1)
 
     check("evidence-homes2-roster", lambda: "C-EVIDENCE-ENUM" not in doctor.REQUIRED_CHECKS
           and doctor.required_checks(2).index("C-EVIDENCE-ENUM") == doctor.REQUIRED_CHECKS.index("C-ARCHIVE-ENUM") + 1
@@ -2563,15 +3779,21 @@ def _gitignore_reconciliation_self_test(check):
             include_if(None)
 
 
+# Whether this file is the process entry (python <file>) rather than an imported module (the opf.py
+# aggregate). It is held as a value, so the final block stays the only __main__ guard in the file
+# (tools/check_entry_guard.py) while self_test still routes an entry run through _fail_closed_main.
+_RUN_AS_ENTRY = __name__ == "__main__"
+
+
 def self_test():
     """The canonical --self-test entry's suite hook (F-SELFTEST-NO-MAIN). Run as this file's process
-    entry (the module __name__ is "__main__"), it routes the suite through _fail_closed_main, which
+    entry (_RUN_AS_ENTRY), it routes the suite through _fail_closed_main, which
     installs the fault recorders before any in-process load, settles them after the suite, and ends the
     process with os._exit, so sys.exit(self_test()) never returns and no atexit callback registered by
     loaded code runs after the verdict. Called in-process (the opf.py aggregate), it runs the suite
     plainly and returns its result; that aggregate entry is the disclosed HARDEN-GATE-ENTRY-WRAP residual
     until the unit runner of #385 lands."""
-    if __name__ == "__main__":
+    if _RUN_AS_ENTRY:
         _fail_closed_main(_self_test)
     return _self_test()
 
@@ -2669,6 +3891,408 @@ def _self_test_vectors():
     with _patch.object(store, "STAGING_KINDS", store.STAGING_KINDS + ("record",)):
         check("staging-record-flip-option-ii", lambda: not refuses(lambda: store.stage_run("record", record_run))
               and not refuses(lambda: store.evidence_run("record", record_run)))
+    # PR-3: the reservation writer on a real store: exclusive, create-only, durable publication. The
+    # reachable on-disk states are nothing, a torn staging leftover, the complete reservation (its
+    # directory entry durable once the publication's final fsync ran), and the complete reservation
+    # plus its shared-inode staging leftover. A later call under the SAME capability retires the
+    # garbage and then completes or refuses deterministically; a call under a NEW capability (what
+    # a retry after a kill holds when it re-enters through acquire_operation; a resumed init
+    # attaches the persisted operation id and so repeats the SAME capability instead) is refused,
+    # and the leftover reservation is the disclosed conservative residual.
+    import os
+    import signal
+    import threading
+    import time
+    import _journal as native_journal
+    import _opf_journal as home_journal
+    import _opf_oplock as oplock
+
+    def reservation_refusal(thunk):
+        try:
+            thunk()
+        except native_journal.JournalError as exc:
+            return str(exc)
+        return None
+
+    with tempfile.TemporaryDirectory(prefix="opf-homes-") as tmp:
+        root = Path(tmp) / "store"
+        machine_dir = root / ".working" / "toml"
+        machine_dir.mkdir(parents=True)
+        anchor_file = root / "anchor"
+        anchor_file.write_bytes(b"")
+        cap = oplock.OpCapability.__new__(oplock.OpCapability)
+        cap._claim = threading.Lock()
+        cap._claimant = None
+        cap._released = False
+        cap._acquirer_pid = os.getpid()
+        cap._acquirer_pid_start = native_journal._pid_start(os.getpid())
+        cap._anchor_fd = os.open(str(anchor_file), os.O_RDONLY)
+        anchor_st = os.fstat(cap._anchor_fd)
+        cap._anchor_ident = (anchor_st.st_dev, anchor_st.st_ino)
+        machine_st = os.stat(machine_dir)
+        cap._machine_ident = (machine_st.st_dev, machine_st.st_ino)
+        cap.store_root = root
+        cap.machine_rel = ".working/toml"
+        cap.op_id = "held-operation"
+        cap.holder = "fixture"
+        try:
+            target = root / store.allocation_record("record", record_run)
+            # The publication's durable order, asserted on one shared recorded trace: the full
+            # payload write, the file fsync, the exclusive link, the staging retire, the
+            # directory fsync. A mutant that makes os.fsync a no-op during the call leaves no
+            # fsync events and fails here (fix round 1, codex MEDIUM: byte-state checks cannot
+            # see durability).
+            import stat as file_stat
+            events = []
+            real_fsync, real_link, real_unlink = os.fsync, os.link, os.unlink
+            real_write_all = native_journal._write_all
+
+            def recording_fsync(fd):
+                st = os.fstat(fd)
+                events.append(("fsync-dir" if file_stat.S_ISDIR(st.st_mode) else "fsync-file",
+                               st.st_ino))
+                real_fsync(fd)
+
+            def recording_link(src, dst, **kwargs):
+                events.append(("link", src, dst))
+                real_link(src, dst, **kwargs)
+
+            def recording_unlink(name, **kwargs):
+                events.append(("unlink", name))
+                real_unlink(name, **kwargs)
+
+            def recording_write_all(fd, data):
+                events.append(("write", os.fstat(fd).st_ino, len(data)))
+                real_write_all(fd, data)
+
+            with _patch.object(os, "fsync", recording_fsync), \
+                    _patch.object(os, "link", recording_link), \
+                    _patch.object(os, "unlink", recording_unlink), \
+                    _patch.object(native_journal, "_write_all", recording_write_all):
+                payload = home_journal.reserve_allocation(cap, "record", record_run,
+                                                          {"BI": 7, "WL": 12})
+            tail = events[-5:]
+            check("reservation-ordered-durable-publication", lambda: [e[0] for e in tail] ==
+                  ["write", "fsync-file", "link", "unlink", "fsync-dir"]
+                  and tail[0][1] == tail[1][1] == os.stat(target).st_ino
+                  and tail[0][2] == len(payload)
+                  and tail[2][2] == record_run + ".toml" and tail[2][1] == tail[3][1]
+                  and tail[4][1] == os.stat(target.parent).st_ino)
+            check("reservation-on-disk-published", lambda: target.read_bytes() == payload and payload ==
+                  home_journal.reservation_payload("record", record_run, "held-operation", {"WL": 12, "BI": 7}))
+            check("reservation-on-disk-exact-destination",
+                  lambda: sorted(os.listdir(target.parent)) == [record_run + ".toml"])
+            # A repeat call under the SAME capability carrying the exact same claims is answered
+            # idempotently from the read-back entry and re-establishes durability: the containing
+            # directory is flushed again before the payload is returned (fix round 1, claude
+            # MEDIUM-1; fix round 2 wording: the entry may predate a publication failure whose
+            # cleanup could not remove it, so presence alone does not establish durability).
+            flushed = []
+
+            def flush_recorder(fd):
+                flushed.append(os.fstat(fd).st_ino)
+                real_fsync(fd)
+
+            with _patch.object(os, "fsync", flush_recorder):
+                check("reservation-retry-idempotent-durable",
+                      lambda: home_journal.reserve_allocation(
+                          cap, "record", record_run, {"BI": 7, "WL": 12}) == payload
+                      and os.stat(target.parent).st_ino in flushed
+                      and target.read_bytes() == payload)
+            # Different claims refuse with their own message: a refusal never reads as
+            # ownership of the requested numbers.
+            second = reservation_refusal(
+                lambda: home_journal.reserve_allocation(cap, "record", record_run, {"BI": 8}))
+            check("reservation-second-refused", lambda: second is not None and "already exists with different content" in second)
+            check("reservation-second-preserves-bytes", lambda: target.read_bytes() == payload)
+            leftover = target.parent / oplock._staging_name(record_run + ".toml")
+            os.link(target, leftover)
+            third = reservation_refusal(
+                lambda: home_journal.reserve_allocation(cap, "record", record_run, {"BI": 9}))
+            check("reservation-crash-after-link-refused", lambda: third is not None
+                  and "already exists with different content" in third and not leftover.exists()
+                  and os.stat(target).st_nlink == 1 and target.read_bytes() == payload)
+            # The same leftover state, retried by the SAME capability with the SAME claims,
+            # completes idempotently: the shared-inode leftover is retired, the entry read back
+            # and the payload returned. This is also the resumed-init shape (attach_init_lease
+            # re-attaches the persisted operation id): the byte-equal retry is crash repair, safe
+            # because the directory is fsynced before the payload is returned. (A retry under a
+            # fresh acquire_operation capability mints a new op_id and is refused;
+            # reservation-new-capability-refused below shows it.)
+            os.link(target, leftover)
+            check("reservation-leftover-retried-same-capability", lambda: home_journal.reserve_allocation(
+                cap, "record", record_run, {"BI": 7, "WL": 12}) == payload
+                and not leftover.exists() and os.stat(target).st_nlink == 1)
+            run2 = "record-20260917T120001Z-0123456789abcdef"
+            torn = target.parent / oplock._staging_name(run2 + ".toml")
+            torn.write_bytes(b"torn")
+            payload2 = home_journal.reserve_allocation(cap, "record", run2, {"BI": 9})
+            check("reservation-crash-before-link-completes", lambda: not torn.exists()
+                  and (target.parent / (run2 + ".toml")).read_bytes() == payload2)
+            run3 = "record-20260917T120002Z-0123456789abcdef"
+            (target.parent / (run3 + ".toml")).mkdir()
+            check("reservation-occupied-refused", lambda: "non-regular entry" in (reservation_refusal(
+                lambda: home_journal.reserve_allocation(cap, "record", run3, {"BI": 1})) or ""))
+            # A symlink squat cannot be read back through the O_NOFOLLOW non-blocking read
+            # and refuses naming the read-back, never implying held numbers.
+            run4 = "record-20260917T120004Z-0123456789abcdef"
+            os.symlink("elsewhere", target.parent / (run4 + ".toml"))
+            check("reservation-symlink-refused", lambda: "cannot read back" in (reservation_refusal(
+                lambda: home_journal.reserve_allocation(cap, "record", run4, {"BI": 1})) or ""))
+            # A final name appearing only between the existence check and the exclusive link
+            # (unreachable under the held capability) refuses with the reservation-specific
+            # message, never the oplock anchor-recovery advice (fix round 1, claude MINOR-4).
+            with _patch.object(native_journal, "_lstat_at", lambda pfd, name: None):
+                raced = reservation_refusal(lambda: home_journal.reserve_allocation(
+                    cap, "record", record_run, {"BI": 7, "WL": 12}))
+            check("reservation-link-race-refused", lambda: raced is not None
+                  and "appeared during publication" in raced and "recover=True" not in raced
+                  and os.stat(target).st_nlink == 1 and target.read_bytes() == payload)
+            # The same race where the publication's own cleanup also fails must keep that
+            # cleanup-failure detail in the reservation-specific refusal instead of dropping it
+            # with the oplock advice (fix round 2, claude MINOR-3; strengthened in fix round 3,
+            # codex MEDIUM): the refusal must NAME the actual stranded staging entry and keep the
+            # injected unlink failure, so a mutant dropping the whole carried detail (if kept: to
+            # if False:) and a mutant keeping the marker but dropping the leftover suffix
+            # (message += detail + leftover to message += detail) both go red here. The stranded
+            # leftover is retired as garbage by the next reserving call;
+            # reservation-stranded-leftover-retired below asserts that retirement.
+            def refusing_unlink(entry, **kwargs):
+                raise OSError(5, "injected unlink failure")
+
+            with _patch.object(native_journal, "_lstat_at", lambda pfd, name: None), \
+                    _patch.object(os, "unlink", refusing_unlink):
+                stranded = reservation_refusal(lambda: home_journal.reserve_allocation(
+                    cap, "record", record_run, {"BI": 7, "WL": 12}))
+            stranded_names = [entry for entry in os.listdir(target.parent)
+                              if oplock._is_staging_name(entry, record_run + ".toml")]
+            check("reservation-link-race-keeps-cleanup-detail", lambda: stranded is not None
+                  and "appeared during publication" in stranded
+                  and "could not be cleaned up" in stranded and "recover=True" not in stranded
+                  and len(stranded_names) == 1 and stranded_names[0] in stranded
+                  and "injected unlink failure" in stranded
+                  and target.read_bytes() == payload)
+            # Fix round 2 (claude MEDIUM-1, decided stricter-safe; wording fixed in fix round 3):
+            # a retry after a kill that re-enters through acquire_operation holds a NEW capability
+            # (a fresh op_id per acquisition), and it stays refused: the payload embeds the op_id,
+            # so the bytes differ. The killed run's leftover reservation is the disclosed
+            # residual; its numbers stay reserved (conservative). The byte-equal idempotent answer
+            # serves a repeat call under the SAME capability: a plain repeat, or a resumed init,
+            # which attaches the persisted operation id rather than minting a new one.
+            cap2 = oplock.OpCapability.__new__(oplock.OpCapability)
+            cap2._claim = threading.Lock()
+            cap2._claimant = None
+            cap2._released = False
+            cap2._acquirer_pid = os.getpid()
+            cap2._acquirer_pid_start = native_journal._pid_start(os.getpid())
+            cap2._anchor_fd = os.open(str(anchor_file), os.O_RDONLY)
+            cap2._anchor_ident = cap._anchor_ident
+            cap2._machine_ident = cap._machine_ident
+            cap2.store_root = root
+            cap2.machine_rel = ".working/toml"
+            cap2.op_id = "fresh-operation"
+            cap2.holder = "fixture"
+            try:
+                fresh = reservation_refusal(lambda: home_journal.reserve_allocation(
+                    cap2, "record", record_run, {"BI": 7, "WL": 12}))
+            finally:
+                os.close(cap2._anchor_fd)
+            check("reservation-new-capability-refused", lambda: fresh is not None
+                  and "already exists with different content" in fresh
+                  and "does not establish that the run holds" in fresh
+                  and target.read_bytes() == payload)
+            # Fix round 3 (claude MINOR, decided assert): the cleanup-detail vector's comment
+            # claimed the stranded leftover is retired as garbage by the next reserving call;
+            # that next call is the cap2 refusal just above, and the retirement is asserted here
+            # rather than claimed, with the reservation keeping its single link.
+            check("reservation-stranded-leftover-retired", lambda: len(stranded_names) == 1
+                  and not (target.parent / stranded_names[0]).exists()
+                  and os.stat(target).st_nlink == 1)
+            # Fix round 2 (claude MINOR-1): a FIFO squatting a reservation name refuses AT ONCE
+            # (the read-back open carries O_NONBLOCK, so a writer-less FIFO cannot block it),
+            # judged in a BOUNDED child: a blocking mutant turns this check red at the deadline
+            # instead of hanging the suite. The child re-binds the fixture capability's acquirer
+            # identity to itself (the fixture equivalent of acquiring in that process) and exits
+            # 7 only on the non-regular-entry refusal.
+            run5 = "record-20260917T120005Z-0123456789abcdef"
+            os.mkfifo(target.parent / (run5 + ".toml"))
+            fifo_child = os.fork()
+            if fifo_child == 0:
+                code = 1
+                try:
+                    cap._acquirer_pid = os.getpid()
+                    cap._acquirer_pid_start = native_journal._pid_start(os.getpid())
+                    squat = reservation_refusal(lambda: home_journal.reserve_allocation(
+                        cap, "record", run5, {"BI": 1}))
+                    if squat is not None and "non-regular entry" in squat:
+                        code = 7
+                except BaseException:
+                    code = 1
+                finally:
+                    os._exit(code)
+            fifo_deadline = time.monotonic() + 30.0
+            fifo_status = None
+            while time.monotonic() < fifo_deadline:
+                waited, raw_status = os.waitpid(fifo_child, os.WNOHANG)
+                if waited == fifo_child:
+                    fifo_status = raw_status
+                    break
+                time.sleep(0.05)
+            if fifo_status is None:
+                os.kill(fifo_child, signal.SIGKILL)
+                os.waitpid(fifo_child, 0)
+            check("reservation-fifo-refused-bounded", lambda s=fifo_status: s is not None
+                  and os.WIFEXITED(s) and os.WEXITSTATUS(s) == 7)
+            # Fix round 2 (codex MEDIUM-1), reworked in fix round 3 (both reviews, MAJOR):
+            # _project's EXISTING-projection branch restores the same ancestor and
+            # containing-directory durability a fresh publication gets, and it retires staging
+            # garbage BEFORE testing or reading the final entry (reserve_allocation's ordering).
+            # Unlike a reservation, the projection payload derives from the journal's own INTENT
+            # header, so a run killed anywhere inside publication IS retried with byte-identical
+            # bytes (recovery under a fresh capability); the retry must flush, not trust
+            # presence. projection-published pins the fresh publication this builds on;
+            # projection-complete-retry-flushes is the durability discriminator over a COMPLETE
+            # publication (red when the existing branch returns without the flushes);
+            # projection-staging-crash-retry-recovers builds the partial-publication crash state
+            # and is red on the pre-fix _project.
+            proj_run = "record-20260917T120006Z-0123456789abcdef"
+            proj_frames = [
+                (native_journal.F_INTENT, dict(txn=proj_run, header=dict(
+                    kind="record", run_id=proj_run, operation_id="journal-operation"), ops=[])),
+                (native_journal.F_COMPLETE, dict(txn=proj_run))]
+            proj_rel = store.txn_record("record", proj_run)
+            proj_parts = proj_rel.split("/")
+            proj_target = root / proj_rel
+            proj_root_fd = store._open_root_fd(root)
+            try:
+                with _patch.object(home_journal, "_existing_frames", return_value=proj_frames):
+                    home_journal._project(proj_root_fd, -1, root / "unused", "record", proj_run)
+                    proj_payload = home_journal.projection_payload(
+                        "record", proj_run, "complete", "journal-operation")
+                    check("projection-published", lambda: proj_target.read_bytes() == proj_payload)
+                    proj_flushed = []
+
+                    def projection_flush_recorder(fd):
+                        proj_flushed.append(os.fstat(fd).st_ino)
+                        real_fsync(fd)
+
+                    with _patch.object(os, "fsync", projection_flush_recorder):
+                        retried = home_journal._project(proj_root_fd, -1, root / "unused",
+                                                        "record", proj_run)
+                    proj_ancestors = [os.stat(root).st_ino] + [
+                        os.stat(root.joinpath(*proj_parts[:depth])).st_ino
+                        for depth in range(1, len(proj_parts))]
+                    check("projection-complete-retry-flushes", lambda: retried is None
+                          and proj_target.read_bytes() == proj_payload
+                          and all(ino in proj_flushed for ino in proj_ancestors))
+                    # Fix round 3 (both reviews, MAJOR): the crash state a kill between the
+                    # exclusive link and the staging retire leaves is the complete projection
+                    # PLUS its shared-inode staging leftover (link count 2). The retry must
+                    # retire the leftover, accept the byte-equal projection unchanged, leave a
+                    # single link and flush the directory; the pre-fix _project read the final
+                    # entry first and refused its second link on every retry; that refusal
+                    # lands here as a red check through reservation_refusal, never an escaping
+                    # cannot-evaluate.
+                    proj_staging = proj_target.parent / oplock._staging_name(proj_target.name)
+                    os.link(proj_target, proj_staging)
+                    crash_flushed = []
+
+                    def crash_flush_recorder(fd):
+                        crash_flushed.append(os.fstat(fd).st_ino)
+                        real_fsync(fd)
+
+                    with _patch.object(os, "fsync", crash_flush_recorder):
+                        crash_retried = reservation_refusal(lambda: home_journal._project(
+                            proj_root_fd, -1, root / "unused", "record", proj_run))
+                    check("projection-staging-crash-retry-recovers",
+                          lambda: crash_retried is None
+                          and not proj_staging.exists()
+                          and proj_target.read_bytes() == proj_payload
+                          and os.stat(proj_target).st_nlink == 1
+                          and os.stat(proj_target.parent).st_ino in crash_flushed
+                          and all(ino in crash_flushed for ino in proj_ancestors))
+            finally:
+                os.close(proj_root_fd)
+            cap._released = True
+            check("reservation-released-refused", lambda: reservation_refusal(
+                lambda: home_journal.reserve_allocation(
+                    cap, "record", "record-20260917T120003Z-0123456789abcdef", {"BI": 1})) is not None)
+        finally:
+            os.close(cap._anchor_fd)
+
+    # PR-3 fix round 1 (codex MAJOR), reworked in fix round 2 (codex MEDIUM-2): ensure_journal_dirs
+    # makes each component entry durable on EVERY call. mkdir and fsync are recorded on ONE shared
+    # trace per boundary; the injected fsync failure is BOUND to an observed creation (the first
+    # fsync at or after the boundary-th mkdir), the interrupted attempt stops there, and the clean
+    # retry runs on the same trace. journal-dirs-fsync-fault-N requires the injection to have fired
+    # after exactly N creations (setup plus that binding; all four also pass on the pre-fix
+    # helper). journal-dirs-created-then-flushed-N (discriminator) requires EVERY observed creation
+    # to be followed by a flush of its parent directory, so a mutant that fsyncs each parent BEFORE
+    # looking up or creating its child (the same inode set, the wrong order) goes red here, and at
+    # the last boundary in the fault check itself (no fsync follows the final mkdir, so its
+    # injection never fires). journal-dirs-retry-flushes-ancestors-N (discriminator) requires the
+    # clean retry to flush every ancestor again, red when the helper flushes only on creation: the
+    # components the interrupted attempt created exist, but presence cannot stand in for
+    # durability. The same shared helper serves _opened and _project; the projection vectors above
+    # exercise its _project caller on a real store.
+    journal_rel = ".working/journals/record/allocations"
+    components = journal_rel.split("/")
+    for boundary in range(1, len(components) + 1):
+        with tempfile.TemporaryDirectory(prefix="opf-homes-") as faulty:
+            dir_fd = os.open(faulty, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                native_fsync, native_mkdir = os.fsync, os.mkdir
+                trace = []
+                state = {"mkdirs": 0, "injected": None}
+
+                def recording_mkdir(entry, mode=0o777, *, dir_fd=None, _trace=trace, _state=state):
+                    native_mkdir(entry, mode, dir_fd=dir_fd)
+                    _state["mkdirs"] += 1
+                    _trace.append(("mkdir", os.fstat(dir_fd).st_ino, entry))
+
+                def bound_failing_fsync(fd, _stop=boundary, _trace=trace, _state=state):
+                    ino = os.fstat(fd).st_ino
+                    if _state["injected"] is None and _state["mkdirs"] >= _stop:
+                        _state["injected"] = len(_trace)
+                        _trace.append(("fsync-injected-failure", ino))
+                        raise OSError(5, "injected fsync failure")
+                    _trace.append(("fsync", ino))
+                    native_fsync(fd)
+
+                def interrupted():
+                    try:
+                        native_journal.ensure_journal_dirs(dir_fd, journal_rel)
+                    except OSError:
+                        return True
+                    return False
+
+                with _patch.object(os, "fsync", bound_failing_fsync), \
+                        _patch.object(os, "mkdir", recording_mkdir):
+                    was_interrupted = interrupted()
+                    # The clean retry, guarded: a mutant whose injection fires only here (the
+                    # fsync-before-mkdir order leaves no fsync after the last boundary's mkdir)
+                    # must land as red checks below, not as an escaping cannot-evaluate.
+                    retry_interrupted = interrupted()
+                events = list(trace)
+                injected_at = state["injected"]
+                check("journal-dirs-fsync-fault-{}".format(boundary),
+                      lambda w=was_interrupted, i=injected_at, e=events: w and i is not None
+                      and sum(1 for ev in e[:i] if ev[0] == "mkdir") == boundary)
+                check("journal-dirs-created-then-flushed-{}".format(boundary),
+                      lambda e=events: all(
+                          any(later[0] == "fsync" and later[1] == ev[1] for later in e[idx + 1:])
+                          for idx, ev in enumerate(e) if ev[0] == "mkdir"))
+                ancestors = [os.stat(faulty).st_ino] + [
+                    os.stat(os.path.join(faulty, *components[:depth])).st_ino
+                    for depth in range(1, len(components))]
+                retried_flushes = [] if injected_at is None else [
+                    ev[1] for ev in events[injected_at + 1:] if ev[0] == "fsync"]
+                check("journal-dirs-retry-flushes-ancestors-{}".format(boundary),
+                      lambda a=ancestors, f=retried_flushes, r=retry_interrupted:
+                      not r and all(ino in f for ino in a))
+            finally:
+                os.close(dir_fd)
+
     run = "adopt" + suffix
     for path in ("notes/a.md", "adoption/a.md", "space name.txt", "\u00e9.txt"):
         check("move-" + path, lambda: store.moved_dest(path) == ".working/archive/moved/" + path)
@@ -2756,6 +4380,9 @@ def _self_test_vectors():
     # deleting that single operative occurrence in place (never a replace-all) turns the gate
     # red with the pin's own finding.
     from unittest.mock import patch
+
+    def tiles(spec, section):
+        return " ".join(_CONTRACT[section]) == _normalized(_sections(spec)[section])
     for section, fragments in _CONTRACT.items():
         body = _sections(text)[section]
         normalized_body = " ".join(body.replace("`", "").split())
@@ -2765,14 +4392,18 @@ def _self_test_vectors():
         # (the rendered gitignore block), which stay covered by the unmutated spec-contract check.
         check("spec-pin-control-" + section, lambda c=control, p=pin_prefix: not any(
             f.startswith(p) for f in contract_findings(c)))
-        check("spec-tile-" + section, lambda s=section, n=normalized_body:
-              " ".join(_CONTRACT[s]) == n)
+        check("spec-tile-" + section, lambda s=section: tiles(text, s))
         # Mutate the registry itself: per-pin deletion tests cannot notice a dropped pin, but
         # the tiling equality does.
         with patch.dict(_CONTRACT, {section: _CONTRACT[section][1:]}):
-            check("spec-tile-dropped-pin-" + section, lambda s=section, n=normalized_body:
-                  " ".join(_CONTRACT[s]) != n)
+            check("spec-tile-dropped-pin-" + section, lambda s=section: not tiles(text, s))
         for fragment in fragments:
+            if isinstance(fragment, _Quoted):
+                # A quotation block flattened onto one line is no block: the control reports it.
+                check("spec-quotation-flip-" + section + "-" + fragment, lambda c=control, f=(
+                    "spec " + section + " missing retired-text quotation: " + fragment):
+                    f in contract_findings(c))
+                continue
             mutated_body = normalized_body.replace(fragment, "", 1)
             mutated = text.replace(body, "\n\n" + mutated_body + "\n\n", 1)
             finding = pin_prefix + ": " + fragment
@@ -2815,6 +4446,1660 @@ def _self_test_vectors():
     check("spec-flip-9.2-idempotence", lambda: removed == 1 and
           "spec 9.2 missing contract: The upgrade MUST be idempotent." in
           contract_findings(text.replace(body, mutated, 1)))
+    # Section 16.1 declaration rules, their section 17 residuals, and the Appendix E pins: deleting
+    # the wrapped sentence in place, or rewording its operative clause, turns the gate red with that
+    # pin's own finding. A reword vector states no precondition of its own: spec-contract above fails
+    # on any text that already lacks a pin, and c == 1 fails where the operative wording is absent.
+    def spec_vectors(section, cases):
+        body = _sections(text)[section]
+        for start, rewordings in cases:
+            pin = [f for f in dict(_CONTRACT, **_PINNED)[section] if f.startswith(start)]
+            sentence = pin[0] if len(pin) == 1 else start
+            finding = "spec " + section + " missing contract: " + sentence
+            pattern = r"\s+".join("`?" + "`?".join(map(re.escape, w)) + "`?"
+                                   for w in sentence.split())
+            deleted, removed = re.subn(pattern, "", body)
+            check("spec-flip-" + section + "-" + start,
+                  lambda d=deleted, r=removed, f=finding, p=pin, b=body:
+                  len(p) == 1 and r == 1 and f in contract_findings(text.replace(b, d, 1)))
+            for old, new in rewordings:
+                reworded, changed = re.subn(r"\s+".join(map(re.escape, old.split())), new, body)
+                check("spec-reword-" + section + "-" + old,
+                      lambda w=reworded, c=changed, f=finding, b=body:
+                      c == 1 and f in contract_findings(text.replace(b, w, 1)))
+    spec_vectors("16.1", (
+            ('An implementation MUST declare,', (
+             ('in the documentation of each release and in every report its emitter writes,',
+              'in the documentation of each release,'),
+            )),
+            ('Each release MUST ship that declaration', (
+             ('as one file, the declaration file.',
+              'as one or more files.'),
+            )),
+            ('A runtime check MUST read the declaration', (
+             ('from the copy of that file installed with the implementation (the installed copy) alone,',
+              'from any copy,'),
+             ('never from the documentation of the release or from any report.',
+              'or from the documentation of the release.'),
+            )),
+            ('Each release MUST also carry,', (
+             ('MUST also carry,',
+              'MAY also carry,'),
+             ('and the documentation of each release MUST state where the implementation carries it.',
+              'and the documentation of each release names it.'),
+            )),
+            ('A release that carries no such digest,', (
+             ('does not conform to this section, and a conformance claim MUST NOT be made for it.',
+              'MAY still conform to this section.'),
+            )),
+            ("A runtime check MUST compare the installed copy's bytes", (
+             ('before it reads any field,',
+              'after it reads every field,'),
+             ('or whose bytes differ from that digest, MUST yield cannot-evaluate and MUST NOT authorize any store operation.',
+              'or whose bytes differ from that digest, MUST yield cannot-evaluate and MAY authorize a store operation.'),
+            )),
+            ('Every report the emitter of a release writes', (
+             ('MUST carry the four parts compared in every report, exactly these:',
+              'MUST carry at least these four parts:'),
+             ('the restatement of the declaration, the shipped-file digest the implementation carries, the installed-copy digest, and the runtime result.',
+              'the restatement of the declaration and the runtime result.'),
+            )),
+            ('The installed-copy digest is the SHA-256', (
+             ('and a report MUST NOT carry `not-read` with any runtime result other than `cannot_evaluate`.',
+              'and a report MAY carry `not-read` with any runtime result.'),
+            )),
+            ('Each digest in a report MUST be written', (
+             ('as 64 lowercase hexadecimal digits,',
+              'in hexadecimal,'),
+             ('`pass` where it authorized store operations and `fail` where it did not.',
+              '`pass` or `fail`.'),
+             ('or another rule of this section made that run yield cannot-evaluate, the admission check over the store that run resolved included,',
+              ''),
+            )),
+            ('A restatement differs from', (
+             ('omits such a field, or states a field the file does not carry.',
+              'or states a field the file does not carry.'),
+            )),
+            ('The documentation of each release MUST restate', (
+             ("MUST restate that file's declaration without differing from it.",
+              "SHOULD restate that file's declaration."),
+            )),
+            ('The expected report of a release', (
+             ('is fixed by the bytes the release ships alone, apart from the runtime result, the one part also coupled to the run it concerns:',
+              'is the report a reference run emits:'),
+             ('and otherwise `pass` or `fail`, between which this section, as it now stands, sets no rule.',
+              'and otherwise `pass`.'),
+            )),
+            ('A report deviates from the expected report', (
+             ('is omitted, written in another form, or holds another value;',
+              'holds another value;'),
+             ('no other content of a report is compared, the base result of a report a reference run emits over a store its admission check refuses (the base-result part below) apart.',
+              'no other content of a report is compared.'),
+            )),
+            ('The runtime-result part also deviates', (
+             ('also deviates where its token disagrees with whether that run authorized store operations, the performed operations the checker observes;',
+              'does not deviate on what that run authorized;'),
+             ('the only part of the expected report not fixed by the shipped bytes alone.',
+              'a part of the expected report the shipped bytes fix.'),
+            )),
+            ('An execution environment is unaltered', (
+             ('changed only as that documentation directs and in this closed operational list, and in nothing else:',
+              'changed as the checker chooses:'),
+             ('the account name, administrative privilege only where that documentation directs it, the working and temporary locations, and the clock.',
+              'the account name, the working and temporary locations, the clock, and any other setting.'),
+            )),
+            ('Every default of that stock install', (
+             ("is part of an unaltered execution environment, so meeting it is the release's,",
+              "alters the execution environment, so undoing it is the checker's,"),
+            )),
+            ('A runtime check is the step of the implementation', (
+             ('and a documented run of the runtime check and the emitter need not resolve a store.',
+              'and a documented run of the runtime check and the emitter always resolves a store.'),
+             ('the emitter is the step of the implementation that writes the conformance reports section 16 describes, never a store-file emitter such as the canonical new-document emitter,',
+              'the emitter is any step of the implementation that writes a file,'),
+            )),
+            ('That comparison detects an edit of the installed copy alone;', (
+             ('detects an edit of the installed copy alone;',
+              'detects every edit of the installation;'),
+             ('section 17 discloses that residual and the others these rules leave.',
+              'these rules leave no residual.'),
+            )),
+            ('Whether a run authorized store operations is an observable', (
+             ("it authorized them exactly where it performed one, a write within a store that run resolved or to that store's lease, as the checker observes the run's writes,",
+              'it authorized them where its own decision said so, observed or not,'),
+            )),
+            ('An attempt is the documented installation', (
+             ('followed by two successive documented runs',
+              'followed by one documented run'),
+             ('made by one checker in an unaltered execution environment,',
+              'made by one checker in any execution environment,'),
+            )),
+            ('A reference run of a release is a run', (
+             ("holds that file's bytes as the release ships them and is readable when the run starts.",
+              "holds that file's bytes as the release ships them."),
+            )),
+            ('The installation or the execution environment is altered', (
+             ("what the stock install's defaults, the changes the closed operational list above permits, the documented steps, the release's own code, and code those steps install from a source the documentation of the release directs left it;",
+              "what the documented steps and the release's own code left it;"),
+             ("and what sits there alters neither, the installation apart: the installed files, the installed copy included, and the files a documented step or the release's own code wrote belong to the installation wherever they sit, those locations included, so an edit of any of them alters the installation there as anywhere.",
+              'and what sits there alters neither.'),
+            )),
+            ('An attempt whose installation or execution environment anything else altered', (
+             ('is not an attempt and establishes nothing.',
+              'is an attempt like any other.'),
+            )),
+            ('A verdict under this section is decided', (
+             ('MUST be reported as unresolved, never as established.',
+              'MAY be reported as established.'),
+            )),
+            ('A release MUST be available:', (
+             ('every attempt MUST complete',
+              'some attempt MUST complete'),
+            )),
+            ('A reference run of a release MUST NOT', (
+             ('MUST NOT emit a report that deviates from the expected report,',
+              'MUST NOT emit a report that omits the restatement,'),
+             ('its runtime check MUST NOT authorize any store operation where the expected runtime result is `cannot_evaluate` or where its admission check, the pre-scan included, refused the store that run resolved.',
+              'its runtime check MAY authorize a store operation where the expected runtime result is `cannot_evaluate`.'),
+             ('or where its admission check, the pre-scan included, refused the store that run resolved.',
+              'whatever its admission check found.'),
+            )),
+            ("Only a checker's own attempts", (
+             ("Only a checker's own attempts and reference runs are evidence under the two rules above:",
+              'Any attempts and reference runs are evidence under the two rules above:'),
+             ('a report of any other run or installation, altered or not, MUST NOT be presented',
+              'a report of any other run or installation MAY be presented'),
+            )),
+            ('A failure of either rule is shown', (
+             ('made on the same platform and version,',
+              ''),
+             ('never counter a shown or established failure.',
+              'counter a shown or established failure.'),
+             ('established for that checker where a second of its own attempts or reference runs,',
+              'established where a second attempt or reference run of any checker,'),
+            )),
+            ('The two rules above are the one path', (
+             ('MUST be judged solely as a failure of the availability rule or of the reference-run rule, shown and established only as those rules provide, never as nonconformance on one showing;',
+              'MAY be judged as nonconformance on one showing;'),
+            )),
+            ('An availability failure is shown by a failed attempt', (
+             ('it has no part, so the same-part condition does not apply to it.',
+              'the same-part condition applies to it.'),
+             ('established by a second failed attempt of the same checker on the same platform and version;',
+              'established by a second failed attempt of any checker;'),
+            )),
+            ('Under the reference-run rule the same-part condition applies to every failure,', (
+             ('shown and reproduced only by a run that performs such an operation, never by a deviating report.',
+              'shown by such an operation and reproduced by any deviating report.'),
+             ("or where that run's admission check, the pre-scan included, refused the store that run resolved included:",
+              'included:'),
+            )),
+            ('The showing and the reproducing evidence MAY be', (
+             ('the two runs of one attempt included.',
+              'never the two runs of one attempt.'),
+            )),
+            ('A checker that reports on a shown failure', (
+             ('and MUST NOT report an unresolved failure, or the absence of a shown one, as conformance of the release.',
+              'and MAY report an unresolved failure as conformance of the release.'),
+            )),
+            ("A release for which a checker's own evidence establishes", (
+             ('a conformance claim under this section MUST name the attempts and reference runs it rests on.',
+              'a conformance claim under this section needs no named evidence.'),
+            )),
+            ('Each such failure is a release nonconformance,', (
+             ('it MUST NOT be treated as making the declaration malformed or contradictory,',
+              'it makes the declaration contradictory,'),
+            )),
+            ('A declaration that carries its release identity,', (
+             ('and omits only its class, declares no class:',
+              'and omits only its class, is malformed:'),
+             ('MUST be treated as upgrade-capable unless the declaration is malformed or contradictory on other grounds.',
+              'MAY be treated as fresh-only.'),
+            )),
+            ('The rules on an absent, unreadable, malformed, contradictory, or classless declaration', (
+             ('govern the file alone:',
+              'govern the file and its restatements:'),
+             ('and each check MUST NOT take a class or any other field from the documentation of the release or from any report.',
+              'and each check MAY take a class from the documentation of the release.'),
+            )),
+            ('Where that documentation states a class that the file omits,', (
+             ('a deviation of the restatement part judged under the reference-run rule like any other, never a direct verdict.',
+              'and the release does not conform to this section.'),
+            )),
+            ('The file declares no class only where it omits its class and no other field:', (
+             ('is malformed and MUST yield cannot-evaluate.',
+              'declares no class.'),
+            )),
+            ('A write this section or section 5.7 itself requires', (
+             ('so a run that stops as cannot-evaluate and writes nothing but what section 5.7 requires to end its own claim performed no store operation.',
+              'so every write of a run is a store operation.'),
+            )),
+            ('Section 8.5 fixes those tokens,', (
+             ('under this section `pass` and `fail` read observably, over performed store operations,',
+              'under this section `pass` and `fail` read as internal decisions,'),
+            )),
+            ('A pass token beside no performed store operation', (
+             ('and a `cannot_evaluate` token beside one each disagree that way, whatever the expected result,',
+              'each disagree that way where the expected result is `pass` or `fail`,'),
+            )),
+            ('The behaviour-coupled comparisons are exactly two,', (
+             ('MUST be reported as unresolved, never as established, a residual section 17 discloses;',
+              'MAY be reported as established;'),
+             ('are exactly two, the token comparison above and the store part below, and they read only the writes the checker observed:',
+              'read every comparison of the run:'),
+             ("the rest of the expected-report comparison, the store-coupled cannot-evaluate expected result included, reads such a run's report as any other, over the store that run resolved as the checker observes it.",
+              'every comparison of such a run gives no evidence.'),
+            )),
+            ('Every requirement of this section that those rules do not compare', (
+             ('is judged by that inspection alone, never by this procedure.',
+              'is judged by this procedure.'),
+            )),
+            ('A run that is no reference run and belongs to none of', (
+             ('however often it is repeated, it is no evidence under the two rules above, it shows and establishes nothing there, and it decides no verdict under this section, on one showing or many,',
+              'repeated twice, it establishes a failure under the two rules above,'),
+             ("is an observation of the implementation's behaviour, never an inspection of the bytes the release ships or a reading of the documentation of the release:",
+              'is an inspection of the implementation that decides as inspection does:'),
+            )),
+            ('A report a reference run emits over a store its admission check refuses', (
+             ('is compared in one more part of its own, the base-result part:',
+              'is not compared further:'),
+            )),
+            ('That sentence is the refusal-report rule', (
+             ('a breach of it deviates there, never as a direct verdict.',
+              'a breach of it is a direct verdict.'),
+            )),
+    ))
+    spec_vectors("17", (
+            ("Admission parses only the section 16.1 candidates",
+             (("so a listed item defined by file content and kept outside those candidates,",
+               "so a listed item kept outside those candidates,"),)),
+            ("An adoption receipt kept outside",
+             (("a store at the supported version whose `import_status` is `partial` or `complete` is"
+               " refused", "its store's `partial` or `complete` `import_status` is refused"),)),
+            ("The pre-scan refuses, before any write,",
+             (("within the recovery bound, together with a discovery outcome that such an operand alone"
+               " decides, so", "within the recovery bound, so"),)),
+            ("A command that writes and takes its lease after admission",
+             (("after admission confirms, once that lease is taken and observable and before any other"
+               " write, that the `lease.toml` carries its own claim and that",
+               "after admission rechecks admission once that lease is taken and observable and before"
+               " any other write, and checks that"),
+              ("is unchanged apart from exactly the bytes its own claim of the lease wrote;",
+               "is unchanged;"),
+              ("and leaves untouched one that does not.",
+               "and leaves untouched one that carries another holder's claim."))),
+            ("Within the section 16.1 recovery bound,",
+             (("before the admission check that follows recovery runs;", "before admission runs;"),
+              ("reports a store with a candidate that an interruption left unreadable, malformed, or"
+               " contradictory as cannot-evaluate", "reports a store with a torn candidate as"
+               " cannot-evaluate"))),
+            ("Only the transactions section 16.1 lists",
+             (("until something outside that implementation, such as a hand edit, repairs it,",
+               "until it is repaired by hand,"),)),
+            ("A section 14.1 restore after a committed apply",
+             (("then refuses where those bytes show a listed item, as `unsupported-legacy-state` where"
+               " the store stays at the supported version,", "then refuses as"
+               " `unsupported-legacy-state` where those bytes show a listed item,"),)),
+            ('- The section 16.1 runtime check compares', (
+             ('so it detects an edit of that copy alone,',
+              'so it detects any edit,'),
+             ('it does not detect a co-edit that changes both',
+              'it detects a co-edit that changes both'),
+             ("or one that changes the installed copy together with the implementation's comparison code so that the comparison no longer refuses that copy,",
+              ''),
+             ('section 16.1 does not require one.',
+              'section 16.1 requires one.'),
+            )),
+            ("Whether a release's runtime check compares", (
+             ('are established only by an inspection of the implementation, never by a reference run:',
+              'are established by reference runs:'),
+            )),
+            ('Section 16.1 verdicts are observer-local:', (
+             ('can mislead that checker.',
+              'cannot mislead any checker.'),
+            )),
+            ('Another checker contests a claim only with its own evidence:', (
+             ('only with its own evidence: under the section 16.1 availability and reference-run rules, with its own attempts and reference runs alone, and otherwise with what it finds by inspecting the bytes the release ships or by reading the documentation of the release,',
+              'only with its own attempts and reference runs,'),
+             ('with its own attempts and reference runs alone,',
+              'with any attempts and reference runs,'),
+             ('such as that the release carries no shipped-file digest or that its documentation states no place for it.',
+              'such as a release that carries no shipped-file digest or whose documentation states no place for it.'),
+            )),
+            ('Honest checkers can reach different verdicts', (
+             ("since section 16.1 makes every default of each such install that the documentation does not exclude, by directing that it be changed or by naming a platform that lacks it, the release's to meet.",
+              'since section 16.1 has the release meet the defaults of every such install.'),
+             ('or, where that documentation names none, the platform the checker in question uses,',
+              ''),
+            )),
+            ('They can also reach different verdicts', (
+             ('They can also reach different verdicts on one platform and version,',
+              'They never reach different verdicts on one platform and version,'),
+             ('show a failure of one rule twice, under the reference-run rule in the same part both times,',
+              'show a failure twice,'),
+            )),
+            ('The same residual covers the section 16.1 rule', (
+             ("whose installation or execution environment differs from what the stock install's defaults, the changes the closed operational list permits, the documented steps, the release's own code, and code those steps install from a source the documentation of the release directs left it",
+              "altered by anything other than the documented steps, the release's own code, code those steps install from a directed source, and the stock platform's defaults"),
+             ('the changes the closed operational list permits,',
+              ''),
+             ("and section 16.1 has a checker that cannot determine an attempt's eligibility report what only such attempts show as unresolved, never established.",
+              'and such an attempt counts until the alteration is proven.'),
+            )),
+            ('A failure that a checker cannot show twice', (
+             ('stays unresolved, however many other checkers each show it once,',
+              'is established where two checkers each show it once,'),
+             ('on the same platform and version and, under the reference-run rule, in the same part,',
+              ''),
+            )),
+            ('Where the documentation of a release directs', (
+             ('attempts made at different times can differ as the bytes the directed source serves differ,',
+              'attempts made at different times never differ,'),
+            )),
+            ('It covers whether a checker observed every write of a run', (
+             ('reports what only the behaviour-coupled comparisons of such runs show as unresolved, never established.',
+              'reports what such runs show as established.'),
+             ("or hide a disagreeing token or a store-part failure that the run's writes show,",
+              ''),
+            )),
+            ('The working and temporary locations a checker chose are its own', (
+             ("the installed files, the installed copy included, and the files a documented step or the release's own code wrote stay part of the installation wherever they sit,",
+              'nothing placed there is part of the installation,'),
+            )),
+            ('That probe, like every run outside', (
+             ('it establishes nothing under the section 16.1 rules however often it is repeated,',
+              'it establishes a failure where it is repeated,'),
+             ('it decides no verdict of its own,',
+              'it decides a verdict of its own,'),
+            )),
+            ('A requirement of section 16.1 on the conduct of', (
+             ('is judged only by that inspection,',
+              'is judged by reference runs,'),
+             ('and one it can attribute is decided by what that inspection finds in those bytes, never by the observed run itself on any number of showings.',
+              'and one it can attribute is decided by the observed run.'),
+            )),
+            ('Appendix E gives informative guidance', (
+             ('Appendix E gives informative guidance',
+              'Appendix E gives normative rules'),
+            )),
+    ))
+    # Appendix E: each reword below reverts a fix of the PR #480 review, or states the opposite of
+    # what section 16.1 makes of a probe, and turns the gate red with that pin's own finding.
+    spec_vectors("E", (
+            ('This appendix is informative:', (
+             ('section 16.1 alone decides',
+              'this appendix decides'),
+            )),
+            ('A shared record informs', (
+             ('never substitutes for',
+              'can substitute for'),
+            )),
+            ('Corroborate across checkers:', (
+             ('stays unresolved for each checker until its own attempts or reference runs show it twice,',
+              "stays unresolved until one checker's own attempts or reference runs show it twice,"),
+             ('until its own attempts or reference runs show it twice, on the same platform and version and, under the reference-run rule, in the same part.',
+              'until its own evidence shows it twice (section 17).'),
+            )),
+            ('Where its installed-copy digest', (
+             ('the report is inconsistent with a run whose runtime check compared',
+              'the report did not come from a runtime check that compared'),
+             ('and, on finding them different, yielded cannot-evaluate as section 16.1 requires, whose emitter reported that run truthfully, and whose report no one altered after the emitter wrote it.',
+              'together with an emitter that reported that run truthfully.'),
+             ('and, on finding them different, yielded cannot-evaluate as section 16.1 requires,',
+              ''),
+             ('truthfully, and whose report no one altered after the emitter wrote it.',
+              'truthfully.'),
+            )),
+            ('It does not show that no comparison ran:', (
+             ('It does not show that no comparison ran:',
+              'It shows that no comparison ran:'),
+             ('a comparison that is skipped, defective, or made without refusing a mismatch,',
+              'a comparison that is skipped or defective,'),
+            )),
+            ('It establishes nothing under section 16.1.', (
+             ('It establishes nothing under section 16.1.',
+              'It establishes a failure under section 16.1.'),
+            )),
+            ('This observes the implementation', (
+             ('This observes',
+              'This inspects'),
+            )),
+            ('An edited installed copy is an altered installation', (
+             ('establishes nothing under the section 16.1 availability and reference-run rules.',
+              'establishes nothing under the section 16.1 availability and reference-run rules; what it yields is inspection evidence about the shipped implementation.'),
+            )),
+            ('It is an observation, never an inspection', (
+             ('It is an observation, never an inspection of the bytes the release ships,',
+              'It is an inspection of the bytes the release ships,'),
+            )),
+    ))
+    # Homes 2 has no homes migration (maintainer decision, 2026-10-10). The spec sentence and its pin
+    # disagree red either way: a reworded spec clause, the retired migration clause restored in the
+    # spec under the current pins, or the retired pin restored under the current spec.
+    spec_vectors("4.2", (
+            ('Homes 2 has no homes migration:', (
+             ('no homes-1 store is migrated to homes 2,',
+              'a homes-1 store is migrated to homes 2 by opf upgrade,'),
+             ('MUST refuse a homes-1 store by name rather than migrate it.',
+              'MAY migrate a homes-1 store.'),
+            )),
+    ))
+    retired = _D('It still supports 1.2.0 and initializes legacy homes (generation 1, with no homes key); '
+                 'writers retain their legacy paths until homes 2 is activated, which requires the homes '
+                 'migration (opf upgrade) to be available.')
+    pins = _CONTRACT["4.2"]
+    at = [i for i, f in enumerate(pins) if f.startswith('It still supports 1.2.0 ')]
+    # A missing or repeated anchor fails inside each check, a named failure rather than a traceback.
+    at0 = at[0] if len(at) == 1 else len(pins)
+    body = _sections(text)["4.2"]
+    normalized_body = " ".join(body.replace("`", "").split())
+    check("spec-homes2-no-migration-spec-restored", lambda i=at0:
+          len(at) == 1 and pins[i + 1].startswith('Homes 2 has no homes migration:') and
+          normalized_body.count(pins[i] + " " + pins[i + 1]) == 1 and
+          "spec 4.2 missing contract: " + pins[i + 1] in contract_findings(text.replace(
+              body, "\n\n" + normalized_body.replace(pins[i] + " " + pins[i + 1], retired, 1) + "\n\n", 1)))
+    with patch.dict(_CONTRACT, {"4.2": pins[:at0] + (retired,) + pins[at0 + 2:]}):
+        check("spec-homes2-no-migration-pin-restored", lambda:
+              len(at) == 1 and "spec 4.2 missing contract: " + retired in contract_findings(text))
+    # Homes 2 has no homes migration anywhere in sections 4.2 and 9.2: neither carries one, a
+    # homes-generation relocation of OPF control areas, legacy journal transport or a homes-2 upgrade
+    # path. Each row names a run of current pins by prefix and the retired pins it replaced. Restoring
+    # the retired text in the spec in place of the run turns the gate red with every current pin's
+    # finding; restoring the retired pins under the current spec turns it red with every retired pin's
+    # finding. A retired sentence restored beside the current text breaks spec-tile above, and the
+    # default entry refuses its _RETIRED fragment (below).
+    def _pin(section, start):
+        found = [f for f in _CONTRACT[section] if f.startswith(start)]
+        return found[0] if len(found) == 1 else start
+    gitignore = _pin("4.2", "Homes-2 init, and any upgrade ")
+    archive = _pin("9.2", "The upgrade MUST NOT write the adoption archive ")
+    no_homes_migration = (
+        ("4.2", ("The homes-2 requirements in sections 4.2, 12,",), (
+            "The homes-2 requirements in sections 4.2, 9.2, 12, 14.1, 14.2, and 15 describe the target "
+            "contract, not an activated runtime guarantee.",)),
+        ("4.2", ("Homes-2 init, and any upgrade ",), (gitignore.replace(
+            "Homes-2 init, and any upgrade of a store already at homes 2, MUST render",
+            "Homes-2 init and upgrade MUST render", 1),)),
+        ("4.2", ("The owning writer MUST derive",), (
+            "The owning writer or migration MUST derive each inventory from the run's transaction "
+            "record or receipt and MUST publish it exclusively with the retained bytes.",)),
+        ("4.2", ("Homes 2 has no legacy journal transport:",), (
+            "Legacy journal transport MUST preserve bytes through the migration's receipt binding.",)),
+        ("9.2", ("The homes-2 generation is declared by", "Absent or 1 denotes legacy homes;",
+                 "The homes-2 declaration does not", "This section defines no homes-generation upgrade:"), (
+            'The homes-generation upgrade targets spec_version = "2.0.0" with required integer '
+            '[opf].homes = 2.',
+            'Absent or 1 denotes legacy homes for migration; unknown future generations MUST be refused.',
+            'The homes-generation target does not itself change the runtime supported version or init '
+            'format.',
+            'The migration MUST refuse a store resolved outside the product root until a multi-root '
+            'coordinator exists.')),
+        ("9.2", ("The bump to the homes-2 declaration",), ()),
+        ("9.2", ("A schema-level bump MUST be additive",), (
+            'A purely schema-level bump MUST be additive, using atomic replacement of existing files, '
+            'create-only writes for new index files, and regeneration of declared views through '
+            'exclusively created temporary files followed by atomic rename.',)),
+        ("9.2", ("The upgrade MUST run under the store consistency contract",), (
+            'A homes-generation bump MUST additionally relocate OPF control areas as a versioned, '
+            'journaled, fail-closed relocation.',
+            'Every destination MUST be digest-verified before its source is removed.',
+            'Both kinds of upgrade MUST run under the store consistency contract and the single-writer '
+            'lease (section 5.7).')),
+        ("9.2", ("The upgrade MUST NOT write the adoption archive ",), (archive.replace(
+            "The upgrade MUST NOT write the adoption archive ",
+            "Both upgrade kinds, on the schema-level path and the homes-generation relocation path, the "
+            "homes-2 path included, alike, MUST NOT write the adoption archive ", 1),)),
+    )
+    for section, starts, old in no_homes_migration:
+        pins = _CONTRACT[section]
+        at = [i for i, f in enumerate(pins) if f.startswith(starts[0])]
+        at0 = at[0] if len(at) == 1 else len(pins)
+        run = pins[at0:at0 + len(starts)]
+        body = _sections(text)[section]
+        normalized_body = " ".join(body.replace("`", "").split())
+        anchored = len(at) == 1 and len(run) == len(starts) and all(
+            f.startswith(s) for f, s in zip(run, starts)) and normalized_body.count(" ".join(run)) == 1
+        prefix = "spec " + section + " missing contract: "
+        check("spec-homes2-no-homes-migration-spec-restored-" + section + "-" + starts[0],
+              lambda a=anchored, r=run, o=old, b=body, nb=normalized_body, p=prefix: a and all(
+                  p + f in found for found in [contract_findings(text.replace(
+                      b, "\n\n" + nb.replace(" ".join(r), " ".join(o), 1) + "\n\n", 1))] for f in r))
+        if old:
+            with patch.dict(_CONTRACT, {section: pins[:at0] + old + pins[at0 + len(starts):]}):
+                check("spec-homes2-no-homes-migration-pin-restored-" + section + "-" + starts[0],
+                      lambda a=anchored, o=old, p=prefix: a and all(
+                          p + f in found for found in [contract_findings(text)] for f in o))
+    # The quotation-regression set, run against the live spec and again against a spec that already
+    # holds a landed, registered quotation (below), each check named with prefix.
+    transport = "Legacy journal transport MUST preserve bytes through the migration's receipt binding."
+    explanation = "Homes 2 has no homes migration, so this rule no longer applies."
+    quotation = _normalized(_RETIRED_QUOTATION + "\n> " + transport)
+    import io
+    from contextlib import redirect_stdout
+    module = sys.modules[__name__]
+
+    def quotation_regressions(text, prefix, check=check):
+        check = (lambda name, thunk, check=check: check(prefix + name, thunk))
+        # The default entry refuses each retired fragment in its own section: the live section holds none
+        # outside a registered quotation, each fragment occurs in the retired pins or text above and names
+        # homes or legacy journal transport, and planting it at the end of its section turns the gate red
+        # with its own finding. Each fragment is paired: the same text in the exact retired-text quotation
+        # form is not a restoration, and every near miss of that form, a negated sentence included, still
+        # is, as is the fragment wrapped across lines in operative text or written with a backslash
+        # escape or hard line break.
+        retired_text = " ".join(" ".join(old) for _s, _p, old in no_homes_migration) + " " + retired
+        # Emptying or narrowing the registry would retire its vectors silently: its shape is pinned.
+        check("spec-retired-registry", lambda: tuple(_RETIRED) == ("4.2", "9.2", "15") and
+              tuple(map(len, _RETIRED.values())) == (4, 5, 1))
+        near_misses = (
+            ("plain", "Retired text, quoted and not in force:\n{}"),
+            ("inline", "> Retired text, quoted and not in force: {}"),
+            ("lead-in", "> Retired text, not in force:\n> {}"),
+            ("case", "> retired text, quoted and not in force:\n> {}"),
+            ("indented", "  > Retired text, quoted and not in force:\n  > {}"),
+            ("no-quote-line", "> Retired text, quoted and not in force:\n{}"),
+            ("lazy", "> Retired text, quoted and not in force:\n> Quoted.\n{}"),
+            ("inside-quote", "> Note.\n> Retired text, quoted and not in force:\n> {}"),
+            ("inside-quote-paragraph", "> Note.\n>\n> Retired text, quoted and not in force:\n> {}"),
+            # The earlier quote opened, or continued by a blank, after one to three spaces.
+            ("inside-indented-quote", " > Note.\n >\n> Retired text, quoted and not in force:\n> {}"),
+            ("inside-quote-indented-blank", "> Note.\n  >\n> Retired text, quoted and not in force:\n> {}"),
+            ("inside-quote-three-spaces", "   > Note.\n   >\n> Retired text, quoted and not in force:\n> {}"),
+            ("negated", 'The retired sentence "{}" no longer applies; homes 2 has no homes migration.'),
+            # Each of these breaks one condition alone: the lead-in indented, text after it, or a
+            # trailing space; the line after it opens with ">" and the line above it is blank.
+            ("indented-lead-in", "  > Retired text, quoted and not in force:\n> {}"),
+            ("lead-in-extra", "> Retired text, quoted and not in force: See section 4.2.\n> {}"),
+            ("lead-in-trailing-space", "> Retired text, quoted and not in force: \n> {}"),
+            # The lead-in in the exact form but not rendered as text: hidden by an HTML comment (with
+            # and without a blank line above), in fenced code, or a lazy continuation of an earlier quote.
+            ("comment-hidden", "<!--\n> Retired text, quoted and not in force:\n> -->\n> {}"),
+            ("comment-hidden-blank", "<!--\n\n> Retired text, quoted and not in force:\n> -->\n> {}"),
+            ("after-html-block", "<div>\n</div>\n\n> Retired text, quoted and not in force:\n> {}"),
+            ("fenced", "```\n> Retired text, quoted and not in force:\n> {}\n```"),
+            ("fenced-blank", "~~~\n\n> Retired text, quoted and not in force:\n> {}\n~~~"),
+            ("lazy-above", "> Note.\nA lazy continuation line.\n> Retired text, quoted and not in force:\n> {}"),
+        )
+        # A fragment wrapped across lines in operative text is read joined, with each line's block-quote
+        # markers removed: in an ordinary or nested quote, a quote in a list item, a near miss of the
+        # lead-in, a quote after a quotation block, and a lazy line.
+        wrapped = (
+            ("quote", "> This requirement is in force:\n> {}\n> {}"),
+            ("nested", "> > {}\n> > {}"),
+            ("spaced", "   > {}\n   >   {}"),
+            ("list", "- > {}\n  > {}"),
+            ("paragraphs", "> {}\n>\n> {}"),
+            ("lead-in", "> Retired text, not in force:\n> {}\n> {}"),
+            ("after-quotation", _RETIRED_QUOTATION + "\n> Quoted.\n\n> {}\n> {}"),
+            ("lazy", "> {}\n{}"),
+            # A backslash hard line break, in operative text and in a quote.
+            ("hard-break", "{}\\\n{}"),
+            ("quote-hard-break", "> {}\\\n> {}"),
+        )
+        # A fragment holding backslash escapes, each ASCII punctuation character escaped, is read as
+        # rendered, in operative text and in a quote; a fragment with no such character has no escape.
+        escaped = (("escaped", "{}"), ("quote-escaped", "> {}"))
+
+        def planted(body, block, spec=text):
+            return spec.replace(body, body.rstrip("\n") + "\n\n" + block + "\n\n", 1)
+
+        def retired_absent(spec, section, fragment):
+            # The retired-text check's readings hold no fragment, and the section as written holds one
+            # only inside a quotation the registry tiles (_Q).
+            return not any(fragment in reading for reading in _readings(spec)[section][1]) and (
+                fragment not in _normalized(_sections(spec)[section]) or any(
+                    fragment in q for q in _CONTRACT[section] if isinstance(q, _Quoted)))
+
+        def halves(fragment):
+            words = fragment.split(" ")
+            return " ".join(words[:len(words) // 2]), " ".join(words[len(words) // 2:])
+
+        def restores(found, section):
+            return [f for f in found if f.startswith("spec {} restores retired ".format(section))]
+        for section, fragments in _RETIRED.items():
+            body = _sections(text)[section]
+            for fragment in fragments:
+                finding = "spec {} restores retired homes-migration text: {}".format(section, fragment)
+                check("spec-retired-absent-" + section + "-" + fragment, lambda s=section, f=fragment:
+                      retired_absent(text, s, f))
+                check("spec-retired-flip-" + section + "-" + fragment,
+                      lambda b=body, f=finding, frag=fragment: text.count(b) == 1 and
+                      f in contract_findings(text.replace(b, b.rstrip("\n") + "\n" + frag + "\n\n", 1)))
+                check("spec-retired-homes-term-" + section + "-" + fragment, lambda frag=fragment:
+                      "homes" in frag.lower() or "legacy journal transport" in frag.lower())
+                check("spec-retired-quoted-" + section + "-" + fragment, lambda b=body, s=section, frag=fragment:
+                      text.count(b) == 1 and not restores(contract_findings(planted(
+                          b, _RETIRED_QUOTATION + "\n> " + frag)), s))
+                for form, shape in near_misses:
+                    check("spec-retired-near-miss-" + form + "-" + section + "-" + fragment,
+                          lambda b=body, f=finding, block=shape.format(fragment): text.count(b) == 1 and
+                          f in contract_findings(planted(b, block)))
+                for form, shape in wrapped:
+                    check("spec-retired-wrapped-" + form + "-" + section + "-" + fragment,
+                          lambda b=body, f=finding, frag=fragment, block=shape.format(*halves(fragment)):
+                          text.count(b) == 1 and frag not in block and f in contract_findings(planted(b, block)))
+                if re.search(r"[!-/:-@\[-`{-~]", fragment):
+                    for form, shape in escaped:
+                        check("spec-retired-" + form + "-" + section + "-" + fragment,
+                              lambda b=body, f=finding, frag=fragment, block=shape.format(re.sub(
+                                  r"[!-/:-@\[-`{-~]", lambda m: "\\" + m.group(0), fragment)):
+                              text.count(b) == 1 and frag not in block and f in contract_findings(planted(b, block)))
+                if section != "15":
+                    check("spec-retired-known-" + section + "-" + fragment,
+                          lambda frag=fragment: frag in retired_text)
+        # The reported false positive, paired: an explanatory sentence quoting the retired journal transport
+        # rule is operative text and red; the same rule in a quotation block, with the explanation kept as
+        # its own paragraph above it, is not a restoration.
+        body = _sections(text)["4.2"]
+        check("spec-retired-quotation-reported-red", lambda b=body: text.count(b) == 1 and
+              restores(contract_findings(planted(b, 'The retired sentence "' + transport + '" no longer '
+                                                 'applies; homes 2 has no homes migration.')), "4.2"))
+        explained = explanation + "\n\n" + _RETIRED_QUOTATION + "\n> " + transport
+        check("spec-retired-quotation-reported-green", lambda b=body: text.count(b) == 1 and
+              contract_findings(planted(b, explained)) == contract_findings(text))
+        # The landed fixture below holds only its own quotation: its base is the spec with every
+        # quotation block of section 4.2 removed, each where removing it drops one block from the
+        # reading, and its registry is the section's without the _Q entries, so a quotation the spec
+        # already holds neither doubles the fixture's block nor satisfies its entry.
+        base, base_registry = text, tuple(f for f in _CONTRACT["4.2"] if not isinstance(f, _Quoted))
+        while _readings(base)["4.2"][2]:
+            start, end = _section_spans(base)["4.2"]
+            lines = base[start:end].split("\n")
+            held = len(_readings(base)["4.2"][2])
+            for i in [i for i, line in enumerate(lines) if line == _RETIRED_QUOTATION]:
+                j = i + 1
+                while j < len(lines) and lines[j].startswith(">"):
+                    j += 1
+                removed = base[:start] + "\n".join(lines[:i] + lines[j:]) + base[end:]
+                if len(_readings(removed)["4.2"][2]) == held - 1:
+                    base = removed
+                    break
+            else:
+                break
+        with patch.dict(_CONTRACT, {"4.2": base_registry}):
+            check("spec-retired-quotation-landed-base", lambda: not _readings(base)["4.2"][2]
+                  and tiles(base, "4.2") and not contract_findings(base))
+        body = _sections(base)["4.2"]
+        # The same quotation landed through the registry: with the explanation pinned (_D) and the block
+        # tiled (_Q), every predicate is green together, the default entry (main), the section tiling,
+        # the pins, the keyword lint and the retired-text absence; the block's quoted text stays out of
+        # the pins and the retired-text check. Each registry shortcut is red: the block registered as an
+        # ordinary pin (missing, since no pin reads quoted text) or as _D (missing, and a keyword on a
+        # descriptive pin), the _Q entry without its block in the spec, the block in a near-miss form,
+        # the _Q entry without its ">" markers (tiling), and a _Q entry holding part of the block, its
+        # lead-in and the quoted sentence's opening or the quoted line alone (exact, not a substring).
+        landed = planted(body, explained, base)
+        registry = base_registry + (_D(explanation), _Q(quotation))
+        missing = "spec 4.2 missing retired-text quotation: " + quotation
+        with tempfile.TemporaryDirectory(prefix="opf-homes-quotation-") as tmp:
+            landed_spec = Path(tmp) / "OPF-SPEC.md"
+            landed_spec.write_text(landed, encoding="utf-8")
+            with patch.dict(_CONTRACT, {"4.2": registry}), patch.object(module, "SPEC", landed_spec):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    landed_rc = main([])
+                check("spec-retired-quotation-landed", lambda r=landed_rc, out=buf.getvalue():
+                      r == 0 and out == "" and tiles(landed, "4.2") and not contract_findings(landed)
+                      and not keyword_findings() and retired_absent(landed, "4.2", transport)
+                      and transport in _normalized(_sections(landed)["4.2"])
+                      and not any(transport in reading for reading in _readings(landed)["4.2"][1])
+                      and transport not in _readings(landed)["4.2"][0]
+                      and _readings(landed)["4.2"][2] == (quotation,))
+                check("spec-retired-quotation-landed-unregistered-spec", lambda:
+                      missing in contract_findings(base) and not tiles(base, "4.2"))
+                near = planted(body, explained.replace(_RETIRED_QUOTATION, "  " + _RETIRED_QUOTATION, 1), base)
+                check("spec-retired-quotation-landed-near-miss", lambda: missing in contract_findings(near) and
+                      restores(contract_findings(near), "4.2") and not retired_absent(near, "4.2", transport))
+            for shortcut, entry in (("plain", str(quotation)), ("descriptive", _D(quotation))):
+                with patch.dict(_CONTRACT, {"4.2": registry[:-1] + (entry,)}):
+                    check("spec-retired-quotation-landed-" + shortcut, lambda e=entry, s=shortcut:
+                          tiles(landed, "4.2") and "spec 4.2 missing contract: " + e in contract_findings(landed)
+                          and (s == "plain" or any(e in f for f in keyword_findings())))
+            with patch.dict(_CONTRACT, {"4.2": registry[:-1] + (_Q(_RETIRED_QUOTATION + " " + transport),)}):
+                check("spec-retired-quotation-landed-no-markers", lambda: not tiles(landed, "4.2")
+                      and any(f.startswith("spec 4.2 missing retired-text quotation: ")
+                              for f in contract_findings(landed)))
+            for name, part in (("opening", _RETIRED_QUOTATION + "\n> " + transport.split(" MUST ", 1)[0]),
+                               ("quoted-line", "> " + transport)):
+                with patch.dict(_CONTRACT, {"4.2": registry[:-1] + (_Q(_normalized(part)),)}):
+                    check("spec-retired-quotation-landed-part-" + name, lambda p=_normalized(part):
+                          p != quotation and p in quotation
+                          and "spec 4.2 missing retired-text quotation: " + p in contract_findings(landed))
+        # A pin holding the marker the pins read in place of a block is missing, so no registry edit lets
+        # a pin span a block.
+        body = _sections(text)["4.2"]
+        spanning = text.replace(body, body.rstrip("\n") + "\n\nBefore.\n\n" + _RETIRED_QUOTATION
+                                + "\n> Quoted.\n\nAfter.\n\n", 1)
+        with patch.dict(_CONTRACT, {"4.2": _CONTRACT["4.2"] + (_D("Before. " + _QUOTATION_JOINT + " After."),)}):
+            check("spec-retired-quotation-joint-pin", lambda: "spec 4.2 missing contract: Before. "
+                  + _QUOTATION_JOINT + " After." in contract_findings(spanning))
+        # A lead-in with no ">" line after it opens no block: it is operative text the pins read, so a
+        # sentence around it reads it, and a fragment split around it is not joined.
+        check("spec-retired-quotation-lead-in-alone", lambda: _read_section(
+            "\nA.\n" + _RETIRED_QUOTATION + "\nB.\n", {4})[0] == "A. " + _RETIRED_QUOTATION + " B."
+            and _read_section("\nA.\n" + _RETIRED_QUOTATION + "\n> B.\n", {4})[0] == "A. " + _QUOTATION_JOINT)
+        # Two quotation blocks in one section are each read as one, the second found at its own offset;
+        # a near miss after a block is still read.
+        second = _RETIRED_QUOTATION + "\n> " + _RETIRED["4.2"][0] + "\n\nBetween.\n\n" + _RETIRED_QUOTATION
+        check("spec-retired-quotation-two-blocks", lambda b=body: not restores(contract_findings(planted(
+            b, second + "\n> " + transport)), "4.2") and restores(contract_findings(planted(
+                b, second.replace("\n\n" + _RETIRED_QUOTATION, "\n\n " + _RETIRED_QUOTATION) + "\n> "
+                + transport)), "4.2"))
+        # A line indented four spaces is no block-quote line: after a blank it opens indented code, so a
+        # lead-in below it opens its own quote and is a quotation.
+        check("spec-retired-quotation-after-indented-code", lambda b=body: text.count(b) == 1 and not restores(
+            contract_findings(planted(b, "    > Code.\n" + _RETIRED_QUOTATION + "\n> " + transport)), "4.2"))
+        # A quotation block is not in force, so a pin moved into one is missing; the same pin moved into a
+        # near miss of the form is operative text and still present.
+        pin = _pin("4.2", "Homes 2 has no homes migration:")
+        normalized_body = " ".join(body.replace("`", "").split())
+        unpinned = text.replace(body, "\n\n" + normalized_body.replace(pin, "", 1) + "\n\n", 1)
+        unpinned_body = _sections(unpinned)["4.2"]
+
+        def moved(block):
+            return unpinned.replace(unpinned_body, unpinned_body.rstrip("\n") + "\n\n" + block + "\n\n", 1)
+        check("spec-retired-quotation-pin-moved", lambda: normalized_body.count(pin) == 1 and
+              "spec 4.2 missing contract: " + pin in contract_findings(moved(_RETIRED_QUOTATION + "\n> " + pin)))
+        check("spec-retired-quotation-pin-near-miss", lambda: normalized_body.count(pin) == 1 and
+              "spec 4.2 missing contract: " + pin in contract_findings(unpinned) and
+              "spec 4.2 missing contract: " + pin not in contract_findings(moved(
+                  "Retired text, quoted and not in force:\n" + pin)))
+        # Text split around a quotation block fails closed for both checks: a pin split there is missing,
+        # and a retired fragment split there is still red.
+        words = pin.split(" ")
+        split_pin = " ".join(words[:4]) + "\n\n" + _RETIRED_QUOTATION + "\n> Quoted.\n\n" + " ".join(words[4:])
+        check("spec-retired-quotation-pin-split", lambda: len(words) > 4 and
+              "spec 4.2 missing contract: " + pin in contract_findings(moved(split_pin)) and
+              "spec 4.2 missing contract: " + pin not in contract_findings(moved(split_pin.replace(
+                  "\n\n" + _RETIRED_QUOTATION + "\n> Quoted.\n\n", " ", 1))))
+        halves = transport.split(" MUST ", 1)
+        check("spec-retired-quotation-fragment-split", lambda b=body: text.count(b) == 1 and len(halves) == 2 and
+              "spec 4.2 restores retired homes-migration text: " + transport in contract_findings(planted(
+                  b, halves[0] + " MUST\n\n" + _RETIRED_QUOTATION + "\n> Quoted.\n\n" + halves[1])))
+        # Retired sentences that name neither homes nor legacy journal transport are not fragments: a
+        # future worklog-generation upgrade stating them again in its section is not a restoration.
+        for section, sentence in (
+                ("4.2", "The owning writer or migration MUST derive each inventory from the run's transaction "
+                        "record or receipt and MUST publish it exclusively with the retained bytes."),
+                ("9.2", "A worklog-generation bump MUST additionally move the worklog ledger as a versioned, "
+                        "journaled, fail-closed relocation. Every destination MUST be digest-verified before its "
+                        "source is removed. Both kinds of upgrade MUST run under the store consistency contract "
+                        "and the single-writer lease (section 5.7). The migration MUST refuse a store resolved "
+                        "outside the product root until a multi-root coordinator exists.")):
+            body = _sections(text)[section]
+            check("spec-retired-generic-" + section, lambda b=body, s=section, n=sentence: text.count(b) == 1
+                  and not restores(contract_findings(planted(b, n)), s))
+    quotation_regressions(text, "")
+    # A spec that already holds the same quotation, landed and registered in section 4.2 (the
+    # explanation pinned _D, the block tiled _Q): it is green, and every quotation regression holds
+    # over it too, so the regressions plant their fixture on a base free of it.
+    quoted_spec = text.replace(_sections(text)["4.2"], _sections(text)["4.2"].rstrip("\n") + "\n\n"
+                               + explanation + "\n\n" + _RETIRED_QUOTATION + "\n> " + transport + "\n\n", 1)
+    with patch.dict(_CONTRACT, {"4.2": _CONTRACT["4.2"] + (_D(explanation), _Q(quotation))}):
+        check("spec-landed-quotation", lambda: text.count(_sections(text)["4.2"]) == 1
+              and not contract_findings(quoted_spec) and not keyword_findings() and tiles(quoted_spec, "4.2")
+              and _readings(quoted_spec)["4.2"][2] == _readings(text)["4.2"][2] + (quotation,))
+        quotation_regressions(quoted_spec, "landed-")
+    # Appendix E guard: every informative section is keyword-free, the guard sees Appendix E,
+    # and planting a requirement keyword there, in prose, a bare code span, or a fenced block,
+    # turns the gate red with that keyword's finding; the quotation form (a code span holding
+    # exactly the keyword after "the keyword" or "the term") stays green, planted as its own
+    # paragraph since the anchor paragraph is a declaration candidate, where a backtick is
+    # refused; unmarking Appendix E turns the gate red too, so the guard cannot be sidestepped
+    # by unmarking.
+    informative_anchor = "This appendix is informative:"
+    check("spec-informative-clean", lambda: not informative_findings(text))
+    check("spec-informative-appendix-e", lambda: any(
+        t.startswith("Appendix E") for t, _ in _informative_sections(text)))
+    for word in ("MUST", "MUST NOT", "SHALL", "REQUIRED", "SHOULD", "MAY", "RECOMMENDED",
+                 "OPTIONAL"):
+        planted = text.replace(informative_anchor,
+                               informative_anchor + " A checker " + word + " share each record.", 1)
+        quoted = text.replace(informative_anchor,
+                              informative_anchor + "\n\nNormative sections use the keyword `"
+                              + word + "`.", 1)
+        check("spec-informative-flip-" + word.replace(" ", "-"), lambda m=planted, w=word.split()[0]:
+              text.count(informative_anchor) == 1 and any(
+                  f.endswith("carries requirement keyword " + w) and "Appendix E" in f
+                  for f in informative_findings(m)))
+        check("spec-informative-quoted-green-" + word.replace(" ", "-"),
+              lambda q=quoted: not informative_findings(q))
+    for plant, name in (
+            (" A checker `MUST` share records.", "bare-codespan"),
+            (" The rule `MUST NOT` applies here.", "codespan-no-lead-in"),
+            ("\n\n```text\nA checker MUST share records.\n```\n", "fenced-keyword"),
+    ):
+        planted = text.replace(informative_anchor, informative_anchor + plant, 1)
+        check("spec-informative-markup-red-" + name, lambda m=planted: any(
+            "carries requirement keyword MUST" in f and "Appendix E" in f
+            for f in informative_findings(m)))
+    check("spec-informative-lowercase-green", lambda: not informative_findings(text.replace(
+        informative_anchor, informative_anchor + " A checker must share records.", 1)))
+    check("spec-informative-unmarked-red", lambda: "spec informative guard: Appendix E not marked"
+          " informative" in informative_findings(text.replace("(informative)", "", 1).replace(
+              informative_anchor, "This appendix recommends practice:", 1)))
+    # Informative status is inherited by every descendant heading at any level, a fenced line
+    # that looks like a heading bounds nothing, and a deeper heading marked informative under a
+    # normative parent is guarded on its own.
+    appendix_tail = "a release's documentation can name one as the platform it documents."
+    sub3 = text.replace(appendix_tail, appendix_tail
+                        + "\n\n### E.1 Record sharing\n\nA checker MUST share records.", 1)
+    sub4 = text.replace(appendix_tail, appendix_tail
+                        + "\n\n#### E.1.1 Sharing detail\n\nEvery record SHOULD be shared.", 1)
+    fence_break = text.replace(appendix_tail, appendix_tail
+                               + "\n\n```markdown\n## not a heading\n```\n\nA checker MUST obey.", 1)
+    marked4 = text.replace(
+        "## 15. Genericization boundary",
+        "#### 14.9 Notes (informative)\n\nA checker MUST keep notes.\n\n## 15. Genericization"
+        " boundary", 1)
+    for name, planted, kw in (("subsection-3", sub3, "MUST"), ("subsection-4", sub4, "SHOULD"),
+                              ("fence-no-boundary", fence_break, "MUST"),
+                              ("marked-level-4", marked4, "MUST")):
+        check("spec-informative-inherit-" + name, lambda m=planted, w=kw:
+              text.count(appendix_tail) == 1 and any(
+                  ("carries requirement keyword " + w) in f for f in informative_findings(m)))
+    # Round-19 guard vectors: heading titles are scanned like bodies (a keyword in a
+    # descendant title or in a marked heading's own title is red), the exempt quotation form
+    # covers "the term" and a sentence-start "The", a fence closes only on a matching delimiter
+    # (same character, at least the opening length, nothing else on the line), the
+    # same-or-shallower reset ends inheritance, and "This subsection is informative" marks its
+    # heading informative. Each vector discriminates one guard behaviour: reverting that
+    # behaviour alone turns the vector red.
+    title_sub = text.replace(appendix_tail, appendix_tail
+                             + "\n\n### E.9 Checkers MUST share records\n\nDetails.", 1)
+    title_marked = text + "\n\n## Appendix Z: what checkers MUST do (informative)\n\nDetails.\n"
+    fence_tilde = text.replace(appendix_tail, appendix_tail
+                               + "\n\n```text\n~~~\n## not a boundary\n```\n\nA checker MUST obey.", 1)
+    fence_short = text.replace(appendix_tail, appendix_tail
+                               + "\n\n````markdown\n```\n## not a boundary\n````\n\nA checker MUST obey.", 1)
+    sub_marked = (text + "\n\n## Appendix Z: subsection notes\n\nThis subsection is informative:"
+                  " background only. A checker MUST share records.\n")
+    for name, planted, kw in (("title-descendant", title_sub, "MUST"),
+                              ("title-marked", title_marked, "MUST"),
+                              ("fence-tilde-inside-backticks", fence_tilde, "MUST"),
+                              ("fence-short-inside-longer", fence_short, "MUST"),
+                              ("subsection-mark", sub_marked, "MUST")):
+        check("spec-informative-guard-red-" + name, lambda m=planted, w=kw: any(
+            ("carries requirement keyword " + w) in f for f in informative_findings(m)))
+    for name, planted in (
+            ("quoted-term", text.replace(informative_anchor, informative_anchor
+             + "\n\nNormative sections use the term `MUST`.", 1)),
+            ("quoted-sentence-start", text.replace(informative_anchor, informative_anchor
+             + "\n\nThe keyword `MUST NOT` is quoted here.", 1)),
+            ("reset-same-level", text
+             + "\n\n## Appendix Z: operative addendum\n\nThe gate MUST stay green.\n"),
+            ("reset-shallower", text + "\n\n# Coda\n\nThe gate MUST stay green.\n"),
+    ):
+        check("spec-informative-guard-green-" + name,
+              lambda m=planted: not informative_findings(m))
+    # Round-20 guard vectors: headings and fences are read as CommonMark reads them. A heading
+    # takes 0 to 3 columns of indentation and a space or tab after its hashes; a line of 4 or
+    # more columns (a tab counts 4) is no heading and no fence; a backtick fence's info string
+    # holds no backtick; a fence closes only on 0 to 3 columns, a run at least as long, then
+    # spaces or tabs alone; lines end at LF, CR LF or CR only. A heading inside a list item or
+    # block quote bounds nothing but is kept where it says "(informative)", and a raw HTML
+    # block is a finding. Each red vector plants an informative heading the guard must see or
+    # keeps an informative scope open; each green vector is the matching form that is no
+    # heading, a fence that masks, or a boundary that ends the scope. A green whose text is
+    # no heading holds the title-only label "Z - informative", which a body does not read
+    # (a body reads "(informative)", PR #481 QA round 10), so it turns red only where the
+    # guard reads that text as a heading.
+    normative = text + "\n## Normative\n\n"
+    informative = text + "\n## Z (informative)\n\n"
+    plant = "\n\nA checker MUST share records.\n"
+    stays = "\n\nThe gate MUST stay green.\n"
+    for name, planted in (
+            ("heading-indent-1", normative + " ## Z (informative)" + plant),
+            ("heading-indent-3", normative + "   ## Z (informative)" + plant),
+            ("heading-tab-separator", normative + "##\tZ (informative)" + plant),
+            ("setext-equals", normative + "Z (informative)\n===" + plant),
+            ("setext-dash", normative + "Z (informative)\n---" + plant),
+            ("setext-continued", normative + "Z notes\n    (informative)\n---" + plant),
+            ("quote-heading", normative + "> ## Z (informative)\n>\n> A checker MUST obey.\n"),
+            ("list-heading", normative + "- ## Z (informative)\n\n  A checker MUST obey.\n"),
+            ("list-setext", normative + "- Z (informative)\n  ---\n\n  A checker MUST obey.\n"),
+            ("fence-inline-code-line", normative + "```literal```\n\n## Z (informative)" + plant),
+            ("fence-indented-code", normative + "    ```\n\n## Z (informative)" + plant),
+            ("fence-tab-indented", normative + "\t```\n\n## Z (informative)" + plant),
+            ("fence-two-backticks", normative + "``\n\n## Z (informative)" + plant),
+            ("fence-two-tildes", normative + "~~\n\n## Z (informative)" + plant),
+            ("fence-after-list-item", informative + "- note\n```\n## Normative\n```" + plant),
+            ("setext-after-ordered-two", normative + "Z notes\n2. more (informative)\n---"
+             + plant),
+            ("setext-then-equals", text + "\n# Z (informative)\n\nCoda\n---\n===" + plant),
+            ("close-indented-4", informative + "```text\n    ```\n## Normative\n```" + plant),
+            ("close-trailing-text", informative + "```text\n```not-a-close\n## Normative\n```"
+             + plant),
+            ("close-trailing-nbsp", informative + "```text\n```\u00a0\n## Normative\n```" + plant),
+            ("indented-4-no-boundary", informative + "    ## Normative" + plant),
+            ("tab-indent-no-boundary", informative + "\t## Normative" + plant),
+            ("list-heading-no-boundary", informative + "- note\n\n  ## Normative" + plant),
+            ("quote-heading-no-boundary", informative + "> ## Normative" + plant),
+            ("lazy-no-boundary", informative + "- note\nlazy line\n  ## Normative" + plant),
+            ("lazy-indented-no-boundary", informative + "   10. note\n    ## x\nplain\n===" + plant),
+            ("reference-setext-no-boundary", informative + "[ref]: /url\n===" + plant),
+            ("separator-u2028", informative + "note\u2028## Normative\u2028A checker MUST obey.\n"),
+            ("separator-formfeed", informative + "note\x0c## Normative\x0cA checker MUST obey.\n"),
+    ):
+        check("spec-informative-commonmark-red-" + name, lambda m=planted: any(
+            "carries requirement keyword MUST" in f for f in informative_findings(m)))
+    for name, planted in (
+            ("heading-indent-4", normative + "    ## Z - informative" + plant),
+            ("heading-tab-indent", normative + "\t## Z - informative" + plant),
+            ("boundary-indent-3", informative + "   ## Coda" + stays),
+            ("boundary-tab-separator", informative + "##\tCoda" + stays),
+            ("boundary-setext", informative + "Coda\n----" + stays),
+            ("boundary-list-closed", informative + "- note\n## Coda" + stays),
+            ("boundary-after-list-blank", informative + "- note\n\n ## Coda" + stays),
+            ("boundary-thematic-closes-list", informative + "- note\n***\n  ## Coda" + stays),
+            ("boundary-cr", informative + "note\r## Coda\r\rThe gate MUST stay green.\n"),
+            ("boundary-after-ordered-item", informative + "- note\n10. item\n  ## Coda" + stays),
+            ("boundary-quote-closes-list", informative + "- note\n> quote\n  ## Coda" + stays),
+            ("boundary-paragraph-after-list", informative + "- note\n\nplain\n  ## Coda" + stays),
+            ("boundary-setext-after-list-break", informative + "- note\n***\nCoda\n===" + stays),
+            ("thematic-after-blank", normative + "Z - informative\n\n---" + plant),
+            ("paragraph-ends-at-fence", normative + "Z - informative\n```\n```\n---" + plant),
+            ("paragraph-ends-at-heading", normative + "Z - informative\n## Normative\n---" + plant),
+            ("paragraph-ends-at-thematic", normative + "Z - informative\n***\n---" + plant),
+            ("paragraph-ends-at-list", normative + "Z - informative\n- item\n---" + plant),
+            ("setext-then-underline-text", normative + "Z (informative)\n---\n===\n\n## Coda"
+             + stays),
+            ("fence-indent-3", normative
+             + "   ```\n## Z - informative\nA checker MUST obey.\n   ```\n"),
+            ("fence-tilde-backtick-info", normative
+             + "~~~ a`b\n## Z - informative\nA checker MUST obey.\n~~~\n"),
+            ("fence-unclosed", normative + "```\n## Z - informative\nA checker MUST obey.\n"),
+            ("close-indent-3", informative + "```text\n## x\n   ```\n\n## Coda" + stays),
+            ("close-trailing-space", informative + "```text\n## x\n``` \t\n\n## Coda" + stays),
+            ("close-longer-run", informative + "```text\n## x\n`````\n\n## Coda" + stays),
+    ):
+        check("spec-informative-commonmark-green-" + name,
+              lambda m=planted: not informative_findings(m))
+    # Each HTML vector opens one block type alone (no line of it is a lone tag of another type).
+    for name, planted in (("div", "<DIV>text\n\n## Z\n"), ("comment", "<!--\n## Z\n-->\n"),
+                          ("heading", "<h2>Z (informative)</h2>\n"), ("in-list", "- <div>\n"),
+                          ("pre", "<pre>text\n## Z\n"), ("processing", "<?x\n## Z\n?>\n"),
+                          ("declaration", "<!X\n## Z\n>\n"), ("cdata", "<![CDATA[\n## Z\n]]>\n"),
+                          ("custom-tag", "<custom-tag>\n## Z\n")):
+        check("spec-informative-commonmark-html-red-" + name, lambda m=normative + planted: any(
+            f.startswith("spec informative guard: raw HTML block at line ")
+            for f in informative_findings(m)))
+    check("spec-informative-commonmark-closing-sequence-title", lambda: (
+        "spec informative section Z (informative) carries requirement keyword MUST"
+        in informative_findings(normative + "## Z (informative) ##" + plant)))
+    # Container, inline and fail-closed vectors. A list item interrupts a paragraph only where
+    # it holds content and, when ordered, starts at 1, so a list-shaped line otherwise
+    # continues it into a setext heading; a list item's content column counts the 1 to 4
+    # columns after its marker; a fence inside a block quote or list item masks its lines and
+    # closes with its container; a keyword in underscore emphasis, split by inline markup, or
+    # written with character references or an invisible format character is read; an HTML
+    # tag holding ">" in a quoted attribute opens a raw HTML block; and a lazy block-shaped
+    # line at 4 or more columns, a block quote continued at 4 or more columns, or a paragraph
+    # opening like a reference definition is a finding, since renderers read them
+    # differently. Each red vector is green without its fix, or (the two ends-with vectors)
+    # where a container's fence outlives it; each green vector is the benign form, its
+    # unread heading text holding the title-only label "Z - informative" (a body reads
+    # "(informative)").
+    for name, planted in (
+            ("setext-ordered-two-continues", normative + "Z (informative)\n2. item\n---" + plant),
+            ("setext-ordered-paren-continues", normative + "Z (informative)\n3) item\n===" + plant),
+            ("setext-empty-bullet-continues", normative + "Z (informative)\n*\n---" + plant),
+            ("list-content-column-4", informative
+             + "-   item\n  ```\n## Normative\nA checker MUST obey.\n```\n"),
+            ("ordered-content-column-4", informative
+             + "1.  item\n   ~~~\n## Normative\nA checker MUST obey.\n~~~\n"),
+            ("quote-fence-ends-with-quote", informative + "> ```\n```\n## Normative\n```" + plant),
+            ("list-fence-ends-with-item", informative + "- ```\n```\n## Normative\n```" + plant),
+            ("quote-space-then-3", normative
+             + ">    ## Z (informative)\n>\n> A checker MUST obey.\n"),
+            ("quote-continued-space-then-3", normative
+             + "> a\n>    ## Z (informative)\n> A checker MUST obey.\n"),
+            ("indented-code-then-underline", informative + "    Coda\n---" + stays),
+            ("setext-arabic-indic-digit-continues", normative + "Z (informative)\n\u0661. item\n---"
+             + plant),
+            ("setext-fullwidth-digit-continues", normative + "Z (informative)\n\uff11) item\n==="
+             + plant),
+    ):
+        check("spec-informative-container-red-" + name, lambda m=planted: any(
+            "carries requirement keyword MUST" in f for f in informative_findings(m)))
+    for name, planted in (
+            ("quote-fence-masks", normative
+             + "> ```\n> ## Z - informative\n> A checker MUST obey.\n> ```\n"),
+            ("list-fence-masks", normative
+             + "- ```\n  ## Z - informative\n  A checker MUST obey.\n  ```\n"),
+            ("ordered-fence-masks-column-4", normative
+             + "1.  ~~~\n    ## Z - informative\n    A checker MUST obey.\n    ~~~\n"),
+            ("ordered-one-interrupts", normative + "Z - informative\n1. item\n---" + plant),
+            ("fence-in-item-then-boundary", informative
+             + "-   item\n    ```\n    ## x\n    ```\n## Coda" + stays),
+            ("five-columns-after-marker", informative + "-     ~~~\n  ```\n## Coda\n```" + stays),
+            ("blank-item-closes-on-blank", informative + "-\n\n  ## Coda" + stays),
+            ("lazy-underline-is-thematic", normative + "> Z - informative\n---" + plant),
+            ("quote-fence-closed-then-boundary", informative + "> ```\nplain\n## Coda" + stays),
+            ("list-fence-closed-then-boundary", informative + "- ```\nplain\n## Coda" + stays),
+    ):
+        check("spec-informative-container-green-" + name,
+              lambda m=planted: not informative_findings(m))
+    # Inline vectors. A keyword is read through an underscore run CommonMark could read as
+    # emphasis and never through an intraword one; split by markup the guard removes, written
+    # with character references, invisible or combining characters, or compatibility forms;
+    # and an informative section fails closed on a link target or inline HTML the guard does
+    # not read. Each red vector is green without the behaviour it names; each green vector is
+    # red under the over-broad form of it (an intraword underscore read as a boundary, every
+    # link or autolink refused, whitespace or a line break dropped, case folded).
+    # Red vectors plant inside the Appendix E anchor paragraph (a declaration candidate, so
+    # each also trips allowlist refusals their any() ignores); green vectors assert zero
+    # findings, so each plants as its own non-candidate paragraph after the anchor, where
+    # the candidate scan does not run.
+    for name, plant_kw in (("underscore", "_MUST_"), ("double-underscore", "__MUST__"),
+                           ("underscore-in-emphasis", "*_MUST_*"),
+                           ("underscore-in-parentheses", "(_MUST_)"),
+                           ("underscore-after-markup", "a*_MUST_"),
+                           ("split-strong", "MU**ST**"), ("split-code-span", "MU`ST`"),
+                           ("split-strong-then-underscore", "**MU**_ST_"),
+                           ("split-strikethrough", "MU~~ST~~"),
+                           ("split-link", "[MU](/u)ST"), ("split-link-title", '[MU](/u "t")ST'),
+                           ("split-reference", "[MU][r]ST"), ("split-collapsed", "[MU][]ST"),
+                           ("decimal-reference", "&#77;UST"), ("hex-reference", "&#x4D;UST"),
+                           ("reference-then-markup", "&#77;UST*s"),
+                           ("reference-unterminated", "MUST&#65 x"),
+                           ("soft-hyphen", "M&shy;UST"), ("zero-width-space", "MU\u200bST"),
+                           ("grapheme-joiner", "MU\u034fST"),
+                           ("variation-selector", "MU\ufe0fST"),
+                           ("grapheme-joiner-reference", "MU&#x34F;ST"),
+                           ("hangul-filler", "MU\u3164ST"), ("control-character", "MU\x01ST"),
+                           ("fullwidth", "\uff2d\uff35\uff33\uff34"),
+                           ("mathematical-bold", "\U0001d40c\U0001d414\U0001d412\U0001d413"),
+                           ("link-shaped-target", "x](M**U**ST)"),
+                           ("link-shaped-reference", "[x][M**U**ST]"),
+                           ("link-shaped-code-span", "x](MU`S`T)"),
+                           ("link-shaped-title", 'x](/u "M**U**ST")'),
+                           ("link-shaped-escaped", "\\](M**U**ST)"),
+                           ("link-shaped-zero-width", "[x][MU\u200bST]"),
+                           ("enclosing-mark", "MU\u20ddST"), ("unassigned", "MU\ufdd0ST"),
+                           ("private-use", "MU\ue000ST"), ("surrogate", "MU\ud800ST"),
+                           ("superscript-digit", "MUST\u00b9"),
+                           ("superscript-reference", "MU**ST**&sup1;"),
+                           ("subscript-digit", "MUST\u2081"),
+                           ("circled-digit", "MUST\u2460"),
+                           ("autolink-scheme", "M<UST:q>")):
+        planted = text.replace(informative_anchor, informative_anchor + " A checker " + plant_kw
+                               + " share each record.", 1)
+        check("spec-informative-inline-red-" + name, lambda m=planted: any(
+            "carries requirement keyword MUST" in f and "Appendix E" in f
+            for f in informative_findings(m)))
+    for name, plant_kw in (("underscore-lowercase", "_must_"),
+                           ("underscore-longer-word", "_MUSTER_"),
+                           ("reference-lowercase", "&#109;ust"),
+                           ("underscore-identifier", "MUST_DO"),
+                           ("underscore-intraword", "x_MUST_y"),
+                           ("underscore-suffix", "DO_MUST"),
+                           ("underscore-leading-identifier", "_MUST_DO"),
+                           ("underscore-inside-word", "MU_ST"),
+                           ("no-break-space", "MU\u00a0ST"), ("line-break", "MU\nST"),
+                           ("fullwidth-lowercase", "\uff4d\uff55\uff53\uff54"),
+                           ("plain-link", '[a guide](/a_b-c.d "Guide")'),
+                           ("plain-link-single-quoted", "[a guide](/u 'Guide')"),
+                           ("plain-reference", "[a guide][ref]"),
+                           ("less-than", "a < b and c <= d"),
+                           ("link-title-space", '[here](/x "two words")'),
+                           ("link-title-angle-brackets", '[here](/x "a>b" ) and [it](/y "a < b")'),
+                           ("link-shaped-lowercase", "x](m**u**st)"),
+                           ("superscript-longer-word", "MUSTER\u00b9")):
+        check("spec-informative-inline-green-" + name, lambda m=text.replace(
+            informative_anchor, informative_anchor + "\n\nA checker " + plant_kw + " share.",
+            1): not informative_findings(m))
+    # A URI autolink in an informative section is read, not refused, by the section scan; it
+    # is planted as its own paragraph since the anchor paragraph is a declaration candidate
+    # (its declaration holds the word), where an autolink is refused.
+    check("spec-informative-inline-green-autolink", lambda m=text.replace(
+        appendix_tail, appendix_tail + "\n\nSee <https://example.org/a_b> for more.", 1):
+          not informative_findings(m))
+    tag = 'a "<" that may open inline HTML'
+    for name, plant_kw, form in (
+            ("link-nested-parentheses", "[MU](/a(b(c)))ST", "a link or image target"),
+            ("link-title-nested-parentheses", '[MU](/a "a(b(c))")ST', "a link or image target"),
+            ("link-title-close-parenthesis", 'MU[](/u "a)b")ST', "a link or image target"),
+            ("link-escaped-parenthesis", "MU[](a\\)b)ST", "a link or image target"),
+            ("link-parenthesized-title", "MU[](/u (a\\)b))ST", "a link or image target"),
+            ("link-angle-destination", "[MU](<a b>)ST", "a link or image target"),
+            ("reference-escaped-label", "[MU][a\\]b]ST", "a link or image target"),
+            ("link-title-backslash", 'MU[](/u "a\\b")ST', "a link or image target"),
+            ("link-title-mixed-quote", "MU[](/u 'a\"b')ST", "a link or image target"),
+            ("html-split-tag", 'MU<span title=">">ST', tag),
+            ("html-split-comment", "MU<!-- x -->ST", tag),
+            ("html-comment-holding-gt", "MU<!-- a > b -->ST", tag),
+            ("html-empty-comment", "MU<!-->ST", tag),
+            ("html-hidden-text", "MU<span hidden>x</span>ST", tag),
+            ("html-in-code-span", "`<b>`", tag),
+            ("less-than-letter", "where a<b holds", tag),
+            ("reference-undecoded", "MU&xsplit;ST",
+             "a character reference the guard does not decode")):
+        planted = text.replace(informative_anchor, informative_anchor + " A checker " + plant_kw
+                               + " share each record.", 1)
+        check("spec-informative-inline-unread-red-" + name, lambda m=planted, w=form: any(
+            ("carries " + w) in f and "Appendix E" in f and "guard does not read" in f
+            for f in informative_findings(m)))
+    for name, planted in (("quoted-attribute", '<a title=">">\n## Z\n'),
+                          ("single-quoted-attribute", "<a title='>'>\n## Z\n")):
+        check("spec-informative-commonmark-html-red-" + name, lambda m=normative + planted: any(
+            f.startswith("spec informative guard: raw HTML block at line ")
+            for f in informative_findings(m)))
+    for name, planted in (("less-than-text", "< 3 columns and <= 4\n"),
+                          ("in-fence", "```\n<div>\n```\n"), ("indented-code", "    <div>\n")):
+        check("spec-informative-commonmark-html-green-" + name,
+              lambda m=normative + planted: not informative_findings(m))
+    for name, planted in (("lazy-block-shaped", "1.   item\n    ## x\n"),
+                          ("quote-continued-at-4", "> a\n    > b\n"),
+                          ("quote-continued-at-4-after-heading", "> # H\n    > b\n"),
+                          ("reference-definition", "[r]: /u\n"),
+                          ("reference-escaped-label", "[a\\]b]: /u\n"),
+                          ("reference-open-label", "[a\nb]: /u\n"),
+                          ("digit-arabic-indic", "\u0661. item\n"),
+                          ("digit-fullwidth", "\uff11) item\n"),
+                          ("digit-mixed", "1\u0661. item\n"),
+                          ("tab-after-quote", ">\tb\n"), ("tab-after-list-marker", "-\tb\n"),
+                          ("tab-in-continuation", "- a\n\tb\n"),
+                          ("tab-nested-containers",
+                           "> > -  \tb\nZ (informative)\n-\n\nA checker MUST share records.\n")):
+        check("spec-informative-unread-red-" + name, lambda m=normative + planted: any(
+            f.startswith("spec informative guard: line ") and "read differently" in f
+            for f in informative_findings(m)))
+    for name, planted in (("lazy-plain-text", "1.   item\n    lazy text\n"),
+                          ("quote-continued-at-3", "> a\n   > b\n"),
+                          ("link-paragraph", "[text](/u) and more\n"),
+                          ("digit-ascii", "1. item\n"), ("digit-ascii-ten", "1234567890. item\n"),
+                          ("digits-without-marker", "\u0661\u0662 items\n"),
+                          ("tab-after-content", "> a\tb\n- c\td\n"),
+                          ("tab-blank-in-list", "- a\n\t\n  b\n")):
+        check("spec-informative-unread-green-" + name,
+              lambda m=normative + planted: not informative_findings(m))
+    # Marker vectors. A heading title or body is informative where its marker reads so after
+    # the normalization the keyword scan uses (character references decoded, markup and
+    # invisible characters removed, compatibility forms folded, a URI autolink read as its
+    # URI), in any ASCII letter case through the shared case fold and with any whitespace
+    # run read as one space, a body also as each of its paragraphs' text with block-quote
+    # markers removed, every paragraph read and none skipped; a heading title that is a
+    # declaration candidate and holds a character outside plain prose is a finding of its
+    # own, at the title line holding it. Each red vector is green without the behaviour it
+    # names; each green vector is an ordinary heading or body that marks nothing. These reds
+    # are regression coverage for the reader: each passes on the round-8 parent too (any()
+    # reads the keyword finding and ignores the allowlist refusals many of them now also
+    # trip); the round-9 behaviour changes are pinned by the allowlist vectors below, which
+    # fail on that parent.
+    notes = normative + "## Z notes\n\n"
+    for name, planted in (
+            ("heading-reference", normative + "## Z (&#105;nformative)" + plant),
+            ("heading-hex-reference", normative + "## Z (&#x69;nformative)" + plant),
+            ("heading-strong", normative + "## Z (informa**tive**)" + plant),
+            ("heading-underscore", normative + "## Z (_informative_)" + plant),
+            ("heading-code-span", normative + "## Z (`informative`)" + plant),
+            ("heading-zero-width", normative + "## Z (informa\u200btive)" + plant),
+            ("heading-fullwidth-parentheses", normative + "## Z \uff08informative\uff09" + plant),
+            ("heading-split-link", normative + "## Z (inform[at](/u)ive)" + plant),
+            ("heading-escaped-parentheses", normative + "## Z \\(informative\\)" + plant),
+            ("heading-inner-spaces", normative + "## Z ( informative )" + plant),
+            ("setext-reference", normative + "Z (&#105;nformative)\n---" + plant),
+            ("list-heading-reference", normative
+             + "- ## Z (&#105;nformative)\n\n  A checker MUST obey.\n"),
+            ("quote-heading-strong", normative
+             + "> ## Z (informa**tive**)\n>\n> A checker MUST obey.\n"),
+            ("body-reference", notes + "This section is &#105;nformative." + plant),
+            ("body-strong", notes + "This section is informa**tive**." + plant),
+            # Regression coverage only (codex round-8 note): this vector passes on the
+            # round-8 parent too, since the joined form removes a plain link target and the
+            # declaration is read; the refusal it now also trips is pinned by the allowlist
+            # vectors, which fail on that parent.
+            ("body-split-link", notes + "This section is [informa](/u)tive." + plant),
+            ("body-zero-width", notes + "This section is informa\u200btive." + plant),
+            ("body-line-break", notes + "This section\nis informative." + plant),
+            ("body-lowercase", notes + "Note that this section is informative." + plant),
+            ("heading-title-case", normative + "## Z (Informative)" + plant),
+            ("heading-uppercase", normative + "## Z (INFORMATIVE)" + plant),
+            ("body-quote-wrapped", notes + "> This section\n> is informative." + plant),
+            ("body-quote-nested", notes + "> > This section\n> > is informative." + plant),
+            ("body-quote-in-list", notes + "- > This section\n  > is informative." + plant),
+            ("body-list-in-quote", notes + "> - This section\n>   is informative." + plant),
+            # Round-5 MAJOR 1: a near-duplicate of a quoted declaration elsewhere in its
+            # section skips nothing; every own paragraph is read.
+            ("body-quote-dup-prefix", notes + "> This section\n> is informative.\n\n"
+             "xThis section\nis informative." + plant),
+            ("body-quote-dup-suffix", notes + "> This section\n> is informative\n\n"
+             "This section\nis informativex." + plant),
+            ("body-quote-dup-code-span", notes + "> This section\n> is informative\n\n"
+             "`aThis section\nis informative`" + plant),
+            # A URI autolink shows its URI as its text, so a declaration it completes is
+            # read and marks its section; in a candidate the autolink itself is also refused
+            # (the candidate-red autolink vectors).
+            ("body-autolink-uri", notes + "This section is <informative:x>." + plant),
+            ("body-autolink-split", notes + "This section is informa<tive:x>tive." + plant),
+            # A disclosed over-fire: the declaration is read wherever it stands in a sentence,
+            # so a sentence that denies it marks its section informative too.
+            ("body-negated-over-fire", notes + "Nothing in this section is informative."
+             + plant)):
+        check("spec-informative-marker-red-" + name, lambda m=planted: any(
+            "carries requirement keyword MUST" in f for f in informative_findings(m)))
+    for name, planted in (
+            ("title-hidden-html", normative + "## Z (informa<span hidden>x</span>tive)" + plant),
+            ("title-unread-link", normative + "## Z (inform[at](/u(x))ive)" + plant),
+            ("title-html-in-list", normative + "- ## Z (informa<b hidden>x</b>tive)\n"),
+            ("title-html-setext", normative + "Z <b hidden>(informative)</b>\n---" + plant),
+            ("title-undecoded-reference", normative + "## Z (informa&xsplit;tive)" + plant),
+            ("title-format-character", normative + "## Z (informa\u200btive)" + plant),
+            ("title-unread-autolink", normative + "## Z <informative:x>" + plant)):
+        check("spec-informative-marker-title-red-" + name, lambda m=planted: any(
+            f.startswith("spec informative guard: heading at line ") and "could hide" in f
+            for f in informative_findings(m)))
+    # A setext title finding names the title line holding the form, not the first title line
+    # or the underline.
+    check("spec-informative-marker-title-red-setext-line", lambda: any(
+        f.startswith("spec informative guard: heading at line {} ".format(
+            normative.count("\n") + 2)) and "could hide" in f
+        for f in informative_findings(
+            normative + "Z notes\nmore informa<b hidden>x</b>tive\n---" + plant)))
+    # Round-9 allowlist title vectors: the title scan shares _unread_markup_at, so each
+    # character class pinned by the allowlist paragraph vectors is refused in a candidate
+    # heading title too; each vector here fails on the round-8 parent (an image renders as
+    # its alt attribute, never as shown text, so in a title as in a paragraph the round-8
+    # forms read nothing in it).
+    for name, planted in (
+            ("image-alt", normative + "## Z (informa![.](/1px.png)tive)" + plant),
+            ("image-empty-alt", normative + "## Z (informa![](/1px.png)tive)" + plant),
+            ("backtick", normative + "## Z informa`x`tive notes" + plant),
+            ("email-autolink-digit", normative + "## Z <1@e.org> informative notes" + plant),
+            ("dotless-i-split", normative + "## Z (\u0131nforma<b></b>tive)" + plant)):
+        check("spec-informative-allowlist-title-red-" + name, lambda m=planted: any(
+            f.startswith("spec informative guard: heading at line ") and "could hide" in f
+            for f in informative_findings(m)))
+    for name, planted in (
+            ("heading-word", normative + "## Informative references" + stays),
+            ("heading-word-in-parentheses", normative + "## Z (see the informative note)" + stays),
+            ("heading-normative", normative + "## Z (normative)" + stays),
+            ("heading-informed", normative + "## Z (informed)" + stays),
+            ("heading-strong-word", normative + "## Z **notes**" + stays),
+            ("heading-plain-link", normative + "## Z [a guide](/u)" + stays),
+            ("heading-autolink", normative + "## Z <https://example.org/a>" + stays),
+            ("heading-code-span-tag", normative + "## API `<type>` overview" + stays),
+            ("list-heading-word", normative + "- ## Z informative notes\n\n  The gate MUST stay.\n"),
+            ("body-informed", notes + "This section is informed by Appendix E." + stays),
+            ("body-guidance", notes + "Appendix E gives informative guidance." + stays),
+            ("body-other-subject", notes + "That section is informative." + stays),
+            ("body-paragraph-then-quote", notes + "This section\n> is informative." + stays),
+            ("body-quote-two-paragraphs", notes + "> This section\n>\n> is informative."
+             + stays),
+            ("body-quote-informed", notes + "> This section\n> is informed by Appendix E."
+             + stays),
+            ("body-quote-informed-last", notes + "> This section\n> is informed by Z."
+             + stays)):
+        check("spec-informative-marker-green-" + name, lambda m=planted: not informative_findings(m))
+    # Declaration-candidate vectors. A paragraph (block-quoted or not, in any section) or a
+    # heading title is a declaration candidate where the letters of "informative" can be
+    # assembled, in order, from the letter runs of its text (character references decoded,
+    # invisible characters dropped, compatibility forms folded, case folded by the shared
+    # fold), each non-ASCII letter standing for any letter of the word, runs between the
+    # pieces skipped. Inside a candidate nothing is masked and nothing but plain prose is
+    # read: each character outside the allowlist (ASCII letters, ASCII digits, space and the
+    # marks _PLAIN_PROSE_MARKS names) is a finding naming the section and the character,
+    # whatever the section's classification. The vectors in this loop predate the allowlist
+    # and are regression coverage: each fails when a refusal class or candidacy step is
+    # removed, and each passed on the round-8 parent too (its per-form refusals caught
+    # them); the round-9 allowlist vectors further down each fail on that parent. Each green
+    # vector is a paragraph that is no candidate, so its markup (a code-span "<type>", an
+    # autolink, an undecoded reference, a control character, a stray "](" before a backtick)
+    # is not scanned at all (a fenced block and indented code are excluded as blocks, the
+    # commonmark-html-green vectors).
+    could_hide = "guard does not read and which could hide an informative declaration"
+    html_form = _char_label("<")
+    ref_form = _char_label("&")
+    ctrl_form = _char_label("\x01")
+    fmt_form = _char_label("\u200b")
+    target_form = _char_label("[")
+    for name, planted, form in (
+            ("tag-split", "This section is informa<b></b>tive.", html_form),
+            ("break-tag", "This section<br>is informative.", html_form),
+            ("break-tag-closed", "This section<br />is informative.", html_form),
+            ("quote-break-tag", "> This section<br>\n> is informative.", html_form),
+            ("mixed-separators", "This<br>section is in<b>forma</b>tive.", html_form),
+            ("break-then-comment", "This<br>section is informa<!-- note -->tive.", html_form),
+            ("comment-split", "This section is informa<!-- x -->tive.", html_form),
+            ("comment-multiline", "This section is informa<!-- x\ny -->tive.", html_form),
+            ("empty-comment", "This section is informa<!-->tive.", html_form),
+            ("cdata-split", "This section is informa<![CDATA[x]]>tive.", html_form),
+            ("processing-instruction", "This section is informa<?x y?>tive.", html_form),
+            ("html-declaration", "This section is informa<!X y>tive.", html_form),
+            ("closing-tag", "This section is informa</b>tive.", html_form),
+            ("quoted-attribute", 'This section is informa<span title=">"></span>tive.',
+             html_form),
+            ("quoted-attribute-split",
+             "This section is in<span title='a>b'>form</span>ative.", html_form),
+            ("link-wrapped-comment", "This section is [informa<!-- x -->tive](u).", html_form),
+            ("hidden-element", "This section is informa<span hidden>x</span>tive.", html_form),
+            ("attribute-text",
+             'This section <span title="is informative">holds rules</span>.', html_form),
+            ("tag-beyond-paragraph", "a <? b\n\nThis section is informa<b></b>tive.\n\nc ?>",
+             html_form),
+            ("quoted-tag-paragraph", "> x <a title='This section\n> is informative'>y</a>",
+             html_form),
+            ("undecoded-reference", "This section is informa&xsplit;tive.", ref_form),
+            # Candidacy is decided from the letters in the folded forms: character
+            # references decoded, invisible characters dropped, compatibility forms folded,
+            # case ignored; each vector here is a candidate only through the named step.
+            ("candidate-reference-decoded", "This section is &#105;nforma<b></b>tive.",
+             html_form),
+            ("candidate-filler-dropped", "This section is informa\u3164<b></b>tive.",
+             html_form),
+            ("candidate-fullwidth-folded",
+             "This section is \uff49\uff4e\uff46\uff4f\uff52\uff4d\uff41<b></b>"
+             "\uff54\uff49\uff56\uff45.", html_form),
+            ("candidate-case-folded", "THIS SECTION IS INFORMA<B></B>TIVE.", html_form),
+            # The first and last pieces may be a suffix and a prefix of their runs, so the
+            # word embedded in a longer run is a candidate too, an over-fire (a rendered
+            # embedding has no word boundary and can mark nothing, but candidacy stays the
+            # wider, fail-closed reading).
+            ("candidate-word-embedded-over-fire", "See Marxinforma<b></b>tivexy here.",
+             html_form),
+            # Nothing in a candidate is masked, so no pairing of backticks, autolinks or
+            # targets can shield a construct: a backslash, an unequal backtick run, an
+            # autolink or a real code span before or around the markup changes nothing;
+            # markup-shaped text inside a real code span or a URI autolink is refused too,
+            # the named over-fires.
+            ("backslash-masks-nothing", "\\` This section is informa<b></b>tive. `",
+             html_form),
+            ("autolink-masks-nothing",
+             "See <https://e.org/`> this section is informa<b></b>tive `x`.", html_form),
+            ("unequal-backtick-runs-mask-nothing",
+             "`` This section is informa<b></b>tive. ` x", html_form),
+            ("code-span-not-masked-over-fire", "See `informa<b></b>tive` in a sample.",
+             html_form),
+            ("autolink-uri-refused-over-fire", "This section is <informative:x>.",
+             html_form),
+            ("autolink-split-refused", "This section is informa<tive:x>tive.", html_form),
+            # A control or format character in a candidate is refused, never dropped and
+            # read around.
+            ("control-character-split", "This section is informa\x01tive.", ctrl_form),
+            ("format-character-split", "This section is informa\u200btive.", fmt_form),
+            # A "](" or "][" that opens no plain target is refused in any candidate: the
+            # joined reading form cannot remove it, so the declaration it splits (CommonMark
+            # reads nested or escaped parentheses and quoted titles into the destination or
+            # title and renders the link text) would otherwise stay unread. The round-7
+            # revision refused these only in a heading title or an informative section, a
+            # then-disclosed residual, so each target-split vector fails on it.
+            ("target-nested-parentheses-split", "This section is [informa](/u(x))tive.",
+             target_form),
+            ("target-escaped-parenthesis-split", "This section is [informa](/u\\)x)tive.",
+             target_form),
+            ("target-quoted-title-parenthesis-split",
+             'This section is [informa](/u "a)b")tive.', target_form),
+            ("target-angle-destination-split", "This section is [informa](<u x>)tive.",
+             target_form),
+            # Backtick-in-target compositions (PR #481 QA round 6): a backtick inside a
+            # destination, title or reference label desynchronised the old code-span
+            # masking; with nothing masked each hidden construct is read directly.
+            ("target-title-backtick-comment",
+             '[a](/u "`") This section is informa<!-- x -->tive. [b](/v "`")', html_form),
+            ("target-title-backtick-break",
+             '[a](/u "`") This section<br>is informative. [b](/v "`")', html_form),
+            ("target-title-backtick-hidden-span",
+             '[a](/u "`") This section is informa<span hidden>x</span>tive. [b](/v "`")',
+             html_form),
+            ("target-title-backtick-trailing",
+             '[x](/u "`") This section is informa<b></b>tive. `', html_form),
+            ("target-destination-backtick",
+             "[a](/u`) This section is informa<!-- x -->tive. [b](/v`)", html_form),
+            ("target-angle-destination-backtick",
+             "[a](<`>) This section is informa<!-- x -->tive. [b](<`>)", html_form),
+            ("image-destination-backtick",
+             "![a](/u`) This section is informa<!-- x -->tive. ![b](/v`)", html_form),
+            ("image-title-backtick",
+             '![a](/u "`") This section is informa<!-- x -->tive. ![b](/v "`")', html_form),
+            ("reference-label-backtick",
+             "[a][r`] This section is informa<!-- x -->tive. [b][s`]", html_form),
+            # PR #481 QA round-7 reproductions, verbatim: on the round-7 revision each
+            # escaped with zero findings (a false URI autolink holding a control character,
+            # or an unread email autolink holding a backtick, paired backticks differently
+            # from CommonMark and masked the comment or tag that hid the declaration); with
+            # nothing masked each is refused.
+            ("round7-autolink-control-backtick",
+             "See <http:x\x01`> a `This section is informa<!-- x -->tive. `", html_form),
+            ("round7-control-in-autolink-url",
+             "x <http://e.org/\x01`> x ` This section is informa<!-- x -->tive. `",
+             html_form),
+            ("round7-email-autolink-backtick",
+             "<1`x@e.org> This section is informa<!-- x -->tive. <2`y@e.org>", html_form),
+            ("round7-email-dot-local",
+             "<.`@e.org> This section is informa<!-- x -->tive. <.`@f.org>", html_form),
+            ("round7-email-break-split",
+             "<1`x@e.org> This section<br>is informative. <2`y@e.org>", html_form),
+            ("round7-email-trailing-backtick",
+             "<1`x@e.org> This section is informa<b></b>tive. `", html_form),
+            # Round-7 target-region probes, verbatim: each held a backtick in a region the
+            # old judge had to settle; the judge is gone and each is refused directly.
+            ("round7-angle-target-backtick",
+             "[a](<)`>) This section is informa<!-- x -->tive. [b](<)`>)", html_form),
+            ("round7-paren-destination-backtick",
+             "[a](/u(x)`) This section is informa<!-- x -->tive. [b](/v(x)`)", html_form),
+            ("round7-escaped-destination-backtick",
+             "[a](/u\\)`) This section is informa<!-- x -->tive. [b](/v\\)`)",
+             html_form),
+            ("round7-title-quote-backtick",
+             "[a](/u ')`') This section is informa<!-- x -->tive. [b](/v ')`')",
+             html_form)):
+        check("spec-informative-candidate-red-" + name, lambda m=notes + planted + plant,
+              w=form: any("section Z notes" in f and could_hide in f and ("carries " + w) in f
+                          for f in informative_findings(m)))
+    # The refusal names the paragraph line holding the construct, not the paragraph's first
+    # line.
+    second_line = notes + "This section\nis informa<b></b>tive." + plant
+    check("spec-informative-candidate-red-second-line", lambda m=second_line: any(
+        ("paragraph at line {} carries".format(m[:m.index("is informa<")].count("\n") + 1)) in f
+        for f in informative_findings(m)))
+    # Round-9 allowlist vectors (PR #481 QA round 8): a candidate is read only where every
+    # character of it is plain prose, and each character outside the set is refused by
+    # name. Every vector here fails on the round-8 parent, which read the planted text with
+    # no refusal finding, so each pins a round-9 behaviour change; and each fails again
+    # when its character class alone is returned to the allowlist, so each excluded class
+    # is pinned by a vector that holds no other refused character (the image and email
+    # vectors also pin their forms through "[" and "<"). An image renders as its alt
+    # attribute, never as shown text, so the round-8 joined form glued the alt letters into
+    # the word, no per-form refusal fired, and a declaration hid with zero findings; the
+    # "[" refusal covers every image and link form. A digit-led email autolink (<1@e.org>)
+    # opens with no letter, "/", "!" or "?", so the round-8 "<" form missed it; the
+    # allowlist refuses every "<". The "##Z (informative)" paragraphs moved here from the
+    # commonmark greens: CommonMark reads them as paragraphs (no space after the hashes; at
+    # most six hashes), a renderer that reads them as headings shows an informative heading
+    # the guard missed, and their "#" is now refused (the could-hide paragraph finding
+    # also pins that the guard keeps reading them as paragraphs).
+    for name, planted, ch in (
+            ("image-alt-split", "This section is informa![.](/1px.png)tive.", "["),
+            ("image-empty-alt", "This section is informa![](/1px.png)tive.", "["),
+            ("plain-link-split", "This section is [informa](/u)tive.", "["),
+            ("plain-reference-split", "This section is [informa][r]tive.", "["),
+            ("email-autolink-digit-local",
+             "See <1@e.org>: this section is informative.", "<"),
+            ("at-sign", "This section is informative; mail x@e.org.", "@"),
+            ("greater-than", "This section is informa>tive.", ">"),
+            ("code-span-backtick", "See `informative` in a sample.", "`"),
+            ("emphasis-asterisk", "This section is informa**tive**.", "*"),
+            ("emphasis-underscore", "This section is _informative_.", "_"),
+            ("strikethrough-tilde", "This section is informa~~x~~tive.", "~"),
+            ("backslash", "This section is informa\\tive.", "\\"),
+            ("plain-ampersand", "This section is informative for AT&T.", "&"),
+            ("decoded-reference", "This section is &#105;nformative.", "&"),
+            ("hash-heading-no-separator", "##Z (informative)", "#"),
+            ("hash-heading-seven-hashes", "####### Z (informative)", "#"),
+            ("equals-sign", "This section is informa=tive.", "="),
+            ("non-ascii-symbol", "This section is informa\u2606tive.", "\u2606"),
+            ("non-ascii-punctuation", "This section is informa\u2010tive.", "\u2010"),
+            ("non-ascii-space", "This section is informa\u00a0tive.", "\u00a0"),
+            ("non-ascii-digit", "This section is informative \u0661.", "\u0661"),
+            ("dotless-i-split", "This section is \u0131nforma<b></b>tive.", "<")):
+        check("spec-informative-allowlist-red-" + name, lambda m=notes + planted + plant,
+              w=_char_label(ch): any("section Z notes" in f and could_hide in f
+                                     and ("carries " + w) in f
+                                     for f in informative_findings(m)))
+    # Round-10 vectors (PR #481 QA round 9): inside a candidate a letter is read only if it
+    # is ASCII, every non-ASCII character, letters included, is refused by name, and in
+    # candidacy each non-ASCII letter stands for any letter of the word. Each red vector
+    # fails on the round-9 parent and on the round-8 one, which admitted every Unicode
+    # letter: there U+0130 case folded to "i" and a combining dot, so a plain declaration
+    # spelled with it was neither read nor refused; a Hangul filler, a letter the reading
+    # forms drop, stood unseen for the space between two words; a letter a Unicode fold
+    # expands (sharp s, a ligature) or an accented letter passed unnamed; and a letter no
+    # fold reads as one of the word's (an accented or Cyrillic i) made no candidate.
+    # body-dotless-i moved here from the marker reds: the ASCII fold no longer reads U+0131
+    # as "i", and its refusal now holds the text.
+    for name, planted, ch in (
+            ("dotted-capital-i-word", "This section is \u0130nformative.", "\u0130"),
+            ("dotted-capital-i-uppercase", "TH\u0130S SECTION IS INFORMATIVE.", "\u0130"),
+            ("dotted-capital-i-subject", "Th\u0130s section is informative.", "\u0130"),
+            ("body-dotless-i", "This section is \u0131nformative.", "\u0131"),
+            ("hangul-filler-3164", "This section is\u3164informative.", "\u3164"),
+            ("hangul-filler-ffa0", "This section\uffa0is informative.", "\uffa0"),
+            ("hangul-filler-115f", "This\u115fsection is informative.", "\u115f"),
+            ("hangul-filler-1160", "This section is\u1160informative.", "\u1160"),
+            ("sharp-s-in-word", "This section is informa\u00dfive.", "\u00df"),
+            ("sharp-s", "This section is informative; see Stra\u00dfe 1.", "\u00df"),
+            ("ligature-fi", "This section is informative for each \ufb01le.", "\ufb01"),
+            ("accented-letter", "This section is informative for the caf\u00e9.", "\u00e9"),
+            ("accented-letter-in-word", "This section is \u00eenformative.", "\u00ee"),
+            ("cyrillic-look-alike", "This section is \u0456nformative.", "\u0456")):
+        check("spec-informative-ascii-red-" + name, lambda m=notes + planted + plant,
+              w=_char_label(ch): any("section Z notes" in f and could_hide in f
+                                     and ("carries " + w) in f
+                                     for f in informative_findings(m)))
+    for name, planted, ch in (
+            ("dotted-capital-i", "## Z (\u0130NFORMATIVE)", "\u0130"),
+            ("dotless-i", "## Z (\u0131nformative)", "\u0131"),
+            ("cyrillic-look-alike", "## Z (\u0456nformative)", "\u0456"),
+            ("hangul-filler", "## Z\u3164(informative)", "\u3164")):
+        check("spec-informative-ascii-title-red-" + name, lambda m=normative + planted + plant,
+              w=_char_label(ch): any(f.startswith("spec informative guard: heading at line ")
+                                     and "could hide" in f and ("carries " + w) in f
+                                     for f in informative_findings(m)))
+    # Round-11 vectors (PR #481 QA round 10): a heading title and a body are each read for
+    # both marker forms, "(informative)" and the declaration, and a title also for the word
+    # set off as a label. Each red vector is plain ASCII and gave zero findings on the
+    # round-10 parent and the two revisions before it: a title stating the declaration
+    # (ATX, after a label, at a deeper level, setext), a title holding the word as a label,
+    # and a body holding "(informative)" were candidates of plain prose, so nothing refused
+    # them, and no marker the parent read held them. Each finding names the section the
+    # marker makes informative.
+    for name, planted, section in (
+            ("title-declaration", normative + "## This section is informative" + plant,
+             "This section is informative"),
+            ("title-declaration-after-label",
+             normative + "## Z: this section is informative" + plant,
+             "Z: this section is informative"),
+            ("title-declaration-level-3", notes + "### This section is informative" + plant,
+             "This section is informative"),
+            ("title-declaration-setext", normative + "This section is informative\n---" + plant,
+             "This section is informative"),
+            ("title-label-dash", normative + "## Z - Informative" + plant, "Z - Informative"),
+            ("title-label-leading", normative + "## Informative: Z notes" + plant,
+             "Informative: Z notes"),
+            ("body-parenthesized", notes + "(informative)" + plant, "Z notes"),
+            ("body-parenthesized-in-sentence",
+             notes + "These notes (informative) give background." + plant, "Z notes"),
+            ("body-parenthesized-quoted", notes + "> (Informative)" + plant, "Z notes")):
+        check("spec-informative-both-forms-red-" + name, lambda m=planted, s=section: (
+            "spec informative section {} carries requirement keyword MUST".format(s)
+            in informative_findings(m)))
+    # A title is read for the label form, a body is not, and the word among other words of
+    # a title marks nothing: each green is a plain candidate that holds no marker its place
+    # reads (the commonmark and container greens that once held "Z (informative)" in a body
+    # now hold the title-only label "Z - informative" for the same reason).
+    for name, planted in (
+            ("body-label", notes + "Z - informative" + stays),
+            ("body-label-leading", notes + "Informative: background only." + stays),
+            ("title-word-in-note", normative + "## Z (informed by the informative note)"
+             + stays)):
+        check("spec-informative-both-forms-green-" + name,
+              lambda m=planted: not informative_findings(m))
+    # Emoji shortcodes (PR #481 QA round 10): GitHub shows infor:m:ative with an emoji for
+    # :m:, so a candidate of allowed characters alone could show a different word; each
+    # red gave zero findings on the round-10 parent, and each now names the shortcode. A
+    # shortcode in a paragraph that is no candidate is not scanned.
+    for name, planted in (
+            ("paragraph-m", notes + "This section is infor:m:ative." + plant),
+            ("paragraph-o", notes + "This section is inf:o:rmative." + plant)):
+        check("spec-informative-shortcode-red-" + name, lambda m=planted: any(
+            "section Z notes" in f and could_hide in f and "carries an emoji shortcode ':" in f
+            for f in informative_findings(m)))
+    check("spec-informative-shortcode-title-red", lambda: any(
+        f.startswith("spec informative guard: heading at line ") and "could hide" in f
+        and "carries an emoji shortcode ':m:ative)'" in f
+        for f in informative_findings(normative + "## Z (infor:m:ative)" + plant)))
+    check("spec-informative-shortcode-green-not-candidate",
+          lambda: not informative_findings(notes + "Mark it :m: or :o: as needed." + stays))
+    # The reader shares the ASCII case fold (_fold_case) with candidacy, and each vector
+    # here fails where the reader alone uses a Unicode fold (str.casefold), in each
+    # direction. A Unicode fold reads U+0345 as a Greek iota, a letter, so the title
+    # "Z", U+0345, "informative" no longer sets the word off as a label and the section is
+    # no longer marked; and it expands U+0130 to "i" and a combining dot, which ends a word,
+    # so "This" after U+0130 would read as a declaration the ASCII fold does not read.
+    # Each text is a candidate and its non-ASCII character is refused either way.
+    check("spec-informative-reader-fold-red-combining-edge", lambda m=normative
+          + "## Z \u0345informative" + plant: (
+              "spec informative section Z \u0345informative carries requirement keyword MUST"
+              in informative_findings(m) and any(
+                  ("carries " + _char_label("\u0345")) in f for f in informative_findings(m))))
+    check("spec-informative-reader-fold-no-expansion", lambda m=notes
+          + "\u0130This section is informative." + plant: (
+              [f for f in informative_findings(m) if "requirement keyword" in f] == []
+              and any(("carries " + _char_label("\u0130")) in f
+                      for f in informative_findings(m))))
+    # A paragraph or heading title holding non-ASCII letters is no candidate, and is not
+    # refused for them, where its letters assemble no "informative" with each non-ASCII
+    # letter counted as any letter.
+    for name, planted in (
+            ("accented-and-sharp-s", notes + "The caf\u00e9 serves Stra\u00dfe guests."),
+            ("hangul-filler", notes + "Keep\u3164this list short."),
+            ("title-accented", normative + "## Z caf\u00e9 notes")):
+        check("spec-informative-ascii-green-" + name,
+              lambda m=planted + stays: not informative_findings(m))
+    for name, planted in (
+            ("code-span-tag", "The layout names `<type>` directories."),
+            ("code-span-reference", "Write `&xsplit;` for the raw form."),
+            ("multiline-code-span", "A `pin\nholds <type>` across lines."),
+            ("autolink-paragraph", "See <https://example.org/guide> for more."),
+            ("less-than-no-letter", "Keep a < b and a <= b ordered."),
+            ("decoded-reference", "Pins use &amp; and &#105; forms."),
+            ("plain-ampersand", "Pins cover AT&T and a & b."),
+            ("escaped-less-than", "Write \\<type> for a placeholder."),
+            ("plain-target-then-code-span",
+             "See [the guide](docs/a.md) and read `<type>` there."),
+            ("quoted-title-no-backtick", 'See [a](/u "t") for details.'),
+            ("bracket-no-link-code-span", "x](`) a ` <b> `"),
+            ("code-span-after-backtick-target", "See [a](/u`) and the `<type>` key."),
+            ("code-span-after-quoted-title", 'See [a](/u "t") and the `<type>` key.'),
+            ("informed-break-tag", "This section<br>is informed by Appendix E."),
+            ("informed-quoted-attribute",
+             "This section is in<span title='a>b'>form</span>ed by Appendix E."),
+            ("information-word-code-span", "The information lives in `<type>` keys."),
+            ("control-character-prose", "Keep a\x01b and c<d ordered."),
+            ("undecoded-reference-prose", "Write &xsplit; raw in prose.")):
+        check("spec-informative-candidate-green-" + name,
+              lambda m=notes + planted + stays: not informative_findings(m))
+    # The default entry runs the informative guard: over a spec with a planted violation,
+    # main([]) is red with the guard's own finding, so unwiring informative_findings from
+    # main() is a named failure here; the unmodified baseline stays green with no output.
+    with tempfile.TemporaryDirectory(prefix="opf-homes-main-") as tmp:
+        planted_spec = Path(tmp) / "OPF-SPEC.md"
+        planted_spec.write_text(text.replace(
+            informative_anchor, informative_anchor + " A checker MUST share each record.", 1),
+            encoding="utf-8")
+        with patch.object(module, "SPEC", planted_spec):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                planted_rc = main([])
+        check("main-default-entry-runs-informative-guard",
+              lambda r=planted_rc, out=buf.getvalue():
+              r == 1 and "carries requirement keyword MUST" in out)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        baseline_rc = main([])
+    check("main-default-entry-green-baseline", lambda r=baseline_rc, out=buf.getvalue():
+          r == 0 and out == "")
     # Section 2 keyword lint: synthetic cases, then every registry marker and keyword flipped,
     # then named fix-5a rewrites reverted.
     check("spec-keywords", lambda: not keyword_findings())
@@ -2827,6 +6112,9 @@ def _self_test_vectors():
         ("A phase inventory MAY be published.", False),
         (_D("The closed kind vocabulary is import."), False),
         (_D("A lease MUST NOT be seized."), True),
+        # A quotation entry is not linted, with a keyword or without one.
+        (_Q("> Retired text, quoted and not in force: > A lease MUST NOT be seized."), False),
+        (_Q("> Retired text, quoted and not in force: > A lease is never seized."), False),
     )
     for fragment, red in lint_cases:
         check("keyword-lint-case-{!r}".format(str(fragment)), lambda f=fragment, r=red:
@@ -2875,8 +6163,9 @@ def main(argv=None):
         if args:
             print("check_opf_homes: unexpected arguments", file=sys.stderr)
             return 2
-        findings = (contract_findings(SPEC.read_text(encoding="utf-8")) + keyword_findings()
-                    + surface_findings())
+        spec_text = SPEC.read_text(encoding="utf-8")
+        findings = (contract_findings(spec_text) + keyword_findings()
+                    + surface_findings() + informative_findings(spec_text))
         for finding in findings:
             print("check_opf_homes: " + finding)
         return 1 if findings else 0
@@ -3155,10 +6444,15 @@ _ENTRY_WIRING = '''if __name__ == "__main__":
 # wrapper, so sys.exit(self_test()) still settles fail-closed and ends with os._exit when this file is
 # the process entry.
 _SELF_TEST_WIRING = '''def self_test():
-    if __name__ == "__main__":
+    if _RUN_AS_ENTRY:
         _fail_closed_main(_self_test)
     return _self_test()
 '''
+
+# The one binding of _RUN_AS_ENTRY, checked by _entry_wiring_failures: a rebinding (a constant, a later
+# store) would route an entry run of self_test around _fail_closed_main.
+_ENTRY_FLAG_WIRING = '_RUN_AS_ENTRY = __name__ == "__main__"\n'
+
 
 def _entry_wiring_failures():
     """One failure string per entry-wiring requirement this file's own source misses (see _ENTRY_WIRING)."""
@@ -3181,6 +6475,12 @@ def _entry_wiring_failures():
     if len(wrappers) != 1 or [ast.dump(node) for node in body] != [ast.dump(node) for node in expected_body]:
         failures.append("fault-channel/entry-wiring: self_test is not the entry-aware wrapper (the "
                         "canonical sys.exit(self_test()) must settle through _fail_closed_main)")
+    stores = [node for node in ast.walk(tree)
+              if isinstance(node, ast.Name) and node.id == "_RUN_AS_ENTRY" and not isinstance(node.ctx, ast.Load)]
+    flag = ast.dump(ast.parse(_ENTRY_FLAG_WIRING).body[0])
+    if len(stores) != 1 or sum(ast.dump(node) == flag for node in tree.body) != 1:
+        failures.append("fault-channel/entry-wiring: _RUN_AS_ENTRY is not bound exactly once, at module "
+                        "scope, as the __main__ comparison")
     return failures
 
 def _fault_channel_vectors():

@@ -15,11 +15,16 @@ archive intake retains its fixed legacy shape and has no manifest contract.
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: _opf_worklog_regressions.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: _opf_worklog_regressions.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import contextlib
 import os
@@ -355,7 +360,8 @@ def _manifest_intake_regressions(check):
         ("parse-value", "parse", ValueError("fixture integer limit"),
          "cannot parse m/manifest.toml (fixture integer limit)"),
         ("parse-recursion", "parse", RecursionError("fixture nesting limit"),
-         "cannot parse m/manifest.toml (input nesting is too deep; present but unparseable): fixture nesting limit"),
+         "cannot parse m/manifest.toml (input nesting is too deep or a dotted key has too many parts; present but "
+         "unparseable): fixture nesting limit"),
         ("top-level-type", "parse", [], "manifest is not a table"),
         ("opf-absent", "read", b"schema = 1\n", identify),
         ("opf-not-table", "read", b"opf = 1\n", identify),
