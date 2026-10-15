@@ -94,24 +94,33 @@ Two roots organize every path in this standard:
 
 ### 4.2 Layout overview
 
-Base spec 1.3.0 defines adoption and the separate imported series on homes 1. The 1.3.0
+Base spec 1.3.0 defines adoption and the separate imported series, and they activate together with
+homes 2: a store carries the 1.3.0 requirements only through the homes-2 declaration below, which
+includes them, never by declaring `spec_version = "1.3.0"`, and no upgrade carries a store into
+them (section 9.2). The 1.3.0
 requirements in sections 4.2, 4.5, 6.1, 8, 9.1, 9.2, 11, 12, 14, and 16.1 are a target contract;
 they do not claim that the reference tooling has activated adoption, imported-series validation,
 or the import writer.
 Activation MUST include deterministic doctor coverage before a writer accepts the new format.
 For an upgrade-capable implementation (section 16.1), activation MUST also include the tested
-upgrade in section 9.2; a fresh-only implementation activates without it and MUST instead include
-the section 16.1 admission check and its refusal evidence. Homes 2 is a separate, later activation.
+refusal of a homes-1 store below, since no upgrade carries a store into homes 2; a fresh-only
+implementation activates without it and MUST instead include the section 16.1 admission check and
+its refusal evidence. Adoption, the imported series and the import writer activate together with
+homes 2, in one activation, never as separate later steps.
 
 The homes-2 contract below is for `spec_version = "2.0.0"` and `[opf].homes = 2`.
 The current reference tooling reserves these names and implements their homes-2 boundary checks. It still
 supports `1.2.0` and initializes legacy homes (generation 1, with no `homes` key); writers retain their
 legacy paths until homes 2 is activated. Homes 2 has no homes migration: a store is at homes 2 only
 when it is created there, no homes-1 store is migrated to homes 2, and once homes 2 is activated
-`opf upgrade` MUST refuse a homes-1 store by name rather than migrate it. The section 9 manifest example
-describes the 1.3.0 target on legacy homes. The homes-2 requirements in sections 4.2, 12, 14.1,
-14.2, and 15, and the section 9.2 refusal of a homes-1 store, describe the target contract, not an
-activated runtime guarantee.
+`opf upgrade` MUST refuse a homes-1 store by name rather than migrate it. Adoption and import have
+no homes-1 path either: once homes 2 is activated, `opf adopt`, `opf import` and
+`opf record import` MUST each refuse a homes-1 store by name, so a homes-1 store keeps its legacy
+grading and never gains the 1.3.0 requirements. The section 9 manifest example shows the 1.3.0
+fields under `spec_version = "1.3.0"` on legacy homes for illustration only; a store declares them
+only through the homes-2 declaration. The homes-2 requirements in sections 4.2, 12, 14.1, 14.2,
+and 15, and the refusals of a homes-1 store in this section and section 9.2, describe the target
+contract, not an activated runtime guarantee.
 
 ```
 <product repository root>/
@@ -174,17 +183,18 @@ per-record layout (section 9) additionally places one file per record under
 
 The imported files are registered managed leaves beside the clean-series files, using the same
 enabled-type roster except `legacy_fragment`; `worklog` uses `worklog.imported.toml` instead of an
-imported index. Their manifest, emitter, upgrade and containment registrations MUST agree. A 1.3.0
-`opf init` and the section 9.2 upgrade MUST create the imported leaves for every enabled type
+imported index. Their manifest, emitter, upgrade and containment registrations MUST agree. A
+homes-2 `opf init` MUST create the imported leaves for every enabled type
 except `legacy_fragment`, create-only and empty; in a store that declares `spec_version` 1.3.0 or
 later, enabling a further type or module other than `legacy_fragment` later MUST create its imported
 leaf in the same act as its clean index.
 `legacy_fragment` has no imported leaf and no imported counter row, since the imported series
-refuses the `LF` namespace (section 8.2). A 1.3.0 `opf init` MUST write at zero the imported
+refuses the `LF` namespace (section 8.2). A homes-2 `opf init` MUST write at zero the imported
 counter row of each type that has an imported leaf (section 8.2). In a store that declares
 `spec_version` 1.3.0 or later, enabling a further type or module other than `legacy_fragment`
 MUST also add its imported counter row in the same act as its clean index, at zero only where no
-imported ancestry exists, as in the section 9.2 upgrade. Both counter-row duties follow from the
+imported ancestry exists and otherwise at the largest `<n>` of that namespace's
+`imported:<NS>-<n>` IDs. Both counter-row duties follow from the
 section 8.2 rule that requires the imported counter rows once the store declares `spec_version`
 1.3.0 or later. They are machine
 records, distinct from the original-source evidence under `.working/imported/`. The first
@@ -209,8 +219,8 @@ validity or filesystem safety. File operands MUST use canonical contained relati
 dot, or parent components, absolute/drive/backslash forms, control characters, or line separators.
 
 Homes-2 init, and any upgrade of a store already at homes 2, MUST render this managed block into
-`.working/.gitignore` from the topology constants; the reference tooling provides the renderer and
-drift gate but installs no block:
+`.working/.gitignore` from the topology constants; until homes 2 is activated, the reference
+tooling provides the renderer and drift gate but installs no block:
 
 ```gitignore
 # >>> opf-managed >>>
@@ -225,7 +235,9 @@ untracking change, never silent index mutation. The block travels with the store
 indexed-ignore candidate set. Gitignore is not access control: `git add -f` can stage ignored
 state. Journals are machine-local even after completion; a clone without them cannot recover those
 transactions, and requested recovery MUST fail closed on a missing journal. Containment and doctor
-exclude journals and make no recovery claim; a rogue file there is outside their coverage.
+exclude journals and make no recovery claim, with one exception: the doctor reads the reservations
+under `journals/<kind>/allocations/` read-only, and only for the section 8.2 counter checks; any
+other journal content, a rogue file included, is outside their coverage.
 
 Under pre-1.3.0 tooling, a store that has not started an adoption keeps, within that tooling's
 own version ceiling, its legacy grading: the homes-2 names are ordinary store paths there, graded,
@@ -285,13 +297,14 @@ other crafted self-consistent bundle, is outside the accident-detection model, c
 the rest of OPF. Tooling
 that carries the section 9.2 ceiling refuses an above-ceiling declaration as a fail-closed
 INVALID finding; tooling released before that ceiling grades such a store as legacy instead, a
-disclosed residual of section 9.2. Activated 1.3.0
-tooling MUST register on homes 1 the imported managed leaves, the adoption archive
-`.working/archive/adoption/<run-id>/`, the Move destination `.working/archive/moved/`, and the
-evidence bundles `.working/imported/<kind>/<run-id>/`, all recognized by containment as OPF
-control area, and MUST add the four section 8.3 imported-series checks to the doctor roster.
-C-EVIDENCE-ENUM MUST NOT run or read anything until homes 2 is activated; on homes 1 the
-section 14.1 completion checks MUST carry the evidence digest verification themselves. The boundary
+disclosed residual of section 9.2. Tooling that activates homes 2 grades every homes-1 store as
+above, legacy and adoption grading alike, since a homes-1 store never gains the 1.3.0
+requirements (section 9.2); it MUST add the four section 8.3 imported-series checks to the
+doctor roster of a store at homes 2 alone, where the boundary below grades the adoption and
+import control areas.
+C-EVIDENCE-ENUM MUST NOT run or read anything until homes 2 is activated, and at homes 2 the
+section 14.1 completion checks MUST still carry their own evidence digest verification beside it
+(section 14.1). The boundary
 below applies only to a store that declares both `homes = 2` and `spec_version = "2.0.0"` once
 the tooling activates that generation.
 
@@ -929,7 +942,8 @@ each enabled type except `legacy_fragment`, since the imported series refuses `L
 `"imported:LF"` row.
 The same rule includes `"imported:WL"`; clean release spans MUST tile only the clean `WL` number
 line. The doctor MUST require the imported counter rows once the store declares `spec_version`
-1.3.0 or later, whether a 1.3.0 `opf init` or the section 9.2 upgrade created them. Uniqueness,
+1.3.0 or later, whether a homes-2 `opf init` wrote them at zero or a re-adoption seeded them from
+its ancestral snapshot. Uniqueness,
 counter high-water, contiguity and no-deletion checks MUST evaluate each series independently;
 allocation MUST increment its counter under the store's lock as one atomic claim, so no gap between
 choosing and reserving can double-allocate. Counters MUST NOT be reset and IDs
@@ -942,7 +956,8 @@ At homes 2 the claim additionally begins with one irrevocable reservation,
 `journals/<kind>/allocations/<run-id>.toml` (sections 4.2 and 8.8), which MUST hold exactly
 `format = "opf.journal.allocation/v1"`, the run's `kind`, `run_id` and `operation_id`, and a
 non-empty `[claims]` table mapping each claimed counter key, a record namespace or, for a run of
-the import engine, a quoted imported-series `"imported:<NS>"` key, to that run's new high-water
+the import engine (kind `import` or `ingest`, section 4.2), a quoted imported-series
+`"imported:<NS>"` key, to that run's new high-water
 value, an integer of at least 1 and at most `2**63 - 1` so every conforming TOML reader can parse
 it. A reservation MUST NOT be rewritten, and a reservation request finding an existing entry for
 the same run MUST be refused unless the entry reads back byte-identical to the exact payload the
@@ -951,7 +966,10 @@ relying on it; a refusal is not evidence that the run holds its numbers. The nex
 applies per series key: at homes 2 the next ID under a counter key, the clean `<NS>` and quoted
 `"imported:<NS>"` number lines independently, is one more than the maximum of the `counters.toml`
 high-water and every reservation's `[claims]` value for that counter key, so recovery MUST treat
-a reserved number as issued even where no published record carries it.
+a reserved number as issued even where no published record carries it. The doctor MUST likewise
+treat a reserved number as issued wherever its checks would otherwise report that number missing,
+reading each reservation read-only and for that purpose alone (section 4.2); an unreadable or
+malformed reservation MUST yield cannot-evaluate.
 
 ### 8.3 The record envelope
 
@@ -1333,8 +1351,9 @@ guarantees:
    doctor.
 6. Every rewritten file MUST be published in one crash-durable journaled transaction, so an
    interruption leaves the store exactly at its prestate or exactly at its poststate once
-   reconciled. The reference tooling keeps that journal under `.aiqt/record/journal` at homes 1
-   and under `.working/journals/record/journal` at homes 2.
+   reconciled. The reference tooling keeps the journal of `create`, `transition`,
+   `done-with-receipt` and `worklog-append` under `.aiqt/record/journal` at homes 1 and under
+   `.working/journals/record/journal` at homes 2; import keeps its own journal (below).
 7. The declared views are rendered.
    Then a full doctor MUST report VALID; a failure leaves the change for review with recovery
    advice scoped to the planned paths. One exception applies to a status change: doctor compares
@@ -1357,8 +1376,11 @@ delta check, cleanliness gate, lease and reconcile-first recovery. Its atomic op
 imported counter rows first, the touched `<type>.imported.index.toml` and
 `worklog.imported.toml` files, and the evidence bundle: the exact original at
 `.working/imported/import/<run-id>/originals/<source-path>` and `inventory.toml` in the retained
-`opf.evidence.inventory/v1` format (section 4.2). The journal remains
-`.aiqt/record/journal` at homes 1 and `.working/journals/record/journal` at homes 2. It MUST NOT
+`opf.evidence.inventory/v1` format (section 4.2). Import runs only at homes 2 (section 4.2), and
+it MUST run as kind `import`: one `imp-` run ID names its evidence bundle
+`.working/imported/import/<run-id>/`, its transaction in the journal home
+`.working/journals/import/` and its reservation `.working/journals/import/allocations/<run-id>.toml`,
+which may claim the imported-series keys (section 8.2). It MUST NOT
 rewrite clean records or clean counters.
 
 Import MUST refuse with exit 2 on a non-importer actor, absent or invalid provenance, a
@@ -1552,12 +1574,16 @@ implementation's class.
 ### 9.2 Store schema upgrades
 
 The homes-2 generation is declared by `spec_version = "2.0.0"` with required integer
-`[opf].homes = 2`, and a store is at homes 2 only when it is created there (section 4.2).
+`[opf].homes = 2`, which carries the base 1.3.0 requirements, and a store is at homes 2 only when
+it is created there (section 4.2).
 Absent or `1` denotes legacy homes; unknown future generations MUST be refused.
 The homes-2 declaration does not itself change the runtime supported version or init format.
 This section defines no homes-generation upgrade: no homes-1 store is migrated to homes 2 and no
 OPF control area is relocated for the homes generation, and once homes 2 is activated
 `opf upgrade` MUST refuse a homes-1 store by name rather than migrate it (section 4.2).
+Nor does it define an upgrade into base 1.3.0, whose requirements only the homes-2 declaration
+carries: a homes-1 store never gains them, and once homes 2 is activated `opf adopt`, `opf import`
+and `opf record import` refuse a homes-1 store by name as well (section 4.2).
 Unproven legacy `.archive/` entries MUST remain in place with a standing finding until
 dispositioned.
 
@@ -1565,8 +1591,9 @@ A base-schema version bump MUST ship a tested, in-place store-schema upgrade (`o
 least one published upgrade-capable implementation (section 16.1), the reference tooling, so that a
 store below the new version has an upgrade path once that upgrade activates; the path holds only
 within this section's preconditions and refusals and that implementation's disclosed residuals.
-The bump to the homes-2 declaration (`spec_version = "2.0.0"` with `[opf].homes = 2`) is the one
-exception: it ships no upgrade, and a store below it has no upgrade path into homes 2 (section 4.2).
+The bump to the homes-2 declaration (`spec_version = "2.0.0"` with `[opf].homes = 2`), which
+carries the base 1.3.0 requirements, is the one exception: it ships no upgrade, and a store below
+it has no upgrade path into homes 2 or into those requirements (section 4.2).
 Every requirement of this section on an upgrade, its deltas, preconditions, report, refusals, and
 remedies binds an upgrade-capable implementation; a fresh-only implementation implements none of
 them and MUST instead refuse under section 16.1. Every implementation class MUST apply the version
@@ -1628,45 +1655,11 @@ when present and is never required, so a store without it stays valid. For the 1
 the allowed schema delta is the `spec_version` bump alone: no other manifest field, schema file, or
 counter changes, and the upgrade MUST NOT create provenance for an existing store (none is ever
 fabricated). Declared views are then regenerated, so a stale committed view can change. A 1.0.0
-store takes the 1.0.0 delta above directly to 1.2.0.
+store takes the 1.0.0 delta above directly to 1.2.0. Repeated upgrade is a verified no-op only
+after full doctor VALID.
 
-For the 1.2.0 to 1.3.0 upgrade, the allowed schema delta is the version bump, registration and
-create-only initialization of missing imported managed leaves for enabled types other than
-`legacy_fragment`, and addition of missing imported counter rows at zero only where no imported
-ancestry exists, never an `"imported:LF"` row.
-Where imported ancestry exists in a namespace, the imported counter row added for it MUST hold the
-highest imported ID number in that namespace, the largest `<n>` of its `imported:<NS>-<n>` IDs.
-Existing records, evidence, clean counters and imported high-water values MUST be preserved;
-a populated collision, missing ancestral counter or unprovable prestate refuses.
-The upgrade MUST refuse before any write a store whose `[unmanaged]` entry equals or contains a
-discovery candidate (section 14.2), which an earlier store can carry, naming the entry and the
-candidate; the remedy is the adopter's own fresh plan re-dispositioning that candidate (section
-14.2), recorded before the upgrade is retried.
-The upgrade MUST NOT create historical records, adoption approval or provenance, MUST NOT change
-posture or import status, and MUST NOT add imported views.
-The bump changes no record's bytes, but it does change what a legacy importer-authored clean
-record confers, because the section 8.6 firewall keys on provenance: the upgrade report MUST
-enumerate every legacy importer-authored clean record whose current authority the firewall
-withdraws, naming each backlog item that leaves the actionability join, each block that stops
-granting a stop, each ratified `done` item whose only receipt is legacy importer-authored and
-so stops holding a valid receipt, and each record that ceases to be a current state under
-section 8.6, so that authority change is reported, never silent. Where a withdrawn authority
-would leave the post-upgrade doctor below VALID, a receipt-stripped `done` item included, the
-upgrade MUST refuse before any write, naming each such record and the remedy: a maintainer-authored clean record that restores or
-supersedes the withdrawn authority under section 8.6, for a receipt-stripped `done` item the
-section 8.6 `maintainer_decision` route, recorded before the upgrade is retried; every named
-remedy MUST be performable through the sanctioned writer without hand-editing canonical files.
-An unresolved legacy import MUST be reconciled under its original contract before upgrading;
-legacy LF records and evidence remain readable and MUST NOT be silently converted.
-A completed legacy import upgrades in place: its `import_status` MUST stay `"complete"`,
-substantiated by its preserved legacy run evidence under section 11, and adoption approval,
-receipt or provenance MUST NOT be fabricated for it.
-The bump also activates the homes-1 recognition of the adoption and import control paths and
-the four imported-series checks of section 4.2; the upgrade itself MUST NOT create such a folder.
-Earlier stores compose their applicable deltas with this delta; repeated upgrade is a verified
-no-op only after full doctor VALID.
-The 1.3.0 delta remains a target contract until a tested upgrade and its required readers
-activate; import writing is a separate later activation.
+No delta carries a store from 1.2.0 to 1.3.0 (section 4.2): a 1.2.0 store stays on homes 1,
+graded as section 4.2 describes, and never gains the 1.3.0 requirements.
 Declaring a spec_version above the tooling's supported version MUST be refused at validation
 as a fail-closed INVALID finding naming the tooling-upgrade remedy, never treated as supported;
 the 1.2.0 reference validator that ships this ceiling already refuses a 1.3.0 declaration with
@@ -1987,9 +1980,10 @@ source completes on those terms; import is never complete on a state that is not
 This proves source accounting and preservation, not byte-level mapping coverage or semantic
 fidelity. No writer-side leftover accounting is required.
 
-Clean-start adoption and import ship on homes 1 with explicit evidence coverage: their completion
-checks MUST re-read inventories and payload digests themselves, because C-EVIDENCE-ENUM is inactive
-until homes 2. The evidence-bundle format in section 4.2 is retained, including the import home
+Clean-start adoption and import ship together with homes 2 and never on homes 1 (section 4.2), with
+explicit evidence coverage: their completion checks MUST re-read inventories and payload digests
+themselves, as defence in depth beside C-EVIDENCE-ENUM rather than relying on it. The
+evidence-bundle format in section 4.2 is retained, including the import home
 `.working/imported/import/<run-id>/`. Preservation durability and digest verification MUST precede
 source removal, at apply for an archived occupying source and at recorded retirement for a frozen
 one, and every removal MUST run in a journaled, recoverable transaction. A source outside the
@@ -2216,8 +2210,11 @@ the section 8.6 authority firewall included, bind both classes.
 An upgrade-capable implementation meets every section 9.2 requirement for each earlier base version
 and generation and grades legacy state under sections 8.1, 8.6, 11, and 14.1. The reference tooling
 targets the upgrade-capable class: its `opf upgrade`, in the repository's reference code, carries a
-store from base 1.0.0 or 1.1.0 to base 1.2.0, within its disclosed residuals, and its upgrade into
-base 1.3.0 remains a target contract (section 9.2). A fresh-only implementation supports exactly
+store from base 1.0.0 or 1.1.0 to base 1.2.0, within its disclosed residuals, and it performs no
+upgrade into base 1.3.0 or homes 2, which section 9.2 does not define: the 1.3.0 requirements
+activate together with homes 2 on stores created there, and once homes 2 is activated the
+reference tooling refuses a homes-1 store by name for adoption, import and upgrade (section 4.2).
+A fresh-only implementation supports exactly
 one base `spec_version`, one homes generation, and one worklog storage generation, initializes
 stores directly at them, and implements no section 9.2 upgrade and no legacy-state grading.
 
@@ -2677,16 +2674,32 @@ The gates in this standard are strong where they are strong and say so where the
 - The unreleased worklog tail is mutable until release: an entry there MAY be corrected in place, a
   guarantee that rests on review and version-control history rather than machine enforcement; machine
   freezing and immutability begin at release cut.
-- On homes 1, under the section 4.2 target contract and only once activated 1.3.0 tooling
-  ships, the adoption and import control areas (`.working/imported/<kind>/<run-id>/`,
-  `.working/archive/adoption/<run-id>/` and `.working/archive/moved/`) are recognized by
-  containment but not re-enumerated by doctor: the completion checks verify their evidence
-  digests when they run, and C-EVIDENCE-ENUM is inactive until homes 2 (section 4.2), so a file
-  added or altered there after completion, a tampered retire preimage no record references
-  included, is outside doctor's coverage until homes 2 activates. This bullet discloses that
-  target contract's residual and claims no shipped tooling behaviour. Version-control history
-  over the tracked store is the control, and activated 1.3.0 tooling's C-IMPORTED-PROVENANCE
-  still re-verifies every preserved original an imported record references.
+- At homes 2, under the section 4.2 target contract, adoption and import run with
+  C-EVIDENCE-ENUM, which re-enumerates their control areas (`.working/imported/<kind>/<run-id>/`,
+  `.working/archive/adoption/<run-id>/` and `.working/archive/moved/`) on every doctor run, and
+  the section 14.1 completion checks still verify their evidence digests themselves when they
+  run; C-EVIDENCE-ENUM asserts membership, not authenticated actor history, and deleting a whole
+  bundle, inventory and payload together, is outside its local snapshot check (section 4.2). This
+  bullet discloses that target contract's residual and claims no shipped tooling behaviour.
+  Version-control history over the tracked store is the control, and C-IMPORTED-PROVENANCE still
+  re-verifies every preserved original an imported record references.
+- On homes 1, where adoption and import never activate (section 4.2), the doctor still gives the
+  section 4.2 adoption grading to a store whose adoption home `.working/imported/adoption/`
+  exists, whatever it holds: an empty home, or one holding only entries that are not adoption
+  runs, switches a store to that grading. The adopting residuals are then reported; an
+  `[unmanaged]` declaration that equals, contains or lies within `.working/imported/` or
+  `.working/archive/` is a finding and covers nothing; and a substantiated `partial` status no
+  longer moves an unregistered path to triage, so such a path is a finding. That grading re-reads
+  each admitted run's listed bundle, archive and Move-root bytes at their recorded digests on
+  every doctor run and registers only the files those runs' committed inventories list, so every
+  other path under `.working/imported/` and `.working/archive/`, an import or ingest bundle
+  included, is graded as unregistered. A frozen source that drifts, or vanishes before its
+  retirement is recorded, is a containment failure. The evidence check detects accidents, not
+  deliberate forgery (section 4.2): a canonical, self-consistent fabricated bundle is admitted,
+  and its frozen sources are then reported as bounded adoption state. The adoption-state read is
+  bounded by fixed ceilings on run directories, frozen sources and bytes read, past which it
+  reports cannot-evaluate. C-EVIDENCE-ENUM never runs on such a store; version-control history
+  over the tracked store is the control there too.
 - Store resolution fails closed on a pointer that does not resolve and on zero or multiple
   manifests at the target; it cannot detect a second store that no pointer names, placed somewhere
   the tooling was never aimed.

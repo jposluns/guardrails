@@ -147,9 +147,12 @@
         receipt kept outside that area, so it can refuse as legacy a store whose recorded import
         status rests on such a receipt.
         It offers no upgrade, repair, or continuity, so a store holding legacy state needs an
-        upgrade-capable implementation. The upgrade into base 1.3.0 is still a target that the
-        reference tooling does not yet perform, and the reference-tooling residuals above name stores
-        its current upgrade cannot carry. A class claim is self-asserted until validation tooling
+        upgrade-capable implementation. The reference tooling performs no upgrade into base 1.3.0:
+        adoption, the imported series and import arrive together with homes 2, the store-homes
+        generation that <code>spec_version = "2.0.0"</code> declares, only on stores created there,
+        and once homes 2 is active the tooling refuses by name a homes-1 store, one created before
+        it, for adoption, import and upgrade. The reference-tooling residuals above name stores its
+        current upgrade cannot carry. A class claim is self-asserted until validation tooling
         ships.</li>
       <li><b style="color:var(--ink)">A host provider's conveniences</b> call the external API of the
         host the target names. The egress bound is that named host and nothing else; the standard

@@ -163,8 +163,11 @@ forward within its disclosed limits, and a fresh-only one supports one current f
 name an older store or one in which its admission check detects an item on its closed legacy-state
 list (OPF-SPEC section 16.1). That check searches only the files section 16.1 permits and the list
 catches only what it lists, so legacy state the list omits, or that sits where the check does not
-search, goes undetected. The reference tooling targets the upgrade-capable class, but its upgrade
-into base 1.3.0 is still a target it does not yet perform.
+search, goes undetected. The reference tooling targets the upgrade-capable class, but it performs
+no upgrade into base 1.3.0: adoption, the imported series and import arrive together with homes 2,
+the store-homes generation that `spec_version = "2.0.0"` declares, only on stores created there,
+and once homes 2 is active the tooling refuses by name a homes-1 store, one created before it, for
+adoption, import and upgrade.
 
 The reference tooling requires Python 3.14 or newer.
 
