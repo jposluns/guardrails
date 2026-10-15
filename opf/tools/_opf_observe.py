@@ -829,7 +829,7 @@ def _show_toml(git, store_root, prefix, relpath, disp, notes):
         data = tomllib.loads(out.out.decode("utf-8"))
     # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply nested
     # array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError, RecursionError, MemoryError) as exc:
         notes.append("prior: {} at HEAD is not valid TOML ({}); the prior committed snapshot is "
                      "omitted".format(disp, exc))
         return None
