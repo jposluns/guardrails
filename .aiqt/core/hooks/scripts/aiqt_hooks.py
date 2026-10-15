@@ -7764,12 +7764,13 @@ _DESTRUCT_RULES = frozenset((
     "kubectl", "wrappers", "wrapper-opts", "runner", "known", "known-forms", "computed", "construct",
     "pipe-feed", "heredoc-feed", "cd", "cd-flow", "scope", "cd-dotdot", "cd-exists", "cd-cdpath", "subst",
     "unresolvable", "no-preserve-root", "home", "scratch", "repo-root", "regenerable", "ignored", "embedded",
-    "gitlink", "git-admin", "dotdot", "snapshot", "clean", "optout", "raw", "shell-context", "raw-join",
+    "gitlink", "git-admin", "dotdot", "snapshot", "clean", "raw", "shell-context", "raw-join",
     "assign", "prose-shadow", "prior-effect", "recover-stop"))
-# The leading opt-out (bash last-wins). A value in _DESTRUCT_OPTOUT_FALSY, compared case-insensitively, is
-# not truthy.
-_DESTRUCT_OPTOUT_RE = re.compile(r"^GUARDRAIL_ALLOW_DESTRUCTIVE=(.*)$")
-_DESTRUCT_OPTOUT_FALSY = frozenset(("", "0", "false", "no", "off"))
+# NO IN-BAND OVERRIDE: no leading assignment, prefix or wording in the command is read as an authorization. A
+# GUARDRAIL_ALLOW_DESTRUCTIVE assignment once skipped a segment, but the guarded assistant could type it into
+# the very command under guard, so it could not carry the human authorization it claimed; it is removed, and
+# such an assignment is an ordinary leading env assignment that no code reads by name. An intended
+# destructive command is run by the human operator outside the session.
 # ONE table of the command words that run another command: privilege, scheduling, tracing, sandbox,
 # multiplexer, remote, shell and evaluation words. The gate-discipline note tier reads the same table as
 # _GATE_NOTE_WRAPPERS. This guard models EXACTLY the subset with an entry in _DESTRUCT_WRAPPER_SPECS; every
@@ -8039,13 +8040,11 @@ _DESTRUCT_ANSI_ESCAPES = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "
                           "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
 _DESTRUCT_ALTS = (
     "This guard cannot verify human authorization (rule sechau) or a verified restore path (rule secrst) "
-    "for it. Safe next steps: hold, and ask the human operator in the conversation to run it or to authorize "
-    "it explicitly; copy or commit the data first, or work on a literal path under /tmp or the session "
-    "TMPDIR; name every target as a literal path rather than a variable, glob, or command substitution, and "
-    "run the command bare or behind a wrapper this guard models, not through another runner, an interpreter, "
-    "a pipeline or a heredoc. If the human has explicitly authorized this exact operation and accepted the "
-    "loss, re-issue it with a leading GUARDRAIL_ALLOW_DESTRUCTIVE=1 assignment; that prefix is a convention "
-    "the assistant can type, so it records a claimed authorization and is not proof of one.")
+    "for it, and nothing in the command can supply either. Safe next steps: hold, and if the operation is "
+    "intended, ask the human operator to run it themselves outside this session; copy or commit the data "
+    "first, or work on a literal path under /tmp or the session TMPDIR; name every target as a literal path "
+    "rather than a variable, glob, or command substitution, and run the command bare or behind a wrapper this "
+    "guard models, not through another runner, an interpreter, a pipeline or a heredoc.")
 
 
 # prior-effect is a bounded prefix model, not a shell interpreter. Definitions and settings accumulate
@@ -9130,24 +9129,19 @@ def _destruct_runpath_only(seg, cwd, ctx):
     return _destruct_prior_run_path(seg, idx, cwd, prior)
 
 
-def _destruct_scan(command, segments, cwd, optout=True, restrict_groups=False):
+def _destruct_scan(command, segments, cwd, restrict_groups=False):
     """The per-segment destructive classification with the prior-effect prefix carried forward, driven
-    over an ordered segment list. Returns (verdicts, notes, deadline): the accumulated (kind, detail)
-    verdict pairs, any optout notes, and the monotonic deadline the snapshot reduction reuses. Shared by
-    the whole-command path and the unparseable-command path, which classifies the segments the
-    recover-mode lexer read (before, inside and after a here-string, a process substitution or an unquoted
-    heredoc) and inspects only their deny verdicts. With restrict_groups (the PARSEABLE path) a segment
-    nested inside a QUOTED "$( )" or a backtick substitution group (marked by _LEX_SUBST_RUNPATH_RAW)
-    is classified by the run-path check alone, leaving the destructive-word/shadow/runner rules for that
-    text to the outer scan; a plain subshell, a function body, a brace group, an unquoted $( ) and a
-    process substitution get the full classification, exactly as on the base revision.
-
-    OPT-OUT POLICY: optout=True (the whole-command path) honours a truthy GUARDRAIL_ALLOW_DESTRUCTIVE
-    leading a segment's own command: that segment is skipped with a note. optout=False (the
-    unparseable-command path) ignores the assignment, so the segment is classified like any other and no
-    note is recorded; the opt-out is not honoured on an unparseable command."""
+    over an ordered segment list. Returns (verdicts, deadline): the accumulated (kind, detail) verdict
+    pairs and the monotonic deadline the snapshot reduction reuses. Shared by the whole-command path and
+    the unparseable-command path, which classifies the segments the recover-mode lexer read (before,
+    inside and after a here-string, a process substitution or an unquoted heredoc) and inspects only their
+    deny verdicts. With restrict_groups (the PARSEABLE path) a segment nested inside a QUOTED "$( )" or a
+    backtick substitution group (marked by _LEX_SUBST_RUNPATH_RAW) is classified by the run-path check
+    alone, leaving the destructive-word/shadow/runner rules for that text to the outer scan; a plain
+    subshell, a function body, a brace group, an unquoted $( ) and a process substitution get the full
+    classification, exactly as on the base revision. Every other segment is classified whatever leading
+    assignments it carries: no in-band override exists on either path."""
     verdicts = []
-    notes = []
     depth = 0
     restrict_stack = []
     nest = 0
@@ -9167,20 +9161,9 @@ def _destruct_scan(command, segments, cwd, optout=True, restrict_groups=False):
         broken = broken or lost
         ctx = {"command": command, "upstream": upstream if prev_sep in ("|", "|&") else [], "prose": prose,
                "prior": prior if effects is not None else None}
-        idx = _command_word_index(seg.argv)
-        last = None
-        for tok in seg.argv[:idx]:
-            m = _DESTRUCT_OPTOUT_RE.fullmatch(tok)
-            if m:
-                last = m.group(1)
         restrict_now = bool(restrict_stack) and restrict_stack[-1]
         if restrict_groups and restrict_now:
             verdicts.extend(_destruct_runpath_only(seg, cwd, ctx))
-        elif (optout and "optout" in _DESTRUCT_RULES and last is not None
-                and last.lower() not in _DESTRUCT_OPTOUT_FALSY and _destruct_segment(seg, cwd, deadline, ctx)):
-            notes.append("GUARDRAIL_ALLOW_DESTRUCTIVE is set on '{}', so this guard did not check it; the "
-                         "prefix records a claimed human authorization and accepted loss (rules sechau, "
-                         "secrst) and is not proof of either.".format(" ".join(seg.argv[idx:])[:200]))
         else:
             verdicts.extend(_destruct_segment(seg, cwd, deadline, ctx))
         next_cwd = _destruct_next_cwd(seg, cwd, prev_sep, depth, nest == 0 and not broken, cdpath_risk)
@@ -9221,7 +9204,7 @@ def _destruct_scan(command, segments, cwd, optout=True, restrict_groups=False):
                     restrict_stack.pop()
             elif not nest:
                 broken = True  # an unbalanced close outside a case pattern: the scope model is lost
-    return verdicts, notes, deadline
+    return verdicts, deadline
 
 
 # Constructs the certain-set reader does not model with certainty, each able to run a command it does not
@@ -10057,13 +10040,13 @@ def destructive_guard(data):
     QUOTED "$( )" or a backtick substitution are classified by the run-path check alone (the
     destructive-word/shadow/runner rules for that text stay with the outer segment text scan), while a plain
     subshell, a function body, a brace group, an unquoted $( ) and a process substitution get the full
-    classification; the opt-out is honoured, and a
+    classification, and a
     recover read that hits a SYNTAX quirk inside a substitution falls back to the plain reading, while
     one that hits a STILL-RUNS stop there is never discarded: it denies wholesale.
     On the UNPARSEABLE path (the default lexer raised: a here-string, a process substitution, an
     unquoted heredoc, an unbalanced quote, a '{fd}>' redirect, a NUL) the text scan above runs first, then
     every segment the recover read reaches - before, inside and after those constructs - gets the full
-    classification, the prior-effect pass included, with the opt-out NOT honoured, and any deny denies.
+    classification, the prior-effect pass included, and any deny denies.
 
     RECOVER-MODE STOPS AND UNCERTAIN READS: a stop the recover read itself reports - a process or command
     substitution nested beyond the limit, or a backslash-newline join inside an unquoted heredoc body or
@@ -10149,10 +10132,11 @@ def destructive_guard(data):
     effect are unrelated. These are conservative false denies, not evidence that those benign commands
     destroy data.
 
-    OPT-OUT: a truthy GUARDRAIL_ALLOW_DESTRUCTIVE leading the segment's own command (bash last-wins; '', 0, false,
-    no, off are falsy) skips that segment with a note. It is a CONVENTION the assistant can type, so it records
-    a claimed human authorization and accepted loss; it is not proof of either. It is not honoured on an
-    unparseable command.
+    NO IN-BAND OVERRIDE: nothing the assistant can type into the command (a prefix, an environment assignment
+    or a phrasing) is read as an authorization. GUARDRAIL_ALLOW_DESTRUCTIVE, a removed opt-out, is read
+    nowhere: a leading assignment of it is judged like any other leading assignment of the same value, so with
+    a plain value such as 1 the command gets the decision it gets without the assignment. A denied operation
+    that is intended is run by the human operator outside the session.
 
     RESIDUAL (not seen): a destructive operation spelled without any in-scope word (python shutil.rmtree, a script
     file, a make target, a value computed at run time and not spelled in the command), state from an earlier turn
@@ -10318,7 +10302,7 @@ def destructive_guard(data):
     if not parseable:
         # UNPARSEABLE COMMAND: the text scan runs first, then ONE recover-mode read models the constructs
         # the default lexer rejects (here-strings, process substitutions, unquoted heredoc bodies and the
-        # substitutions inside them). Every segment it reaches is classified with the opt-out not honoured.
+        # substitutions inside them). Every segment it reaches is classified.
         hit = _destruct_text_marker(command) if "raw" in _DESTRUCT_RULES else None
         if hit:
             return _deny("AIQT rules sechau/secrst: the command could not be parsed by the shell lexer (a "
@@ -10331,17 +10315,15 @@ def destructive_guard(data):
                          "(rules sechau, secrst).")
         if "raw" in _DESTRUCT_RULES and "prior-effect" in _DESTRUCT_RULES:
             segments, failure, _end = _lex_command(command, recover=True)
-            verdicts, _notes, _deadline = _destruct_scan(command, segments, cwd, optout=False)
+            verdicts, _deadline = _destruct_scan(command, segments, cwd)
             denies = [detail for kind, detail in verdicts if kind == "deny"]
             if denies:
                 return _deny("AIQT rules sechau/secrst: the shell lexer could not read this command in one pass "
                              "({}). Read again with here-strings, process substitutions, unquoted heredoc "
-                             "bodies and the substitutions inside them modelled, and with any "
-                             "GUARDRAIL_ALLOW_DESTRUCTIVE prefix ignored (it is not honoured on an unparseable "
-                             "command), it carries: {}. This guard classifies only the command shapes it "
-                             "models exactly, so it denies rather than run (fail closed). Re-issue it as a "
-                             "parseable command with literal targets. {}".format(exc, "; ".join(denies),
-                                                                                 _DESTRUCT_ALTS),
+                             "bodies and the substitutions inside them modelled, it carries: {}. This guard "
+                             "classifies only the command shapes it models exactly, so it denies rather than "
+                             "run (fail closed). Re-issue it as a parseable command with literal targets. "
+                             "{}".format(exc, "; ".join(denies), _DESTRUCT_ALTS),
                              "AIQT guardrail: denied an unparseable command that carries a destructive or "
                              "prior-effect operation (rules sechau, secrst).")
             if failure is not None and failure[1] == 1:
@@ -10426,7 +10408,7 @@ def destructive_guard(data):
             segments = _lex_command(command)
     else:
         segments = _lex_command(command)
-    verdicts, notes, deadline = _destruct_scan(command, segments, cwd, restrict_groups=used_groups)
+    verdicts, deadline = _destruct_scan(command, segments, cwd, restrict_groups=used_groups)
     denies = [detail for kind, detail in verdicts if kind == "deny"]
     if denies:
         return _deny("AIQT rules sechau/secrst (human-authorization, verified-restore-path): denied a "
@@ -10445,6 +10427,7 @@ def destructive_guard(data):
                              uncertain, _DESTRUCT_ALTS),
                          "AIQT guardrail: denied an uncertain, effectful command (rules sechau, secrst, "
                          "fail-closed).")
+    notes = []
     for top in sorted({detail for kind, detail in verdicts if kind == "snap"}):
         if time.monotonic() > deadline:
             return _deny("AIQT rules sechau/secrst: the delete would remove uncommitted content in {}, and the "

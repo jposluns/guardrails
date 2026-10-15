@@ -86,7 +86,8 @@ PRIOR_EFFECT_VECTORS = [
     ("pe-heredoc-body-create-same-line", 4, "cat <<EOF; {scratch}/zz\n$(cp helper {scratch}/zz)\nEOF", "deny"),
     ("pe-herestring-word-run", 4, "cp helper {scratch}/zz; cat <<< \"$({scratch}/zz)\"", "deny"),
     ("pe-nested-quote-subst-suffix", 4, "echo \"$(printf \"it's\")\"; cp helper {scratch}/zz; {scratch}/zz", "deny"),
-    # the opt-out is not honoured on an unparseable command
+    # a leading GUARDRAIL_ALLOW_DESTRUCTIVE assignment (the removed opt-out) changes nothing on an unparseable
+    # command: the run of the copied path still denies
     ("pe-optout-unparseable", 4, "cp helper {scratch}/zz; GUARDRAIL_ALLOW_DESTRUCTIVE=1 {scratch}/zz; cat <<< ok",
      "deny"),
     # a recover-mode stop: a separator after an unbalanced quote, and a NUL, cannot be classified past

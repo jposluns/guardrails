@@ -126,12 +126,13 @@ feeding an unmodelled command, a substitution, or an unparseable command DENIES;
 backgrounded, wrapped, inside a compound body, through '..', to a missing directory or under CDPATH leaves
 the cwd unknown, so a later relative operand DENIES. A literal /tmp or TMPDIR path, a regenerable build
 DIRECTORY, tracked clean content (positive ls-files evidence required), a modelled wrapper or keyword in front
-of an allowed command, a known non-runner naming a destructive word as data (echo, git rm, sudo docker rm), the
-exact $(cat <<'EOF' ...) prose idiom and the leading GUARDRAIL_ALLOW_DESTRUCTIVE opt-out ALLOW (some with a
-note), and untracked content in a repository is SNAPSHOT-THEN-ALLOWED. Every reproduced slip is asserted
-denied. A mutant sweep removes each named rule from _DESTRUCT_RULES and requires every vector that
-names it to change outcome; functional mutants cover the probe tracked evidence and a fake clock that crosses
-the classification deadline mid-work.
+of an allowed command, a known non-runner naming a destructive word as data (echo, git rm, sudo docker rm) and
+the exact $(cat <<'EOF' ...) prose idiom ALLOW (some with a note), and untracked content in a repository is
+SNAPSHOT-THEN-ALLOWED. Every reproduced slip is asserted denied. No in-band override exists: a command carrying
+a leading GUARDRAIL_ALLOW_DESTRUCTIVE assignment (the removed opt-out) gets the decision, and the snapshot, of the
+same command without it, and no reason, note or hook string spells that assignment. A mutant sweep removes each
+named rule from _DESTRUCT_RULES and requires every vector that names it to change outcome; functional mutants
+cover the probe tracked evidence and a fake clock that crosses the classification deadline mid-work.
 
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
@@ -2402,8 +2403,11 @@ def _test_destructive_guard(failures, tmp):
         ("allow-tmp-literal", "scratch", "rm -rf /tmp/aiqt-selftest-absent-dir", rp, "allow", real_roots),
         ("allow-tmpdir-literal", "scratch", "rm -rf {}/work".format(scratch), rp, "allow", real_roots),
         ("allow-untracked-snapshot", "snapshot", "rm notes.txt", rp, "allow-note", {}),
-        ("allow-optout-note", "optout", "GUARDRAIL_ALLOW_DESTRUCTIVE=1 rm -rf {}/appdata".format(absent), rp,
-         "allow-note", {}),
+        # The removed opt-out: a leading GUARDRAIL_ALLOW_DESTRUCTIVE assignment is an ordinary assignment, so the
+        # prefixed delete outside scratch and every repository denies exactly as deny-abs-outside does (the
+        # opt-out skipped the segment and allowed it with a note).
+        ("deny-optout-removed", "rm", "GUARDRAIL_ALLOW_DESTRUCTIVE=1 rm -rf {}/appdata".format(absent), rp,
+         "deny", {}),
         ("allow-dd-null", "benign-sink", "dd if=/dev/zero of=/dev/null count=1", rp, "allow", {}),
         # (A) an operand '..' resolves the way the kernel does: the symlink BEFORE it first, so the lexical
         # collapse (rp/src/pkg, an allow-note) is a forgery; the real target is outside every repository. A
@@ -2648,11 +2652,7 @@ def _test_destructive_guard(failures, tmp):
         templates = {label: template for label, _cls, template, _want in PRIOR_EFFECT_VECTORS}
         saved_prior_effects = aiqt_hooks._destruct_prior_effects
         saved_sql_exec = aiqt_hooks._DESTRUCT_SQL_EXEC_RE
-        saved_scan = aiqt_hooks._destruct_scan
         never_match = re.compile(r"(?!x)x")
-
-        def honour_optout(command, segments, cwd, optout=True):
-            return saved_scan(command, segments, cwd)
 
         def blank_field(field, empty):
             def patched(segments, _field=field, _empty=empty):
@@ -2734,9 +2734,8 @@ def _test_destructive_guard(failures, tmp):
             ("sql-sqlite3", "pe-sqlite-shell", blank_client("sqlite3")),
             ("sql-mysql", "pe-mysql-shell-escape", blank_client("mysql")),
             ("sql-mariadb", "pe-mariadb-source", blank_client("mariadb")),
-            # The unparseable-command path ignores the opt-out, a recover-mode stop with a
-            # separator after it denies, and the sqlite3 single-quoted pipe form has its own witness
-            ("optout-policy", "pe-optout-unparseable", ("_destruct_scan", honour_optout)),
+            # A recover-mode stop with a separator after it denies, and the sqlite3 single-quoted pipe form
+            # has its own witness
             ("recover-stop-rule", "pe-stop-separator-after-quote",
              ("_DESTRUCT_RULES", saved_rules - frozenset(("recover-stop",)))),
             ("sql-sqlite3-single-quote", "pe-sqlite-output-pipe-single",
@@ -3178,6 +3177,8 @@ def _test_destructive_guard(failures, tmp):
         before = _recovery_refs(repo)
         for label, command, cwd, want in (
                 ("dz-snapshot-ref", "rm -f notes.txt", rp, "allow-note"),
+                # spellings of the removed opt-out (falsy, last-wins empty, behind a wrapper, on another
+                # segment): each denies, as the same command without the assignment does
                 ("dz-optout-falsy", "GUARDRAIL_ALLOW_DESTRUCTIVE=0 rm -rf {}/appdata".format(absent), rp, "deny"),
                 ("dz-optout-last-wins",
                  "GUARDRAIL_ALLOW_DESTRUCTIVE=1 GUARDRAIL_ALLOW_DESTRUCTIVE= rm -rf {}/x".format(absent), rp, "deny"),
@@ -3356,6 +3357,120 @@ def _test_destructive_guard(failures, tmp):
         if (aiqt_hooks.HANDLERS.get("destructive_guard") is not handler
                 or aiqt_hooks.HANDLER_EVENT.get("destructive_guard") != aiqt_hooks.PRETOOL):
             failures.append("(dz-wiring) destructive_guard handler/event wiring is missing or wrong")
+        # NO IN-BAND OVERRIDE. The GUARDRAIL_ALLOW_DESTRUCTIVE opt-out skipped every rule for its segment, but
+        # the guarded assistant could type it, so it is removed. (dz-optout-removed-<row>) a command carrying
+        # it gets the decision of the same command without it (deny where the bare command denies), as with
+        # any other leading assignment of a plain value (FOO=1), on a whole command and on a later segment;
+        # the opt-out allowed every deny row with a note. (dz-optout-removed-snapshot) the prefixed untracked
+        # delete takes the recovery snapshot the opt-out skipped. (dz-optout-removed-text-<case>) no reason or
+        # note of the parseable, unparseable and note paths names the removed prefix, and each deny there asks
+        # the operator to run an intended operation themselves. (dz-optout-removed-source) no string in either
+        # hook copy spells a GUARDRAIL_ALLOW_DESTRUCTIVE assignment, and (dz-optout-removed-dead, -dead-live)
+        # its names, rule and _destruct_scan parameter are gone from both copies and the loaded module.
+        def run_text(command, cwd, opts):
+            """(reduced decision, every reason and note text) for one Bash command, set up as run() is."""
+            os.environ["HOME"] = opts.get("home", home0)
+            aiqt_hooks._destruct_scratch_roots = saved_roots if opts.get("real_roots") else (lambda: [scratch_real])
+            data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}
+            if cwd is not None:
+                data["cwd"] = cwd
+            try:
+                code, obj, _err = handler(data)
+            finally:
+                os.environ["HOME"] = home0
+                aiqt_hooks._destruct_scratch_roots = saved_roots
+            texts = []
+            if isinstance(obj, dict):
+                texts.append(str(obj.get("systemMessage", "")))
+                specific = obj.get("hookSpecificOutput")
+                if isinstance(specific, dict):
+                    texts.append(str(specific.get("permissionDecisionReason", "")))
+            return _reduce_result(code, obj), " ".join(texts)
+
+        removed_prefixes = ("GUARDRAIL_ALLOW_DESTRUCTIVE=1 ", "GUARDRAIL_ALLOW_DESTRUCTIVE=yes ", "FOO=1 ")
+        for label, head, tail, cwd, want, opts in (
+                ("abs-outside", "", "rm -rf {}/appdata".format(absent), rp, "deny", {}),
+                ("root", "", "rm -rf /", rp, "deny", {}),
+                ("home", "", "rm -rf {}".format(clean / "homedir"), rp, "deny", fake_home),
+                ("repo-root", "", "rm -rf {}".format(clean), rp, "deny", {}),
+                ("dot-git", "", "rm -rf .git", rp, "deny", {}),
+                ("ignored", "", "rm .env", rp, "deny", {}),
+                ("find-delete", "", "find . -name '*.pyc' -delete", rp, "deny", {}),
+                ("dropdb", "", "dropdb prod", rp, "deny", {}),
+                ("terraform", "", "terraform destroy -auto-approve", rp, "deny", {}),
+                ("later-segment", "true && ", "rm -rf {}/x".format(absent), rp, "deny", {}),
+                ("unparseable", "", "rm -rf {}/x; cat <<< ok".format(absent), rp, "deny", {}),
+                ("clean-dir", "", "rm -rf src/pkg", rp, "allow-note", {}),
+                ("clean-file", "", "rm src/pkg/a.py", rp, "allow", {}),
+                ("tmpdir", "", "rm -rf {}/work".format(scratch), rp, "allow", real_roots)):
+            bare = run(head + tail, cwd, opts)
+            got = [run(head + prefix + tail, cwd, opts) for prefix in removed_prefixes]
+            if bare != want or got != [want] * len(removed_prefixes):
+                failures.append("(dz-optout-removed-{}) {!r} must be {} bare and with each of {}; got {} bare "
+                                "and {}".format(label, head + tail, want, removed_prefixes, bare, got))
+        refs_before = len(_recovery_refs(repo))
+        got = run("GUARDRAIL_ALLOW_DESTRUCTIVE=1 rm notes.txt", rp, {})
+        if got != "allow-note" or len(_recovery_refs(repo)) != refs_before + 1:
+            failures.append("(dz-optout-removed-snapshot) the prefixed untracked delete must snapshot then allow "
+                            "with a note, as the bare one does; got {} with {} new recovery ref(s)".format(
+                                got, len(_recovery_refs(repo)) - refs_before))
+        for case, command in (
+                ("bare-deny", "rm -rf {}/appdata".format(absent)),
+                ("prefixed-deny", "GUARDRAIL_ALLOW_DESTRUCTIVE=1 rm -rf {}/appdata".format(absent)),
+                ("unparseable-deny", "GUARDRAIL_ALLOW_DESTRUCTIVE=1 rm -rf {}/x; cat <<< ok".format(absent)),
+                ("prefixed-note", "GUARDRAIL_ALLOW_DESTRUCTIVE=1 rm -rf src/pkg")):
+            got, text = run_text(command, rp, {})
+            if ("GUARDRAIL_ALLOW" in text.upper()
+                    or (got == "deny" and "ask the human operator to run it themselves" not in text)):
+                failures.append("(dz-optout-removed-text-{}) {!r} gave {} with a reason or note that names the "
+                                "removed prefix or omits the operator-runs-it step: {!r}".format(
+                                    case, command, got, text[:600]))
+        assignment_re = re.compile(r"GUARDRAIL_ALLOW_DESTRUCTIVE[\s()\\+?]*=", re.IGNORECASE)
+
+        def fold(node):
+            """The text of a str constant, a '+' chain of them, or an f-string (an unfoldable field reads as
+            ''), else None."""
+            if isinstance(node, ast.Constant):
+                return node.value if isinstance(node.value, str) else None
+            if isinstance(node, ast.JoinedStr):
+                return "".join(part.value if isinstance(part, ast.Constant) else
+                               (fold(part.value) or "") if isinstance(part, ast.FormattedValue) else ""
+                               for part in node.values)
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                left, right = fold(node.left), fold(node.right)
+                return None if left is None or right is None else left + right
+            return None
+
+        def spelled_lines(tree):
+            """Line numbers of every string in `tree` that spells a GUARDRAIL_ALLOW_DESTRUCTIVE assignment."""
+            return sorted({node.lineno for node in ast.walk(tree) if assignment_re.search(fold(node) or "")})
+
+        hook_copies = (Path(aiqt_hooks.__file__),
+                       repo_root() / "plugin" / "aiqt-guardrails-hooks" / "hooks" / "scripts" / "aiqt_hooks.py")
+        for copy in hook_copies:
+            tree = ast.parse(copy.read_text(encoding="utf-8"))
+            if spelled_lines(tree):
+                failures.append("(dz-optout-removed-source) {} has strings spelling a GUARDRAIL_ALLOW_DESTRUCTIVE "
+                                "assignment at lines {}".format(copy, spelled_lines(tree)))
+            bound = {node.name for node in tree.body
+                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+            bound.update(target.id for node in tree.body if isinstance(node, ast.Assign)
+                         for target in node.targets if isinstance(target, ast.Name))
+            live = sorted(bound & {"_DESTRUCT_OPTOUT_RE", "_DESTRUCT_OPTOUT_FALSY"})
+            if live:
+                failures.append("(dz-optout-removed-dead) {} still binds {}".format(copy, live))
+        # the scan itself: each spelling below is caught, and a mention that spells no assignment is not
+        for probe in ("x = 'Prefix GUARDRAIL_ALLOW_DESTRUCTIVE=1 to override.'",
+                      "x = 'GUARDRAIL_ALLOW_' + 'DESTRUCTIVE=yes'", "x = f\"GUARDRAIL_ALLOW_DESTRUCTIVE={'1'}\""):
+            if not spelled_lines(ast.parse(probe)):
+                failures.append("(dz-optout-removed-scan) the assignment scan misses {!r}".format(probe))
+        if spelled_lines(ast.parse("x = 'GUARDRAIL_ALLOW_DESTRUCTIVE, a removed opt-out, is read nowhere'")):
+            failures.append("(dz-optout-removed-scan-mention) the assignment scan flags a mention")
+        scan_code = aiqt_hooks._destruct_scan.__code__
+        if ("optout" in saved_rules or "optout" in scan_code.co_varnames[:scan_code.co_argcount]
+                or hasattr(aiqt_hooks, "_DESTRUCT_OPTOUT_RE") or hasattr(aiqt_hooks, "_DESTRUCT_OPTOUT_FALSY")):
+            failures.append("(dz-optout-removed-dead-live) the loaded hook still carries the optout rule, the "
+                            "_destruct_scan optout parameter or an opt-out name")
     finally:
         aiqt_hooks._destruct_scratch_roots = saved_roots
         aiqt_hooks._DESTRUCT_RULES = saved_rules
@@ -13651,9 +13766,9 @@ def _main_isolated(monitor):
           "runner or wrapper option, a known command in a running form, a computed command word, a continuation, "
           "heredoc or ANSI-C construct, a fed pipeline or heredoc, a substitution, an unparseable command), "
           "SNAPSHOT-THEN-ALLOWS untracked repository content, and ALLOWS tracked clean content (positive "
-          "ls-files evidence, a note on a recursive delete), a literal scratch path, a regenerable build "
-          "directory (the directory type required), and the leading opt-out "
-          "convention (with a note). A "
+          "ls-files evidence, a note on a recursive delete), a literal scratch path, and a regenerable build "
+          "directory (the directory type required); no in-band override exists, so a command carrying the "
+          "removed GUARDRAIL_ALLOW_DESTRUCTIVE prefix gets the decision of the same command without it. A "
           "mis-wired PreToolUse event hard-blocks (exit 2). Historical note: several guards were "
           "originally ASK-based; this suite now asserts the no-ask outcomes above and the global "
           "invariant guarantees none reverts to an ask.")
