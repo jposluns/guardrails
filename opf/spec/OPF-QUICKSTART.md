@@ -66,10 +66,11 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    exempt ledger listed above, not an index); specification
    sections 4 and 9). A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
    Anything already sitting in `.working/` takes a per-file disposition in the adoption plan
-   (`opf adopt`; a fresh `opf init` refuses an existing `.working/` directory): keep it, migrate it
-   for a later post-adoption import, move it, or retire it; nothing is absorbed or overwritten
-   silently. `opf init` also refuses when the git history of HEAD's first-parent line shows a
-   prior store (specification section 8.2: counters never restart, so record ids are never
+   (`opf adopt`; a fresh `opf init` refuses an existing `.working/` directory and an existing root
+   `CHANGELOG.md` or `VERSION`): keep it, migrate it for a later post-adoption import, move it, or
+   retire it; nothing is absorbed or overwritten silently. `opf init` also refuses when the git
+   history of HEAD's first-parent line shows a prior store (specification section 8.2: counters
+   never restart, so record ids are never
    reissued). That scan follows the first-parent line only: a store that never reached a tree on
    HEAD's first-parent line (for example one created and deleted on a side branch, merged or not)
    is not detected. The scan also has a path limit: the scan checks the root's current path only
