@@ -628,7 +628,7 @@ def evaluate(root, hook=None):
     findings = _behaviour_findings(hook, root, pack_rels, registrations)
     try:
         doc = tomllib.loads(_text(_input(root, ROSTER_REL, "the platform roster"), "the platform roster"))
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise CannotEvaluate("%s does not parse (%s)" % (ROSTER_REL, exc))
     version = doc.get("format-version")
     if set(doc) != frozenset(("format-version", "platform")) or type(version) is not int \
