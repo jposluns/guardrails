@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "660ab4f925dc4f5bf0680f1475956f07052511f44f09eb1ff5f8486d66a232e9"
+tree-sha256 = "a6e07eab56dadc0c17ac9b90ef2695966d5a5c45cba28a0089e693a1f7268d6d"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -137,7 +137,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3068
-sha256 = "422bc3a6f1499536f638863757bbf527b56a182e2ba82780f26d026936161e64"
+sha256 = "d2b9eb4c5f6119d1e19a78c87f653d525930a540a60b6ed9afc2b9692eda523c"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -3556,8 +3556,8 @@ sha256 = "783a0eb4e035a7c4c73af119236bf496ab1c4d7bc57d49ae42db5e14cb0b812d"
 
 [[sources]]
 path = "tools/gen_agents.py"
-bytes = 151352
-sha256 = "40cadfea2c3cc0c513550e96d331baf80983c201937dc208d3996e97a5b7c8c7"
+bytes = 154582
+sha256 = "14d6d078ee3615b3d3ab875a057653054084948ca2925803b85a7bd31e9b558c"
 
 [[sources]]
 path = "tools/gen_changelog.py"
@@ -3786,8 +3786,8 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
-bytes = 22314
-sha256 = "311b5a1269b981e25558871305a4b6b8de4e9b7bce1218875582a8620bad498c"
+bytes = 22444
+sha256 = "ad50899a0a740ac0628ed99ca164ae9fe0abf724f7b681e18d9be7a3549571ef"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"

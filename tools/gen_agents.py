@@ -121,7 +121,11 @@ def main():
 #   T11 migration: the exact legacy rendering composes (write 0); with extra text, write 2.
 #   T12 each registry error: exit 2 in both modes, nothing written; every field of the wrong TOML type
 #       (an array, a table, a number or a boolean) is a clean refusal naming the field and stating the
-#       type rule it broke, never an exception.
+#       type rule it broke, never an exception. A registry parse that raises a bare ValueError (a real
+#       integer literal longer than the interpreter's digit limit, the limit pinned to its default for
+#       the leg) or a MemoryError (injected at the parse load_registry makes, for the fixture's registry
+#       text only) is load_registry's named refusal "does not parse (<class>)" in both modes: run() maps
+#       any ValueError to exit 2 by itself, so the exit code alone cannot show that refusal ran.
 #   T13 each block-source error: exit 2, nothing written.
 #   T14 a CRLF-converted legacy AGENTS.md: --check 1.
 #   T15 two targets in one run (the gen_adapters pair) with either one refused: the other is not written.
@@ -651,6 +655,52 @@ def self_test_main(nested_run=False):
                     if rule is not None and rule not in out:
                         failures.append("{}: the refusal does not state the type rule {!r}: {}".format(
                             label, rule, out.strip()))
+
+        # A parse that raises a bare ValueError or a MemoryError must be load_registry's own refusal,
+        # naming the class. run() maps any ValueError to exit 2 by itself, so only the refusal text tells
+        # that handler from the bare error escaping it; a MemoryError escaping it escapes run() too.
+        def parse_refused(label, root, cls):
+            want = "{}: does not parse ({})".format(ac.REGISTRY_REL, cls)
+            for check in (True, False):
+                out = expect(label, root, check, 2)
+                if want not in out:
+                    failures.append("{}: {} does not give the refusal {!r}: {}".format(
+                        label, "--check" if check else "write", want, out.strip()))
+
+        # The real case: an integer literal one digit longer than the interpreter's default limit on
+        # integer string conversion, which tomllib raises as a bare ValueError. The limit is pinned to
+        # that default for the leg (a runner started with the limit lifted would parse the literal) and
+        # restored afterwards.
+        int_label = "T12 an over-long integer literal"
+        saved_digits = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(sys.int_info.default_max_str_digits)
+        try:
+            long_int = "format-version = " + "1" * (sys.int_info.default_max_str_digits + 1)
+            parse_refused(int_label, tree(mutated(int_label, composed_reg, "format-version = 1", long_int),
+                                          agents=golden), "ValueError")
+        finally:
+            sys.set_int_max_str_digits(saved_digits)
+        # A MemoryError at the parse load_registry makes, injected for the fixture's registry text only
+        # (any other parse goes to the real parser), which is restored afterwards.
+        oom_label = "T12 a MemoryError at the registry parse"
+        root = tree(composed_reg, agents=golden)
+        real_loads = ac.tomllib.loads
+        oom_fired = []
+
+        def oom_loads(text, *a, **k):
+            if text == composed_reg:
+                oom_fired.append(True)
+                raise MemoryError("injected memory exhaustion at the registry parse")
+            return real_loads(text, *a, **k)
+
+        ac.tomllib.loads = oom_loads
+        try:
+            parse_refused(oom_label, root, "MemoryError")
+        finally:
+            ac.tomllib.loads = real_loads
+        if len(oom_fired) != 2:
+            failures.append("{}: the injected MemoryError fired {} times, not once in each mode, so the "
+                            "leg did not judge the registry parse".format(oom_label, len(oom_fired)))
         root = tree(None, agents=golden)
         expect("T12 registry absent", root, True, 2)
         expect("T12 registry absent", root, False, 2)
@@ -2496,7 +2546,8 @@ def self_test_main(nested_run=False):
           "with nothing written; an undeclared block is refused and a retired one dropped; registry order "
           "is restored; a marker in a legacy target is refused; only the exact legacy rendering migrates; "
           "every registry and block-source error is exit 2, a wrong-typed registry field included, naming the "
-          "field; CRLF is drift; either refused adapter blocks the other's write; no corpus is exit 2 and "
+          "field, and a registry parse raising a bare ValueError (an over-long integer literal) or a "
+          "MemoryError (injected) is refused naming the class; CRLF is drift; either refused adapter blocks the other's write; no corpus is exit 2 and "
           "deletes nothing; an unreachable corpus deletes nothing; a marker-like rule body is exit 2 for a "
           "composed target; a symlinked target or parent, a dangling link and a directory target are exit 2 "
           "with nothing outside the tree touched; an in-sync legacy target rewrites; a write keeps the "
