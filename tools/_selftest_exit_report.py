@@ -10,10 +10,12 @@ run that faults after its last check() still delivered a passing report. The gat
 finalized report:
 
   _bootstrap_main()                      the entry point of every gate launch ([python, -I, -B, -c,
-                                         <shim>, <this module's directory>, <runner>, <report>]):
-                                         install the observation hooks below, then run the
-                                         registered runner as __main__ with [<runner>,
-                                         --execution-report, <report>] as its argv; NO runner
+                                         <shim>, <this module's directory>, <runner>, <report>,
+                                         <row args>...]): install the observation hooks below,
+                                         then run the registered runner as __main__ with
+                                         [<runner>, <row args>..., --execution-report, <report>]
+                                         as its argv ([<runner>, --execution-report, <report>]
+                                         for a row with no args); NO runner
                                          statement, import-time included, precedes the hooks, so
                                          there is no pre-arm window under the gate; the
                                          runner's module is the real sys.modules["__main__"]
@@ -429,15 +431,17 @@ class _RunnerLoader(importlib.machinery.SourceFileLoader):
 
 def _bootstrap_main():
     """The gate's child entry point: install the observation hooks, then run the registered runner
-    as __main__ with the argv contract it expects ([<runner>, --execution-report, <report>]). The
-    gate launches [python, -I, -B, -c, <import this module and call _bootstrap_main>, <this
-    module's directory>, <runner>, <report>], so sys.argv here is [-c, <dir>, <runner>, <report>].
+    as __main__ with the argv contract it expects ([<runner>, <row args>..., --execution-report,
+    <report>], the row args being the literal arguments the gate validated and forwarded, none for a
+    row without an args key). The gate launches [python, -I, -B, -c, <import this module and call
+    _bootstrap_main>, <this module's directory>, <runner>, <report>, <row args>...], so sys.argv
+    here is [-c, <dir>, <runner>, <report>, <row args>...].
     The runner's module REPLACES sys.modules["__main__"] and is never restored, so an exit handler
     or destructor that imports __main__ sees the runner's module, as under a direct launch (a
     runpy.run_path run restores the bootstrap's __main__ as the runner's exit unwinds)."""
-    runner, report = sys.argv[2], sys.argv[3]
+    runner, report, forwarded = sys.argv[2], sys.argv[3], sys.argv[4:]
     _install()
-    sys.argv[:] = [runner, "--execution-report", report]
+    sys.argv[:] = [runner, *forwarded, "--execution-report", report]
     loader = _RunnerLoader("__main__", runner)
     main = types.ModuleType("__main__")
     main.__file__ = runner
