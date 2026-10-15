@@ -945,8 +945,8 @@ CONFIG_MEMBER_BOUNDS = {
     # ESTIMATED (the same load-proportional assumption): 3600 s, about 2.4 times that longest
     # measured run, covers load5 up to about 58.
     # DELIBERATE SHORTER DEADLINE: 3600 s sits far BELOW this member's own worst case (its per-leg
-    # bounds alone sum to 9264 s, about 2.6 hours, and its self-test's worst case with the negative
-    # leg, cleanup deadlines and vectors is 11072 s; see _LEG_CEILING_S and _job_worst_case_s in the
+    # bounds alone sum to 8839 s, about 2.5 hours, and its self-test's worst case with the negative
+    # leg, cleanup deadlines and vectors is 10807 s; see _LEG_CEILING_S and _job_worst_case_s in the
     # member itself), exactly as the default's comment above sanctions: this lane owns no member's
     # verdict, and cutting a stalled rerun short is cannot-evaluate, never a pass or a fail of the
     # member.
@@ -3679,6 +3679,7 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_adopt_apply.py": "Apply-shell refusal, evidence and journal vectors over temporary filesystem fixtures.",
     "opf/tools/_opf_adopt_discover.py": "Read-only source-discovery vectors over temporary filesystem fixtures.",
     "opf/tools/_opf_adopt_hook.py": "Pure enable-hook merge vectors over synthetic registration bytes.",
+    "opf/tools/_opf_import_batch.py": "Pure batch parsing, canonical emission and digest vectors over in-memory bytes.",
     "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",

@@ -73,6 +73,7 @@ _SUBSET = [
     ("opf-adopt-selftest", "_opf_adopt.py", ["--self-test"]),
     ("opf-adopt-apply-selftest", "_opf_adopt_apply.py", ["--self-test"]),
     ("opf-adopt-hook-selftest", "_opf_adopt_hook.py", ["--self-test"]),
+    ("opf-import-batch-selftest", "_opf_import_batch.py", ["--self-test"]),
     ("opf-pack-manifest-selftest", "_opf_pack_manifest.py", ["--self-test"]),
     ("opf-adopt-observe-selftest", "_opf_adopt_observe.py", ["--self-test"]),
     ("opf-adopt-discover-selftest", "_opf_adopt_discover.py", ["--self-test"]),
@@ -101,7 +102,7 @@ _SUBSET = [
 #     read as 600; timeout=limit reads as nothing). A deadline that under-reads a leg's real
 #     sequential waits kills the leg at its bound and the gate exits 2, a loud refusal to evaluate,
 #     never a clean pass; the measured-ceiling term is what keeps such legs runnable.
-#   * _MIN_LEG_BOUND_S, the floor for the legs that finish in seconds.
+#   * _MIN_LEG_BOUND_S, the floor for the legs that finish in seconds (see below).
 # The legs run one after another, so the worst case of one gate run is the SUM of the bounds plus one
 # bounded post-kill cleanup deadline per leg (_DRAIN_MARGIN_S, which the output drain and the leader
 # reap SHARE, paid only by a leg killed at its bound); the self-test requires the whole opf-closure CI
@@ -110,44 +111,48 @@ _SUBSET = [
 # limit rather than shrinking it. A change that adds or lengthens a leg's wait updates this table in
 # the same change.
 # Every ceiling below is whole seconds, rounded up, from ONE source: a serial isolated run of every leg
-# started 2026-10-13 and finished 2026-10-14, at the tree of revision
-# 05eb4d88483b6f833fe38b46403d4a8d218c7cb6, whose opf/ subtree is byte-identical to this tree's (the
-# change carrying this table touches no file under opf/). The run was plain (no nice), one leg at a
-# time, on an otherwise busy 24-CPU host, with the 5-minute load average at the leg's start on its
-# row. A later refresh that changes opf/ CARRIES THESE FIGURES
-# FORWARD AS INFERRED, not measured, until the legs are re-measured at the refreshed tree.
+# started 2026-10-15T08:38Z and finished 2026-10-15T09:07Z, at the merge of revision
+# da4b403ab55892cdbac837ba0c51e092ab971ffd into this change, whose opf/ subtree (git tree
+# 7bf8107f4c6d23f5c89298ef121af566f5e48614) is byte-identical to that revision's and to this tree's
+# (the change carrying this table touches no file under opf/). Each leg ran as the gate runs it
+# (python3 -I -B against a copy of opf/ alone), plain (no nice), one leg at a time, on a shared 24-CPU
+# host, with the 5-minute load average at the leg's start on its row (13.7 to 24.6). A later refresh
+# that changes opf/ CARRIES THESE FIGURES FORWARD AS INFERRED, not measured, until the legs are
+# re-measured at the refreshed tree.
 # _LOAD_HEADROOM is the allowance for a slower or more loaded host than that run's. The multiplier is
-# an INFERENCE, not a measurement: the measurement host was already oversubscribed (the load5 on every
-# row exceeds its 24 CPUs), so contention that run already paid sits inside every ceiling, and the
-# multiplier covers a host slower still; a leg that outgrows it trips its bound (exit 2, fail-closed),
-# never passes clean. The multiplier is also capped by the job fit: at 4 the job's worst case on this
-# table (_job_worst_case_s) is 23106 s, over the 21600 s default job limit, while at 3 it is 21186 s.
+# an INFERENCE, not a measurement: the host carried other work during the run, but a host loaded beyond
+# it adds contention these ceilings do not hold; a leg that outgrows its bound trips it (exit 2,
+# fail-closed), never passes clean. One loaded observation checks it: a run of opf.py --self-test on a
+# loaded host, at another tree, took 1348.7 s, 2.78 times this table's 485.6 s, and 3 x 486 = 1458 s
+# covers it by 109.3 s. The multiplier is capped by the job fit (_job_worst_case_s against the 21600 s
+# default job limit): on this table the worst case is 20506 s at 3 and 22702 s at 4.
 _LEG_CEILING_S = {
-    "opf-homes-selftest": 67,  # measured: 66.4 s at load5 33.3
-    "opf-homes-contract": 1,  # measured: 0.3 s at load5 35.1
-    "opf-tooling-selftest": 436,  # measured: 435.7 s at load5 35.1
-    "opf-drift-selftest": 3,  # measured: 2.6 s at load5 26.2
-    "opf-doctor-selftest": 53,  # measured: 52.8 s at load5 26.2
-    "opf-init-selftest": 207,  # measured: 206.7 s at load5 25.7
-    "opf-init-contract-validator-selftest": 1,  # measured: 0.0 s at load5 27.6
-    "opf-init-contract-check-selftest": 1,  # measured: 0.0 s at load5 27.6
-    "opf-upgrade-selftest": 86,  # measured: 85.6 s at load5 27.6
-    "opf-adopt-selftest": 137,  # measured: 137.0 s at load5 28.3
-    "opf-adopt-apply-selftest": 7,  # measured: 6.7 s at load5 28.8
-    "opf-adopt-hook-selftest": 1,  # measured: 0.9 s at load5 28.7
-    "opf-pack-manifest-selftest": 18,  # measured: 18.0 s at load5 28.7
-    "opf-adopt-observe-selftest": 270,  # measured: 269.1 s at load5 28.6
-    "opf-adopt-discover-selftest": 1,  # measured: 0.5 s at load5 28.8
-    "opf-prompt-pack-selftest": 1,  # measured: 0.7 s at load5 28.8
-    "opf-prompt-pack": 1,  # measured: 0.1 s at load5 28.8
-    "opf-oplock-selftest": 102,  # measured: 101.8 s at load5 28.8
-    "opf-init-substrate-selftest": 5,  # measured: 4.2 s at load5 28.3
-    "opf-init-builders-selftest": 1,  # measured: 0.2 s at load5 28.3
-    "opf-init-operation-selftest": 98,  # measured: 97.3 s at load5 28.3
-    "opf-init-p0-selftest": 35,  # measured: 34.7 s at load5 27.6
-    "opf-init-observe-selftest": 1,  # measured: 0.9 s at load5 27.2
-    "commonmark-headings-selftest": 10,  # measured: 9.1 s at load5 27.2
-    "commonmark-conformance": 1,  # measured: 0.1 s at load5 27.2
+    "opf-homes-selftest": 91,  # measured: 90.1 s at load5 13.7
+    "opf-homes-contract": 1,  # measured: 0.4 s at load5 13.9
+    "opf-tooling-selftest": 486,  # measured: 485.6 s at load5 13.9
+    "opf-drift-selftest": 3,  # measured: 2.7 s at load5 15.9
+    "opf-doctor-selftest": 69,  # measured: 68.5 s at load5 15.9
+    "opf-init-selftest": 228,  # measured: 227.4 s at load5 16.3
+    "opf-init-contract-validator-selftest": 1,  # measured: 0.1 s at load5 17.6
+    "opf-init-contract-check-selftest": 1,  # measured: 0.1 s at load5 17.6
+    "opf-upgrade-selftest": 96,  # measured: 95.4 s at load5 17.6
+    "opf-adopt-selftest": 152,  # measured: 151.1 s at load5 18.6
+    "opf-adopt-apply-selftest": 9,  # measured: 8.2 s at load5 21.5
+    "opf-adopt-hook-selftest": 1,  # measured: 1.0 s at load5 21.6
+    "opf-import-batch-selftest": 1,  # measured: 0.7 s at load5 21.6
+    "opf-pack-manifest-selftest": 17,  # measured: 16.8 s at load5 21.7
+    "opf-adopt-observe-selftest": 284,  # measured: 283.7 s at load5 21.9
+    "opf-adopt-discover-selftest": 1,  # measured: 0.5 s at load5 23.9
+    "opf-prompt-pack-selftest": 1,  # measured: 0.8 s at load5 23.9
+    "opf-prompt-pack": 1,  # measured: 0.2 s at load5 23.9
+    "opf-oplock-selftest": 108,  # measured: 107.4 s at load5 23.9
+    "opf-init-substrate-selftest": 4,  # measured: 3.4 s at load5 24.5
+    "opf-init-builders-selftest": 1,  # measured: 0.3 s at load5 24.6
+    "opf-init-operation-selftest": 100,  # measured: 99.2 s at load5 24.6
+    "opf-init-p0-selftest": 40,  # measured: 39.8 s at load5 24.3
+    "opf-init-observe-selftest": 2,  # measured: 1.1 s at load5 24.3
+    "commonmark-headings-selftest": 13,  # measured: 12.2 s at load5 24.3
+    "commonmark-conformance": 1,  # measured: 0.2 s at load5 24.2
 }
 _LOAD_HEADROOM = 3
 _LAUNCH_MARGIN_S = 60
@@ -156,7 +161,12 @@ _LAUNCH_MARGIN_S = 60
 # the leg's process group can hold the output pipe open longer; the drain then returns with the partial
 # output it collected and the cleanup is reported incomplete by name, never hangs the gate.
 _DRAIN_MARGIN_S = 10
-_MIN_LEG_BOUND_S = 120
+# The floor equals _LAUNCH_MARGIN_S, which the deliberate-deadline term already reaches for every leg, so
+# it adds nothing while the two stay equal; it keeps the lower limit explicit should the launch margin
+# change. At the former 120 s floor this table's job worst case is 22166 s at a headroom of 3, over the
+# job limit, and no single multiplier both covers the 1348.7 s run above (that needs at least 2.776) and
+# fits the job (that allows at most 2.737).
+_MIN_LEG_BOUND_S = 60
 
 _CI_WORKFLOW = Path(".github") / "workflows" / "quality.yml"
 _CI_JOB = "opf-closure"
@@ -462,6 +472,36 @@ def _adopt_observe_registration_self_test():
     print("RED closure-registration -> closure/adopt-observe-registration")
 
 
+def _check_import_batch_registration(subset):
+    """Independent requirement, not inferred from the release manifest.
+
+    Covers this exact closure-roster tuple, not arbitrary dispatcher changes
+    or the registrations of other gates.
+    """
+    expected = ("opf-import-batch-selftest", "_opf_import_batch.py", ["--self-test"])
+    matches = [row for row in subset
+               if row[0] == expected[0] or row[1] == expected[1]]
+    if matches != [expected]:
+        raise AssertionError("closure/import-batch-registration")
+
+
+def _import_batch_registration_self_test():
+    _check_import_batch_registration(_SUBSET)
+    print("PASS closure/import-batch-registration")
+    # Mutate the real roster, independently of the shell-runner deletion.
+    # No digest or generated-manifest check participates in the verdict.
+    changed = list(_SUBSET)
+    changed.remove(("opf-import-batch-selftest", "_opf_import_batch.py", ["--self-test"]))
+    try:
+        _check_import_batch_registration(changed)
+    except AssertionError as exc:
+        if str(exc) != "closure/import-batch-registration":
+            raise
+    else:
+        raise AssertionError("closure/import-batch-registration-not-red")
+    print("RED closure-registration -> closure/import-batch-registration")
+
+
 def _isolated_env():
     """A minimal environment for the isolated subset. PYTHONPATH and PYTHONHOME are dropped so nothing off
     the copied tree can be imported (belt-and-suspenders atop `python3 -I`, which already ignores them), and
@@ -572,6 +612,7 @@ def _run_subset(opf_root, run_dir, bounds):
     (name, rc, tail, elapsed_s, launched, bound_s, cleanup)."""
     _check_pack_manifest_registration(_SUBSET)
     _check_adopt_observe_registration(_SUBSET)
+    _check_import_batch_registration(_SUBSET)
     env = _isolated_env()
     results = []
     for name, script, args in _SUBSET:
@@ -633,9 +674,11 @@ def _report(results):
     return 0
 
 
-def run(root):
+def run(root, ceilings=None):
     """Materialize opf/ alone and run the subset in isolation. Returns 0 (closure holds), 1 (a subset gate
-    failed: closure broken), or 2 (harness error, opf/ unreadable, or a leg killed at its bound), fail-closed."""
+    failed: closure broken), or 2 (harness error, opf/ unreadable, a leg with no ceiling row, refused
+    before any leg launches, or a leg killed at its bound), fail-closed. ceilings defaults to
+    _LEG_CEILING_S (the self-test passes a table missing a row)."""
     opf_src = Path(root) / "opf"
     if not (opf_src.is_dir() and (opf_src / "tools" / "opf.py").is_file()):
         print("error: opf/ subtree not found under {} (cannot evaluate closure)".format(root),
@@ -649,7 +692,7 @@ def run(root):
             print("error: could not materialize the isolated opf/ copy: {}".format(exc), file=sys.stderr)
             return 2
         try:
-            bounds = _leg_bounds(opf_root / "tools")
+            bounds = _leg_bounds(opf_root / "tools", ceilings)
         except _BoundError as exc:
             print("error: cannot derive the per-leg bounds: {}".format(exc), file=sys.stderr)
             return 2
@@ -674,8 +717,8 @@ def _bounds_self_test(root):
     required = _leg_bounds(tools_dir)
     live = dict((name, row[0]) for name, row in required.items())
     # The expectation is recombined here from the ceiling table and the wait scan, independently of
-    # _leg_bounds, so a _leg_bounds that drops a term (the headroom, the wait sum, the floor) is a
-    # named fault, not a tautology.
+    # _leg_bounds, so a _leg_bounds that drops a term (the headroom, the wait sum) is a named fault,
+    # not a tautology; dropping the floor changes no bound while it equals the launch margin.
     needs = {}
     for name, script, _args in _SUBSET:
         sources = [tools_dir / script]
@@ -730,6 +773,33 @@ def _bounds_self_test(root):
         print("RED missing-ceiling -> cannot derive the bound (fail-closed)")
     else:
         raise AssertionError("closure/missing-ceiling-not-refused")
+    # End to end through run(): a subset leg with no ceiling row is refused BY NAME before ANY leg
+    # launches. The row dropped is the LAST leg's, so a runner that checked each ceiling only as it
+    # reached that leg would launch every earlier leg first. Every launch is recorded and refused here
+    # (Popen raises, so nothing runs even when the refusal comes too late), and one is a named fault.
+    last = _SUBSET[-1][0]
+    ceilings = dict(_LEG_CEILING_S)
+    del ceilings[last]
+    launches = []
+
+    def refuse_launch(argv, **_kwargs):
+        launches.append(argv)
+        raise OSError("launch refused by the missing-row vector")
+
+    real_popen = subprocess.Popen
+    out = io.StringIO()
+    subprocess.Popen = refuse_launch
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = run(root, ceilings)
+    finally:
+        subprocess.Popen = real_popen
+    said = out.getvalue()
+    if code != 2 or "leg {} has no ceiling in _LEG_CEILING_S".format(last) not in said or launches:
+        raise AssertionError("closure/missing-row-refused-by-name-before-any-launch (exit {}, {} "
+                             "launch(es)): {!r}".format(code, len(launches), said))
+    print("RED a subset leg with no ceiling row ({}) -> refused by name through run(), exit 2, before "
+          "any leg launches".format(last))
     # The declared-wait scan reads what it says it reads: sequential sites SUM; a conditional site
     # counts once at its largest arm; a repeated site counts once; arithmetic is MIS-READ in either
     # direction (600 * 3 reads as 600, under its real 1800; 600 / 3 reads as 600, over its real 200);
@@ -1378,6 +1448,7 @@ def self_test_main():
     try:
         _pack_manifest_registration_self_test()
         _adopt_observe_registration_self_test()
+        _import_batch_registration_self_test()
         _negative_verdict_self_test()
         _cleanup_doubles_self_test()
         required = _bounds_self_test(root)
