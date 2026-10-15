@@ -102,9 +102,9 @@ end a step red; every other exit spelling stays unclassified.
 
 Exit convention:
   0  extraction succeeded, every difference has an active exception, no exception is
-     stale or reversed, and both mandatory self-members are present
+     stale or reversed, and every mandatory member is present on both sides
   1  an evaluated parity finding, stale or reversed exception, missing mandatory
-     self-member, or required-status finding
+     member, or required-status finding
   2  cannot-evaluate, including an unreadable input, malformed control input, empty
      extraction, unsupported shell or YAML shape, unresolved command value, hidden
      action, circular runner invocation, or shadow-scan discrepancy
@@ -116,7 +116,10 @@ failure. Interpreter-flag differences are intentionally removed from identity an
 owned by check_python_launcher_isolation.py. Scope is exactly the two named files, so
 gates in other workflows are not enumerated. Argument order is identity-relevant,
 making a harmless reorder fail loud. Coordinated removal of both of this gate's own
-invocations cannot be detected if nobody runs the remaining file manually. The
+invocations cannot be detected if nobody runs the remaining file manually. The repository
+contracts (REPO_GATES) and the cited-standards contract's --self-test are
+MANDATORY_MEMBERS, so removing one of them from both runners together is a
+missing-mandatory finding, not a silent pass (claude PR #520 round 2 MEDIUM-1). The
 extractors implement a disclosed shell and YAML subset; an unknown construct is
 cannot-evaluate rather than a clean pass. Fail-closed cases include an unknown
 top-level or job-level workflow key, an exit outside the exact terminal summary
@@ -187,14 +190,16 @@ time (splitlines(), the adapter's line split and newline rejoin, and
 Path.read_text()'s universal-newline translation, which turns \r into \n
 before any text screen can see it), so EVERY read of a runner or workflow
 file, in the live check (run_paths), in self-test vector 26, and in
-tools/selftest_git_fixture_env.py's roster and roster checks, goes through
+tools/selftest_git_fixture_env.py's roster and the core runner's
+roster checks, goes through
 the ONE byte-level reader (read_runner_text): the RAW BYTES are screened
 against this same alphabet before any decode, so no decode-layer newline
 translation or multi-byte spelling can erase a forbidden byte ahead of the
 screen, and the accepted bytes are decoded strictly as ASCII, which maps
 each byte to one character and translates no newline. A self-test vector
 pins every read_text or splitlines attribute and every text-mode open()
-call in this file and in tools/selftest_git_fixture_env.py, as spelled,
+call in this file, in tools/selftest_git_fixture_env.py and in its four
+registered suite runners, as spelled,
 against an exact per-function allowlist, so a new read path written
 through those APIs turns the self-test red for review against the reader;
 a read spelled another way (getattr, an alias) is outside that tripwire.
@@ -333,8 +338,13 @@ MASKED_REF_EXPRESSIONS = frozenset({
     "$PR_HEAD_SHA",
 })
 
-# One repository-local, non-shipped gate; no general .github executable allowance.
-REPO_GATE = ".github/check_newtab_contract.py"
+# The repository-local, non-shipped gates, each named; no general .github executable allowance.
+# Each is also a MANDATORY_MEMBERS entry (the cited-standards contract together with its
+# --self-test), so a both-runner removal is a missing-mandatory finding.
+REPO_GATES = frozenset({
+    ".github/check_cited_standards_contract.py",
+    ".github/check_newtab_contract.py",
+})
 
 # The one status branch protection requires. In a workflow with more than one job,
 # exactly one job carries this name, a job-level if: of always(), and a needs: list
@@ -488,6 +498,12 @@ ALLOWLIST = (
 )
 
 MANDATORY_MEMBERS = frozenset({
+    # The repository contracts (claude PR #520 round 2 MEDIUM-1): mandatory, so removing
+    # one from BOTH runners together is a missing-mandatory finding (exit 1), never a
+    # silent pass; a one-sided removal is already a local-only or ci-only finding.
+    ".github/check_cited_standards_contract.py",
+    ".github/check_cited_standards_contract.py --self-test",
+    ".github/check_newtab_contract.py",
     "tools/check_ci_parity.py",
     "tools/check_ci_parity.py --self-test",
     "tools/check_git_option_table.py",
@@ -544,7 +560,8 @@ JOB_PROPERTY_KEYS = frozenset({
 _TOOL_NONDELIM = r"[^\s'\"(),:=`;{}\[\]]"  # a char that is NOT a legitimate delimiter
 TOOL_RE = re.compile(
     r"(?:(?<!" + _TOOL_NONDELIM + r")|(?<=(?<!" + _TOOL_NONDELIM + r")\./))"
-    r"(?:(?:opf/)?tools/[A-Za-z0-9_.-]+\.(?:py|sh)|" + re.escape(REPO_GATE) + r")\b"
+    r"(?:(?:opf/)?tools/[A-Za-z0-9_.-]+\.(?:py|sh)|"
+    + "|".join(re.escape(gate) for gate in sorted(REPO_GATES)) + r")\b"
 )
 PY_TARGET_RE = re.compile(r"^(?:opf/)?tools/[A-Za-z0-9_.-]+\.py$")
 ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
@@ -708,14 +725,15 @@ def normalize(tokens):
                 "dynamic-target",
                 "gate target must be a literal tools/*.py path",
             )
-        if (target != REPO_GATE and not PY_TARGET_RE.fullmatch(target)
+        if (target not in REPO_GATES and not PY_TARGET_RE.fullmatch(target)
                 or ".." in target.split("/")):
             return Result(
                 False,
                 None,
                 "gate-target",
                 "unsupported gate target {!r}; expected a literal "
-                "tools/*.py path, {} or gitleaks dir".format(target, REPO_GATE),
+                "tools/*.py path, {} or gitleaks dir".format(
+                    target, " or ".join(sorted(REPO_GATES))),
             )
         canonical = [target]
 
@@ -3230,6 +3248,11 @@ def self_test():
         "python3 -I -B tools/check_ci_parity.py",
         "python3 -I -B tools/check_git_option_table.py --self-test",
         "python3 -I -B tools/check_git_option_table.py",
+        # The mandatory repository contracts: every matched fixture roster carries them,
+        # as the two real runners do.
+        "python3 -I -B .github/check_cited_standards_contract.py --self-test",
+        "python3 -I -B .github/check_cited_standards_contract.py",
+        "python3 -I -B .github/check_newtab_contract.py",
     )
 
     def local_fixture(commands=(), tail=()):
@@ -3340,19 +3363,45 @@ def self_test():
         0,
     )
 
-    repo_command = "python3 -I -B " + REPO_GATE
-    case("01b repository gate matched",
-         evaluate(local_fixture(common + (repo_command,)),
-                  ci_fixture(common + (repo_command,)), ()), 0)
-    case("01c repository gate local-only",
-         evaluate(local_fixture(common + (repo_command,)), ci_fixture(common), ()),
-         1, ("local-only",), (REPO_GATE,), ())
-    case("01d repository gate ci-only",
-         evaluate(local_fixture(common), ci_fixture(common + (repo_command,)), ()),
-         1, ("ci-only",), (), (REPO_GATE,))
-    case("01e repository gate shadow scan",
-         evaluate(local_fixture(common, ("echo " + REPO_GATE,)), ci_fixture(common), ()),
-         2)
+    def drop(member):
+        """The common roster without the one command whose identity is member."""
+        return tuple(c for c in common if c != "python3 -I -B " + member)
+
+    case("01b repository gates matched",
+         evaluate(local_fixture(common), ci_fixture(common), ()), 0)
+    for repo_gate in sorted(REPO_GATES):
+        case("01c repository gate local-only: " + repo_gate,
+             evaluate(local_fixture(common), ci_fixture(drop(repo_gate)), ()),
+             1, ("local-only", "missing-mandatory"), (repo_gate,), ())
+        case("01d repository gate ci-only: " + repo_gate,
+             evaluate(local_fixture(drop(repo_gate)), ci_fixture(common), ()),
+             1, ("ci-only", "missing-mandatory"), (), (repo_gate,))
+        case("01e repository gate shadow scan: " + repo_gate,
+             evaluate(local_fixture(common, ("echo " + repo_gate,)), ci_fixture(common), ()),
+             2)
+        # The runner's echo line is refused by its own grammar too; a workflow step name is
+        # not, so only the shadow scan's match on this repository gate refuses it.
+        case("01g repository gate shadow scan in a step name: " + repo_gate,
+             evaluate(local_fixture(common), ci_fixture(common, (
+                 "      - name: Run " + repo_gate,
+                 "        run: python3 -I -B tools/check_ci_parity.py",
+             )), ()), 2)
+    # claude PR #520 round 2 MEDIUM-1: each mandatory repository-contract member removed
+    # from BOTH runners together is a missing-mandatory finding, never a silent pass. The
+    # member list is spelled out rather than derived from MANDATORY_MEMBERS, so reverting
+    # the contracts out of that set turns these vectors red instead of silently skipping.
+    for member in (
+            ".github/check_cited_standards_contract.py",
+            ".github/check_cited_standards_contract.py --self-test",
+            ".github/check_newtab_contract.py"):
+        count += 1
+        if member not in MANDATORY_MEMBERS:
+            failures.append(
+                "01h {} is not in MANDATORY_MEMBERS; a both-runner removal of a "
+                "repository contract would be undetected again".format(member))
+        case("01h repository contract removed from both runners: " + member,
+             evaluate(local_fixture(drop(member)), ci_fixture(drop(member)), ()),
+             1, ("missing-mandatory",), (), ())
     unknown = "python3 -I -B .github/unrecognized.py"
     case("01f unknown repository executable refused",
          evaluate(local_fixture(common + (unknown,)),
@@ -3914,8 +3963,9 @@ def self_test():
         ("missing-mandatory",),
     )
 
-    # Both rosters carry the ci-parity mandatory members but omit the git-option-table pair, so the only
-    # findings are missing-mandatory for those two (rosters are otherwise matched, no local/ci-only drift).
+    # Both rosters carry the ci-parity mandatory members but omit the git-option-table pair and the
+    # three repository-contract members, so the only findings are missing-mandatory for those five
+    # (rosters are otherwise matched, no local/ci-only drift).
     git_option_absent = (
         "python3 -I -B tools/check_ci_parity.py --self-test",
         "python3 -I -B tools/check_ci_parity.py",
@@ -4864,8 +4914,9 @@ def self_test():
 
     # codex qa10 MAJOR-1 (class closure): every read of runner or workflow
     # text must go through read_runner_text, the ONE byte-level reader.
-    # This structural vector parses this file and
-    # tools/selftest_git_fixture_env.py and pins EVERY read_text or
+    # This structural vector parses this file,
+    # tools/selftest_git_fixture_env.py and its four registered suite
+    # runners and pins EVERY read_text or
     # splitlines attribute and every text-mode open() call, as spelled, to
     # an exact per-function site count, so a new, moved or removed read
     # written through those APIs turns this vector red and forces review
@@ -4949,12 +5000,6 @@ def self_test():
             # inside the allowlist.
             ("_close_lock_sites", "open-text"): 1,
             ("_maintenance_pin_scan", "read_text"): 1,
-            ("_manifest_extra_setup_failures", "read_text"): 1,
-            # The member-timeout control's fixture pid file: no runner text.
-            ("_member_timeout_controls", "read_text"): 1,
-            # The cleanup-failure control's captured diagnostic lines: no runner text.
-            ("_member_timeout_controls", "splitlines"): 1,
-            ("_opf_home_lifecycles", "read_text"): 1,
             # /proc/<pid>/stat, the timeout control's liveness probe.
             ("_pid_state", "open-text"): 1,
             ("_registered_selftests", "splitlines"): 1,
@@ -4968,10 +5013,24 @@ def self_test():
             # disclosed residual applies: the pin is the per-function count
             # of text-mode open() calls, not the read target.
             ("_sweep_call_sites", "open-text"): 1,
-            ("_system_pin_checks", "read_text"): 1,
             ("_system_pin_probe", "splitlines"): 1,
             ("prepare", "read_text"): 1,
             ("run", "splitlines"): 1,
+        },
+        "tools/selftest_git_fixture_env_core.py": {
+            ("_manifest_extra_setup_failures", "read_text"): 1,
+            # The member-timeout control's fixture pid file: no runner text.
+            ("_member_timeout_controls", "read_text"): 1,
+            # The cleanup-failure control's captured diagnostic lines: no runner text.
+            ("_member_timeout_controls", "splitlines"): 1,
+            ("_system_pin_checks", "read_text"): 1,
+        },
+        # The two poison-only lanes spell no read_text, splitlines or text-mode open() site;
+        # a first one added there drifts from this empty allowlist and forces review.
+        "tools/selftest_git_fixture_env_config_combined.py": {},
+        "tools/selftest_git_fixture_env_config_malformed.py": {},
+        "tools/selftest_git_fixture_env_config_system.py": {
+            ("_opf_home_lifecycles", "read_text"): 1,
         },
     }
     for relative, allowed in sorted(allowed_read_sites.items()):
@@ -5029,7 +5088,8 @@ def self_test():
                      first=("python3 tools/a.py", "python3 tools/b.py")),
         ())
     case("30b a member present in two jobs is counted once", moved, 0)
-    if "tools/b.py" not in moved.ci_members or len(moved.ci_members) != 6:
+    if ("tools/b.py" not in moved.ci_members
+            or len(moved.ci_members) != len(common) + 2):
         failures.append(
             "30b moved member was not counted exactly once: {!r}".format(
                 sorted(moved.ci_members)))
