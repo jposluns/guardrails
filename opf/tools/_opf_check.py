@@ -86,7 +86,7 @@ from _opf_store import (  # noqa: E402
 from _opf_schema import (  # noqa: E402
     validate_record, validate_counters, check_unique_ids, check_ids_within_counters, check_monotonic,
     validate_transition, parse_status, BASELINE_SPECS, ACTOR_KINDS, LINK_RELS, _valid_id_shape,
-    SUPPORTED_SCHEMA, _valid_timestamp, IMPORTED_NAMESPACES,
+    SUPPORTED_SCHEMA, _valid_timestamp, IMPORTED_NAMESPACES, IMPORTED_PREFIX, parse_series_id,
 )
 # U3 supplies the ledger validators, the frozen/rotation/partition guards, and the across-time append-only.
 from _opf_release import (  # noqa: E402
@@ -1894,6 +1894,142 @@ def _check_worklog_contiguous(numbers, rep):
             break
 
 
+def _imported_counter_namespaces(enabled_types):
+    """The namespaces whose imported counter row the doctor requires once the imported series is active
+    (spec 8.2): one per enabled type except legacy_fragment, i.e. every enabled normative namespace the
+    imported series may carry (IMPORTED_NAMESPACES refuses LF, the reserved TX and the unassigned CL)."""
+    return frozenset(ns for ns in enabled_types.values() if ns in IMPORTED_NAMESPACES)
+
+
+def _gather_imported_rows(root_fd, machine_rel, enabled_types, rep):
+    """Read the imported-series leaves for the per-series id checks (spec 8.2/8.3). Each enabled type except
+    legacy_fragment keeps its imported rows inline in the machine store in either layout (spec 4.2): the
+    [[record]] rows of <type>.imported.index.toml, and the [[entry]] rows of worklog.imported.toml.
+    Returns (rows, unread): `rows` holds (counter_key, id, row) for every row whose id lies in its own leaf
+    series, imported:<NS>-<n> over the leaf type namespace, in leaf then row order; `unread` holds the
+    counter keys whose leaf could not be read (a CANNOT-EVALUATE is already recorded), so no later check
+    reads an unread leaf as an empty one. An ABSENT leaf contributes no rows, and every id its counter
+    allocated is still owed (C-NO-DELETION). A row outside its leaf series (a clean id, another namespace,
+    a non-string or malformed id) is a finding here, the series grammar; the rest of the imported envelope
+    is C-IMPORTED-SCHEMA work, never graded here."""
+    rows, unread = [], set()
+    for tname in sorted(enabled_types):
+        ns = enabled_types[tname]
+        if ns not in IMPORTED_NAMESPACES:
+            continue
+        key = IMPORTED_PREFIX + ns
+        if tname in _LEDGER_TYPES:
+            rel, member = _rel(machine_rel, _opf_store.IMPORTED_WORKLOG_NAME), "entry"
+        else:
+            rel, member = _rel(machine_rel, tname + _opf_store.IMPORTED_INDEX_SUFFIX), "record"
+        data, st = _read_toml(root_fd, rel, rep)
+        if st == "absent":
+            continue
+        if st != "ok":
+            unread.add(key)
+            continue
+        arr = data.get(member, []) if isinstance(data, dict) else None
+        if not isinstance(arr, list):
+            rep.cant("{} carries no readable [[{}]] array, so its imported ids cannot be graded (spec "
+                     "8.2/8.3)".format(rel, member))
+            unread.add(key)
+            continue
+        for i, row in enumerate(arr):
+            rid = row.get("id") if isinstance(row, dict) else None
+            shape = parse_series_id(rid)
+            if shape is None or shape[0] != key:
+                rep.finding("C-ID-SPACE: {} {}[{}] id {} is not an {}-<n> id; an imported leaf holds only "
+                            "its own type series (spec 8.2)".format(rel, member, i, _safe_display(rid), key))
+                continue
+            rows.append((key, rid, row))
+    return rows, unread
+
+
+def _check_imported_worklog_contiguous(numbers, rep):
+    """C-CONTIGUITY on the imported:WL number line, graded apart from the clean worklog (spec 8.2: contiguity
+    evaluates each series independently): the imported worklog tiles from imported:WL-1 with no gap. The two
+    lines never merge, so an imported gap never breaks clean release tiling and an imported entry never fills
+    a clean gap (clean release spans tile only the clean WL line, spec 8.2). A pairwise scan over the sorted
+    distinct present numbers, never sized by a high-water (F15); a duplicate is the C-ID-SPACE finding."""
+    nums = sorted(set(numbers))
+    if not nums:
+        return
+    if nums[0] != 1:
+        rep.finding("C-CONTIGUITY: the imported worklog does not start at imported:WL-1 (first present is "
+                    "imported:WL-{}; each series tiles its own number line, spec 8.2)".format(nums[0]))
+    for i in range(1, len(nums)):
+        if nums[i] != nums[i - 1] + 1:
+            rep.finding("C-CONTIGUITY: the imported worklog is not contiguous; imported:WL-{} is missing (the "
+                        "imported line is graded apart from clean release tiling, spec 8.2)".format(
+                            nums[i - 1] + 1))
+            break
+
+
+def _check_imported_no_deletion(rows, unread, high, floor, namespaces, rep):
+    """C-NO-DELETION over the imported series (spec 8.2/8.3): for each required imported counter row, the
+    present imported ids must be exactly floor+1 .. high-water on that row own number line, apart from the
+    clean one. Imported records never rotate (spec 12), so the imported leaves are their only location. The
+    same O(present) arithmetic as the clean scan: an overhang COUNT above the max present id, then the first
+    gap below it, never a range() expansion of the high-water (F15). A key whose leaf is unread, or whose
+    counter is absent or malformed (the C-COUNTERS finding), is skipped here, never read as a deletion."""
+    present = {}
+    for key, rid, _row in rows:
+        present.setdefault(key, set()).add(parse_series_id(rid)[2])
+    for key in sorted(IMPORTED_PREFIX + ns for ns in namespaces):
+        if key in unread:
+            continue
+        hw = high.get(key)
+        if not (isinstance(hw, int) and not isinstance(hw, bool) and hw >= 0):
+            continue
+        base = floor.get(key, 0)
+        nums = sorted(n for n in present.get(key, ()) if n > base)
+        max_present = nums[-1] if nums else base
+        if hw > max_present:
+            rep.finding("C-NO-DELETION: {} allocated {}-<n> id(s) above {}-{} are absent from the imported "
+                        "leaves (counters {} high-water is {}; imported records are immutable after "
+                        "publication, spec 8.2/8.3)".format(hw - max_present, key, key, max_present, key, hw))
+        expected = base + 1
+        for n in nums:
+            if n != expected:
+                rep.finding("C-NO-DELETION: {}-{} is absent from the imported leaves (an allocated id between "
+                            "1 and {}-{} cannot be deleted; spec 8.2/8.3)".format(key, expected, key, max_present))
+                break
+            expected += 1
+
+
+def _check_imported_append_only(prior_imported, rows, unread, rep):
+    """C-HISTORY-APPEND-ONLY over the imported leaves (spec 8.3: imported records and their worklog entries
+    MUST be immutable after publication; a correction is a fresh import run). Every imported id in the prior
+    committed snapshot must still be present with an unchanged canonical body digest (_record_digest, the
+    digest the prior carries). A prior that carries no imported baseline is a named CANNOT-EVALUATE, never a
+    silent pass; an id whose leaf is unread is skipped, its CANNOT-EVALUATE already recorded."""
+    if prior_imported is None:
+        rep.cant("C-HISTORY-APPEND-ONLY: the prior committed snapshot carries no imported-series baseline; "
+                 "imported immutability across time (spec 8.3) is not evaluated")
+        return
+    current = {}
+    for _key, rid, row in rows:
+        current.setdefault(rid, row)
+    for rid in sorted(prior_imported):
+        if parse_series_id(rid)[0] in unread:
+            continue
+        row = current.get(rid)
+        if row is None:
+            rep.finding("C-HISTORY-APPEND-ONLY: prior imported record {!r} is absent from the imported leaves "
+                        "(imported records are immutable after publication; spec 8.3)".format(rid))
+            continue
+        try:
+            digest = _record_digest(row)
+        except _opf_emit.EmitError as exc:
+            rep.cant("C-HISTORY-APPEND-ONLY: cannot canonicalize imported record {!r} to compare against the "
+                     "prior digest ({})".format(rid, exc))
+            continue
+        if digest != prior_imported[rid]:
+            rep.finding("C-HISTORY-APPEND-ONLY: imported record {!r} changed since the prior committed snapshot "
+                        "(imported records and their worklog entries are immutable after publication; a "
+                        "correction is a fresh import run, spec 8.3)".format(rid))
+
+
 def _verify_immutable_body(rid, cur, prior_digests, rep):
     """C-HISTORY-RESURRECTION: a created-terminal record (done / worklog / autonomous_decision / reference)
     is immutable in BODY too (OPF-SPEC 8.5). The prior snapshot carries only (type, status), so body
@@ -2599,7 +2735,10 @@ def _wellformed_release_row(row):
 
 def _normalize_prior(prior):
     """Validate the injected prior committed snapshot: {releases: list, counters_high: {ns: int},
-    records: {id: (type, status)}, digests: {id: str} (optional)}. Every record id is shape-validated and
+    records: {id: (type, status)}, digests: {id: str} (optional), imported: {imported id: digest} (optional,
+    spec 8.3)}. An "imported:<NS>" counter is returned apart as imported_high, and the imported member with
+    its imported_malformed verdict, for the driver to grade where the imported series is active (spec 8.2).
+    Every record id is shape-validated and
     its namespace reconciled against its declared type's roster namespace, so a malformed id or a
     namespace/type mismatch makes the WHOLE prior malformed -> CANNOT-EVALUATE naming the observation,
     never a store INVALID (codex-9/F4). Returns the normalized dict or None when any field is malformed
@@ -2622,12 +2761,17 @@ def _normalize_prior(prior):
         if not _wellformed_release_row(row):
             return None
     norm_high = {}
+    imported_high = {}
     for ns, val in counters_high.items():
-        if not isinstance(ns, str) or ns not in _ROSTER_NS_SET:
+        # An "imported:<NS>" counter over the imported namespaces is held apart (spec 8.2): the driver grades
+        # it only where the imported series is active and reads it as a malformed prior everywhere else.
+        imported_key = (isinstance(ns, str) and ns.startswith(IMPORTED_PREFIX)
+                        and ns[len(IMPORTED_PREFIX):] in IMPORTED_NAMESPACES)
+        if not isinstance(ns, str) or (ns not in _ROSTER_NS_SET and not imported_key):
             return None
         if not (isinstance(val, int) and not isinstance(val, bool) and val >= 0):
             return None
-        norm_high[ns] = val
+        (imported_high if imported_key else norm_high)[ns] = val
     norm_records = {}
     for rid, val in records.items():
         if not isinstance(rid, str):
@@ -2651,8 +2795,26 @@ def _normalize_prior(prior):
             if not isinstance(did, str) or not isinstance(dval, str):
                 return None
             norm_digests[did] = dval
+    # The optional `imported` member: {imported id: canonical body digest} of the imported leaves at the
+    # prior commit (spec 8.3). Malformed contents are recorded, not refused here: the member was ignored
+    # before the imported series, and the driver refuses it only where the series is active.
+    imported = prior.get("imported")
+    norm_imported, imported_malformed = None, False
+    if imported is not None:
+        norm_imported = {}
+        if not isinstance(imported, dict):
+            imported_malformed = True
+        else:
+            for iid, dval in imported.items():
+                shape = parse_series_id(iid)
+                if (shape is None or shape[0] == shape[1] or shape[1] not in IMPORTED_NAMESPACES
+                        or not isinstance(dval, str)):
+                    imported_malformed = True
+                    break
+                norm_imported[iid] = dval
     return {"releases": list(releases), "counters_high": norm_high, "records": norm_records,
-            "digests": norm_digests}
+            "digests": norm_digests, "imported_high": imported_high, "imported": norm_imported,
+            "imported_malformed": imported_malformed}
 
 
 def _normalize_observations(observations):
@@ -2826,6 +2988,13 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     enabled_modules = _enabled_modules(manifest_data)
     homes = _opf_store.homes_generation(manifest_data)
     rep.require_homes(homes)
+    # The imported series (spec 8.2/8.3): its 1.3.0 content activates only inside the 2.0.0 /
+    # homes = 2 declaration, so the per-series id grading keys on that declaration as this tooling grades it.
+    # homes_generation answers 2 only for the exact pair AND only once this tooling supports homes 2
+    # (SUPPORTED_HOMES), so every store graded today is generation 1 and the imported grading ships inert.
+    # ONE flag feeds C-COUNTERS, C-ID-SPACE, C-NO-DELETION, C-CONTIGUITY and the across-time checks, so
+    # they cannot disagree about which stores carry the series.
+    imported = homes >= 2
 
     # --- C-ROSTER: reconcile the manifest [types] against the authoritative roster (spec 9/8.1) -------
     rep.ran("C-ROSTER")
@@ -2932,8 +3101,13 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         # opf init while legacy_fragment stays out of the manifest [types] (schema-deferred), so LF is
         # absent from known_ns; passing it as optional keeps such a store clean without requiring LF on
         # a store that lacks it, as a new store does (spec 8.2).
-        high, cfindings = validate_counters(counters_data, known_namespaces=known_ns,
-                                            optional_namespaces=frozenset(IMPORTER_TYPES.values()))
+        # With the imported series active (spec 8.2) the doctor also REQUIRES one "imported:<NS>" row per
+        # enabled type except legacy_fragment, each an independent number line; inactive, an imported key
+        # stays a finding exactly as before.
+        high, cfindings = validate_counters(
+            counters_data, known_namespaces=known_ns,
+            optional_namespaces=frozenset(IMPORTER_TYPES.values()),
+            imported_namespaces=_imported_counter_namespaces(enabled_types) if imported else None)
         for f in cfindings:
             rep.finding("counters.toml: {}".format(f))
         counters_ok = not cfindings
@@ -2973,6 +3147,17 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         rep.finding("C-ID-SPACE: {}".format(f))
     for f in check_ids_within_counters(committed_ids, high):
         rep.finding("C-ID-SPACE: {}".format(f))
+    # The imported series is graded on its OWN number lines (spec 8.2: each series independently): read from
+    # the imported leaves only, unique within the series, and each id within its own "imported:<NS>"
+    # high-water, never the clean one. The clean union above never holds an imported id.
+    imported_rows, imported_unread = [], set()
+    if imported:
+        imported_rows, imported_unread = _gather_imported_rows(root_fd, machine_rel, enabled_types, rep)
+        imported_ids = [rid for _key, rid, _row in imported_rows]
+        for f in check_unique_ids(imported_ids, imported_series=True):
+            rep.finding("C-ID-SPACE: imported series: {}".format(f))
+        for f in check_ids_within_counters(imported_ids, high, imported_series=True):
+            rep.finding("C-ID-SPACE: imported series: {}".format(f))
 
     # --- the cross-record checks ----------------------------------------------------------------------
     rep.ran("C-RECEIPTS")
@@ -3067,12 +3252,22 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                 break
             expected += 1
 
+    # The imported series owns BOTH sides per imported counter row too, on its own number line (spec 8.2/8.3).
+    if imported:
+        _check_imported_no_deletion(imported_rows, imported_unread, high, floor,
+                                    _imported_counter_namespaces(enabled_types), rep)
+
     rep.ran("C-PARTITION")
     for f in check_ids_partition(active_wl_ids, archive_wl_ids):
         rep.finding("C-PARTITION: {}".format(f))
 
     rep.ran("C-CONTIGUITY")
     _check_worklog_contiguous(merged.keys(), rep)
+    # imported:WL tiles its own line, apart from the clean tiling above (spec 8.2): `merged` stays clean-only,
+    # so clean release spans, frozen coverage and the changelog gates never read an imported entry.
+    if imported and IMPORTED_PREFIX + "WL" not in imported_unread:
+        _check_imported_worklog_contiguous([parse_series_id(rid)[2] for key, rid, _row in imported_rows
+                                            if key == IMPORTED_PREFIX + "WL"], rep)
 
     # --- C-TRACKED / C-SYNC-AGREE: topology, from the injected observations (spec 5.1/5.6) ------------
     rep.ran("C-TRACKED")
@@ -3303,8 +3498,14 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- the across-time checks, from the injected prior committed snapshot (spec 6.1/8.2/8.4/13) -----
     prior = obs.get("prior")
+    prior_malformed = obs.get("prior_malformed")
+    # The imported parts of the prior are graded only where the series is active (spec 8.2/8.3). Inactive,
+    # an imported counter key keeps its former verdict, a malformed prior, and the imported member is
+    # ignored as before; active, a malformed imported member makes the whole prior malformed.
+    if prior is not None and (prior["imported_malformed"] if imported else prior["imported_high"]):
+        prior, prior_malformed = None, True
     prior_reason = ("the prior committed snapshot observation was supplied but malformed"
-                    if obs.get("prior_malformed") else "no prior committed snapshot was supplied")
+                    if prior_malformed else "no prior committed snapshot was supplied")
     rep.ran("C-HISTORY-APPEND-ONLY")
     if prior is None:
         rep.cant("C-HISTORY-APPEND-ONLY: {}; across-time release immutability (spec 6.1/13) is not "
@@ -3319,6 +3520,10 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         _verify_append_only(prior["releases"], cur_releases, ap)
         for f in ap:
             rep.finding("C-HISTORY-APPEND-ONLY: {}".format(f))
+    if imported and prior is not None:
+        # Append-only over the imported leaves (spec 8.3), independent of the version ledger: every prior
+        # imported record stays present and byte-identical in its canonical form.
+        _check_imported_append_only(prior["imported"], imported_rows, imported_unread, rep)
 
     rep.ran("C-HISTORY-COUNTERS")
     if prior is None:
@@ -3328,7 +3533,10 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         rep.cant("C-HISTORY-COUNTERS: the current counters did not evaluate; counter non-regression is not "
                  "checkable")
     else:
-        for f in check_monotonic(prior["counters_high"], high):
+        # Both number lines on an active series (spec 8.2): an "imported:<NS>" high-water is compared on its
+        # own line. Inactive, the prior holds no imported key (see above), so this is the clean comparison.
+        for f in check_monotonic({**prior["counters_high"], **prior["imported_high"]}, high,
+                                 imported_series=imported):
             rep.finding("C-HISTORY-COUNTERS: {}".format(f))
 
     rep.ran("C-HISTORY-RESURRECTION")
@@ -4654,6 +4862,241 @@ def self_test():
             _icc_g["required_checks"] = _icc_prev_rc
             _icc_g["REQUIRED_CHECKS"] = _icc_prev_req
             _icc_g["HOMES2_CHECKS"] = _icc_prev_h2
+        # OPF-IMPORTED-SERIES IS-3b: the per-series id grading (spec 8.2/8.3), keyed on the 2.0.0 / homes = 2
+        # declaration as this tooling grades it. SUPPORTED_HOMES is patched to 2 inside the
+        # block (the check_opf_homes per-vector idiom), so homes_generation grades the declared pair as
+        # generation 2 through the driver itself; it is restored in finally. Containment of the imported
+        # leaves still keys on the IS-2 gate (SUPPORTED_SPEC_VERSION at 1.3.0), which the homes-2 declaration
+        # never opens, so a store carrying imported leaves also reads them as unregistered C-CONTAINMENT
+        # strays: the leaf vectors judge the per-check verdicts, and each leaf control asserts that
+        # C-CONTAINMENT is its ONLY non-passing check. Re-keying containment is a later change.
+        _i3_ns = sorted(set(BASELINE_TYPES.values()))
+
+        def _i3_machine(imp=None, drop=(), leaves=None):
+            m = clean_machine()
+            m["manifest.toml"]["opf"]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
+            m["manifest.toml"]["opf"]["homes"] = 2
+            rows = {"imported:" + ns: 0 for ns in _i3_ns}
+            rows.update(imp or {})
+            for key in drop:
+                rows.pop(key, None)
+            m["counters.toml"]["counters"].update(rows)
+            m.update(leaves or {})
+            return m
+
+        def _i3_row(rid, **over):
+            r = {"id": rid, "type": "backlog_item", "status": "done", "title": "t",
+                 "actor": {"kind": "importer", "id": "assistant"}}
+            r.update(over)
+            return r
+
+        def _i3_wl(n):
+            return {"id": "imported:WL-{}".format(n), "type": "worklog", "status": "recorded",
+                    "actor": {"kind": "importer", "id": "assistant"}, "kind": "added",
+                    "summary": "i{}".format(n)}
+
+        def _i3_obs(imported=None, high=None):
+            o = clean_prior()
+            o["prior"]["imported"] = {} if imported is None else imported
+            o["prior"]["counters_high"].update(high or {})
+            return o
+
+        def _i3_run(machine, obs=None):
+            return run(machine, obs=_i3_obs() if obs is None else obs)
+
+        def _i3_bad(r):
+            return {c for c, v in r.checks.items() if v != "PASS"} if r is not None else None
+
+        def _i3_msgs(r, cid):
+            return r.by_check.get(cid, []) if r is not None else []
+
+        _i3_bi2 = {"backlog_item.imported.index.toml": idx([_i3_row("imported:BI-1"), _i3_row("imported:BI-2")])}
+        _i3_prev_homes = _opf_store.SUPPORTED_HOMES
+        try:
+            _opf_store.SUPPORTED_HOMES = 2
+            # The clean homes-2 store with a zero row for every imported counter (spec 8.2) is VALID.
+            _i3_clean = _i3_run(_i3_machine())
+            check("imported-homes2-clean-valid", _i3_clean is not None and _i3_clean.status == VALID)
+            # C-COUNTERS requires the imported rows on homes 2 (red when imported_namespaces is not passed:
+            # the missing row is then no finding, and with every row dropped the store reads VALID). As for
+            # a missing clean row, the overall status is dominated by the correlated C-HISTORY-COUNTERS
+            # cant (the current counters did not evaluate), so discriminate on the per-check verdict.
+            _i3_miss = _i3_run(_i3_machine(drop=("imported:BI",)))
+            check("imported-counter-row-missing-finding",
+                  _i3_miss is not None and _i3_miss.checks.get("C-COUNTERS") == "FINDING"
+                  and [f for f in _i3_miss.findings if "imported" in f]
+                  == ["counters.toml: [counters] is missing a high-water for imported namespace "
+                      "'imported:BI' (spec 8.2)"])
+            _i3_none = _i3_run(_i3_machine(drop=tuple("imported:" + ns for ns in _i3_ns)))
+            check("imported-counter-rows-all-missing-finding",
+                  _i3_none is not None and _i3_none.status == CANNOT_EVALUATE
+                  and _i3_bad(_i3_none) == {"C-COUNTERS", "C-HISTORY-COUNTERS"}
+                  and _i3_none.checks.get("C-COUNTERS") == "FINDING"
+                  and sum("missing a high-water for imported namespace" in f for f in _i3_none.findings)
+                  == len(_i3_ns) == 12)
+            # legacy_fragment has no imported counter row: its LF counter stays required as a clean row and
+            # no imported:LF row is asked for, while a present imported:LF row is refused (spec 8.2).
+            _i3_lf = _i3_machine()
+            _i3_lf["manifest.toml"]["types"]["legacy_fragment"] = {"namespace": "LF"}
+            _i3_lf["counters.toml"]["counters"]["LF"] = 0
+            _i3_lf["legacy_fragment.index.toml"] = idx([])
+            _i3_lfr = _i3_run(copy.deepcopy(_i3_lf))
+            _i3_lf["counters.toml"]["counters"]["imported:LF"] = 0
+            _i3_lfx = _i3_run(_i3_lf)
+            check("imported-counter-no-lf-row",
+                  _i3_lfr is not None and _i3_lfr.checks.get("C-COUNTERS") == "PASS"
+                  and _i3_lfx is not None and _i3_lfx.checks.get("C-COUNTERS") == "FINDING"
+                  and any("imported:LF" in f for f in _i3_msgs(_i3_lfx, "C-COUNTERS")))
+            # The leaf control: two imported rows within imported:BI = 2 grade clean in every imported-aware
+            # check; only the IS-2 containment gap remains (the leaf is an unregistered stray on this store).
+            _i3_ok = _i3_run(_i3_machine(imp={"imported:BI": 2}, leaves=_i3_bi2))
+            check("imported-leaf-control-only-containment",
+                  _i3_ok is not None and _i3_bad(_i3_ok) == {"C-CONTAINMENT"}
+                  and _i3_ok.findings and all("backlog_item.imported.index.toml" in f and "unregistered" in f
+                                              for f in _i3_ok.findings))
+            # C-ID-SPACE per series: an imported id above its OWN imported high-water (the clean BI line is 2
+            # and holds BI-1 and BI-2) is an unreserved id (red when the imported ids are not graded).
+            _i3_above = _i3_run(_i3_machine(imp={"imported:BI": 1}, leaves=_i3_bi2))
+            check("imported-id-above-high-water-finding",
+                  _i3_above is not None and _i3_above.checks.get("C-ID-SPACE") == "FINDING"
+                  and _i3_msgs(_i3_above, "C-ID-SPACE") == ["C-ID-SPACE: imported series: id "
+                                                            "\"imported:BI-2\" exceeds the imported:BI high-water 1 "
+                                                            "(unreserved id; spec 8.2)".replace(chr(34), chr(39))])
+            _i3_dup = _i3_run(_i3_machine(imp={"imported:BI": 2}, leaves={"backlog_item.imported.index.toml": idx(
+                [_i3_row("imported:BI-1"), _i3_row("imported:BI-2"), _i3_row("imported:BI-2")])}))
+            check("imported-duplicate-id-finding",
+                  _i3_dup is not None and any("imported series: duplicate id" in f and "imported:BI-2" in f
+                                              for f in _i3_msgs(_i3_dup, "C-ID-SPACE")))
+            # The series grammar: an imported leaf holds only its own type imported series, never a clean id
+            # or another namespace (spec 8.2).
+            _i3_for = _i3_run(_i3_machine(imp={"imported:BI": 1}, leaves={"backlog_item.imported.index.toml": idx(
+                [_i3_row("imported:BI-1"), _i3_row("BI-2"), _i3_row("imported:DN-1")])}))
+            check("imported-leaf-foreign-series-id-finding",
+                  _i3_for is not None and _i3_for.checks.get("C-ID-SPACE") == "FINDING"
+                  and len([f for f in _i3_msgs(_i3_for, "C-ID-SPACE") if "is not an imported:BI-<n> id" in f]) == 2)
+            # C-NO-DELETION on the imported line: an overhang above the max present id, a gap below it, and a
+            # vanished leaf all owe their allocated ids (red when the imported scan is removed).
+            _i3_del = _i3_run(_i3_machine(imp={"imported:BI": 2}, leaves={
+                "backlog_item.imported.index.toml": idx([_i3_row("imported:BI-1")])}))
+            check("imported-deleted-record-finding",
+                  _i3_del is not None and _i3_del.checks.get("C-NO-DELETION") == "FINDING"
+                  and any("1 allocated imported:BI-<n> id(s) above imported:BI-1" in f
+                          for f in _i3_msgs(_i3_del, "C-NO-DELETION")))
+            _i3_gap = _i3_run(_i3_machine(imp={"imported:BI": 3}, leaves={"backlog_item.imported.index.toml": idx(
+                [_i3_row("imported:BI-1"), _i3_row("imported:BI-3")])}))
+            check("imported-deleted-record-gap-finding",
+                  _i3_gap is not None and any("imported:BI-2 is absent from the imported leaves" in f
+                                              for f in _i3_msgs(_i3_gap, "C-NO-DELETION")))
+            _i3_gone = _i3_run(_i3_machine(imp={"imported:BI": 2}))
+            check("imported-deleted-leaf-finding",
+                  _i3_gone is not None and _i3_bad(_i3_gone) == {"C-NO-DELETION"}
+                  and any("2 allocated imported:BI-<n> id(s) above imported:BI-0" in f
+                          for f in _i3_msgs(_i3_gone, "C-NO-DELETION")))
+            # imported:WL tiles apart from the clean worklog (spec 8.2). An imported gap is the imported line
+            # finding only: clean contiguity, frozen coverage and the changelog gates still pass (red when the
+            # imported numbers join the clean scan, or when the imported scan is removed).
+            _i3_wlg = _i3_run(_i3_machine(imp={"imported:WL": 3}, leaves={
+                "worklog.imported.toml": {"schema": 1, "entry": [_i3_wl(1), _i3_wl(3)]}}))
+            check("imported-wl-gap-does-not-break-clean-tiling",
+                  _i3_wlg is not None
+                  and [f for f in _i3_msgs(_i3_wlg, "C-CONTIGUITY")] == [
+                      "C-CONTIGUITY: the imported worklog is not contiguous; imported:WL-2 is missing (the "
+                      "imported line is graded apart from clean release tiling, spec 8.2)"]
+                  and _i3_wlg.checks.get("C-FROZEN-COVERAGE") == "PASS"
+                  and _i3_wlg.checks.get("C-CHANGELOG-GATES") == "PASS")
+            # The reverse: a clean worklog gap stays the clean finding, never filled or renamed by a contiguous
+            # imported line that holds the missing number, imported:WL-3 (red when the lines merge).
+            _i3_rv = _i3_machine(imp={"imported:WL": 3}, leaves={
+                "worklog.imported.toml": {"schema": 1, "entry": [_i3_wl(1), _i3_wl(2), _i3_wl(3)]}})
+            _i3_rv["worklog.toml"] = {"schema": 1, "entry": [wl(4)]}
+            _i3_rvr = _i3_run(_i3_rv)
+            check("clean-wl-gap-not-filled-by-imported-line",
+                  _i3_rvr is not None and [f for f in _i3_msgs(_i3_rvr, "C-CONTIGUITY")] == [
+                      "C-CONTIGUITY: the worklog (active + archive) is not contiguous; WL-3 is missing (a gap "
+                      "breaks span tiling, spec 6.1/11)"])
+            _i3_wl1 = _i3_run(_i3_machine(imp={"imported:WL": 2}, leaves={
+                "worklog.imported.toml": {"schema": 1, "entry": [_i3_wl(2)]}}))
+            check("imported-wl-not-from-one-finding",
+                  _i3_wl1 is not None and any("does not start at imported:WL-1" in f
+                                              for f in _i3_msgs(_i3_wl1, "C-CONTIGUITY")))
+            # Append-only history over the imported leaves (spec 8.3): an unchanged prior imported record
+            # passes; an edited or vanished one is a finding; a prior with no imported baseline is a named
+            # CANNOT-EVALUATE; an imported counter regression is a C-HISTORY-COUNTERS finding.
+            _i3_one = {"backlog_item.imported.index.toml": idx([_i3_row("imported:BI-1")])}
+            _i3_dig = _record_digest(_i3_row("imported:BI-1"))
+            _i3_hok = _i3_run(_i3_machine(imp={"imported:BI": 1}, leaves=_i3_one),
+                              obs=_i3_obs({"imported:BI-1": _i3_dig}, {"imported:BI": 1}))
+            check("imported-history-unchanged-passes",
+                  _i3_hok is not None and _i3_bad(_i3_hok) == {"C-CONTAINMENT"})
+            _i3_hed = _i3_run(_i3_machine(imp={"imported:BI": 1}, leaves={
+                "backlog_item.imported.index.toml": idx([_i3_row("imported:BI-1", title="edited")])}),
+                obs=_i3_obs({"imported:BI-1": _i3_dig}))
+            check("imported-record-edited-after-commit-finding",
+                  _i3_hed is not None and _i3_hed.checks.get("C-HISTORY-APPEND-ONLY") == "FINDING"
+                  and any("imported:BI-1" in f and "changed since the prior committed snapshot" in f
+                          for f in _i3_msgs(_i3_hed, "C-HISTORY-APPEND-ONLY")))
+            _i3_hgo = _i3_run(_i3_machine(imp={"imported:BI": 1}, leaves=_i3_one),
+                              obs=_i3_obs({"imported:BI-1": _i3_dig, "imported:BI-2": _i3_dig}))
+            check("imported-record-vanished-after-commit-finding",
+                  _i3_hgo is not None and any("imported:BI-2" in f and "is absent from the imported leaves" in f
+                                              for f in _i3_msgs(_i3_hgo, "C-HISTORY-APPEND-ONLY")))
+            _i3_nob = clean_prior()
+            _i3_hnb = _i3_run(_i3_machine(), obs=_i3_nob)
+            check("imported-prior-without-baseline-cannot-evaluate",
+                  _i3_hnb is not None and _i3_hnb.status == CANNOT_EVALUATE
+                  and _i3_hnb.checks.get("C-HISTORY-APPEND-ONLY") == "CANNOT-EVALUATE"
+                  and any("no imported-series baseline" in m for m in _i3_hnb.cannot_evaluate))
+            _i3_hrg = _i3_run(_i3_machine(imp={"imported:BI": 1}, leaves=_i3_one),
+                              obs=_i3_obs({"imported:BI-1": _i3_dig}, {"imported:BI": 3}))
+            check("imported-counter-regressed-finding",
+                  _i3_hrg is not None and _i3_hrg.checks.get("C-HISTORY-COUNTERS") == "FINDING"
+                  and any("imported:BI" in f and "regressed 3 to 1" in f
+                          for f in _i3_msgs(_i3_hrg, "C-HISTORY-COUNTERS")))
+            _i3_hmf = _i3_run(_i3_machine(), obs=_i3_obs({"BI-1": _i3_dig}))
+            check("imported-prior-malformed-member-when-active",
+                  _i3_hmf is not None and _i3_hmf.checks.get("C-HISTORY-APPEND-ONLY") == "CANNOT-EVALUATE"
+                  and any("malformed" in m for m in _i3_msgs(_i3_hmf, "C-HISTORY-APPEND-ONLY")))
+            # An unreadable imported leaf, or one with no [[record]] array, is a named CANNOT-EVALUATE and is
+            # never read as an empty leaf: neither its allocated ids nor a prior imported record are reported
+            # deleted (spec 11: an unreadable input fails closed; red when an unread leaf joins the
+            # no-deletion or the append-only scan).
+            _i3_unread = []
+            for _i3_text in ("record = [ not toml", "schema = 1\nrecord = 1\n"):
+                _i3_ur = _i3_run(_i3_machine(imp={"imported:BI": 2}, leaves={
+                    "backlog_item.imported.index.toml": _i3_text}), obs=_i3_obs({"imported:BI-1": _i3_dig}))
+                _i3_unread.append(
+                    _i3_ur is not None and _i3_ur.status == CANNOT_EVALUATE
+                    and _i3_ur.checks.get("C-ID-SPACE") == "CANNOT-EVALUATE"
+                    and any("backlog_item.imported.index.toml" in m for m in _i3_ur.cannot_evaluate)
+                    and not any("imported:BI" in m for m in _i3_msgs(_i3_ur, "C-NO-DELETION")
+                                + _i3_msgs(_i3_ur, "C-HISTORY-APPEND-ONLY")))
+            check("imported-unread-leaf-cannot-evaluate-never-deleted", _i3_unread == [True, True])
+            # Support alone never activates: with SUPPORTED_HOMES at 2, a 1.2.0 store without the homes key
+            # grades generation 1, needs no imported row, and keeps the former prior handling.
+            _i3_sup = run(clean_machine())
+            check("imported-grading-off-without-homes2-declaration",
+                  _i3_sup is not None and _i3_sup.status == VALID)
+        finally:
+            _opf_store.SUPPORTED_HOMES = _i3_prev_homes
+        # The declaration alone never activates either: at the shipped SUPPORTED_HOMES the declared pair
+        # grades generation 1, so an imported counter row is still the former C-COUNTERS finding and the
+        # leaves are never read (red when the flag reads the declaration without tooling support).
+        _i3_off = run(_i3_machine(imp={"imported:BI": 1}, leaves=_i3_bi2))
+        check("imported-grading-off-at-shipped-support",
+              _i3_off is not None and _i3_off.checks.get("C-COUNTERS") == "FINDING"
+              and _i3_off.checks.get("C-ID-SPACE") == "PASS" and _i3_off.checks.get("C-NO-DELETION") == "PASS")
+        # Inactive prior handling is unchanged: an imported counter key keeps the malformed-prior verdict,
+        # and an imported member is ignored.
+        _i3_pk = clean_prior()
+        _i3_pk["prior"]["counters_high"]["imported:BI"] = 0
+        _i3_pkr = run(clean_machine(), obs=_i3_pk)
+        _i3_pm = clean_prior()
+        _i3_pm["prior"]["imported"] = "not a table"
+        _i3_pmr = run(clean_machine(), obs=_i3_pm)
+        check("imported-prior-inert-on-homes1",
+              _i3_pkr is not None and _i3_pkr.checks.get("C-HISTORY-COUNTERS") == "CANNOT-EVALUATE"
+              and any("malformed" in m for m in _i3_msgs(_i3_pkr, "C-HISTORY-COUNTERS"))
+              and _i3_pmr is not None and _i3_pmr.status == VALID)
         # F2 (per-record): worklog/<WL-n>.toml is never a per-record body -> INVALID; a garbage body control
         # is still caught.
         wlr = copy.deepcopy(pr_machine)

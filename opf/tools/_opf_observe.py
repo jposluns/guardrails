@@ -79,7 +79,7 @@ _GIT_TIMEOUT_S = 30
 # The honest empty prior for an unborn HEAD (a repository with no commits): nothing was ever committed, so
 # every across-time baseline is genuinely empty. Shaped exactly as _opf_check._normalize_prior accepts.
 def _empty_prior():
-    return {"releases": [], "counters_high": {}, "records": {}, "digests": {}}
+    return {"releases": [], "counters_high": {}, "records": {}, "digests": {}, "imported": {}}
 
 
 _GitOutcome = namedtuple("_GitOutcome", "completed rc out err")
@@ -932,7 +932,54 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
                     return None
                 records[rid] = (tname, state)
                 digests[rid] = digest
-    return {"releases": releases, "counters_high": counters_high, "records": records, "digests": digests}
+    imported = _reconstruct_imported(git, store_root, machine_rel, prefix, manifest, types_tbl, notes)
+    if imported is None:
+        return None
+    return {"releases": releases, "counters_high": counters_high, "records": records, "digests": digests,
+            "imported": imported}
+
+
+def _reconstruct_imported(git, store_root, machine_rel, prefix, manifest, types_tbl, notes):
+    """The prior imported baseline {imported id: canonical body digest} for the across-time immutability of
+    the imported leaves (spec 8.3). The imported series activates with the homes-2 declaration, so it lives
+    only in a store this tooling grades as homes 2 (the 2.0.0 / homes = 2 declaration), and any other HEAD
+    manifest yields the honest empty baseline. A leaf absent from the HEAD machine-store tree contributes no
+    rows; a listed leaf that cannot be read or parsed, a non-array row list, or a row with no string id omits
+    the WHOLE prior, as for the clean files. Returns the dict, or None (omit + note)."""
+    if _opf_store.homes_generation(manifest) < 2:
+        return {}
+    listing = _run_git(git, store_root, ["ls-tree", "--name-only", "HEAD:{}{}".format(prefix, machine_rel)])
+    if not listing.completed or listing.rc != 0:
+        notes.append("prior: the machine store tree {} cannot be listed at HEAD; the prior committed snapshot "
+                     "is omitted".format(machine_rel))
+        return None
+    present = set(listing.out.decode("utf-8", "replace").splitlines())
+    imported = {}
+    for name in sorted(_opf_store.imported_leaf_names(types_tbl)):
+        if name not in present:
+            continue
+        data = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, name), name, notes)
+        if data is None:
+            return None
+        member = "entry" if name == _opf_store.IMPORTED_WORKLOG_NAME else "record"
+        rows = data.get(member, [])
+        if not isinstance(rows, list):
+            notes.append("prior: HEAD {} [[{}]] is not an array; the prior committed snapshot is "
+                         "omitted".format(name, member))
+            return None
+        for row in rows:
+            rid = row.get("id") if isinstance(row, dict) else None
+            if not isinstance(rid, str):
+                notes.append("prior: HEAD {} carries a row with no string id; the prior committed snapshot "
+                             "is omitted".format(name))
+                return None
+            try:
+                imported[rid] = _opf_check._record_digest(row)
+            except _opf_emit.EmitError as exc:
+                notes.append("prior: cannot canonicalize the body of imported record {!r} to compute its "
+                             "digest ({}); the prior committed snapshot is omitted".format(rid, exc))
+                return None
+    return imported
 
 
 def _observe_prior(git, store_root, machine_rel, notes):
@@ -1026,9 +1073,11 @@ def self_test_isolated():
     """Exercise gather over synthetic git repositories built in a tempdir (removed in a finally, for
     test-hermeticity). Covered: tracked vs untracked manifest; zero / one / multiple remotes; a prior
     extracted from a committed HEAD (records and the immutable-body digest matching the engine's own
-    _record_digest over the same committed content); an unborn HEAD -> the honest empty prior; and a
+    _record_digest over the same committed content); an unborn HEAD -> the honest empty prior; a
     non-repository directory -> the remote and prior fields OMITTED with a note while tracked reads
-    "untracked". Judged ONLY on gather's RETURNED structure (never by grepping git's stdout for verdicts).
+    "untracked"; and the imported baseline of a homes-2 HEAD (empty unless homes 2 is supported, the
+    committed leaf rows under the engine's digest once it is, the whole prior omitted on a row with no
+    id). Judged ONLY on gather's RETURNED structure (never by grepping git's stdout for verdicts).
     Returns 0 clean, 1 on a failed check, 2 on a harness error. When git is not on PATH at all it SKIPs
     clean, like the POSIX-signal watchdogs, since every path depends on git."""
     import shutil as _shutil
@@ -1183,6 +1232,8 @@ def self_test_isolated():
                   and prior.get("records", {}).get("DN-1") == ("done", "recorded"))
             check("prior-releases", isinstance(prior.get("releases"), list) and len(prior["releases"]) == 1)
             check("prior-counters", prior.get("counters_high", {}).get("BI") == 1)
+            # A HEAD below homes 2 carries no imported series: the imported baseline is the empty one.
+            check("prior-imported-empty-below-homes2", prior.get("imported") == {})
             # Digest honesty: gather's digest for the immutable done record must equal the engine's own
             # _record_digest over the SAME committed body (parsed here independently from the working tree).
             with open(str(tracked_repo / machine_rel / ("done" + _INDEX_SUFFIX)), "rb") as fh:
@@ -1237,6 +1288,52 @@ def self_test_isolated():
         check("non-repo-remote-omitted", "actual_remote" not in obs)
         check("non-repo-prior-omitted", "prior" not in obs)
         check("non-repo-notes", any("omitted" in n for n in notes))
+
+        # 7. The imported baseline of a homes-2 HEAD (spec 8.3): a committed 2.0.0 / homes = 2 store whose
+        # only imported leaf is backlog_item's. At the shipped SUPPORTED_HOMES the HEAD grades generation 1,
+        # so the baseline is the honest empty one even with the leaf committed (red when the branch reads
+        # the declaration without tooling support). With homes 2 supported, the baseline holds exactly the
+        # leaf's row under the engine's own _record_digest, and the leaves absent from HEAD (done, worklog)
+        # contribute nothing (red when the branch is dropped, or an absent leaf is read). A committed leaf
+        # row with no string id omits the WHOLE prior with a note, as for the clean files (red when that
+        # refusal is removed).
+        homes2_repo = base / "homes2"
+        homes2_repo.mkdir()
+        _git_setup(homes2_repo, home, "init")
+        _write_store(homes2_repo)
+        manifest_path = homes2_repo / machine_rel / _MANIFEST_NAME
+        manifest_path.write_text(manifest_path.read_text(encoding="utf-8").replace(
+            'spec_version = "1.0.0"\n', 'spec_version = "{}"\nhomes = 2\n'.format(
+                _opf_store.HOMES2_SPEC_VERSION)), encoding="utf-8")
+        leaf_rel = "{}/backlog_item{}".format(machine_rel, _opf_store.IMPORTED_INDEX_SUFFIX)
+        leaf_row = ('[[record]]\n'
+                    'type = "backlog_item"\n'
+                    'status = "done"\n'
+                    'title = "t"\n'
+                    '[record.actor]\nkind = "importer"\nid = "assistant"\n')
+        _write(homes2_repo, leaf_rel, 'schema = 1\n\n' + leaf_row.replace(
+            '[[record]]\n', '[[record]]\nid = "imported:BI-1"\n'))
+        _git_setup(homes2_repo, home, "add", "-A")
+        _git_setup(homes2_repo, home, "commit", "-m", "seed homes-2 store")
+        with open(str(homes2_repo / leaf_rel), "rb") as fh:
+            leaf_digest = _opf_check._record_digest(tomllib.loads(fh.read().decode("utf-8"))["record"][0])
+        prev_homes = _opf_store.SUPPORTED_HOMES
+        try:
+            obs, notes = gather(_Res(homes2_repo, machine_rel))
+            check("homes2-prior-imported-inert-at-shipped-support",
+                  isinstance(obs.get("prior"), dict) and obs["prior"].get("imported") == {})
+            _opf_store.SUPPORTED_HOMES = 2
+            obs, notes = gather(_Res(homes2_repo, machine_rel))
+            check("homes2-prior-imported-baseline",
+                  isinstance(obs.get("prior"), dict)
+                  and obs["prior"].get("imported") == {"imported:BI-1": leaf_digest})
+            _write(homes2_repo, leaf_rel, 'schema = 1\n\n' + leaf_row)
+            _git_setup(homes2_repo, home, "commit", "-am", "an imported row with no id")
+            obs, notes = gather(_Res(homes2_repo, machine_rel))
+            check("homes2-prior-imported-row-without-id-omitted",
+                  "prior" not in obs and any("carries a row with no string id" in n for n in notes))
+        finally:
+            _opf_store.SUPPORTED_HOMES = prev_homes
     except OSError as exc:
         print("opf observe self-test: harness error: could not build a git fixture ({}); fail-closed".format(
             exc), file=sys.stderr)
@@ -1250,7 +1347,7 @@ def self_test_isolated():
         return 1
     print("opf observe self-test: PASS (tracked/untracked; 0/1/multiple remotes; prior from a committed "
           "HEAD with an engine-matching immutable-body digest; unborn HEAD -> empty prior; a non-repo dir "
-          "omits remote and prior with a note)")
+          "omits remote and prior with a note; a homes-2 HEAD's imported baseline)")
     return 0
 
 
