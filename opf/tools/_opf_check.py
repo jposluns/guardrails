@@ -191,7 +191,7 @@ _REQUIRED_SET = frozenset(REQUIRED_CHECKS)
 # roster, and so its report, is exactly REQUIRED_CHECKS.
 HOMES2_CHECKS = ("C-EVIDENCE-ENUM",)
 # The imported-content checks (C-IMPORTED-*, spec 8.2): the content grading of the imported-series
-# leaves, deferred until activation (OPF-SPEC-130) lands them, so EMPTY today. While it is empty the
+# leaves, deferred until the spec 1.3.0 activation lands them, so EMPTY today. While it is empty the
 # activation tripwire in _check_containment routes any store whose imported series is ACTIVE to
 # CANNOT-EVALUATE (the leaves would be registered as managed while nothing reads their content), and
 # the self-test asserts imported_content_checks_landed below: once SUPPORTED_SPEC_VERSION reaches
@@ -2213,7 +2213,7 @@ def classify_containment(manifest_data, machine_rel, imported=False):
     False for every store this tooling validates today, the accepted 2.0.0 / homes = 2 reservation
     included. When True, the imported managed leaves join the managed set; the default False keeps
     every current store's grading unchanged, so the registration ships inert until activation
-    raises SUPPORTED_SPEC_VERSION (OPF-SPEC-130). Returns a ContainmentClassification."""
+    raises SUPPORTED_SPEC_VERSION to 1.3.0. Returns a ContainmentClassification."""
     mrel = machine_rel
     dp = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
     layout = dp.get("layout") if isinstance(dp, dict) else None
@@ -2414,12 +2414,12 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
     # check (C-IMPORTED-*) is still deferred must never certify, or the imported leaves would be
     # registered as managed while nothing reads their content (the PRC-F1 N-1 blind spot, reopened
     # at activation). A CANNOT-EVALUATE, not a finding: the store is not known bad, the tooling is
-    # known incomplete. Activation (OPF-SPEC-130) lands the checks, populates
+    # known incomplete. The spec 1.3.0 activation lands the checks, populates
     # IMPORTED_CONTENT_CHECKS, and so disarms this.
     if imported and not IMPORTED_CONTENT_CHECKS:
         rep.cant("C-CONTAINMENT: the imported series is active but every imported-content check "
                  "(C-IMPORTED-*) is still deferred; the imported leaves would be certified "
-                 "unread, so the store cannot be evaluated (spec 8.2/4.2; OPF-SPEC-130)")
+                 "unread, so the store cannot be evaluated (spec 8.2/4.2)")
     # Re-emit the classifier's collected messages in the ORIGINAL order (all malformed CANNOT-EVALUATEs, then
     # all colliding findings), exactly as the inline classification emitted them before the extraction.
     for msg in cls.malformed + cls.worklog_errors:
@@ -3197,7 +3197,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # The explicit imported-series activation flag (spec 8.2/4.2), derived through
     # _opf_store.imported_series_declared: the declared spec_version AND this tooling's own
     # support. False for every store this tooling validates: the helper itself answers False until
-    # activation raises SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION (OPF-SPEC-130), which
+    # activation raises SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION, which
     # C-MANIFEST alone does not guarantee (it accepts the reserved 2.0.0 / homes = 2 declaration
     # today, spec 4.2).
     _check_containment(root_fd, machine_rel, manifest_data, import_status, rep,
@@ -4273,7 +4273,7 @@ def self_test():
                              else t + _opf_store.IMPORTED_INDEX_SUFFIX)
                             for t, ns in _is2_roster.items() if ns in IMPORTED_NAMESPACES}))
         # ACTIVATED full-doctor fixtures: SUPPORTED_SPEC_VERSION is patched to
-        # IMPORTED_SPEC_VERSION inside the vector (the OPF-SPEC-130 activation, the same per-vector
+        # IMPORTED_SPEC_VERSION inside the vector (the spec 1.3.0 activation, the same per-vector
         # patch idiom check_opf_homes uses for SUPPORTED_HOMES), so a spec_version 1.3.0 store
         # validates and the driver-derived flag is True end to end.
         _is2_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION

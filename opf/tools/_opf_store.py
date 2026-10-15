@@ -379,7 +379,7 @@ def imported_series_declared(manifest_data):
     declaration closed (it accepts the reserved HOMES2_SPEC_VERSION / homes = 2 pair, spec 4.2), so a
     VALID store can declare 2.0.0 today, and reading the declaration alone would register the
     imported leaves on it while every imported-content check is still deferred. Raising
-    SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION is the activation (OPF-SPEC-130); this helper
+    SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION is the spec 1.3.0 activation; this helper
     needs no edit then, but activation must also land the imported-content checks (C-IMPORTED-*):
     the opf-check activation tripwire refuses to certify an active imported series while that
     roster is empty, so raising the constant alone cannot ship."""
