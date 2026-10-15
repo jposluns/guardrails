@@ -94,9 +94,13 @@ Each case runs on its own copy of that template; the root is removed in a finall
       transaction under the LEGACY dotted name an earlier build minted is still reconciled, at kill
       points on both sides of COMPLETE (flip: a recovery that enumerates only grammar-named
       transactions)
-  T20 a legacy .aiqt/record/journal on a homes-2 store is refused by name and never recovered,
-      with the .aiqt subtree byte-unchanged and no typed journal home created (flip: probe the
-      generation as 1, under which the legacy journal is reconciled in place)
+  T20 a legacy .aiqt/record/journal on a homes-2 store is refused with the exact refusal text, which
+      names the path and the operator's remedy (reconcile it with the homes-1 tooling that wrote it,
+      then remove it by hand), and is never recovered: every store byte unchanged, no typed journal
+      home created, and nothing at or beneath the legacy path opened, listed, followed or read, its
+      one access the no-follow existence probe (flips: probe the generation as 1, under which the
+      legacy journal is reconciled in place; the reviewed head's refusal text, which names no remedy;
+      a refusal that reads the journal first; a refusal that leaves a store write outside .aiqt)
   T21 a direct homes-2 _publish, its reservation published first under the same held capability and
       run id, lands ONE capability-bound transaction in .working/journals/record/journal under that run
       id with its projection at txn_record("record", <rid>), the operands rewritten, and nothing under
@@ -425,6 +429,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import builtins
 import contextlib
 import copy
 import datetime
@@ -2403,10 +2408,6 @@ record._opf_store = _Homes2SpecGate()
 """
 
 
-def subtree(root, prefix):
-    return dict((k, v) for k, v in snapshot(root).items() if k == prefix or k.startswith(prefix + "/"))
-
-
 def t19_run_id_grammar(fx):
     """A publication's journal transaction name is the record run id in the homes grammar, and the
     shared constructor accepts it verbatim."""
@@ -2457,23 +2458,84 @@ def flip_t19_legacy():
     return patch.object(journal, "_journal_txn_dirs", grammar_only)
 
 
+# The exact refusal a legacy record journal on a homes-2 store draws: the path, why it is never recovered,
+# and the operator's remedy.
+LEGACY_JOURNAL_REFUSAL = (
+    "opf record create: refused: a legacy record journal .aiqt/record/journal is present on a homes-2 "
+    "store. This tooling never reads, recovers, archives or removes it: homes 2 has no homes migration "
+    "(spec 4.2), and on a homes-2 store OPF reads no artefact from a former .aiqt/ location (spec 15). "
+    "Remedy: reconcile .aiqt/record/journal with the homes-1 tooling that wrote it, then remove it by "
+    "hand and re-run. Nothing written (fail-closed); exit 2\n")
+
+
+@contextlib.contextmanager
+def _legacy_journal_access(root, seen):
+    """While active, append to `seen` every access AT or BENEATH the legacy record journal of `root`: an
+    os.open, os.listdir, os.scandir, os.readlink or open() of it, and any stat of it but the no-follow
+    existence probe of the path itself (spec 15: that probe, used only to refuse, is not a read). A
+    descriptor or dir_fd-relative argument is resolved through its /proc/self/fd link; without that link
+    table the vector cannot evaluate (Harness), never a vacuous pass. Each stand-in joins the capability
+    sets its real call is in (_journal._st_supports), so a containment probe still finds the call."""
+    if not Path("/proc/self/fd").is_dir():
+        raise Harness("no /proc/self/fd link table to resolve descriptor-relative accesses with")
+    legacy = os.path.join(os.path.realpath(str(root)), record.JOURNAL_REL)
+    readlink = os.readlink
+
+    def where(target, dir_fd):
+        try:
+            if isinstance(target, int):
+                return readlink("/proc/self/fd/{}".format(target))
+            target = os.fsdecode(target)
+            if not os.path.isabs(target):
+                base = os.getcwd() if dir_fd is None else readlink("/proc/self/fd/{}".format(dir_fd))
+                target = os.path.join(base, target)
+            return os.path.normpath(target)
+        except OSError:
+            return None
+
+    def watched(real, label, probe):
+        def access(*args, **kwargs):
+            target = args[0] if args else kwargs.get("path", kwargs.get("file"))
+            at = where("." if target is None else target, kwargs.get("dir_fd"))
+            inside = at is not None and (at == legacy or at.startswith(legacy + os.sep))
+            no_follow = label == "os.lstat" or kwargs.get("follow_symlinks", True) is False
+            if inside and not (probe and no_follow and at == legacy):
+                seen.append((label, at))
+            return real(*args, **kwargs)
+        return access
+
+    with contextlib.ExitStack() as stack:
+        for module, name, probe in ((os, "open", False), (os, "listdir", False), (os, "scandir", False),
+                                    (os, "readlink", False), (os, "stat", True), (os, "lstat", True),
+                                    (builtins, "open", False), (io, "open", False)):
+            real = getattr(module, name)
+            stand_in = watched(real, "{}.{}".format(module.__name__, name), probe)
+            stack.enter_context(patch.object(module, name, stand_in))
+            for table in journal._st_supports(module):
+                if real in table:                 # a capability probe (os.open in os.supports_dir_fd)
+                    table.add(stand_in)           # still finds the call
+                    stack.callback(table.discard, stand_in)
+        yield
+
+
 def t20_homes2_legacy_refused(fx):
-    """A legacy .aiqt/record/journal found on a homes-2 store is refused by name and never recovered: the
-    .aiqt subtree stays byte-unchanged (the T15 leftover lock included) and no typed journal home is
-    created."""
+    """A legacy .aiqt/record/journal found on a homes-2 store is refused with the exact refusal text, which
+    names the path and the operator's remedy, and is never recovered: every store byte stays unchanged
+    (the T15 leftover lock included), no typed journal home is created, and nothing at or beneath the
+    legacy path is opened, listed, followed or read (_legacy_journal_access): its one access is the
+    no-follow existence probe."""
     env = fx.env
     root = fx.case("t20-homes2-legacy")
     proc = child(env, root, CREATE, flip=FAILING_LOCK_RELEASE)
     assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-800:])
     assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T20 the legacy journal holds a leftover lock"
     with _self_test_homes2_active(root):
-        aiqt_before = subtree(root, ".aiqt")
-        result = record_cli(env, root, CREATE)
-        refused(result, "legacy record journal")
-        assert "it is never recovered: homes 2 has no homes migration (spec 4.2)" in result[2] \
-            and "left unread and unchanged" in result[2] and "transports" not in result[2] \
-            and "in place" not in result[2], result[2][-800:]
-        assert subtree(root, ".aiqt") == aiqt_before, "T20 the .aiqt subtree is byte-unchanged"
+        before, seen = snapshot(root), []
+        with _legacy_journal_access(root, seen):
+            result = record_cli(env, root, CREATE)
+        assert result == (2, "", LEGACY_JOURNAL_REFUSAL), ("T20 the exact refusal text", result)
+        assert seen == [], ("T20 nothing at or beneath the legacy journal is read", seen)
+        assert snapshot(root) == before, "T20 every store byte is unchanged"
         assert not (Path(root) / ".working/journals").exists(), "T20 no typed journal home is created"
 
 
@@ -2481,6 +2543,44 @@ def flip_t20():
     """Probe the generation as 1 (the reviewed head's behaviour): the legacy journal is reconciled in
     place and .aiqt changes."""
     return patch.object(record, "_probe_homes", lambda ctx: 1)
+
+
+def flip_t20_remedy():
+    """The reviewed head's refusal text, from the same probe: it names the path but no remedy."""
+    def unremedied(ctx):
+        if journal._lstat_contained(ctx.root_fd, record.JOURNAL_REL) is not None:
+            raise record.RecordError("a legacy record journal {} is present on a homes-2 store; it is never "
+                                     "recovered: homes 2 has no homes migration (spec 4.2), and the legacy "
+                                     "journal is left unread and unchanged. Nothing written "
+                                     "(fail-closed)".format(record.JOURNAL_REL))
+    return patch.object(record, "_refuse_legacy_journal", unremedied)
+
+
+def flip_t20_read():
+    """A refusal that first reads the legacy journal (its lock owner and transactions), then refuses with
+    the exact text, every byte unchanged: only the access recorder turns it red."""
+    original = record._refuse_legacy_journal
+
+    def reading(ctx):
+        jr_fd = journal.open_journal_root_fd(ctx.root_fd, record.JOURNAL_REL)
+        try:
+            record._journal_view(jr_fd, Path(ctx.res.store_root) / record.JOURNAL_REL)
+        finally:
+            journal._close_fd_quietly(jr_fd)
+        original(ctx)
+    return patch.object(record, "_refuse_legacy_journal", reading)
+
+
+def flip_t20_write():
+    """A refusal that leaves one store write outside .aiqt behind (a lease file, as a refusal raised after
+    the lease was claimed would), with the exact text and nothing read: only the whole-store snapshot
+    turns it red, where the reviewed head's .aiqt-subtree comparison stayed green."""
+    original = record._refuse_legacy_journal
+
+    def writing(ctx):
+        (Path(ctx.res.store_root) / LEASE).write_bytes(b"")
+        original(ctx)
+    return patch.object(record, "_refuse_legacy_journal", writing)
 
 
 def t21_homes2_publish(fx):
@@ -6386,7 +6486,8 @@ TESTS = (
     ("T18-options-apply-only-ratification", t18_apply_only_ratification, flip_t18_apply_only),
     ("T19-record-run-id-grammar", t19_run_id_grammar, flip_t19),
     ("T19-legacy-name-recovery", t19_legacy_name_recovery, flip_t19_legacy),
-    ("T20-homes2-legacy-journal-refused", t20_homes2_legacy_refused, flip_t20),
+    ("T20-homes2-legacy-journal-refused", t20_homes2_legacy_refused, (flip_t20, flip_t20_remedy,
+                                                                      flip_t20_read, flip_t20_write)),
     ("T21-homes2-publish-typed", t21_homes2_publish, flip_t21),
     ("T22-homes2-claim-reserves", t22_homes2_claim_reserves, (flip_t22_refuse, flip_t22_noreserve,
                                                               flip_t22_validator)),

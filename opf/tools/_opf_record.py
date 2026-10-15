@@ -122,7 +122,9 @@ publishing leaves its reservation standing, its numbers conservatively still res
 does not yet read reservations, so a store carrying such an orphan grades the orphan's numbers as
 missing records until that later change). A legacy
 .aiqt/record/journal found on a homes-2 store is refused and never recovered: homes 2 has no homes
-migration to carry it (spec 4.2).
+migration to carry it (spec 4.2). The refusal names the path and the operator's remedy (reconcile it
+with the homes-1 tooling that wrote it, then remove it by hand); this tooling only probes, no-follow,
+that the path exists, and never reads, archives or removes it (spec 15).
 
 Exit contract: 0 recorded and doctor-VALID, or carrying only that pending cannot-evaluate (uncommitted);
 2 refusal or cannot-evaluate, with recovery text where the working tree changed. Exit 1 is not used (it
@@ -2099,16 +2101,22 @@ def _reconcile_journal(ctx):
 
 def _refuse_legacy_journal(ctx):
     """A legacy .aiqt/record/journal present on a homes-2 store is refused and never recovered: homes 2
-    has no homes migration to carry it (spec 4.2). Read-only."""
+    has no homes migration to carry it (spec 4.2). The refusal names the path and the remedy, which is
+    the operator's: reconcile the journal with the homes-1 tooling that wrote it, then remove it by
+    hand. The one access is a no-follow existence probe, used only to refuse (spec 15): the journal is
+    never read, archived or removed here."""
     try:
         st = _journal._lstat_contained(ctx.root_fd, JOURNAL_REL)
     except (_journal.JournalError, OSError) as exc:
         raise RecordError("cannot inspect the legacy record journal {} ({}); fail-closed".format(
             JOURNAL_REL, exc))
     if st is not None:
-        raise RecordError("a legacy record journal {} is present on a homes-2 store; it is never recovered: "
-                          "homes 2 has no homes migration (spec 4.2), and the legacy journal is left unread "
-                          "and unchanged. Nothing written (fail-closed)".format(JOURNAL_REL))
+        raise RecordError("a legacy record journal {0} is present on a homes-2 store. This tooling never "
+                          "reads, recovers, archives or removes it: homes 2 has no homes migration "
+                          "(spec 4.2), and on a homes-2 store OPF reads no artefact from a former .aiqt/ "
+                          "location (spec 15). Remedy: reconcile {0} with the homes-1 tooling that wrote "
+                          "it, then remove it by hand and re-run. Nothing written (fail-closed)".format(
+                              JOURNAL_REL))
 
 
 def _reconcile_capability_journal(ctx):
