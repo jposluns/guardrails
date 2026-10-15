@@ -144,7 +144,9 @@ non-list args; or the gate's own interpreter not isolated).
 Diagnostics are deterministic, sorted by relative path then line then location.
 
 DISCLOSED RESIDUAL (this gate does not catch): wrapper or indirect launchers (``bash -c "python3 ..."``,
-a ``.sh`` re-launcher), ``$PYTHON`` and shell aliases or functions, a dynamically assembled argv, the
+a ``.sh`` re-launcher), ``$PYTHON`` and shell aliases or functions, a dynamically assembled argv, bash
+brace expansion (``pyth{o,}n3``, which the shell-line prefilter skips because no quote or backslash
+breaks a ``python`` substring, expands to ``python3 pythn3``), the
 programmatic ``subprocess`` children in the tools and the ``regenerate`` strings in .aiqt/gensrc.json
 (a separate follow-up), a runtime ``sys.path`` mutation OTHER than a literal index-0 insertion in the
 three enumerated QA-suite sources (a ``sys.path[0:0]`` slice, a computed index, a runtime-assembled
@@ -686,11 +688,15 @@ def _check_shell_line(rel, lineno, line, errors, failures):
     to a command word, is a cannot-evaluate, so a launcher hidden in an unexpected construct is
     never silently passed.
 
-    The raw prefilter remains ONLY as a cheap early-accept that can never cause a miss: bash decoding
-    strips quote/backslash characters and never inserts letters, so a decoded `python` launcher must
-    leave in the raw line either its contiguous substring (matched by PY_TOKEN_RE) or a quote/backslash
-    that broke that substring. A line carrying neither provably contains no launcher after decoding and
-    is skipped; anything else is tokenized and decided on the decoded words."""
+    The raw prefilter remains ONLY as a cheap early-accept, and it is sound for quote removal alone:
+    quote removal strips quote/backslash characters and never inserts letters, so a launcher that
+    decoding produces must leave in the raw line either its contiguous `python` substring (matched by
+    PY_TOKEN_RE) or a quote/backslash that broke that substring. A line carrying neither holds no
+    launcher that quote removal could produce, and is skipped; anything else is tokenized and decided
+    on the decoded words. The skip is not a proof that bash runs no launcher from that line: other
+    expansions can build one from text the prefilter does not match, and two are disclosed residuals
+    (see DISCLOSED RESIDUAL above): bash brace expansion (`pyth{o,}n3` expands to the words `python3
+    pythn3`, so bash runs python3) and a dynamically assembled argv."""
     code = _strip_comment(line)
     if not PY_TOKEN_RE.search(code) and not QUOTE_OR_ESCAPE_RE.search(code):
         return

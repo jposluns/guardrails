@@ -13,13 +13,28 @@ HONEST SCOPE. This catches ACCIDENTAL reintroduction of internal terms and host 
 exfiltration control. The SHA-256 hashes are UNSALTED and low-entropy n-grams are dictionary-reversible,
 so this is OBSCURITY, not secrecy (a salt cannot help: a public gate must hash arbitrary public text, so
 any salt would also be public). Deliberate obfuscation (mid-word splits, HTML entities, zero-width chars)
-can evade the hash layer; binary/archive contents (e.g. a .zip) are not unpacked; the structural path
-patterns are scoped to this host's Linux layout. The dual-family verifiers and the private plaintext check
-are the compensating layers. A line carrying a `leak-allow` marker is exempt from the STRUCTURAL layer.
+can evade the hash layer; a ZIP archive is unpacked and its members scanned, but another compressed
+format (a gzip, bzip2 or 7z file, or a self-extracting ZIP whose name does not end in .zip) is only
+byte-scanned, so text compressed inside it is not seen; the structural path patterns are scoped to this
+host's Linux layout. The dual-family verifiers and the private plaintext check are the compensating
+layers. A line carrying a `leak-allow` marker is exempt from the STRUCTURAL layer.
 
 SCANNED SET. The walk yields every file in the working tree except the .git, node_modules and
 __pycache__ subtrees (the denylist file included). Each yielded path is first CLASSIFIED by a stat probe
 (a metadata check, not a content read), then its content is read as bytes and handled one of four ways:
+  - it is a ZIP archive (a name ending in .zip in any case, or content opening with a ZIP signature,
+    whatever that content decodes as): its own bytes are scanned in the lossless byte view (so member
+    names, the archive comment and any bytes outside the members are read too), and it is opened with
+    the standard-library zipfile module entirely in memory (nothing is extracted to disk and no member
+    name is used as a filesystem path), each member's content decoded by the three rules below and
+    scanned, a finding named <archive>!<member>:<line>. Before any member is read, the central directory
+    is checked against MAX_ARCHIVE_MEMBERS and MAX_ARCHIVE_TOTAL_SIZE (declared uncompressed bytes), and
+    each member against the encryption flag, a compression method outside ARCHIVE_METHODS and a
+    nested-archive name; an archive over either bound, a corrupt or encrypted archive, a member that
+    cannot be read or decoded, a member whose stored data does not end exactly at its declared size
+    (re-inflated independently, so a directory understating a size cannot hide the rest of a member),
+    and a nested archive member (by its name or by a ZIP signature opening its content) are each
+    CANNOT EVALUATE, naming the archive or <archive>!<member>;
   - it decodes as UTF-8: it is scanned, whatever its suffix (a .csv, .example or .sha256 included);
   - it starts with a UTF-16 or UTF-32 byte-order mark: the declared encoding is decided by a
     successful decode, never by the 4-byte prefix alone (the UTF-32 LE mark embeds the UTF-16 LE
@@ -34,18 +49,19 @@ __pycache__ subtrees (the denylist file included). Each yielded path is first CL
     (each unit size is covered at every byte phase); counted as one
     lossless decode (a wide encoding WITHOUT such a mark still falls to the byte decode below, where
     the patterns cannot match across its wide characters; a disclosed residual);
-  - its suffix is on the named binary allow-list BINARY_SUFFIXES (matched case-insensitively; an
-    archive): it is named on a SKIP line and counted, never passed silently;
   - anything else holding a non-UTF-8 byte, whatever its suffix or that suffix's case (a missing suffix
     included), is decoded losslessly (surrogateescape keeps every byte; none is dropped or replaced)
     and scanned.
 SYMLINK RULES, stated exactly: a symlink to a regular file is followed (the stat probe reads the target)
 and the target's content is scanned; a dangling or unresolvable file symlink is a read error (exit 2); a
-non-regular target (a FIFO, a device) is named on a SKIP line and its content is never opened; a
-SYMLINKED DIRECTORY is never followed and never silently dropped: it is named on a SKIP line and
-counted, with the subtree behind it not scanned.
-The PASS and FAIL lines state the scanned and skipped counts.
-Exit 0 clean, 1 on any finding or a malformed hashes file, 2 on a read error (unreadable dir/file, fail-closed).
+non-regular target (a FIFO, a device) is CANNOT EVALUATE and its content is never opened; a SYMLINKED
+DIRECTORY is never followed and never silently dropped: it is CANNOT EVALUATE, the subtree behind it
+unread.
+CANNOT EVALUATE is never a skip: each such input is named on a CANNOT EVALUATE line and the run exits 2,
+so PASS is printed only when every walked input was read. The PASS and FAIL lines state the scanned-file
+count and the ZIP archive and member counts.
+Exit 0 clean, 1 on any finding or a malformed hashes file, 2 on a read error (unreadable dir/file,
+fail-closed) or on any CANNOT EVALUATE input.
 
   check_leaks.py              scan the working tree
   check_leaks.py --self-test  build fixture trees and assert the scanned-set contract above
@@ -65,23 +81,34 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import hashlib
+import io
 import re
 import stat
+import struct
+import zipfile
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 
 SKIP_DIRS = {".git", "node_modules", "__pycache__"}
-# Declared text suffixes. This gate no longer keys its decode on them (every non-UTF-8 file off the
-# binary allow-list is decoded losslessly and scanned, whatever its suffix); the set stays because the
+# Declared text suffixes. This gate no longer keys its decode on them (every non-UTF-8 file that is not a
+# ZIP archive is decoded losslessly and scanned, whatever its suffix); the set stays because the
 # internal-names gate imports it as its own scope filter.
 TEXT_SUFFIXES = {".md", ".mdc", ".py", ".sh", ".yml", ".yaml", ".toml", ".json", ".txt",
                  ".html", ".css", ".js", ".cfg", ".ini", ".conf", ".svg"}
-# Named binary allow-list, defined beside TEXT_SUFFIXES: the ONLY suffixes (matched case-insensitively)
-# whose non-UTF-8 content may skip the scan, each named on a SKIP line. Exactly the shipped-archive
-# suffix today; a new binary format must be added here deliberately or its bytes are scanned.
-BINARY_SUFFIXES = {".zip"}
+# A ZIP archive is unpacked and every member scanned, never skipped. It is recognized by a name ending in
+# ZIP_SUFFIX (case-insensitively) or by content opening with a ZIP signature (a local file header, an
+# empty archive's end record, a split-archive marker), the same test marking a nested archive member.
+ZIP_SUFFIX = ".zip"
+ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+# Archive bounds, read from the central directory before any member is read; over either is CANNOT EVALUATE.
+MAX_ARCHIVE_MEMBERS = 1000  # far above the two-member shipped skill packs; keeps one archive's work finite
+MAX_ARCHIVE_TOTAL_SIZE = 16 * 1024 * 1024  # declared uncompressed bytes; caps memory and a zip bomb's expansion
+# zipfile caps each deflate read at the size asked for, but its bzip2, LZMA and Zstandard readers expand a
+# whole compressed chunk at once, so a member stored any other way is CANNOT EVALUATE, never read.
+ARCHIVE_METHODS = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
 
 _OCT = r'(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
 STRUCTURAL = [
@@ -175,6 +202,22 @@ def _display(rel):
     return str(rel).encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
 
 
+def _member_display(name):
+    """A printable form of an archive member name: every non-printable character (a newline included) is
+    backslash-escaped, so a crafted member name cannot forge an output line."""
+    return "".join(ch if ch.isprintable() else ascii(ch)[1:-1] for ch in name)
+
+
+class CannotEvaluate(Exception):
+    """An input the gate cannot read in full: a non-regular file, or an archive or archive member that
+    read_archive refuses. Never a skip: scan_tree names it with its reason (and the member, when one
+    member is the cause), and run() exits 2."""
+
+    def __init__(self, reason, member=None):
+        super().__init__(reason)
+        self.member = member
+
+
 def _stat_mode(path):
     """The classification probe: stat() mode, FOLLOWING a file symlink (the file rule). A module-level
     seam so the self-test can report a non-regular mode deterministically (case 6) on every runner."""
@@ -201,28 +244,20 @@ WIDE_VIEWS = (("utf-16-le", 0), ("utf-16-le", 1), ("utf-16-be", 0), ("utf-16-be"
               ("utf-32-be", 0), ("utf-32-be", 1), ("utf-32-be", 2), ("utf-32-be", 3))
 
 
-def read_scan_text(path):
-    """Read one walked file for the scan. Returns (texts, lossless, skip_reason): texts is a tuple of
-    the decoded views to scan, or None when the file is skipped; lossless is True when a non-UTF-8 file
-    was decoded without dropping or replacing a byte; skip_reason says why a file is not scanned. The
-    policy, in order: a non-regular file (the stat probe follows a file symlink, so a symlink to a
-    regular file reads as its target) is a named SKIP whose content is never opened; UTF-8 content is
-    scanned whatever the suffix; content behind a UTF-16 or UTF-32 byte-order mark has its declared
-    encoding decided by a successful decode (UTF-32 first, then UTF-16 where its 2-byte mark is
-    present), never by the 4-byte prefix alone, a stream decoding as neither candidate raising
-    OSError naming the file (fail-closed exit 2, never an ineffective clean scan), and the decodable
-    file scanned in every WIDE_VIEWS view (UTF-16 LE and BE at byte offsets 0 and 1, UTF-32 LE and BE
-    at byte offsets 0 to 3, undecodable units replaced) AND in the lossless surrogateescape byte view,
-    so a fake, a mismatched-endian or a misaligned mark cannot hide UTF-16 or UTF-32 text from every
-    view at once (each unit size is covered at every byte phase); a
-    remaining non-UTF-8 file whose suffix is on BINARY_SUFFIXES (case-insensitively) is a named SKIP;
-    anything else is decoded losslessly with surrogateescape and scanned, whatever its suffix. A read
-    error raises OSError for the caller's fail-closed exit 2 (a dangling symlink included)."""
-    if not stat.S_ISREG(_stat_mode(path)):
-        return None, False, "not a regular file"
-    data = _read_bytes(path)
+def decode_views(data, name):
+    """Decode one file's (or one archive member's) bytes for the scan. Returns (texts, lossless): texts
+    is a tuple of the decoded views to scan; lossless is True when non-UTF-8 content was decoded without
+    dropping or replacing a byte. The policy, in order: UTF-8 content is scanned whatever the suffix;
+    content behind a UTF-16 or UTF-32 byte-order mark has its declared encoding decided by a successful
+    decode (UTF-32 first, then UTF-16 where its 2-byte mark is present), never by the 4-byte prefix
+    alone, a stream decoding as neither candidate raising OSError naming `name` (fail-closed, never an
+    ineffective clean scan), and the decodable content scanned in every WIDE_VIEWS view (UTF-16 LE and
+    BE at byte offsets 0 and 1, UTF-32 LE and BE at byte offsets 0 to 3, undecodable units replaced) AND
+    in the lossless surrogateescape byte view, so a fake, a mismatched-endian or a misaligned mark cannot
+    hide UTF-16 or UTF-32 text from every view at once (each unit size is covered at every byte phase);
+    anything else is decoded losslessly with surrogateescape and scanned, whatever its suffix."""
     try:
-        return (data.decode("utf-8"),), False, None
+        return (data.decode("utf-8"),), False
     except UnicodeDecodeError:
         pass
     bom_encoding = None
@@ -244,7 +279,7 @@ def read_scan_text(path):
         except UnicodeDecodeError as exc:
             raise OSError("{}: byte-order mark declares {} (decided by decode, not by the prefix "
                           "alone) but the stream does not decode as it ({}); fail-closed"
-                          .format(path, bom_encoding, exc))
+                          .format(name, bom_encoding, exc))
         views = [wide, data.decode("utf-8", errors="surrogateescape")]
         # Every wide view beside the declared one (WIDE_VIEWS: each unit size at every byte phase): a
         # mark that misstates the endianness or sits over a stream misaligned by any byte offset
@@ -253,61 +288,185 @@ def read_scan_text(path):
         # one, and the byte view stays lossless).
         for enc, off in WIDE_VIEWS:
             views.append(data[off:].decode(enc, errors="replace"))
-        return tuple(views), True, None
-    if path.suffix.lower() in BINARY_SUFFIXES:
-        return None, False, "not UTF-8, on the binary allow-list (suffix {})".format(path.suffix.lower())
-    return (data.decode("utf-8", errors="surrogateescape"),), True, None
+        return tuple(views), True
+    return (data.decode("utf-8", errors="surrogateescape"),), True
+
+
+def _is_zip(name, data):
+    """True for a ZIP archive: a name ending in ZIP_SUFFIX (case-insensitively) or content opening with a
+    ZIP signature."""
+    return name.lower().endswith(ZIP_SUFFIX) or data[:4] in ZIP_SIGNATURES
+
+
+def _member_data_matches(data, info, content):
+    """True when the member's stored data holds exactly `content` and nothing past it. zipfile stops at
+    the size the central directory declares, so a directory that understates a deflated member's size
+    (beside a CRC of the shortened text) would otherwise hide the rest of that member from the scan: the
+    stored bytes are re-read from the local header and inflated independently, bounded at one byte past
+    the declared size, and must end exactly there."""
+    start = info.header_offset
+    if data[start:start + 4] != b"PK\x03\x04":
+        return False
+    name_len, extra_len = struct.unpack("<HH", data[start + 26:start + 30])
+    begin = start + 30 + name_len + extra_len
+    raw = data[begin:begin + info.compress_size]
+    if len(raw) != info.compress_size:
+        return False
+    if info.compress_type == zipfile.ZIP_STORED:
+        return raw == content
+    inflater = zlib.decompressobj(-15)
+    return inflater.decompress(raw, info.file_size + 1) == content and inflater.eof
+
+
+def read_archive(data):
+    """Unpack one ZIP archive held in memory, yielding (member, texts) for each member in directory order:
+    member is its printable name and texts its decode_views views. Nothing is extracted to disk and no
+    member name is used as a filesystem path. Before any member is read, the central directory is
+    checked: more than MAX_ARCHIVE_MEMBERS members, more than MAX_ARCHIVE_TOTAL_SIZE declared uncompressed
+    bytes, an encrypted member, a compression method outside ARCHIVE_METHODS, or a member named as an
+    archive each raise CannotEvaluate. So do a corrupt archive, a member that cannot be read (each read
+    asks for at most one byte past the member's declared size, and zipfile stops at that size and checks
+    the CRC), a member whose stored data does not end exactly at its declared size (_member_data_matches),
+    a member whose content opens with a ZIP signature, and a member whose byte-order mark fails its
+    decode. CannotEvaluate carries the member's name when one member is the cause."""
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except Exception as exc:  # zipfile reports corruption as BadZipFile, ValueError, EOFError and others
+        raise CannotEvaluate("not a readable ZIP archive: {}: {}".format(type(exc).__name__, exc))
+    with archive:
+        infos = archive.infolist()
+        if len(infos) > MAX_ARCHIVE_MEMBERS:
+            raise CannotEvaluate("{} members, over MAX_ARCHIVE_MEMBERS ({}); no member was read"
+                                 .format(len(infos), MAX_ARCHIVE_MEMBERS))
+        total = sum(info.file_size for info in infos)
+        if total > MAX_ARCHIVE_TOTAL_SIZE:
+            raise CannotEvaluate("{} uncompressed bytes declared, over MAX_ARCHIVE_TOTAL_SIZE ({}); no "
+                                 "member was read".format(total, MAX_ARCHIVE_TOTAL_SIZE))
+        for info in infos:
+            member = _member_display(info.filename)
+            if info.flag_bits & 0x1:
+                raise CannotEvaluate("encrypted member; no member was read", member)
+            if info.compress_type not in ARCHIVE_METHODS:
+                raise CannotEvaluate("compression method {} is neither stored nor deflated; no member was "
+                                     "read".format(info.compress_type), member)
+            if _is_zip(info.filename, b""):
+                raise CannotEvaluate("nested archive member, not unpacked; no member was read", member)
+        for info in infos:
+            member = _member_display(info.filename)
+            try:
+                with archive.open(info) as handle:
+                    content = handle.read(info.file_size + 1)
+            except Exception as exc:  # BadZipFile (a CRC or header mismatch), zlib.error, EOFError and others
+                raise CannotEvaluate("member cannot be read: {}: {}".format(type(exc).__name__, exc), member)
+            try:
+                matches = _member_data_matches(data, info, content)
+            except (struct.error, zlib.error) as exc:
+                raise CannotEvaluate("member data cannot be checked: {}: {}".format(type(exc).__name__, exc),
+                                     member)
+            if not matches:
+                raise CannotEvaluate("member data does not match its declared size, so it was not read in "
+                                     "full", member)
+            if _is_zip("", content):
+                raise CannotEvaluate("nested archive member (its content opens with a ZIP signature), not "
+                                     "unpacked", member)
+            try:
+                texts, _lossless = decode_views(content, member)
+            except OSError as exc:
+                raise CannotEvaluate("member does not decode: {}".format(exc), member)
+            yield member, texts
+
+
+def read_scan_text(path):
+    """Read one walked file for the scan. Returns (texts, lossless, archive): texts and lossless as
+    decode_views returns them, and archive None; or, for a ZIP archive (_is_zip), texts holding the
+    archive's own bytes in the lossless byte view (so member names, the archive comment and any bytes
+    outside the members are scanned), lossless False, and archive the read_archive generator over its
+    members. A non-regular file (the stat probe follows a file symlink, so a symlink to a regular file
+    reads as its target) raises CannotEvaluate before its content is opened. A read error raises OSError
+    for the caller's fail-closed exit 2 (a dangling symlink included)."""
+    if not stat.S_ISREG(_stat_mode(path)):
+        raise CannotEvaluate("not a regular file; its content was never opened")
+    data = _read_bytes(path)
+    if _is_zip(path.name, data):
+        return (data.decode("utf-8", errors="surrogateescape"),), False, read_archive(data)
+    texts, lossless = decode_views(data, path)
+    return texts, lossless, None
 
 
 def scan_tree(root):
-    """Scan every file under root. Returns (findings, scanned, lossless, skipped): skipped lists each file
-    (or symlinked directory) not scanned, with its reason. Raises OSError (or UnicodeDecodeError on the
-    denylist) on a read error."""
+    """Scan every file under root, unpacking each ZIP archive. Returns (findings, scanned, lossless,
+    archives, members, unevaluated): unevaluated names each input that could not be read in full (a
+    non-regular file, a symlinked directory, an archive or <archive>!<member> that read_archive refuses),
+    with its reason, and run() exits 2 on any. Raises OSError (or UnicodeDecodeError on the denylist) on a
+    read error."""
     # load_denylist reads a required file (the leak-hash denylist); run keeps this call inside its
     # fail-closed try so an unreadable denylist is a clean exit 2, not a traceback.
     hashes, maxn, findings = load_denylist(root)
     findings = list(findings)
-    scanned, lossless, skipped = 0, 0, []
+    scanned, lossless, archives, members, unevaluated = 0, 0, 0, 0, []
     symlink_dirs = []
-    for path in sorted(walk_files(root, SKIP_DIRS, symlink_dirs=symlink_dirs)):
-        rel = _display(path.relative_to(root))
-        texts, decoded_lossless, reason = read_scan_text(path)
-        if texts is None:
-            skipped.append("{} ({})".format(rel, reason))
-            continue
-        scanned += 1
-        lossless += decoded_lossless
+
+    def scan_unit(name, texts):
         seen = set()
         for text in texts:
             for number, label in scan_text(text, hashes, maxn, honor_leak_allow=True):
-                seen.add("{}:{}: {}".format(rel, number, label) if number is not None
-                         else "{}: {}".format(rel, label))
+                seen.add("{}:{}: {}".format(name, number, label) if number is not None
+                         else "{}: {}".format(name, label))
         findings.extend(sorted(seen))
+
+    for path in sorted(walk_files(root, SKIP_DIRS, symlink_dirs=symlink_dirs)):
+        rel = _display(path.relative_to(root))
+        read_members = 0
+        try:
+            texts, decoded_lossless, archive = read_scan_text(path)
+            scan_unit(rel, texts)
+            for member, member_texts in archive or ():
+                scan_unit(rel + "!" + member, member_texts)
+                read_members += 1
+        except CannotEvaluate as exc:
+            unevaluated.append("{}{} ({})".format(rel, "" if exc.member is None else "!" + exc.member, exc))
+            continue
+        scanned += 1
+        lossless += decoded_lossless
+        if archive is not None:
+            archives += 1
+            members += read_members
     for link in symlink_dirs:
-        skipped.append("{} (symlinked directory; not followed)".format(_display(link.relative_to(root))))
-    skipped.sort()
-    return findings, scanned, lossless, skipped
+        unevaluated.append("{} (symlinked directory; not followed, so the subtree behind it was not read)"
+                           .format(_display(link.relative_to(root))))
+    unevaluated.sort()
+    return findings, scanned, lossless, archives, members, unevaluated
 
 
 def run(root):
     try:
-        findings, scanned, lossless, skipped = scan_tree(root)
+        findings, scanned, lossless, archives, members, unevaluated = scan_tree(root)
     except (OSError, UnicodeDecodeError) as exc:
         # An unreadable/corrupt denylist OR an unreadable directory/file is a read failure on a required
         # input, not a clean skip: fail closed (exit 2) so a leak gate never reports clean without having
         # read its denylist and scanned every subtree. UnicodeDecodeError covers a non-UTF-8 denylist.
         print("error: cannot read a required input (denylist or tree) ({}); fail-closed".format(exc), file=sys.stderr)
         return 2
-    for item in skipped:
-        print("SKIP (not scanned): " + item)
-    counts = ("{} file(s) scanned ({} non-UTF-8 text file(s) decoded losslessly), {} file(s) skipped (each "
-              "named on a SKIP line)".format(scanned, lossless, len(skipped)))
+    counts = ("{} file(s) scanned ({} non-UTF-8 text file(s) decoded losslessly), including {} ZIP archive(s) "
+              "with {} member(s) scanned".format(scanned, lossless, archives, members))
+    if unevaluated:
+        # An input not read in full is never a skip: PASS would claim content the gate did not read, so the
+        # run fails closed (exit 2), naming each such input and still reporting what the read content held.
+        for item in unevaluated:
+            print("CANNOT EVALUATE (not read in full): " + item, file=sys.stderr)
+        print("error: {} input(s) could not be read in full, each named on a CANNOT EVALUATE line, so the "
+              "tree cannot pass; {}; {} possible leak(s) in the content that was read; fail-closed"
+              .format(len(unevaluated), counts, len(findings)), file=sys.stderr)
+        for finding in sorted(set(findings)):
+            print("  " + finding, file=sys.stderr)
+        return 2
     if findings:
         print("FAIL: {} possible leak(s) of internal host specifics or codenames; {}".format(len(findings), counts))
         for finding in sorted(set(findings)):
             print("  " + finding)
         return 1
-    print("PASS: no internal host specifics or known codenames in the scanned working tree; " + counts)
+    print("PASS: no internal host specifics or known codenames in the scanned working tree, every walked "
+          "input read; " + counts)
     return 0
 
 
@@ -322,7 +481,7 @@ def main():
 # on every runner: the two environment-dependent behaviours (a non-regular file, an unreadable file) are
 # exercised through deterministic fault injection on the module seams _stat_mode/_read_bytes instead of
 # a conditional skip, so a PASS is never printed while a guarded case did not run.
-#   1. a clean tree passes (exit 0) and its PASS line states the scanned and skipped counts,
+#   1. a clean tree passes (exit 0) and its PASS line states the scanned-file and ZIP archive counts,
 #   2. a private IP in a .csv is a finding (exit 1); 2b. a private IP in a Latin-1 .tsv (a suffix on no
 #      list) is decoded losslessly and found,
 #   3. a host path in a Latin-1 .md is a finding, decoded losslessly; 3b. the same in a Latin-1
@@ -348,13 +507,26 @@ def main():
 #   4. a codename in a Latin-1 .txt matches the hash layer (exit 1); 4b. the denylist file itself is
 #      scanned (a private IP in one of its comment lines is a finding); 4c. a suffixless Latin-1 file is
 #      decoded losslessly and its host path found,
-#   5. an undecodable .zip is named on a SKIP line and counted (exit 0); 5b. the allow-list match is
-#      case-insensitive (an undecodable .ZIP is the same named SKIP),
-#   6. a non-regular file (injected FIFO mode) is named on a SKIP line, its content NEVER read (the
-#      read seam raises for it, so a read-before-SKIP regression fails the case outright)
-#      (exit 0); 6b. a symlink to a regular file is followed and its target scanned (exit 1); 6c. a
-#      symlinked directory is named on a SKIP line, never silently dropped (exit 0); 6d. a dangling
-#      symlink fails closed (exit 2),
+#   5. a .zip that is not a readable archive is CANNOT EVALUATE (exit 2, naming it), never a skip;
+#      5b. the suffix match is case-insensitive (a corrupt .ZIP is the same CANNOT EVALUATE); 5c. a
+#      private IP in a deflated member, and a host path in a Latin-1 member and in a UTF-16 member, are
+#      each a finding named <archive>!<member>:<line> (exit 1: members go through the walked-file
+#      decode); 5d. a clean archive passes (exit 0) and is counted as scanned with its members; 5e. a
+#      ZIP under another name (its content opens with a ZIP signature) is unpacked too; 5f. a private IP
+#      in the archive comment is found in the archive's own byte view; 5g/5h. each archive bound is
+#      checked just inside, exactly at and just outside it (the member count, and the total
+#      uncompressed size): inside and at pass, outside is CANNOT EVALUATE with no member read (a
+#      member planted with a private IP yields no member finding); 5i-5l. an encrypted member, a member
+#      compressed with an unsupported method, a nested archive member (by name, and by a ZIP signature
+#      opening its content), a member that cannot be read (a CRC mismatch) and a member whose
+#      byte-order mark fails its decode are each CANNOT EVALUATE naming <archive>!<member> (exit 2);
+#      5m. a directory understating a deflated member's size (beside a CRC of the shortened text) is
+#      CANNOT EVALUATE, not a PASS over the text past the declared size,
+#   6. a non-regular file (injected FIFO mode) is CANNOT EVALUATE (exit 2, naming it), its content
+#      NEVER read (the read seam raises for it, so a read-before-classification regression shows as a
+#      read error, not the CANNOT EVALUATE line); 6b. a symlink to a regular file is followed and its
+#      target scanned (exit 1); 6c. a symlinked directory is CANNOT EVALUATE (exit 2, naming it), never
+#      silently dropped; 6d. a dangling symlink fails closed (exit 2),
 #   7. an unreadable file (injected PermissionError) fails closed (exit 2).
 # Cases 1 through 6 each fail on the original pre-531 scan. Against the round-1 revision this replaces,
 # 2b, 3b, 3c and 6c are new findings or named skips, 6 and 7 run where that revision skipped, and 4b,
@@ -368,8 +540,10 @@ def main():
 # named. Against the round-4 revision this replaces, 3l-3o pin the UTF-32 views at byte offsets 0 to
 # 3 (each of those four planted texts hid from every then-scanned view; 3p was already found by that
 # revision and stays as the phase-3 control) and 3v asserts the WIDE_VIEWS enumeration itself and the
-# views read_scan_text returns. The planted host path and private IP are assembled from pieces so
-# this source stays clean under its own scan.
+# views read_scan_text returns. Against the gate that skipped every undecodable .zip, a non-regular file
+# and a symlinked directory with a PASS (exit 0), 1, 5, 5b, 6 and 6c now assert the counts or the exit 2
+# that replaced each skip, and 5c-5m are new; each of these fails on that gate. The planted host path
+# and private IP are assembled from pieces so this source stays clean under its own scan.
 _HOST_PATH = "/" + "opt/" + "fixture-host/private/path"
 _PRIVATE_IP = "10." + "20.30.40"
 
@@ -378,6 +552,7 @@ def self_test_main():
     import io
     import os
     import shutil
+    import struct
     import tempfile
     from contextlib import redirect_stderr, redirect_stdout
 
@@ -395,6 +570,32 @@ def self_test_main():
             path.write_bytes(data)
         return base
 
+    def zip_blob(members, method=zipfile.ZIP_DEFLATED, comment=b""):
+        """A ZIP archive built in memory, with a fixed timestamp so its bytes are reproducible."""
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            for name, data in members:
+                archive.writestr(zipfile.ZipInfo(name, (2020, 1, 1, 0, 0, 0)), data, compress_type=method)
+            archive.comment = comment
+        return buffer.getvalue()
+
+    def patch_directory(blob, index, offset, fmt, value):
+        """Rewrite one field of the index-th central directory record, at its offset from the record's
+        start: the flag word (8), the compression method (10), the CRC (16) or the uncompressed size (24)."""
+        end = blob.rindex(b"PK\x05\x06")
+        pos = struct.unpack("<I", blob[end + 16:end + 20])[0]
+        for _ in range(index):
+            pos += 46 + sum(struct.unpack("<HHH", blob[pos + 28:pos + 34]))
+        return blob[:pos + offset] + struct.pack(fmt, value) + blob[pos + offset + struct.calcsize(fmt):]
+
+    def expect_cannot_evaluate(label, what, rc, out, name, reason):
+        """Exit 2 with a CANNOT EVALUATE line naming `name` and a reason starting `reason`, never a skip
+        or a PASS."""
+        line = "CANNOT EVALUATE (not read in full): {} ({}".format(name, reason)
+        if rc != 2 or line not in out or "SKIP" in out or "PASS" in out:
+            failures.append("{} expected exit 2 with a CANNOT EVALUATE line naming {} ({}...), never a "
+                            "skip or a PASS (case {}; got {}: {!r})".format(what, name, reason, label, rc, out))
+
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-leaks-gate-selftest-"))
     except OSError as exc:
@@ -403,11 +604,13 @@ def self_test_main():
     clean_files = {"docs/a.md": b"# Plain\n\nNothing private here.\n", "site/data.csv": b"id,name\n1,alpha\n"}
     failures = []
     try:
-        # 1. a clean tree passes and states its counts.
+        # 1. a clean tree passes and states its counts, every walked input read.
         rc, out = run_capture(tree("clean", clean_files))
-        if rc != 0 or "2 file(s) scanned (0 non-UTF-8" not in out or "0 file(s) skipped" not in out:
-            failures.append("a clean tree expected exit 0 with 2 files scanned and 0 skipped "
-                            "(got {}: {!r})".format(rc, out))
+        if (rc != 0 or "2 file(s) scanned (0 non-UTF-8" not in out
+                or "including 0 ZIP archive(s) with 0 member(s) scanned" not in out
+                or "every walked input read" not in out):
+            failures.append("a clean tree expected exit 0 with 2 files scanned, 0 ZIP archives, every "
+                            "walked input read (case 1; got {}: {!r})".format(rc, out))
 
         # 2. a private IP in a UTF-8 .csv is a finding (scanned whatever the suffix).
         rc, out = run_capture(tree("csv", dict(clean_files, **{
@@ -594,12 +797,12 @@ def self_test_main():
             0x49, 0, 0, 0, 0x4a, 0, 0, 0,          # view can never compare equal
             0, 0, 0, 0x4b, 0, 0, 0, 0x4c])
         probe_path.write_bytes(probe_bytes)
-        probe_texts, probe_lossless, probe_reason = read_scan_text(probe_path)
+        probe_texts, probe_lossless, probe_archive = read_scan_text(probe_path)
         want_views = [probe_bytes.decode("utf-16"),
                       probe_bytes.decode("utf-8", errors="surrogateescape")]
         for enc, off in expected_views:
             want_views.append(probe_bytes[off:].decode(enc, errors="replace"))
-        if (probe_reason is not None or probe_lossless is not True
+        if (probe_archive is not None or probe_lossless is not True
                 or not isinstance(probe_texts, tuple) or list(probe_texts) != want_views):
             failures.append("read_scan_text must return the declared decode, the lossless byte "
                             "view, then every WIDE_VIEWS decode in order ({} view(s) returned; "
@@ -633,29 +836,155 @@ def self_test_main():
             failures.append("a host path in a Latin-1 suffixless file expected exit 1 "
                             "(got {}: {!r})".format(rc, out))
 
-        # 5. an undecodable .zip is named on a SKIP line and counted.
-        rc, out = run_capture(tree("zip", dict(clean_files, **{
-            "site/downloads/pack.zip": b"PK\x03\x04\xff\xfe\x00binary"})))
-        if (rc != 0 or "SKIP (not scanned): site/downloads/pack.zip (not UTF-8" not in out
-                or "1 file(s) skipped" not in out):
-            failures.append("an undecodable .zip expected exit 0 with a SKIP line naming it and 1 file "
-                            "skipped (got {}: {!r})".format(rc, out))
+        # 5/5b. a .zip that is not a readable archive is CANNOT EVALUATE, never a skip, whatever the
+        #     suffix's case.
+        for label, name in (("5", "site/downloads/pack.zip"), ("5b", "site/downloads/pack2.ZIP")):
+            files = dict(clean_files)
+            files[name] = b"PK\x03\x04\xff\xfe\x00binary"
+            rc, out = run_capture(tree("zip-corrupt-" + label, files))
+            expect_cannot_evaluate(label, "a corrupt archive", rc, out, name, "not a readable ZIP archive")
 
-        # 5b. the binary allow-list match is case-insensitive: an undecodable .ZIP is the same named SKIP.
+        # 5c. members are unpacked and decoded like walked files: a private IP in a deflated member, a
+        #     host path in a Latin-1 member and one in a UTF-16 member are each named <archive>!<member>.
         files = dict(clean_files)
-        files["site/downloads/pack2.ZIP"] = b"PK\x03\x04\xff\xfe\x00binary"
-        rc, out = run_capture(tree("zip-upper", files))
-        if (rc != 0 or "SKIP (not scanned): site/downloads/pack2.ZIP (not UTF-8, on the binary allow-list" not in out
-                or "1 file(s) skipped" not in out):
-            failures.append("an undecodable .ZIP expected exit 0 with a SKIP line naming it "
-                            "(got {}: {!r})".format(rc, out))
+        files["site/downloads/plant.zip"] = zip_blob((
+            ("docs/plant.txt", ("id\n1," + _PRIVATE_IP + "\n").encode("ascii")),
+            ("docs/latin1.md", b"caf\xe9 see " + _HOST_PATH.encode("ascii") + b"\n"),
+            ("docs/wide.md", ("see " + _HOST_PATH + "\n").encode("utf-16"))))
+        rc, out = run_capture(tree("zip-plant", files))
+        wanted = ("site/downloads/plant.zip!docs/plant.txt:2: private IP (10/8)",
+                  "site/downloads/plant.zip!docs/latin1.md:1: absolute host path",
+                  "site/downloads/plant.zip!docs/wide.md:1: absolute host path",
+                  "including 1 ZIP archive(s) with 3 member(s) scanned")
+        if rc != 1 or any(want not in out for want in wanted):
+            failures.append("a private IP and host paths in deflated, Latin-1 and UTF-16 archive members "
+                            "expected exit 1, each named <archive>!<member>:<line> (case 5c; got {}: {!r})"
+                            .format(rc, out))
 
-        # 6. a non-regular file is named on a SKIP line and counted, its content never read.
+        # 5d. a clean archive passes and is counted as scanned, with its members.
+        files = dict(clean_files)
+        files["site/downloads/clean.zip"] = zip_blob((("SKILL.md", b"# Skill\n\nNothing private.\n"),
+                                                      ("LICENSE", b"Plain licence text.\n")))
+        rc, out = run_capture(tree("zip-clean", files))
+        if (rc != 0 or "3 file(s) scanned" not in out
+                or "including 1 ZIP archive(s) with 2 member(s) scanned" not in out):
+            failures.append("a clean archive expected exit 0, counted as scanned with its 2 members "
+                            "(case 5d; got {}: {!r})".format(rc, out))
+
+        # 5e. a ZIP under another name is recognized by its signature and unpacked.
+        files = dict(clean_files)
+        files["site/downloads/pack.bin"] = zip_blob((("plant.txt", ("ip " + _PRIVATE_IP + "\n").encode("ascii")),))
+        rc, out = run_capture(tree("zip-signature", files))
+        if rc != 1 or "site/downloads/pack.bin!plant.txt:1: private IP (10/8)" not in out:
+            failures.append("a ZIP named pack.bin expected exit 1 with its member finding (case 5e; got "
+                            "{}: {!r})".format(rc, out))
+
+        # 5f. the archive's own bytes are scanned too: a private IP in its comment is a finding.
+        files = dict(clean_files)
+        files["site/downloads/comment.zip"] = zip_blob((("a.txt", b"plain\n"),),
+                                                       comment=("note " + _PRIVATE_IP).encode("ascii"))
+        rc, out = run_capture(tree("zip-comment", files))
+        if (rc != 1 or not re.search(r"site/downloads/comment\.zip:\d+: private IP \(10/8\)", out)
+                or "including 1 ZIP archive(s) with 1 member(s) scanned" not in out):
+            failures.append("a private IP in an archive comment expected exit 1 from the archive's byte "
+                            "view (case 5f; got {}: {!r})".format(rc, out))
+
+        # 5g. the member-count bound, just inside, exactly at and just outside it. Outside, the first
+        #     member carries a private IP: no member finding proves the bound was checked from the
+        #     directory before any member was read.
+        limit = MAX_ARCHIVE_MEMBERS
+        for label, count in (("5g-inside", limit - 1), ("5g-at", limit), ("5g-outside", limit + 1)):
+            first = ("ip " + _PRIVATE_IP + "\n").encode("ascii") if count > limit else b"x\n"
+            members = [("m0.txt", first)] + [("m{}.txt".format(i), b"x\n") for i in range(1, count)]
+            files = dict(clean_files)
+            files["site/downloads/many.zip"] = zip_blob(members)
+            rc, out = run_capture(tree("zip-" + label, files))
+            if count > limit:
+                expect_cannot_evaluate(label, "an archive over the member-count bound", rc, out,
+                                       "site/downloads/many.zip",
+                                       "{} members, over MAX_ARCHIVE_MEMBERS".format(count))
+                if "many.zip!" in out:
+                    failures.append("an archive over the member-count bound had a member read (case {}; "
+                                    "got {}: {!r})".format(label, rc, out))
+            elif rc != 0 or "with {} member(s) scanned".format(count) not in out:
+                failures.append("an archive of {} members (bound {}) expected exit 0 with every member "
+                                "scanned (case {}; got {}: {!r})".format(count, limit, label, rc, out))
+
+        # 5h. the total-uncompressed-size bound, just inside, exactly at and just outside it: the second
+        #     member is NUL bytes (one line, deflated to about 16 KiB) sized so the members' total lands on
+        #     each value. Outside, the first member carries a private IP: no <archive>!<member> finding
+        #     proves no member was read.
+        limit = MAX_ARCHIVE_TOTAL_SIZE
+        for label, total in (("5h-inside", limit - 1), ("5h-at", limit), ("5h-outside", limit + 1)):
+            first = ("ip " + _PRIVATE_IP + "\n").encode("ascii") if total > limit else b"plain\n"
+            files = dict(clean_files)
+            files["site/downloads/big.zip"] = zip_blob((("a.txt", first),
+                                                        ("b.txt", bytes(total - len(first)))))
+            rc, out = run_capture(tree("zip-" + label, files))
+            if total > limit:
+                expect_cannot_evaluate(label, "an archive over the total-size bound", rc, out,
+                                       "site/downloads/big.zip",
+                                       "{} uncompressed bytes declared, over MAX_ARCHIVE_TOTAL_SIZE"
+                                       .format(total))
+                if "big.zip!" in out:
+                    failures.append("an archive over the total-size bound had a member read (case {}; "
+                                    "got {}: {!r})".format(label, rc, out))
+            elif rc != 0 or "with 2 member(s) scanned" not in out:
+                failures.append("an archive declaring {} uncompressed bytes (bound {}) expected exit 0 "
+                                "with both members scanned (case {}; got {}: {!r})"
+                                .format(total, limit, label, rc, out))
+
+        # 5i-5l. an archive or member the gate cannot read in full is CANNOT EVALUATE naming
+        #     <archive>!<member>: an encrypted member (5i), an unsupported compression method (5j, bzip2),
+        #     a nested archive by name (5k; its content is not an archive, so only the name decides, and
+        #     the member before it carries a private IP that no finding may show, since the directory is
+        #     checked before any member is read) and by content (5k), a member failing its CRC (5l; one
+        #     stored byte flipped) and a member whose byte-order mark fails its decode (5l).
+        plain = zip_blob((("a.txt", b"plain text\n"),), method=zipfile.ZIP_STORED)
+        flipped = 30 + len("a.txt")
+        planted = ("ip " + _PRIVATE_IP + "\n").encode("ascii")
+        for label, name, blob, member, reason in (
+                ("5i", "locked.zip", patch_directory(plain, 0, 8, "<H", 0x0001), "a.txt",
+                 "encrypted member"),
+                ("5j", "bzip.zip", patch_directory(plain, 0, 10, "<H", 12), "a.txt",
+                 "compression method 12 is neither stored nor deflated"),
+                ("5k", "outer.zip", zip_blob((("a.txt", planted), ("inner.zip", b"not an archive\n"))),
+                 "inner.zip", "nested archive member, not unpacked; no member was read"),
+                ("5k", "outer2.zip", zip_blob((("a.txt", b"x\n"), ("inner.bin", zip_blob((("x.txt", b"x\n"),))))),
+                 "inner.bin", "nested archive member (its content opens with a ZIP signature)"),
+                ("5l", "crc.zip", plain[:flipped] + bytes([plain[flipped] ^ 0x01]) + plain[flipped + 1:],
+                 "a.txt", "member cannot be read: BadZipFile"),
+                ("5l", "bom.zip", zip_blob((("odd.md", ("see x\n").encode("utf-16") + b"x"),)), "odd.md",
+                 "member does not decode")):
+            files = dict(clean_files)
+            files["site/downloads/" + name] = blob
+            rc, out = run_capture(tree("zip-{}-{}".format(label, name), files))
+            expect_cannot_evaluate(label, "an archive the gate cannot read in full", rc, out,
+                                   "site/downloads/{}!{}".format(name, member), reason)
+            if "site/downloads/{}!a.txt:".format(name) in out:
+                failures.append("a member was read before the directory checks refused {} (case {}; got "
+                                "{}: {!r})".format(name, label, rc, out))
+
+        # 5m. a directory that understates a deflated member's size, beside a CRC of the shortened text,
+        #     cannot hide the rest of the member: zipfile alone stops at the declared size and the CRC
+        #     agrees, so the member's data is re-inflated and must end there, or it is CANNOT EVALUATE
+        #     (here the private IP past the declared size would otherwise pass unread).
+        hidden = ("note\nip " + _PRIVATE_IP + "\n").encode("ascii")
+        blob = zip_blob((("a.txt", hidden),))
+        blob = patch_directory(patch_directory(blob, 0, 16, "<I", zlib.crc32(hidden[:5])), 0, 24, "<I", 5)
+        files = dict(clean_files)
+        files["site/downloads/short.zip"] = blob
+        rc, out = run_capture(tree("zip-understated", files))
+        expect_cannot_evaluate("5m", "a member whose directory understates its size", rc, out,
+                               "site/downloads/short.zip!a.txt",
+                               "member data does not match its declared size")
+
+        # 6. a non-regular file is CANNOT EVALUATE (exit 2, naming it), its content never read.
         #    Deterministic: the stat seam reports a FIFO mode for one fixture file, so the case runs on
         #    every runner (no /dev/null dependency). The read seam RAISES for that file, so a scan that
-        #    reads the content before (or instead of) skipping fails this case outright (exit 2 and no
-        #    SKIP line), not only when the planted private IP happens to surface; on a real FIFO such a
-        #    read could block the gate.
+        #    reads the content before (or instead of) classifying it fails this case outright (a read
+        #    error and no CANNOT EVALUATE line), not only when the planted private IP happens to
+        #    surface; on a real FIFO such a read could block the gate.
         files = dict(clean_files)
         files["docs/fifo.md"] = ("fd " + _PRIVATE_IP + "\n").encode("ascii")
         base = tree("nonreg", files)
@@ -668,8 +997,8 @@ def self_test_main():
         saved_read6 = module._read_bytes
         def _refuse_fifo_read(path, _real=saved_read6):
             if path.name == "fifo.md":
-                raise OSError("self-test seam: the non-regular fifo.md was content-read; the SKIP "
-                              "must happen before any read")
+                raise OSError("self-test seam: the non-regular fifo.md was content-read; it must be "
+                              "classified before any read")
             return _real(path)
         module._stat_mode = _fifo_mode
         module._read_bytes = _refuse_fifo_read
@@ -678,10 +1007,11 @@ def self_test_main():
         finally:
             module._stat_mode = saved_mode
             module._read_bytes = saved_read6
-        if (rc != 0 or "SKIP (not scanned): docs/fifo.md (not a regular file)" not in out
-                or "1 file(s) skipped" not in out):
-            failures.append("a non-regular file expected exit 0 with a SKIP line naming it and its "
-                            "planted content unread (got {}: {!r})".format(rc, out))
+        expect_cannot_evaluate("6", "a non-regular file", rc, out, "docs/fifo.md",
+                               "not a regular file; its content was never opened")
+        if "self-test seam" in out:
+            failures.append("a non-regular file's content was read before it was classified (case 6; got "
+                            "{}: {!r})".format(rc, out))
 
         # 6b. a symlink to a regular file is followed and its target scanned (the file rule).
         base = tree("symfile", dict(clean_files))
@@ -692,15 +1022,13 @@ def self_test_main():
             failures.append("a symlink to a regular file expected exit 1 on the target content "
                             "(got {}: {!r})".format(rc, out))
 
-        # 6c. a symlinked directory is named on a SKIP line and counted, never silently dropped.
+        # 6c. a symlinked directory is CANNOT EVALUATE (exit 2, naming it), never silently dropped.
         base = tree("symdir", dict(clean_files))
         (tmp / "behind").mkdir(exist_ok=True)
         os.symlink(str(tmp / "behind"), str(base / "docs" / "linkdir"))
         rc, out = run_capture(base)
-        if (rc != 0 or "SKIP (not scanned): docs/linkdir (symlinked directory; not followed)" not in out
-                or "1 file(s) skipped" not in out):
-            failures.append("a symlinked directory expected exit 0 with a SKIP line naming it "
-                            "(got {}: {!r})".format(rc, out))
+        expect_cannot_evaluate("6c", "a symlinked directory", rc, out, "docs/linkdir",
+                               "symlinked directory; not followed")
 
         # 6d. a dangling file symlink is a read error: fail-closed (exit 2), never a clean skip.
         base = tree("dangle", dict(clean_files))
@@ -733,7 +1061,7 @@ def self_test_main():
         for failure in failures:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: a clean tree passes and states its scanned and skipped counts; a private IP in a "
+    print("SELF-TEST PASS: a clean tree passes and states its scanned-file and archive counts; a private IP in a "
           ".csv or a Latin-1 .tsv, a host path in a Latin-1 .md, a Latin-1 README.MD, a UTF-16 or UTF-32 "
           "file with a byte-order mark, a UTF-16 stream starting with U+0000 (decided by a successful "
           "decode, never the 4-byte prefix alone), single-byte text behind a fake UTF-16 mark (the "
@@ -743,12 +1071,16 @@ def self_test_main():
           "itself and the views read_scan_text returns, count, order and decoder per view, both "
           "asserted), a suffixless Latin-1 file or a symlinked regular "
           "file's target, "
-          "a codename in a Latin-1 .txt, and a private IP inside the denylist file are each a finding "
-          "(exit 1); an undecodable .zip (in either suffix case) and an injected non-regular file are "
-          "each named on a SKIP line and counted, the non-regular content never read (its read seam "
-          "raises if it is); a symlinked directory is named on a SKIP line, never silently dropped; and "
-          "a dangling symlink, an injected unreadable file, and a BOM-declared stream that decodes as "
-          "neither declared candidate each fail closed (exit 2, naming the file)")
+          "a codename in a Latin-1 .txt, a private IP inside the denylist file, a private IP or host path "
+          "in a deflated, Latin-1 or UTF-16 ZIP member (named <archive>!<member>:<line>), in a ZIP under "
+          "another name, or in an archive comment are each a finding (exit 1); a clean archive passes, "
+          "counted with its members; each archive bound passes just inside and at it and is CANNOT "
+          "EVALUATE just outside it, with no member read; a corrupt archive (in either suffix case), an "
+          "encrypted, unsupported-method, nested, CRC-failing, undecodable or size-understated member, an injected "
+          "non-regular file (its content never read: its read seam raises if it is) and a symlinked "
+          "directory are each CANNOT EVALUATE (exit 2, naming it), never a skip; and a dangling symlink, "
+          "an injected unreadable file, and a BOM-declared stream that decodes as neither declared "
+          "candidate each fail closed (exit 2, naming the file)")
     return 0
 
 
