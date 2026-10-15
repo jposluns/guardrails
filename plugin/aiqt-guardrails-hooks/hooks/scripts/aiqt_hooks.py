@@ -208,7 +208,8 @@ import sys
 # streams: with a sys.stderr whose write works but whose flush fails, `raise SystemExit` here ended
 # as the interpreter's own exit 120 instead of the refusal exit. Nothing runs before this guard, so
 # os._exit discards no other buffered output; the warning itself is flushed before the exit.
-FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_prompt_stamp", "orch_resume_audit",
+FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_lease_heartbeat_post",
+                         "orch_lease_heartbeat_stop", "orch_prompt_stamp", "orch_resume_audit",
                          "orch_stop_guard", "orch_teammate_idle")
 
 if tuple(sys.version_info[:2]) < (3, 14):
@@ -236,6 +237,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import collections
 import datetime
+import errno
 import fnmatch
 import json
 import math
@@ -9257,7 +9259,9 @@ def _orch_write_json(path, obj):
 
 def _orch_write_json_atomic(path, obj):
     """Crash-safe JSON overwrite, the one writer of turn-state.json, backlog-checkpoint.json,
-    checkpoint-init.marker, attestations-validated.json and forced-exit-surfaced.json. Returns None on success,
+    checkpoint-init.marker, attestations-validated.json and forced-exit-surfaced.json (the
+    lease-heartbeat past-holder memory has its OWN descriptor-bound writer,
+    _orch_lease_hb_memory_save, and is no longer written here). Returns None on success,
     else a short failure detail the caller names in its output (the caller decides what a failure means).
     It serializes obj first (a value json cannot encode fails before any file is created), creates the
     parent directory and opens it ONCE (os.open _ORCH_O_WALK|O_DIRECTORY|O_CLOEXEC: where O_PATH exists the
@@ -9580,14 +9584,54 @@ def _orch_mode_classify_text(text):
     return _ORCH_MODE_ARMED
 
 
+def _orch_lease_age_class(age, max_age):
+    """ONE age classifier for every lease freshness reader (_orch_scope_live, the resume-audit
+    lease probes, and the lease-heartbeat core), so no two of them can disagree on a boundary:
+    'cannot' when a horizon is DECLARED but not usable (a boolean, zero, negative, NaN, infinite,
+    or any non-number), judged FIRST, before any age comparison, so a future-dated mtime can never
+    hide an unusable horizon behind 'future' (an invalid horizon never reads as fresh and never as
+    a mere clock anomaly: it is a cannot-evaluate whatever the mtime, chkfcl); 'future' when age
+    (seconds) is more than _ORCH_CLOCK_SKEW ahead of the clock (clock skew or tamper; never fresh
+    forever, and the future value is kept as evidence, never rewritten), judged only under a None
+    or a valid positive horizon, which classify exactly as before; 'stale' when the valid declared
+    horizon (hours) is exceeded; else 'fresh' (an age exactly at the horizon or exactly at the
+    skew boundary is still fresh, matching the comparisons this classifier replaced; a None
+    max_age declares NO horizon, so no staleness check applies)."""
+    if max_age is not None and (
+            isinstance(max_age, bool) or not isinstance(max_age, (int, float))
+            or (isinstance(max_age, float) and not math.isfinite(max_age)) or max_age <= 0):
+        return "cannot"
+    if age < -_ORCH_CLOCK_SKEW:
+        return "future"
+    if max_age is None:
+        return "fresh"
+    if age > max_age * 3600:
+        return "stale"
+    return "fresh"
+
+
+_ORCH_SCOPE_CANNOT_DETAIL = ("the declared lease max_age_hours horizon is not usable, so lease "
+                             "scope cannot be evaluated; correct it in the registry (the "
+                             "confinement's trust root)")
+
+
 def _orch_scope_live(reg, root, session_id=None):
     """The D11 scope check: True when a declared orchestrator lease file is live (present, non-empty,
-    within max_age_hours when declared) OR a declared mode record carries a mode line. When the lease
-    declares holder_is_session_id AND the caller's session_id is known, a LIVE lease must additionally
-    NAME that session_id, so a co-located NON-holder session (a bounded worker) does not inherit the
-    global backlog (CX-M3). Where the lease records no comparable session identity, scope is repo-coarse
-    (a co-located session may inherit the backlog): a disclosed residual, not a strict boundary."""
+    within max_age_hours when declared) OR a declared mode record carries a mode line; False when scope
+    is provably not live; the string 'cannot' when a DECLARED max_age_hours horizon is not usable (a
+    boolean, zero, negative, NaN, infinite or non-number) on a lease that would otherwise read live
+    and no mode record reads live, so liveness cannot be evaluated. 'cannot' is TRUTHY on purpose: a
+    caller that only truth-tests this answer stays armed (the fail-closed direction), and every caller
+    handles it explicitly (the stop family and the yield guard route it into their existing
+    cannot-evaluate deny path; the dispatch ledger and the prompt stamp stay armed and surface it;
+    none turns a lease-scoped guard off over it). When the lease declares holder_is_session_id AND the
+    caller's session_id is known, a LIVE lease must additionally NAME that session_id, so a co-located
+    NON-holder session (a bounded worker) does not inherit the global backlog (CX-M3); a session the
+    lease does not name is a NON-holder (False) even under an unusable horizon. Where the lease
+    records no comparable session identity, scope is repo-coarse (a co-located session may inherit the
+    backlog): a disclosed residual, not a strict boundary."""
     lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else None
+    cannot = False
     if lease:
         path = _orch_path(root, lease.get("path"))
         if path:
@@ -9595,12 +9639,19 @@ def _orch_scope_live(reg, root, session_id=None):
                 st = os.stat(path)
                 fresh = True
                 max_age = lease.get("max_age_hours")
-                if isinstance(max_age, (int, float)) and max_age > 0:
+                if max_age is not None:
                     age = _orch_now().timestamp() - st.st_mtime
                     # a future mtime (age below -skew) is anomalous (clock skew or tamper) and never reads
-                    # as fresh forever; a small future skew is tolerated (CX future-mtime finding).
-                    fresh = -_ORCH_CLOCK_SKEW <= age <= max_age * 3600
-                if st.st_size > 0 and fresh:
+                    # as fresh forever; a small future skew is tolerated (CX future-mtime finding). A
+                    # DECLARED horizon that is not usable (a boolean, zero, negative, NaN, infinite or
+                    # non-number) classifies 'cannot' WHATEVER the mtime (the classifier judges the
+                    # horizon first, so a future-dated mtime cannot hide it): an invalid horizon is
+                    # a cannot-evaluate, never unlimited freshness and never a silent guards-off
+                    # (every caller stays armed).
+                    cls = _orch_lease_age_class(age, max_age)
+                    fresh = cls == "fresh"
+                    cannot = cls == "cannot" and st.st_size > 0
+                if st.st_size > 0 and (fresh or cannot):
                     if lease.get("holder_is_session_id"):
                         # STRICT opt-in holder scoping: the caller must carry a session id AND the lease
                         # must be readable AND name that id as a whole token; anything else is a NON-holder
@@ -9612,13 +9663,19 @@ def _orch_scope_live(reg, root, session_id=None):
                                 held = fh.read()
                         except OSError:
                             return False
-                        return _orch_token_present(session_id, held)
-                    return True
+                        if not _orch_token_present(session_id, held):
+                            return False
+                        if not cannot:
+                            return True
+                    elif not cannot:
+                        return True
             except OSError:
                 if lease.get("holder_is_session_id"):
                     return False  # holder mode: an unreadable lease -> caller cannot be confirmed holder
                 # otherwise an absent/unreadable lease is not live; fall through to the mode check
-    return _orch_mode(reg, root) is not None
+    if _orch_mode(reg, root) is not None:
+        return True  # a live mode record is an independent scope source; it outranks a lease 'cannot'
+    return "cannot" if cannot else False
 
 
 def _orch_escape_stat(path):
@@ -10024,10 +10081,18 @@ def decide_yield(ctx):
             return ("ALLOW_WITH_FINDINGS",
                     "{} schedule denials on an unchanged basis; yielding with findings"
                     .format(ctx["schedule_denials"]), disposition)
+        sched_cannot = ctx.get("cannot_evaluate", [])
+        # the unevaluable items are NAMED here exactly as on the stop path below, so a
+        # scope-level cannot-evaluate such as lease:max_age_hours tells the operator WHAT to
+        # correct, not only that one exists
+        named_sched = ", ".join(i for i, _c, _p in sched_cannot[:_ORCH_MAX_NAMED])
+        if len(sched_cannot) > _ORCH_MAX_NAMED:
+            named_sched += "; and {} more".format(len(sched_cannot) - _ORCH_MAX_NAMED)
         return ("DENY",
-                "a proof source for {} open item(s) is unreadable (cannot-evaluate); missing evidence "
-                "never licenses a new idle or wake. Fix the source, or release through the "
-                "operator-owned escape sentinel.".format(len(ctx.get("cannot_evaluate", []))), disposition)
+                "a proof source for {} open item(s) is unreadable (cannot-evaluate): {}. Missing "
+                "evidence never licenses a new idle or wake. Fix the source, or release through "
+                "the operator-owned escape sentinel.".format(len(sched_cannot), named_sched),
+                disposition)
     if not ctx["actionable"]:
         rechecked = ctx["waiting"] + ctx["blocked"]
         if kind == "schedule_idle" and rechecked and ctx["wake_named"] is False:
@@ -10042,11 +10107,17 @@ def decide_yield(ctx):
                     "pending: {}".format(
                         ", ".join(i for i, _c, _p in rechecked[:_ORCH_MAX_NAMED])), disposition)
         if ctx.get("cannot_evaluate", []):
+            cannot_items = ctx.get("cannot_evaluate", [])
+            # the unevaluable items are NAMED (bounded), so a scope-level cannot-evaluate such as
+            # lease:max_age_hours tells the operator WHAT to correct, not only that one exists
+            named_cannot = ", ".join(i for i, _c, _p in cannot_items[:_ORCH_MAX_NAMED])
+            if len(cannot_items) > _ORCH_MAX_NAMED:
+                named_cannot += "; and {} more".format(len(cannot_items) - _ORCH_MAX_NAMED)
             return ("DENY",
-                    "cntdef: {} open item(s) have an unreadable proof source (cannot-evaluate); an "
-                    "unconfirmable blocker cannot license a stop (ignorance refuses the wind-down). "
-                    "Fix the source; the operator-owned escape sentinel is the release for a genuine "
-                    "block.".format(len(ctx.get("cannot_evaluate", []))), disposition)
+                    "cntdef: {} open item(s) have an unreadable proof source (cannot-evaluate): "
+                    "{}. An unconfirmable blocker cannot license a stop (ignorance refuses the "
+                    "wind-down). Fix the source; the operator-owned escape sentinel is the release "
+                    "for a genuine block.".format(len(cannot_items), named_cannot), disposition)
         return ("ALLOW", "no actionable item remains; the disposition table is the enumeration",
                 disposition)
     if kind == "schedule_idle" and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP \
@@ -10416,9 +10487,16 @@ def _orch_stop_family(data, event_name, kind):
                           "({}); the {} fails open on its own read error and, because the registry is "
                           "unreadable, writes NO guard-event (no record).".format(reg,
                                                                                   event_name))
-    if not _orch_scope_live(reg, root, data.get("session_id")):
+    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    if not scope:
         return _allow()
     ctx, ts, basis = _orch_build_ctx(reg, root, kind, data)
+    if scope == "cannot":
+        # D11 scope CANNOT be evaluated (a declared but unusable max_age_hours): routed into this
+        # guard's existing cannot-evaluate deny path (FIX 1: ignorance refuses the wind-down; the
+        # loop bound and the operator escape still release), never a silent guards-off _allow().
+        ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
+            ("lease:max_age_hours", "cannot-evaluate", _ORCH_SCOPE_CANNOT_DETAIL)]
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
                   if ctx.get("escape_spoof") else "")
     verdict, reason, disposition = decide_yield(ctx)
@@ -10516,7 +10594,8 @@ def orch_yield_tool(data):
             "work rather than parking or stopping the run.".format(reg),
             "AIQT guardrail: denied a scheduling call under an unreadable orchestration registry "
             "(ignorance refuses the wind-down); fix the registry or keep working.")
-    if not _orch_scope_live(reg, root, data.get("session_id")):
+    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    if not scope:
         return _allow()
     tool = data.get("tool_name")
     declared = reg.get("yield_tools")
@@ -10526,6 +10605,11 @@ def orch_yield_tool(data):
     kind = "stop" if tool_input.get("stop") is True else "schedule_idle"
     wake_text = " ".join(str(v) for v in tool_input.values() if isinstance(v, str))
     ctx, ts, basis = _orch_build_ctx(reg, root, kind, data, wake_text=wake_text)
+    if scope == "cannot":
+        # D11 scope cannot be evaluated: routed into this guard's existing cannot-evaluate deny
+        # path (the schedule cap and the operator escape still release), never a silent _allow().
+        ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
+            ("lease:max_age_hours", "cannot-evaluate", _ORCH_SCOPE_CANNOT_DETAIL)]
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
                   if ctx.get("escape_spoof") else "")
     # Measured quiet beats a claimed quiet duration (estsep: the two grades never blend silently).
@@ -11861,7 +11945,8 @@ def orch_dispatch_ledger(data):
     status, reg = _orch_registry(root)
     if status != "ok":
         return _allow()
-    if not _orch_scope_live(reg, root, data.get("session_id")):
+    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    if not scope:
         return _allow()  # only the holder session writes the shared dispatch ledger (CX-M4b)
     tool = data.get("tool_name")
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
@@ -11907,6 +11992,11 @@ def orch_dispatch_ledger(data):
     if not _orch_append_jsonl(path, row):
         return _allow_note("AIQT guardrail: the dispatch-ledger write failed; "
                            "the launched work may be invisible to the stop guard.")
+    if scope == "cannot":
+        # armed and surfaced, never a silent skip: the row above was recorded anyway, so launched
+        # work stays visible to the stop guard while the operator corrects the horizon
+        return _allow_note("AIQT guardrail: {}; this dispatch row was recorded anyway (the "
+                           "ledger stays armed).".format(_ORCH_SCOPE_CANNOT_DETAIL))
     return _allow()
 
 
@@ -14195,7 +14285,8 @@ def orch_prompt_stamp(data):
     status, reg = _orch_registry(root)
     if status != "ok":
         return _allow()
-    if not _orch_scope_live(reg, root, data.get("session_id")):
+    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    if not scope:
         return _allow()  # only the holder session stamps/resets the shared turn-state (CX-M4b)
     prompt = data.get("prompt")
     ts = _orch_turn_state(root) or {}
@@ -14212,6 +14303,10 @@ def orch_prompt_stamp(data):
         ts.pop("schedule_basis", None)
         unsaved = _orch_save_turn_state(root, ts)
         if unsaved is None:
+            if scope == "cannot":
+                # armed and surfaced, never a silent skip: the stamp above was written anyway
+                return _allow_note("AIQT guardrail: {}; this prompt was stamped anyway (the "
+                                   "stamp stays armed).".format(_ORCH_SCOPE_CANNOT_DETAIL))
             return _allow()
         # the stamp is this recorder's record; the prompt proceeds and the unwritten stamp is noted
         return _allow_note("AIQT guardrail: this prompt was read as genuine human input, but turn-state.json "
@@ -14237,6 +14332,10 @@ def orch_prompt_stamp(data):
                 "or as genuine human input; record it manually (nocncl).".format(unsaved))
         return _context_note("UserPromptSubmit", context + " Additionally, " + warn,
                              "AIQT guardrail: this prompt was read as timer-originated, but " + warn)
+    if scope == "cannot":
+        return _context_note("UserPromptSubmit", context,
+                             "AIQT guardrail: {}; this wake was classified anyway (the stamp "
+                             "stays armed).".format(_ORCH_SCOPE_CANNOT_DETAIL))
     return (0, {"hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
         "additionalContext": context}}, None)
@@ -14365,9 +14464,15 @@ def _orch_resume_probes(reg, root):
             try:
                 st = os.stat(path)
                 age = _orch_now().timestamp() - st.st_mtime
-                if isinstance(max_age, (int, float)) and max_age > 0 and age > max_age * 3600:
+                age_class = _orch_lease_age_class(age, max_age)
+                if age_class == "cannot":
+                    # an invalid declared horizon (a boolean, zero, negative, NaN, infinite or
+                    # non-number) is a cannot-evaluate finding, never unlimited freshness
+                    findings.append("the lease max_age_hours declaration is not a usable horizon "
+                                    "({!r}): cannot-evaluate".format(max_age))
+                if age_class == "stale":
                     findings.append("the orchestrator lease is stale (older than {}h)".format(max_age))
-                if age < -_ORCH_CLOCK_SKEW:
+                if age_class == "future":
                     # CONV4-G2 + CONV6-F: a FUTURE lease mtime (clock skew or tamper) is checked whenever
                     # the lease is stattable, NOT only when a max_age horizon happens to be configured.
                     findings.append("the orchestrator lease mtime is in the future (clock skew or tamper)")
@@ -14375,6 +14480,7 @@ def _orch_resume_probes(reg, root):
                 pass  # no lease yet is a legitimate resume state
             except OSError as exc:
                 findings.append("declared lease unreadable ({}): cannot-evaluate".format(exc))
+    findings.extend(_orch_lease_hb_resume_findings(reg, root, lease))
     findings.extend(_orch_merge_pending_findings(reg, root))
     findings.extend(_orch_validate_attestations(reg, root))
     findings.extend(_orch_pending_artefact_findings(root))
@@ -15131,6 +15237,2762 @@ def orch_resume_barrier(data):
         "audit found divergence ({}) and this mutation is outside the record surfaces. Correct the "
         "record first, then clear the barrier with 'python3 tools/orch_doctor.py --resume-audit'."
         .format("; ".join(barrier.get("findings") or [])[:500]))
+
+
+# --- lease heartbeat (cnclse/recncl) ------------------------------------------------------------------
+# Two warn-only bindings (orch_lease_heartbeat_post on PostToolUse, orch_lease_heartbeat_stop on Stop)
+# over ONE core, because the generator requires a distinct handler per control. The core keeps the
+# holding session's concurrency-lease liveness record fresh, or warns when it cannot: the incident
+# class is a LIVE session whose lease heartbeat goes stale because refresh is manual, after which
+# _orch_scope_live reads scope as dead and every lease-scoped guard silently goes out of scope. Inert
+# unless the registry's lease declares holder_is_session_id and a valid heartbeat block (the registry
+# is the confinement's trust root, so the opt-in, and the wider refresh mode, is an operator act
+# there). A write happens ONLY in the declared refresh mode, ONLY when one parsed holder field is
+# EXACTLY the payload session_id (never a whole-token presence test: a decoy line such as
+# `previous_holder: <sid>` passes _orch_token_present and must never authorize a write), and ONLY on
+# a lease proven to be a single-link regular file owned by this effective uid, reached by a
+# component-wise no-follow descriptor walk. Every fault direction is no-write: a lease that is
+# absent, unreadable, symlinked anywhere on its path, not a regular file, multi-link, foreign-owned,
+# oversized, not strict UTF-8, unparsable, duplicate-keyed, missing a declared field,
+# state-inactive, future-dated, stale, or too close to staleness is NEVER created, seized, revived,
+# renewed or rewritten; it is surfaced as a named warning on Stop (exit 0, never a block) and a
+# guard-events row. No bookkeeping write may land in the lease either: the past-holder memory and
+# the guard-events destinations are proven DISTINCT from the declared lease (by resolved path, by
+# inode and by parent identity) and carried, with that proof, as ONE per-event holder EVERY
+# bookkeeping writer consumes (the row append, the event append, the memory save, the tracking
+# backoff save and the crash recorder: none re-reads anything, and none writes without it). The
+# proof is BOUND to the lease access in hand: opening the lease, taking the declared lock and
+# re-opening under it each INVALIDATE it, and only a re-proof on the descriptor then in hand
+# (_orch_lease_hb_sep_fd) restores it, so a branch holding no freshly proven descriptor (a failed
+# first open, a failed under-lock re-open, a busy or faulted lock) writes and records NOTHING; the
+# busy- and faulted-lock DEFERRALS surface on Stop only (one made on a PostToolUse event is
+# dropped with that event's holder, a disclosed narrowing), while every other no-holder refusal
+# rides the hook result of the event it happened on (on PostToolUse the result's error text, the
+# dispatcher's stderr); an unknown or unusable lease path leaves the holder unproven too. The
+# declared lease path and lock_path values are validated BEFORE any path resolution (an embedded
+# NUL, or an empty component from a doubled, leading or trailing separator, is the named refusal
+# on Stop, never a resolution fault or a silent allow). The timestamp written is a clock read at
+# the event (_orch_now, tstamp), never a recalled value, and a refresh inside
+# refresh_after_minutes is a no-op (idempotent).
+# DISCLOSED residual, the SAME-USER CONCURRENCY CLASS, stated here ONCE and completely (every
+# narrower residual sentence of earlier rounds is subsumed by this one): a concurrently running
+# process of the SAME user can rename, re-point, link or replace ANY entry between ANY check and
+# its use (the state directory, the lease's parent directory, the lease, a bookkeeping
+# destination, a temporary file), so a row can land at a declared path (the suite keeps a
+# disclosed-residual WITNESS vector that re-points the lease's parent directory at the state
+# directory between the destination open and the identity read and shows the row landing at the
+# declared lease path) or a bookkeeping write can be lost. The checks therefore cover
+# ACCIDENTAL mis-targeting and a stale or replaced lease, and they do not guarantee a boundary
+# against a same-user concurrent actor: on POSIX every path-based step can be raced by a process
+# of the same user, so closing that class needs OS isolation (distinct users, or a state
+# directory and lease directory private to this keeper), not more checks here.
+_ORCH_LEASE_HB_KIND = "lease-heartbeat"       # the guard-events kind of every row this core appends
+_ORCH_LEASE_HB_MAX_BYTES = 64 * 1024          # a larger lease is a cannot-evaluate, never read further
+_ORCH_LEASE_HB_MODES = frozenset(("warn", "refresh"))
+_ORCH_LEASE_HB_FORMATS = frozenset(("lines", "json"))
+_ORCH_LEASE_HB_KEYS = frozenset(("mode", "format", "holder_field", "field", "state_field",
+                                 "active_values", "refresh_after_minutes", "warn_after_minutes",
+                                 "lock_path"))
+_ORCH_LEASE_HB_REQUIRED = frozenset(("mode", "format", "holder_field", "refresh_after_minutes",
+                                     "warn_after_minutes"))
+_ORCH_LEASE_HB_RECORD = "lease-heartbeat.json"  # the past-holder memory in the state directory
+_ORCH_LEASE_HB_EVENTS = "guard-events.jsonl"    # the OTHER bookkeeping destination this keeper
+                                                # appends to (_orch_guard_event), named here only so
+                                                # the lease/bookkeeping separation can prove the
+                                                # declared lease is neither destination
+_ORCH_LEASE_HB_WRITER_NAMES = ("turn-state.json", "backlog-checkpoint.json",
+                                "checkpoint-init.marker", "attestations-validated.json",
+                                "forced-exit-surfaced.json")
+                                              # every OTHER whole-file replacement target of this
+                                              # plugin in the state directory (the
+                                              # _orch_write_json_atomic inventory; the memory and
+                                              # events names above are the keeper's own), named so
+                                              # the lock separation can refuse a declared lock
+                                              # aliasing one under ANY spelling (kept aligned with
+                                              # _orch_write_json_atomic's docstring, chkfcl)
+_ORCH_LEASE_HB_RETRY_SECONDS = 600            # while a refusal persists on an unchanged lease
+                                              # identity, the git tracking probe is re-run at
+                                              # most this often (the backoff)
+_ORCH_LEASE_HB_TRACKED_DETAIL = ("the lease is tracked by git, or the tracking probe failed; "
+                                 "a tracked lease is never rewritten by a hook")
+
+
+def _orch_lease_hb_dests(root, reg):
+    """The keeper's two bookkeeping destinations, (past-holder memory path, guard-events log
+    path), resolved ONCE per event from the registry dict the caller ALREADY read and validated
+    (PURE delegation to _state_dir_from_registry: no registry read of its own) and passed to the
+    separation check and to EVERY writer, so the separation decision and every subsequent save or
+    append use the SAME resolved paths: a registry re-read that fails (or is changed) between the
+    separation decision and a write can no longer redirect a writer onto a destination the
+    decision never examined."""
+    sd = _state_dir_from_registry(root, reg)
+    return (os.path.join(sd, _ORCH_LEASE_HB_RECORD), os.path.join(sd, _ORCH_LEASE_HB_EVENTS))
+
+
+def _orch_lease_hb_holder():
+    """A fresh, EMPTY separation holder: the one per-event record EVERY bookkeeping writer
+    consumes (_orch_lease_hb_event, _orch_lease_hb_row_once, _orch_lease_hb_memory_save, the
+    tracking backoff save inside _orch_lease_hb_tracked_refused, and the crash recorder). dests
+    is filled from the event's single registry read; lease_fd carries the HELD lease descriptor
+    whose separation _orch_lease_hb_sep_fd proved (the descriptor itself, never a boolean: the
+    proof IS the open lease access), lease_parent_fd the held directory descriptor the lease
+    was opened under (every write-time lstat of the lease name runs relative to it), lease_name
+    the lease's leaf name under that descriptor, lease_path the declared spelling, and state_fd
+    the state directory opened ONCE, O_DIRECTORY|O_NOFOLLOW, when the proof passed: every
+    bookkeeping open, lstat, exclusive temporary create and replace then runs RELATIVE to these
+    held descriptors (dir_fd), binding every such step to the HELD directory identities rather
+    than to path spellings; what a concurrently running process of the same user can still do
+    is the SAME-USER CONCURRENCY CLASS, stated once and completely in the section comment above
+    _ORCH_LEASE_HB_KIND and witnessed in the suite (the saves check their temporary descriptor
+    before its first byte, then re-check the temporary name immediately before the replace).
+    Opening (or re-opening) the lease and taking the declared lock clear the lease descriptors;
+    only _orch_lease_hb_prove passing on the descriptors then in hand fills the holder, and it
+    is emptied again BEFORE any held descriptor or the lock is released, so a write attempted
+    after cleanup finds no held descriptor and withholds. The holder OWNS state_fd (the event's
+    cleanup closes it); the lease descriptors stay owned by their opener."""
+    return {"dests": None, "lease_fd": None, "lease_parent_fd": None, "lease_name": None,
+            "state_fd": None, "lease_path": None, "withheld": []}
+
+
+def _orch_lease_hb_holder_ok(holder):
+    """True only when holder carries the HELD, separation-proven lease descriptor, the lease
+    parent-directory and state-directory descriptors the proof was built on, the lease leaf
+    name and the destinations the proof examined: the structural gate of every bookkeeping
+    writer, so a branch holding no proven descriptor (the entry path before the first open, an
+    invalid declaration, a failed first open, a failed under-lock re-open, a busy or faulted
+    lock, a crash before the proof or after cleanup, an unknown or unusable lease path) writes
+    and records nothing anywhere."""
+    if not isinstance(holder, dict):
+        return False
+    for key in ("lease_fd", "lease_parent_fd", "state_fd"):
+        fd = holder.get(key)
+        if not isinstance(fd, int) or isinstance(fd, bool) or fd < 0:
+            return False
+    return (isinstance(holder.get("lease_name"), str) and bool(holder["lease_name"])
+            and isinstance(holder.get("lease_path"), str) and bool(holder["lease_path"])
+            and isinstance(holder.get("dests"), tuple) and len(holder["dests"]) == 2)
+
+
+def _orch_lease_hb_withheld(holder, detail):
+    """Record a withheld bookkeeping write on the event's holder and return False: the binding
+    reports every withheld write through the HOOK RESULT (the Stop banner, or the result's error
+    text, which the dispatcher writes to stderr), NEVER into a file, so a destination refused at
+    write time stays visible without landing a byte anywhere."""
+    try:
+        if isinstance(holder, dict):
+            holder.setdefault("withheld", []).append(str(detail))
+    except Exception:
+        pass
+    return False
+
+
+def _orch_lease_hb_withheld_text(holder, event="Stop"):
+    """The one-line report of this event's withheld bookkeeping writes, or None when nothing was
+    withheld: the bindings surface it through the hook result (appended to the Stop banner, or
+    carried as the result's error text, which the dispatcher writes to stderr), never into a
+    file. A BUSY- or FAULTED-LOCK deferral (_orch_lease_hb_no_holder), and a core-fault record
+    made with no held descriptor on those branches (_orch_lease_hb_crash_row), are included on
+    Stop only, at most once each per turn end: the declared lock being busy is expected
+    coordination, and neither is worth one report per tool call (the faulted-lock deferral and
+    the crash record each NAME their fault). A due refresh's Stop banner names the flock fault
+    itself and DROPS the faulted-lock deferral (_orch_lease_hb_judge), so the fault is rendered
+    exactly once per turn end; and each event builds a FRESH holder, so a deferral made on a
+    PostToolUse event (a lock deferral or a core fault deferred on those branches) is dropped
+    with that event's holder and surfaces only where the Stop event reproduces it, a disclosed
+    narrowing."""
+    withheld = list(holder.get("withheld") or []) if isinstance(holder, dict) else []
+    if isinstance(holder, dict) and event == "Stop":
+        withheld.extend(d for d in (holder.get("deferred") or []) if d not in withheld)
+    if not withheld:
+        return None
+    return ("AIQT guardrail (lease heartbeat): bookkeeping withheld ({}).".format(
+        "; ".join(withheld)))
+
+
+def _orch_lease_hb_lock_fault_deferral(lock_fault):
+    """The ONE faulted-lock deferral line, built here so the judge's Stop banner, which names
+    the same flock fault and carries the bookkeeping consequence, can DROP the deferral and
+    render the fault exactly once per turn end."""
+    return ("the declared lock faulted ({}), so this event's bookkeeping is "
+            "withheld".format(lock_fault))
+
+
+def _orch_lease_hb_no_holder(holder):
+    """The structural-gate refusal of a bookkeeping writer reached with NO held,
+    separation-proven lease descriptor, always returning False. On the BUSY-lock branch (the one
+    no-holder branch that still runs the decision table, so writers are reached on EVERY
+    PostToolUse call while another holder legitimately has the declared lock) the refusal is
+    recorded once as a DEFERRAL surfaced on Stop only (_orch_lease_hb_withheld_text), never a
+    per-tool-call report; the FAULTED-lock branch (the other such branch) defers the same way,
+    NAMING the lock fault rather than the generic no-descriptor refusal; every other no-holder
+    write is withheld and reported as the named refusal, exactly as before."""
+    if isinstance(holder, dict) and holder.get("lock_busy"):
+        try:
+            deferred = holder.setdefault("deferred", [])
+            detail = ("the declared lock is busy, so this event's bookkeeping is deferred to "
+                      "a later event")
+            if detail not in deferred:
+                deferred.append(detail)
+        except Exception:
+            pass
+        return False
+    if isinstance(holder, dict) and holder.get("lock_fault") is not None:
+        try:
+            deferred = holder.setdefault("deferred", [])
+            detail = _orch_lease_hb_lock_fault_deferral(holder["lock_fault"])
+            if detail not in deferred:
+                deferred.append(detail)
+        except Exception:
+            pass
+        return False
+    return _orch_lease_hb_withheld(holder, "no held, separation-proven lease descriptor")
+
+
+def _orch_lease_hb_lease_ids(holder):
+    """The lease identities every bookkeeping write must differ from, read at WRITE time (and
+    AFTER the write's own destination stat, so a destination renamed onto the lease name before
+    this read is seen at the name and refused): the fstat of the held, separation-proven lease
+    descriptor, plus an lstat of the lease leaf NAME taken relative to the held lease
+    parent-directory descriptor (a cooperating writer can have re-pointed that name at a
+    bookkeeping destination since the proof, so the name's CURRENT identity refuses the write
+    too; the dir_fd binding keeps this read on the HELD parent directory whatever its ancestors
+    are renamed to, while what a same-user concurrent actor can still do is the SAME-USER
+    CONCURRENCY CLASS in the section comment above _ORCH_LEASE_HB_KIND).
+    (ids, None) on success, else (None, detail); an absent lease name contributes no identity
+    (nothing is there to alias), while any other stat fault withholds (chkfcl)."""
+    try:
+        lst = os.fstat(holder["lease_fd"])
+    except OSError as exc:
+        return (None, "the held lease descriptor cannot be stat'ed ({})".format(exc))
+    ids = {(lst.st_dev, lst.st_ino)}
+    try:
+        nst = os.stat(holder["lease_name"], dir_fd=holder["lease_parent_fd"],
+                      follow_symlinks=False)
+        ids.add((nst.st_dev, nst.st_ino))
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as exc:
+        return (None, "the declared lease name cannot be stat'ed ({})".format(exc))
+    return (ids, None)
+
+
+def _orch_lease_hb_append_fstat(fd):
+    """The append destination's identity stat, bound to the very descriptor the row would be
+    written through (never a pathname). A seam, as _orch_lease_hb_restat is, so the self-test
+    can plant a swap between the destination open and this stat deterministically."""
+    return os.fstat(fd)
+
+
+def _orch_lease_hb_row_write(fd, view):
+    """ONE write syscall of a guard-events row through the append descriptor, returning the
+    byte count written (a short write leaves the rest to the caller's loop, which calls this
+    again). A seam, as _orch_lease_hb_append_fstat is, so the self-test can observe EVERY write
+    of the final row, the repeat after a forced short write included, inside the critical
+    section."""
+    return os.write(fd, view)
+
+
+def _orch_lease_hb_append_checked(holder, path, obj):
+    """The ONE lease-heartbeat row appender, bound to held descriptors at BOTH ends: the
+    destination is opened by its leaf NAME relative to the holder's held state-directory
+    descriptor (dir_fd, so a swap of the state directory's own name after the proof cannot
+    redirect the open) with O_WRONLY|O_APPEND|O_CREAT|O_NOFOLLOW|O_NONBLOCK|O_NOCTTY|O_CLOEXEC
+    (a symlink planted at the name is refused, never followed; an absent log is created, as the
+    state directory's first append always did; a FIFO, with or without a reader, returns
+    PROMPTLY and never blocks the hook: opened non-blocking with no reader the open fails
+    outright, and with one the fstat below refuses it before any write), THAT descriptor is
+    fstat'ed, and the row is written through it only when it is a regular file with exactly one
+    hard link whose (st_dev, st_ino) differs from the held lease descriptor's AND from an lstat
+    of the lease name taken relative to the held lease parent-directory descriptor AFTER the
+    destination fstat (read after, so a destination renamed onto the lease name between the
+    open and that read is seen at the lease name and refused); otherwise NOTHING is written and
+    the refusal is reported through the hook result (the Stop banner or the result's error
+    text, the dispatcher's stderr), never into a file, though the O_CREAT of the open can
+    already have CREATED an empty destination file before the checks ran, a DISCLOSED side
+    effect of a refused append (no row byte lands anywhere). DISCLOSED residual: the same-user
+    concurrency class, stated once and completely in the section comment above
+    _ORCH_LEASE_HB_KIND; the checks here cover accidental mis-targeting and a stale or replaced
+    lease, never a concurrently running process of the same user. Returns whether the row was
+    appended."""
+    if not _orch_lease_hb_holder_ok(holder):
+        return _orch_lease_hb_no_holder(holder)
+    fd = None
+    try:
+        fd = os.open(os.path.basename(path),
+                     os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+                     | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+                     | getattr(os, "O_CLOEXEC", 0), 0o666, dir_fd=holder["state_fd"])
+        st = _orch_lease_hb_append_fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return _orch_lease_hb_withheld(
+                holder, "the bookkeeping destination is not a regular file")
+        if st.st_nlink != 1:
+            return _orch_lease_hb_withheld(
+                holder, "the bookkeeping destination does not have exactly one hard link")
+        ids, fault = _orch_lease_hb_lease_ids(holder)
+        if ids is None:
+            return _orch_lease_hb_withheld(holder, fault)
+        if (st.st_dev, st.st_ino) in ids:
+            return _orch_lease_hb_withheld(
+                holder, "the bookkeeping destination aliases the declared lease")
+        blob = (json.dumps(obj, sort_keys=True) + "\n").encode("utf-8")
+        view = memoryview(blob)
+        while view:
+            view = view[_orch_lease_hb_row_write(fd, view):]
+        return True
+    except (OSError, ValueError) as exc:
+        return _orch_lease_hb_withheld(
+            holder, "the bookkeeping append failed ({})".format(exc))
+    finally:
+        _orch_lease_hb_close(fd)
+
+
+def _orch_lease_hb_event(holder, decision, detail):
+    """Best-effort append of one lease-heartbeat guard-events row, through the event's separation
+    HOLDER only: it writes NOTHING unless the holder carries the held, separation-proven lease
+    descriptor (_orch_lease_hb_holder_ok), and the append itself re-opens the SAME events
+    destination the proof examined no-follow, by name RELATIVE to the held state-directory
+    descriptor, and fstats the descriptor it writes through (_orch_lease_hb_append_checked),
+    against that held lease descriptor AND an lstat of the lease name taken relative to the
+    held lease parent-directory descriptor AFTER the destination fstat, so a destination
+    aliased onto the lease AFTER the proof is refused at write time, not only at proof time (and never a fresh _orch_guard_event resolution, whose
+    independent registry re-read could land the row somewhere the proof never examined).
+    Returns whether the append succeeded; a guard never changes its decision over a failed or
+    withheld one."""
+    if not _orch_lease_hb_holder_ok(holder):
+        return _orch_lease_hb_no_holder(holder)
+    return _orch_lease_hb_append_checked(holder, holder["dests"][1],
+                                         {"ts": _orch_now().isoformat(),
+                                          "kind": _ORCH_LEASE_HB_KIND,
+                                          "decision": decision, "detail": detail})
+
+
+def _orch_lease_hb_path_bad(value):
+    """The refusal detail when a declared path value cannot name a file (an embedded NUL, which
+    path resolvers raise ValueError on, or an empty component from a doubled, leading or
+    trailing separator, which collapses silently to a DIFFERENT path than the declared
+    spelling), else None. Judged on the string alone, BEFORE any filesystem resolution
+    (_orch_lease_hb_paths_bad runs it ahead of realpath, stat and the entry separation proof),
+    so an unusable declared value is the NAMED refusal, never a late resolution fault or a
+    silent allow (guardrail-config-integrity). Exactly ONE leading separator is the absolute
+    anchor: stripping every leading separator would hide the empty leading component of a
+    doubled root ('//tmp/lease', '///tmp/lease')."""
+    if "\0" in value:
+        return "contains an embedded NUL"
+    rest = value[len(os.sep):] if os.path.isabs(value) else value
+    if any(part == "" for part in rest.split(os.sep)):
+        return "contains an empty path component (a doubled, leading or trailing separator)"
+    return None
+
+
+def _orch_lease_hb_paths_bad(lease):
+    """The named refusal when the declared lease path or lock_path VALUE cannot name a file,
+    judged on the strings alone BEFORE any filesystem resolution (realpath, stat, the entry
+    separation proof): an embedded NUL raises ValueError inside a resolver, and an empty
+    component silently collapses to a DIFFERENT path than the declared spelling, so either must
+    be the named refusal on Stop, never a resolution fault or a silent allow. None when both
+    values are usable; _orch_lease_hb_config repeats these checks inside the whole-declaration
+    validation (kept aligned, chkfcl)."""
+    path = lease.get("path")
+    if not (isinstance(path, str) and path):
+        return "a heartbeat block requires a declared lease path"
+    detail = _orch_lease_hb_path_bad(path)
+    if detail:
+        return "the declared lease path {}".format(detail)
+    block = lease.get("heartbeat")
+    if isinstance(block, dict) and "lock_path" in block:
+        lock_path = block.get("lock_path")
+        if not (isinstance(lock_path, str) and lock_path):
+            return "lock_path must be a non-empty string"
+        detail = _orch_lease_hb_path_bad(lock_path)
+        if detail:
+            return "lock_path {}".format(detail)
+    return None
+
+
+def _orch_lease_hb_config(reg, root=None):
+    """The adopter declaration, validated whole: ('absent', None) when the registry's lease declares
+    no heartbeat block (byte-for-byte today's behaviour), ('ok', block) on a valid declaration, and
+    ('bad', detail) otherwise. A bad block never writes and never falls back to another mode; it is
+    surfaced (a Stop warning and a resume-audit finding; never a guard-events row or a memory
+    save, because no descriptor proof exists before the first open and a writer with no held
+    descriptor withholds), so a typo can never silently select a posture
+    (guardrail-config-integrity). With root (every runtime caller passes it: the event entry and
+    the resume audit) a declared lock_path also runs the ONE shared read-only lock validation
+    (_orch_lease_hb_lock_sep) against the lease and against every file this plugin's whole-file
+    writers replace, on paths and destinations resolved from the authoritative root, so an
+    alternate spelling, a relative lock_path that resolves to a refused target, an inode alias, a
+    lock inside the state directory and a stat fault are each the NAMED invalid-declaration
+    refusal at declaration validation too, read-only and BEFORE any state-directory creation
+    (without root, direct unit callers, only the string-level checks run)."""
+    lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else None
+    if not lease or "heartbeat" not in lease:
+        return ("absent", None)
+    block = lease.get("heartbeat")
+    if not isinstance(block, dict):
+        return ("bad", "heartbeat is not an object")
+    extra = set(block) - _ORCH_LEASE_HB_KEYS
+    if extra:
+        return ("bad", "unknown heartbeat key(s): {}".format(", ".join(sorted(extra))))
+    missing = _ORCH_LEASE_HB_REQUIRED - set(block)
+    if missing:
+        return ("bad", "missing heartbeat key(s): {}".format(", ".join(sorted(missing))))
+    if lease.get("holder_is_session_id") is not True:
+        return ("bad", "a heartbeat block requires lease.holder_is_session_id true (the holder proof)")
+    if not (isinstance(lease.get("path"), str) and lease.get("path")):
+        return ("bad", "a heartbeat block requires a declared lease path")
+    lease_path_bad = _orch_lease_hb_path_bad(lease.get("path"))
+    if lease_path_bad:
+        return ("bad", "the declared lease path {}".format(lease_path_bad))
+    max_age = lease.get("max_age_hours")
+    if not isinstance(max_age, (int, float)) or isinstance(max_age, bool) \
+            or (isinstance(max_age, float) and not math.isfinite(max_age)) or max_age <= 0:
+        return ("bad", "a heartbeat block requires a finite max_age_hours greater than 0")
+    # isinstance BEFORE membership: an unhashable declared value (a list, an object) must be the
+    # NAMED invalid-declaration refusal, never a TypeError the binding records as a core fault
+    # that silently allows (guardrail-config-integrity)
+    mode = block.get("mode")
+    if not isinstance(mode, str) or mode not in _ORCH_LEASE_HB_MODES:
+        return ("bad", "mode must be 'warn' or 'refresh'")
+    fmt = block.get("format")
+    if not isinstance(fmt, str) or fmt not in _ORCH_LEASE_HB_FORMATS:
+        return ("bad", "format must be 'lines' or 'json'")
+    refresh_after = block.get("refresh_after_minutes")
+    warn_after = block.get("warn_after_minutes")
+    for value, name in ((refresh_after, "refresh_after_minutes"), (warn_after, "warn_after_minutes")):
+        if type(value) is not int or value < 1:
+            return ("bad", "{} must be an integer of at least 1".format(name))
+    if not refresh_after < warn_after:
+        return ("bad", "refresh_after_minutes must be below warn_after_minutes")
+    if warn_after * 60 > max_age * 3600 - 2 * _ORCH_CLOCK_SKEW:
+        return ("bad", "warn_after_minutes must stay at least two clock skews under max_age_hours")
+    fields = [block.get("holder_field")]
+    for key in ("field", "state_field"):
+        if key in block:
+            fields.append(block.get(key))
+    for value in fields:
+        if not isinstance(value, str) or not value or value == "Operating-mode":
+            return ("bad", "field names must be non-empty strings other than Operating-mode")
+    if len(set(fields)) != len(fields):
+        return ("bad", "field names must be distinct")
+    if ("state_field" in block) != ("active_values" in block):
+        return ("bad", "state_field and active_values are declared together or not at all")
+    if "active_values" in block:
+        active = block.get("active_values")
+        if not isinstance(active, list) or not active \
+                or not all(isinstance(v, str) and v for v in active):
+            return ("bad", "active_values must be a non-empty list of non-empty strings")
+    if "lock_path" in block:
+        lock_path = block.get("lock_path")
+        if not (isinstance(lock_path, str) and lock_path):
+            return ("bad", "lock_path must be a non-empty string")
+        lock_path_bad = _orch_lease_hb_path_bad(lock_path)
+        if lock_path_bad:
+            return ("bad", "lock_path {}".format(lock_path_bad))
+        if os.path.normpath(lock_path) == os.path.normpath(lease.get("path")):
+            # the lock must be a STABLE, SEPARATE coordination file this keeper never
+            # replaces: a lock that IS the lease would be replaced by the keeper's own
+            # refresh (flock attaches to the open file description, so the next cooperating
+            # keeper locks the replacement while this one still holds the orphaned inode)
+            return ("bad", "lock_path names the declared lease path (the lock must be a "
+                    "stable coordination file separate from the lease)")
+        if root is not None:
+            # the SHARED read-only lock validation (the same check the event entry runs),
+            # resolving the state directory and both bookkeeping destinations from the
+            # authoritative root: it creates NOTHING (the separation check's state-directory
+            # creation runs later, and only on a valid declaration), and the resume audit
+            # reports this refusal through the invalid-declaration finding
+            lock_sep = _orch_lease_hb_lock_sep(_orch_path(root, lease.get("path")),
+                                               _orch_path(root, lock_path),
+                                               _orch_lease_hb_dests(root, reg))
+            if lock_sep is not None:
+                return ("bad", lock_sep)
+    return ("ok", block)
+
+
+def _orch_lease_hb_close(*fds):
+    """Close walk descriptors exactly once each, ATTEMPTING EVERY ONE even when an earlier close
+    raises: an OSError is swallowed because every outcome the descriptor could affect is settled
+    before this runs, and any OTHER exception class (an interrupt, an injected core fault) is
+    held until every remaining descriptor has had its one close attempt, and then the FIRST such
+    fault propagates. A descriptor whose close raised is never retried, whichever side of the
+    close syscall the fault arrived on (the number may already be closed and reused by another
+    acquisition), so the fail direction of that one ambiguous close is a leaked descriptor,
+    never a close of a descriptor this caller no longer owns. Every terminal cleanup of the
+    lease heartbeat releases its descriptors through ONE call of this helper (the event
+    finalizer, _orch_lease_hb_event_cleanup, and the judge's re-opened descriptors with the
+    lock last), so a fault at one close can never skip the next."""
+    fault = None
+    for fd in fds:
+        if fd is None:
+            continue
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        except BaseException as exc:  # the remaining closes still run; then it propagates
+            if fault is None:
+                fault = exc
+    if fault is not None:
+        raise fault
+
+
+def _orch_lease_hb_close_mark(fd, done):
+    """Close one held descriptor, recording fd in done IMMEDIATELY BEFORE the close syscall
+    (OSError swallowed, as in _orch_lease_hb_close). The record leads the syscall so a fault
+    that interrupts this helper between the two reads as CLOSED and is never retried: after a
+    fault the number may already be closed and reused by another acquisition, so the fail
+    direction of that one ambiguous step is a leaked descriptor, never a close of a descriptor
+    this caller no longer owns. A seam, so the self-test can inject a fault on EITHER side of
+    the close and prove both ownership outcomes."""
+    done.append(fd)
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _orch_lease_hb_close_held(held, fd):
+    """Close one descriptor of a held-descriptor ledger at a transfer seam: fd leaves held
+    exactly when the close primitive RECORDED it (closed, or interrupted at the one ambiguous
+    step, which resolves to closed-and-never-retried), and stays in held when the fault arrived
+    BEFORE the record, so the enclosing cleanup still owns it and closes it exactly once. The
+    two-sided ledger distinguishes a close that faults before closing from one after it,
+    without ever retrying an ambiguously closed descriptor."""
+    done = []
+    try:
+        _orch_lease_hb_close_mark(fd, done)
+    finally:
+        if fd in done and fd in held:
+            held.remove(fd)
+
+
+def _orch_lease_hb_open(root, path):
+    """Open the declared lease by a component-wise no-follow walk (openat semantics, the
+    symlink-resolution discipline): (parent_fd, leaf_fd, leaf_name, None) on success, with the
+    final parent held O_RDONLY|O_DIRECTORY (reopened as '.' under the walked descriptor, so a field
+    write can fsync it; the final parent therefore needs read permission, a disclosed platform
+    cost) and the lease held O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_NOCTTY; (None, None, None,
+    ('absent'|'cannot', detail)) on any other outcome (an unusable path value, for example an
+    embedded NUL raising ValueError, is a named cannot refusal). The anchor is '/' for an
+    absolute path and the repo root for a relative one; a '..' component is refused outright; no
+    component is ever re-resolved by name after its open, and no symlink is followed at ANY
+    component (an ancestor alias such as a symlinked /var/run refuses, the fail-closed
+    direction). Descriptor ownership is a LEDGER kept exact from the moment of each
+    acquisition: every descriptor enters held when opened and leaves it exactly once, at its
+    transfer close (_orch_lease_hb_close_held, which distinguishes a close fault BEFORE its
+    close syscall, where the enclosing cleanup still owns and closes the descriptor, from one
+    AT or AFTER it, where it is never retried) or at the hand-off of the final (parent, leaf)
+    pair; on any fault the terminal cleanup closes every descriptor still in the ledger exactly
+    once, running the REMAINING closes even when one of them faults, then propagating the
+    FIRST such fault (as _orch_lease_hb_close does; _orch_lease_hb_lock keeps its cleanup
+    fault the same way). The caller closes both returned descriptors exactly once (via
+    _orch_lease_hb_close)."""
+    if not isinstance(path, str) or not path:
+        return (None, None, None, ("cannot", "no usable lease path"))
+    if os.pardir in path.split(os.sep):
+        return (None, None, None, ("cannot", "the lease path contains '..' (refused)"))
+    if os.path.isabs(path):
+        anchor, rest = os.sep, path.lstrip(os.sep)
+    else:
+        anchor, rest = root, path
+    parts = [p for p in rest.split(os.sep) if p and p != os.curdir]
+    if not parts:
+        return (None, None, None, ("cannot", "the lease path names no file"))
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    held = []
+    handed = False
+    stage = "walk"
+    try:
+        fd = os.open(anchor, _ORCH_O_WALK | os.O_DIRECTORY | cloexec)
+        held.append(fd)
+        for comp in parts[:-1]:
+            nxt = os.open(comp, _ORCH_O_WALK | os.O_DIRECTORY | os.O_NOFOLLOW | cloexec,
+                          dir_fd=fd)
+            # the next component enters the ledger BEFORE the finished one's transfer close: a
+            # close fault on either side of that close still owns every acquisition exactly once
+            held.append(nxt)
+            _orch_lease_hb_close_held(held, fd)
+            fd = nxt
+        parent = os.open(os.curdir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | cloexec,
+                         dir_fd=fd)
+        held.append(parent)
+        _orch_lease_hb_close_held(held, fd)
+        leaf_name = parts[-1]
+        stage = "leaf"
+        leaf = os.open(leaf_name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
+                       | getattr(os, "O_NOCTTY", 0) | cloexec, dir_fd=parent)
+        held.append(leaf)
+        handed = True
+        return (parent, leaf, leaf_name, None)
+    except FileNotFoundError:
+        return (None, None, None, ("absent", "the declared lease is absent"))
+    except OSError as exc:
+        if stage == "leaf":
+            return (None, None, None, ("cannot", "the lease cannot be opened ({})".format(exc)))
+        return (None, None, None, ("cannot", "the lease path walk was refused ({})".format(exc)))
+    except ValueError as exc:
+        # an unusable component (an embedded NUL) raises ValueError, not OSError: a NAMED
+        # cannot refusal, with every held walk descriptor closed exactly once by the cleanup
+        return (None, None, None, ("cannot", "the path is unusable ({})".format(exc)))
+    finally:
+        if not handed:
+            fault = None
+            for leftover in reversed(list(held)):
+                try:
+                    _orch_lease_hb_close_held(held, leftover)
+                except BaseException as exc:  # the remaining closes still run; then it propagates
+                    if fault is None:  # the FIRST fault, as _orch_lease_hb_close keeps it
+                        fault = exc
+            if fault is not None:
+                raise fault
+
+
+def _orch_lease_hb_fstat(fd):
+    """The lease identity stat, bound to the open descriptor (never a pathname). A one-line seam,
+    as _orch_escape_stat is, so the self-test can exercise the foreign-owner leg hermetically on a
+    single-uid host."""
+    return os.fstat(fd)
+
+
+def _orch_lease_hb_restat(dirfd, name):
+    """Re-stat the lease NAME without following links, bound to the held parent directory
+    descriptor: the identity re-check before any write, so a swap between the proof and the write
+    refuses the write. A seam so the self-test can inject that swap deterministically."""
+    return os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+
+
+def _orch_lease_hb_replace(tmp, name, dirfd):
+    """The one rename of a heartbeat field write, bound to the held parent directory descriptor on
+    both sides. A seam so the self-test can inject a rename failure."""
+    os.replace(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+
+
+def _orch_lease_hb_load(fd):
+    """('ok', (st, text)) from an already-opened lease descriptor, else ('cannot', detail). Every
+    check runs on the OPEN descriptor, so a name swapped after the open cannot redirect it: a
+    regular file (a FIFO opened non-blocking is refused here and never blocks the hook), exactly
+    one hard link (a hard-linked alias is ambiguous), owned by this effective uid (a foreign-owned
+    lease is never this session's to touch), at most _ORCH_LEASE_HB_MAX_BYTES, and strict UTF-8."""
+    try:
+        st = _orch_lease_hb_fstat(fd)
+    except OSError as exc:
+        return ("cannot", "the lease cannot be stat'ed ({})".format(exc))
+    if not stat.S_ISREG(st.st_mode):
+        return ("cannot", "the lease is not a regular file")
+    if st.st_nlink == 0:
+        # an orphaned descriptor, not a multi-link file: the name was re-pointed after the open
+        return ("cannot", "the lease was replaced or unlinked since it was opened")
+    if st.st_nlink != 1:
+        return ("cannot", "the lease has more than one hard link")
+    if st.st_uid != os.geteuid():
+        return ("cannot", "the lease is not owned by this effective uid")
+    if st.st_size > _ORCH_LEASE_HB_MAX_BYTES:
+        return ("cannot", "the lease is larger than {} bytes".format(_ORCH_LEASE_HB_MAX_BYTES))
+    chunks, total = [], 0
+    try:
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _ORCH_LEASE_HB_MAX_BYTES:
+                return ("cannot",
+                        "the lease grew past {} bytes mid-read".format(_ORCH_LEASE_HB_MAX_BYTES))
+            chunks.append(chunk)
+    except OSError as exc:
+        return ("cannot", "the lease cannot be read ({})".format(exc))
+    try:
+        text = b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError:
+        return ("cannot", "the lease is not strict UTF-8")
+    return ("ok", (st, text))
+
+
+def _orch_lease_hb_lines(text, key):
+    """Every PHYSICAL line of a lines-format lease that declares key, as (index, prefix, value,
+    trail, ending): the reader splits on line endings FIRST (keepends), so a value can never cross
+    a line boundary, and the pieces are byte-exact (prefix is the leading run through the colon and
+    its horizontal whitespace, trail the trailing horizontal whitespace, ending the line's own
+    terminator), so a rewrite of the one value changes no other byte."""
+    out = []
+    head = re.compile(r"^([ \t]*" + re.escape(key) + r"[ \t]*:[ \t]*)(.*)")
+    for index, line in enumerate(text.splitlines(keepends=True)):
+        body, ending = line, ""
+        for candidate in ("\r\n", "\n", "\r"):
+            if body.endswith(candidate):
+                body, ending = body[:-len(candidate)], candidate
+                break
+        matched = head.match(body)
+        if matched:
+            rest = matched.group(2)
+            value = rest.rstrip(" \t")
+            out.append((index, matched.group(1), value, rest[len(value):], ending))
+    return out
+
+
+def _orch_lease_hb_parse(text, cfg, keys=None):
+    """('ok', info) or ('cannot', detail): the declared fields of the lease content (or only the
+    keys selection: the holder proof is parsed FIRST and alone, so a foreign lease that lacks the
+    holding session's other declared fields stays a silent foreign lease, never a warning aimed at
+    a session that does not hold it), parsed by ONE sound reader per declared format. info carries
+    holder, and where declared state and hb (the raw heartbeat value; for the lines format also
+    hb_line, the byte-exact pieces of its one line, so a refresh changes only the value). A
+    declared field that is absent or appears more than once is a cannot-evaluate (ambiguity never
+    authorizes a write), and in json the top level must be an object with no duplicate key (the
+    strict duplicate-rejecting hook) and string declared fields. Prose and other lines are allowed
+    around a lines-format lease, so it may share a file with the operating-mode record; the
+    declaration validation already refuses Operating-mode as a field."""
+    if keys is None:
+        keys = (("holder_field", "holder"), ("state_field", "state"), ("field", "hb"))
+    info = {}
+    if cfg["format"] == "lines":
+        for cfg_key, name in keys:
+            if cfg_key != "holder_field" and cfg_key not in cfg:
+                continue
+            found = _orch_lease_hb_lines(text, cfg[cfg_key])
+            if len(found) != 1:
+                return ("cannot", "the declared {} field appears {} times (exactly once required)"
+                        .format(name, len(found)))
+            info[name] = found[0][2]
+            if name == "hb":
+                info["hb_line"] = found[0]
+        return ("ok", info)
+    try:
+        obj = json.loads(text, object_pairs_hook=_orch_reject_duplicate_keys)
+    except (ValueError, RecursionError) as exc:
+        return ("cannot", "the lease does not parse as json ({})".format(type(exc).__name__))
+    if not isinstance(obj, dict):
+        return ("cannot", "the lease json top level is not an object")
+    for cfg_key, name in keys:
+        if cfg_key != "holder_field" and cfg_key not in cfg:
+            continue
+        key = cfg[cfg_key]
+        if key not in obj:
+            return ("cannot", "the declared {} field is missing".format(name))
+        if not isinstance(obj[key], str):
+            return ("cannot", "the declared {} field is not a string".format(name))
+        info[name] = obj[key]
+    info["json"] = obj
+    return ("ok", info)
+
+
+def _orch_lease_hb_ts(value):
+    """(parsed_utc, suffix) for a heartbeat field value, or (None, detail): an ISO-8601 UTC time
+    whose zone is spelled 'Z' or '+00:00' (the suffix a refresh keeps, at seconds precision). An
+    epoch number, a naive or differently-zoned time, or any other form is (None, detail): an
+    unreadable liveness value never reads as fresh or stale, it is a cannot-evaluate (chkfcl)."""
+    if not isinstance(value, str):
+        return (None, "not a string")
+    if value.endswith("Z"):
+        suffix = "Z"
+    elif value.endswith("+00:00"):
+        suffix = "+00:00"
+    else:
+        return (None, "timestamp form not supported (a UTC time ending 'Z' or '+00:00' is required)")
+    parsed = _orch_parse_utc(value)
+    if parsed is None:
+        return (None, "unparseable timestamp")
+    return (parsed, suffix)
+
+
+def _orch_lease_hb_memory(dests):
+    """The past-holder memory ({} when absent, unreadable, not a regular file, or oversized), read
+    from the SAME resolved destination (dests[0]) the event's separation check examined: the
+    BEST-EFFORT record of the last session this core proved to hold the lease, plus the last
+    guard-events row state (the once-per-state log discipline of _orch_lease_hb_row_once). It
+    never authorizes anything, and an unreadable memory only widens silence or repeats one row,
+    never a write to the lease. The open is non-blocking and no-follow and the file type is
+    checked on the DESCRIPTOR before any read, so a FIFO planted at the record's name can never
+    block the hook (opened non-blocking it returns at once and S_ISREG refuses it) and a symlink
+    is never followed; the read is bounded at _ORCH_LEASE_HB_MAX_BYTES before any parse, so an
+    oversized file is the empty-memory case, never an unbounded read."""
+    path = dests[0]
+    fd = None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
+                     | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0))
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > _ORCH_LEASE_HB_MAX_BYTES:
+            return {}
+        chunks, total = [], 0
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _ORCH_LEASE_HB_MAX_BYTES:
+                return {}
+            chunks.append(chunk)
+        data = json.loads(b"".join(chunks).decode("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError, RecursionError):
+        return {}
+    finally:
+        _orch_lease_hb_close(fd)
+
+
+def _orch_lease_hb_save_replace(tmp, name, dirfd):
+    """The one rename of a bookkeeping save, bound to the held state-directory descriptor on
+    BOTH sides (src_dir_fd and dst_dir_fd), so a swap of the state directory's own name after
+    the proof cannot redirect it. A seam, as _orch_lease_hb_replace is, so the self-test can
+    plant a swap between the identity checks and this replace deterministically."""
+    os.replace(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+
+
+def _orch_lease_hb_save_tmp_fstat(fd):
+    """The save's temporary-descriptor identity stat, bound to the very descriptor the memory
+    (or backoff) save would write through, taken BEFORE its first byte. A seam, as
+    _orch_lease_hb_append_fstat is, so the self-test can plant a rename, a hard link or an
+    unlink of the temporary between the exclusive create and this stat deterministically."""
+    return os.fstat(fd)
+
+
+def _orch_lease_hb_save_cleanup(tmp, tmp_id, state_fd):
+    """The failure cleanup of one bookkeeping save (and of the heartbeat field write,
+    _orch_lease_hb_write_field, which passes the held lease parent-directory descriptor as
+    state_fd), returning the leftover DISCLOSURE detail
+    (joined into the withheld report) or None: the temporary NAME is unlinked only while ONE
+    bounded no-follow stat proves it still carries the inode this save created (this save
+    never removes an entry it did not create; a name re-pointed at a DIFFERENT learned inode
+    is left alone silently, as the entry there is not this save's); a temporary whose identity
+    was never learned, because the pre-write stat itself faulted, is NEVER unlinked and the
+    leftover is disclosed by name; a cleanup stat fault other than CONFIRMED absence
+    (FileNotFoundError) also never unlinks and discloses the name AND the fault, because an
+    unreadable result cannot establish absence (chkfcl); and a failed unlink discloses the
+    leftover too. A fault of any OTHER class raised in here (an interrupt at the stat or the
+    unlink) returns no detail at all, so BOTH callers catch it around this call, disclose the
+    temporary through the event holder (the fixed disclosure first, formatted before the
+    temporary was created, _orch_lease_hb_cleanup_fault_fixed, recorded by
+    _orch_lease_hb_cleanup_record, then the rendered one,
+    _orch_lease_hb_cleanup_fault_rendered) and then let the FIRST fault propagate, save for the
+    residuals _orch_lease_hb_cleanup_record states (a stop raised while that record itself is
+    appended propagates without it)."""
+    try:
+        cst = os.stat(tmp, dir_fd=state_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None  # confirmed absence: nothing remains to disclose or unlink
+    except (OSError, ValueError) as exc:
+        return ("its temporary file cannot be re-checked for cleanup ({}) and may remain "
+                "({})".format(exc, tmp))
+    if tmp_id is not None and (cst.st_dev, cst.st_ino) == tmp_id:
+        try:
+            os.unlink(tmp, dir_fd=state_fd)
+        except OSError as exc:
+            return ("its temporary file cannot be removed ({}) and may remain "
+                    "({})".format(exc, tmp))
+        return None
+    if tmp_id is None:
+        return "its temporary file may remain ({})".format(tmp)
+    return None
+
+
+def _orch_lease_hb_cleanup_fault_fixed(tmp):
+    """The FIXED leftover disclosure when _orch_lease_hb_save_cleanup itself raised a fault of a
+    class other than OSError, built from the temporary's name alone and nothing of the fault, so
+    it can never fail on the fault's own text. BOTH callers format it BEFORE they create the
+    temporary, so their failure cleanup formats nothing to name an interrupted cleanup's
+    temporary, and they record it through the event holder (_orch_lease_hb_cleanup_record)
+    BEFORE the fault is rendered (_orch_lease_hb_cleanup_fault_rendered)."""
+    return "its temporary file cleanup was interrupted and the file may remain ({})".format(tmp)
+
+
+def _orch_lease_hb_cleanup_fallback(what, tmp):
+    """The PREFORMATTED fallback record of BOTH callers of _orch_lease_hb_save_cleanup, formatted
+    with the fixed disclosure BEFORE they create the temporary: what failed and the temporary
+    that may remain. It is recorded in place of the full record only when building that record
+    faults (_orch_lease_hb_cleanup_record), so the temporary is still named once its own append
+    completes; it cannot stand in for a record whose append itself stops (the residual
+    _orch_lease_hb_cleanup_record states)."""
+    return "{} failed and its temporary file may remain ({})".format(what, tmp)
+
+
+def _orch_lease_hb_withheld_entry(holder, entry):
+    """Record ONE withheld entry on the event's holder, as _orch_lease_hb_withheld does, but
+    append the very str given (nothing is formatted or copied here) and return the MARK that
+    binds that record: (the holder's withheld list, the record's index, the entry itself). None
+    when nothing was recorded or the mark could not be built: an ordinary fault (an Exception,
+    a MemoryError) is absorbed here, and then the record may or may not have been appended (an
+    append that takes effect and then raises leaves it in place without a mark). A STOP (not an
+    Exception: an interrupt or an exit) is never absorbed here: one raised before the append has
+    taken effect (by the append itself, or delivered as a signal before it) propagates with
+    NOTHING recorded, and no fallback can record the entry once the append itself has stopped;
+    _orch_lease_hb_cleanup_record orders that stop and states the loss as a residual. Only
+    through this mark does
+    _orch_lease_hb_cleanup_fault_rendered replace a record, so it replaces exactly the record
+    made here and no other."""
+    try:
+        if isinstance(holder, dict):
+            withheld = holder.setdefault("withheld", [])
+            if isinstance(withheld, list):
+                withheld.append(entry)
+                return (withheld, len(withheld) - 1, entry)
+    except Exception:
+        pass
+    return None
+
+
+def _orch_lease_hb_cleanup_record(holder, head, failure, disclosure, fallback, fault):
+    """The ONE withheld record BOTH callers of _orch_lease_hb_save_cleanup make through the event
+    holder when their temporary may remain while a fault is propagating or after the cleanup
+    itself faulted (fault, else None): head, then the named failure when there is one, then the
+    disclosure, as one entry bound by a mark (_orch_lease_hb_withheld_entry). Returns (mark,
+    lead, fault). Nothing on that path is formatted outside this guard: when building the
+    record raises an ordinary fault (an Exception: a MemoryError), the record is the caller's
+    PREFORMATTED fallback (_orch_lease_hb_cleanup_fallback), which names the temporary too, and
+    mark and lead are None, so no rendered detail ever replaces it. A STOP raised while
+    building or recording it (not an Exception: an interrupt or an exit, a signal delivered
+    there) is never absorbed and never raised from here: it is returned in place of no fault or
+    of an ordinary fault, and an earlier stop is kept, so the caller orders it as it orders a
+    stop raised in the cleanup (ahead of an Exception already propagating, never displacing a
+    stop already propagating). An ordinary fault while appending is absorbed
+    (_orch_lease_hb_withheld_entry), and then the mark is unavailable and the record may or may
+    not have been appended (an append that takes effect and then raises leaves the record in
+    place, unbound, so no rendered detail replaces it). DISCLOSED residuals: a STOP
+    raised while the record itself is appended (before that append has taken effect) is ordered
+    exactly as above but propagates WITHOUT the disclosure: nothing is recorded, and no
+    preformatted fallback can be, since recording one would need the very append that stopped
+    (a stop raised while the record is BUILT leaves the fallback to be appended instead). The
+    order holds for faults raised INSIDE these guards. Memory exhaustion so severe that a
+    fixed-size step fails (a call, the append that records the entry) can lose the record and
+    can leave the caller's cleanup at that step, and a stop delivered as a signal at an instant
+    OUTSIDE the guards (between two statements of the caller's cleanup) leaves the cleanup at
+    that point, unordered, in place of the fault already propagating."""
+    entry = fallback
+    lead = None
+    stop = None
+    try:
+        lead = head if failure is None else "{}{}; ".format(head, failure)
+        entry = lead + disclosure
+    except Exception:
+        lead = None  # building the record faulted: the preformatted fallback names the temporary
+    except BaseException as exc:
+        lead = None
+        stop = exc
+    mark = None
+    try:
+        mark = _orch_lease_hb_withheld_entry(holder, entry)
+    except Exception:
+        pass  # a fault at the call itself: nothing is bound, the record is not replaced
+    except BaseException as exc:
+        stop = exc if stop is None else stop
+    if stop is not None and (fault is None or isinstance(fault, Exception)):
+        fault = stop
+    return (mark if lead is not None else None), lead, fault
+
+
+def _orch_lease_hb_cleanup_fault_detail(exc, tmp, fixed):
+    """The leftover DISCLOSURE detail when _orch_lease_hb_save_cleanup itself raised a fault of
+    a class other than OSError: whether its unlink ran is unknown, so the temporary is named as
+    one that may remain, together with the fault. The temporary is named FIRST, in the fixed
+    string built from its name alone and nothing of the fault (fixed,
+    _orch_lease_hb_cleanup_fault_fixed, formatted before the temporary was created), which BOTH
+    callers have already recorded through the event holder before this runs; the class and
+    text of the fault are added only after that. An ordinary fault raised while rendering them
+    (an Exception: an exception whose str() raises, a MemoryError) returns that fixed string
+    itself, so a fault that cannot be rendered never loses the disclosure and that rendering
+    fault never displaces the first fault. A STOP raised while rendering them (not an
+    Exception: an interrupt or an exit, raised from a str() or delivered as a signal) is never
+    absorbed: it propagates out of here with the fixed disclosure already recorded, and each
+    caller then orders it as it orders a stop raised in the cleanup itself
+    (_orch_lease_hb_cleanup_fault_rendered)."""
+    detail = fixed
+    try:
+        detail = ("its temporary file cleanup was interrupted ({}: {}) and the file may "
+                  "remain ({})".format(type(exc).__name__, exc, tmp))
+    except Exception:
+        pass  # an ordinary rendering fault: the fixed detail still names the temporary
+    return detail
+
+
+def _orch_lease_hb_cleanup_fault_rendered(mark, lead, fixed, exc, tmp):
+    """The step BOTH callers take after _orch_lease_hb_save_cleanup itself raised exc, once they
+    have recorded lead + fixed (the fixed disclosure naming the temporary,
+    _orch_lease_hb_cleanup_fault_fixed) through the event holder and kept the MARK of that one
+    record (_orch_lease_hb_cleanup_record): only then is the fault rendered
+    (_orch_lease_hb_cleanup_fault_detail), and a rendered detail replaces THAT record IN PLACE,
+    by one item store made only while the holder's withheld list still has exactly the length
+    it had right after the record and that slot still holds the very entry recorded (identity,
+    never equality). A record appended or swapped in meanwhile (by a str() with side effects)
+    is therefore never overwritten, the rendering never adds a second record, and otherwise
+    every record is left as it is; an interrupt around the store leaves one of the two
+    recorded, never neither. Returns the cleanup fault the caller's ordering applies to: exc
+    itself, or a STOP raised while rendering or at the store (not an Exception: an interrupt or
+    an exit) in place of an ordinary exc, so that stop follows the rule a stop raised in the
+    cleanup already follows (it propagates ahead of an Exception already propagating and never
+    displaces a stop already propagating); when exc is itself a stop, that earlier stop is kept.
+    Nothing here removes the record: the fixed disclosure stays recorded unless a rendered
+    detail naming the same temporary replaced it. DISCLOSED residual: as for
+    _orch_lease_hb_cleanup_record, this order holds for faults raised inside these guards, never
+    for a stop delivered as a signal at an instant outside them."""
+    try:
+        detail = _orch_lease_hb_cleanup_fault_detail(exc, tmp, fixed)
+    except Exception:
+        return exc  # an ordinary fault here too: the recorded fixed disclosure stands
+    except BaseException as stop:
+        # a STOP raised while rendering (the helper keeps the fixed detail for every
+        # Exception): never absorbed, it takes the place of an ordinary cleanup fault
+        return stop if isinstance(exc, Exception) else exc
+    try:
+        if mark is not None and detail is not fixed:
+            withheld, index, entry = mark
+            if len(withheld) == index + 1 and withheld[index] is entry:
+                withheld[index] = lead + detail
+    except Exception:
+        pass  # the recorded fixed disclosure stands
+    except BaseException as stop:
+        # a STOP at the store (a signal delivered there): ordered as a rendering stop is
+        return stop if isinstance(exc, Exception) else exc
+    return exc
+
+
+def _orch_lease_hb_memory_save(holder, memory):
+    """Best-effort save of the past-holder memory the caller already read this event, bound to
+    held descriptors at BOTH ends: it writes NOTHING unless the holder carries the held,
+    separation-proven lease descriptor, the lease parent-directory descriptor and the
+    state-directory descriptor (_orch_lease_hb_holder_ok). The temporary file is created
+    EXCLUSIVELY (O_EXCL|O_NOFOLLOW, a random name) relative to the held state-directory
+    descriptor, and the temporary DESCRIPTOR is checked BEFORE its first byte
+    (_orch_lease_hb_save_tmp_fstat): the save writes only through a regular file with exactly
+    one hard link whose (st_dev, st_ino) differs from the held lease descriptor's and from a
+    fresh lstat of the lease name taken relative to the held lease parent-directory descriptor,
+    so a temporary renamed onto the lease name, hard-linked, or unlinked between the create and
+    the first write is refused with NOTHING written through the descriptor. The replace runs
+    relative to that same held state-directory descriptor on BOTH sides
+    (_orch_lease_hb_save_replace), after the replace TARGET is re-checked relative to it at
+    write time (an lstat of the memory name must find nothing there, or a regular file with
+    exactly one hard link whose (st_dev, st_ino) differs from the held lease descriptor's and
+    from an lstat of the lease name taken relative to the held lease parent-directory
+    descriptor AFTER the target stat) and after the replace SOURCE is re-checked immediately
+    before the replace: the temporary name must still carry the very single-link regular inode
+    this save created, checked and wrote, so a temporary name re-pointed after the write
+    publishes nothing. The failure cleanup and the leftover disclosure
+    (_orch_lease_hb_save_cleanup) run from a FINALLY, for ANY exception class (a core fault
+    mid-save included, which still propagates to the crash path afterwards): the temporary
+    name is unlinked only while one bounded no-follow stat proves it still carries the inode
+    this save created (this save never removes an entry it did not create), a temporary whose
+    identity was never learned, because the pre-write stat itself faulted, is never unlinked
+    and the leftover is DISCLOSED in the report instead (save for the residuals stated below),
+    and a cleanup stat fault other than confirmed absence also never unlinks and discloses the
+    name AND the fault (an unreadable result cannot establish absence, chkfcl); a fault of any
+    other class raised INSIDE that cleanup (an interrupt at its stat or unlink) discloses the
+    temporary by name on the holder BEFORE it propagates (with the same residuals), and the
+    FIRST fault wins (an exception already propagating keeps
+    propagating, else the cleanup's own fault does, unchanged), except that a cleanup fault
+    that is a STOP (not an Exception: an interrupt or an exit) propagates ahead of an Exception
+    already propagating, so the crash handling (which catches Exception) never swallows it; the
+    disclosure is recorded first either way, after the named failure when there is one, and it
+    names the temporary even when the fault cannot be rendered: the fixed disclosure is
+    formatted before the temporary is created and recorded BEFORE the fault is rendered, so a
+    stop raised while rendering it propagates by the same rule with the disclosure already
+    recorded, and the rendered detail replaces only that very record
+    (_orch_lease_hb_cleanup_fault_rendered); a fault raised while that record is built or
+    recorded is ordered by the same rule, a preformatted fallback naming the temporary taking
+    the record's place when it cannot be built (_orch_lease_hb_cleanup_record, which makes every
+    record of a temporary that may remain and states the residuals: a stop raised while such a
+    record is itself appended, before that append has taken effect, propagates by the same rule
+    WITHOUT the disclosure, as no fallback can be recorded once that append has stopped; memory
+    exhaustion at a fixed-size step; and a stop delivered as a signal outside its guards). A
+    failed or refused save is
+    recorded on the holder and
+    reported through the hook result (the Stop banner or the result's error text, the
+    dispatcher's stderr); it only widens silence or repeats one guard-events row later, never a
+    write to the lease. DISCLOSED residual: the same-user concurrency class, stated once and
+    completely in the section comment above _ORCH_LEASE_HB_KIND; these checks cover accidental
+    mis-targeting and a stale or replaced lease, never a concurrently running process of the
+    same user."""
+    if not _orch_lease_hb_holder_ok(holder):
+        _orch_lease_hb_no_holder(holder)
+        return
+    name = os.path.basename(holder["dests"][0])
+    state_fd = holder["state_fd"]
+    tmp = _orch_lease_hb_tmp_name(name)
+    # the fixed disclosure and the fallback record are formatted HERE, before the temporary
+    # exists, so the failure cleanup below formats nothing outside a guard before it records a
+    # temporary that may remain (_orch_lease_hb_cleanup_record)
+    fixed = _orch_lease_hb_cleanup_fault_fixed(tmp)
+    fallback = _orch_lease_hb_cleanup_fallback("the memory save", tmp)
+    try:
+        tmp_fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                         | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=state_fd)
+    except (OSError, ValueError) as exc:
+        _orch_lease_hb_withheld(
+            holder, "the memory temporary file cannot be created ({})".format(exc))
+        return
+    failure = None
+    tmp_id = None
+    checked = False
+    published = False
+    interrupted = False
+    first_stop = False
+    try:
+        try:
+            # the temporary DESCRIPTOR is checked BEFORE its first byte: a temporary renamed
+            # onto the lease name, hard-linked or unlinked between the exclusive create and
+            # this write is refused here, with nothing written through the descriptor
+            tst = _orch_lease_hb_save_tmp_fstat(tmp_fd)
+            tmp_id = (tst.st_dev, tst.st_ino)
+            if not stat.S_ISREG(tst.st_mode) or tst.st_nlink != 1:
+                failure = ("the memory temporary file is not a single-link regular file "
+                           "(linked or unlinked before its first write)")
+            if failure is None:
+                ids, fault = _orch_lease_hb_lease_ids(holder)
+                if ids is None:
+                    failure = fault
+                elif tmp_id in ids:
+                    failure = "the memory temporary file aliases the declared lease"
+            if failure is None:
+                checked = True
+                blob = json.dumps(memory, sort_keys=True).encode("utf-8")
+                view = memoryview(blob)
+                while view:
+                    view = view[os.write(tmp_fd, view):]
+                os.fsync(tmp_fd)
+        except (OSError, ValueError) as exc:
+            failure = "the memory temporary file cannot be {} ({})".format(
+                "written" if checked else "checked", exc)
+        finally:
+            try:
+                os.close(tmp_fd)  # once: after a failed close the number may already be reused
+            except OSError as exc:
+                failure = failure or \
+                    "the memory temporary file cannot be closed ({})".format(exc)
+        if failure is None:
+            dst = None
+            try:
+                dst = os.stat(name, dir_fd=state_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            except (OSError, ValueError) as exc:
+                failure = "the memory destination cannot be stat'ed ({})".format(exc)
+        if failure is None:
+            # the lease identities are read AFTER the target stat, so a destination renamed
+            # onto the lease name before this read is seen at the name and refused
+            ids, fault = _orch_lease_hb_lease_ids(holder)
+            if ids is None:
+                failure = fault
+            elif dst is not None and (not stat.S_ISREG(dst.st_mode) or dst.st_nlink != 1
+                                      or (dst.st_dev, dst.st_ino) in ids):
+                failure = ("the memory destination is not a single-link regular file distinct "
+                           "from the declared lease")
+        if failure is None:
+            try:
+                # the replace SOURCE is re-checked immediately before the replace: the
+                # temporary name must still carry the single-link regular file this save
+                # created, checked and wrote, so a temporary name re-pointed after the write
+                # publishes nothing
+                rst = os.stat(tmp, dir_fd=state_fd, follow_symlinks=False)
+                if (rst.st_dev, rst.st_ino) != tmp_id or not stat.S_ISREG(rst.st_mode) \
+                        or rst.st_nlink != 1:
+                    failure = ("the memory temporary name no longer carries the file this "
+                               "save created")
+            except (OSError, ValueError) as exc:
+                failure = "the memory temporary file cannot be re-checked ({})".format(exc)
+        if failure is None:
+            try:
+                _orch_lease_hb_save_replace(tmp, name, state_fd)
+                published = True
+            except (OSError, ValueError) as exc:
+                failure = "the memory save replace failed ({})".format(exc)
+    except BaseException as exc:
+        # an exception of ANY class propagates past here to the judge's crash handler:
+        # recorded, with whether it is a STOP (not an Exception: an interrupt or an exit), so
+        # a fault raised inside the cleanup's guards below never displaces it, unless that
+        # fault is a stop and this one is not (the residual: _orch_lease_hb_cleanup_record)
+        interrupted = True
+        first_stop = not isinstance(exc, Exception)
+        raise
+    finally:
+        if not published:
+            # the failure cleanup and the leftover DISCLOSURE run from this finally for ANY
+            # exception class (a core fault mid-save included, which still propagates past
+            # here to the judge's crash handler), never only for the named refusals above. A
+            # fault of any other class INSIDE the cleanup returns no detail, so the temporary
+            # is disclosed on the holder BEFORE any fault propagates (save for the residual
+            # below), and the FIRST fault wins: an exception already propagating keeps
+            # propagating, else this one does; except that a STOP raised in the cleanup (not
+            # an Exception: an interrupt, an exit) propagates ahead of an Exception already
+            # propagating, whose crash handling catches Exception and would otherwise swallow
+            # the stop. The FIXED disclosure, formatted before the temporary existed, is
+            # recorded BEFORE that fault is rendered, so a stop raised while rendering it
+            # leaves the disclosure recorded and takes the same order; a fault raised while the
+            # record is built or recorded takes that order too, but a stop raised while the
+            # record itself is appended, before that append has taken effect, leaves NOTHING
+            # recorded (the residual _orch_lease_hb_cleanup_record states); the rendered detail
+            # replaces only the record its mark binds
+            cleanup_fault = None
+            try:
+                disclosure = _orch_lease_hb_save_cleanup(tmp, tmp_id, state_fd)
+            except BaseException as exc:
+                cleanup_fault = exc
+                disclosure = fixed
+            mark = lead = None
+            if disclosure is not None:
+                mark, lead, cleanup_fault = _orch_lease_hb_cleanup_record(
+                    holder, "" if failure is not None else "the memory save was interrupted; ",
+                    failure, disclosure, fallback, cleanup_fault)
+            elif failure is not None:
+                _orch_lease_hb_withheld(holder, failure)
+            if mark is not None and cleanup_fault is not None:
+                cleanup_fault = _orch_lease_hb_cleanup_fault_rendered(
+                    mark, lead, fixed, cleanup_fault, tmp)
+            if cleanup_fault is not None and (not interrupted or (
+                    not first_stop and not isinstance(cleanup_fault, Exception))):
+                raise cleanup_fault
+    if not published:
+        return
+    try:
+        os.fsync(state_fd)
+    except OSError:
+        pass  # the replace is already published; a directory fsync fault only weakens durability
+
+
+def _orch_lease_hb_row_once(holder, memory, now, kind, code, detail, lease_key=None):
+    """Append a guard-events row ONCE per refusal state, never per tool call: the state is (kind,
+    code, lease identity), remembered in the past-holder memory, so a refusal that persists
+    unchanged across events keeps ONE row until the state that caused it changes (a different
+    refusal, a changed lease identity, or a cleared memory re-arms it). The event log is the
+    over-fire metric; one row per state keeps it bounded while the keeper runs on every tool call,
+    and the remembered timestamp also drives the git-probe backoff
+    (_orch_lease_hb_tracked_refused). It consumes the event's separation holder: without a proof
+    made on the lease access currently in hand it writes NOTHING and leaves the memory unchanged
+    (_orch_lease_hb_holder_ok). Returns whether a row was appended (the state changed); the
+    append and the memory save stay best-effort (a lost row or memory only widens silence)."""
+    if not _orch_lease_hb_holder_ok(holder):
+        # no held descriptor: nothing is recorded and the memory state is kept
+        return _orch_lease_hb_no_holder(holder)
+    last = memory.get("last_row") if isinstance(memory.get("last_row"), dict) else {}
+    if (last.get("kind"), last.get("code"), last.get("lease")) == (kind, code, lease_key):
+        return False
+    _orch_lease_hb_event(holder, kind, detail)
+    memory["last_row"] = {"kind": kind, "code": code, "lease": lease_key,
+                          "ts": now.isoformat()}
+    _orch_lease_hb_memory_save(holder, memory)
+    return True
+
+
+def _orch_lease_hb_tracked_refused(root, path, st, now, memory, holder):
+    """True when the tracking gate refuses a field write (the probe must PROVE the lease
+    untracked, and a cannot-evaluate refuses). While that refusal persists on an UNCHANGED lease
+    identity the probe is not re-run until _ORCH_LEASE_HB_RETRY_SECONDS elapses (elapsed inside
+    [0, backoff) skips; at the bound, past it, or under an unreadable or future remembered time it
+    re-probes, so a tampered memory can only cost probes, never a write), and a re-probe that
+    refuses again rewrites only the remembered timestamp, never a second row. A changed lease
+    identity re-probes at once, so a persisting refusal costs no git subprocess per tool call."""
+    lease_key = [st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size]
+    last = memory.get("last_row") if isinstance(memory.get("last_row"), dict) else {}
+    if (last.get("kind"), last.get("code"), last.get("lease")) == \
+            ("no-write", _ORCH_LEASE_HB_TRACKED_DETAIL, lease_key):
+        parsed = _orch_parse_utc(last.get("ts"))
+        if parsed is not None and 0 <= (now - parsed).total_seconds() \
+                < _ORCH_LEASE_HB_RETRY_SECONDS:
+            return True  # the same refusal state persists; the probe is backed off
+        if _orch_lease_hb_git_tracked(root, path) is not False:
+            last["ts"] = now.isoformat()
+            memory["last_row"] = last
+            _orch_lease_hb_memory_save(holder, memory)
+            return True
+        return False
+    return _orch_lease_hb_git_tracked(root, path) is not False
+
+
+def _orch_lease_hb_statedir_stat(state_dir):
+    """The state-directory existence stat of the separation check, a seam so the self-test can
+    report the directory ABSENT while a concurrent keeper creates it just before the makedirs
+    that follows: a sequential repeat finds the directory by this stat and never reaches the
+    creation, so only this injection can prove the creation stays idempotent (exist_ok) under
+    the concurrent-creation race it exists for."""
+    return os.stat(state_dir)
+
+
+def _orch_lease_hb_bookkeeping_sep(path, dests):
+    """None when the declared lease is DISTINCT from both of this keeper's bookkeeping destinations
+    (the past-holder memory <state_dir>/lease-heartbeat.json and the guard-events log
+    <state_dir>/guard-events.jsonl, resolved ONCE per event by _orch_lease_hb_dests from the SAME
+    registry read and passed to every writer), else (side, detail): side names the access that
+    failed, carried to the Stop remediation from the FAULT itself, never recovered from a
+    substring of the detail ('lease': the declared lease path faulted; 'state': the keeper's own
+    state records faulted; 'collision': the two provably meet, so a distinct lease path is the
+    remedy). This is the event's PRELIMINARY path-based refusal: a pass here licenses NO
+    bookkeeping write (only _orch_lease_hb_sep_fd on an opened descriptor hands the holder the
+    descriptor every writer then writes through). Separation is judged by resolved
+    path (os.path.realpath on both sides, so a symlink alias, or an ABSENT destination whose first
+    append would create it at the lease's name, cannot collide under a different spelling), by
+    inode identity where both sides exist (a hard-link alias resolves to different paths yet is
+    the same file), and by PARENT identity: a lease whose parent directory IS the state directory
+    (same st_dev, st_ino) is refused outright, so an alias spelling that realpath cannot fold (a
+    case-folding filesystem, a bind mount) can never let a first bookkeeping append create the
+    lease's own file. BEFORE the state directory is created, a lease path that IS the state
+    directory or an ANCESTOR of it (resolved paths, common-path containment) is refused with
+    nothing created: creating the directory there would plant this keeper's records at or under
+    the declared lease name itself. A stat fault other than absence refuses too: separation that
+    cannot be evaluated is treated as a collision (chkfcl). While a refusal persists the keeper
+    writes NOTHING anywhere: no lease write, no memory save and no guard-events row (a refusal
+    never records into the refused lease, and without the memory a row could not keep its
+    once-per-state bound); the Stop output is the only surfacing (the warning, joined there by
+    any deferral or withheld report), so it stays bounded at one
+    message per turn end."""
+    if not isinstance(path, str) or not path:
+        # an UNKNOWN lease path can never be proven distinct from anything: the refusal leaves
+        # the event's holder empty and every bookkeeping writer withholds (never a silent
+        # None, which would have read as "nothing to land in" and licensed the writers)
+        return ("lease",
+                "the lease/bookkeeping separation cannot be evaluated (no usable lease path)")
+    try:
+        lease_real = os.path.realpath(path)
+    except (OSError, ValueError) as exc:
+        return ("lease",
+                "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+    lease_id = None
+    try:
+        st = os.stat(path)
+        lease_id = (st.st_dev, st.st_ino)
+    except FileNotFoundError:
+        pass  # an absent lease can still collide by resolved path (checked per destination below)
+    except (OSError, ValueError) as exc:
+        return ("lease",
+                "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+    for dest in dests:
+        if lease_real == os.path.realpath(dest):
+            return ("collision", "the declared lease path coincides with this keeper's own "
+                    "bookkeeping destination ({})".format(dest))
+        try:
+            dst = os.stat(dest)
+        except FileNotFoundError:
+            continue  # an absent destination can only collide by resolved path or parent identity
+        except OSError as exc:
+            return ("state",
+                    "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+        if lease_id is not None and (dst.st_dev, dst.st_ino) == lease_id:
+            return ("collision", "the declared lease shares an inode with this keeper's own "
+                    "bookkeeping destination ({})".format(dest))
+    state_dir = os.path.dirname(dests[0])
+    try:
+        sd_real = os.path.realpath(state_dir)
+        if lease_real == sd_real or os.path.commonpath([sd_real, lease_real]) == lease_real:
+            # refused BEFORE any creation: making the state directory here would create a
+            # directory at (or under) the declared lease name itself
+            return ("collision", "the declared lease path is this keeper's own state directory "
+                    "or an ancestor of it ({})".format(state_dir))
+    except (OSError, ValueError) as exc:
+        return ("state",
+                "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+    try:
+        sd_st = _orch_lease_hb_statedir_stat(state_dir)
+    except FileNotFoundError:
+        # the parent-identity leg compares REAL identities, so an ABSENT state directory is
+        # created first (idempotent under concurrent creation: exist_ok, so two keepers racing
+        # this creation both pass; the first bookkeeping append would create it anyway): on a
+        # filesystem whose alias spellings realpath cannot fold (case folding, a bind mount),
+        # an absent state directory could otherwise skip this leg and let the first append
+        # create the file of the lease itself under a different spelling
+        try:
+            os.makedirs(state_dir, exist_ok=True)
+            sd_st = os.stat(state_dir)
+        except OSError as exc:
+            return ("state",
+                    "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+    except OSError as exc:
+        return ("state",
+                "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+    try:
+        pst = os.stat(os.path.dirname(lease_real) or os.sep)
+    except FileNotFoundError:
+        return None  # no lease parent directory: nothing of the lease exists to collide with
+    except OSError as exc:
+        return ("lease",
+                "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+    if (pst.st_dev, pst.st_ino) == (sd_st.st_dev, sd_st.st_ino):
+        return ("collision", "the declared lease lies directly in this keeper's own state "
+                "directory ({}), where its bookkeeping destinations live".format(state_dir))
+    return None
+
+
+def _orch_lease_hb_within(child, ancestor):
+    """Whether the resolved path child IS the resolved path ancestor or lies anywhere beneath
+    it, judged COMPONENT by component (os.path.commonpath), never by a textual prefix: an
+    ancestor of '/' contains every absolute path, a nested descendant is contained, and a
+    sibling sharing the ancestor's textual prefix ('<dir>-old' beside '<dir>') is not. Raises
+    ValueError (or TypeError) when the two cannot be compared (a mix of absolute and relative
+    paths, an unusable value); the caller refuses on that fault. A seam, so the self-test can
+    force a comparison fault and an alias spelling that this leg cannot see."""
+    return os.path.commonpath([child, ancestor]) == ancestor
+
+
+def _orch_lease_hb_lock_sep(path, lock_path, dests):
+    """None when the declared lock_path is DISTINCT from the declared lease, from both
+    bookkeeping replacement targets (the past-holder memory dests[0] and the guard-events log
+    dests[1]) and from EVERY file this plugin's whole-file writers replace (the
+    _ORCH_LEASE_HB_WRITER_NAMES inventory of _orch_write_json_atomic, and anything else inside
+    the state directory where those targets live), else the named refusal detail. The lock must
+    be a STABLE, SEPARATE coordination file NO writer of this plugin ever replaces: flock
+    attaches to the open file description, so a lock any whole-file writer replaced (os.replace
+    publishes a NEW inode under the name) would leave the next cooperating keeper locking the
+    replacement while this keeper still holds the orphaned inode, both inside the critical
+    section at once. This is the ONE shared read-only validation, run at declaration validation
+    and at the resume audit (_orch_lease_hb_config with root) and again at the event's entry,
+    always on paths and destinations resolved from the authoritative root: judged by resolved
+    path (os.path.realpath on both sides, so an alternate or RELATIVE spelling that resolves to
+    a refused target refuses; the declaration validation's string check already refused the
+    spelled name equality), by COMPONENT-aware resolved-path CONTAINMENT in the state directory
+    (_orch_lease_hb_within: a state directory of '/' contains every lock, a nested descendant
+    is contained, a sibling sharing the directory's textual prefix is not, and a comparison
+    fault is the named refusal), by PARENT
+    identity (a lock whose parent directory IS the state directory under an alias spelling
+    realpath cannot fold), and by inode identity where both sides exist (a hard-link alias).
+    It creates NOTHING (an absent state directory skips only the identity legs; the
+    resolved-path legs still refuse every spelling of it), and it is judged AGAIN under the
+    held lock by descriptor identity (_orch_lease_hb_lock_held_sep), so an alias planted
+    between this check and the lock take is refused too. A stat fault other than absence
+    refuses (chkfcl: a separation that cannot be evaluated never licenses the critical
+    section)."""
+    try:
+        lock_real = os.path.realpath(lock_path)
+        lock_id = None
+        try:
+            lst = os.stat(lock_path)
+            lock_id = (lst.st_dev, lst.st_ino)
+        except FileNotFoundError:
+            # an absent lock is the lock open's own named refusal; the resolved-path legs
+            # below still refuse a spelling that RESOLVES onto the lease or a target
+            pass
+        state_dir = os.path.dirname(dests[0])
+        named = [(path, "the declared lease path"),
+                 (dests[0], "this keeper's own past-holder memory ({})".format(dests[0])),
+                 (dests[1], "this keeper's own guard-events log ({})".format(dests[1]))]
+        named.extend((os.path.join(state_dir, writer_name),
+                      "a file this plugin's whole-file writers replace ({})".format(
+                          os.path.join(state_dir, writer_name)))
+                     for writer_name in _ORCH_LEASE_HB_WRITER_NAMES)
+        for other, what in named:
+            if lock_real == os.path.realpath(other):
+                return "the declared lock_path coincides with {}".format(what)
+            if lock_id is None:
+                continue
+            try:
+                ost = os.stat(other)
+            except FileNotFoundError:
+                continue  # an absent target has no inode the lock could alias
+            if (ost.st_dev, ost.st_ino) == lock_id:
+                return "the declared lock_path shares an inode with {}".format(what)
+        sd_real = os.path.realpath(state_dir)
+        try:
+            inside = _orch_lease_hb_within(lock_real, sd_real)
+        except (TypeError, ValueError) as exc:
+            # a containment that cannot be compared never licenses the lock (chkfcl)
+            return ("the lock/state-directory containment cannot be evaluated ({})"
+                    .format(exc))
+        if inside:
+            # resolved-path containment, COMPONENT-aware: ANY name inside the state directory
+            # is a file a whole-file writer of this plugin may replace (today's inventory or a
+            # later one)
+            return ("the declared lock_path lies inside this keeper's own state directory "
+                    "({}), whose files this plugin's whole-file writers replace"
+                    .format(state_dir))
+        try:
+            sd_st = os.stat(state_dir)
+        except FileNotFoundError:
+            # an absent state directory holds nothing whose identity the lock could carry,
+            # and NOTHING is created here (this validation runs at declaration validation,
+            # before any state-directory creation); the resolved-path legs above already
+            # refused every spelling of it
+            return None
+        try:
+            pst = os.stat(os.path.dirname(lock_real) or os.sep)
+        except FileNotFoundError:
+            return None  # no lock parent directory exists to BE the state directory
+        if (pst.st_dev, pst.st_ino) == (sd_st.st_dev, sd_st.st_ino):
+            # parent identity: an alias spelling realpath cannot fold (a bind mount, case
+            # folding) still resolves to the same directory inode
+            return ("the declared lock_path lies inside this keeper's own state directory "
+                    "({}) under an alias spelling, whose files this plugin's whole-file "
+                    "writers replace".format(state_dir))
+        return None
+    except (OSError, ValueError) as exc:
+        return "the lock/lease separation cannot be evaluated ({})".format(exc)
+
+
+def _orch_lease_hb_sep_fd(fd, dests):
+    """The descriptor-bound proof of the lease/bookkeeping separation, run on the lease
+    descriptor currently in hand (the first open, and again on the re-open under a declared
+    lock): None when the open lease's inode is neither bookkeeping destination, else (side,
+    detail) as _orch_lease_hb_bookkeeping_sep returns them. The path-based entry check ran
+    before any descriptor existed; a cooperating writer at an open or lock seam can replace the
+    lease with a hard link to a bookkeeping destination, so the identity is re-proven on the
+    exact descriptor every subsequent read, row and save would be about, and ONLY a pass here
+    hands the event's holder this very descriptor (_orch_lease_hb_holder), the one every
+    bookkeeping write then re-checks its destination against at write time. A stat fault other
+    than a destination's absence refuses too (chkfcl)."""
+    try:
+        lst = os.fstat(fd)
+    except OSError as exc:
+        return ("lease",
+                "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+    for dest in dests:
+        try:
+            dst = os.stat(dest)
+        except FileNotFoundError:
+            continue  # an absent destination has no inode the open lease could alias
+        except OSError as exc:
+            return ("state",
+                    "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+        if (dst.st_dev, dst.st_ino) == (lst.st_dev, lst.st_ino):
+            return ("collision", "the declared lease shares an inode with this keeper's own "
+                    "bookkeeping destination ({})".format(dest))
+    return None
+
+
+def _orch_lease_hb_prove(holder, parent, leaf, name, path, dests):
+    """Build the event's PROVEN holder from the descriptors currently in hand, or return (side,
+    detail) with the holder left unproven: the open lease descriptor is re-proven distinct from
+    both bookkeeping destinations (_orch_lease_hb_sep_fd), the state directory is resolved ONCE
+    by opening it O_RDONLY|O_DIRECTORY|O_NOFOLLOW (a symlink planted at its name is refused,
+    never followed), and that descriptor is compared against the held lease parent-directory
+    descriptor by fstat identity (st_dev, st_ino): when the two are the SAME directory the
+    holder is refused outright, so no bookkeeping write can land beside (or at) the lease
+    through an alias spelling realpath cannot fold (a bind mount, case folding). Only a full
+    pass fills the holder with the lease descriptor, the lease parent-directory descriptor, the
+    lease leaf name and the state-directory descriptor; every bookkeeping write then opens,
+    stats, creates and replaces RELATIVE to those held descriptors (dir_fd), bound to the held
+    directory IDENTITIES rather than to path spellings, and the separation compares
+    descriptors, not names (what a same-user concurrent actor can still do is the SAME-USER
+    CONCURRENCY CLASS in the section comment above _ORCH_LEASE_HB_KIND).
+    The holder OWNS the state-directory descriptor (an under-lock re-proof closes and replaces
+    the first proof's; the event's cleanup, _orch_lease_hb_event_cleanup, closes the last), and
+    THIS function owns the freshly opened descriptor in a try/finally from the moment it is
+    opened until it is transferred to the holder, across both identity fstats and the
+    replacement of a previous holder descriptor, so ANY fault there (not only OSError) closes
+    it exactly once, never a leak. The previous holder descriptor keeps EXPLICIT ownership
+    across its replacement too, under the before/after-close ledger discipline
+    (_orch_lease_hb_close_mark): it stays the holder's, so the event's cleanup closes it, until
+    the close primitive RECORDS it, and a fault at or after the record is never retried; the
+    lease descriptors stay owned by their opener."""
+    sep = _orch_lease_hb_sep_fd(leaf, dests)
+    if sep is not None:
+        return sep
+    try:
+        state_fd = os.open(os.path.dirname(dests[0]), os.O_RDONLY | os.O_DIRECTORY
+                           | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except (OSError, ValueError) as exc:
+        return ("state", "the state directory cannot be opened for the write-time binding "
+                "({})".format(exc))
+    handed = False
+    try:
+        # ownership of the freshly opened state-directory descriptor is exception-safe from
+        # this moment until its transfer to the holder: ANY fault across the identity fstats
+        # or the replacement of a previous holder descriptor still closes it exactly once
+        fault = None
+        try:
+            sst = os.fstat(state_fd)
+            pst = os.fstat(parent)
+        except OSError as exc:
+            fault = ("state",
+                     "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+        if fault is None and (sst.st_dev, sst.st_ino) == (pst.st_dev, pst.st_ino):
+            fault = ("collision", "the declared lease lies directly in this keeper's own state "
+                     "directory ({}), where its bookkeeping destinations live"
+                     .format(os.path.dirname(dests[0])))
+        if fault is not None:
+            return fault
+        previous = holder.get("state_fd")
+        if previous is not None:
+            # an under-lock re-proof replaces the first proof's descriptor under the
+            # before/after-close LEDGER discipline (_orch_lease_hb_close_mark), with the
+            # previous descriptor OWNED at every instant: it stays the holder's (the REAL
+            # event cleanup closes it) until the close primitive RECORDS it, so a fault
+            # immediately BEFORE the close leaves exactly one owner and one terminal close,
+            # and a fault AT or AFTER it leaves it recorded as closed and NEVER retried (the
+            # number may already be reused by another acquisition)
+            done = []
+            try:
+                _orch_lease_hb_close_mark(previous, done)
+            finally:
+                if previous in done:
+                    holder["state_fd"] = None
+        holder["state_fd"] = state_fd  # transferred: the event's cleanup owns it from here
+        handed = True
+        holder["lease_fd"] = leaf
+        holder["lease_parent_fd"] = parent
+        holder["lease_name"] = name
+        holder["lease_path"] = path
+        return None
+    finally:
+        if not handed:
+            _orch_lease_hb_close(state_fd)
+
+
+def _orch_lease_hb_crash_row(holder, exc):
+    """Best-effort guard-events row for a fault inside the lease-heartbeat core: the bindings catch
+    their own crashes, because the dispatcher's generic fail-open warning would otherwise print a
+    systemMessage on EVERY tool call for one core fault. The row is the only FILE trace (a
+    no-holder fault instead rides the hook result of the event it happened on, PostToolUse
+    included, as the result's error text); a row that
+    cannot be appended is swallowed here (a recorder fault must never become a per-call banner),
+    the disclosed best-effort residual of this keeper's recording. The recorder consumes ONLY the
+    event's own separation holder, through the same structural gate as every other bookkeeping
+    writer (_orch_lease_hb_holder_ok inside _orch_lease_hb_event): it re-reads NOTHING, so a
+    registry re-read fault or change can never hand it destinations the proof never examined.
+    It is reached with a USABLE holder only from the judge's own handler, while the proven
+    descriptor (and any declared lock) is still held, and the row goes through the write-time
+    descriptor check like every other append; a crash while the holder carries no descriptor
+    (before the first open, an invalid declaration, a failed open or re-open, a busy or faulted
+    lock, or AFTER the cleanup that empties the holder before releasing descriptors and lock)
+    writes nothing anywhere (an unknown lease is unknown, never absent; a refusal is never
+    recorded into the refused lease, crash paths included) and is surfaced AS the named core
+    fault, never folded into a lock deferral: on the busy- and faulted-lock branches it joins
+    the Stop-only deferrals under its own fault text (a crash is reported as the crash; the
+    lock deferral stays its own line; a deferral made on a PostToolUse event is DROPPED with
+    that event's holder, so it surfaces only where the Stop event reproduces the fault, the
+    disclosed narrowing of _orch_lease_hb_withheld_text), elsewhere it is withheld under that
+    text and rides the hook result of its own event."""
+    try:
+        detail = "lease-heartbeat core fault: {}: {}".format(type(exc).__name__, exc)
+        if _orch_lease_hb_holder_ok(holder):
+            _orch_lease_hb_event(holder, "error", detail)
+        elif isinstance(holder, dict) and (holder.get("lock_busy")
+                                           or holder.get("lock_fault") is not None):
+            deferred = holder.setdefault("deferred", [])
+            if detail not in deferred:
+                deferred.append(detail)
+        else:
+            _orch_lease_hb_withheld(holder, detail)
+    except Exception:
+        pass
+
+
+def _orch_lease_hb_git_tracked(root, path):
+    """False when the lease provably cannot be tracked in root's work tree because it lies OUTSIDE
+    that tree (an absolute out-of-tree lease is a legitimate refresh target the probe would
+    otherwise always refuse), or when git PROVES it untracked (ls-files --error-unmatch exits 1
+    under the isolated environment); True when it is tracked, and None on any probe fault. Outside
+    is decided on RESOLVED identities (os.path.realpath on both sides), never the lexical
+    spelling, so an alias spelling of an in-tree lease (a symlinked ancestor, /tmp against
+    /private/tmp) cannot skip the probe, and the resolved path is what the probe asks git about.
+    The caller refuses a content write on anything but False: a tracked lease is a committed
+    surface, and a cannot-evaluate never writes. Run only when a write is already due and no
+    unchanged refusal is backed off (_orch_lease_hb_tracked_refused), so the subprocess cost is
+    bounded, never per tool call."""
+    try:
+        resolved = os.path.realpath(path)
+        rel = os.path.relpath(resolved, os.path.realpath(root))
+    except ValueError:
+        # a resolution compare fault (e.g. different drives once resolved): a PROBE fault the
+        # caller refuses on, never proven-untracked (chkfcl: False would license the write on a
+        # comparison that failed)
+        return None
+    except OSError:
+        return None  # an unresolvable comparison cannot prove outside-ness: a probe fault
+    if rel.split(os.sep)[0] == os.pardir:
+        return False  # outside the work tree: nothing there is tracked in it
+    try:
+        env = _isolate_git_env(dict(os.environ))
+        probe = subprocess.run(["git", "-C", root, "ls-files", "--error-unmatch", "--", resolved],
+                               capture_output=True, timeout=5, env=env)
+    except Exception:
+        return None
+    if probe.returncode == 0:
+        return True
+    if probe.returncode == 1:
+        return False
+    return None
+
+
+def _orch_lease_hb_protected(root, path, st, state_dir):
+    """A refusal detail when the lease path may not receive a content write, else None (state_dir
+    is the event's ONE resolved state directory, from the same registry read as the bookkeeping
+    destinations, never a fresh re-resolution that could diverge from them): a '.git',
+    '.aiqt' or '.claude' component anywhere on the declared path, the repo's own plugin/ subtree,
+    an inode alias of a registry file, or a lease ANYWHERE inside a protected directory's subtree
+    (the state directory, where the escape sentinel and this keeper's own records live, and the
+    repo's .git, .aiqt, .claude and plugin directories). Containment is established by comparing
+    the identity (st_dev, st_ino) of every ancestor directory of the lease against each protected
+    directory's resolved identity, never by enumerating a directory's immediate children, so a
+    nested path such as <state_dir>/nested/lease.txt refuses too (the lease path itself was walked
+    no-follow; the protected directory is resolved, so a symlinked one protects its target). The
+    keeper refreshes a liveness record; it never touches a guardrail-config or generated surface.
+    A stat fault on any surface that may exist is a refusal (a protection check that cannot be
+    evaluated never licenses a write); only a surface that provably does not exist is skipped."""
+    norm = os.path.normpath(path)
+    for part in norm.split(os.sep):
+        if part in (".git", ".aiqt", ".claude"):
+            return ("the lease path holds a {} component (a protected surface is never rewritten)"
+                    .format(part))
+    rel_parts = os.path.relpath(norm, root).split(os.sep)
+    if rel_parts and rel_parts[0] == "plugin":
+        return "the lease path is under the repo's plugin/ subtree (a generated surface)"
+    for probe in (os.path.join(root, ".aiqt", "orchestration.local.json"),
+                  os.path.join(root, ".aiqt", "orchestration.json")):
+        try:
+            pst = os.lstat(probe)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return "the protected-path check cannot be evaluated ({})".format(probe)
+        if (pst.st_dev, pst.st_ino) == (st.st_dev, st.st_ino):
+            return "the lease shares an inode with a protected file ({})".format(probe)
+    ancestors = set()
+    cursor = os.path.dirname(norm)
+    while cursor:
+        try:
+            ast = os.lstat(cursor)
+        except OSError:
+            return "the protected-path check cannot be evaluated ({})".format(cursor)
+        ancestors.add((ast.st_dev, ast.st_ino))
+        parent_dir = os.path.dirname(cursor)
+        if parent_dir == cursor:
+            break
+        cursor = parent_dir
+    for pdir in (state_dir, os.path.join(root, ".git"),
+                 os.path.join(root, ".aiqt"), os.path.join(root, ".claude"),
+                 os.path.join(root, "plugin")):
+        try:
+            pst = os.stat(pdir)  # resolved: a symlinked protected directory protects its target
+        except (FileNotFoundError, NotADirectoryError):
+            continue  # a surface that does not exist protects nothing
+        except OSError:
+            return "the protected-directory check cannot be evaluated ({})".format(pdir)
+        if not stat.S_ISDIR(pst.st_mode):
+            continue  # a worktree gitfile .git is a regular file: no subtree to contain anything
+        if (pst.st_dev, pst.st_ino) in ancestors:
+            return ("the lease lies inside a protected directory subtree ({}); a protected "
+                    "surface is never rewritten".format(pdir))
+    return None
+
+
+def _orch_lease_hb_flock(fd):
+    """The one flock of a declared coordination lock (LOCK_EX|LOCK_NB), a seam so the self-test can
+    inject a non-busy flock fault (for example ENOLCK) hermetically."""
+    fcntl = __import__("fcntl")
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _orch_lease_hb_lock_ids(fd):
+    """The held lock descriptor's identity stat, bound to the very descriptor flock was taken
+    on. A seam, as _orch_lease_hb_append_fstat is, so the self-test can observe the under-lock
+    lock-separation re-check deterministically."""
+    return os.fstat(fd)
+
+
+def _orch_lease_hb_lock_held_sep(lock_fd, holder):
+    """None when the HELD lock descriptor's identity differs from the held lease descriptor's,
+    from an lstat of the lease name relative to the held lease parent-directory descriptor,
+    from a stat of each bookkeeping replacement target AND from every entry of the state
+    directory, swept by lstat RELATIVE to the held state-directory descriptor (the sweep is
+    bounded by that directory's own entry count, a handful of this plugin's files), else the
+    named refusal detail: the under-the-held-lock leg of the lock separation (the entry leg is
+    _orch_lease_hb_lock_sep), run once the under-lock re-proof has filled the holder, so a
+    lease, a bookkeeping target or ANY state-directory file (one a whole-file writer of this
+    plugin replaces, turn-state.json included) aliased onto the lock AT the lock seam, or the
+    lock renamed INTO the state directory, is refused by fstat identity on the very descriptor
+    flock was taken on (a keeper that wrote past this would REPLACE its own held lock: the
+    next cooperating keeper then locks the replacement while this one still holds the orphaned
+    inode). Any stat fault refuses (chkfcl)."""
+    try:
+        lst = _orch_lease_hb_lock_ids(lock_fd)
+    except OSError as exc:
+        return "the held lock cannot be stat'ed ({})".format(exc)
+    lock_id = (lst.st_dev, lst.st_ino)
+    ids, fault = _orch_lease_hb_lease_ids(holder)
+    if ids is None:
+        return fault
+    if lock_id in ids:
+        return "the declared lock shares an inode with the declared lease"
+    for dest in holder["dests"]:
+        try:
+            dst = os.stat(dest)
+        except FileNotFoundError:
+            continue  # an absent target has no inode the held lock could alias
+        except (OSError, ValueError) as exc:
+            return "the lock/bookkeeping separation cannot be evaluated ({})".format(exc)
+        if (dst.st_dev, dst.st_ino) == lock_id:
+            return ("the declared lock shares an inode with this keeper's own bookkeeping "
+                    "destination ({})".format(dest))
+    try:
+        entries = os.listdir(holder["state_fd"])
+    except OSError as exc:
+        return "the lock/state-directory separation cannot be evaluated ({})".format(exc)
+    for entry in entries:
+        try:
+            est = os.stat(entry, dir_fd=holder["state_fd"], follow_symlinks=False)
+        except FileNotFoundError:
+            continue  # unlinked between the scan and this stat: no inode the lock could alias
+        except (OSError, ValueError) as exc:
+            return "the lock/state-directory separation cannot be evaluated ({})".format(exc)
+        if (est.st_dev, est.st_ino) == lock_id:
+            # swept by identity on the HELD state-directory descriptor: the held lock IS a
+            # file of the state directory (planted there, or renamed into it after the entry
+            # check), where this plugin's whole-file writers replace files
+            return ("the declared lock lives in this keeper's own state directory (entry "
+                    "{}), whose files this plugin's whole-file writers replace".format(entry))
+    return None
+
+
+def _orch_lease_hb_lock(root, lock_path):
+    """Take the declared coordination lock: ('ok', fd) holding LOCK_EX until the caller closes fd,
+    ('skip', None) ONLY when another holder provably has it (flock raised EWOULDBLOCK/EAGAIN: this
+    event simply does not refresh; a later one will), ('no-write', detail) when the lock cannot be
+    evaluated, including any OTHER flock fault (ENOLCK, EINVAL, EBADF...): a fault that is not
+    busy is a NAMED refusal surfaced on Stop, never a silent skip (no guard-events row: the
+    lock seam cleared the holder's descriptor, so every bookkeeping writer defers a refusal
+    NAMING this fault to Stop until the under-lock re-proof, which a faulted lock never
+    reaches). The lock is an
+    existing operator-created file reached by the same no-follow walk as the lease; it is NEVER
+    created here, and a platform without flock cannot honour the declaration (a cannot-evaluate,
+    no write)."""
+    parent, fd, _name, fault = _orch_lease_hb_open(root, _orch_path(root, lock_path))
+    if fault is not None:
+        kind, detail = fault
+        if kind == "absent":
+            return ("no-write", "the declared lock file is absent (a hook never creates it)")
+        return ("no-write", "the declared lock cannot be evaluated ({})".format(detail))
+    held = [parent, fd]
+    handed = False
+    try:
+        # ownership of the held lock descriptor starts at ITS acquisition: the walked parent's
+        # transfer close keeps the ledger exact on a fault BEFORE its close syscall (the parent
+        # stays owned by the terminal cleanup) and AT or AFTER it (never retried), and the lock
+        # descriptor is closed exactly once on every non-handed outcome either way
+        _orch_lease_hb_close_held(held, parent)
+        try:
+            _orch_lease_hb_flock(fd)
+        except ImportError:
+            return ("no-write", "no flock on this platform; the declared lock cannot be honoured")
+        except OSError as exc:
+            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                return ("skip", None)  # busy: this event does not refresh; a later one will
+            return ("no-write", "the declared lock cannot be taken ({})".format(exc))
+        handed = True
+        return ("ok", fd)
+    finally:
+        if handed and fd in held:
+            held.remove(fd)  # the lock descriptor is the caller's from the moment of return
+        fault2 = None
+        for leftover in reversed(list(held)):
+            try:
+                _orch_lease_hb_close_held(held, leftover)
+            except BaseException as exc:  # the remaining closes still run; then it propagates
+                if fault2 is None:  # the FIRST fault, as _orch_lease_hb_close keeps it
+                    fault2 = exc
+        if fault2 is not None:
+            raise fault2
+
+
+def _orch_lease_hb_render(text, cfg, info, new_value):
+    """The refreshed lease content: in lines format ONLY the one heartbeat value changes (the
+    line's own prefix, trailing whitespace and ending, and every other line, stay byte-identical);
+    in json format the object is re-serialized in its original key order with only the heartbeat
+    value changed, a DISCLOSED formatting normalization (json.dumps spacing; a trailing newline is
+    kept when the original ended with one)."""
+    if cfg["format"] == "lines":
+        pieces = text.splitlines(keepends=True)
+        index, prefix, _old, trail, ending = info["hb_line"]
+        pieces[index] = prefix + new_value + trail + ending
+        return "".join(pieces)
+    obj = dict(info["json"])
+    obj[cfg["field"]] = new_value
+    return json.dumps(obj) + ("\n" if text.endswith("\n") else "")
+
+
+def _orch_lease_hb_verify(dirfd, name, cfg, session_id, new_value):
+    """Post-replace verification, a seam the self-test injects a failure through: re-open the lease
+    under the HELD parent descriptor, re-prove the holder, and require the written value. None when
+    confirmed; else the detail the Stop binding reports as a write that HAPPENED (recorded
+    accurately, never claimed clean: the replace is already published when this runs)."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
+                     | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=dirfd)
+    except (OSError, ValueError) as exc:
+        return "the refreshed lease cannot be re-opened ({})".format(exc)
+    try:
+        loaded = _orch_lease_hb_load(fd)
+    finally:
+        _orch_lease_hb_close(fd)
+    if loaded[0] != "ok":
+        return "the refreshed lease cannot be re-read ({})".format(loaded[1])
+    parse_status, info = _orch_lease_hb_parse(loaded[1][1], cfg)
+    if parse_status != "ok":
+        return "the refreshed lease cannot be re-parsed ({})".format(info)
+    if info["holder"] != session_id or info.get("hb") != new_value:
+        return "the refreshed lease does not carry this session's refreshed value"
+    return None
+
+
+def _orch_lease_hb_tmp_name(name):
+    """The exclusive temporary-file name of ONE field write (a random suffix beside the lease). A
+    seam, as _orch_lease_hb_restat is, so the self-test can FORCE the name onto a planted entry
+    and prove the O_EXCL|O_NOFOLLOW open refuses it (an unforced random name would miss the plant
+    with near certainty, proving nothing about the open discipline)."""
+    return ".{}.{}.hb.tmp".format(name, os.urandom(8).hex())
+
+
+def _orch_lease_hb_field_tmp_fstat(fd):
+    """The field write's temporary-descriptor identity stat, taken on the very descriptor the
+    exclusive create returned, BEFORE its mode change or first byte, so the failure cleanup can
+    prove it still owns the temporary NAME it would unlink. A seam, as
+    _orch_lease_hb_save_tmp_fstat is, so the self-test can fault it and prove an entry whose
+    ownership was never established is never removed and is disclosed."""
+    return os.fstat(fd)
+
+
+def _orch_lease_hb_write_field(root, cfg, session_id, now, path, parent, name, st, text, info,
+                               suffix, memory, holder=None):
+    """The heartbeat FIELD write (refresh mode with a declared field): build the new bytes with the
+    event's own clock read, create an exclusive temporary file beside the lease (a random name with
+    O_EXCL|O_NOFOLLOW, so nothing planted at a temporary-like name is ever opened or replaced),
+    learn its identity on the descriptor (_orch_lease_hb_field_tmp_fstat), carry over the
+    original permission bits, write and fsync it, re-check the lease's identity
+    against the proof fstat (dev, ino, mtime_ns, size), replace through the held directory
+    descriptor, fsync that directory, and verify. Returns None, ('no-write', detail) with the
+    lease untouched, or ('written-unverified', detail) after a replace that could not be
+    confirmed. The failure cleanup runs from a FINALLY, for ANY exception class, through the
+    same identity-aware cleanup as the bookkeeping saves (_orch_lease_hb_save_cleanup, relative
+    to the held lease parent descriptor): the temporary NAME is unlinked only while one bounded
+    no-follow stat proves it still carries the inode this write created, so an entry whose
+    ownership is unestablished (the identity stat itself faulted, or the name now carries
+    another inode) is NEVER removed; a temporary that may remain (identity never learned, a
+    cleanup stat fault other than confirmed absence, a failed unlink) is DISCLOSED by name, in
+    the no-write detail on a named refusal, and through the event holder's withheld report
+    whenever an exception of any other class is propagating to the crash path (a named
+    refusal followed by an interrupting close fault included), save for the residuals stated
+    below: the channel is chosen by whether an exception is propagating, recorded by an except
+    clause that re-raises, never by whether a failure was named. A fault of any other class
+    raised INSIDE that cleanup (an interrupt at its stat or unlink) discloses the temporary by
+    name through the holder too, BEFORE it propagates (with the same residuals), and the FIRST
+    fault wins (an exception already propagating keeps
+    propagating, else the cleanup's own fault does, unchanged), except that a cleanup fault
+    that is a STOP (not an Exception: an interrupt or an exit) propagates ahead of an Exception
+    already propagating, so the crash handling (which catches Exception) never swallows it; the
+    disclosure is recorded first either way, after the named failure when there is one (the
+    propagating fault discards the no-write detail), and it names the temporary even when the
+    fault cannot be rendered: the fixed disclosure is formatted before the temporary is created
+    and recorded BEFORE the fault is rendered, so a stop raised while rendering it propagates by
+    the same rule with the disclosure already recorded, and the rendered detail replaces only
+    that very record (_orch_lease_hb_cleanup_fault_rendered); a fault raised while that record
+    is built or recorded is ordered by the same rule, a preformatted fallback naming the
+    temporary taking the record's place when it cannot be built (_orch_lease_hb_cleanup_record,
+    which makes every withheld record of a temporary that may remain and states the residuals:
+    a stop raised while such a record is itself appended, before that append has taken effect,
+    propagates by the same rule WITHOUT the disclosure, as no fallback can be recorded once
+    that append has stopped; memory exhaustion at a fixed-size step; and a stop delivered as a
+    signal outside its guards). Where the no-write detail itself cannot be built because of an
+    ordinary fault (an Exception), the refusal returns the preformatted fallback TEXT naming the
+    temporary instead (refusal text, never a withheld record). A STOP raised while the no-write
+    detail is built (no fault already propagating) is never absorbed: it propagates with that
+    detail never returned, so the temporary goes unnamed, a disclosed residual of the same
+    class. The protected-path and
+    git-tracking gates run in _orch_lease_hb_refresh BEFORE the form split, so they cover this
+    form and the mtime form alike; this writer does NOT reuse _orch_write_json_atomic, whose
+    makedirs and pathname-resolved directory open fit the state directory, not an
+    adopter-declared lease path."""
+    new_value = now.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%S") + suffix
+    blob = _orch_lease_hb_render(text, cfg, info, new_value).encode("utf-8")
+    tmp = _orch_lease_hb_tmp_name(name)
+    # the fixed disclosure and the fallback record are formatted HERE, before the temporary
+    # exists, as in the memory save (_orch_lease_hb_cleanup_record)
+    fixed = _orch_lease_hb_cleanup_fault_fixed(tmp)
+    fallback = _orch_lease_hb_cleanup_fallback("the heartbeat field write", tmp)
+    try:
+        tmp_fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                         | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=parent)
+    except (OSError, ValueError) as exc:
+        # ValueError too (an unusable forced or inherited temporary name): the named no-write
+        # refusal, never a core fault
+        return ("no-write", "the temporary file cannot be created ({})".format(exc))
+    failure = None
+    tmp_id = None
+    published = False
+    interrupted = False
+    first_stop = False
+    try:
+        try:
+            # the temporary's identity is learned FIRST, on its own descriptor, so the cleanup
+            # below can prove it still owns the name it would unlink
+            tst = _orch_lease_hb_field_tmp_fstat(tmp_fd)
+            tmp_id = (tst.st_dev, tst.st_ino)
+            os.fchmod(tmp_fd, stat.S_IMODE(st.st_mode) & 0o777)
+            view = memoryview(blob)
+            while view:
+                view = view[os.write(tmp_fd, view):]
+            os.fsync(tmp_fd)
+        except OSError as exc:
+            failure = "the temporary file cannot be {} ({})".format(
+                "written" if tmp_id is not None else "checked", exc)
+        finally:
+            try:
+                os.close(tmp_fd)  # once: after a failed close the number may already be reused
+            except OSError as exc:
+                failure = failure or "the temporary file cannot be closed ({})".format(exc)
+        if failure is None:
+            try:
+                rst = _orch_lease_hb_restat(parent, name)
+                if (rst.st_dev, rst.st_ino, rst.st_mtime_ns, rst.st_size) != \
+                        (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size):
+                    failure = "the lease changed between the proof and the replace"
+            except OSError as exc:
+                failure = "the identity re-check failed ({})".format(exc)
+        if failure is None:
+            try:
+                # RESIDUAL (writers that ignore the declared lock): between the re-check above
+                # and this replace such a writer can still unlink the lease (this replace then
+                # revives it under the refreshed content) or swap in its own acquire (this
+                # replace then overwrites it); os.replace creates the destination name either
+                # way. The declared lock closes this for every writer that takes it (the caller
+                # holds it from before the lease was read); for the rest the re-check narrows
+                # the window (it cannot remove it), and the post-replace verification reports a
+                # lost race, it cannot undo it.
+                _orch_lease_hb_replace(tmp, name, parent)
+                published = True
+            except OSError as exc:
+                failure = "the replace failed ({})".format(exc)
+    except BaseException as exc:
+        # an exception of ANY class propagates past here to the judge's crash handler, which
+        # discards the named failure: recorded, so the disclosure below rides the holder, with
+        # whether it is a STOP (not an Exception: an interrupt or an exit), so a fault raised
+        # inside the cleanup's guards below never displaces it, unless that fault is a stop
+        # and this one is not (the residual: _orch_lease_hb_cleanup_record)
+        interrupted = True
+        first_stop = not isinstance(exc, Exception)
+        raise
+    finally:
+        if not published:
+            # the failure cleanup and the residue DISCLOSURE run from this finally for ANY
+            # exception class: the name is unlinked only while it provably carries the inode
+            # this write created, and a temporary that may remain is disclosed by name. The
+            # CHANNEL is chosen by whether an exception is propagating, never by whether a
+            # failure was named: the no-write detail below when none is, else the holder's
+            # withheld report (a named failure followed by an interrupting close fault would
+            # otherwise lose the disclosure with the discarded detail). A fault of any other
+            # class INSIDE the cleanup returns no detail and propagates itself, so it takes the
+            # holder too, BEFORE any fault propagates (after the named failure, when there is
+            # one; save for the residual below), and the FIRST fault wins: an exception
+            # already propagating keeps propagating, else this one does, unchanged; except
+            # that a STOP raised in the cleanup (not an Exception: an interrupt, an exit)
+            # propagates ahead of an Exception already propagating, whose crash handling
+            # catches Exception and would otherwise swallow the stop. The FIXED disclosure,
+            # formatted before the temporary existed, is recorded BEFORE that fault is
+            # rendered, so a stop raised while rendering it leaves the disclosure recorded and
+            # takes the same order; a fault raised while the record is built or recorded takes
+            # that order too, but a stop raised while the record itself is appended, before
+            # that append has taken effect, leaves NOTHING recorded (the residual
+            # _orch_lease_hb_cleanup_record states); the rendered detail replaces only the
+            # record its mark binds
+            cleanup_fault = None
+            try:
+                disclosure = _orch_lease_hb_save_cleanup(tmp, tmp_id, parent)
+            except BaseException as exc:
+                cleanup_fault = exc
+                disclosure = fixed
+            mark = lead = None
+            if disclosure is not None:
+                if interrupted or cleanup_fault is not None:
+                    # the named failure leads the disclosure, as in the memory save: the
+                    # propagating fault discards the no-write detail that would carry it
+                    mark, lead, cleanup_fault = _orch_lease_hb_cleanup_record(
+                        holder, "the heartbeat field write was interrupted; ", failure,
+                        disclosure, fallback, cleanup_fault)
+                else:
+                    try:
+                        failure = "{}; {}".format(failure, disclosure)
+                    except Exception:
+                        # the no-write detail cannot be built (a MemoryError): the
+                        # preformatted fallback still names the temporary; a STOP raised
+                        # here is never absorbed and propagates with the detail never
+                        # returned (the residual the docstring states)
+                        failure = fallback
+            if mark is not None and cleanup_fault is not None:
+                cleanup_fault = _orch_lease_hb_cleanup_fault_rendered(
+                    mark, lead, fixed, cleanup_fault, tmp)
+            if cleanup_fault is not None and (not interrupted or (
+                    not first_stop and not isinstance(cleanup_fault, Exception))):
+                raise cleanup_fault
+    if failure is not None:
+        return ("no-write", failure)
+    try:
+        os.fsync(parent)
+    except OSError:
+        pass  # the replace is already published; a directory fsync fault only weakens durability
+    verify = _orch_lease_hb_verify(parent, name, cfg, session_id, new_value)
+    if verify is not None:
+        return ("written-unverified", verify)
+    return None
+
+
+def _orch_lease_hb_refresh(root, cfg, session_id, now, path, parent, name, leaf, st, text, info,
+                           suffix, memory, holder):
+    """One refresh attempt on a lease proven inside the caller's critical section (the caller
+    takes any declared lock BEFORE the lease is read and holds it across this write): None on
+    success, else ('no-write'|'written-unverified', detail) from the write discipline. BOTH forms
+    pass the same protected-path and git-tracking gates BEFORE the form split (in the mtime form
+    the mtime IS the recorded liveness value, so a touch changes lease semantics even though no
+    content byte changes): a protected target, a git-tracked lease, a failed tracking probe
+    (_orch_lease_hb_tracked_refused: an out-of-tree lease passes the gate, and an unchanged
+    refusal backs the probe off) and a protection check that cannot be evaluated all refuse. The
+    mtime form (no declared field) then re-checks the lease identity AND content identity against
+    the proof fstat (dev, ino, mtime_ns, size) and touches the OPEN descriptor only (os.utime on
+    the fd: a clock read, no content change); the field form is _orch_lease_hb_write_field.
+    RESIDUAL (writers that ignore the declared lock): such a writer can still change the lease
+    between the re-check and the touch; the re-check narrows that window (it cannot remove it)
+    and the descriptor-bound touch cannot land on a different inode."""
+    protected = _orch_lease_hb_protected(root, path, st, os.path.dirname(holder["dests"][0]))
+    if protected:
+        return ("no-write", protected)
+    if _orch_lease_hb_tracked_refused(root, path, st, now, memory, holder):
+        return ("no-write", _ORCH_LEASE_HB_TRACKED_DETAIL)
+    if "field" not in cfg:
+        try:
+            rst = _orch_lease_hb_restat(parent, name)
+        except OSError as exc:
+            return ("no-write", "the identity re-check failed ({})".format(exc))
+        if (rst.st_dev, rst.st_ino, rst.st_mtime_ns, rst.st_size) != \
+                (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size):
+            return ("no-write", "the lease changed between the proof and the refresh")
+        try:
+            os.utime(leaf)
+        except OSError as exc:
+            return ("no-write", "the timestamp update failed ({})".format(exc))
+        return None
+    return _orch_lease_hb_write_field(root, cfg, session_id, now, path, parent, name,
+                                      st, text, info, suffix, memory, holder)
+
+
+
+
+def _orch_lease_hb_judge(root, cfg, lease, session_id, event, now, path, parent, leaf, name,
+                         memory, holder):
+    """The decision table over an OPEN lease (every row's fault direction is no-write; only the
+    Stop binding surfaces the returned text, and a refusal that persists unchanged is recorded
+    once per state change, never per call: _orch_lease_hb_row_once). Age is the OLDER of the
+    mtime age and the declared heartbeat field's age, so a rewrite that bumps only the mtime
+    cannot hide a stale recorded liveness value (the incident class). In refresh mode any declared
+    coordination lock is taken BEFORE the lease is read, so holder, state, timestamps, owner and
+    link count are all proven inside the lock's critical section and an in-place change by a
+    writer that used the lock (a holder swapped, a state released) is read here and refuses; a
+    busy lock makes this event a read-only pass (a later event refreshes). Once the lock is held
+    the lease is RE-OPENED under it, so a cooperating takeover between the first open and the lock
+    reads as lease taken (or lost), never as a link-count cannot-evaluate. A writer that ignores
+    the lock can race the proofs at the write sites, and so can any same-user concurrent actor
+    at every path-based step (the SAME-USER CONCURRENCY CLASS, stated once and completely in the
+    section comment above _ORCH_LEASE_HB_KIND). Once
+    re-opened, the lease/bookkeeping separation is RE-PROVEN on the under-lock descriptor
+    (_orch_lease_hb_sep_fd), so a cooperating writer that aliases the lease onto a bookkeeping
+    destination at the lock seam is refused with nothing written and nothing recorded, and the
+    LOCK separation is re-proven there too, by identity on the held lock descriptor
+    (_orch_lease_hb_lock_held_sep: a lock aliased onto the lease or a bookkeeping save target
+    would be REPLACED by this keeper's own writes, voiding the critical section for the next
+    cooperating keeper); where
+    that re-open FAILS there is no descriptor to re-prove the separation on, so the refusal is
+    surfaced on Stop and nothing is recorded there either (chkfcl). Attempting the lock at all
+    EMPTIES the event's holder of its proven descriptor: a busy or faulted lock never re-opens
+    and never re-proves, so until the under-lock re-proof passes EVERY bookkeeping writer
+    withholds (a cooperating lock holder can have re-aliased the declared lease at name level,
+    a swap no proof bound to the pre-lock descriptor can see). A core fault inside this table
+    records its ONE crash row from the handler below, while the proven descriptor and any held
+    lock are still in hand, and the holder is emptied BEFORE the under-lock descriptors or the
+    lock are released, so nothing can append outside the critical section."""
+    held_before = memory.get("session_id") == session_id
+    lock_fd = None
+    lock_busy = False
+    lock_fault = None
+    reopened = (None, None)
+    try:
+        if cfg["mode"] == "refresh" and "lock_path" in cfg:
+            # the lock seam EMPTIES the holder of its proven descriptor BEFORE the lock is
+            # taken: a cooperating lock holder may have re-aliased the declared lease at name
+            # level (a swap no proof bound to the pre-lock descriptor can see), so a row may be
+            # written again only after the under-lock re-open re-proves separation on the NEW
+            # descriptor; a busy or faulted lock never re-proves, so every bookkeeping writer
+            # withholds on those branches (the Stop text is the only surfacing)
+            holder["lease_fd"] = None
+            holder["lease_parent_fd"] = None
+            lock_status, lock_value = _orch_lease_hb_lock(root, cfg["lock_path"])
+            if lock_status == "ok":
+                lock_fd = lock_value
+            elif lock_status == "skip":
+                lock_busy = True
+                # the BUSY-lock branch still runs the decision table with the holder emptied,
+                # so writers are reached with no held descriptor on EVERY call: their refusal
+                # is recorded as a DEFERRAL surfaced on Stop only, never per tool call
+                holder["lock_busy"] = True
+            else:
+                lock_fault = lock_value
+                # the FAULTED-lock branch still runs the decision table with the holder
+                # emptied, exactly as the busy branch does: a writer reached there defers a
+                # refusal NAMING this fault to Stop, never a report on every tool call
+                holder["lock_fault"] = lock_fault
+        if lock_fd is not None:
+            # The lease descriptor was opened BEFORE the lock. A COOPERATING writer that held the
+            # lock in that window may have atomically replaced the lease (a legitimate takeover)
+            # or unlinked it; the pre-lock descriptor then points at an orphaned inode whose load
+            # would refuse as a link-count cannot-evaluate. A cheap re-open UNDER the held lock
+            # names the real outcome instead: absent reads as lease lost and a new holder reads
+            # as lease taken, exactly as they read at the pre-lock seams.
+            reparent, releaf, rename, refault = _orch_lease_hb_open(root, path)
+            reopened = (reparent, releaf)  # owned by the finally from the moment of acquisition
+            if refault is not None:
+                kind, detail = refault
+                if kind == "absent":
+                    if event == "Stop" and held_before:
+                        return ("AIQT guardrail (lease heartbeat): the declared lease is gone and "
+                                "this session held it earlier (lease lost). A hook never creates "
+                                "a lease; reconcile the record and re-acquire through the acquire "
+                                "step.")
+                    return None
+                # the under-lock re-open FAILED, so NO open descriptor exists to re-prove the
+                # lease/bookkeeping separation on, and a separation that cannot be proved is a
+                # collision (chkfcl): at this seam a cooperating writer can have swapped the
+                # declared lease onto a bookkeeping destination (a symlink the no-follow
+                # re-open refuses, an aliased ancestor directory, an unreadable plant), where
+                # a refusal row appended through the destination name would land in the file
+                # the declared lease now resolves to. The refusal is surfaced on Stop; NOTHING
+                # is recorded (a DISCLOSED narrowing: a lease made unreadable under a declared
+                # lock surfaces per turn end without a guard-events row).
+                if event == "Stop":
+                    return ("AIQT guardrail (lease heartbeat): the declared lease cannot be "
+                            "evaluated ({}). Nothing was written: an unreadable, symlinked or "
+                            "ambiguous lease is never rewritten by a hook; inspect and repair it "
+                            "by hand.".format(detail))
+                return None
+            parent, leaf, name = reparent, releaf, rename
+            resep = _orch_lease_hb_prove(holder, reparent, releaf, rename, path,
+                                         holder["dests"])
+            if resep is not None:
+                # a cooperating writer at the lock seam aliased the lease onto a bookkeeping
+                # destination (or the write-time descriptor binding cannot be rebuilt): as at
+                # the event's entry check, NOTHING is written or recorded while the collision
+                # persists; the Stop warning is the only surfacing.
+                if event == "Stop":
+                    return _orch_lease_hb_sep_msg(resep)
+                return None
+            lock_sep = _orch_lease_hb_lock_held_sep(lock_fd, holder)
+            if lock_sep is not None:
+                # the LOCK separation is re-proven under the held lock, by identity on the
+                # very descriptor flock was taken on: a cooperating actor at the lock seam
+                # can have aliased the lease (or a bookkeeping save target) onto the lock,
+                # and a keeper that then refreshed or saved would REPLACE its own held lock
+                # (the next cooperating keeper locks the replacement while this one still
+                # holds the orphaned inode). Nothing is written and nothing is recorded (a
+                # row's own memory save could itself replace the aliased lock); the Stop
+                # warning is the only surfacing while this refusal persists.
+                if event == "Stop":
+                    return ("AIQT guardrail (lease heartbeat): {}. Nothing was written: the "
+                            "declared lock must stay a stable coordination file separate "
+                            "from the lease and from this keeper's bookkeeping records."
+                            .format(lock_sep))
+                return None
+        loaded = _orch_lease_hb_load(leaf)
+        if loaded[0] != "ok":
+            _orch_lease_hb_row_once(holder, memory, now, "no-write", loaded[1], loaded[1])
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): the declared lease cannot be evaluated "
+                        "({}). Nothing was written: an unreadable, symlinked or ambiguous lease "
+                        "is never rewritten by a hook; inspect and repair it by hand."
+                        .format(loaded[1]))
+            return None
+        st, text = loaded[1]
+        lease_key = [st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size]
+        head_status, head = _orch_lease_hb_parse(text, cfg, keys=(("holder_field", "holder"),))
+        if head_status != "ok":
+            _orch_lease_hb_row_once(holder, memory, now, "no-write", head, head, lease_key)
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): the declared lease cannot be evaluated "
+                        "({}). Nothing was written: a malformed or ambiguous lease is never "
+                        "rewritten by a hook; inspect and repair it by hand.".format(head))
+            return None
+        if head["holder"] != session_id:
+            # EXACT equality on ONE parsed holder field, never token presence: a foreign lease is
+            # never seized, never refreshed, and the only surfacing is to a session the past-holder
+            # memory says held it earlier.
+            if event == "Stop" and held_before:
+                return ("AIQT guardrail (lease heartbeat): the lease now names another holder "
+                        "although this session held it earlier (lease taken). Never seize it "
+                        "back; reconcile the record and coordinate through the acquire step.")
+            return None
+        parse_status, info = _orch_lease_hb_parse(text, cfg)
+        if parse_status != "ok":
+            # the holder is PROVEN here, so a missing or duplicated remaining declared field is
+            # this session's own lease to repair; it is surfaced, and still never rewritten.
+            _orch_lease_hb_row_once(holder, memory, now, "no-write", info, info, lease_key)
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): the lease this session holds cannot be "
+                        "evaluated ({}). Nothing was written: a malformed or ambiguous lease is "
+                        "never rewritten by a hook; inspect and repair it by hand.".format(info))
+            return None
+        if memory.get("session_id") != session_id:
+            # the past-holder memory is rewritten on a CHANGE of proven holder, never per call,
+            # and only after the FULL parse validates the lease: bookkeeping follows validation
+            # (the lease/bookkeeping separation was already proven before this core ran)
+            memory["version"] = 1
+            memory["session_id"] = session_id
+            memory["ts"] = now.isoformat()
+            _orch_lease_hb_memory_save(holder, memory)
+        if "state_field" in cfg and info["state"] not in cfg["active_values"]:
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): the lease state {!r} is not an active "
+                        "value; a released lease is never revived by a hook. Re-acquire through "
+                        "the acquire step if this session should still hold it."
+                        .format(info["state"]))
+            return None
+        max_age = lease.get("max_age_hours")
+        ages = [now.timestamp() - st.st_mtime]
+        suffix = None
+        if "field" in cfg:
+            parsed, second = _orch_lease_hb_ts(info["hb"])
+            if parsed is None:
+                _orch_lease_hb_row_once(holder, memory, now, "no-write",
+                                        "heartbeat value: {}".format(second),
+                                        "heartbeat value: {}".format(second), lease_key)
+                if event == "Stop":
+                    return ("AIQT guardrail (lease heartbeat): the lease heartbeat value cannot "
+                            "be read ({}). Nothing was written: an unreadable liveness value is "
+                            "never overwritten by a hook.".format(second))
+                return None
+            suffix = second
+            ages.append((now - parsed).total_seconds())
+        classes = [_orch_lease_age_class(a, max_age) for a in ages]
+        if "future" in classes:
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): the lease carries a time more than "
+                        "{}s in the future (clock skew or tamper). Nothing was written and the "
+                        "future value is kept as evidence; reconcile it by hand."
+                        .format(_ORCH_CLOCK_SKEW))
+            return None
+        if "cannot" in classes:
+            # unreachable behind _orch_lease_hb_config's horizon validation; kept so an invalid
+            # horizon can never read fresh if the two validations ever diverge (chkfcl)
+            _orch_lease_hb_row_once(holder, memory, now, "no-write",
+                                    "the declared max_age_hours horizon cannot be evaluated",
+                                    "the declared max_age_hours horizon cannot be evaluated",
+                                    lease_key)
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): the declared max_age_hours horizon "
+                        "cannot be evaluated; nothing was written (a cannot-evaluate never "
+                        "writes). Correct it in the registry (the confinement's trust root).")
+            return None
+        age = max(ages)
+        if "stale" in classes:
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): the lease has lapsed (older than {}h), "
+                        "so the guards it scopes are out of scope. A lapsed lease is never "
+                        "silently renewed: reconcile the record and re-acquire through the "
+                        "acquire step.".format(max_age))
+            return None
+        if age > max_age * 3600 - 2 * _ORCH_CLOCK_SKEW:
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): the lease is too close to its {}h "
+                        "staleness horizon to renew safely (inside two clock skews); nothing was "
+                        "written. Re-acquire through the acquire step.".format(max_age))
+            return None
+        if age < cfg["refresh_after_minutes"] * 60:
+            return None
+        gap = age > cfg["warn_after_minutes"] * 60
+        if cfg["mode"] != "refresh":
+            if gap:
+                _orch_lease_hb_row_once(holder, memory, now, "warn", "heartbeat gap (warn mode)",
+                                        "heartbeat gap {:.0f} min (warn mode; nothing written)"
+                                        .format(age / 60), lease_key)
+                if event == "Stop":
+                    return ("AIQT guardrail (lease heartbeat): heartbeat gap {:.0f} min on the "
+                            "lease this session holds (warn mode: nothing was written). Refresh "
+                            "the lease record manually, or declare heartbeat mode 'refresh' in "
+                            "the registry.".format(age / 60))
+            return None
+        if lock_busy:
+            return None  # the declared lock is held elsewhere; a later event refreshes
+        if lock_fault is not None:
+            _orch_lease_hb_row_once(holder, memory, now, "no-write", lock_fault, lock_fault,
+                                    lease_key)
+            if event == "Stop":
+                # the banner below NAMES the flock fault and carries the bookkeeping
+                # consequence, so the row attempt's own faulted-lock deferral is DROPPED
+                # here: the fault is rendered exactly once per turn end, never repeated by
+                # the appended withheld report (a crash deferral keeps its own line)
+                try:
+                    (holder.get("deferred") or []).remove(
+                        _orch_lease_hb_lock_fault_deferral(lock_fault))
+                except ValueError:
+                    pass
+                return ("AIQT guardrail (lease heartbeat): the heartbeat refresh was refused "
+                        "({}); the lease is unchanged and this event's bookkeeping is "
+                        "withheld under the same fault.".format(lock_fault))
+            return None
+        outcome = _orch_lease_hb_refresh(root, cfg, session_id, now, path, parent, name, leaf,
+                                         st, text, info, suffix, memory, holder)
+        if outcome is not None:
+            kind, detail = outcome
+            if kind == "written-unverified":
+                # a write HAPPENED: every one of these is a real event, recorded per occurrence
+                _orch_lease_hb_event(holder, kind, detail)
+                if event == "Stop":
+                    return ("AIQT guardrail (lease heartbeat): the heartbeat WAS replaced but "
+                            "could not be verified afterwards ({}). A write happened; inspect "
+                            "the lease by hand.".format(detail))
+                return None
+            _orch_lease_hb_row_once(holder, memory, now, kind, detail, detail, lease_key)
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): the heartbeat refresh was refused "
+                        "({}); the lease is unchanged.".format(detail))
+            return None
+        if gap:
+            _orch_lease_hb_event(holder, "refresh",
+                                 "heartbeat gap {:.0f} min closed by a refresh".format(age / 60))
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): heartbeat gap {:.0f} min on the lease "
+                        "this session holds; it is refreshed NOW. A gap past warn_after_minutes "
+                        "usually means the refresh cadence is too slow for this run."
+                        .format(age / 60))
+        return None
+    except Exception as exc:
+        # the ONE crash row of a core fault, recorded HERE while the proven descriptor and any
+        # held lock are still in hand (this handler runs before the finally below releases
+        # them), through the same write-time descriptor check as every other append; the
+        # holder is then emptied, so the binding's own recorder, which runs after cleanup,
+        # finds no held descriptor and withholds a second row
+        _orch_lease_hb_crash_row(holder, exc)
+        holder["lease_fd"] = None
+        holder["lease_parent_fd"] = None
+        raise
+    finally:
+        # the holder is emptied BEFORE the descriptor it carries or the lock is released: a
+        # write attempted after this cleanup (outside the critical section) finds no held
+        # descriptor and withholds
+        if holder.get("lease_fd") is not None and holder["lease_fd"] in reopened:
+            holder["lease_fd"] = None
+        if holder.get("lease_parent_fd") is not None \
+                and holder["lease_parent_fd"] in reopened:
+            holder["lease_parent_fd"] = None
+        # ONE terminal disposition, the lock LAST: a fault at a re-opened descriptor's close
+        # (any exception class) still attempts every remaining close, the lock's included,
+        # exactly once, and then propagates (_orch_lease_hb_close)
+        _orch_lease_hb_close(*reopened, lock_fd)
+
+
+def _orch_lease_hb_sep_msg(sep):
+    """The Stop surfacing of a separation refusal (nothing written, nothing recorded either
+    way). The remediation is chosen from the refusal's own SIDE, carried as (side, detail) from
+    the check that failed, never recovered from a substring of the detail: a faulted
+    state-record access is repaired in the keeper's state directory (redeclaring the lease
+    would not touch it), a faulted lease access is repaired at the declared lease path, and a
+    proven collision names the lease-path remediation."""
+    side, detail = sep
+    if side == "state":
+        return ("AIQT guardrail (lease heartbeat): {}. Nothing was written and nothing was "
+                "recorded (a refusal never records into the refused lease); repair the keeper's "
+                "state directory and its records so the separation can be evaluated."
+                .format(detail))
+    if side == "lease":
+        return ("AIQT guardrail (lease heartbeat): {}. Nothing was written and nothing was "
+                "recorded (a refusal never records into the refused lease); inspect and repair "
+                "the declared lease path so the separation can be evaluated.".format(detail))
+    return ("AIQT guardrail (lease heartbeat): {}. Nothing was written and nothing was recorded "
+            "(a refusal never records into the refused lease); declare a lease path distinct "
+            "from the keeper's own state records.".format(detail))
+
+
+def _orch_lease_hb_event_cleanup(holder, *fds):
+    """The event's ONE terminal cleanup of its separation holder, factored so the suite can
+    drive the REAL cleanup (never a test-side close) across the previous-holder fault
+    injections: the holder is emptied BEFORE the descriptor it owns is released (a crash row
+    attempted after this cleanup finds no held descriptor and withholds; the judge records a
+    core fault's one row while the descriptor is still held), and the holder-owned
+    state-directory descriptor is closed exactly ONCE per acquisition. fds are the caller's
+    own remaining descriptors (the event finalizer passes the lease descriptor and its parent,
+    which stay owned by their opener until this one disposition): the state-directory
+    descriptor and every one of fds go through ONE _orch_lease_hb_close call, so a fault at
+    any close (any exception class, before or after its syscall) still attempts every
+    remaining close exactly once, never retries the faulted one, and then propagates."""
+    state_fd = None
+    if isinstance(holder, dict):
+        holder["lease_fd"] = None
+        holder["lease_parent_fd"] = None
+        state_fd = holder.get("state_fd")
+        holder["state_fd"] = None
+    _orch_lease_hb_close(state_fd, *fds)
+
+
+def _orch_lease_heartbeat(data, event, holder=None):
+    """The ONE lease-heartbeat core behind orch_lease_heartbeat_post and orch_lease_heartbeat_stop:
+    returns the Stop warning text, or None when there is nothing to surface. Scoped exactly like
+    the other registry components (silent with no root, no ok registry, or no declaration; silent
+    too with no usable payload session_id, because no write and no holder-aimed message can be
+    proven without one). The REAL per-tool-call cost: before any lease check, EVERY event pays the
+    git-toplevel resolution (_orch_root: one scrubbed `git rev-parse --show-toplevel` subprocess),
+    ONE whole-file registry read (_orch_registry reads the registry file to EOF in 1 MiB chunks
+    with NO total-byte bound; unchanged by this control; the bookkeeping destinations are derived
+    from that same read by _orch_lease_hb_dests, never by a second read), and the
+    lease/bookkeeping separation proof (_orch_lease_hb_bookkeeping_sep: os.path.realpath of the
+    lease and of both destinations, one stat of the lease, up to one stat per destination, and up
+    to two parent-directory stats), and, where a lock_path is declared, the shared read-only
+    lock validation (_orch_lease_hb_lock_sep) TWICE per event, both before the quick path: once
+    inside the declaration validation (_orch_lease_hb_config with root) and once more at the
+    entry check, after the separation proof, whose absent-state-directory leg may just have
+    created the directory the identity legs compare against (each run is up to ten
+    os.path.realpath calls and up to eleven stats: the lock, its eight refused targets, namely
+    the lease, both bookkeeping destinations and the five _ORCH_LEASE_HB_WRITER_NAMES files, the
+    state directory and the lock's parent directory), so a healthy lease on PostToolUse costs
+    that subprocess, that whole-file read, that separation work, those two lock validations
+    where a lock is declared, and one os.lstat, never literally one stat; an event
+    that reaches the lease open (Stop always, PostToolUse past the quick path) adds the
+    descriptor-bound separation re-proof and the write-time binding (one fstat plus up to one
+    stat per destination, one state-directory open and two fstats). The
+    quick mtime path applies
+    only where NO heartbeat field is declared (there the mtime IS the recorded liveness value);
+    with a declared field a fresh mtime cannot prove the field's own recorded time fresh (the
+    decision uses the OLDER of the two ages), so the bounded walk-and-read runs on each event.
+    While a refusal persists unchanged, its guard-events row is recorded once per state change
+    (_orch_lease_hb_row_once) and the git tracking probe is backed off
+    (_ORCH_LEASE_HB_RETRY_SECONDS), so neither the event log nor the subprocess count grows per
+    tool call. holder, when given, is the event's separation holder (one is created here
+    otherwise), a dict owned by the calling binding and consumed by EVERY bookkeeping writer:
+    this core records the derived destinations in it and hands it the LEASE DESCRIPTOR itself,
+    the lease parent-directory descriptor and a state-directory descriptor opened ONCE,
+    O_DIRECTORY|O_NOFOLLOW, when _orch_lease_hb_prove passes (at the first open, and again on
+    the re-open under a declared lock; the path-based entry check licenses nothing, and a state
+    directory that IS the lease's parent by descriptor identity refuses the holder outright).
+    Every bookkeeping write then re-opens its own destination no-follow RELATIVE to the held
+    state-directory descriptor (dir_fd; the saves create their exclusive temporary file and
+    replace relative to it too), fstats the descriptor it writes through and refuses a
+    non-regular, multi-link or lease-aliased inode at WRITE time (against the held descriptor
+    and an lstat of the lease name relative to the held parent descriptor, read AFTER the
+    destination stat), and the holder is
+    emptied BEFORE any held descriptor or lock is released, so a writer reached with no held
+    descriptor (an invalid declaration, a failed open or re-open, a busy or faulted lock, a
+    crash before the proof or after cleanup) withholds and reports the refusal through the hook
+    result (the Stop banner or the dispatcher's stderr; a busy or faulted declared lock defers
+    its report to Stop only, at most once per turn end, a fault named as itself and rendered
+    once, since a due refresh's banner names the flock fault and DROPS the deferral; a
+    deferral made on a PostToolUse event is dropped with that event's holder), never into a
+    file; the crash recorder
+    (_orch_lease_hb_crash_row) consumes
+    THAT record only, never a fresh registry read, and records only from inside the judge while
+    the descriptor is still held."""
+    root = _orch_root(data)
+    if root is None:
+        return None
+    status, reg = _orch_registry(root)
+    if status != "ok":
+        return None
+    lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else {}
+    if not lease or "heartbeat" not in lease:
+        return None  # byte-for-byte the absent arm of _orch_lease_hb_config: inert, no stat cost
+    now = _orch_now()
+    dests = _orch_lease_hb_dests(root, reg)
+    if holder is None:
+        holder = _orch_lease_hb_holder()  # every bookkeeping writer below requires one
+    holder["dests"] = dests
+    bad_decl = _orch_lease_hb_paths_bad(lease)
+    if bad_decl is not None:
+        # the declared path VALUES are judged BEFORE any filesystem resolution (realpath, stat,
+        # the entry separation proof): an unusable value (an embedded NUL, an empty component)
+        # must be the NAMED refusal on Stop, never a resolution fault the binding records as a
+        # core fault that silently allows. No separation can be proven about an unusable path,
+        # so the holder stays unproven and nothing is written or recorded anywhere.
+        if event == "Stop":
+            return ("AIQT guardrail (lease heartbeat): the registry's lease heartbeat "
+                    "declaration is invalid ({}). Nothing was written and nothing was recorded: "
+                    "an unusable declared path never reaches path resolution and never falls "
+                    "back to another mode. Correct it in the registry (the confinement's trust "
+                    "root).".format(bad_decl))
+        return None
+    cfg_status, cfg = _orch_lease_hb_config(reg, root)
+    if cfg_status == "absent":
+        return None  # unreachable behind the fast path above; kept aligned with it (chkfcl)
+    if cfg_status == "bad":
+        # withheld bookkeeping: no descriptor proof exists before the first open, so the
+        # invalid-declaration refusal is surfaced on Stop ONLY (no guard-events row and no
+        # memory save: a writer with no held descriptor writes nothing anywhere). Validated
+        # BEFORE the separation check, whose absent-state-directory leg CREATES the state
+        # directory: an invalid declaration must create nothing either.
+        if event == "Stop":
+            return ("AIQT guardrail (lease heartbeat): the registry's lease heartbeat declaration "
+                    "is invalid ({}). Nothing was written and no staleness watch ran: an invalid "
+                    "declaration never writes and never falls back to another mode. Correct it in "
+                    "the registry (the confinement's trust root).".format(cfg))
+        return None
+    sep = _orch_lease_hb_bookkeeping_sep(_orch_path(root, lease.get("path")), dests)
+    if sep is not None:
+        # the preliminary path-based refusal, judged BEFORE any memory save or guard-events
+        # append on EVERY path: a refusal never records into the refused lease
+        if event == "Stop":
+            return _orch_lease_hb_sep_msg(sep)
+        return None
+    if "lock_path" in cfg:
+        lock_sep = _orch_lease_hb_lock_sep(_orch_path(root, lease.get("path")),
+                                           _orch_path(root, cfg.get("lock_path")), dests)
+        if lock_sep is not None:
+            # refused BEFORE anything is taken or written: the lock must be a STABLE,
+            # SEPARATE coordination file this keeper never replaces (its own memory save or
+            # field refresh would otherwise replace the very file its flock is held on, and
+            # the next cooperating keeper would lock the replacement while this one still
+            # holds the orphaned inode). The holder is unproven here, so nothing is written
+            # or recorded; the Stop warning is the only surfacing while this persists.
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): {}. Nothing was written: the "
+                        "declared lock must be a stable coordination file separate from the "
+                        "lease and from this keeper's bookkeeping records; declare a "
+                        "distinct lock_path.".format(lock_sep))
+            return None
+    # the path-based check above licenses NO writer (the holder still carries no descriptor):
+    # a fault anywhere before the first open writes and records nothing anywhere, and the
+    # Stop text is the only surfacing
+    session_id = data.get("session_id")
+    if not (isinstance(session_id, str) and session_id):
+        return None
+    path = _orch_path(root, lease.get("path"))
+    if event == "PostToolUse" and "field" not in cfg:
+        # the quick mtime path: with NO declared heartbeat field the mtime IS the recorded
+        # liveness value, so a fresh mtime alone proves the refresh is not due. With a declared
+        # field the field's own age can be due under a fresh mtime (the decision uses the OLDER
+        # of the two ages), so the shortcut never applies there and the full read runs.
+        try:
+            quick = os.lstat(path)
+            if stat.S_ISREG(quick.st_mode) and \
+                    0 <= now.timestamp() - quick.st_mtime < cfg["refresh_after_minutes"] * 60:
+                return None
+        except OSError:
+            pass  # absent or unstattable: the full walk below classifies it
+    memory = _orch_lease_hb_memory(dests)
+    # the holder still carries NO descriptor here: a row may be written only once the
+    # separation is proven on the descriptor this open yields (_orch_lease_hb_sep_fd below),
+    # so the failed-open branches hold nothing and withhold every row (the Stop text is the
+    # only surfacing)
+    parent, leaf, name, fault = _orch_lease_hb_open(root, path)
+    if fault is not None:
+        kind, detail = fault
+        if kind == "absent":
+            if event == "Stop" and memory.get("session_id") == session_id:
+                return ("AIQT guardrail (lease heartbeat): the declared lease is gone and this "
+                        "session held it earlier (lease lost). A hook never creates a lease; "
+                        "reconcile the record and re-acquire through the acquire step.")
+            return None
+        # the first open FAILED, so NO open descriptor exists to re-prove the lease/bookkeeping
+        # separation on, and a separation that cannot be proved is a collision (chkfcl): at this
+        # seam a cooperating writer can have swapped the declared lease onto a bookkeeping
+        # destination (a symlink this no-follow open refuses, an aliased ancestor directory, an
+        # unreadable plant), where a refusal row appended through the destination name would
+        # land in the file the declared lease now resolves to. The refusal is surfaced on Stop;
+        # NOTHING is recorded (the same discipline as the failed under-lock re-open).
+        if event == "Stop":
+            return ("AIQT guardrail (lease heartbeat): the declared lease cannot be evaluated "
+                    "({}). Nothing was written: an unreadable, symlinked or ambiguous lease is "
+                    "never rewritten by a hook; inspect and repair it by hand.".format(detail))
+        return None
+    try:
+        # descriptor ownership is exception-safe from the MOMENT of acquisition: a fault inside
+        # the first separation proof (or anywhere later) still closes each descriptor exactly
+        # once through this finally, and the holder stays unproven across such a fault
+        first_sep = _orch_lease_hb_prove(holder, parent, leaf, name, path, dests)
+        if first_sep is not None:
+            # the separation is re-proven on the FIRST opened descriptor too (the entry proof
+            # was path-based, and a cooperating writer can alias the lease onto a bookkeeping
+            # destination between that proof and this open, a hard link the path proof can no
+            # longer see), and the write-time binding is built here: the state directory is
+            # opened O_DIRECTORY|O_NOFOLLOW and refused outright when it IS the lease's parent
+            # directory by descriptor identity. Nothing is written and nothing is recorded
+            # while a refusal persists. DISCLOSED residual: the same-user concurrency class,
+            # stated once and completely in the section comment above _ORCH_LEASE_HB_KIND
+            # (these checks cover accidental mis-targeting and a stale or replaced lease,
+            # never a concurrently running process of the same user).
+            if event == "Stop":
+                return _orch_lease_hb_sep_msg(first_sep)
+            return None
+        return _orch_lease_hb_judge(root, cfg, lease, session_id, event, now, path, parent, leaf,
+                                    name, memory, holder)
+    finally:
+        # the holder is emptied BEFORE the descriptors are released: a crash row attempted
+        # after this cleanup (the binding's recorder) finds no held descriptor and withholds
+        # (the judge records a core fault's one row while the descriptor is still held); the
+        # holder OWNS the state-directory descriptor and the REAL event cleanup releases it,
+        # exactly once per acquisition, in ONE disposition with the lease descriptors, so a
+        # fault at any of these closes still attempts the rest
+        _orch_lease_hb_event_cleanup(holder, leaf, parent)
+
+
+def orch_lease_heartbeat_post(data):
+    """cnclse/recncl, PostToolUse (warn-only keeper, never blocks): run the lease-heartbeat core
+    after every tool call and stay SILENT on stdout (no systemMessage: guard-events rows, and
+    the result's error text carrying any withheld-bookkeeping report to the dispatcher's stderr,
+    are the only traces; the Stop binding owns the message). The binding contains the core's own
+    faults: without this catch a core fault would surface the dispatcher's fail-open
+    systemMessage on EVERY tool call."""
+    holder = _orch_lease_hb_holder()
+    try:
+        _orch_lease_heartbeat(data, "PostToolUse", holder)
+    except Exception as exc:
+        _orch_lease_hb_crash_row(holder, exc)
+    withheld = _orch_lease_hb_withheld_text(holder, "PostToolUse")
+    if withheld:
+        return (0, None, withheld)  # exit 0, nothing structured: the report, never a block
+    return _allow()
+
+
+def orch_lease_heartbeat_stop(data):
+    """cnclse/recncl, Stop (warn-only keeper): the same core, and the ONE binding that surfaces its
+    warning (exit 0 systemMessage, at most one per turn end, only about a lease this session
+    holds, held, or has misconfigured). A withheld-bookkeeping report rides the hook result
+    too: appended to the banner where one is surfaced, else carried as the result's error text
+    (the dispatcher's stderr). It covers a turn that made no tool calls, never blocks, and
+    never alters orch_stop_guard's decision."""
+    message = None
+    holder = _orch_lease_hb_holder()
+    try:
+        message = _orch_lease_heartbeat(data, "Stop", holder)
+    except Exception as exc:
+        _orch_lease_hb_crash_row(holder, exc)
+    withheld = _orch_lease_hb_withheld_text(holder, "Stop")
+    if message:
+        return _stop_warn(message if not withheld else message + " " + withheld)
+    if withheld:
+        return (0, None, withheld)  # exit 0, nothing structured: the report, never a block
+    return _allow()
+
+
+def _orch_lease_hb_resume_findings(reg, root, lease):
+    """The resume-audit layer of the lease heartbeat (shared with tools/orch_doctor.py
+    --resume-audit through _orch_resume_probes): an invalid declaration is a finding (the controls
+    cannot run), and where a valid declaration names a heartbeat field, a field that cannot be
+    evaluated, or whose recorded time is stale or future while the file's mtime may still read
+    fresh (the incident class), is a finding. Probes only; this NEVER writes the lease, and with
+    no declaration it adds nothing."""
+    status, cfg = _orch_lease_hb_config(reg, root)
+    if status == "bad":
+        return ["the lease heartbeat declaration is invalid ({}); the lease-heartbeat controls "
+                "cannot run until it is corrected".format(cfg)]
+    if status != "ok" or "field" not in cfg:
+        return []
+    parent, leaf, _name, fault = _orch_lease_hb_open(root, _orch_path(root, (lease or {}).get("path")))
+    if fault is not None:
+        kind, detail = fault
+        if kind == "absent":
+            return []  # no lease yet is a legitimate resume state (as the mtime probe reads it)
+        return ["the declared lease heartbeat cannot be evaluated ({}): cannot-evaluate"
+                .format(detail)]
+    try:
+        loaded = _orch_lease_hb_load(leaf)
+        if loaded[0] != "ok":
+            return ["the declared lease heartbeat cannot be evaluated ({}): cannot-evaluate"
+                    .format(loaded[1])]
+        parse_status, info = _orch_lease_hb_parse(loaded[1][1], cfg)
+        if parse_status != "ok":
+            return ["the declared lease heartbeat cannot be evaluated ({}): cannot-evaluate"
+                    .format(info)]
+        parsed, second = _orch_lease_hb_ts(info["hb"])
+        if parsed is None:
+            return ["the lease heartbeat value cannot be read ({}): cannot-evaluate".format(second)]
+        max_age = (lease or {}).get("max_age_hours")
+        age_class = _orch_lease_age_class((_orch_now() - parsed).total_seconds(), max_age)
+        if age_class == "cannot":
+            # unreachable behind _orch_lease_hb_config's horizon validation, kept so an invalid
+            # horizon can never read fresh if the two validations ever diverge (chkfcl)
+            return ["the lease max_age_hours declaration is not a usable horizon: cannot-evaluate"]
+        if age_class == "stale":
+            return ["the orchestrator lease heartbeat field is stale (older than {}h) although "
+                    "the file mtime may still read fresh".format(max_age)]
+        if age_class == "future":
+            return ["the orchestrator lease heartbeat field is in the future (clock skew or "
+                    "tamper)"]
+        return []
+    finally:
+        _orch_lease_hb_close(leaf, parent)
 
 
 # --- write-scope guard (EN-8, wrtscp) ----------------------------------------------------------------
@@ -15910,6 +18772,8 @@ HANDLERS = {
     "orch_prompt_stamp": orch_prompt_stamp,
     "orch_resume_audit": orch_resume_audit,
     "orch_resume_barrier": orch_resume_barrier,
+    "orch_lease_heartbeat_post": orch_lease_heartbeat_post,
+    "orch_lease_heartbeat_stop": orch_lease_heartbeat_stop,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
@@ -15947,6 +18811,8 @@ HANDLER_EVENT = {
     "orch_prompt_stamp": "UserPromptSubmit",
     "orch_resume_audit": "SessionStart",
     "orch_resume_barrier": PRETOOL,
+    "orch_lease_heartbeat_post": "PostToolUse",
+    "orch_lease_heartbeat_stop": "Stop",
 }
 
 
