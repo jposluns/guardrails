@@ -3475,7 +3475,9 @@ def _real_pack_not_run_vectors(tmp, failures):
             return True
         return _pin
 
-    saved = {"_archive_head": _archive_head, "_pin_fixture_version": _pin_fixture_version}
+    # Saved by name, so _archive_head is referenced only as _archive_head(repo_root()) (the git-fixture-env
+    # trust check pins that one call shape).
+    saved = {name: globals()[name] for name in ("_archive_head", "_pin_fixture_version")}
     for name, lock_index, want in (("not-run-commit", True, "could not build the fixture git repo"),
                                    ("not-run-clause", False, "no sole-coverer clause to edit")):
         got = []
