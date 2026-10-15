@@ -128,7 +128,7 @@ def _parse_manifest(raw):
     _require(len(raw) <= MAX_FILE_BYTES, "manifest-byte-bound")
     try:
         document = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeError, ValueError, RecursionError) as exc:
+    except (UnicodeError, ValueError, RecursionError, MemoryError) as exc:
         raise _Refusal(CANNOT_EVALUATE, "manifest-unparseable") from exc
 
     _require(type(document) is dict, "manifest-table", CANNOT_EVALUATE)

@@ -93,7 +93,7 @@ def _load_toml(path):
         raise GateError("required input {} is absent".format(path))
     # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply nested
     # array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (OSError, ValueError, RecursionError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, ValueError, RecursionError, MemoryError, tomllib.TOMLDecodeError) as exc:
         raise GateError("cannot read {} ({})".format(path, exc))
 
 

@@ -838,6 +838,32 @@ def precheck_special_files(root):
     return root
 
 
+def _precheck_entry(argv):
+    """The exit status of one --precheck run (see the __main__ block below): 0 when the walk
+    finds nothing to refuse, 2 on an unknown argument or a root disagreement; a refusal by the walk
+    itself exits 2 from inside precheck_special_files."""
+    if argv != ["--precheck"]:
+        print("usage: python3 -I -B {} --precheck".format(sys.argv[0] or __file__), file=sys.stderr)
+        return 2
+    _entry = Path(os.path.abspath(__file__))
+    _root = _derive_precheck_root(_entry)
+    _resolved_root = os.path.realpath(_derive_precheck_root(Path(os.path.realpath(__file__))))
+    if os.path.realpath(_root) != _resolved_root:
+        print("error: the tree root derived from the invoked path {} is {}, but the module file "
+              "resolves into {}; a symlinked script directory cannot certify the invoked tree; "
+              "fail-closed".format(_entry, _root, _resolved_root), file=sys.stderr)
+        return 2
+    _confirmed = _git_toplevel(_root)
+    if _confirmed is not None and _confirmed != os.path.realpath(_root):
+        print("error: the tree root derived from {} is {}, but git rev-parse --show-toplevel says "
+              "{}; cannot evaluate which tree to walk; fail-closed".format(_entry, _root, _confirmed),
+              file=sys.stderr)
+        return 2
+    precheck_special_files(_root)
+    print("PASS: special-file precheck found nothing to refuse in {}".format(_root))
+    return 0
+
+
 if __name__ == "__main__":
     # Runner/CI entry (D-400-SPECIAL-FILE-PRECHECK): precheck the tree BEFORE any gate runs.
     # Usage: python3 -I -B <this module> --precheck
@@ -851,23 +877,4 @@ if __name__ == "__main__":
     # filter. On a root this user owns, a dubious-ownership refusal is exit 2 (_git_lines), never
     # read as git-absent. Exit 0 when the walk finds nothing to refuse; exit 2 on a refusal, a root
     # disagreement, or an unknown argument.
-    if sys.argv[1:] != ["--precheck"]:
-        print("usage: python3 -I -B {} --precheck".format(sys.argv[0] or __file__), file=sys.stderr)
-        raise SystemExit(2)
-    _entry = Path(os.path.abspath(__file__))
-    _root = _derive_precheck_root(_entry)
-    _resolved_root = os.path.realpath(_derive_precheck_root(Path(os.path.realpath(__file__))))
-    if os.path.realpath(_root) != _resolved_root:
-        print("error: the tree root derived from the invoked path {} is {}, but the module file "
-              "resolves into {}; a symlinked script directory cannot certify the invoked tree; "
-              "fail-closed".format(_entry, _root, _resolved_root), file=sys.stderr)
-        raise SystemExit(2)
-    _confirmed = _git_toplevel(_root)
-    if _confirmed is not None and _confirmed != os.path.realpath(_root):
-        print("error: the tree root derived from {} is {}, but git rev-parse --show-toplevel says "
-              "{}; cannot evaluate which tree to walk; fail-closed".format(_entry, _root, _confirmed),
-              file=sys.stderr)
-        raise SystemExit(2)
-    precheck_special_files(_root)
-    print("PASS: special-file precheck found nothing to refuse in {}".format(_root))
-    raise SystemExit(0)
+    raise SystemExit(_precheck_entry(sys.argv[1:]))

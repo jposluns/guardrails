@@ -109,7 +109,7 @@ def document(raw, label):
     require(isinstance(raw, bytes), label + ": expected bytes")
     try:
         return tomllib.loads(raw.decode("utf-8"))
-    except (ValueError, RecursionError) as exc:
+    except (ValueError, RecursionError, MemoryError) as exc:
         raise CannotEvaluate(label + ": invalid UTF-8/TOML: " + str(exc)) from exc
 
 
@@ -805,6 +805,10 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
+    ((".github/check_cited_standards_contract.py", "subprocess.run:<no-py-literal>"),
+     (1, "launches a scratch copy of this script, written from its own source beside stub "
+      "collaborator modules under the self-test scratch (the import-failure vector); the "
+      "original is this enumerated module")),
     ((".preview/char-policy-write.py", "spec_from_file_location:"),
      (1, "loads the sibling gate tools/check_no_dashes.py (the GATE constant), itself an enumerated "
       "registered gate module")),
@@ -1094,15 +1098,20 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
+    (("tools/check_brief_capability.py", "subprocess.run:<no-py-literal>"),
+     (1, "launches python -c LINEAR_CHILD, a module-level literal that imports this enumerated "
+      "module from its own directory under an RLIMIT_AS cap for the linear-time vectors; no "
+      "other in-tree module is launched")),
     (("tools/check_byte_canon.py", "subprocess.run:<no-py-literal>"),
      (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     (("tools/check_ci_parity.py", "subprocess.run:<no-py-literal>"),
-     (2, "two recording wrappers forward the wrapped caller's argv to the saved real subprocess.run "
-      "(real_run); a call through a tracked launcher alias tokenizes since round 6, and these carry "
-      "no .py literal of their own")),
+     (3, "three direct calls, none with a .py literal and none launching an in-tree Python module: "
+      "_run_runner_copy runs bash over a scratch copy of the local runner whose tool commands "
+      "are stubs, and the required-status vector runs bash -c over the pinned aggregate body "
+      "and over its two-line options control")),
     (("tools/check_clauses.py", "subprocess.run:<no-py-literal>"),
      (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
@@ -1190,7 +1199,10 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     (("tools/check_python_floor.py", "spec_from_file_location:"),
-     (1, "loads a copy of itself this self-test wrote under its scratch")),
+     (2, "two loader sites: _rule_reverts loads a copy of itself this self-test wrote under its "
+      "scratch, and _load_path loads, under probe names, the NEWTAB contract copy written into "
+      "a scratch fixture and the enumerated modules opf/enforcement/claude/pretooluse_deny.py "
+      "and tools/_gen_common.py")),
     (("tools/check_python_floor.py", "subprocess.run:<no-py-literal>"),
      (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
@@ -1321,7 +1333,7 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     (("tools/selftest_aiqt_hooks.py", "subprocess.run:<no-py-literal>"),
-     (34, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (39, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
@@ -1331,15 +1343,40 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     (("tools/selftest_git_fixture_env.py", "subprocess.Popen:<no-py-literal>"),
-     (2, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     (("tools/selftest_git_fixture_env.py", "subprocess.run:<no-py-literal>"),
-     (23, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (9, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
+    (("tools/selftest_git_fixture_env_config_combined.py", "subprocess.Popen:<no-py-literal>"),
+     (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+      "launcher call, the pristine import name included, so a new launch site drifts this count "
+      "and stays reviewable at this row; an argv built at runtime that names an in-tree module "
+      "is the named LIMITS residue")),
+    (("tools/selftest_git_fixture_env_config_combined.py", "subprocess.run:<no-py-literal>"),
+     (6, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+      "launcher call, the pristine import name included, so a new launch site drifts this count "
+      "and stays reviewable at this row; an argv built at runtime that names an in-tree module "
+      "is the named LIMITS residue")),
+    (("tools/selftest_git_fixture_env_config_malformed.py", "subprocess.run:<no-py-literal>"),
+     (3, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+      "launcher call, the pristine import name included, so a new launch site drifts this count "
+      "and stays reviewable at this row; an argv built at runtime that names an in-tree module "
+      "is the named LIMITS residue")),
+    (("tools/selftest_git_fixture_env_config_system.py", "subprocess.run:<no-py-literal>"),
+     (2, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+      "launcher call, the pristine import name included, so a new launch site drifts this count "
+      "and stays reviewable at this row; an argv built at runtime that names an in-tree module "
+      "is the named LIMITS residue")),
+    (("tools/selftest_git_fixture_env_core.py", "subprocess.run:<no-py-literal>"),
+     (3, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+      "launcher call, the pristine import name included, so a new launch site drifts this count "
+      "and stays reviewable at this row; an argv built at runtime that names an in-tree module "
+      "is the named LIMITS residue")),
     (("tools/selftest_orch_hooks.py", "__import__:io"),
      (1, "a stdlib late import by literal name for a StringIO capture; no in-tree module is imported")),
     (("tools/selftest_orch_hooks.py", "import_module:orch_doctor"),
@@ -2356,7 +2393,10 @@ def _raw_read_entry_modules(root):
                 declare(token, rel)
     try:
         manifest = tomllib.loads(_lint_read_text(root / _RAW_READ_SUITE_MANIFEST))
-    except (OSError, ValueError) as exc:  # TOMLDecodeError is a ValueError
+    # TOMLDecodeError is a ValueError; tomllib raises RecursionError on deep nesting (and, from CPython
+    # 3.14.8, on a key of more than 1000 dotted parts) and MemoryError on a many-part key under a memory
+    # limit, so each is the same named failure, never a traceback.
+    except (OSError, ValueError, RecursionError, MemoryError) as exc:
         failures.append("raw-read-lint: {}: unreadable or unparseable ({}); the registered "
                         "self-test runners cannot be enumerated".format(
                             _RAW_READ_SUITE_MANIFEST, exc))
@@ -3094,6 +3134,8 @@ RAW_READ_ALLOWLIST = dict((
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_registry_dir::os.open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_worktree_entry::os.open", 3),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_wrtscp_read_json_artifact::open", 1),
+    (".github/check_cited_standards_contract.py::_import_failure_process::read_text", 1),
+    (".github/check_cited_standards_contract.py::corpus_findings::read_text", 2),
     (".preview/char-policy-write.py::_emit_line::os.open", 1),
     (".preview/char-policy-write.py::_read_capped::os.open", 1),
     (".preview/char-policy-write.py::_read_capped::os.read", 1),
@@ -3241,7 +3283,7 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/_opf_adopt.py::self_test::read_text", 1),
     ("opf/tools/_opf_adopt_apply.py::_finish_ops_self_test::read_bytes", 2),
     ("opf/tools/_opf_adopt_apply.py::_self_test_checks::os.open", 2),
-    ("opf/tools/_opf_adopt_apply.py::_self_test_checks::read_bytes", 19),
+    ("opf/tools/_opf_adopt_apply.py::_self_test_checks::read_bytes", 20),
     ("opf/tools/_opf_adopt_apply.py::dir_at::os.open", 1),
     ("opf/tools/_opf_adopt_apply.py::preserved_now::read_bytes", 2),
     ("opf/tools/_opf_adopt_apply.py::read_retained::os.open", 1),
@@ -3332,6 +3374,7 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/_opf_init_substrate.py::_t_s4_phase_discipline::open", 2),
     ("opf/tools/_opf_init_substrate.py::_t_s6_crash_resume::open", 3),
     ("opf/tools/_opf_init_substrate.py::_t_s6_crash_resume::os.read", 1),
+    ("opf/tools/_opf_journal.py::_existing_reservation::os.open", 1),
     ("opf/tools/_opf_observe.py::_capture_bounded::os.read", 1),
     ("opf/tools/_opf_observe.py::_worktree_open_succeeds::os.open", 1),
     ("opf/tools/_opf_observe.py::self_test_isolated::open", 1),
@@ -3402,11 +3445,12 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/_opf_worklog_regressions.py::_entry_point_census::read_text", 1),
     ("opf/tools/_opf_worklog_regressions.py::_upgrade_preflight_regressions::read_text", 1),
     ("opf/tools/_opf_worklog_regressions.py::snapshot::read_bytes", 2),
+    ("opf/tools/_opf_write_guard.py::_read_capped::os.read", 1),
+    ("opf/tools/_opf_write_guard.py::_self_test_vectors::os.open", 2),
     ("opf/tools/_opf_write_guard.py::acquire_lease::os.open", 1),
+    ("opf/tools/_opf_write_guard.py::judged::read_bytes", 1),
     ("opf/tools/_opf_write_guard.py::lease_held_message::os.open", 1),
-    ("opf/tools/_opf_write_guard.py::lease_held_message::os.read", 1),
     ("opf/tools/_opf_write_guard.py::read_lease_payload::os.open", 1),
-    ("opf/tools/_opf_write_guard.py::read_lease_payload::os.read", 1),
     ("opf/tools/_optlevel.py::source_docstring::open", 1),
     ("opf/tools/check_opf_doctor.py::_claude_hook_self_test::read_text", 2),
     ("opf/tools/check_opf_doctor.py::_doctor_suite::os.open", 1),
@@ -3421,6 +3465,8 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/check_opf_doctor.py::_stubbed::read_text", 2),
     ("opf/tools/check_opf_drift.py::_drift_suite::read_text", 1),
     ("opf/tools/check_opf_drift.py::build_clean_store::os.open", 1),
+    ("opf/tools/check_opf_homes.py::_self_test_vectors::os.open", 3),
+    ("opf/tools/check_opf_homes.py::_self_test_vectors::read_bytes", 11),
     ("opf/tools/check_opf_homes.py::_spec_text::os.open", 1),
     ("opf/tools/check_opf_homes.py::_spec_text::os.read", 1),
     ("opf/tools/check_opf_homes.py::index_digest::read_bytes", 1),
@@ -3556,6 +3602,10 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/audit_reference.py::_self_test::read_text", 1),
     ("tools/check_artifact_checksums.py::hash_file::read_bytes", 1),
     ("tools/check_artifact_checksums.py::load_evidence::read_text", 1),
+    ("tools/check_brief_capability.py::_expected_check_ids::open", 1),
+    ("tools/check_brief_capability.py::_production_source::open", 1),
+    ("tools/check_brief_capability.py::_read_regular::os.open", 1),
+    ("tools/check_brief_capability.py::_read_regular::os.read", 1),
     ("tools/check_byte_canon.py::run::read_bytes", 1),
     ("tools/check_byte_canon.py::validate_allowances::read_bytes", 1),
     ("tools/check_byte_canon.py::validate_hardbreak::read_bytes", 1),
@@ -3654,6 +3704,8 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/check_selftest_execution.py::_manifest_suites::open", 1),
     ("tools/check_selftest_execution.py::_read_report::open", 1),
     ("tools/check_selftest_execution.py::_source_check_ids::read_text", 1),
+    ("tools/check_selftest_execution.py::recorded_argv::read_text", 1),
+    ("tools/check_selftest_execution.py::self_test::read_bytes", 1),
     ("tools/check_selftest_execution.py::self_test::read_text", 7),
     ("tools/check_sized_instructions.py::_read_text::read_bytes", 1),
     ("tools/check_sized_instructions.py::_source_hash::read_bytes", 1),
@@ -3724,9 +3776,13 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/gen_mappings.py::main::read_text", 1),
     ("tools/gen_reference_facts.py::build::read_text", 1),
     ("tools/gen_reference_facts.py::self_test_main::read_text", 2),
+    ("tools/gen_renderers.py::_closure_failure::read_bytes", 1),
+    ("tools/gen_renderers.py::_crlf_generate::read_bytes", 1),
+    ("tools/gen_renderers.py::_determinism_failure::read_bytes", 1),
     ("tools/gen_renderers.py::_parse_module::read_bytes", 1),
     ("tools/gen_renderers.py::framed_code_digest::read_bytes", 1),
-    ("tools/gen_renderers.py::self_test_main::read_text", 5),
+    ("tools/gen_renderers.py::self_test_main::read_bytes", 3),
+    ("tools/gen_renderers.py::self_test_main::read_text", 2),
     ("tools/gen_secret_patterns.py::run::read_text", 1),
     ("tools/gen_site.py::_read::read_text", 1),
     ("tools/gen_skill.py::_open_dir_fd::os.open", 2),
@@ -3769,30 +3825,35 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/pin.py::self_test::read_text", 1),
     ("tools/selftest_aiqt_hooks.py::_ask_label_failures::read_text", 1),
     ("tools/selftest_aiqt_hooks.py::_duplicate_label_failures::read_text", 1),
+    ("tools/selftest_aiqt_hooks.py::_g423_state::read_text", 1),
     ("tools/selftest_aiqt_hooks.py::_main_isolated::open", 1),
     ("tools/selftest_aiqt_hooks.py::_main_isolated::read_bytes", 14),
-    ("tools/selftest_aiqt_hooks.py::_main_isolated::read_text", 4),
+    ("tools/selftest_aiqt_hooks.py::_main_isolated::read_text", 8),
     ("tools/selftest_aiqt_hooks.py::_note_constructor_shape_failures::read_text", 1),
     ("tools/selftest_aiqt_hooks.py::_note_site_inventory::read_text", 1),
+    ("tools/selftest_aiqt_hooks.py::_stop_field_claim_failures::read_bytes", 1),
+    ("tools/selftest_aiqt_hooks.py::_stop_field_claim_failures::read_text", 1),
     ("tools/selftest_aiqt_hooks.py::_test_note_shape_pins::read_text", 1),
     ("tools/selftest_ci_status.py::_run_checks::read_text", 2),
     ("tools/selftest_ci_status.py::invoke::read_text", 3),
     ("tools/selftest_git_fixture_env.py::_auto_maintenance_children::read_text", 1),
     ("tools/selftest_git_fixture_env.py::_await_holder_ready::os.read", 1),
     ("tools/selftest_git_fixture_env.py::_close_lock_sites::open", 1),
-    ("tools/selftest_git_fixture_env.py::_config_injection_lane::attr.open", 1),
-    ("tools/selftest_git_fixture_env.py::_config_injection_lane::read_bytes", 5),
-    ("tools/selftest_git_fixture_env.py::_member_timeout_controls::read_text", 1),
     ("tools/selftest_git_fixture_env.py::_pid_state::open", 1),
     ("tools/selftest_git_fixture_env.py::_read_record::open", 1),
     ("tools/selftest_git_fixture_env.py::_recorded_states::open", 1),
     ("tools/selftest_git_fixture_env.py::_require_wrapper_observed::read_bytes", 1),
     ("tools/selftest_git_fixture_env.py::_snapshot_git_dir::read_bytes", 1),
-    ("tools/selftest_git_fixture_env.py::_suite_main::read_bytes", 2),
     ("tools/selftest_git_fixture_env.py::_sweep_call_sites::open", 1),
-    ("tools/selftest_git_fixture_env.py::launch::read_bytes", 2),
     ("tools/selftest_git_fixture_env.py::prepare::read_text", 1),
     ("tools/selftest_git_fixture_env.py::run::read_bytes", 4),
+    ("tools/selftest_git_fixture_env_config_combined.py::_combined_lane::attr.open", 1),
+    ("tools/selftest_git_fixture_env_config_combined.py::_combined_lane::read_bytes", 2),
+    ("tools/selftest_git_fixture_env_config_combined.py::launch::read_bytes", 2),
+    ("tools/selftest_git_fixture_env_config_malformed.py::_malformed_lane::read_bytes", 2),
+    ("tools/selftest_git_fixture_env_config_system.py::_system_lane::read_bytes", 1),
+    ("tools/selftest_git_fixture_env_core.py::_core_lanes::read_bytes", 2),
+    ("tools/selftest_git_fixture_env_core.py::_member_timeout_controls::read_text", 1),
     ("tools/selftest_opf_render.py::_selftest::read_text", 2),
     ("tools/selftest_orch_hooks.py::_cell::read_bytes", 1),
     ("tools/selftest_orch_hooks.py::_cell::read_text", 1),
@@ -3817,6 +3878,7 @@ RAW_READ_ALLOWLIST = dict((
 ))
 
 RAW_READ_REASONS = dict((
+    (".github/check_cited_standards_contract.py", _RAW_READ_PENDING),
     ("opf/tools/_commonmark_headings.py", _RAW_READ_PENDING),
     ("opf/tools/_journal.py", _RAW_READ_PENDING),
     ("opf/tools/_opf_adopt_apply.py", _RAW_READ_PENDING),
@@ -3860,6 +3922,7 @@ RAW_READ_REASONS = dict((
     ("tools/aei_backlog_md.py", _RAW_READ_PENDING),
     ("tools/aiqt_corpus.py", _RAW_READ_PENDING),
     ("tools/check_artifact_checksums.py", _RAW_READ_PENDING),
+    ("tools/check_brief_capability.py", _RAW_READ_PENDING),
     ("tools/check_byte_canon.py", _RAW_READ_PENDING),
     ("tools/check_ci_parity.py", _RAW_READ_PENDING),
     ("tools/check_cited_standards.py", _RAW_READ_PENDING),
@@ -4857,6 +4920,10 @@ RAW_READ_SITE_REASONS = dict((
      "never block, and nothing is read through the descriptor; counted because proven O_WRONLY no "
      "longer exempts (a write-only open of a FIFO blocks until a reader appears, fifo(7)) and the "
      "chain proves no O_NONBLOCK"),
+    ("opf/tools/_opf_journal.py::_existing_reservation::os.open",
+     "(c) O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC beneath the parent handle with an fstat "
+     "S_ISREG refusal before any read, the read itself the capped _journal._read_fd: the open "
+     "cannot block on a planted FIFO and a non-regular reservation entry is refused unread"),
     ("opf/tools/_opf_observe.py::_worktree_open_succeeds::os.open",
      "(c) a non-blocking reader whose literal chain carries os.O_NONBLOCK; pinned with its reason: "
      "EVERY os.open site counts since round 6 (the predicate-rested exemption is removed), and the "
@@ -4948,12 +5015,23 @@ RAW_READ_SITE_REASONS = dict((
      "(c) the site opens with os.O_DIRECTORY, so the open of anything but a directory fails at "
      "once and a directory open cannot block; no file content is read through it; (a) every one of "
      "these opens names a directory the same self-test created under its own tempfile scratch"),
+    ("opf/tools/_opf_write_guard.py::_read_capped::os.read",
+     "(c) a bounded os.read loop (at most 65537 bytes) over a caller-owned descriptor: its only "
+     "callers, lease_held_message and read_lease_payload, each open the lease themselves with "
+     "O_NONBLOCK and fstat-check S_ISREG before calling, so it cannot name a blocking FIFO"),
+    ("opf/tools/_opf_write_guard.py::_self_test_vectors::os.open",
+     "(a) opens, O_RDONLY | O_DIRECTORY, the scratch base directory and its m/ subdirectory this "
+     "self-test created under tempfile; an O_DIRECTORY open of a FIFO fails ENOTDIR, and nothing "
+     "is read through either descriptor, each only a dir_fd anchor"),
     ("opf/tools/_opf_write_guard.py::acquire_lease::os.open",
      "(c) a write-only creator: the flags carry O_CREAT and O_EXCL, so the open either creates a "
      "fresh regular file or fails EEXIST on any existing entry (a planted FIFO included) and can "
      "never block, and nothing is read through the descriptor; counted because proven O_WRONLY no "
      "longer exempts (a write-only open of a FIFO blocks until a reader appears, fifo(7)) and the "
      "chain proves no O_NONBLOCK"),
+    ("opf/tools/_opf_write_guard.py::judged::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
     ("opf/tools/_opf_write_guard.py::lease_held_message::os.open",
      "(c) O_RDONLY | O_NOFOLLOW | O_NONBLOCK with an fstat S_ISREG refusal before any read, "
      "composing the held-lease message: the open cannot block on a planted FIFO and a non-regular "
@@ -4961,23 +5039,12 @@ RAW_READ_SITE_REASONS = dict((
      "MAJOR 1): the proven-O_NONBLOCK exemption is REMOVED (the shared predicate it rested on was "
      "defeated through attribute chains and source evaluators in both round-5 reviews), so this "
      "previously exempt pure chain is pinned here with its reason instead"),
-    ("opf/tools/_opf_write_guard.py::lease_held_message::os.read",
-     "(c) ONE os.read call of at most 65536 bytes (no loop) over a descriptor this function "
-     "opened itself with O_NONBLOCK and fstat-checked S_ISREG before reading, so it cannot "
-     "name a blocking FIFO; "
-     "the descriptor read is counted since round 11 (decided 2: read and pread left the inert "
-     "table because a held descriptor of unknown type can block)"),
     ("opf/tools/_opf_write_guard.py::read_lease_payload::os.open",
      "(c) O_RDONLY | O_NOFOLLOW | O_NONBLOCK with an fstat S_ISREG refusal before any read and a "
      "64 KiB bound, reading the lease payload for an ownership compare: the open cannot block on a "
      "planted FIFO and a non-regular lease reads as None. Counted since round 6 (#400 re-cut round "
      "6, codex MAJOR 1 = claude MAJOR 1): the proven-O_NONBLOCK exemption is REMOVED, so this "
      "previously exempt pure chain is pinned here with its reason instead"),
-    ("opf/tools/_opf_write_guard.py::read_lease_payload::os.read",
-     "(c) a bounded os.read loop over a descriptor this function opened itself with "
-     "O_NONBLOCK and fstat-checked S_ISREG before reading, so it cannot name a blocking FIFO; "
-     "the descriptor read is counted since round 11 (decided 2: read and pread left the inert "
-     "table because a held descriptor of unknown type can block)"),
     ("opf/tools/check_opf_doctor.py::_install_seen::read_text",
      "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
      "the repository tree"),
@@ -5248,6 +5315,13 @@ RAW_READ_SITE_REASONS = dict((
      "(a) reads its OWN source from the module directory to build the round-7 child-mutant fixture "
      "(codex 4: the mutated copy must be rejected by the exact-failure-set comparison); the module "
      "is a tracked repository file this gate itself scans"),
+    ("tools/check_brief_capability.py::_read_regular::os.open",
+     "(c) O_RDONLY | O_NONBLOCK | O_CLOEXEC with an fstat S_ISREG refusal before any read and a "
+     "MAX_BYTES bound: the open cannot block on a planted FIFO and a non-regular file is refused "
+     "unread"),
+    ("tools/check_brief_capability.py::_read_regular::os.read",
+     "(c) a bounded os.read loop (MAX_BYTES) over the descriptor this function opened itself with "
+     "O_NONBLOCK and fstat-checked S_ISREG before reading, so it cannot name a blocking FIFO"),
     ("tools/check_footer.py::_read_regular_page::os.open",
      "(c) a non-blocking reader whose literal chain carries os.O_NONBLOCK; pinned with its reason: "
      "EVERY os.open site counts since round 6 (the predicate-rested exemption is removed), and the "
@@ -5403,15 +5477,6 @@ RAW_READ_SITE_REASONS = dict((
      "a bounded read-only read of the suite module's own committed source (the census opens the "
      "__code__.co_filename of a function this module defines) on a precheck-certified tree; "
      "conversion to a shared non-blocking reader is pending and tracked by this pin"),
-    ("tools/selftest_git_fixture_env.py::_config_injection_lane::attr.open",
-     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
-     "the repository tree"),
-    ("tools/selftest_git_fixture_env.py::_config_injection_lane::read_bytes",
-     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
-     "the repository tree"),
-    ("tools/selftest_git_fixture_env.py::_member_timeout_controls::read_text",
-     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
-     "the repository tree"),
     ("tools/selftest_git_fixture_env.py::_pid_state::open",
      "(b) reads /proc, a kernel interface the suite samples for its own child processes, never the "
      "repository tree"),
@@ -5427,20 +5492,35 @@ RAW_READ_SITE_REASONS = dict((
     ("tools/selftest_git_fixture_env.py::_snapshot_git_dir::read_bytes",
      "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
      "the repository tree"),
-    ("tools/selftest_git_fixture_env.py::_suite_main::read_bytes",
-     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
-     "the repository tree"),
     ("tools/selftest_git_fixture_env.py::_sweep_call_sites::open",
      "a bounded read-only read of the suite module's own committed source (the census opens the "
      "__code__.co_filename of a function this module defines) on a precheck-certified tree; "
      "conversion to a shared non-blocking reader is pending and tracked by this pin"),
-    ("tools/selftest_git_fixture_env.py::launch::read_bytes",
-     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
-     "the repository tree"),
     ("tools/selftest_git_fixture_env.py::prepare::read_text",
      "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
      "the repository tree"),
     ("tools/selftest_git_fixture_env.py::run::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_git_fixture_env_config_combined.py::_combined_lane::attr.open",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_git_fixture_env_config_combined.py::_combined_lane::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_git_fixture_env_config_combined.py::launch::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_git_fixture_env_config_malformed.py::_malformed_lane::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_git_fixture_env_config_system.py::_system_lane::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_git_fixture_env_core.py::_core_lanes::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_git_fixture_env_core.py::_member_timeout_controls::read_text",
      "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
      "the repository tree"),
     ("tools/selftest_orch_hooks.py::_cell::read_bytes",
@@ -6863,6 +6943,11 @@ RAW_READ_UNSUPPORTED_USES = dict((
      (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
       "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
       "this line is the reviewed site")),
+    (("opf/tools/_opf_write_guard.py",
+      "with mock.patch.object(os, \"read\", read_fault):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, "
+      "and this line is the reviewed site")),
     (("opf/tools/_vendor/marko/ast_renderer.py",
       "for k, v in element.__dict__.items()"),
      (1, "a reflective namespace fetch, fail-closed on any base (round 6); carried from the round-8 "
@@ -6989,6 +7074,26 @@ RAW_READ_UNSUPPORTED_USES = dict((
      (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
       "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
     (("opf/tools/check_opf_homes.py",
+      "_patch.object(os, \"link\", recording_link), \\"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, "
+      "and this line is the reviewed site")),
+    (("opf/tools/check_opf_homes.py",
+      "_patch.object(os, \"mkdir\", recording_mkdir):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, "
+      "and this line is the reviewed site")),
+    (("opf/tools/check_opf_homes.py",
+      "_patch.object(os, \"unlink\", recording_unlink), \\"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, "
+      "and this line is the reviewed site")),
+    (("opf/tools/check_opf_homes.py",
+      "_patch.object(os, \"unlink\", refusing_unlink):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, "
+      "and this line is the reviewed site")),
+    (("opf/tools/check_opf_homes.py",
       "fd = os.open(path, os.O_RDONLY | getattr(os, \"O_NONBLOCK\", 0) | getattr(os, \"O_CLOEXEC\", 0)"),
      (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
       "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
@@ -7005,9 +7110,14 @@ RAW_READ_UNSUPPORTED_USES = dict((
       "this line is the reviewed site")),
     (("opf/tools/check_opf_homes.py",
       "patch.object(home_journal.os, \"close\"):"),
-     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
       "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
       "this line is the reviewed site")),
+    (("opf/tools/check_opf_homes.py",
+      "patch.object(home_journal.os, \"fsync\") as flushed:"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, "
+      "and this line is the reviewed site")),
     (("opf/tools/check_opf_homes.py",
       "patch.object(planning.os, \"close\"), \\"),
      (3, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
@@ -7043,6 +7153,31 @@ RAW_READ_UNSUPPORTED_USES = dict((
      (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
       "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
       "this line is the reviewed site")),
+    (("opf/tools/check_opf_homes.py",
+      "with _patch.object(os, \"fsync\", bound_failing_fsync), \\"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, "
+      "and this line is the reviewed site")),
+    (("opf/tools/check_opf_homes.py",
+      "with _patch.object(os, \"fsync\", crash_flush_recorder):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, "
+      "and this line is the reviewed site")),
+    (("opf/tools/check_opf_homes.py",
+      "with _patch.object(os, \"fsync\", flush_recorder):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, "
+      "and this line is the reviewed site")),
+    (("opf/tools/check_opf_homes.py",
+      "with _patch.object(os, \"fsync\", projection_flush_recorder):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, "
+      "and this line is the reviewed site")),
+    (("opf/tools/check_opf_homes.py",
+      "with _patch.object(os, \"fsync\", recording_fsync), \\"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, "
+      "and this line is the reviewed site")),
     (("opf/tools/check_opf_homes.py",
       "with patch.object(home_journal.os, \"fstat\", side_effect=fstat), \\"),
      (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
@@ -8168,9 +8303,14 @@ RAW_READ_UNSUPPORTED_USES = dict((
       "substitutes; the def line is the reviewed acquisition")),
     (("tools/check_python_floor.py",
       "module = importlib.util.module_from_spec(spec)"),
-     (1, "module_from_spec materializes a module object from a spec constructed beside it by a "
+     (2, "module_from_spec materializes a module object from a spec constructed beside it by a "
       "reviewed loader call; the construction line is the pinned site (round 10, decided 1: a "
       "loader-yielding importlib member is never consumed)")),
+    (("tools/check_python_floor.py",
+      "named = getattr(builtins, name.id, None)"),
+     (1, "getattr reads a builtin exception class by the name an except clause spells, so the "
+      "tomllib leg can classify the handler; the value is only tested with isinstance and "
+      "issubclass, never called, so nothing is executed or opened through it")),
     (("tools/check_python_launcher_isolation.py",
       "return shlex.split(_space_shell_operators(s), comments=False, posix=True)"),
      (1, "the keyword posix=True selects the POSIX quoting mode of shlex; the argument is a "
@@ -8313,11 +8453,6 @@ RAW_READ_UNSUPPORTED_USES = dict((
       "subprocess.run = lambda *a, **k: _FakeProc(bad)"),
      (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
       "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
-    (("tools/check_secrets.py",
-      "import builtins as _b"),
-     (1, "an import-alias acquisition: round 9 refuses an import under another name instead of "
-      "tracking the alias, so this pinned statement is the one reviewable site for every use made "
-      "through the alias (named LIMITS residue)")),
     (("tools/check_selftest_execution.py",
       "from os import path"),
      (1, "the IMPORT_FROM bytecode witness: _global_name_reads reads the code of this probe "
@@ -8647,37 +8782,42 @@ RAW_READ_UNSUPPORTED_USES = dict((
      (2, "a monkeypatch store of a posixpath member inside a self-test seam, restored in the "
       "same vector; the store line is the pinned, reviewable site")),
     (("tools/selftest_git_fixture_env.py",
+      "with patch.object(subprocess, \"Popen\", spawn):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/selftest_git_fixture_env_core.py",
       "mutant.__dict__)"),
-     (1, "a reflective namespace fetch, fail-closed on any base (round 6); carried from the round-8 "
-      "namespace-handle shape pins, with the fetch line as the reviewed site")),
-    (("tools/selftest_git_fixture_env.py",
+     (1, "a reflective namespace fetch, fail-closed on any base (round 6); carried from the "
+      "round-8 namespace-handle shape pins, with the fetch line as the reviewed site")),
+    (("tools/selftest_git_fixture_env_core.py",
       "patch.object(subprocess, \"Popen\", spawn), \\"),
      (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
-      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
-      "this line is the reviewed site")),
-    (("tools/selftest_git_fixture_env.py",
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, "
+      "and this line is the reviewed site")),
+    (("tools/selftest_git_fixture_env_core.py",
       "real_popen = subprocess.Popen"),
-     (2, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition "
-      "line is the reviewed site and launches through it are invisible by design")),
-    (("tools/selftest_git_fixture_env.py",
+     (2, "a saved launcher reference; round 9 does not follow the name it feeds, so the "
+      "acquisition line is the reviewed site and launches through it are invisible by design")),
+    (("tools/selftest_git_fixture_env_core.py",
       "subprocess.Popen"),
-     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition "
-      "line is the reviewed site and launches through it are invisible by design")),
-    (("tools/selftest_git_fixture_env.py",
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the "
+      "acquisition line is the reviewed site and launches through it are invisible by design")),
+    (("tools/selftest_git_fixture_env_core.py",
       "with patch.object(os, \"killpg\", refusing(real_killpg)), \\"),
      (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
-      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
-      "this line is the reviewed site")),
-    (("tools/selftest_git_fixture_env.py",
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, "
+      "and this line is the reviewed site")),
+    (("tools/selftest_git_fixture_env_core.py",
       "with patch.object(subprocess, \"Popen\", spawn), \\"),
      (4, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
-      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
-      "this line is the reviewed site")),
-    (("tools/selftest_git_fixture_env.py",
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, "
+      "and this line is the reviewed site")),
+    (("tools/selftest_git_fixture_env_core.py",
       "with patch.object(subprocess, \"Popen\", spawn):"),
-     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
-      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
-      "this line is the reviewed site")),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, "
+      "and this line is the reviewed site")),
     (("tools/selftest_orch_hooks.py",
       "(0 if os.geteuid() == 0 else 736 if getattr(os, \"O_PATH\", 0) else 368, 736, []))"),
      (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "

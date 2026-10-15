@@ -45,9 +45,31 @@ concurrency and environment can only skip, cancel or fail a job, which Quality g
 reads as not success; a strategy matrix job's result is failure when any leg fails
 (GitHub behaviour, not observed here); name, runs-on, permissions, outputs, env, services,
 with and secrets do not decide a result (with and secrets apply only under uses).
-The step-level keys that could (continue-on-error, if:, shell:, timeout-minutes)
-are outside the recognized step keys and stay cannot-evaluate, as does a gate
-command chained with || true.
+The step-level keys that could (continue-on-error, if:, timeout-minutes, and any
+shell: other than the exact line shell: bash) are outside the recognized step keys
+and stay cannot-evaluate, as does a gate command chained with || true.
+Step shell: every step with a run: key carries exactly one STEP_SHELL_LINE
+(shell: bash). GitHub's workflow syntax reference documents a step-level shell
+(jobs.<job_id>.steps[*].shell) as overriding the job's default, and a job's
+default as overriding a workflow default of the same name (the most specific
+default wins). That a step shell also overrides a workflow's defaults.run.shell
+is inferred from those two statements, not documented for that case. Without
+the line, a top-level defaults: run: shell: true {0} would make every run:
+step, this gate's own included, exit 0 without running its command (inferred
+from GitHub's custom-shell syntax, not observed on Actions). A run: step
+without the line is a required-status finding (exit 1); a second shell: line
+in one step and a shell: line on a step with no run: key are cannot-evaluate.
+A top-level defaults: key stays outside TOP_LEVEL_KEYS (cannot-evaluate) and a
+job-level one stays a result-masking finding.
+The line closes the defaults.run.shell route only. It does not close
+defaults.run.working-directory at workflow or job level: a step shell does not
+override it, and every gate is invoked by a relative path (python3 -I -B
+tools/...), so a defaults block can still choose the directory each gate's
+script is resolved in, and with it which file runs, this gate's own
+invocation included. That route stays refused only where the local runner
+runs this gate.
+Any step key at indent 8 before a job's first step item (run:, uses:, env:,
+with:, shell: or another) is cannot-evaluate (exit 2); YAML rejects that shape.
 Aggregator: a workflow with more than one job must route every job into the one
 status branch protection requires. Exactly one job is named "Quality gates"
 (REQUIRED_STATUS_NAME); its job-level if: is always() (GitHub reads a skipped
@@ -68,8 +90,11 @@ one-line flow list, or one plain scalar) is cannot-evaluate. A one-job workflow 
 its own status and carries no aggregator rule, only the result-masking rule.
 Not checked: the branch-protection setting itself (that Quality gates is the
 required check, and that no other job reports that name through an expression in
-its name:); GitHub's evaluation of needs.*.result, if: always(), cancellation and
-matrix results, which is documented behaviour this gate does not observe; and the
+its name:); GitHub's evaluation of needs.*.result, if: always(), cancellation
+and matrix results, which is documented behaviour this gate does not observe;
+step-shell precedence over defaults.run.shell (documented over a job default,
+inferred over a workflow default), also not observed; defaults.run.working-directory
+(Step shell, above); and the
 runner image, runs-on labels, services and environment values (a job or step env:
 can set a variable such as BASH_ENV that changes what an accepted gate command
 does). Inside a run: block the exact line exit 1 is accepted, because it can only
@@ -77,9 +102,9 @@ end a step red; every other exit spelling stays unclassified.
 
 Exit convention:
   0  extraction succeeded, every difference has an active exception, no exception is
-     stale or reversed, and both mandatory self-members are present
+     stale or reversed, and every mandatory member is present on both sides
   1  an evaluated parity finding, stale or reversed exception, missing mandatory
-     self-member, or required-status finding
+     member, or required-status finding
   2  cannot-evaluate, including an unreadable input, malformed control input, empty
      extraction, unsupported shell or YAML shape, unresolved command value, hidden
      action, circular runner invocation, or shadow-scan discrepancy
@@ -91,7 +116,10 @@ failure. Interpreter-flag differences are intentionally removed from identity an
 owned by check_python_launcher_isolation.py. Scope is exactly the two named files, so
 gates in other workflows are not enumerated. Argument order is identity-relevant,
 making a harmless reorder fail loud. Coordinated removal of both of this gate's own
-invocations cannot be detected if nobody runs the remaining file manually. The
+invocations cannot be detected if nobody runs the remaining file manually. The repository
+contracts (REPO_GATES) and the cited-standards contract's --self-test are
+MANDATORY_MEMBERS, so removing one of them from both runners together is a
+missing-mandatory finding, not a silent pass (claude PR #520 round 2 MEDIUM-1). The
 extractors implement a disclosed shell and YAML subset; an unknown construct is
 cannot-evaluate rather than a clean pass. Fail-closed cases include an unknown
 top-level or job-level workflow key, an exit outside the exact terminal summary
@@ -166,14 +194,16 @@ time (splitlines(), the adapter's line split and newline rejoin, and
 Path.read_text()'s universal-newline translation, which turns \r into \n
 before any text screen can see it), so EVERY read of a runner or workflow
 file, in the live check (run_paths), in self-test vector 26, and in
-tools/selftest_git_fixture_env.py's roster and roster checks, goes through
+tools/selftest_git_fixture_env.py's roster and the core runner's
+roster checks, goes through
 the ONE byte-level reader (read_runner_text): the RAW BYTES are screened
 against this same alphabet before any decode, so no decode-layer newline
 translation or multi-byte spelling can erase a forbidden byte ahead of the
 screen, and the accepted bytes are decoded strictly as ASCII, which maps
 each byte to one character and translates no newline. A self-test vector
 pins every read_text or splitlines attribute and every text-mode open()
-call in this file and in tools/selftest_git_fixture_env.py, as spelled,
+call in this file, in tools/selftest_git_fixture_env.py and in its four
+registered suite runners, as spelled,
 against an exact per-function allowlist, so a new read path written
 through those APIs turns the self-test red for review against the reader;
 a read spelled another way (getattr, an alias) is outside that tripwire.
@@ -312,8 +342,13 @@ MASKED_REF_EXPRESSIONS = frozenset({
     "$PR_HEAD_SHA",
 })
 
-# One repository-local, non-shipped gate; no general .github executable allowance.
-REPO_GATE = ".github/check_newtab_contract.py"
+# The repository-local, non-shipped gates, each named; no general .github executable allowance.
+# Each is also a MANDATORY_MEMBERS entry (the cited-standards contract together with its
+# --self-test), so a both-runner removal is a missing-mandatory finding.
+REPO_GATES = frozenset({
+    ".github/check_cited_standards_contract.py",
+    ".github/check_newtab_contract.py",
+})
 
 # The one status branch protection requires. In a workflow with more than one job,
 # exactly one job carries this name, a job-level if: of always(), and a needs: list
@@ -349,12 +384,20 @@ RESULT_MASKING_JOB_KEYS = dict((
      "so a gate command need not run or fail its step"),
 ))
 
+# The one step-level shell: spelling accepted, required once on every step with a
+# run: key (module docstring, Step shell). GitHub documents a step's shell: as
+# overriding the job's default shell (over a workflow default it is inferred), so
+# a defaults.run.shell cannot choose the shell a gate command runs under. It does
+# not close defaults.run.working-directory (module docstring, Step shell).
+STEP_SHELL_LINE = "shell: bash"
+
 # The Quality gates job, pinned line for line after its job-id line. Blank and
 # whole-line comment lines are ignored, and the needs: key with its nested lines is
 # compared as the one slot line below, because needs: is checked against the job set
-# instead. Any other departure (a deleted exit 1, a changed success filter, an added
-# key, step or continue-on-error) is a required-status finding. The self-test runs
-# the pinned run: body under bash for every needed-result spelling it must refuse.
+# instead. Any other departure (a deleted exit 1, a removed shell: bash, a changed
+# success filter, an added key, step or continue-on-error) is a required-status
+# finding. The self-test runs the pinned run: body under bash for every
+# needed-result spelling it must refuse.
 REQUIRED_STATUS_NEEDS_SLOT = "    needs: <every other job>"
 REQUIRED_STATUS_JOB = (
     "    name: Quality gates",
@@ -363,6 +406,7 @@ REQUIRED_STATUS_JOB = (
     "    runs-on: ubuntu-latest",
     "    steps:",
     "      - name: Every quality job succeeded",
+    "        " + STEP_SHELL_LINE,
     "        env:",
     "          RESULTS: ${{ join(needs.*.result, ' ') }}",
     "        run: |",
@@ -516,6 +560,12 @@ ALLOWLIST = (
 )
 
 MANDATORY_MEMBERS = frozenset({
+    # The repository contracts (claude PR #520 round 2 MEDIUM-1): mandatory, so removing
+    # one from BOTH runners together is a missing-mandatory finding (exit 1), never a
+    # silent pass; a one-sided removal is already a local-only or ci-only finding.
+    ".github/check_cited_standards_contract.py",
+    ".github/check_cited_standards_contract.py --self-test",
+    ".github/check_newtab_contract.py",
     "tools/check_ci_parity.py",
     "tools/check_ci_parity.py --self-test",
     "tools/check_git_option_table.py",
@@ -572,7 +622,8 @@ JOB_PROPERTY_KEYS = frozenset({
 _TOOL_NONDELIM = r"[^\s'\"(),:=`;{}\[\]]"  # a char that is NOT a legitimate delimiter
 TOOL_RE = re.compile(
     r"(?:(?<!" + _TOOL_NONDELIM + r")|(?<=(?<!" + _TOOL_NONDELIM + r")\./))"
-    r"(?:(?:opf/)?tools/[A-Za-z0-9_.-]+\.(?:py|sh)|" + re.escape(REPO_GATE) + r")\b"
+    r"(?:(?:opf/)?tools/[A-Za-z0-9_.-]+\.(?:py|sh)|"
+    + "|".join(re.escape(gate) for gate in sorted(REPO_GATES)) + r")\b"
 )
 PY_TARGET_RE = re.compile(r"^(?:opf/)?tools/[A-Za-z0-9_.-]+\.py$")
 ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
@@ -762,14 +813,15 @@ def normalize(tokens):
                 "dynamic-target",
                 "gate target must be a literal tools/*.py path",
             )
-        if (target != REPO_GATE and not PY_TARGET_RE.fullmatch(target)
+        if (target not in REPO_GATES and not PY_TARGET_RE.fullmatch(target)
                 or ".." in target.split("/")):
             return Result(
                 False,
                 None,
                 "gate-target",
                 "unsupported gate target {!r}; expected a literal "
-                "tools/*.py path, {} or gitleaks dir".format(target, REPO_GATE),
+                "tools/*.py path, {} or gitleaks dir".format(
+                    target, " or ".join(sorted(REPO_GATES))),
             )
         canonical = [target]
 
@@ -2003,6 +2055,24 @@ def _result_masking_findings(job_ids, job_fields):
     return findings
 
 
+def _step_shell_findings(steps):
+    """Return a finding for every step with a run: key and no STEP_SHELL_LINE."""
+    findings = []
+    for step in steps:
+        if step["run"] and not step["shell"]:
+            findings.append(Finding(
+                "required-status",
+                step["job"],
+                "step {!r} at line {} in job {!r} has a run: key without {}; a "
+                "workflow or job defaults.run.shell would then choose the "
+                "program its command runs under, so the gate need not run "
+                "or fail its step".format(
+                    step["name"], step["line"], step["job"],
+                    STEP_SHELL_LINE),
+            ))
+    return findings
+
+
 def _aggregator_shape_findings(aggregator, lines, start):
     """Compare the job whose id is on lines[start] with REQUIRED_STATUS_JOB.
 
@@ -2138,6 +2208,8 @@ def extract_ci(text):
     top_keys = set()
     refused_job = False
     job_body_started = False
+    steps = []
+    current_step = None
     index = 0
 
     while index < len(lines):
@@ -2308,6 +2380,7 @@ def extract_ci(text):
         if in_jobs and indent == 4 and stripped == "steps:":
             in_steps = True
             current_mapping = None
+            current_step = None
             last_job_key = None
             index += 1
             continue
@@ -2356,6 +2429,11 @@ def extract_ci(text):
         if indent == 6 and stripped.startswith("- "):
             current_mapping = None
             item = stripped[2:]
+            current_step = dict(
+                job=current_job[:-1], line=line_number,
+                name=item[5:].strip() if item.startswith("name:") else item,
+                run=False, shell=[])
+            steps.append(current_step)
             if item.startswith("name:") and item[5:].strip():
                 index += 1
                 continue
@@ -2376,8 +2454,24 @@ def extract_ci(text):
         if indent == 8:
             current_mapping = None
 
+            if current_step is None:
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "step-key",
+                    "step key {!r} appears before the job's first step "
+                    "item".format(stripped),
+                ))
+                index += 1
+                continue
+
             if stripped in ("env:", "with:"):
                 current_mapping = stripped[:-1]
+                index += 1
+                continue
+
+            if stripped == STEP_SHELL_LINE:
+                current_step["shell"].append(line_number)
                 index += 1
                 continue
 
@@ -2389,6 +2483,7 @@ def extract_ci(text):
 
             if stripped.startswith("run:"):
                 value = stripped[4:].strip()
+                current_step["run"] = True
 
                 if value in (">", ">-", ">+"):
                     diagnostics.append(_diagnostic(
@@ -2516,8 +2611,26 @@ def extract_ci(text):
             "workflow has no top-level jobs: mapping",
         ))
 
+    for step in steps:
+        if step["shell"][1:]:
+            diagnostics.append(_diagnostic(
+                source,
+                step["shell"][1],
+                "duplicate-key",
+                "step {!r} declares shell: more than once".format(
+                    step["name"]),
+            ))
+        if step["shell"] and not step["run"]:
+            diagnostics.append(_diagnostic(
+                source,
+                step["shell"][0],
+                "step-key",
+                "shell: applies only to a step with a run: key",
+            ))
+
     findings = _required_status_findings(
         job_ids, job_fields, lines, source, diagnostics)
+    findings.extend(_step_shell_findings(steps))
     diagnostics.extend(_shadow_check(text, source, origins))
     return Extraction(
         frozenset(members),
@@ -3294,6 +3407,11 @@ def self_test():
         "python3 -I -B tools/check_ci_parity.py",
         "python3 -I -B tools/check_git_option_table.py --self-test",
         "python3 -I -B tools/check_git_option_table.py",
+        # The mandatory repository contracts: every matched fixture roster carries them,
+        # as the two real runners do.
+        "python3 -I -B .github/check_cited_standards_contract.py --self-test",
+        "python3 -I -B .github/check_cited_standards_contract.py",
+        "python3 -I -B .github/check_newtab_contract.py",
     )
 
     def local_fixture(commands=(), tail=()):
@@ -3333,6 +3451,7 @@ def self_test():
         for number, command in enumerate(commands, 1):
             lines.extend((
                 "      - name: Gate {}".format(number),
+                "        shell: bash",
                 "        run: " + command,
             ))
         lines.extend(extra_steps)
@@ -3403,19 +3522,45 @@ def self_test():
         0,
     )
 
-    repo_command = "python3 -I -B " + REPO_GATE
-    case("01b repository gate matched",
-         evaluate(local_fixture(common + (repo_command,)),
-                  ci_fixture(common + (repo_command,)), ()), 0)
-    case("01c repository gate local-only",
-         evaluate(local_fixture(common + (repo_command,)), ci_fixture(common), ()),
-         1, ("local-only",), (REPO_GATE,), ())
-    case("01d repository gate ci-only",
-         evaluate(local_fixture(common), ci_fixture(common + (repo_command,)), ()),
-         1, ("ci-only",), (), (REPO_GATE,))
-    case("01e repository gate shadow scan",
-         evaluate(local_fixture(common, ("echo " + REPO_GATE,)), ci_fixture(common), ()),
-         2)
+    def drop(member):
+        """The common roster without the one command whose identity is member."""
+        return tuple(c for c in common if c != "python3 -I -B " + member)
+
+    case("01b repository gates matched",
+         evaluate(local_fixture(common), ci_fixture(common), ()), 0)
+    for repo_gate in sorted(REPO_GATES):
+        case("01c repository gate local-only: " + repo_gate,
+             evaluate(local_fixture(common), ci_fixture(drop(repo_gate)), ()),
+             1, ("local-only", "missing-mandatory"), (repo_gate,), ())
+        case("01d repository gate ci-only: " + repo_gate,
+             evaluate(local_fixture(drop(repo_gate)), ci_fixture(common), ()),
+             1, ("ci-only", "missing-mandatory"), (), (repo_gate,))
+        case("01e repository gate shadow scan: " + repo_gate,
+             evaluate(local_fixture(common, ("echo " + repo_gate,)), ci_fixture(common), ()),
+             2)
+        # The runner's echo line is refused by its own grammar too; a workflow step name is
+        # not, so only the shadow scan's match on this repository gate refuses it.
+        case("01g repository gate shadow scan in a step name: " + repo_gate,
+             evaluate(local_fixture(common), ci_fixture(common, (
+                 "      - name: Run " + repo_gate,
+                 "        run: python3 -I -B tools/check_ci_parity.py",
+             )), ()), 2)
+    # claude PR #520 round 2 MEDIUM-1: each mandatory repository-contract member removed
+    # from BOTH runners together is a missing-mandatory finding, never a silent pass. The
+    # member list is spelled out rather than derived from MANDATORY_MEMBERS, so reverting
+    # the contracts out of that set turns these vectors red instead of silently skipping.
+    for member in (
+            ".github/check_cited_standards_contract.py",
+            ".github/check_cited_standards_contract.py --self-test",
+            ".github/check_newtab_contract.py"):
+        count += 1
+        if member not in MANDATORY_MEMBERS:
+            failures.append(
+                "01h {} is not in MANDATORY_MEMBERS; a both-runner removal of a "
+                "repository contract would be undetected again".format(member))
+        case("01h repository contract removed from both runners: " + member,
+             evaluate(local_fixture(drop(member)), ci_fixture(drop(member)), ()),
+             1, ("missing-mandatory",), (), ())
     unknown = "python3 -I -B .github/unrecognized.py"
     case("01f unknown repository executable refused",
          evaluate(local_fixture(common + (unknown,)),
@@ -3559,6 +3704,7 @@ def self_test():
     ci_version_lines = ci_fixture(common).rstrip().splitlines()
     ci_version_lines.extend((
         "      - name: Version",
+        "        shell: bash",
         "        run: |",
         "          set -euo pipefail",
         '          if [ "$EVENT_NAME" = "pull_request" ]; then',
@@ -3606,6 +3752,7 @@ def self_test():
     protected_ci_lines = ci_fixture(common).rstrip().splitlines()
     protected_ci_lines.extend((
         "      - name: Branch root",
+        "        shell: bash",
         "        run: |",
         "          set -euo pipefail",
         '          if [ "$EVENT_NAME" = "pull_request" ]; then',
@@ -3822,6 +3969,7 @@ def self_test():
         "    steps:",
         "      - uses: actions/checkout@v4",
         "      - name: Branch root",
+        "        shell: bash",
         '        run: python3 tools/check_branch_root.py '
         '--protected "$PR_HEAD_SHA" --head "$PR_HEAD_SHA"',
     )) + "\n"
@@ -3974,8 +4122,9 @@ def self_test():
         ("missing-mandatory",),
     )
 
-    # Both rosters carry the ci-parity mandatory members but omit the git-option-table pair, so the only
-    # findings are missing-mandatory for those two (rosters are otherwise matched, no local/ci-only drift).
+    # Both rosters carry the ci-parity mandatory members but omit the git-option-table pair and the
+    # three repository-contract members, so the only findings are missing-mandatory for those five
+    # (rosters are otherwise matched, no local/ci-only drift).
     git_option_absent = (
         "python3 -I -B tools/check_ci_parity.py --self-test",
         "python3 -I -B tools/check_ci_parity.py",
@@ -4952,8 +5101,9 @@ def self_test():
 
     # codex qa10 MAJOR-1 (class closure): every read of runner or workflow
     # text must go through read_runner_text, the ONE byte-level reader.
-    # This structural vector parses this file and
-    # tools/selftest_git_fixture_env.py and pins EVERY read_text or
+    # This structural vector parses this file,
+    # tools/selftest_git_fixture_env.py and its four registered suite
+    # runners and pins EVERY read_text or
     # splitlines attribute and every text-mode open() call, as spelled, to
     # an exact per-function site count, so a new, moved or removed read
     # written through those APIs turns this vector red and forces review
@@ -5036,10 +5186,6 @@ def self_test():
             # reads, so a reviewed count with a changed read target stays
             # inside the allowlist.
             ("_close_lock_sites", "open-text"): 1,
-            # The member-timeout control's fixture pid file: no runner text.
-            ("_member_timeout_controls", "read_text"): 1,
-            # The cleanup-failure control's captured diagnostic lines: no runner text.
-            ("_member_timeout_controls", "splitlines"): 1,
             # /proc/<pid>/stat, the timeout control's liveness probe.
             ("_pid_state", "open-text"): 1,
             ("_registered_selftests", "splitlines"): 1,
@@ -5056,6 +5202,18 @@ def self_test():
             ("prepare", "read_text"): 1,
             ("run", "splitlines"): 1,
         },
+        "tools/selftest_git_fixture_env_core.py": {
+            # The member-timeout control's fixture pid file: no runner text.
+            ("_member_timeout_controls", "read_text"): 1,
+            # The cleanup-failure control's captured diagnostic lines: no runner text.
+            ("_member_timeout_controls", "splitlines"): 1,
+        },
+        # The three config lanes spell no read_text, splitlines or text-mode open() site (the
+        # system lane parses the OPF modules through read_text_nonblocking); a first one added
+        # there drifts from this empty allowlist and forces review.
+        "tools/selftest_git_fixture_env_config_combined.py": {},
+        "tools/selftest_git_fixture_env_config_malformed.py": {},
+        "tools/selftest_git_fixture_env_config_system.py": {},
     }
     for relative, allowed in sorted(allowed_read_sites.items()):
         got_sites = _read_api_sites(
@@ -5089,6 +5247,7 @@ def self_test():
             for number, command in enumerate(commands, 1):
                 lines.extend((
                     "      - name: Gate {}".format(number),
+                    "        shell: bash",
                     "        run: " + command,
                 ))
         lines.extend(aggregator)
@@ -5111,7 +5270,8 @@ def self_test():
                      first=("python3 tools/a.py", "python3 tools/b.py")),
         ())
     case("30b a member present in two jobs is counted once", moved, 0)
-    if "tools/b.py" not in moved.ci_members or len(moved.ci_members) != 6:
+    if ("tools/b.py" not in moved.ci_members
+            or len(moved.ci_members) != len(common) + 2):
         failures.append(
             "30b moved member was not counted exactly once: {!r}".format(
                 sorted(moved.ci_members)))
@@ -5198,6 +5358,7 @@ def self_test():
         "    steps:\n"
         "      - uses: actions/checkout@v4\n"
         "      - name: Gate 1\n"
+        "        shell: bash\n"
         "        run: python3 tools/b.py\n"
     )
     one_need = multi_job_ci(
@@ -5280,9 +5441,10 @@ def self_test():
     # 32 RESULT-MASKING KEYS: continue-on-error, uses, defaults and container
     # on any job are each a required-status finding whatever their value,
     # one-job workflows included. Each red fixture passed before the change.
-    # The step-level siblings (continue-on-error, if:, shell:, and a gate
-    # chained with || true) were already cannot-evaluate through the step-key
-    # allowlist and the shell grammar; 32j to 32m pin that.
+    # The step-level siblings (continue-on-error, if:, a shell: other than
+    # shell: bash, and a gate chained with || true) were already
+    # cannot-evaluate through the step-key allowlist and the shell grammar;
+    # 32j to 32m pin that.
     for label, line, needle in (
             ("32a continue-on-error: true", "    continue-on-error: true",
              "continue-on-error"),
@@ -5394,10 +5556,13 @@ def self_test():
                   ()),
          0)
 
-    # 33i The pinned run: body itself, run under bash as GitHub runs a step
-    # with no shell: (bash -e), exits 0 only when every needed result is
-    # success. A body without its exit 1 passes a failure, so this vector
-    # fails if the pin loses the line.
+    # 33i The pinned run: body itself, run under bash with the options
+    # GitHub documents for shell: bash (bash --noprofile --norc -eo pipefail
+    # {0}; here through -c, not a script file), exits 0 only when every
+    # needed result is success. A body without its exit 1 passes a failure,
+    # so this vector fails if the pin loses the line. The pinned body sets
+    # -euo pipefail itself, so it cannot show that the launch supplies them;
+    # the options vector after it runs a failing pipeline with no set line.
     import os
     import shutil
     import subprocess
@@ -5413,7 +5578,7 @@ def self_test():
         if results is not None:
             env["RESULTS"] = results
         return subprocess.run(
-            ["bash", "--noprofile", "--norc", "-e", "-c",
+            ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
              "\n".join(body) + "\n"],
             env=env, stdin=subprocess.DEVNULL, capture_output=True,
             text=True, timeout=60).returncode
@@ -5446,6 +5611,129 @@ def self_test():
             failures.append(
                 "33i the deleted-exit-1 body did not pass a failure, so the "
                 "scenarios above do not discriminate")
+        # 33i options: a failing pipeline followed by a succeeding command,
+        # with no set line of its own, exits nonzero only when the launch
+        # carries both -e and -o pipefail, so dropping either option from
+        # aggregate() fails this vector. The control runs the same body with
+        # neither option and requires exit 0, so the body itself is not what
+        # fails.
+        options_body = ("false | true", "true")
+        count += 1
+        if aggregate(options_body, None) == 0:
+            failures.append(
+                "33i a failing pipeline with no set line exited 0, so the "
+                "launch does not apply -e and -o pipefail")
+        count += 1
+        if subprocess.run(
+                ["bash", "--noprofile", "--norc", "-c",
+                 "\n".join(options_body) + "\n"],
+                env=dict(PATH=os.defpath, LC_ALL="C"),
+                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                timeout=60).returncode != 0:
+            failures.append(
+                "33i the options body failed with neither -e nor -o "
+                "pipefail, so the options vector does not discriminate")
+
+    # 34 STEP SHELL: every run: step carries exactly one shell: bash, so a
+    # workflow or job defaults.run.shell cannot choose the program a gate runs
+    # under. Before the change any step-level shell: was cannot-evaluate, so a
+    # pinned line could not be held at all; 34a to 34c are findings only
+    # through STEP_SHELL_LINE and REQUIRED_STATUS_JOB, and 34e, 34f and 34h
+    # only through the step-shell diagnostics. 34d and 34g pin refusals that
+    # held before the change, so a looser shell or top-level grammar fails them.
+    work_shell = "        shell: bash\n        run: python3 tools/b.py\n"
+    finding_case(
+        "34a a work step without shell: bash is a finding",
+        evaluate(multi_local,
+                 mutated(good_multi, work_shell,
+                         "        run: python3 tools/b.py\n"),
+                 ()),
+        1, "without shell: bash")
+    gates_step = "      - name: Every quality job succeeded\n"
+    for needle in ("REQUIRED_STATUS_JOB", "without shell: bash"):
+        finding_case(
+            "34b the Quality gates step without shell: bash is a finding "
+            "({})".format(needle),
+            evaluate(multi_local,
+                     mutated(good_multi, gates_step + "        shell: bash\n",
+                             gates_step),
+                     ()),
+            1, needle)
+    finding_case(
+        "34c a block run: step without shell: bash in a one-job workflow is "
+        "a finding",
+        evaluate(local_fixture(common + ("python3 tools/a.py",)),
+                 ci_fixture(common, ("      - name: Block",
+                                     "        run: |",
+                                     "          python3 tools/a.py")),
+                 ()),
+        1, "without shell: bash")
+    for label, line in (
+            ("34d1 shell: sh", "        shell: sh"),
+            ("34d2 a custom shell true {0}", "        shell: true {0}"),
+            ("34d3 a quoted shell: 'bash'", "        shell: 'bash'"),
+            ("34d4 shell: bash -e {0}", "        shell: bash -e {0}"),
+            ("34d5 shell: pwsh", "        shell: pwsh")):
+        diagnostic_case(
+            label + " in place of shell: bash is cannot-evaluate",
+            evaluate(multi_local,
+                     mutated(good_multi, work_shell,
+                             line + "\n        run: python3 tools/b.py\n"),
+                     ()),
+            "step-key")
+    diagnostic_case(
+        "34e a repeated shell: bash in one step is cannot-evaluate",
+        evaluate(multi_local,
+                 mutated(good_multi, work_shell,
+                         "        shell: bash\n" + work_shell),
+                 ()),
+        "duplicate-key")
+    diagnostic_case(
+        "34f shell: bash on a step with no run: key is cannot-evaluate",
+        evaluate(local_fixture(common),
+                 ci_fixture(common, ("      - uses: actions/checkout@v4",
+                                     "        shell: bash")),
+                 ()),
+        "step-key")
+    diagnostic_case(
+        "34g a top-level defaults: run: shell: true {0} is cannot-evaluate",
+        evaluate(multi_local,
+                 mutated(good_multi, "jobs:\n",
+                         "defaults:\n  run:\n    shell: true {0}\n"
+                         "jobs:\n"),
+                 ()),
+        "unknown-top-key")
+    two_steps = "    name: Job two\n    runs-on: ubuntu-latest\n    steps:\n"
+    diagnostic_case(
+        "34h a shell: bash line before the first step of a job is "
+        "cannot-evaluate, not read into the previous job's last step",
+        evaluate(multi_local,
+                 mutated(good_multi, two_steps,
+                         two_steps + "        shell: bash\n"),
+                 ()),
+        "step-key")
+    case("34i control: a comment after shell: bash passes",
+         evaluate(multi_local,
+                  mutated(good_multi, work_shell,
+                          "        shell: bash  # pinned\n"
+                          "        run: python3 tools/b.py\n"),
+                  ()),
+         0)
+    # 34j A step key before a job's first step item is cannot-evaluate (YAML
+    # rejects that shape). Before the change each case passed with exit 0: a
+    # run: there added its members and drew no shell: finding.
+    for label, lines_in in (
+            ("34j1 a run: line", "        run: python3 tools/b.py\n"),
+            ("34j2 a block run: |",
+             "        run: |\n          python3 tools/b.py\n"),
+            ("34j3 a uses: line", "        uses: actions/checkout@v4\n"),
+            ("34j4 an env: mapping", "        env:\n          A: b\n")):
+        diagnostic_case(
+            label + " before the first step of a job is cannot-evaluate",
+            evaluate(multi_local,
+                     mutated(good_multi, two_steps, two_steps + lines_in),
+                     ()),
+            "step-key")
 
     # D-400-SPECIAL-FILE-PRECHECK bootstrap (runner side): the exact test-and-abort line is accepted
     # only at top level before any gate, registers no member, and satisfies the shadow scan through
@@ -5610,7 +5898,7 @@ def self_test():
     # step-key diagnostic (cannot-evaluate), never a clean order pass. An env:/with: mapping stays
     # modelled (quality.yml carries both). These vectors fail without the step-key rule.
     count += 1
-    for weakening in ("if: ${{ false }}", "continue-on-error: true", "shell: bash",
+    for weakening in ("if: ${{ false }}", "continue-on-error: true", "shell: sh",
                       "timeout-minutes: 1"):
         neutered = order_fixture.replace(
             "      - name: Special-file precheck\n",
@@ -5627,6 +5915,35 @@ def self_test():
     if got_problems or got_diagnostics:
         failures.append("36b an env: mapping on a gate step stays modelled, got {!r} {!r}".format(
             got_problems, got_diagnostics))
+    # The step-shell rule (STEP_SHELL_LINE on every quality.yml run: step) is modelled: the plain
+    # shell: bash line on the precheck step and on a gate step keeps a clean order pass, while every
+    # other shell spelling and a shell: on a step with no run: key stay step-key refusals. The clean
+    # vector fails without the shell: branch, and each refusal fails if that branch accepts more than
+    # the one plain line.
+    count += 1
+    bashed = order_fixture.replace(
+        "      - name: Special-file precheck\n",
+        "      - name: Special-file precheck\n        shell: bash\n", 1).replace(
+        "      - name: A gate\n", "      - name: A gate\n        shell: bash\n", 1)
+    got_problems, got_diagnostics = workflow_precheck_order_problems(bashed, "fixture.yml")
+    if got_problems or got_diagnostics:
+        failures.append("36b shell: bash on the run: steps must stay modelled, got {!r} {!r}".format(
+            got_problems, got_diagnostics))
+    for label, mutated_fixture in (
+        ("a custom shell true {0}", bashed.replace("        shell: bash\n        run: |\n",
+                                                   "        shell: true {0}\n        run: |\n", 1)),
+        ("a quoted shell 'bash'", bashed.replace("        shell: bash\n        run: |\n",
+                                                 "        shell: 'bash'\n        run: |\n", 1)),
+        ("shell: bash -e {0}", bashed.replace("        shell: bash\n        run: |\n",
+                                              "        shell: bash -e {0}\n        run: |\n", 1)),
+        ("shell: bash on the checkout step",
+         order_fixture.replace("      - uses: actions/checkout@v4\n",
+                               "      - uses: actions/checkout@v4\n        shell: bash\n", 1)),
+    ):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(mutated_fixture, "fixture.yml")
+        if not any(diagnostic.code == "step-key" for diagnostic in got_diagnostics):
+            failures.append("36b {} must be a step-key diagnostic, got {!r} {!r}".format(
+                label, got_problems, got_diagnostics))
 
     # D-400-SPECIAL-FILE-PRECHECK order (QA round 5, claude M1): GitHub applies workflow- and
     # job-level env: and defaults: to every step, so a BASH_ENV, PATH or defaults.run.shell value
@@ -6340,7 +6657,10 @@ WORKFLOW_LEVEL_KEYS = ("jobs", "name", "on", "permissions")
 # required-status rule holds the aggregate to it), and needs: only sequences jobs (a needed-job
 # failure is visible in the needs results the pinned aggregate body reads).
 JOB_LEVEL_KEYS = ("name", "runs-on", "steps", "strategy", "if", "needs")
-STEP_KEYS = ("name", "uses", "run", "env", "with")
+# shell: is modelled ONLY as STEP_SHELL_LINE (shell: bash), the line the required-status rule holds on
+# every quality.yml run: step: any other shell value, and a shell: on a step with no run: key, is a
+# step-key refusal (_workflow_step).
+STEP_KEYS = ("name", "uses", "run", "env", "with", "shell")
 
 
 def _grammar_context_code(indent):
@@ -6648,8 +6968,10 @@ def _workflow_line_grammar(text, source):
 def _workflow_step(item_map, line, source, diagnostics, run_line_numbers):
     """One step dict (uses, run, env, withs, keys, line) from a grammar-accepted step mapping.
     Semantic rules on top of the grammar: the first entry must be a non-empty name: or a uses:;
-    only STEP_KEYS are modelled (an if:, continue-on-error:, shell: or timeout-minutes: above
-    all can disable, soften or reinterpret the step without touching its run body); name: and
+    only STEP_KEYS are modelled (an if:, continue-on-error:, timeout-minutes: or a shell: other
+    than STEP_SHELL_LINE above all can disable, soften or reinterpret the step without touching
+    its run body; shell: bash, which the required-status rule holds on every quality.yml run:
+    step, is modelled only as that exact plain line on a step with a run: key); name: and
     uses: must carry a modelled scalar (stored DECODED, so a simply quoted
     'actions/checkout@v4' is the same checkout as the plain spelling); run: must carry a
     plain scalar or a literal block (its body OPAQUE, kept verbatim); env:/with: must be block
@@ -6666,7 +6988,7 @@ def _workflow_step(item_map, line, source, diagnostics, run_line_numbers):
         if key not in STEP_KEYS:
             diagnostics.append(_diagnostic(source, number, "step-key",
                                "unsupported step key {!r}; a key this parse does not model "
-                               "(if:, continue-on-error:, shell:, timeout-minutes:, ...) could "
+                               "(if:, continue-on-error:, timeout-minutes:, ...) could "
                                "disable or soften the step".format(key)))
             continue
         step["keys"].add(key)
@@ -6677,6 +6999,15 @@ def _workflow_step(item_map, line, source, diagnostics, run_line_numbers):
                                    "value".format(key)))
             elif key == "uses":
                 step["uses"] = child[1]
+        elif key == "shell":
+            # The plain shell: bash line only (a quoted 'bash' decodes to the same text but carries
+            # the quoted marker, so it is refused here, as the required-status rule refuses it).
+            if child != ("scalar", STEP_SHELL_LINE.split(": ", 1)[1]):
+                diagnostics.append(_diagnostic(source, number, "step-key",
+                                   "step key shell: is modelled only as the plain line {!r}; any "
+                                   "other shell (sh, a custom shell such as true {{0}}, a quoted "
+                                   "'bash', bash -e {{0}}) can reinterpret or neuter the step's "
+                                   "run body".format(STEP_SHELL_LINE)))
         elif key == "run":
             if child[0] == "block":
                 step["run"].extend(child[1])
@@ -6710,6 +7041,9 @@ def _workflow_step(item_map, line, source, diagnostics, run_line_numbers):
                                            "step env entry {!r} names an execution-control "
                                            "variable; it can neuter a shell or python step "
                                            "without touching its run body".format(entry_key)))
+    if "shell" in step["keys"] and "run" not in step["keys"]:
+        diagnostics.append(_diagnostic(source, line, "step-key",
+                           "shell: applies only to a step with a run: key"))
     if step["uses"] is not None and step["run"]:
         # #400 round 13 (codex): a step carrying BOTH uses: and run: is refused. GitHub rejects
         # the combination, but a parse that modelled the step by its uses: alone would let the

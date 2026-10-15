@@ -418,9 +418,10 @@ def self_test_main():
 def _precheck_copies_problems(gen_text, opf_text):
     """D-400-SPECIAL-FILE-PRECHECK: the precheck section of tools/_gen_common.py and its copy in
     opf/tools/_containment.py (the standalone OPF pack may not import tools/) must stay in step. The
-    COMPARED SURFACE is the whole section: the helpers and the function (_git_lines, _git_toplevel,
-    _ignored_paths, _derive_precheck_root, precheck_special_files; docstrings set aside), the module
-    tables (_PRECHECKED_ROOTS, _SPECIAL_KINDS), and the __main__ entry block, each equal between the
+    COMPARED SURFACE is the whole section: the helpers and the functions (_git_lines, _git_toplevel,
+    _ignored_paths, _derive_precheck_root, precheck_special_files, and _precheck_entry, the --precheck
+    entry the __main__ block calls; docstrings set aside), the module tables (_PRECHECKED_ROOTS,
+    _SPECIAL_KINDS), and the __main__ entry block, each equal between the
     two modules as parsed trees. Beyond equality, each MODULE is held to shape rules that keep the
     compared definitions the OPERATIVE ones at import and at --precheck time: each compared name is
     bound exactly once anywhere in the module (a later `precheck_special_files = lambda root: root`
@@ -455,7 +456,7 @@ def _precheck_copies_problems(gen_text, opf_text):
     from _binding_proof import namespace_mutation_problems
 
     guarded = ("precheck_special_files", "_PRECHECKED_ROOTS", "_SPECIAL_KINDS", "_git_lines",
-               "_git_toplevel", "_ignored_paths", "_derive_precheck_root")
+               "_git_toplevel", "_ignored_paths", "_derive_precheck_root", "_precheck_entry")
     tables = ("_PRECHECKED_ROOTS", "_SPECIAL_KINDS")
 
     def is_main_guard(node):

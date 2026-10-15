@@ -411,6 +411,7 @@ _CONTRACT = {
         'Doctor MUST NOT consult a journal to decide partial status and makes no claim that a staged plan has a recoverable transaction.',
         "In homes 2, ordinary transaction operands, including those of an open transaction being recovered, MUST NOT equal, descend from, or contain journals/; a legacy store's transactions and recovery keep their legacy operand handling, and no shipped writer targets that home.",
         'Capability-bound journal APIs MUST derive their destinations from kind and run identity.',
+        'An ID reservation under allocations/ MUST be created exclusively and create-only, made durable before it is relied on and never rewritten, so an interrupted publication leaves no reservation or the complete one (section 8.2).',
         _D('Homes 2 has no legacy journal transport: no homes-1 journal is carried into journals/, and a homes-2 store is never recovered from one (section 15).'),
         _D('These comparisons are byte-exact: on a case-insensitive or normalizing filesystem, a differently cased or composed spelling can alias a reserved home and is not caught.'),
         'Discovery precedes the manifest, so it cannot know the generation: it MUST examine manifest.toml in every immediate subdirectory, including journals/, MUST fail closed on a reserved-name match or ambiguity, and MUST NOT read deeper there.',
@@ -535,6 +536,9 @@ _CONTRACT = {
         'Rotation, index rewrites, and store relocation MUST NOT touch counters.toml.',
         'Re-adoption MUST seed both series from a pinned ancestral snapshot and MUST refuse a missing required namespace; it MUST NOT zero-seed prior ancestry.',
         'Only a genuinely first adoption MAY start its counters at zero.',
+        'At homes 2 the claim additionally begins with one irrevocable reservation, journals/<kind>/allocations/<run-id>.toml (sections 4.2 and 8.8), which MUST hold exactly format = "opf.journal.allocation/v1", the run\'s kind, run_id and operation_id, and a non-empty [claims] table mapping each claimed counter key, a record namespace or, for a run of the import engine, a quoted imported-series "imported:<NS>" key, to that run\'s new high-water value, an integer of at least 1 and at most 2**63 - 1 so every conforming TOML reader can parse it.',
+        "A reservation MUST NOT be rewritten, and a reservation request finding an existing entry for the same run MUST be refused unless the entry reads back byte-identical to the exact payload the request would publish, in which case the request MUST re-establish the entry's durability before relying on it; a refusal is not evidence that the run holds its numbers.",
+        'The next-ID derivation applies per series key: at homes 2 the next ID under a counter key, the clean <NS> and quoted "imported:<NS>" number lines independently, is one more than the maximum of the counters.toml high-water and every reservation\'s [claims] value for that counter key, so recovery MUST treat a reserved number as issued even where no published record carries it.',
     ),
     "8.3": (
         _D('Clean records carry the envelope below; the imported envelope follows it.'),
@@ -2105,6 +2109,7 @@ def boundary_self_test():
     import contextlib
     import copy
     import hashlib
+    import inspect
     from types import SimpleNamespace
     from unittest.mock import patch
     import _journal as journal
@@ -2915,9 +2920,14 @@ def boundary_self_test():
         with patch.object(journal, "_read_contained", return_value=(b"corrupt", None)):
             check("internal-projection-conflict-refused", lambda: refuses(
                 lambda: home_journal._project(100, 103, Path("/unused") / run, "import", run)))
-        with patch.object(journal, "_read_contained", return_value=(payload, None)):
+        with patch.object(journal, "_read_contained", return_value=(payload, None)), \
+                patch.object(home_journal.os, "fsync") as flushed:
             check("internal-projection-idempotent", lambda: home_journal._project(
                 100, 103, Path("/unused") / run, "import", run) is None and publish.call_count == 1)
+            # Fix round 2 (codex MEDIUM): accepting the byte-equal projection re-establishes the
+            # containing directory's durability through the parent handle _open_parent returned.
+            check("internal-projection-idempotent-flushes-parent",
+                  lambda: flushed.call_args.args == (104,))
 
     # PR B (maintainer ruling): shared native-journal validation is kind-generic; adoption identities
     # validate through the same pure validators the adoption executor will bind to.
@@ -2974,6 +2984,106 @@ def boundary_self_test():
                 ("record", lambda: home_journal.projection_record(bad_kind, bad_run, "complete", "op")),
                 ("payload", lambda: home_journal.projection_payload(bad_kind, bad_run, "complete", "op"))):
             check("internal-identity-{}-{}".format(label, validator), lambda: journal_refuses(call))
+
+    # PR-3: the irrevocable ID reservation (spec 4.2/8.2). Pure shape, identity and claims here,
+    # then the derived destination and publication order on one shared recorded trace with
+    # filesystem writes denied by mocks; real exclusivity, crash states, the durable publication
+    # order and the on-disk refusals run in _self_test_vectors.
+    record_run = "record-20260917T120000Z-0123456789abcdef"
+    reservation_rel = ".working/journals/record/allocations/" + record_run + ".toml"
+    # Regression pins (fix round 1, claude MINOR-3): allocation_record and require_ordinary_target
+    # predate PR-3; these three pin the base behaviour the reservation writer builds on.
+    check("reservation-path-derived", lambda: store.allocation_record("record", record_run) == reservation_rel)
+    check("reservation-ordinary-target-refused", lambda: refuses(
+        lambda: store.require_ordinary_target(reservation_rel)))
+    with patch.object(home_journal, "_opened", side_effect=AssertionError("opened the store journal")):
+        check("reservation-operand-refused", lambda: "journal home" in (refusal(
+            lambda: home_journal.run_transaction(object(), "record", record_run,
+                                                 [dict(op="create", path=reservation_rel)],
+                                                 lambda _name: b"")) or ""))
+    check("reservation-no-caller-path", lambda: list(inspect.signature(
+        home_journal.reserve_allocation).parameters) == ["cap", "kind", "run_id", "claims"])
+    check("reservation-typed-record", lambda: tomllib.loads(home_journal.reservation_payload(
+        "record", record_run, "held-operation", {"WL": 12, "BI": 7}).decode()) == {
+        "format": "opf.journal.allocation/v1", "kind": "record", "run_id": record_run,
+        "operation_id": "held-operation", "claims": {"BI": 7, "WL": 12}})
+    # The claims grammar is the store's counter-key grammar for the reserving kind (spec 8.2,
+    # _opf_schema._is_counter_key): every record namespace for every kind, the quoted
+    # imported-series keys only for an import-engine kind, and a value inside TOML's integer
+    # range, each bound tested just inside, at, and just outside it.
+    for bad in (None, {}, [("BI", 1)], {"BI": 0}, {"BI": -1}, {"BI": True}, {"bi": 1}, {"BIX": 1},
+                {7: 1}, {"BI": "7"}, {"ZZ": 1}, {"TX": 1}, {"imported:BI": 1}, {"BI": 2 ** 63}):
+        check("reservation-claims-refused-{!r}".format(bad), lambda b=bad: journal_refuses(
+            lambda: home_journal.reservation_payload("record", record_run, "op", b)))
+    for bad in ({"imported:LF": 1}, {"imported:bi": 1}, {"imported:BIX": 1}, {"imported:BI": 0},
+                {"imported:BI": 2 ** 63}):
+        check("reservation-import-claims-refused-{!r}".format(bad), lambda b=bad: journal_refuses(
+            lambda: home_journal.reservation_payload("import", run, "op", b)))
+    check("reservation-claims-value-bounds", lambda: not journal_refuses(
+        lambda: home_journal.reservation_payload("record", record_run, "op",
+                                                 {"BI": 1, "WL": 2 ** 63 - 2, "MD": 2 ** 63 - 1})))
+    check("reservation-import-series-claims", lambda: tomllib.loads(home_journal.reservation_payload(
+        "import", run, "op", {"imported:BI": 3, "BI": 2}).decode())["claims"] ==
+        {"BI": 2, "imported:BI": 3})
+    check("reservation-operation-id-refused", lambda: journal_refuses(
+        lambda: home_journal.reservation_payload("record", record_run, "", {"BI": 1})))
+    # The invalid-identity (and claims) refusal precedes ANY capability use: _held_root is
+    # replaced by a sentinel that fails the vector if it is ever reached, so a capability refusal
+    # cannot stand in for the identity one (fix round 1, codex MEDIUM; claude MINOR-2).
+    with patch.object(home_journal, "_held_root",
+                      side_effect=AssertionError("capability used before identity validation")):
+        for label, bad_kind, bad_run in (("traversal", "record", "../escape"), ("kind", "bogus", record_run),
+                                         ("foreign-run", "record", run)):
+            check("reservation-identity-" + label, lambda k=bad_kind, r=bad_run: journal_refuses(
+                lambda: home_journal.reserve_allocation(object(), k, r, {"BI": 1})))
+        check("reservation-claims-before-capability", lambda: "claims" in (refusal(
+            lambda: home_journal.reserve_allocation(object(), "record", record_run, {})) or ""))
+    check("reservation-capability-required", lambda: journal_refuses(
+        lambda: home_journal.reserve_allocation(object(), "record", record_run, {"BI": 1})))
+
+    @contextlib.contextmanager
+    def held_root(_cap):
+        yield 100
+
+    held = SimpleNamespace(op_id="held-operation")
+    trace = []
+    with patch.object(home_journal, "_held_root", held_root), \
+            patch.object(journal, "ensure_journal_dirs") as mkdirs, \
+            patch.object(journal, "_open_parent", return_value=(106, record_run + ".toml")) as parent, \
+            patch.object(journal, "_lstat_at",
+                         side_effect=lambda *args: trace.append("existence")) as prior, \
+            patch.object(journal, "_close_fd_quietly"), \
+            patch.object(oplock, "_remove_staging_garbage",
+                         side_effect=lambda *args: trace.append("garbage")) as garbage, \
+            patch.object(oplock, "_create_control_file",
+                         side_effect=lambda *args: (trace.append("publish"), (107, (1, 107)))[1]) as reserved, \
+            patch.object(home_journal.os, "close"):
+        reserved_payload = home_journal.reserve_allocation(held, "record", record_run, {"BI": 7})
+        check("reservation-derived-parent", lambda: mkdirs.call_args.args ==
+              (100, ".working/journals/record/allocations"))
+        check("reservation-derived-destination", lambda: parent.call_args.args == (100, reservation_rel))
+        # The order is judged on the one recorded trace: garbage retired, THEN the final name
+        # judged, THEN publication; call arguments alone cannot show it (fix round 1, codex
+        # MEDIUM; claude MINOR-1).
+        check("reservation-garbage-removed-first", lambda: trace == ["garbage", "existence", "publish"]
+              and garbage.call_args.args == (106, record_run + ".toml", "id reservation"))
+        check("reservation-published-exact-payload", lambda: reserved.call_args.args ==
+              (106, record_run + ".toml", reserved_payload, "id reservation") and reserved_payload ==
+              home_journal.reservation_payload("record", record_run, "held-operation", {"BI": 7}))
+        # An existing entry is judged by _existing_reservation's read-back, never republished
+        # and never blindly refused as already-held (fix round 1, claude MEDIUM-1; codex MINOR).
+        prior.side_effect = lambda *args: trace.append("existence") or object()
+        with patch.object(home_journal, "_existing_reservation",
+                          side_effect=journal.JournalError("existing id reservation differs")) as judged:
+            check("reservation-existing-judged", lambda: "differs" in (refusal(
+                lambda: home_journal.reserve_allocation(held, "record", record_run, {"BI": 7})) or "")
+                and reserved.call_count == 1 and judged.call_args.args ==
+                (106, record_run + ".toml", "record", record_run, reserved_payload))
+        with patch.object(home_journal, "_existing_reservation",
+                          return_value=reserved_payload):
+            check("reservation-existing-idempotent", lambda: home_journal.reserve_allocation(
+                held, "record", record_run, {"BI": 7}) == reserved_payload
+                and reserved.call_count == 1)
 
     check("evidence-homes2-roster", lambda: "C-EVIDENCE-ENUM" not in doctor.REQUIRED_CHECKS
           and doctor.required_checks(2).index("C-EVIDENCE-ENUM") == doctor.REQUIRED_CHECKS.index("C-ARCHIVE-ENUM") + 1
@@ -3785,6 +3895,408 @@ def _self_test_vectors():
     with _patch.object(store, "STAGING_KINDS", store.STAGING_KINDS + ("record",)):
         check("staging-record-flip-option-ii", lambda: not refuses(lambda: store.stage_run("record", record_run))
               and not refuses(lambda: store.evidence_run("record", record_run)))
+    # PR-3: the reservation writer on a real store: exclusive, create-only, durable publication. The
+    # reachable on-disk states are nothing, a torn staging leftover, the complete reservation (its
+    # directory entry durable once the publication's final fsync ran), and the complete reservation
+    # plus its shared-inode staging leftover. A later call under the SAME capability retires the
+    # garbage and then completes or refuses deterministically; a call under a NEW capability (what
+    # a retry after a kill holds when it re-enters through acquire_operation; a resumed init
+    # attaches the persisted operation id and so repeats the SAME capability instead) is refused,
+    # and the leftover reservation is the disclosed conservative residual.
+    import os
+    import signal
+    import threading
+    import time
+    import _journal as native_journal
+    import _opf_journal as home_journal
+    import _opf_oplock as oplock
+
+    def reservation_refusal(thunk):
+        try:
+            thunk()
+        except native_journal.JournalError as exc:
+            return str(exc)
+        return None
+
+    with tempfile.TemporaryDirectory(prefix="opf-homes-") as tmp:
+        root = Path(tmp) / "store"
+        machine_dir = root / ".working" / "toml"
+        machine_dir.mkdir(parents=True)
+        anchor_file = root / "anchor"
+        anchor_file.write_bytes(b"")
+        cap = oplock.OpCapability.__new__(oplock.OpCapability)
+        cap._claim = threading.Lock()
+        cap._claimant = None
+        cap._released = False
+        cap._acquirer_pid = os.getpid()
+        cap._acquirer_pid_start = native_journal._pid_start(os.getpid())
+        cap._anchor_fd = os.open(str(anchor_file), os.O_RDONLY)
+        anchor_st = os.fstat(cap._anchor_fd)
+        cap._anchor_ident = (anchor_st.st_dev, anchor_st.st_ino)
+        machine_st = os.stat(machine_dir)
+        cap._machine_ident = (machine_st.st_dev, machine_st.st_ino)
+        cap.store_root = root
+        cap.machine_rel = ".working/toml"
+        cap.op_id = "held-operation"
+        cap.holder = "fixture"
+        try:
+            target = root / store.allocation_record("record", record_run)
+            # The publication's durable order, asserted on one shared recorded trace: the full
+            # payload write, the file fsync, the exclusive link, the staging retire, the
+            # directory fsync. A mutant that makes os.fsync a no-op during the call leaves no
+            # fsync events and fails here (fix round 1, codex MEDIUM: byte-state checks cannot
+            # see durability).
+            import stat as file_stat
+            events = []
+            real_fsync, real_link, real_unlink = os.fsync, os.link, os.unlink
+            real_write_all = native_journal._write_all
+
+            def recording_fsync(fd):
+                st = os.fstat(fd)
+                events.append(("fsync-dir" if file_stat.S_ISDIR(st.st_mode) else "fsync-file",
+                               st.st_ino))
+                real_fsync(fd)
+
+            def recording_link(src, dst, **kwargs):
+                events.append(("link", src, dst))
+                real_link(src, dst, **kwargs)
+
+            def recording_unlink(name, **kwargs):
+                events.append(("unlink", name))
+                real_unlink(name, **kwargs)
+
+            def recording_write_all(fd, data):
+                events.append(("write", os.fstat(fd).st_ino, len(data)))
+                real_write_all(fd, data)
+
+            with _patch.object(os, "fsync", recording_fsync), \
+                    _patch.object(os, "link", recording_link), \
+                    _patch.object(os, "unlink", recording_unlink), \
+                    _patch.object(native_journal, "_write_all", recording_write_all):
+                payload = home_journal.reserve_allocation(cap, "record", record_run,
+                                                          {"BI": 7, "WL": 12})
+            tail = events[-5:]
+            check("reservation-ordered-durable-publication", lambda: [e[0] for e in tail] ==
+                  ["write", "fsync-file", "link", "unlink", "fsync-dir"]
+                  and tail[0][1] == tail[1][1] == os.stat(target).st_ino
+                  and tail[0][2] == len(payload)
+                  and tail[2][2] == record_run + ".toml" and tail[2][1] == tail[3][1]
+                  and tail[4][1] == os.stat(target.parent).st_ino)
+            check("reservation-on-disk-published", lambda: target.read_bytes() == payload and payload ==
+                  home_journal.reservation_payload("record", record_run, "held-operation", {"WL": 12, "BI": 7}))
+            check("reservation-on-disk-exact-destination",
+                  lambda: sorted(os.listdir(target.parent)) == [record_run + ".toml"])
+            # A repeat call under the SAME capability carrying the exact same claims is answered
+            # idempotently from the read-back entry and re-establishes durability: the containing
+            # directory is flushed again before the payload is returned (fix round 1, claude
+            # MEDIUM-1; fix round 2 wording: the entry may predate a publication failure whose
+            # cleanup could not remove it, so presence alone does not establish durability).
+            flushed = []
+
+            def flush_recorder(fd):
+                flushed.append(os.fstat(fd).st_ino)
+                real_fsync(fd)
+
+            with _patch.object(os, "fsync", flush_recorder):
+                check("reservation-retry-idempotent-durable",
+                      lambda: home_journal.reserve_allocation(
+                          cap, "record", record_run, {"BI": 7, "WL": 12}) == payload
+                      and os.stat(target.parent).st_ino in flushed
+                      and target.read_bytes() == payload)
+            # Different claims refuse with their own message: a refusal never reads as
+            # ownership of the requested numbers.
+            second = reservation_refusal(
+                lambda: home_journal.reserve_allocation(cap, "record", record_run, {"BI": 8}))
+            check("reservation-second-refused", lambda: second is not None and "already exists with different content" in second)
+            check("reservation-second-preserves-bytes", lambda: target.read_bytes() == payload)
+            leftover = target.parent / oplock._staging_name(record_run + ".toml")
+            os.link(target, leftover)
+            third = reservation_refusal(
+                lambda: home_journal.reserve_allocation(cap, "record", record_run, {"BI": 9}))
+            check("reservation-crash-after-link-refused", lambda: third is not None
+                  and "already exists with different content" in third and not leftover.exists()
+                  and os.stat(target).st_nlink == 1 and target.read_bytes() == payload)
+            # The same leftover state, retried by the SAME capability with the SAME claims,
+            # completes idempotently: the shared-inode leftover is retired, the entry read back
+            # and the payload returned. This is also the resumed-init shape (attach_init_lease
+            # re-attaches the persisted operation id): the byte-equal retry is crash repair, safe
+            # because the directory is fsynced before the payload is returned. (A retry under a
+            # fresh acquire_operation capability mints a new op_id and is refused;
+            # reservation-new-capability-refused below shows it.)
+            os.link(target, leftover)
+            check("reservation-leftover-retried-same-capability", lambda: home_journal.reserve_allocation(
+                cap, "record", record_run, {"BI": 7, "WL": 12}) == payload
+                and not leftover.exists() and os.stat(target).st_nlink == 1)
+            run2 = "record-20260917T120001Z-0123456789abcdef"
+            torn = target.parent / oplock._staging_name(run2 + ".toml")
+            torn.write_bytes(b"torn")
+            payload2 = home_journal.reserve_allocation(cap, "record", run2, {"BI": 9})
+            check("reservation-crash-before-link-completes", lambda: not torn.exists()
+                  and (target.parent / (run2 + ".toml")).read_bytes() == payload2)
+            run3 = "record-20260917T120002Z-0123456789abcdef"
+            (target.parent / (run3 + ".toml")).mkdir()
+            check("reservation-occupied-refused", lambda: "non-regular entry" in (reservation_refusal(
+                lambda: home_journal.reserve_allocation(cap, "record", run3, {"BI": 1})) or ""))
+            # A symlink squat cannot be read back through the O_NOFOLLOW non-blocking read
+            # and refuses naming the read-back, never implying held numbers.
+            run4 = "record-20260917T120004Z-0123456789abcdef"
+            os.symlink("elsewhere", target.parent / (run4 + ".toml"))
+            check("reservation-symlink-refused", lambda: "cannot read back" in (reservation_refusal(
+                lambda: home_journal.reserve_allocation(cap, "record", run4, {"BI": 1})) or ""))
+            # A final name appearing only between the existence check and the exclusive link
+            # (unreachable under the held capability) refuses with the reservation-specific
+            # message, never the oplock anchor-recovery advice (fix round 1, claude MINOR-4).
+            with _patch.object(native_journal, "_lstat_at", lambda pfd, name: None):
+                raced = reservation_refusal(lambda: home_journal.reserve_allocation(
+                    cap, "record", record_run, {"BI": 7, "WL": 12}))
+            check("reservation-link-race-refused", lambda: raced is not None
+                  and "appeared during publication" in raced and "recover=True" not in raced
+                  and os.stat(target).st_nlink == 1 and target.read_bytes() == payload)
+            # The same race where the publication's own cleanup also fails must keep that
+            # cleanup-failure detail in the reservation-specific refusal instead of dropping it
+            # with the oplock advice (fix round 2, claude MINOR-3; strengthened in fix round 3,
+            # codex MEDIUM): the refusal must NAME the actual stranded staging entry and keep the
+            # injected unlink failure, so a mutant dropping the whole carried detail (if kept: to
+            # if False:) and a mutant keeping the marker but dropping the leftover suffix
+            # (message += detail + leftover to message += detail) both go red here. The stranded
+            # leftover is retired as garbage by the next reserving call;
+            # reservation-stranded-leftover-retired below asserts that retirement.
+            def refusing_unlink(entry, **kwargs):
+                raise OSError(5, "injected unlink failure")
+
+            with _patch.object(native_journal, "_lstat_at", lambda pfd, name: None), \
+                    _patch.object(os, "unlink", refusing_unlink):
+                stranded = reservation_refusal(lambda: home_journal.reserve_allocation(
+                    cap, "record", record_run, {"BI": 7, "WL": 12}))
+            stranded_names = [entry for entry in os.listdir(target.parent)
+                              if oplock._is_staging_name(entry, record_run + ".toml")]
+            check("reservation-link-race-keeps-cleanup-detail", lambda: stranded is not None
+                  and "appeared during publication" in stranded
+                  and "could not be cleaned up" in stranded and "recover=True" not in stranded
+                  and len(stranded_names) == 1 and stranded_names[0] in stranded
+                  and "injected unlink failure" in stranded
+                  and target.read_bytes() == payload)
+            # Fix round 2 (claude MEDIUM-1, decided stricter-safe; wording fixed in fix round 3):
+            # a retry after a kill that re-enters through acquire_operation holds a NEW capability
+            # (a fresh op_id per acquisition), and it stays refused: the payload embeds the op_id,
+            # so the bytes differ. The killed run's leftover reservation is the disclosed
+            # residual; its numbers stay reserved (conservative). The byte-equal idempotent answer
+            # serves a repeat call under the SAME capability: a plain repeat, or a resumed init,
+            # which attaches the persisted operation id rather than minting a new one.
+            cap2 = oplock.OpCapability.__new__(oplock.OpCapability)
+            cap2._claim = threading.Lock()
+            cap2._claimant = None
+            cap2._released = False
+            cap2._acquirer_pid = os.getpid()
+            cap2._acquirer_pid_start = native_journal._pid_start(os.getpid())
+            cap2._anchor_fd = os.open(str(anchor_file), os.O_RDONLY)
+            cap2._anchor_ident = cap._anchor_ident
+            cap2._machine_ident = cap._machine_ident
+            cap2.store_root = root
+            cap2.machine_rel = ".working/toml"
+            cap2.op_id = "fresh-operation"
+            cap2.holder = "fixture"
+            try:
+                fresh = reservation_refusal(lambda: home_journal.reserve_allocation(
+                    cap2, "record", record_run, {"BI": 7, "WL": 12}))
+            finally:
+                os.close(cap2._anchor_fd)
+            check("reservation-new-capability-refused", lambda: fresh is not None
+                  and "already exists with different content" in fresh
+                  and "does not establish that the run holds" in fresh
+                  and target.read_bytes() == payload)
+            # Fix round 3 (claude MINOR, decided assert): the cleanup-detail vector's comment
+            # claimed the stranded leftover is retired as garbage by the next reserving call;
+            # that next call is the cap2 refusal just above, and the retirement is asserted here
+            # rather than claimed, with the reservation keeping its single link.
+            check("reservation-stranded-leftover-retired", lambda: len(stranded_names) == 1
+                  and not (target.parent / stranded_names[0]).exists()
+                  and os.stat(target).st_nlink == 1)
+            # Fix round 2 (claude MINOR-1): a FIFO squatting a reservation name refuses AT ONCE
+            # (the read-back open carries O_NONBLOCK, so a writer-less FIFO cannot block it),
+            # judged in a BOUNDED child: a blocking mutant turns this check red at the deadline
+            # instead of hanging the suite. The child re-binds the fixture capability's acquirer
+            # identity to itself (the fixture equivalent of acquiring in that process) and exits
+            # 7 only on the non-regular-entry refusal.
+            run5 = "record-20260917T120005Z-0123456789abcdef"
+            os.mkfifo(target.parent / (run5 + ".toml"))
+            fifo_child = os.fork()
+            if fifo_child == 0:
+                code = 1
+                try:
+                    cap._acquirer_pid = os.getpid()
+                    cap._acquirer_pid_start = native_journal._pid_start(os.getpid())
+                    squat = reservation_refusal(lambda: home_journal.reserve_allocation(
+                        cap, "record", run5, {"BI": 1}))
+                    if squat is not None and "non-regular entry" in squat:
+                        code = 7
+                except BaseException:
+                    code = 1
+                finally:
+                    os._exit(code)
+            fifo_deadline = time.monotonic() + 30.0
+            fifo_status = None
+            while time.monotonic() < fifo_deadline:
+                waited, raw_status = os.waitpid(fifo_child, os.WNOHANG)
+                if waited == fifo_child:
+                    fifo_status = raw_status
+                    break
+                time.sleep(0.05)
+            if fifo_status is None:
+                os.kill(fifo_child, signal.SIGKILL)
+                os.waitpid(fifo_child, 0)
+            check("reservation-fifo-refused-bounded", lambda s=fifo_status: s is not None
+                  and os.WIFEXITED(s) and os.WEXITSTATUS(s) == 7)
+            # Fix round 2 (codex MEDIUM-1), reworked in fix round 3 (both reviews, MAJOR):
+            # _project's EXISTING-projection branch restores the same ancestor and
+            # containing-directory durability a fresh publication gets, and it retires staging
+            # garbage BEFORE testing or reading the final entry (reserve_allocation's ordering).
+            # Unlike a reservation, the projection payload derives from the journal's own INTENT
+            # header, so a run killed anywhere inside publication IS retried with byte-identical
+            # bytes (recovery under a fresh capability); the retry must flush, not trust
+            # presence. projection-published pins the fresh publication this builds on;
+            # projection-complete-retry-flushes is the durability discriminator over a COMPLETE
+            # publication (red when the existing branch returns without the flushes);
+            # projection-staging-crash-retry-recovers builds the partial-publication crash state
+            # and is red on the pre-fix _project.
+            proj_run = "record-20260917T120006Z-0123456789abcdef"
+            proj_frames = [
+                (native_journal.F_INTENT, dict(txn=proj_run, header=dict(
+                    kind="record", run_id=proj_run, operation_id="journal-operation"), ops=[])),
+                (native_journal.F_COMPLETE, dict(txn=proj_run))]
+            proj_rel = store.txn_record("record", proj_run)
+            proj_parts = proj_rel.split("/")
+            proj_target = root / proj_rel
+            proj_root_fd = store._open_root_fd(root)
+            try:
+                with _patch.object(home_journal, "_existing_frames", return_value=proj_frames):
+                    home_journal._project(proj_root_fd, -1, root / "unused", "record", proj_run)
+                    proj_payload = home_journal.projection_payload(
+                        "record", proj_run, "complete", "journal-operation")
+                    check("projection-published", lambda: proj_target.read_bytes() == proj_payload)
+                    proj_flushed = []
+
+                    def projection_flush_recorder(fd):
+                        proj_flushed.append(os.fstat(fd).st_ino)
+                        real_fsync(fd)
+
+                    with _patch.object(os, "fsync", projection_flush_recorder):
+                        retried = home_journal._project(proj_root_fd, -1, root / "unused",
+                                                        "record", proj_run)
+                    proj_ancestors = [os.stat(root).st_ino] + [
+                        os.stat(root.joinpath(*proj_parts[:depth])).st_ino
+                        for depth in range(1, len(proj_parts))]
+                    check("projection-complete-retry-flushes", lambda: retried is None
+                          and proj_target.read_bytes() == proj_payload
+                          and all(ino in proj_flushed for ino in proj_ancestors))
+                    # Fix round 3 (both reviews, MAJOR): the crash state a kill between the
+                    # exclusive link and the staging retire leaves is the complete projection
+                    # PLUS its shared-inode staging leftover (link count 2). The retry must
+                    # retire the leftover, accept the byte-equal projection unchanged, leave a
+                    # single link and flush the directory; the pre-fix _project read the final
+                    # entry first and refused its second link on every retry; that refusal
+                    # lands here as a red check through reservation_refusal, never an escaping
+                    # cannot-evaluate.
+                    proj_staging = proj_target.parent / oplock._staging_name(proj_target.name)
+                    os.link(proj_target, proj_staging)
+                    crash_flushed = []
+
+                    def crash_flush_recorder(fd):
+                        crash_flushed.append(os.fstat(fd).st_ino)
+                        real_fsync(fd)
+
+                    with _patch.object(os, "fsync", crash_flush_recorder):
+                        crash_retried = reservation_refusal(lambda: home_journal._project(
+                            proj_root_fd, -1, root / "unused", "record", proj_run))
+                    check("projection-staging-crash-retry-recovers",
+                          lambda: crash_retried is None
+                          and not proj_staging.exists()
+                          and proj_target.read_bytes() == proj_payload
+                          and os.stat(proj_target).st_nlink == 1
+                          and os.stat(proj_target.parent).st_ino in crash_flushed
+                          and all(ino in crash_flushed for ino in proj_ancestors))
+            finally:
+                os.close(proj_root_fd)
+            cap._released = True
+            check("reservation-released-refused", lambda: reservation_refusal(
+                lambda: home_journal.reserve_allocation(
+                    cap, "record", "record-20260917T120003Z-0123456789abcdef", {"BI": 1})) is not None)
+        finally:
+            os.close(cap._anchor_fd)
+
+    # PR-3 fix round 1 (codex MAJOR), reworked in fix round 2 (codex MEDIUM-2): ensure_journal_dirs
+    # makes each component entry durable on EVERY call. mkdir and fsync are recorded on ONE shared
+    # trace per boundary; the injected fsync failure is BOUND to an observed creation (the first
+    # fsync at or after the boundary-th mkdir), the interrupted attempt stops there, and the clean
+    # retry runs on the same trace. journal-dirs-fsync-fault-N requires the injection to have fired
+    # after exactly N creations (setup plus that binding; all four also pass on the pre-fix
+    # helper). journal-dirs-created-then-flushed-N (discriminator) requires EVERY observed creation
+    # to be followed by a flush of its parent directory, so a mutant that fsyncs each parent BEFORE
+    # looking up or creating its child (the same inode set, the wrong order) goes red here, and at
+    # the last boundary in the fault check itself (no fsync follows the final mkdir, so its
+    # injection never fires). journal-dirs-retry-flushes-ancestors-N (discriminator) requires the
+    # clean retry to flush every ancestor again, red when the helper flushes only on creation: the
+    # components the interrupted attempt created exist, but presence cannot stand in for
+    # durability. The same shared helper serves _opened and _project; the projection vectors above
+    # exercise its _project caller on a real store.
+    journal_rel = ".working/journals/record/allocations"
+    components = journal_rel.split("/")
+    for boundary in range(1, len(components) + 1):
+        with tempfile.TemporaryDirectory(prefix="opf-homes-") as faulty:
+            dir_fd = os.open(faulty, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                native_fsync, native_mkdir = os.fsync, os.mkdir
+                trace = []
+                state = {"mkdirs": 0, "injected": None}
+
+                def recording_mkdir(entry, mode=0o777, *, dir_fd=None, _trace=trace, _state=state):
+                    native_mkdir(entry, mode, dir_fd=dir_fd)
+                    _state["mkdirs"] += 1
+                    _trace.append(("mkdir", os.fstat(dir_fd).st_ino, entry))
+
+                def bound_failing_fsync(fd, _stop=boundary, _trace=trace, _state=state):
+                    ino = os.fstat(fd).st_ino
+                    if _state["injected"] is None and _state["mkdirs"] >= _stop:
+                        _state["injected"] = len(_trace)
+                        _trace.append(("fsync-injected-failure", ino))
+                        raise OSError(5, "injected fsync failure")
+                    _trace.append(("fsync", ino))
+                    native_fsync(fd)
+
+                def interrupted():
+                    try:
+                        native_journal.ensure_journal_dirs(dir_fd, journal_rel)
+                    except OSError:
+                        return True
+                    return False
+
+                with _patch.object(os, "fsync", bound_failing_fsync), \
+                        _patch.object(os, "mkdir", recording_mkdir):
+                    was_interrupted = interrupted()
+                    # The clean retry, guarded: a mutant whose injection fires only here (the
+                    # fsync-before-mkdir order leaves no fsync after the last boundary's mkdir)
+                    # must land as red checks below, not as an escaping cannot-evaluate.
+                    retry_interrupted = interrupted()
+                events = list(trace)
+                injected_at = state["injected"]
+                check("journal-dirs-fsync-fault-{}".format(boundary),
+                      lambda w=was_interrupted, i=injected_at, e=events: w and i is not None
+                      and sum(1 for ev in e[:i] if ev[0] == "mkdir") == boundary)
+                check("journal-dirs-created-then-flushed-{}".format(boundary),
+                      lambda e=events: all(
+                          any(later[0] == "fsync" and later[1] == ev[1] for later in e[idx + 1:])
+                          for idx, ev in enumerate(e) if ev[0] == "mkdir"))
+                ancestors = [os.stat(faulty).st_ino] + [
+                    os.stat(os.path.join(faulty, *components[:depth])).st_ino
+                    for depth in range(1, len(components))]
+                retried_flushes = [] if injected_at is None else [
+                    ev[1] for ev in events[injected_at + 1:] if ev[0] == "fsync"]
+                check("journal-dirs-retry-flushes-ancestors-{}".format(boundary),
+                      lambda a=ancestors, f=retried_flushes, r=retry_interrupted:
+                      not r and all(ino in f for ino in a))
+            finally:
+                os.close(dir_fd)
+
     run = "adopt" + suffix
     for path in ("notes/a.md", "adoption/a.md", "space name.txt", "\u00e9.txt"):
         check("move-" + path, lambda: store.moved_dest(path) == ".working/archive/moved/" + path)

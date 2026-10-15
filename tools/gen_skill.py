@@ -862,10 +862,17 @@ def plugin_identity(root, root_fd=None):
     path = root.joinpath(*IDENTITY_MANIFEST_PARTS)
     try:
         data = tomllib.loads(_read_input(root_fd, root, IDENTITY_MANIFEST_PARTS))
-    except RecursionError as exc:
-        # tomllib raises RecursionError (a RuntimeError, not a ValueError) on a deeply nested array or inline
-        # table; map it into the ValueError family build_outputs surfaces as exit 2
-        # (F-TOML-BARE-VALUEERROR-CLASS).
+    except (ValueError, RecursionError, MemoryError) as exc:
+        # A ValueError (a TOMLDecodeError or an over-long integer literal) is already the family
+        # build_outputs surfaces as exit 2 and passes unchanged. tomllib raises RecursionError (a RuntimeError)
+        # on a deeply nested array or inline table and, from CPython 3.14.8, on a key of more than 1000 dotted
+        # parts, and MemoryError on a many-part key under a memory limit; map each into that family
+        # (F-TOML-BARE-VALUEERROR-CLASS). A MemoryError is named as the resource failure it is, never as
+        # nesting.
+        if isinstance(exc, ValueError):
+            raise
+        if isinstance(exc, MemoryError):
+            raise ValueError("{}: out of memory parsing TOML ({})".format(path, exc)) from exc
         raise ValueError("{}: TOML nesting is too deep to parse ({})".format(path, exc)) from exc
     plugin = data.get("plugin") if isinstance(data, dict) else None
     name = plugin.get("author-name") if isinstance(plugin, dict) else None
@@ -1326,6 +1333,28 @@ def self_test_main():
                 failures.append("an identity manifest parser overflow failed without its finding ({})".format(exc))
         except RecursionError:
             failures.append("an identity manifest parser overflow let a bare RecursionError escape plugin_identity")
+        finally:
+            tomllib.loads, tomllib.load = real_loads, real_load
+
+        # F-TOML-BARE-VALUEERROR-CLASS, memory leg: an injected MemoryError at the parse maps into the same
+        # ValueError family but is named as a memory failure, never as nesting.
+        def oom_loads(text, **kwargs):
+            if "injected-overflow" in text:
+                raise MemoryError("injected memory exhaustion")
+            return real_loads(text, **kwargs)
+
+        tomllib.loads = oom_loads
+        tomllib.load = lambda fp, **kwargs: oom_loads(fp.read().decode("utf-8"), **kwargs)
+        try:
+            plugin_identity(deep)
+            failures.append("an identity manifest memory failure must fail closed (ValueError -> exit 2)")
+        except ValueError as exc:
+            if "out of memory parsing TOML (injected memory exhaustion)" not in str(exc):
+                failures.append(
+                    "an identity manifest memory failure must be named a memory failure, not nesting "
+                    "({})".format(exc))
+        except MemoryError:
+            failures.append("an identity manifest memory failure let a bare MemoryError escape plugin_identity")
         finally:
             tomllib.loads, tomllib.load = real_loads, real_load
 

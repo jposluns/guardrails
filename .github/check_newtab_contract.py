@@ -20,7 +20,10 @@ def main():
     declaration = precheck_special_files(REPO) / ".aiqt/newtab.toml"
     try:
         actual = load_toml(declaration)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError, MemoryError) as exc:
+        # tomllib refuses deep nesting and (CPython 3.14.8 on) a 1001-part key with RecursionError, and a
+        # many-part key under a memory limit with MemoryError; load_toml maps each into ValueError at the
+        # parse locus, and this handler names both classes as well: each is exit 2, never a traceback.
         print("error: cannot read NEWTAB repository declaration: {}".format(exc), file=sys.stderr)
         return 2
     expected = dict(roots=["site", "opf/site"])
