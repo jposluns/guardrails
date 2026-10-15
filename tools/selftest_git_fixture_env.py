@@ -536,7 +536,8 @@ def _registered_selftests(root=ROOT):
     commands = set()
     for relative, extract in (("tools/run_all_checks.sh", extract_local),
                               ("opf/tools/run_all_checks.sh", extract_local),
-                              (".github/workflows/quality.yml", extract_ci)):
+                              (".github/workflows/quality.yml", extract_ci),
+                              (".github/workflows/msg-leaks.yml", extract_ci)):
         source, read_diagnostic = read_runner_text(root / relative, relative)
         if read_diagnostic is not None:
             raise ValueError("{}: registry diagnostics: {}".format(
@@ -935,7 +936,7 @@ def _config_poison_fixture(base):
 # reaching a bound stays cannot-evaluate, attributed to the bound, never a FAIL of that member
 # and never a pass, because this lane owns no member's verdict.
 # Every roster member is a registered step or the runner behind a registered --suite step
-# (_registered_selftests reads the CI workflow, both standalone runners and the suite manifest),
+# (_registered_selftests reads both CI workflows, both standalone runners and the suite manifest),
 # and that step runs the member to completion under no deadline from this suite, so no member's
 # pass or fail depends on this bound. This lane asks a different question (does the
 # member stay clean under injected caller hooks, ignore files, attributes and fsmonitor). The
