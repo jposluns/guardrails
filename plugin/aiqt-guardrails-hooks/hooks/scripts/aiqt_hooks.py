@@ -5946,7 +5946,7 @@ def _uncertain_line_lossy(command):
     'git reset --hard'; gd-uncertain-reset-name pins it in the no-session-directory deny). NAMING ONLY: the
     caller is already in scope via the raw scan and already on the non-pristine path (the closed
     allowlist grammar or the no-session-directory deny); this re-read changes no decision.
-    A prose line (gd-f17-nested: 'mention git reset --hard ...' inside a heredoc nested in a
+    A prose line (gd-nested-prose: 'mention git reset --hard ...' inside a heredoc nested in a
     substitution) does not lex to a 'git' command word, so the generic wording stays there.
     The lines are read after joining continuations (_join_continuations), so a verb a
     continuation splits is named too."""
@@ -6118,15 +6118,15 @@ def git_discard(data):
     # or a backslash fragments under a wrapper ('env git re\<newline>set --hard', 'git status; env git
     # re""set --hard', "env git re'set' --hard", 'command g""it reset --hard') is in scope, where the
     # closed allowlist grammar denies it, instead of a silent allow. A work-losing verb behind a commented
-    # heredoc opener is in scope the same way. raw_lossy also feeds the F-97 deny below, so a pristine
-    # 'git "check"out-index -a -f' denies like 'git checkout-index -a -f'.
+    # heredoc opener is in scope the same way. raw_lossy also feeds the unrecognized-subcommand deny
+    # below, so a pristine 'git "check"out-index -a -f' denies like 'git checkout-index -a -f'.
     # DISCLOSED over-refusal (the safe direction): the de-quoted copy reads quoted prose too, so
     # a command that only prints fragmented work-losing prose ("echo 'git re""set --hard'", a quoted printf
     # argument) is in scope, where the grammar denies it (echo and printf are not accepted command words);
     # and a read-only subcommand whose quoted argument de-quotes to a work-losing keyword
-    # ('git log --grep="re""set"') denies through F-97 like its plain spelling (gd-dequote-prose-* vectors). The
-    # read is kept: quoted text is code under eval, 'bash -c' or 'sh -c', and this read is what brings a
-    # fragmented verb there into scope.
+    # ('git log --grep="re""set"') denies through that deny like its plain spelling
+    # (gd-dequote-prose-* vectors). The read is kept: quoted text is code under eval, 'bash -c' or
+    # 'sh -c', and this read is what brings a fragmented verb there into scope.
     raw_lossy = (_raw_has_lossy_git(command)
                  or _raw_has_lossy_git(_join_continuations(command)[0])
                  or _raw_has_lossy_git(_dequoted_text(command)))
@@ -6640,15 +6640,60 @@ _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests bod
 # (env git push -'f' origin main, \-f, escaped +main) is not matched, because bash quote/escape removal
 # cannot be replicated by a raw-string regex; this is the same inherent lexical boundary as a
 # shell-expanded $VAR, disclosed and not chased (F-117/F-119).
-# --mirror is matched at EVERY git-accepted abbreviation (--mi is the
-# shortest unambiguous push prefix: --mi/--mir/--mirr/--mirro/--mirror), mirroring the '--de'
-# treatment of --delete; --force already matches from '--for'. The three predicate regexes are
-# applied per raw SEGMENT by _raw_push_match (split at newlines and unquoted ;/&/| separators,
-# see _raw_push_segments), so '^' anchors a segment start.
+# Every remote-overwriting long option is matched at EVERY abbreviation git accepts, derived from
+# git push's own long-option set rather than by hand. That set (git 2.55, the option table behind
+# 'git push -h'): verbose, quiet, repo, all, branches, mirror, delete, tags, dry-run, porcelain,
+# force, force-with-lease, force-if-includes, recurse-submodules, thin, receive-pack, exec,
+# set-upstream, progress, prune, no-verify (with its negation verify), follow-tags, signed, atomic,
+# push-option, ipv4, ipv6. git takes a prefix that names exactly ONE option (an exact name wins, and
+# --branches is an alias of --all, so those two never clash). The options that can overwrite, delete
+# or bulk-update remote refs, each with its shortest accepted prefix:
+#   --force              --force    (each shorter prefix also names the two options below)
+#   --force-with-lease   --force-w
+#   --force-if-includes  --force-i
+#   --mirror             --m
+#   --all                --al       (--a also names --atomic)
+#   --branches           --b
+#   --delete             --de       (--d also names --dry-run)
+#   --prune              --pru      (--p and --pr also name --porcelain, --progress or --push-option)
+# --tags and --follow-tags are left out: they add refs under refs/tags only and never update or
+# delete a branch (a force spelling beside them is matched as force); no other option forces,
+# deletes or sweeps. _push_abbrev_alternative turns each row into one alternative that matches every
+# prefix from the shortest to the full name as a whole option word (the full '--all' and '--branches'
+# spellings it replaces also matched a longer hyphenated word such as '--all-targets', which no git
+# push option is); the broader '--for[a-z-]*', '--de[a-z-]*' and
+# '--pru[a-z-]*' spellings beside them also match prefixes git rejects as ambiguous ('--for',
+# '--forc'), an over-match in the safe direction. The parsed classifier (_push_parse) matches every
+# prefix of each name through _has_long_prefix. tools/selftest_aiqt_hooks.py recomputes the shortest
+# prefixes from a recorded copy of the option set above and fails when these rows disagree with it.
+# The three predicate regexes are applied per raw SEGMENT by _raw_push_match (split at newlines and
+# unquoted ;/&/| separators, see _raw_push_segments), so '^' anchors a segment start.
+_PUSH_FORCE_ABBREVS = (
+    ("force", "force"), ("force-with-lease", "force-w"), ("force-if-includes", "force-i"),
+    ("mirror", "m"), ("all", "al"), ("branches", "b"))
+_PUSH_DELETE_ABBREVS = (("delete", "de"), ("prune", "pru"))
+
+
+def _push_abbrev_alternative(name, shortest):
+    """One regex alternative matching '--<prefix>' for every prefix of `name` at least as long as
+    `shortest`, ending where the option word ends (no letter, digit, '_' or '-' follows, so
+    '--force-with' followed by '-x' does not match): ('mirror', 'm') gives
+    '--m(?:i(?:r(?:r(?:o(?:r)?)?)?)?)?(?![\\w-])'."""
+    tail = ""
+    for ch in reversed(name[len(shortest):]):
+        tail = "(?:" + re.escape(ch) + tail + ")?"
+    return "--" + re.escape(shortest) + tail + r"(?![\w-])"
+
+
 _RAW_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
-_RAW_PUSH_FORCE_RE = re.compile(r"(?i)--for[a-z-]*|--mi(?:r(?:r(?:or?)?)?)?\b|--all\b|--branches\b|(?:^|[\s'\"])-[A-Za-z0-9]*f|(?:^|[\s'\"])\+\S")
+_RAW_PUSH_FORCE_RE = re.compile(
+    r"(?i)--for[a-z-]*|"
+    + "|".join(_push_abbrev_alternative(name, shortest) for name, shortest in _PUSH_FORCE_ABBREVS)
+    + r"|(?:^|[\s'\"])-[A-Za-z0-9]*f|(?:^|[\s'\"])\+\S")
 _RAW_PUSH_DELETE_RE = re.compile(
-    r"(?i)--de[a-z-]*|--pru[a-z-]*|(?:^|[\s'\"])-[A-Za-z0-9]*d[A-Za-z0-9]*|(?:^|[\s'\"]):(?:refs/heads/|heads/)?(?:"
+    r"(?i)--de[a-z-]*|--pru[a-z-]*|"
+    + "|".join(_push_abbrev_alternative(name, shortest) for name, shortest in _PUSH_DELETE_ABBREVS)
+    + r"|(?:^|[\s'\"])-[A-Za-z0-9]*d[A-Za-z0-9]*|(?:^|[\s'\"]):(?:refs/heads/|heads/)?(?:"
     + "|".join(sorted(_PROTECTED)) + r")\b")
 _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")\b")
 # GD-146: the raw-fallback parity for a command-local mirror configuration the parsed path cannot reach
@@ -6662,8 +6707,9 @@ _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")
 # mirror=true, or a split value) is NOT matched by this regex on the raw text;
 # _protected_line_fallback also applies it to the DE-QUOTED copy (_dequoted_text), and the
 # raw-text backstop applies it to each segment's de-quoted copy, so a fragment made only of quote
-# characters, backslashes and a '$' before a quote is matched there (gd146-m37, re-expected), while a
-# fragment made another way (an escape decoded inside $'...', an expansion) is not. Arbitrary shell
+# characters, backslashes and a '$' before a quote is matched there (the key-fragmented wrapped
+# mirror-config vector, re-expected), while a fragment made another way (an escape decoded inside
+# $'...', an expansion) is not. Arbitrary shell
 # fragmentation of an unparseable or wrapper-prefixed command cannot be robustly matched by a regex (only
 # a shell parser could, which the pack deliberately avoids), so this is an inherent lexical-scan boundary,
 # the same class as the disclosed wrapper/alias/fragmented-command-word residuals; it is DISCLOSED, not
@@ -7829,8 +7875,9 @@ def _raw_push_guard(command):
     no protected name, rather than let a benign lexed git segment vouch for the command).
     DISCLOSED COST (the safe direction): push-shaped prose naming a
     protected branch inside a heredoc body line, quoted string, comment or commit message
-    DENIES whenever it shares a segment with a push and force spelling (witnessed by pl-cf1 and
-    the pl-mispair vectors); the per-segment read removes only the CROSS-segment pairings (a rebase
+    DENIES whenever it shares a segment with a push and force spelling (witnessed by the
+    quoted-heredoc prose vector and the pl-mispair vectors); the per-segment read removes only the
+    CROSS-segment pairings (a rebase
     origin/main beside a feature force-push, an rm -rf beside a plain push, a --format or
     --depth value: pl-segflow vectors). A force or delete spelling that names no protected
     branch is NOT matched here: it is judged by the parsed classifier (force to a feature ref
