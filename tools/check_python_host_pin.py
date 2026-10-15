@@ -1714,51 +1714,140 @@ def _committed_host_runs():
 
 
 def _workflow_lanes(text):
-    """The git-fixture-env lanes of a workflow text outside HOST_JOBS: (each non-comment line of a job
-    under the top-level jobs: key that names both --suite and git-fixture-env, in file order; for each
-    such line, the lines of its job that name python-version). Each line is kept with one trailing
-    carriage return and its leading and trailing spaces and tabs removed, so a lane line that names both
-    in any other spelling differs from the run: lines HOST_SUITES names, and a lane's job is read for
-    its pin rather than assumed to pin '3.14'. A non-comment line of such a job that names --suite or the
-    file name of the suite runner HOST_SUITES runs in git-fixture-env-host-patch, and carries a dollar
-    sign (a ${{ }} expression, a matrix value among them, or a shell expansion), is CannotEvaluate: the
-    suite it runs is not spelled on that line, so it is never read as no lane. A lane run by a command
-    that names neither --suite nor that file name (a wrapper script among them) is not read here."""
-    runners = {os.path.basename(token) for run in HOST_SUITES[GFE] for token in shlex.split(run)
-               if token.endswith(".py")}
-    lanes, pins, in_jobs, job = [], {}, False, None
+    """The git-fixture-env lanes of a workflow text, read by command tokens: (the command of each lane
+    in a job outside HOST_JOBS, its shlex tokens joined by single spaces, in file order; for each lane,
+    the non-comment lines of its job, the job's header excluded, that name python-version). Each line
+    has one trailing carriage return removed, and each pin line returned then has its leading and
+    trailing spaces and tabs removed, so a lane's job is read for its pin rather than assumed to pin
+    '3.14'. A line carrying a line-break character (LINE_BREAKS) or a form feed or vertical tab
+    (CONTROL_CHARS), a repeated job id and a line under jobs: that is neither a job id at indent 2 nor
+    content at indent 4 or deeper are CannotEvaluate. Each job outside HOST_JOBS is read whole with the
+    jobs leg's extended job model (_outside_line_refusals, _outside_entries, _job_tree,
+    _refuse_upper_case_keys), and EVERY line of every run: value in it (a step's own run:, a job-level
+    run: and a with: input named run among them, a literal block's body lines included) is tokenized
+    separately with shlex (POSIX); a line shlex cannot tokenize is CannotEvaluate. A line is a lane
+    candidate when any of its tokens contains --suite or the stem of the suite runner HOST_SUITES runs
+    in git-fixture-env-host-patch (check_selftest_execution: its file path, its module form
+    tools.check_selftest_execution and a command string handed to another shell among them). A
+    candidate is kept as a lane only when its tokens are exactly that runner's command (python3 -I -B
+    tools/check_selftest_execution.py), --suite and a literal suite name containing git-fixture-env (the
+    runner's suite id grammar: a letter or digit, then letters, digits, '.', '_' and '-'); it is
+    accepted as no lane only when they are exactly that command, --suite and a literal suite name not
+    containing git-fixture-env, or that command and --self-test; any other candidate is CannotEvaluate
+    (a dollar sign, a ${{ }} expression, the module form, another shell, an operator, an assignment or
+    an extra token among them), never read as no lane. A quote splice that shlex quote removal resolves
+    (--su""ite git-fixture-env-extra or --suite 'git-fixture'-env-extra among them) is read by its
+    resolved tokens. Every other scalar value of such a job (an env, matrix or with: value, or a name:,
+    among them) whose text or shlex tokens contain --suite or the runner's stem is CannotEvaluate too:
+    this reader does not follow a value into the command that uses it. NOT read here: a lane none of
+    whose run: tokens and values contain --suite or the runner's stem (its runner and flag both
+    supplied by a ${{ }} expression, which the jobs leg refuses in any run: outside HOST_JOBS, or by
+    variables whose values spell neither name whole, a wrapper script, or a command string handed to
+    another shell that splits both names with quotes, among them)."""
+    runner = shlex.split(HOST_SUITES[GFE][0])[:-2]
+    stems = {os.path.basename(token)[:-len(".py")] for run in HOST_SUITES[GFE] for token in shlex.split(run)
+             if token.endswith(".py")}
+    suite_name = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+    def candidate(words):
+        return any("--suite" in word or any(stem in word for stem in stems) for word in words)
+
+    def scalars(node):
+        if isinstance(node, dict):
+            for item in node.values():
+                yield from scalars(item)
+        elif isinstance(node, list):
+            for item in node:
+                yield from scalars(item)
+        elif isinstance(node, str):
+            yield node
+
+    jobs, in_jobs, job = {}, False, None
     for number, line in enumerate(text.split("\n"), 1):
         line = line[:-1] if line.endswith("\r") else line
+        for char, label in {**LINE_BREAKS, **CONTROL_CHARS}.items():
+            if char in line:
+                raise CannotEvaluate("{}:{}: carries {}; this lane reader splits only on newline and "
+                                     "cannot read it".format(WORKFLOW_REL, number, label))
         stripped = line.strip(" \t")
-        if not stripped or stripped.startswith("#"):
+        if not stripped:
             continue
-        if not line.startswith((" ", "\t")):
+        comment = stripped.startswith("#")
+        if not comment and not line.startswith((" ", "\t")):
             in_jobs, job = line.split("#", 1)[0].rstrip(" \t") == "jobs:", None
             continue
-        header = JOB_RE.fullmatch(line) if in_jobs else None
-        if header is not None:
-            job = header.group("id")
-        elif job is not None and job not in HOST_JOBS:
-            if "$" in stripped and ("--suite" in stripped
-                                    or any(runner in stripped for runner in runners)):
+        if in_jobs and not comment:
+            header = JOB_RE.fullmatch(line)
+            if header is not None:
+                job = header.group("id")
+                if job in jobs:
+                    raise CannotEvaluate("{}:{}: the job id {} repeats; this lane reader cannot tell which "
+                                         "job YAML keeps".format(WORKFLOW_REL, number, job))
+                jobs[job] = [(number, line)]
+                continue
+            if not line.startswith("    "):
+                raise CannotEvaluate("{}:{}: a line under jobs: that is neither a job id at indent 2 nor job "
+                                     "content at indent 4 or deeper; this lane reader cannot place it".format(
+                                         WORKFLOW_REL, number))
+        if job is not None:
+            jobs[job].append((number, line))
+    lanes, pins = [], []
+    for job, lines in jobs.items():
+        if job in HOST_JOBS:
+            continue
+        where = "the job {}, outside the host-patch jobs".format(job)
+        content = [(number, line) for number, line in lines if not line.strip(" \t").startswith("#")]
+        _outside_line_refusals(job, content)
+        tree = _job_tree(job, _outside_entries(job, lines[1:], where), where)
+        _refuse_upper_case_keys(job, tree)
+        pinned = tuple(line.strip(" \t") for number, line in content[1:] if PIN_KEY in line)
+        runs = set()
+        for number, value in _other_runs(tree, set()):
+            runs.add(id(value))
+            for line_text in value.split("\n"):
+                try:
+                    words = shlex.split(line_text)
+                except ValueError as exc:
+                    raise CannotEvaluate("{}:{}: a run: line of the job {} that shlex cannot tokenize ({}); "
+                                         "this lane reader cannot read it".format(
+                                             WORKFLOW_REL, number, job, exc))
+                if not candidate(words):
+                    continue
+                if words[:-2] == runner and words[-2] == "--suite" and suite_name.fullmatch(words[-1]):
+                    if "git-fixture-env" in words[-1]:
+                        lanes.append(" ".join(words))
+                        pins.append(pinned)
+                elif words != runner + ["--self-test"]:
+                    raise CannotEvaluate(
+                        "{}:{}: a run: line of the job {} has a token naming --suite or the suite runner "
+                        "{}, but its tokens are not exactly {} --suite <a literal suite name> or {} "
+                        "--self-test (a dollar sign, a ${{{{ }}}} expression, the module form, another shell "
+                        "or an extra token among them); this lane reader cannot read which suite it "
+                        "runs".format(WORKFLOW_REL, number, job, " or ".join(sorted(stems)),
+                                      " ".join(runner), " ".join(runner)))
+        for value in scalars(tree):
+            try:
+                words = shlex.split(value)
+            except ValueError:
+                words = []
+            if id(value) not in runs and candidate([value] + words):
                 raise CannotEvaluate(
-                    "{}:{}: a line of the job {} names --suite or a suite runner and carries a dollar sign "
-                    "(a ${{{{ }}}} expression or a shell expansion); this lane reader cannot read which "
-                    "suite it runs".format(WORKFLOW_REL, number, job))
-            if "--suite" in stripped and "git-fixture-env" in stripped:
-                lanes.append((stripped, job))
-            if PIN_KEY in stripped:
-                pins.setdefault(job, []).append(stripped)
-    return tuple(lane for lane, _ in lanes), tuple(tuple(pins.get(job, ())) for _, job in lanes)
+                    "{}:{}: a value of the job {} that is not a run: command (an env, matrix or with: value, "
+                    "or a name:, among them) names --suite or the suite runner {}; a value reaches a command "
+                    "only through an expansion or an action input, which this lane reader does not follow, "
+                    "so this lane reader cannot read which suite it runs".format(
+                        WORKFLOW_REL, value.line, job, " or ".join(sorted(stems))))
+    return tuple(lanes), tuple(pins)
 
 
 def _lane_reading(reader, refusal, text):
-    """reader (a _workflow_lanes) over text, or (2, whether the message names the dollar-sign refusal)
-    when it raises refusal (the CannotEvaluate class of reader's module)."""
+    """reader (a _workflow_lanes) over text, or (2, whether the message is the reader's own refusal of a
+    line or value naming --suite or the suite runner) when it raises refusal (the CannotEvaluate class of
+    reader's module); any other refusal, a job-model refusal of a fixture among them, is (2, False)."""
     try:
         return reader(text)
     except refusal as exc:
-        return 2, "carries a dollar sign" in str(exc)
+        return 2, "this lane reader cannot read which suite it runs" in str(exc)
 
 
 def _host_job(job):
@@ -3367,42 +3456,82 @@ def _self_test_cases(base):
     if real is not None:
         check("real/tree-passes-at-its-host-patch", evaluate(ROOT, real)[0], 0)
     # The git-fixture-env host-patch suites are the '3.14' lanes of the committed workflow, in its order
-    # (_workflow_lanes): each lane line with its surrounding spaces and tabs removed, and the pin lines
-    # of the job that carries it. A lane line the reader cannot read is cannot-evaluate (exit 2).
-    lanes = (tuple("run: " + run for run in HOST_SUITES[GFE]),
-             (("python-version: '3.14'",),) * len(HOST_SUITES[GFE]))
+    # (_workflow_lanes): each lane's command, its shlex tokens joined by single spaces, and the pin lines
+    # of the job that carries it. A run: line or value the reader cannot read is cannot-evaluate (exit 2).
+    lanes = (HOST_SUITES[GFE], (("python-version: '3.14'",),) * len(HOST_SUITES[GFE]))
     check("real/git-fixture-env-host-suites-are-the-lanes", _workflow_lanes(_read_text(ROOT / WORKFLOW_REL)),
           lanes)
-    # A lane whose suite comes from a matrix value or a shell expansion, beside the four literal lanes:
-    # the reader refuses the line (cannot-evaluate), and lanes_mutant, whose reader no longer refuses
-    # it, returns exactly the four literal lanes, the silent pass the refusal closes. The three lines
-    # name --suite and the runner's file name, --suite alone (the runner run as a module) and the
-    # runner's file name alone (its flag and suite both matrix values).
-    lanes_mutant = _mutant(base, "python_host_pin_lane_dollar_mutant", source,
-                           (('if "$" in stripped and (' + '"--suite" in stripped',
-                             'if False and ("--suite" in stripped'),))
+    # Each lanes/ vector adds one job beside the four literal lanes and pairs the intact reader with a copy
+    # of this gate (_mutant) whose reader drops one rule: "refusal" leaves a candidate line that is not an
+    # exact form unread; "literal" selects run: lines by literal text again (--suite and git-fixture-env
+    # both spelled on the line, the reader this one replaces); "runner" drops the runner-stem token test;
+    # "flag" drops the --suite token test; "whole-token" tests whole tokens (the exact flag, a path's
+    # normpath base name, a module name's last part), not text inside them; "values" no longer refuses a
+    # value outside a run: naming --suite or the runner; "lanes-only" accepts a runner --suite line only
+    # for a git-fixture-env suite. Each vector is red in its copy: the four literal lanes alone where the
+    # intact reader refuses the job or reads a fifth lane, or a refusal where it accepts the line as no lane.
+    flag_test, stem_test = '"--suite" ' + 'in word', 'any(stem ' + 'in word for stem in stems)'
+    copies = {name: _mutant(base, "python_host_pin_lanes_" + name.replace("-", "_"), source, edits)
+              for name, edits in (
+                  ("refusal", (('elif words != runner + ' + '["--self-test"]:', "elif False:"),)),
+                  ("literal", (("words = shlex." + "split(line_text)",
+                                "words = shlex." + "split(line_text) if "
+                                '"--suite" in line_text and "git-fixture-env" in line_text else []'),)),
+                  ("runner", ((stem_test, "False"),)),
+                  ("flag", ((flag_test + " or ", ""),)),
+                  ("whole-token", ((flag_test, 'word == "--suite"'),
+                                   (stem_test, 'any(os.path.basename(os.path.normpath(word)) == stem + ".py" '
+                                    'or word.split(".")[-1] == stem for stem in stems)'))),
+                  ("values", (("if id(value) " + "not in runs and ", "if False and "),)),
+                  ("lanes-only", (("suite_name.fullmatch(" + "words[-1]):",
+                                   'suite_name.fullmatch(words[-1]) and "git-fixture-env" in words[-1]:'),)))}
     lane_jobs = "".join(
         "  lane-{}:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/setup-python@v5\n"
         "        with:\n          python-version: '3.14'\n      - name: Suite\n"
         "        run: {}\n".format(number, run) for number, run in enumerate(HOST_SUITES[GFE], 1))
     runner = "python3 -I -B tools/check_selftest_execution.py"
-    for check_id, matrix, env, run in (
-            ("lanes/matrix-suite-lane-cannot-evaluate", "        suite: [git-fixture-env-extra]\n", "",
-             runner + " --suite ${{ matrix.suite }}"),
-            ("lanes/module-runner-variable-suite-lane-cannot-evaluate", "", "        env:\n"
-             "          SUITE: git-fixture-env-extra\n",
-             "python3 -I -B -m tools.check_selftest_execution --suite \"$SUITE\""),
-            ("lanes/runner-matrix-arguments-lane-cannot-evaluate",
-             "        include:\n          - flag: --suite\n            suite: git-fixture-env-extra\n", "",
-             runner + " ${{ matrix.flag }} ${{ matrix.suite }}")):
+    widened = (HOST_SUITES[GFE] + (runner + " --suite git-fixture-env-extra",),
+               (("python-version: '3.14'",),) * (len(HOST_SUITES[GFE]) + 1))
+    refused = (2, True)
+    for check_id, copy, matrix, env, run, want, want_copy in (
+            # Lines naming the runner or --suite whose suite comes from a matrix value or an expansion.
+            ("lanes/matrix-suite-lane-cannot-evaluate", "refusal", "        suite: [git-fixture-env-extra]\n",
+             "", runner + " --suite ${{ matrix.suite }}", refused, lanes),
+            ("lanes/module-runner-variable-suite-lane-cannot-evaluate", "refusal", "",
+             "        env:\n          SUITE: git-fixture-env-extra\n",
+             "python3 -I -B -m tools.check_selftest_execution --suite \"$SUITE\"", refused, lanes),
+            ("lanes/runner-matrix-arguments-lane-cannot-evaluate", "runner",
+             "        flag: [suite]\n        suite: [git-fixture-env-extra]\n", "",
+             runner + " --${{ matrix.flag }} ${{ matrix.suite }}", refused, lanes),
+            # The module form with every argument from a variable: only the runner's stem names it.
+            ("lanes/module-runner-variable-flags-lane-cannot-evaluate", "runner", "", "",
+             "python3 -I -B -m tools.check_selftest_execution $FLAGS", refused, lanes),
+            # The runner from a variable: only --suite names it.
+            ("lanes/variable-runner-suite-lane-cannot-evaluate", "flag", "", "",
+             "python3 -I -B \"$RUNNER\" --suite git-fixture-env-extra", refused, lanes),
+            # A lane handed to another shell as one argument: the names sit inside one token.
+            ("lanes/shell-string-lane-cannot-evaluate", "whole-token", "", "",
+             "bash -c \"" + runner + " --suite git-fixture-env-extra\"", refused, lanes),
+            # A lane spelled in an env value and run through an expansion.
+            ("lanes/env-command-lane-cannot-evaluate", "values", "",
+             "        env:\n          CMD: " + runner + " --suite git-fixture-env-extra\n", "$CMD",
+             refused, lanes),
+            # Quote splices that shell quote removal, and shlex, resolve to --suite git-fixture-env-extra.
+            ("lanes/quote-spliced-suite-name-lane-read", "literal", "", "",
+             runner + " --suite 'git-fixture'-env-extra", widened, lanes),
+            ("lanes/quote-spliced-suite-flag-lane-read", "literal", "", "",
+             runner + " --su\"\"ite git-fixture-env-extra", widened, lanes),
+            # A runner --suite line of another suite: accepted, not a lane.
+            ("lanes/unrelated-suite-line-accepted", "lanes-only", "", "",
+             runner + " --suite orch-behaviour-selftest", lanes, refused)):
         extra = ("  lane-extra:\n    runs-on: ubuntu-latest\n"
                  + ("    strategy:\n      matrix:\n" + matrix if matrix else "")
                  + "    steps:\n      - uses: actions/setup-python@v5\n        with:\n"
                  "          python-version: '3.14'\n      - name: Suite\n" + env + "        run: " + run + "\n")
         text = HEAD + lane_jobs + extra
         check(check_id, (_lane_reading(_workflow_lanes, CannotEvaluate, text),
-                         _lane_reading(lanes_mutant._workflow_lanes, lanes_mutant.CannotEvaluate, text)),
-              ((2, True), lanes))
+                         _lane_reading(copies[copy]._workflow_lanes, copies[copy].CannotEvaluate, text)),
+              (want, want_copy))
     # The python-floor gate accepts a host-patch pin only inside these jobs of this workflow, read from this
     # source in this form, and refuses these line-break characters: its copies of those names must be these.
     floor = _copy(base, "python_floor_names", _read_text(ROOT / "tools" / "check_python_floor.py"))
