@@ -262,7 +262,9 @@ def self_test_main():
     # fail-closed, and current -> 0. Needs a writable tempdir; skipped (not failed) where none exists,
     # since CI always has one and this is supplementary to the classify/audit coverage above.
     import io
+    import os
     import shutil
+    import signal
     import tempfile
     from contextlib import redirect_stderr, redirect_stdout
 
@@ -280,10 +282,15 @@ def self_test_main():
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-currency-selftest-"))
-    except OSError:
+    except OSError as exc:
         tmp = None
-        print("SELF-TEST NOTE: no writable temp directory; run()-level cases SKIPPED "
-              "(classify()/audit() coverage above still ran)", file=sys.stderr)
+        # #400 re-cut round 4 (codex 7): an unavailable temp directory is a RECORDED
+        # failure (nonzero), never an omitted run()-level case set; the round-3 NOTE
+        # alone let every run()-level case, the FIFO refusal vector included, vanish.
+        print("SELF-TEST NOTE: no writable temp directory ({}); the run()-level cases"
+              " cannot be evaluated".format(exc), file=sys.stderr)
+        failures.append("no writable temp directory ({}); the run()-level cases (the FIFO"
+                        " refusal vector included) were NOT RUN; failing closed".format(exc))
     if tmp is not None:
         try:
             std = tmp / "standards"
@@ -303,6 +310,51 @@ def self_test_main():
                 failures.append("run() malformed under --warn-only MUST stay exit 2 (never masked)")
             if _run_quiet(tmp / "does-not-exist") != 2:
                 failures.append("run() with an absent standards dir expected fail-closed exit 2")
+            # F-CORPUS-FIFO-HANG (QA round 4): a FIFO at a *.toml path the load_manifests glob picks
+            # up (the shape a git-ignored drop-in takes, which the D-400 precheck deliberately does
+            # not walk) must be the named refusal (exit 2), never a blocking read. MUTATION: reverting
+            # _standards.load_manifests to a plain open() blocks here; the alarm records the hang.
+            # POSIX only (os.mkfifo, SIGALRM).
+            if hasattr(os, "mkfifo") and hasattr(signal, "SIGALRM"):
+                fifo_dir = None
+                try:
+                    fifo_dir = Path(tempfile.mkdtemp(prefix="standards-fifo-", dir=str(tmp)))
+                    (fifo_dir / "cur.toml").write_text(_manifest("cur", "stable", days_ago(10)),
+                                                       encoding="utf-8")
+                    os.mkfifo(fifo_dir / "zz-local.toml")
+                except OSError as exc:
+                    # #400 re-cut round 4 (codex 7): a failed FIFO fixture is a recorded
+                    # cannot-evaluate, never an omitted case.
+                    fifo_dir = None
+                    failures.append("the FIFO manifest refusal vector could not be built"
+                                    " ({}); NOT RUN; failing closed".format(exc))
+                if fifo_dir is not None:
+
+                    class _Hang(Exception):
+                        pass
+
+                    def _on_alarm(_signum, _frame):
+                        raise _Hang()
+
+                    previous = signal.signal(signal.SIGALRM, _on_alarm)
+                    signal.alarm(10)
+                    try:
+                        rc_fifo = _run_quiet(fifo_dir)
+                    except _Hang:
+                        rc_fifo = "hung"
+                    finally:
+                        signal.alarm(0)
+                        signal.signal(signal.SIGALRM, previous)
+                    if rc_fifo != 2:
+                        failures.append("run() with a FIFO manifest expected the named refusal exit 2, "
+                                        "got {}".format(rc_fifo))
+            else:
+                # #400 re-cut (codex MEDIUM 4, claude MINOR 11): a capability-gated vector is an
+                # explicit NOT RUN and a recorded failure, never a silent pass.
+                print("NOT RUN: the FIFO manifest refusal vector (os.mkfifo or "
+                      "signal.SIGALRM unavailable); failing closed")
+                failures.append("the FIFO manifest refusal vector NOT RUN (os.mkfifo or "
+                                "signal.SIGALRM unavailable); failing closed")
             # F-TOML-BARE-VALUEERROR-CLASS: an integer literal past CPython's 4300-digit int-string limit
             # makes tomllib raise a BARE ValueError (not TOMLDecodeError). _standards.load_manifests must
             # still raise ManifestError, so run() fails closed at exit 2 rather than escaping a traceback.

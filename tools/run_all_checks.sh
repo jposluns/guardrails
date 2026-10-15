@@ -23,6 +23,26 @@ notrun=0
 # names are listed again before RESULT: FAIL; a failing suite never needs a hand re-run to find it.
 failed_names=""
 
+# D-400-SPECIAL-FILE-PRECHECK: ONE walk of the repository tree BEFORE any gate runs. A special file (a
+# FIFO above all: a plain read of a FIFO with no writer blocks forever), a symlink to one (a
+# git-ignored link included), an unresolvable (looping) non-ignored symlink, or a non-ignored symlink
+# to a directory outside the repository root is refused by name and the run STOPS here with exit 2; a
+# dangling symlink and a symlink to a regular file pass (neither can block a read). The walk DESCENDS
+# git-ignored directories (a stray .venv, editor or build output) and every nested .git directory that
+# is not the repository's own git dir (and, QA round 7, the own git dir is exempt only at the
+# repository ROOT: a root gitfile naming an in-tree directory gets that directory walked), refusing
+# a special file by name wherever it sits; a SYMLINK named __pycache__ is refused by name, ignored
+# or not (the interpreter itself reads through it at import time); every GIT_* variable is scrubbed
+# from the walk's git queries, so an inherited GIT_DIR cannot redirect them; only the contents of
+# any OTHER accepted (ignored, non-shadowing) out-of-root directory link stay outside the walk,
+# covered by the gates' non-blocking, fstat-checked readers (see the precheck docstring). The
+# shell test on the first line is the BOOTSTRAP: python3 would block LOADING the precheck script
+# itself if that path were a FIFO, so a non-regular or symlinked script is refused by name before
+# python3 touches it. Residual: the interpreter binary and THIS runner script are read before the
+# bootstrap line can run. Every gate and self-test below then acts on a checked tree.
+[ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+python3 -I -B tools/_gen_common.py --precheck || exit 2
+
 run_gate() {
   local name="$1"; shift
   echo "--- ${name} ---"

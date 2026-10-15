@@ -56,7 +56,7 @@ marker of any kind), so every exemption is a reviewed code change and never trav
                                       symlink/type and unreadable-binary cases, and the GD-130 tracked/untracked
                                       stray-artifact pair) run in memory with no
                                       filesystem dependency and ALWAYS run; a real-surface end-to-end layer
-                                      runs too where a writable tempdir exists and is reported PARTIAL where not
+                                      runs too where a writable tempdir exists and is a nonzero cannot-evaluate where not
 
 Exit convention (matches the repo's gates):
   0  clean
@@ -102,6 +102,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_leaks import _tokens, ngram_forms  # noqa: E402  reuse the leak gate's n-gram normalization
+from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
 
 class GateError(Exception):
@@ -763,7 +764,7 @@ def run(root, lister=_list_tracked):
 # classification, and unreadable-binary/git-enumeration fail-closed paths). They ALWAYS run: no
 # writable tempdir, no chmod, no symlink support, no wall clock, no randomness. A real-surface end-to-end
 # layer runs additionally where a writable tempdir exists, and every case it cannot run is tracked so the
-# result is reported PARTIAL (never a full PASS) whenever ANY case skips.
+# result is a NONZERO cannot-evaluate, exit 3 (never a PASS), whenever ANY case skips.
 
 _CLEAN_MD = "# Heading\n\nPortable governance content with no operator identity and no operating vocabulary.\n"
 
@@ -821,14 +822,26 @@ def _build_surface(base, name, email):
     return base, entries
 
 
-def self_test_main():
+def _git_available():
+    """Whether git can run the real-git GD-130 pair; a seam the round-7 cannot-evaluate
+    vector injects (the git-fixture lifecycle above it still sees the real host)."""
+    import shutil
+    return shutil.which("git") is not None
+
+
+_SENTINEL_FAILURE = ("the injected unavailable-fixture cases ((p)) and the inherited-sentinel "
+                     "regression ((q)) NOT RUN (AIQT_PORTABILITY_SELFTEST_CHILD=1 inherited "
+                     "at this top-level --self-test entry); failing closed")
+
+
+def self_test_main(selftest_child=False):
     from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
     scrub_git_environment()
     with fixture_git_lifecycle():
-        return _self_test_main_isolated()
+        return _self_test_main_isolated(selftest_child)
 
 
-def _self_test_main_isolated():
+def _self_test_main_isolated(selftest_child=False):
     from _git_fixture_env import scrub_git_environment
     scrub_git_environment()
     name, email = "Jeff Posluns", "jeff@posluns.ca"
@@ -1188,7 +1201,7 @@ def _self_test_main_isolated():
 
     # --- real-surface end-to-end layer (runs where a writable tempdir exists) ----------------------
     # Cases (a)-(n) use an injected tracked-entry roster over real files. Case (o) uses a real git index
-    # when git is available; its absence is tracked as PARTIAL, never reported as a full PASS.
+    # when git is available; its absence is a recorded cannot-evaluate (exit 3), never a full PASS.
     import io
     import shutil
     import tempfile
@@ -1338,7 +1351,7 @@ def _self_test_main_isolated():
         try:
             # GD-130: the REAL _disk_kind rejects a symlinked ANCESTOR (never follows it) and a terminal
             # symlink; run() canonicalizes a symlinked ROOT anchor. ALL symlink/fs setup is inside the guard
-            # so a symlink-less host reports PARTIAL (never a raise); the root-boundary check DISCRIMINATES
+            # so a symlink-less host exits 3 cannot-evaluate (never a raise); the root-boundary check DISCRIMINATES
             # (it fails if root.resolve() is absent, because the injected lister would then receive the
             # symlink rather than the canonical root).
             _dk = base_tmp / "disk-kind"
@@ -1499,7 +1512,7 @@ def _self_test_main_isolated():
                 failures.append("GD-130: a tracked-empty site/downloads expected fail-closed exit 2")
 
             # (o) Canonical real-git witness: untracked stray passes, then the same path tracked fails C3.
-            if shutil.which("git") is None:
+            if not _git_available():
                 skipped.append("real-git tracked/untracked GD-130 pair (git is unavailable)")
             else:
                 sroot, _entries = _fresh("real-git")
@@ -1527,6 +1540,85 @@ def _self_test_main_isolated():
                         failures.append("GD-130 real-git: git add of stray .pyc failed")
                     elif _run_quiet(sroot) != 1:
                         failures.append("GD-130 real-git: tracked stray .pyc expected exit 1")
+
+            # (p) #400 re-cut round 7 (codex 5): each unavailable REQUIRED fixture must
+            #     yield the NONZERO cannot-evaluate exit (3), never PASS (PARTIAL) exit 0:
+            #     one injected child per condition (refused tempdir; refused symlinks for
+            #     the ancestor-symlink/root-boundary block; git absent for the real-git
+            #     tracked/untracked pair), each run through the real wiring. The children
+            #     are marked by ARGUMENT, not only by the environment sentinel they
+            #     inherit: an inherited sentinel at a top-level entry is a recorded NOT
+            #     RUN failure (#400 re-cut round 8, decided 2), never a silent skip.
+            if selftest_child:
+                # the deliberate child of the injection and regression runners below: its
+                # own copies of cases (p) and (q) stay skipped BY ARGUMENT, which an
+                # inherited environment cannot forge (#400 re-cut round 8, decided 2)
+                pass
+            elif os.environ.get("AIQT_PORTABILITY_SELFTEST_CHILD") == "1":
+                # #400 re-cut round 8 (decided 2): an INHERITED child sentinel at a
+                # top-level --self-test entry is a recorded NOT RUN failure (nonzero),
+                # never a silent omission of cases (p) and (q); the recursion guard still
+                # holds (this branch spawns nothing)
+                failures.append(_SENTINEL_FAILURE)
+            else:
+                childenv = dict(os.environ, AIQT_PORTABILITY_SELFTEST_CHILD="1")
+                toolsdir = str(Path(__file__).resolve().parent)
+                injections = (
+                    ("tempdir",
+                     "_real_mkdtemp = tempfile.mkdtemp\n"
+                     "def _refused(*args, **kwargs):\n"
+                     "    if str(kwargs.get('prefix', '')).startswith('aiqt-portability-selftest-'):\n"
+                     "        raise OSError('injected: no writable temp directory')\n"
+                     "    return _real_mkdtemp(*args, **kwargs)\n"
+                     "tempfile.mkdtemp = _refused\n",
+                     "all end-to-end surface cases (no writable temp directory)"),
+                    ("symlink",
+                     "def _refused(*args, **kwargs):\n"
+                     "    raise OSError('injected: no symlink support')\n"
+                     "os.symlink = _refused\n",
+                     "_disk_kind ancestor-symlink and root-boundary real-fs tests "
+                     "(no symlink support)"),
+                    ("git",
+                     "import check_portability as _pre\n"
+                     "_pre._git_available = lambda: False\n",
+                     "real-git tracked/untracked GD-130 pair (git is unavailable)"),
+                )
+                for tag, patch, marker in injections:
+                    runner = base_tmp / ("cannot-evaluate-" + tag + ".py")
+                    runner.write_text(
+                        "import sys, os, shutil, tempfile\n"
+                        + "sys.path.insert(0, " + repr(toolsdir) + ")\n"
+                        + patch
+                        + "import check_portability as mod\n"
+                        + "sys.exit(mod.self_test_main(selftest_child=True))\n",
+                        encoding="utf-8")
+                    proc = subprocess.run([sys.executable, "-I", "-B", str(runner)],
+                                          capture_output=True, text=True, env=childenv,
+                                          timeout=600)
+                    out = proc.stdout + proc.stderr
+                    if proc.returncode != 3 or "CANNOT EVALUATE" not in out or marker not in out:
+                        failures.append("injected unavailable fixture ({}) expected the nonzero "
+                                        "cannot-evaluate exit 3 naming {!r}, got rc={} "
+                                        "tail={!r}".format(tag, marker, proc.returncode,
+                                                               out[-200:]))
+
+                # (q) #400 re-cut round 8 (decided 2, and decided 4: this vector guards the
+                #     PARENT wiring, not a helper): run the REAL script entry with the
+                #     sentinel inherited and no child argument; it must fail rc 1 with
+                #     EXACTLY the recorded NOT RUN failure, so a silent top-level skip of
+                #     case (p) can never return
+                proc = subprocess.run([sys.executable, "-I", "-B",
+                                       str(Path(__file__).resolve()), "--self-test"],
+                                      capture_output=True, text=True, env=childenv,
+                                      timeout=600)
+                sentinel_failures = [line[4:] for line in
+                                     (proc.stdout + proc.stderr).splitlines()
+                                     if line.startswith("  - ")]
+                if proc.returncode != 1 or sentinel_failures != [_SENTINEL_FAILURE]:
+                    failures.append("an inherited child sentinel at a top-level --self-test "
+                                    "entry expected rc 1 with exactly the recorded NOT RUN "
+                                    "failure, got rc={} failures={!r}".format(
+                                        proc.returncode, sentinel_failures[-6:]))
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -1541,8 +1633,13 @@ def _self_test_main_isolated():
             "lister/reader enumeration, symlink/gitlink/type, git-enumeration and unreadable-binary "
             "fail-closed paths, plus the exemption marker)")
     if skipped:
-        print("SELF-TEST PASS (PARTIAL): {}; the following were SKIPPED, so those invariants are UNVERIFIED "
-              "this run: {}".format(core, "; ".join(skipped)))
+        # #400 re-cut round 7 (codex 5): an unavailable required fixture is a NONZERO
+        # cannot-evaluate result, never a PASS (PARTIAL) exit 0 that could ship a defect
+        # detectable only by the omitted cases
+        print("SELF-TEST CANNOT EVALUATE: {}; NOT RUN (required fixtures unavailable), so those "
+              "invariants are UNVERIFIED this run: {}; failing closed (exit 3)".format(
+                  core, "; ".join(skipped)))
+        return 3
     else:
         print("SELF-TEST PASS: {}; the end-to-end surface cases hold (clean pass, planted identity/email/"
               "vocabulary/pathname/marker/unknown-file findings, tracked no-skip enumeration, GD-130 "
@@ -1575,7 +1672,7 @@ def main():
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
-    return run(root)
+    return run(precheck_special_files(root))
 
 
 if __name__ == "__main__":

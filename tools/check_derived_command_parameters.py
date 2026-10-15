@@ -81,6 +81,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _gen_common import precheck_special_files, read_source_bytes  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
 CONFIG_REL = ".aiqt/derived-command-parameters.toml"
 ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")           # a kebab-case binding identifier
@@ -411,7 +412,11 @@ def scan_file(root, path, binding, telemetry):
     literal value (it may be sensitive). telemetry accumulates the commands and options actually matched,
     so run() can reconcile the config's selectors against the real source."""
     try:
-        raw = path.read_bytes()
+        # read_source_bytes, never a plain read: the surface walk picks up WHATEVER sits under the
+        # declared prefix (the D-400 precheck walks ignored directories too, but it certifies only
+        # what stood at walk time, never a later drop-in), so a FIFO here is the named refusal
+        # (SourceReadRefused -> GateError, exit 2), never a blocking read (F-CORPUS-FIFO-HANG class).
+        raw = read_source_bytes(path)
     except OSError as exc:
         raise GateError("configuration {} binding {!r}: cannot read declared surface {} ({})".format(
             CONFIG_REL, binding["id"], path.relative_to(root), exc))
@@ -504,7 +509,7 @@ def run(root):
 # --- self-test ---------------------------------------------------------------------------------------
 # The tokenization and value-classification cases are pure and ALWAYS run. An end-to-end layer over a real
 # synthetic tree (real reads, real containment) runs where a writable tempdir exists and is reported
-# PARTIAL where not. No wall clock, no randomness, no network.
+# a nonzero cannot-evaluate where not (round 7). No wall clock, no randomness, no network.
 
 def _run_quiet(root):
     import io
@@ -513,7 +518,12 @@ def _run_quiet(root):
         return run(root)
 
 
-def self_test_main():  # noqa: C901  a flat sequence of independent cases
+_SENTINEL_FAILURE = ("the injected unavailable-fixture cases ((w)) and the inherited-sentinel "
+                     "regression ((x)) NOT RUN (AIQT_DERIVED_SELFTEST_CHILD=1 inherited at "
+                     "this top-level --self-test entry); failing closed")
+
+
+def self_test_main(selftest_child=False):  # noqa: C901  a flat sequence of independent cases
     failures = []
     commands = {"sample-tool"}
     options = ["--target"]
@@ -857,6 +867,93 @@ def self_test_main():  # noqa: C901  a flat sequence of independent cases
                        {"cmd/resume.md": "sample-tool -xt sample-org/repo\n"})
             if _run_quiet(r) != 1:
                 failures.append("e2e: a bundled short-option literal value was not scanned")
+
+            # (w) #400 re-cut round 7 (codex 5): each unavailable REQUIRED fixture must
+            #     yield the NONZERO cannot-evaluate exit (3), never PASS (PARTIAL) exit 0:
+            #     one injected child per condition (refused tempdir; refused symlink for
+            #     the declared-surface case; refused symlink for the dangling-symlink
+            #     configuration case), each run through the real wiring. The children are
+            #     marked by ARGUMENT, not only by the environment sentinel they inherit: an
+            #     inherited sentinel at a top-level entry is a recorded NOT RUN failure
+            #     (#400 re-cut round 8, decided 2), never a silent skip.
+            import os as _os
+            import subprocess
+            if selftest_child:
+                # the deliberate child of the injection and regression runners below: its
+                # own copies of cases (w) and (x) stay skipped BY ARGUMENT, which an
+                # inherited environment cannot forge (#400 re-cut round 8, decided 2)
+                pass
+            elif _os.environ.get("AIQT_DERIVED_SELFTEST_CHILD") == "1":
+                # #400 re-cut round 8 (decided 2): an INHERITED child sentinel at a
+                # top-level --self-test entry is a recorded NOT RUN failure (nonzero),
+                # never a silent omission of cases (w) and (x); the recursion guard still
+                # holds (this branch spawns nothing)
+                failures.append(_SENTINEL_FAILURE)
+            else:
+                childenv = dict(_os.environ, AIQT_DERIVED_SELFTEST_CHILD="1")
+                toolsdir = str(Path(__file__).resolve().parent)
+                injections = (
+                    ("tempdir",
+                     "_real_mkdtemp = tempfile.mkdtemp\n"
+                     "def _refused(*args, **kwargs):\n"
+                     "    if str(kwargs.get('prefix', '')).startswith('aiqt-derived-cmd-selftest-'):\n"
+                     "        raise OSError('injected: no writable temp directory')\n"
+                     "    return _real_mkdtemp(*args, **kwargs)\n"
+                     "tempfile.mkdtemp = _refused\n",
+                     "all end-to-end cases (no writable temp directory)"),
+                    ("surface-symlink",
+                     "_real_symlink = os.symlink\n"
+                     "def _refused(target, *args, **kwargs):\n"
+                     "    if str(target).endswith('real.md'):\n"
+                     "        raise OSError('injected: no symlink support')\n"
+                     "    return _real_symlink(target, *args, **kwargs)\n"
+                     "os.symlink = _refused\n",
+                     "the symlink fail-closed case (no symlink support)"),
+                    ("config-symlink",
+                     "_real_symlink = os.symlink\n"
+                     "def _refused(target, *args, **kwargs):\n"
+                     "    if str(target).endswith('does-not-exist.toml'):\n"
+                     "        raise OSError('injected: no symlink support')\n"
+                     "    return _real_symlink(target, *args, **kwargs)\n"
+                     "os.symlink = _refused\n",
+                     "the dangling-symlink configuration case (no symlink support)"),
+                )
+                for tag, patch, marker in injections:
+                    runner = base_tmp / ("cannot-evaluate-" + tag + ".py")
+                    runner.write_text(
+                        "import sys, os, tempfile\n"
+                        + "sys.path.insert(0, " + repr(toolsdir) + ")\n"
+                        + patch
+                        + "import check_derived_command_parameters as mod\n"
+                        + "sys.exit(mod.self_test_main(selftest_child=True))\n",
+                        encoding="utf-8")
+                    proc = subprocess.run([sys.executable, "-I", "-B", str(runner)],
+                                          capture_output=True, text=True, env=childenv,
+                                          timeout=600)
+                    out = proc.stdout + proc.stderr
+                    if proc.returncode != 3 or "CANNOT EVALUATE" not in out or marker not in out:
+                        failures.append("injected unavailable fixture ({}) expected the nonzero "
+                                        "cannot-evaluate exit 3 naming {!r}, got rc={} "
+                                        "tail={!r}".format(tag, marker, proc.returncode,
+                                                               out[-200:]))
+
+                # (x) #400 re-cut round 8 (decided 2, and decided 4: this vector guards the
+                #     PARENT wiring, not a helper): run the REAL script entry with the
+                #     sentinel inherited and no child argument; it must fail rc 1 with
+                #     EXACTLY the recorded NOT RUN failure, so a silent top-level skip of
+                #     case (w) can never return
+                proc = subprocess.run([sys.executable, "-I", "-B",
+                                       str(Path(__file__).resolve()), "--self-test"],
+                                      capture_output=True, text=True, env=childenv,
+                                      timeout=600)
+                sentinel_failures = [line[4:] for line in
+                                     (proc.stdout + proc.stderr).splitlines()
+                                     if line.startswith("  - ")]
+                if proc.returncode != 1 or sentinel_failures != [_SENTINEL_FAILURE]:
+                    failures.append("an inherited child sentinel at a top-level --self-test "
+                                    "entry expected rc 1 with exactly the recorded NOT RUN "
+                                    "failure, got rc={} failures={!r}".format(
+                                        proc.returncode, sentinel_failures[-6:]))
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -873,8 +970,12 @@ def self_test_main():  # noqa: C901  a flat sequence of independent cases
             "clusters are matched, backslash-newline continuations join a split sink, the argument window "
             "is bounded, telemetry records the matched selectors, and multiple sinks are all checked")
     if skipped:
-        print("SELF-TEST PASS (PARTIAL): {}; SKIPPED (UNVERIFIED this run): {}".format(
-            core, "; ".join(skipped)))
+        # #400 re-cut round 7 (codex 5): an unavailable required fixture is a NONZERO
+        # cannot-evaluate result, never a PASS (PARTIAL) exit 0 that could ship a defect
+        # detectable only by the omitted cases
+        print("SELF-TEST CANNOT EVALUATE: {}; NOT RUN (required fixtures unavailable): {}; "
+              "failing closed (exit 3)".format(core, "; ".join(skipped)))
+        return 3
     else:
         print("SELF-TEST PASS: {}; and the end-to-end layer holds (NOT APPLICABLE, clean pass, literal "
               "finding, malformed-version/duplicate-id/empty-scope/absolute/escaping/unmatched/non-UTF-8/"
@@ -904,7 +1005,7 @@ def main():
     (self_test,) = parsed
     if self_test:
         return self_test_main()
-    root = Path(__file__).resolve().parents[1]
+    root = precheck_special_files(Path(__file__).resolve().parents[1])
     return run(root)
 
 

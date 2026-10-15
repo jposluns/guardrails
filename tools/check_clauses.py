@@ -217,7 +217,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
     os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml  # noqa: E402
+from _gen_common import repo_root, load_toml, read_source_bytes, precheck_special_files  # noqa: E402
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 from check_versions import _parse as _semver  # noqa: E402  reuse the shipped bare-SemVer parser
 from gen_rules import parse_source, CID_RE  # noqa: E402  reuse the frontmatter parser and corpus-id regex
@@ -852,7 +852,7 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
                                 .format(where, source_path, row.get("corpus-id")))
         if source_path not in digest_cache:
             try:
-                raw = abs_path.read_bytes()
+                raw = read_source_bytes(abs_path)
             except FileNotFoundError:
                 digest_cache[source_path] = ("missing", None, None)
             except OSError as exc:  # a permission or I/O error is environmental: fail closed
@@ -2271,6 +2271,35 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             base = _fresh(rules, rows, born3, tombstones=tombs3, successors=succs3)
             if _run_quiet(**_paths(base)) != 0:
                 failures.append("same-release pass-through fold: expected exit 0")
+
+            # (50) #400 re-cut round 7 (codex 5): a refused temporary-directory fixture must
+            #      yield the NONZERO cannot-evaluate exit (3), never PASS (PARTIAL) exit 0.
+            #      The child patches tempfile.mkdtemp (for this self-test's prefix only)
+            #      before importing this module and runs the whole self-test through the
+            #      real wiring; its own end-to-end section, this case included, is the
+            #      section being skipped, so it cannot recurse.
+            import subprocess
+            runner = base_tmp / "clauses_cannot_evaluate_vector.py"
+            runner.write_text(
+                "import sys, tempfile\n"
+                "sys.path.insert(0, {tools!r})\n"
+                "_real_mkdtemp = tempfile.mkdtemp\n"
+                "def _refused(*args, **kwargs):\n"
+                "    if str(kwargs.get('prefix', '')).startswith('aiqt-clauses-selftest-'):\n"
+                "        raise OSError('injected: no writable temp directory')\n"
+                "    return _real_mkdtemp(*args, **kwargs)\n"
+                "tempfile.mkdtemp = _refused\n"
+                "import check_clauses\n"
+                "sys.exit(check_clauses.self_test_main())\n".format(
+                    tools=str(Path(__file__).resolve().parent)),
+                encoding="utf-8")
+            proc = subprocess.run([sys.executable, "-I", "-B", str(runner)],
+                                  capture_output=True, text=True, timeout=600)
+            if proc.returncode != 3 or "CANNOT EVALUATE" not in (proc.stdout + proc.stderr):
+                failures.append("an injected unavailable temp-directory fixture expected the "
+                                "nonzero cannot-evaluate exit 3 with its CANNOT EVALUATE "
+                                "marker, got rc={} tail={!r}".format(
+                                    proc.returncode, (proc.stdout + proc.stderr)[-200:]))
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -2322,8 +2351,13 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
               "over-fires are refused, and the disclosed residuals pass)"
               .format(core))
     else:
-        print("SELF-TEST PASS (PARTIAL): {}; the end-to-end fixture cases were SKIPPED (no writable temp "
-              "directory), so those invariants are UNVERIFIED this run".format(core))
+        # #400 re-cut round 7 (codex 5): a required fixture this self-test cannot build is a
+        # NONZERO cannot-evaluate result, never a PASS (PARTIAL) exit 0 that could ship a
+        # defect detectable only by the omitted end-to-end cases
+        print("SELF-TEST CANNOT EVALUATE: {}; the end-to-end fixture cases were NOT RUN (no "
+              "writable temp directory), so those invariants are UNVERIFIED this run; "
+              "failing closed (exit 3)".format(core))
+        return 3
     return 0
 
 
@@ -2363,7 +2397,7 @@ def main():
         return 2
     if opts["self_test"]:
         return self_test_main()
-    root = Path(opts["root"]).resolve() if opts["root"] else repo_root()
+    root = precheck_special_files(Path(opts["root"]).resolve()) if opts["root"] else repo_root()
     rules_dir = Path(opts["rules_dir"]) if opts["rules_dir"] else root / ".aiqt" / "core" / "rules"
     inventory = Path(opts["inventory"]) if opts["inventory"] else root / ".aiqt" / "core" / "clauses.toml"
     register = Path(opts["register"]) if opts["register"] else root / ".aiqt" / "core" / "id-history.toml"
