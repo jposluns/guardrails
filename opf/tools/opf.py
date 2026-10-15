@@ -14302,8 +14302,7 @@ def _watchdog_run_legs(cases, launch):
 
 
 def _watchdog_declared_seconds(plan=None):
-    """The opf self-test's DECLARED sequential worst case, in seconds, that
-    tools/selftest_git_fixture_env.py sizes its per-member bound above: for
+    """The opf self-test's DECLARED sequential worst case, in seconds: for
     every watchdog regression leg, its own process bound (its budget plus
     the launch margin; the runner launches the legs one at a time) plus its
     close-out after that bound (_watchdog_leg_closeout_seconds), plus the
@@ -14321,10 +14320,10 @@ def _watchdog_declared_seconds(plan=None):
     raised at any other point, and exceptions another thread raises into
     the caller), nor for the self-test's work outside the charged legs and
     calls (the regression runner's pre-flight vectors among it). The
-    other registered opf self-tests declare no end-to-end budget; the
-    consumer's margin is the allowance for them. `plan` defaults to the
-    runner's own tables; the consumer passes a synthetic plan as its
-    red-on-revert vector for each term."""
+    other registered opf self-tests declare no end-to-end budget, and
+    this total covers none of them. `plan` defaults to the runner's own
+    tables; the regression runner's floor vectors pass a synthetic plan
+    to check how the top-level isolation run is priced."""
     if plan is None:
         plan = _watchdog_regression_self_test(plan_only=True)
     if not isinstance(plan, dict):
@@ -15537,7 +15536,12 @@ def _init_repo(root):
     repo = Path(os.path.abspath(os.fsdecode(lines[2])))
     if root != repo and repo not in root.parents:
         raise RuntimeError("git preflight: reported repository does not contain root")
-    repo_fd = _opf_store._open_dir_nofollow(repo)
+    # A no-follow probe only, closed unread: traverse_only. Where os.O_PATH exists the probe needs search
+    # permission only, so an enclosing repository with search but no read permission (0111) above a nested
+    # product root is confirmed rather than refused EACCES (#516). Without os.O_PATH the walk opens every
+    # component O_RDONLY, so such a repository still refuses EACCES (fail-closed), first at _init_main's
+    # readable root walk through it; see _opf_store._open_dir_nofollow.
+    repo_fd = _opf_store._open_dir_nofollow(repo, traverse_only=True)
     _opf_store._journal._close_fd_propagating(repo_fd)
     if _init_git(git, repo, args) != raw:
         raise RuntimeError("git preflight: repository identity changed during confirmation")
@@ -16854,7 +16858,11 @@ def _init_no_prior_store(git, repo, root):
 
 
 def _init_same_root(root, root_fd):
-    check_fd = _opf_store._open_dir_nofollow(root)
+    # fstat only, never listed or read: traverse_only. Where os.O_PATH exists the identity check needs search
+    # permission only, so a search-only (0111) root binds. Without os.O_PATH the walk opens every component
+    # O_RDONLY, so the check needs read permission on the root and each ancestor, and a search-only root
+    # still refuses EACCES (fail-closed); see _opf_store._open_dir_nofollow.
+    check_fd = _opf_store._open_dir_nofollow(root, traverse_only=True)
     try:
         current = os.fstat(check_fd)
         opened = os.fstat(root_fd)
@@ -17915,7 +17923,10 @@ def _upgrade_run(root):
         try:
             manifest_model = tomllib.loads(manifest_bytes.decode("utf-8"))
             counters_model = tomllib.loads(counters_bytes.decode("utf-8"))
-        except (UnicodeError, tomllib.TOMLDecodeError) as exc:
+        except (ValueError, RecursionError, MemoryError) as exc:
+            # ValueError: tomllib.TOMLDecodeError, a UnicodeDecodeError and an over-long integer literal;
+            # RecursionError: deep nesting and (CPython 3.14.8 on) a 1001-part key; MemoryError: a many-part
+            # key under a memory limit.
             raise _UpgradeError("store manifest or counters does not parse as TOML ({})".format(exc))
 
         # spec_version triage: current is an idempotent byte no-op; above-tooling fails closed; only the
@@ -17953,8 +17964,9 @@ def _upgrade_run(root):
         except ValueError:
             sv_tuple = None
         if sv_tuple is not None and sv_tuple > tuple(int(p) for p in _UPGRADE_TO.split(".")):
-            raise _UpgradeError("store declares spec_version {!r} ABOVE the {} this tooling implements; "
-                                "a newer store is never downgraded (fail-closed)".format(sv, _UPGRADE_TO))
+            raise _UpgradeError("store declares spec_version {!r} ABOVE the {} upgrade target; opf upgrade "
+                                "never downgrades a store and performs no homes migration (fail-closed)".format(
+                                    sv, _UPGRADE_TO))
         minor = sv == _UPGRADE_MID
 
         # PRECONDITION (spec 9.2): re-emitting the UNCHANGED parsed model reproduces the on-disk bytes
@@ -18501,7 +18513,9 @@ def _adopt_read_inputs(path):
     validation), never duplicated here. The read is BOUNDED, the planner's own read discipline: a
     no-follow, nonblocking open (every component is walked from the filesystem root with O_NOFOLLOW, the
     store root's _opf_store._open_dir_nofollow walk, so a symlinked parent, ancestor or final component
-    refuses; and a FIFO returns at once rather than blocking), a SINGLY-LINKED (st_nlink == 1) regular file
+    refuses; and a FIFO returns at once rather than blocking; the parent is opened traverse_only, since it
+    is only the dir_fd of the worksheet open and never listed, so a worksheet in a search-only directory
+    reads as a plain open of it does), a SINGLY-LINKED (st_nlink == 1) regular file
     only (a hardlinked worksheet is a second name for another inode, refused class-consistent with the
     engine's own single-link control reads), and the planner's per-file byte bound
     (_opf_adopt_plan.MAX_FILE_BYTES) checked on the opened fd and again by the journal's capped reader, so
@@ -18512,7 +18526,7 @@ def _adopt_read_inputs(path):
     cap = _opf_adopt_plan.MAX_FILE_BYTES
     try:
         parent, name = os.path.split(path if os.path.isabs(path) else os.path.join(os.getcwd(), path))
-        pfd = _opf_store._open_dir_nofollow(parent)
+        pfd = _opf_store._open_dir_nofollow(parent, traverse_only=True)   # a dir_fd only, never read
         fd = None
         try:
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
@@ -18551,7 +18565,7 @@ def _adopt_read_inputs(path):
         _opf_store._close_fd_exc_safe(fd)
     try:
         doc = tomllib.loads(raw.decode("utf-8"))
-    except (ValueError, RecursionError) as exc:   # UnicodeDecodeError and TOMLDecodeError are ValueErrors
+    except (ValueError, RecursionError, MemoryError) as exc:   # UnicodeDecodeError and TOMLDecodeError are ValueErrors
         raise ValueError("--inputs worksheet unreadable or malformed ({}): {}".format(path, exc))
     if not (isinstance(doc, dict) and type(doc.get("schema")) is int and doc.get("schema") == 1):
         raise ValueError("--inputs worksheet must be a TOML table carrying `schema = 1` (an integer 1, "
@@ -20100,6 +20114,43 @@ def _cli_self_test():
                         failures.append("adopt plan with {} worksheet: rc={!r} (expected 2 + {!r})".format(
                             label, rc, needle))
 
+                # The worksheet's PARENT is only the dir_fd of the worksheet open, never listed, so it is opened
+                # traverse_only: a worksheet in a search-only (0111) directory reads as a plain open of it does.
+                # Red without traverse_only (the readable parent open refuses EACCES). Mode bits do not bind
+                # uid 0, so that run discloses a skip; without os.O_PATH the walk keeps its documented O_RDONLY
+                # fallback, so the EACCES refusal is asserted there instead (fail-closed, never relaxed).
+                _so_dir = os.path.join(abase, "searchonly")
+                _so_ws = os.path.join(_so_dir, "inputs.toml")
+                try:
+                    os.mkdir(_so_dir)
+                    with open(_so_ws, "w", encoding="utf-8") as fh:
+                        fh.write('schema = 1\nproduct = "opf"\n'
+                                 'expected_observation_digest = "sha256:' + "0" * 64 + '"\n' + bindings_toml)
+                except OSError as exc:
+                    print("opf cli self-test: harness error: could not build the adopt --inputs search-only "
+                          "fixture ({})".format(exc), file=sys.stderr)
+                    return EXIT_MALFORMED
+                if hasattr(os, "geteuid") and os.geteuid() == 0:
+                    print("opf cli self-test: DISCLOSED SKIP: adopt --inputs search-only parent vector not run "
+                          "(uid 0 is not bound by mode bits)", file=sys.stderr)
+                else:
+                    os.chmod(_so_dir, 0o111)
+                    try:
+                        try:
+                            _so_out = sorted(_adopt_read_inputs(_so_ws))
+                        except ValueError as exc:
+                            _so_out = str(exc)
+                    finally:
+                        os.chmod(_so_dir, 0o755)
+                    if hasattr(os, "O_PATH"):
+                        if not isinstance(_so_out, list) or "bindings" not in _so_out:
+                            failures.append("adopt --inputs worksheet in a search-only (0111) directory: "
+                                            "expected it read as a plain open reads it, got {!r}".format(_so_out))
+                    elif not isinstance(_so_out, str) or "[Errno 13]" not in _so_out:
+                        failures.append("adopt --inputs worksheet in a search-only (0111) directory without "
+                                        "os.O_PATH: expected the documented EACCES refusal, got {!r}".format(
+                                            _so_out))
+
                 # Round-5 defect 2 (K9a fix 5): a parent-directory close that reports an error inside
                 # the --inputs open must not leak the just-opened worksheet fd. Inject the failure at
                 # the REAL close (the number is still released, as on Linux); the read still fails
@@ -20110,8 +20161,8 @@ def _cli_self_test():
                 _wl_real_close = os.close
                 _wl_seen = {}
 
-                def _wl_walk(path):
-                    fd = _wl_real_walk(path)
+                def _wl_walk(path, **kwargs):
+                    fd = _wl_real_walk(path, **kwargs)
                     _wl_seen["pfd"] = fd
                     return fd
 
@@ -21342,8 +21393,8 @@ def _close_exc_safe_vectors_self_test():
         def call():
             real_nofollow = _opf_store._open_dir_nofollow
 
-            def nofollow(path):
-                fd = real_nofollow(path)
+            def nofollow(path, **kwargs):
+                fd = real_nofollow(path, **kwargs)   # the real walk, with _init_repo's traverse_only
                 arm(fd)                       # only the repository-root probe's close is injected
                 return fd
             with mock.patch.object(_opf_store, "_open_dir_nofollow", nofollow):
@@ -21693,6 +21744,7 @@ def _self_tests():
     ("opf-observe", _opf_observe.self_test),
     ("opf-absorb", _opf_absorb.self_test),
     ("opf-record", _opf_record.self_test),
+    ("opf-write-guard", _opf_write_guard.self_test),
     ("opf-adopt-apply", _opf_adopt_apply.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-check", _opf_check.self_test),

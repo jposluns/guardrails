@@ -2565,9 +2565,9 @@ exit 0
         # nested suite alone can exceed 120 s, so this leg timed out to
         # cannot-evaluate without ever reading host configuration. 600 s
         # keeps the worst-case hang inside the lanes' per-member bound
-        # (tools/selftest_git_fixture_env.py, _MEMBER_BOUND_SECONDS) while
-        # removing the load sensitivity; the interception probe and
-        # the scratch legs keep the tight bound.
+        # (tools/selftest_git_fixture_env.py, _config_member_bound: 1200 s
+        # by default) while removing the load sensitivity; the interception
+        # probe and the scratch legs keep the tight bound.
         proc = run_shell(shim + source, timeout=120 if scratch_only else 600)
         try:
             argv_log = log.read_bytes()
