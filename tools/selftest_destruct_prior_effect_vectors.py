@@ -753,7 +753,8 @@ PRIOR_EFFECT_VECTORS = [
     ("pe-word-xargs-find-exec-printf-dot-overdeny", 4, 'xargs find . -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
     ("pe-word-xargs-find-exec-printf-operand-dot-overdeny", 4, 'xargs find . -exec printf zq {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
     # FIX-514-R20 (D-514-DEFN-WHOLE-TAIL, DECIDED 1, both reviews MAJOR): once a segment opens a
-    # function definition (any spelling, newline-split or not) or a coproc (any form), EVERY later
+    # function definition (a header the reader recognizes, newline-split or not) or a coproc
+    # (any form), EVERY later
     # segment of the command, to its end, is judged WHOLE by the segment word rule; the
     # rounds-18/19 one-segment carry leaked at a newline-split brace body, a function-keyword
     # parenthesized body and a second body command. A runner-word and an opaque-word witness per

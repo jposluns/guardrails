@@ -978,7 +978,7 @@ def _lex_command(command, partial=False, recover=False, _start=0, _close=False, 
     substitution after a descriptor number, or any such stop inside a nested group; 0 (SYNTAX, the text
     from the stop point on is NOT read as commands, though bash may still run commands BEFORE the stop -
     earlier lines before a last-line syntax error, and a trailing backslash it keeps as a literal): an
-    unbalanced quote or escape, a malformed redirect, an unclosed group; 2 (UNCERTAIN, a
+    unbalanced quote or escape, a malformed redirect, an unclosed process substitution; 2 (UNCERTAIN, a
     construct the reader cannot model with certainty though the read did not stop): a process or command
     substitution nested beyond _LEX_RECOVER_DEPTH (every nested group counts toward ONE limit, process
     substitutions included), or a backslash-newline inside an unquoted heredoc body or delimiter (recorded
@@ -8468,7 +8468,7 @@ _DESTRUCT_WRITER_RES = (
 # RUNNER - every _COMMAND_RUNNERS word, and find with its whole command line - is read by the
 # WORD-LEVEL rule (FIX-514-R16, DECIDED 1) on EVERY route that reaches it - directly, behind the
 # reserved-word time prefix, inside a coproc (plain, NAME and parenthesized-body forms), and in a
-# function definition of any spelling, the header and the body's FIRST command included
+# function definition whose header the reader recognizes, the header and the body's FIRST command included
 # (FIX-514-R17/R18/R19, DECIDED 2):
 # EVERY word of its argument list (option, option value,
 # operand, find path, predicate or action operand) is UNKNOWN, denying, when it is opaque (an
@@ -9265,7 +9265,7 @@ def destructive_guard(data):
     stop categories remain: a STILL-RUNS stop (a NUL, a case statement in RESERVED-WORD position inside a
     substitution, a heredoc delimiter or nested command list the read cannot parse, a process substitution
     after a descriptor number) DENIES WHOLESALE; a SYNTAX stop (an unbalanced quote or escape, a malformed
-    redirect, an unclosed group) is classified up to the stop and then DENIES whenever any text at or
+    redirect, an unclosed process substitution) is classified up to the stop and then DENIES whenever any text at or
     after the stop was left unread (FULL WIDTH, FIX-514-R12: every such stop leaves at least its stopping
     character unread, so a syntax stop denies; the former separator-gated allow is gone).
 
