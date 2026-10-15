@@ -93,7 +93,7 @@ from _opf_schema import (  # noqa: E402
 from _opf_release import (  # noqa: E402
     validate_version, validate_worklog, _entries_by_id,
     check_frozen_coverage, check_ids_partition, check_rotation_only_released, _verify_append_only, _wl_num,
-    parse_semver, _parse_span, _valid_digest, RELEASE_KEYS,
+    parse_semver, _parse_span, _valid_digest, RELEASE_KEYS, RELEASE_OPTIONAL_KEYS, _imported_row_findings,
 )
 
 # Fixed store-tree file / directory names (OPF-SPEC 4.2 layout; all lowercase machine source).
@@ -2724,17 +2724,19 @@ def _check_lease(root_fd, machine_rel, rep):
 
 # --- observations (the inert git-derived facts the caller injects) -----------------------------------
 
-def _wellformed_release_row(row):
+def _wellformed_release_row(row, imported_rows=False):
     """True when `row` is a structurally well-formed release row: the per-row shape validate_version
-    enforces (keys EXACTLY RELEASE_KEYS, a valid SemVer version, an RFC 3339 date, a well-formed
-    worklog_span, and a sha256 coverage_digest). Cross-row tiling, uniqueness, and monotonicity are NOT
+    enforces (keys EXACTLY RELEASE_KEYS plus any RELEASE_OPTIONAL_KEYS, a valid SemVer version, an RFC
+    3339 date, a well-formed worklog_span, a sha256 coverage_digest, and the optional imported flag under
+    the shared _imported_row_findings rule, `imported_rows` being the switch C-VERSION-LEDGER applies to
+    the store). Cross-row tiling, uniqueness, and monotonicity are NOT
     applied: this decides only whether an INJECTED prior row can serve as the append-only immutability
     baseline, so a well-formed row that merely DIFFERS from the current ledger still reaches the graded
     rewrite check (a real history rewrite), while a dict of garbage keys is a malformed observation routed
     to CANNOT-EVALUATE rather than a false rewrite finding (F5; guard-input-soundness)."""
     if not isinstance(row, dict):
         return False
-    if set(row) != RELEASE_KEYS:
+    if set(row) - RELEASE_OPTIONAL_KEYS != RELEASE_KEYS:
         return False
     if parse_semver(row.get("version")) is None:
         return False
@@ -2745,16 +2747,19 @@ def _wellformed_release_row(row):
         return False
     if not _valid_digest(row.get("coverage_digest")):
         return False
+    if _imported_row_findings(row, imported_rows, "prior release row"):
+        return False
     return True
 
 
-def _normalize_prior(prior):
+def _normalize_prior(prior, imported_rows=False):
     """Validate the injected prior committed snapshot: {releases: list, counters_high: {ns: int},
     records: {id: (type, status)}, digests: {id: str} (optional)}. Every record id is shape-validated and
     its namespace reconciled against its declared type's roster namespace, so a malformed id or a
     namespace/type mismatch makes the WHOLE prior malformed -> CANNOT-EVALUATE naming the observation,
-    never a store INVALID (codex-9/F4). Returns the normalized dict or None when any field is malformed
-    (which the caller routes to CANNOT-EVALUATE, never a permissive pass)."""
+    never a store INVALID (codex-9/F4). Each release row is judged under `imported_rows`, the imported
+    release-row switch of the store (_wellformed_release_row). Returns the normalized dict or None when any
+    field is malformed (which the caller routes to CANNOT-EVALUATE, never a permissive pass)."""
     if not isinstance(prior, dict):
         return None
     releases = prior.get("releases")
@@ -2770,7 +2775,7 @@ def _normalize_prior(prior):
     # counter high-water must be a genuine non-negative int (never a bool); a record value must be a
     # (type, status) pair of strings.
     for row in releases:
-        if not _wellformed_release_row(row):
+        if not _wellformed_release_row(row, imported_rows):
             return None
     norm_high = {}
     for ns, val in counters_high.items():
@@ -2810,7 +2815,9 @@ def _normalize_observations(observations):
     """Validate the injected, inert observations object (all fields optional). Returns (obs, error): `obs`
     is a plain dict holding only the recognized, shape-checked fields, and `error` is None on success or a
     fail-closed message when the object itself is malformed. A recognized field present but malformed is
-    DROPPED so its check routes to CANNOT-EVALUATE naming the missing input (guard-input-soundness)."""
+    DROPPED so its check routes to CANNOT-EVALUATE naming the missing input (guard-input-soundness). The
+    prior committed snapshot is the one field carried raw (`prior_raw`): _validate_opened_store normalizes
+    it once the manifest has decided the homes generation its release rows are judged under."""
     if observations is None:
         return {}, None
     if not isinstance(observations, dict):
@@ -2836,11 +2843,9 @@ def _normalize_observations(observations):
         obs["actual_remote_malformed"] = True
     prior = observations.get("prior")
     if prior is not None:
-        norm = _normalize_prior(prior)
-        if norm is not None:
-            obs["prior"] = norm
-        else:
-            obs["prior_malformed"] = True    # supplied but rejected; the history checks say "malformed"
+        # Carried raw: whether a prior release row may carry the imported flag depends on the homes
+        # generation only the manifest decides, so _validate_opened_store normalizes it (_normalize_prior).
+        obs["prior_raw"] = prior
     return obs, None
 
 
@@ -2987,6 +2992,10 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     enabled_modules = _enabled_modules(manifest_data)
     homes = _opf_store.homes_generation(manifest_data)
     rep.require_homes(homes)
+    # The optional imported release-row flag (spec 6.1, 14.3) is admitted only on an active homes-2 store
+    # (spec_version 2.0.0 with homes = 2), which homes_generation reports only once this tooling activates
+    # homes 2; until then the flag stays a C-VERSION-LEDGER finding and a malformed prior release row.
+    imported_rows = homes >= 2
 
     # --- C-ROSTER: reconcile the manifest [types] against the authoritative roster (spec 9/8.1) -------
     rep.ran("C-ROSTER")
@@ -3068,7 +3077,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
             _rel(machine_rel, VERSION_NAME)))
         version_data = None
     elif vst == "ok":
-        vv = validate_version(version_data)
+        vv = validate_version(version_data, imported_rows=imported_rows)
         if vv.status == CANNOT_EVALUATE:
             rep.cant("version.toml: {}".format("; ".join(vv.findings)))
             version_data = None
@@ -3456,9 +3465,13 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                         rep.finding("C-CHANGELOG-GATES: {}".format(f))
 
     # --- the across-time checks, from the injected prior committed snapshot (spec 6.1/8.2/8.4/13) -----
-    prior = obs.get("prior")
+    # The prior is normalized here, under the imported_rows switch C-VERSION-LEDGER applied: a prior
+    # release row may carry the imported flag only where the current ledger may.
+    prior_raw = obs.get("prior_raw")
+    prior = _normalize_prior(prior_raw, imported_rows) if prior_raw is not None else None
     prior_reason = ("the prior committed snapshot observation was supplied but malformed"
-                    if obs.get("prior_malformed") else "no prior committed snapshot was supplied")
+                    if prior_raw is not None and prior is None
+                    else "no prior committed snapshot was supplied")
     rep.ran("C-HISTORY-APPEND-ONLY")
     if prior is None:
         rep.cant("C-HISTORY-APPEND-ONLY: {}; across-time release immutability (spec 6.1/13) is not "
@@ -4962,6 +4975,74 @@ def self_test():
         rp["prior"]["releases"][0]["coverage_digest"] = "sha256:" + "c" * 64
         rpr = run(clean_machine(), obs=rp)
         check("f5-wellformed-prior-rewrite-invalid", rpr is not None and rpr.status == INVALID)
+
+        # --- the optional imported release-row flag (spec 6.1, 14.3): C-VERSION-LEDGER and the prior-row
+        # check admit it only on an active homes-2 store, which shipped tooling never reports (SUPPORTED_HOMES
+        # = 1), so each homes-2 leg activates the generation inside the fixture and declares the 2.0.0 pair.
+        # The verdicts read are per check: the composed changelog gates still read the ledger at the default
+        # switch, outside these checks.
+        imp_empty = compute_span_digest(full_wl, None)
+
+        def imp_row(version, imported=True):
+            r = {"version": version, "date": "2025-01-01T00:00:00Z", "worklog_span": [],
+                 "coverage_digest": imp_empty}
+            if imported is not None:
+                r["imported"] = imported
+            return r
+
+        def imp_run(rows, prior_rows, active, spec_version=_opf_store.HOMES2_SPEC_VERSION):
+            m = clean_machine()
+            m["version.toml"]["release"] = rows + m["version.toml"]["release"]
+            m["manifest.toml"]["opf"].update(spec_version=spec_version, homes=2)
+            o = copy.deepcopy(clean_prior())
+            o["prior"]["releases"] = prior_rows + o["prior"]["releases"]
+            saved = _opf_store.SUPPORTED_HOMES
+            _opf_store.SUPPORTED_HOMES = 2 if active else 1
+            try:
+                return run(m, obs=o)
+            finally:
+                _opf_store.SUPPORTED_HOMES = saved
+
+        def verdicts(r, *cids):
+            return None if r is None else tuple(r.checks.get(c) for c in cids)
+
+        hist = ("C-HISTORY-APPEND-ONLY", "C-HISTORY-COUNTERS", "C-HISTORY-RESURRECTION")
+        _imp2 = imp_run([imp_row("0.9.0")], [imp_row("0.9.0")], active=True)
+        # C-EVIDENCE-ENUM runs only at homes 2, so its presence proves which generation each leg graded.
+        check("rel-imported-doctor-homes2-accepted",
+              verdicts(_imp2, "C-VERSION-LEDGER", "C-EVIDENCE-ENUM") == ("PASS", "PASS"))
+        check("prior-imported-row-wellformed", verdicts(_imp2, *hist) == ("PASS",) * 3)
+        # The shipped generation: the 2.0.0 pair declared but homes 2 not activated grades as generation 1,
+        # so the same rows are refused (a C-VERSION-LEDGER finding and a malformed prior); homes = 2 at the
+        # base spec_version under an activated homes 2 is generation 1 too.
+        _imp1 = imp_run([imp_row("0.9.0")], [imp_row("0.9.0")], active=False)
+        check("rel-imported-doctor-homes1-refused",
+              verdicts(_imp1, "C-VERSION-LEDGER", "C-EVIDENCE-ENUM") == ("FINDING", None)
+              and any("not admitted" in f for f in _imp1.findings))
+        check("prior-imported-row-malformed-homes1",
+              verdicts(_imp1, *hist) == (CANNOT_EVALUATE,) * 3
+              and any("malformed" in m for m in _imp1.cannot_evaluate))
+        _imp12 = imp_run([imp_row("0.9.0")], [imp_row("0.9.0")], active=True,
+                         spec_version=SUPPORTED_SPEC_VERSION)
+        check("rel-imported-doctor-homes2-at-base-version-refused",
+              verdicts(_imp12, "C-VERSION-LEDGER", "C-HISTORY-APPEND-ONLY", "C-EVIDENCE-ENUM")
+              == ("FINDING", CANNOT_EVALUATE, None))
+        # The prior-row check applies the value and span rules of validate_version at their boundaries.
+        check("prior-row-imported-admitted", _wellformed_release_row(imp_row("0.9.0"), True))
+        check("prior-row-imported-dormant-refused", not _wellformed_release_row(imp_row("0.9.0")))
+        check("prior-row-imported-false-refused", not _wellformed_release_row(imp_row("0.9.0", False), True))
+        check("prior-row-imported-int1-refused", not _wellformed_release_row(imp_row("0.9.0", 1), True))
+        check("prior-row-imported-nonempty-span-refused", not _wellformed_release_row(
+            dict(imp_row("0.9.0"), worklog_span=["WL-1", "WL-1"],
+                 coverage_digest=compute_span_digest(full_wl, (1, 1))), True))
+        check("prior-row-plain-still-wellformed", _wellformed_release_row(imp_row("0.9.0", None)))
+        # The flag MUST NOT be added to or removed from an existing row (spec 6.1): with both ledgers
+        # admitted, C-HISTORY-APPEND-ONLY reads either change as a rewrite.
+        for _imp_label, _imp_cur, _imp_prior in (("added-to", True, None), ("removed-from", None, True)):
+            _impr = imp_run([imp_row("0.9.0", _imp_cur)], [imp_row("0.9.0", _imp_prior)], active=True)
+            check("history-flag-{}-existing-row-finding".format(_imp_label),
+                  verdicts(_impr, "C-VERSION-LEDGER", "C-HISTORY-APPEND-ONLY") == ("PASS", "FINDING")
+                  and any("C-HISTORY-APPEND-ONLY" in f and "rewritten" in f for f in _impr.findings))
 
         # --- B5: a '..' moved destination is refused (confinement), never an uncaught JournalError ----
         b5 = clean_machine()

@@ -70,7 +70,8 @@ following where sections 6 and 7 leave a gap:
     worklogs, D1) plus the
     `[[release]]` / `[[summary]]` (version.toml) or `[[entry]]` (worklog.toml) arrays of tables, matching
     Appendix B/C; unknown top-level keys and unknown row keys are fail-closed findings (closed keyset,
-    spec 8.3 discipline applied to the ledgers). SemVer is validated to SemVer 2.0.0 precedence including
+    spec 8.3 discipline applied to the ledgers); the one optional release-row key, `imported` (spec 6.1,
+    14.3), is admitted only where the caller enables imported rows. SemVer is validated to SemVer 2.0.0 precedence including
     pre-release ordering; build metadata is accepted and ignored for precedence, per SemVer 2.0.0.
   - SPAN TILING is defined here as: the non-empty release spans, taken in release-row order, start at WL-1
     and each next non-empty span starts at the previous span's end + 1 (contiguous, non-overlapping, in ID
@@ -128,6 +129,9 @@ WL_NAMESPACE = "WL"                       # the worklog type's namespace (spec 8
 VERSION_TOP_KEYS = frozenset({"schema", "release", "summary"})
 WORKLOG_TOP_KEYS = frozenset({"schema", "entry"})
 RELEASE_KEYS = frozenset({"version", "date", "worklog_span", "coverage_digest"})
+# The optional release-row keys (spec 6.1): `imported` marks a historical release recorded under spec 14.3.
+# validate_version admits it only when its caller enables imported rows (_imported_row_findings).
+RELEASE_OPTIONAL_KEYS = frozenset({"imported"})
 SUMMARY_KEYS = frozenset({"covers", "status", "digest", "superseded_by"})
 
 SUMMARY_STATUSES = ("working", "published", "superseded")
@@ -561,13 +565,39 @@ def released_end(releases):
 
 # --- version.toml validation (spec 6.1) --------------------------------------------------------------
 
-def validate_version(data):
+def _imported_row_findings(row, imported_rows, where):
+    """The findings for the optional `imported` flag of one release-row table (spec 6.1, 14.3); empty
+    when the row carries no flag or carries it legally. A present flag is a finding unless
+    `imported_rows` admits imported rows for the store, unless its value is exactly the boolean true (an
+    integer 1 or any other truthy value is not), and unless the worklog_span of the row is empty (a
+    pre-migration release has no worklog entries). validate_version and the doctor prior-row check share
+    it, so both apply one rule."""
+    if "imported" not in row:
+        return []
+    findings = []
+    if not imported_rows:
+        findings.append("{}: the imported flag is not admitted for this store; imported release rows are "
+                        "not active (spec 6.1/14.3; fail-closed)".format(where))
+    value = row.get("imported")
+    if not (type(value) is bool and value):
+        findings.append("{}: imported must be exactly true when present, not {} (spec 6.1)".format(
+            where, _safe_display(value)))
+    if "worklog_span" in row and row.get("worklog_span") != []:
+        findings.append("{}: an imported row must carry an empty worklog_span; a pre-migration release has "
+                        "no worklog entries (spec 6.1/14.3)".format(where))
+    return findings
+
+
+def validate_version(data, *, imported_rows=False):
     """Validate a parsed version.toml (spec 6.1). Returns a VersionValidation. CANNOT-EVALUATE when the
     input is not a table; INVALID when a well-formed table violates the ledger schema; VALID otherwise.
     Structural only: it validates the release rows (version SemVer + uniqueness + monotonicity, date,
     span shape + tiling, digest format) and the summary rows (covers token, status, digest presence,
     superseded_by), but leaves the changelog FACTS gates (tile-the-ledger-exactly, heading 1:1, freeze
-    recompute) to U5 and the coverage-digest recompute to `check_frozen_coverage`."""
+    recompute) to U5 and the coverage-digest recompute to `check_frozen_coverage`. `imported_rows` admits
+    the optional `imported` release-row flag (spec 6.1, 14.3) under _imported_row_findings; it stays False
+    unless the caller grades a store whose imported release rows are active, so every other caller refuses
+    the flag."""
     if not isinstance(data, dict):
         return VersionValidation(CANNOT_EVALUATE, ["version.toml is not a table"])
 
@@ -602,7 +632,7 @@ def validate_version(data):
         if not isinstance(row, dict):
             findings.append("{} is not a table".format(where))
             continue
-        row_extra = set(row) - RELEASE_KEYS
+        row_extra = set(row) - RELEASE_KEYS - RELEASE_OPTIONAL_KEYS
         if row_extra:
             findings.append("{}: unknown key(s): {}".format(where, ", ".join(_sorted_key_names(row_extra))))
         for req in ("version", "date", "worklog_span", "coverage_digest"):
@@ -630,6 +660,7 @@ def validate_version(data):
             _parse_span(row.get("worklog_span"), findings, where)
         if "coverage_digest" in row and not _valid_digest(row.get("coverage_digest")):
             findings.append("{}: coverage_digest must be 'sha256:<64 hex>' (spec 6.1)".format(where))
+        findings.extend(_imported_row_findings(row, imported_rows, where))
 
     # Spans must tile the released worklog exactly (contiguous, non-overlapping, from WL-1; spec 6.1).
     _tile_releases([r for r in releases if isinstance(r, dict)], findings)
@@ -881,7 +912,7 @@ def _verify_append_only(prior_releases, candidate_releases, findings):
 
 
 def release_cut(version_data, worklog_data, new_version, date,
-                registered_vendors=frozenset(), registered_kinds=None):
+                registered_vendors=frozenset(), registered_kinds=None, *, imported_rows=False):
     """Freeze the current unreleased worklog tail into a released span keyed to `new_version` (spec 6.1,
     6.2). Returns a CutResult carrying a NEW version.toml value with the release row appended; it is a
     PURE per-ledger function (workers-produce-inert-data): the worklog is never mutated and nothing is ever
@@ -918,8 +949,12 @@ def release_cut(version_data, worklog_data, new_version, date,
 
     `registered_vendors` and `registered_kinds` are the manifest's registered x-<vendor> extensions and
     additional worklog change kinds (spec 6.2, 8.7); they are threaded into validate_worklog so a worklog
-    using a manifest-registered kind or extension validates through the cut, matching validate_worklog (M6)."""
-    vv = validate_version(version_data)
+    using a manifest-registered kind or extension validates through the cut, matching validate_worklog (M6).
+
+    `imported_rows` is the validate_version switch, so a cut can follow imported historical rows on a store
+    whose imported release rows are active; the row the cut appends never carries the flag (spec 6.1: a
+    witnessed release cut MUST NOT set it)."""
+    vv = validate_version(version_data, imported_rows=imported_rows)
     if vv.status == CANNOT_EVALUATE:
         return CutResult(CANNOT_EVALUATE, ["cannot cut: version.toml does not evaluate"] + vv.findings)
     if vv.status != VALID:
@@ -1979,6 +2014,62 @@ def self_test():
                   and any("duplicate worklog id" in f for f in _long_v.findings) == (_limit != 640))
     finally:
         sys.set_int_max_str_digits(_prev_wl_limit)
+
+    # --- the optional imported flag (spec 6.1, 14.3) -----------------------------------------------------
+    # Refused at the default switch; admitted only when the caller enables imported rows, and then only as
+    # exactly true on an empty span. Each rule is pinned at its boundary: true and [] just inside; false, 1,
+    # 1.0 and "true" just outside the value rule; WL-1..WL-1, the smallest non-empty span, just outside the
+    # span rule.
+    _imp_empty = coverage_digest([])
+
+    def imp_row(version, **over):
+        r = {"version": version, "date": "2025-01-01T00:00:00Z", "worklog_span": [],
+             "coverage_digest": _imp_empty, "imported": True}
+        r.update(over)
+        return r
+
+    imp_ver = {"schema": 1, "release": [imp_row("0.9.0")]}
+    check("rel-imported-accepted-when-active", validate_version(imp_ver, imported_rows=True).status == VALID)
+    _imp_dormant = validate_version(imp_ver)
+    check("rel-imported-refused-when-dormant",
+          _imp_dormant.status == INVALID and any("not admitted" in f for f in _imp_dormant.findings))
+    for _imp_label, _imp_value in (("false", False), ("int1", 1), ("float1", 1.0), ("string", "true")):
+        _imp_bad = validate_version({"schema": 1, "release": [imp_row("0.9.0", imported=_imp_value)]},
+                                    imported_rows=True)
+        check("rel-imported-{}-refused".format(_imp_label),
+              _imp_bad.status == INVALID and any("exactly true" in f for f in _imp_bad.findings))
+    _imp_span = validate_version({"schema": 1, "release": [
+        imp_row("0.9.0", worklog_span=["WL-1", "WL-1"], coverage_digest=compute_span_digest(by_id, (1, 1)))]},
+        imported_rows=True)
+    check("rel-imported-nonempty-span-refused",
+          _imp_span.status == INVALID and len(_imp_span.findings) == 1
+          and "empty worklog_span" in _imp_span.findings[0])
+    # An imported row covers no entries, so its stored digest must be the empty-coverage constant; any other
+    # well-formed digest is a frozen-coverage mismatch (check_frozen_coverage, unchanged).
+    _imp_dig = {"schema": 1, "release": [imp_row("0.9.0", coverage_digest="sha256:" + "0" * 64)]}
+    check("rel-imported-digest-must-be-empty-coverage",
+          validate_version(_imp_dig, imported_rows=True).status == VALID
+          and bool(check_frozen_coverage(_imp_dig, by_id)) and not check_frozen_coverage(imp_ver, by_id))
+    # The flag MUST NOT be added to or removed from an existing row (spec 6.1): the canonical row comparison
+    # reads either change as a rewrite.
+    _imp_plain = imp_row("0.9.0")
+    del _imp_plain["imported"]
+    _af_add, _af_drop = [], []
+    _verify_append_only([_imp_plain], [imp_row("0.9.0")], _af_add)
+    _verify_append_only([imp_row("0.9.0")], [_imp_plain], _af_drop)
+    check("append-only-imported-flag-added-detected", bool(_af_add))
+    check("append-only-imported-flag-removed-detected", bool(_af_drop))
+    # A witnessed cut follows imported historical rows when the switch admits them, never sets the flag on
+    # the row it appends, and keeps the flag on every earlier row; at the default switch it refuses the ledger.
+    imp_mixed = {"schema": 1, "release": [imp_row("0.8.0"), imp_row("0.9.0"), dict(vok["release"][0])]}
+    _imp_cut = release_cut(imp_mixed, worklog, "1.1.0", "2026-06-15T00:00:00Z", imported_rows=True)
+    check("cut-after-imported-rows-valid",
+          _imp_cut.status == VALID and _imp_cut.frozen_span == ["WL-3", "WL-4"])
+    check("cut-never-sets-imported-flag",
+          _imp_cut.status == VALID and "imported" not in _imp_cut.version_data["release"][-1]
+          and [r.get("imported") for r in _imp_cut.version_data["release"]] == [True, True, None, None])
+    check("cut-imported-rows-dormant-refused",
+          release_cut(imp_mixed, worklog, "1.1.0", "2026-06-15T00:00:00Z").status == INVALID)
 
     if failures:
         print("OPF-RELEASE SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
