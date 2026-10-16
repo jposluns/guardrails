@@ -1506,10 +1506,14 @@ def _is_possible_producer(seg):
 # (--output=X / -oX) or separated (--output X / -o X).
 def _diff_output_diversion(argv):
     """Return (present, target) for a git --output/-o diff-output diversion before any '--' boundary, or
-    (False, None). The target decides console vs file: the diff lands there, not on stdout."""
+    (False, None). The target decides console vs file: the diff lands there, not on stdout. A boundary word
+    right after an option word may be that option's value (_option_may_take_value: git diff -S
+    --end-of-options --output=/dev/stderr writes the patch to stderr), so it does not end the scan; git's
+    revision walk ends the options at the first '--' whatever comes before it, so reading a '--' there as a
+    possible value only over-detects a diversion, which never earns an allow."""
     end = len(argv)
     for j, word in enumerate(argv):
-        if word in _DIFF_END_OF_OPTIONS:
+        if word in _DIFF_END_OF_OPTIONS and not (j > 0 and _option_may_take_value(argv[j - 1])):
             end = j
             break
     i = 0
@@ -1558,12 +1562,15 @@ def _argv_has_patch_enabler(argv):
     narrows the short patch-letter set to _SUMMARY_PATCH_SHORT (p/u/U, excluding the merge-only -c letter;
     see that constant), and the long enablers to the --patch*/--unified* prefixes (excluding --cc, the
     merge-only combined-diff form). Any other (unknown) option is not a patch enabler; this predicate
-    answers only 'is a patch forced on', leaving every other classification to the caller (F-R2-5)."""
+    answers only 'is a patch forced on', leaving every other classification to the caller (F-R2-5). A boundary
+    word right after an option word outside those value sets may be that option's value
+    (_option_may_take_value: git diff --stat --word-diff-regex --end-of-options -p prints the patch), so the
+    scan goes on past it, which can only find an enabler more often."""
     i = 0
     n = len(argv)
     while i < n:
         tok = argv[i]
-        if tok in _DIFF_END_OF_OPTIONS:
+        if tok in _DIFF_END_OF_OPTIONS and not (i > 0 and _option_may_take_value(argv[i - 1])):
             break  # every remaining token is an operand (a pathspec/ref), never an option
         if not tok.startswith("-") or tok == "-":
             i += 1
@@ -2458,12 +2465,27 @@ def _git_sub_and_args(tokens):
 _EOO_TOKENS = frozenset(("--", "--end-of-options"))
 
 
-def _split_pre_post(args):
+def _option_may_take_value(word):
+    """True when word is an option word that may take the NEXT word as its separated value: '-' and at least
+    one more character, not itself an end-of-options word, and, for a long option, no '=' (an attached value
+    consumes nothing). git's option parser gives a value-taking option the next word whatever it is, so an
+    end-of-options word right after one is that option's VALUE, not the end of the options (git commit -m --
+    -n takes '--' as the message and runs -n as --no-verify). A scan for which reading more words as options
+    errs safe passes this as the takes_value of _split_pre_post: it holds for any option word, listed in a
+    value table or not, because an omitted value-taking option would end the options early and hide the
+    words after it; an option that takes no value only costs reading a later operand as an option."""
+    return (len(word) > 1 and word.startswith("-") and word not in _EOO_TOKENS
+            and not (word.startswith("--") and "=" in word))
+
+
+def _split_pre_post(args, takes_value=None):
     """Split a subcommand's arg list at the FIRST option-boundary token ('--' or '--end-of-options').
     Returns (pre, post, had_sep): pre is the option region before it, post is every operand after it (all
-    pathspecs, verbatim), had_sep says a boundary token was present."""
+    pathspecs, verbatim), had_sep says a boundary token was present. With takes_value, a boundary token right
+    after a word for which takes_value is true is read as that word's separated option VALUE and stays in the
+    option region (_option_may_take_value, or a consumer's own value table)."""
     for idx, a in enumerate(args):
-        if a in _EOO_TOKENS:
+        if a in _EOO_TOKENS and not (takes_value is not None and idx > 0 and takes_value(args[idx - 1])):
             return args[:idx], args[idx + 1:], True
     return args, [], False
 
@@ -2744,9 +2766,12 @@ def _git_is_breadth(sub, args):
     """Whether add/commit takes scope from the ambient whole tree rather than enumerated paths. Option
     recognition STOPS at a '--' end-of-options marker, so a file literally named '--all'/'-A' after '--'
     is an operand, not a breadth selector; a genuine whole-tree pathspec ('.'/':/'') still counts on
-    either side of the marker."""
+    either side of the marker. A marker right after an option word may be that option's value
+    (_option_may_take_value: git commit -m -- -a takes '--' as the message and commits the whole tree), so it
+    does not stop recognition; when it does end the options this reads a later operand as a selector, a
+    safe-direction over-match."""
     if sub == "add":
-        pre, post, _had = _split_pre_post(args)
+        pre, post, _had = _split_pre_post(args, _option_may_take_value)
         for arg in pre:
             if arg in (".", ":/", "--all"):
                 return True
@@ -2754,7 +2779,7 @@ def _git_is_breadth(sub, args):
                 return True
         return any(arg in (".", ":/") for arg in post)
     if sub == "commit":
-        pre, _post, _had = _split_pre_post(args)
+        pre, _post, _had = _split_pre_post(args, _option_may_take_value)
         for arg in pre:
             if arg == "--all":
                 return True
@@ -3295,8 +3320,10 @@ def _reset_role(args):
     erase staged-ONLY content, GD-41 blocker 6 - the earlier cut allowed these unconditionally). Mode flags
     are matched by unambiguous PREFIX ('--ha' == '--hard'), and an ambiguous bare '--m' (mixed OR merge) is
     scoped either way; option parsing stops at the first '--'/'--end-of-options' so a mode-looking operand
-    past it is a pathspec, not a mode."""
-    pre, _post, _had_sep = _split_pre_post(args)
+    past it is a pathspec, not a mode, unless that word is the value of a value-taking reset option
+    (_discard_takes_value: git reset --pathspec-from -- --hard reads a pathspec file named '--' and resets
+    --hard), when the options go on past it."""
+    pre, _post, _had_sep = _split_pre_post(args, lambda word: _discard_takes_value("reset", word))
     if any(a == "--pathspec-from-file" or a.startswith("--pathspec-from-file=") for a in pre):
         return ("scoped", "git reset --pathspec-from-file (a path-scoped reset from a file)")
     mode = None  # "clobber" / "soft" / "scoped"
@@ -3330,10 +3357,13 @@ def _clean_is_dry_run(pre):
     one is present the guard CANNOT reliably tell a real '-n' flag from an exclude PATTERN token that merely
     looks like '-n' (git clean -f -e '*.keep' -n, or the adversarial git clean -f -e -n where '-n' is the
     pattern), so it does NOT trust '-n' at all and returns False, routing the clean to its unconditional ASK.
+    The long --exclude is matched by CONSERVATIVE PREFIX (_has_long_prefix), as git resolves an abbreviation:
+    git clean -f -n --exc -- --no-dry-run gives '--' to --exc as its pattern and then removes the untracked
+    files, so an abbreviated exclude must not leave '-n' trusted either.
     A '-n'/'--dry-run' with no arg-consuming option present still reports a dry run and allows."""
     for t in pre:
-        if t in _CLEAN_ARG_OPTS or t.startswith("--exclude="):
-            return False  # a separate/inline arg-consuming exclude: do not trust '-n'
+        if t in _CLEAN_ARG_OPTS or _has_long_prefix((t,), "exclude"):
+            return False  # a separate/inline/abbreviated arg-consuming exclude: do not trust '-n'
         if t.startswith("-") and not t.startswith("--") and "e" in t[1:]:
             return False  # an ATTACHED short exclude ('-en' is '-e' with value 'n'): '-n' not trustworthy
     if _has_long_prefix(pre, "no-dry-run"):
@@ -3437,7 +3467,9 @@ def _discard_role(sub, args):
                            "arbitrary ref unconditionally)")
         return ("allow", None)
     if sub == "branch":
-        pre, post, _had_sep = _split_pre_post(args)
+        # A '--' right after an option word may be that option's value, so the options go on past it
+        # (_option_may_take_value): git branch --sort -- -D victim gives '--' to --sort and force-deletes victim.
+        pre, post, _had_sep = _split_pre_post(args, _option_may_take_value)
         short_flags, operands = _branch_parse_options(pre)
         operands = operands + post
         has_big_d = "D" in short_flags
@@ -3744,8 +3776,9 @@ def _discard_index_only(sub, args):
     Index-only forms: restore --staged/-S without --worktree/-W (index unstage); reset without
     --hard/--merge/--keep (the default/mixed reset touches the index only; --hard/--merge/--keep update the
     worktree); rm --cached (index-only removal). checkout/switch/clean and every other form touch the
-    worktree."""
-    pre, _post, _had = _split_pre_post(args)
+    worktree. A '--' that is the value of a value-taking option of the verb (_discard_takes_value) does not
+    end the options: git restore -S --pathspec-from-file -- -W restores the worktree too."""
+    pre, _post, _had = _split_pre_post(args, lambda word: _discard_takes_value(sub, word))
     if sub == "restore":
         staged = any(a == "--staged" or (a.startswith("-") and not a.startswith("--") and "S" in a[1:])
                      for a in pre)
@@ -4797,6 +4830,24 @@ def _discard_valued_arity(valued):
     value)."""
     return ("".join(sorted(v[1] for v in valued if not v.startswith("--"))),
             tuple(sorted(v[2:] for v in valued if v.startswith("--"))))
+
+
+def _discard_takes_value(sub, word):
+    """True when word is a value-taking option of the lossy verb sub (the value spellings of its
+    _DISCARD_VERB_OPTS entry, through _discard_valued_arity) whose value is the NEXT word: a long one
+    without '=', matched by conservative prefix as _discard_patch_token matches it, or a short cluster
+    whose first value letter is its last character. git gives such an option the next word whatever it is,
+    so the role helpers pass this to _split_pre_post and an end-of-options word in that place is the
+    option's value, not the end of the options."""
+    valued, long_valued = _discard_valued_arity(_DISCARD_VERB_OPTS.get(sub, ((), ()))[1])
+    if word.startswith("--"):
+        name = word[2:]
+        return bool(name) and "=" not in word and any(full.startswith(name) for full in long_valued)
+    if word.startswith("-"):
+        for i, ch in enumerate(word[1:]):
+            if ch in valued:
+                return i == len(word) - 2
+    return False
 
 
 def _discard_patch_token(sub, args):
@@ -6520,12 +6571,13 @@ def _push_parse(args):
     flags are NOT modelled (round-4, disclosed): '--no-force'/'--no-delete' cancel nothing here,
     '--force-if-includes' alone (a documented no-op without --force-with-lease) still reads as force,
     and --dry-run is judged like the real thing - all safe-direction over-denies; re-issue without the
-    contrived flag combination. Also NOT modelled (disclosed, contrived under-block): a
-    `--`/`--end-of-options` that is the VALUE of a preceding value-taking option (git push -o
-    --end-of-options --force ...) is split as an end-of-options boundary by _split_pre_post
-    before the value-aware loop, so a force after it can read as an operand; re-issue without the
-    contrived option-value."""
-    pre, post, _had_sep = _split_pre_post(args)
+    contrived flag combination. A `--`/`--end-of-options` right after an option word may be that option's
+    VALUE (git push -o -- --force origin main gives '--' to -o and force-pushes), so it does not end the
+    option region (_option_may_take_value): the value-aware loop then skips it as the value of a listed
+    value-taking option, or passes over it as an option word that names nothing judged, and the words after
+    it are read as options. When the option takes no value the '--' really ends the options, and a refspec
+    after it that looks like a force or sweep option is read as one, a safe-direction over-deny."""
+    pre, post, _had_sep = _split_pre_post(args, _option_may_take_value)
     force = delete = mirror = sweep_all = prune = False
     skip_value = False  # the previous token was a separated value-taking option: skip its value
     operands = []       # remote + refspecs in command order; the loop appends, then post extends
@@ -7907,6 +7959,9 @@ _NOVERIFY_SHORT_N_VERBS = frozenset(("commit", "am"))
 # contrived input whose value itself spells -n or --no-verify it can only cause an over-ask/over-deny,
 # never a silent allow), so an option is added only once confirmed value-taking (adding a NON-value-
 # taking option would wrongly skip a real operand and could cause a silent allow, so it is never done).
+# Where the option region ends does not rest on these sets, since there an omitted option would err the other
+# way: an end-of-options word right after ANY option word is read as that option's possible value
+# (_option_may_take_value), so the words after it are still judged.
 _GATE_SHORT_VALUE_OPTS = {
     "commit": frozenset(("m", "F", "C", "c", "t")),
     "am": frozenset(()),
@@ -7998,7 +8053,8 @@ def _raw_git_then(command, verb_re):
 def _gate_short_n_step(sub, tok):
     """(hit, skip_next) for one token of the option region of a git commit or am (sub) in the short -n scan of
     the hook-bypass check (_gate_git_bypass): hit when the token is a bare or clustered -n; skip_next when the
-    token is a value-taking option whose value is the NEXT token, which the scan then passes over unread. The
+    token is a value-taking option whose value is the NEXT token, which the scan then passes over unread, even
+    an end-of-options word (git commit -F -- -n reads its message from a file named '--'). The
     value-taking short and long options are skipped (mirroring _push_parse) so an attached value ('-m-n ...'),
     a separated value ('--message -n'), or a stuck optional value ('-Skeyid') is never char-scanned as the
     flag; a long option is never char-scanned (the long form is judged by _has_long_prefix)."""
@@ -8611,9 +8667,10 @@ def _gate_flow_note(records, command):
 def _gate_weakening_fallback(command):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): an apparent
     git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
-    a short -n cluster ASKS (the raw string cannot bind the cluster to its subcommand, so it cannot
-    prove the -n is the bypass rather than an unrelated flag); a checker keyword next to a raw swallow
-    or truncating-pipe spelling ASKS; anything else ALLOWS (the true boundary). Over-matching by
+    a short -n cluster DENIES too, fail-safe, although the raw string cannot bind the cluster to its
+    subcommand and so cannot prove the -n is the bypass rather than an unrelated flag; a checker keyword
+    next to a raw swallow or truncating-pipe spelling ALLOWS WITH A NOTE; anything else ALLOWS (the true
+    boundary). Over-matching by
     design, the documented posture of the sibling fallbacks (_diff_source_fallback,
     _commit_identity_fallback, _protected_line_fallback): re-issue the command parseable."""
     if _raw_git_then(command, _RAW_NOVERIFY_VERB_RE) and _RAW_NOVERIFY_RE.search(command):
@@ -8651,8 +8708,8 @@ def _gate_weakening_fallback(command):
 
 # The size bound of the gate-weakening check, a fail-closed refusal (_gate_size_over): a command of more than
 # _GATE_MAX_CHARS characters is refused before it is lexed, and one that lexes (wholly, or up to its first
-# unparseable construct) into more than _GATE_MAX_SEGMENTS segments or _GATE_MAX_WORDS words is refused before
-# it is judged. Lexing is linear in the length (about 1 second per million characters of empty lines, the
+# unparseable construct, the segment the lexer was still inside counted too) into more than _GATE_MAX_SEGMENTS
+# segments or _GATE_MAX_WORDS words is refused before it is judged. Lexing is linear in the length (about 1 second per million characters of empty lines, the
 # costliest shape measured, and an unparseable command is lexed twice), and the note tier's scan of every
 # wrapped command (_gate_suffixes) is quadratic in a segment's words, so a longer command could outlast the
 # 10-second hook timeout, and a hook stopped at its timeout prints no decision at all. The bounds are set so
@@ -8739,7 +8796,13 @@ def _gate_git_bypass(argv):
     ANYWAY, and a separated option VALUE is scanned too - both err toward a deny, never an allow, while a
     LONGER distinct option (--no-verify-signatures, --no-verbose) never matches because its full name is not
     a prefix of 'no-verify'), or, ONLY on the verbs where -n IS --no-verify (commit, am), a bare or clustered
-    -n that is not an option's value (_gate_short_n_step).
+    -n that is not an option's value (_gate_short_n_step). An end-of-options word right after an option word
+    may be that option's VALUE, since git gives a value-taking option the next word whatever it is (git
+    commit -m -- -n takes '--' as the message and skips the hooks), so it does not end the option region
+    (_option_may_take_value), whatever the option, listed in a value table or not; and a listed value-taking
+    option passes over the next word unread even when it is an end-of-options word. When the option takes no
+    value the word really ends the options, and a pathspec after it that spells a bypass (git commit --amend
+    -- -n, a file named -n) is read as one, a safe-direction over-deny.
 
     LINEAR in the length of the segment, however many git words it holds: one pass from the right end records,
     for every position, where the subcommand falls when git's global options are skipped from there, whether a
@@ -8772,7 +8835,9 @@ def _gate_git_bypass(argv):
     # Filled from the right end, each over positions j at or after the first command line's first argument:
     # sub_at[j], the subcommand's index when git's global options are skipped from j (None past the end);
     # info_at[j] and long_at[j], a help flag or a --no-verify long prefix at j or later, before the next
-    # end-of-options word; short_at[verb][j], the index of the first short -n of the scan of that verb from j.
+    # end-of-options word that ends the options (one not right after an option word, which may be that
+    # option's value: _option_may_take_value); short_at[verb][j], the index of the first short -n of the scan
+    # of that verb from j.
     sub_at = [None] * (n + 2)
     info_at = [False] * (n + 1)
     long_at = [False] * (n + 1)
@@ -8785,7 +8850,7 @@ def _gate_git_bypass(argv):
             sub_at[j] = sub_at[j + 2]
         else:
             sub_at[j] = sub_at[j + 1]
-        if tok in _EOO_TOKENS:
+        if tok in _EOO_TOKENS and not _option_may_take_value(argv[j - 1]):
             continue  # the option region ends here: nothing at or after it counts
         info_at[j] = info_at[j + 1] or (tok in _INFO_FLAGS and _has_info_flag((argv[j - 1], tok)))
         long_at[j] = long_at[j + 1] or _has_long_prefix((tok,), "no-verify")
@@ -8795,8 +8860,8 @@ def _gate_git_bypass(argv):
                 at[j] = j
             elif not skip_next:
                 at[j] = at[j + 1]
-            elif j + 1 < n and argv[j + 1] not in _EOO_TOKENS:
-                at[j] = at[j + 2]  # the next token is this option's value, passed over unread
+            else:
+                at[j] = at[j + 2]  # the next token, an end-of-options word too, is this option's value
     for c in starts:
         s = sub_at[c + 1]
         if s is None or argv[s] not in _NOVERIFY_VERBS or info_at[c + 1]:
@@ -8881,9 +8946,12 @@ def gate_weakening(data):
         # otherwise the raw fallback stands. The in-progress segment the lexer was inside is dropped, since
         # its unseen tokens could change it.
         recovered, complete = _lex_command(command, partial=True)
+        # The size bound counts every segment the lexer read, the one it was still inside included: dropping
+        # that one first let 4,097 words before an unsupported construct (echo x x ... <(true)) pass unbounded.
+        # Only the judgement below drops it, since its unseen tokens could change it.
+        over = _gate_size_over(command, recovered)
         if not complete:
             recovered = recovered[:-1]
-        over = _gate_size_over(command, recovered)
         if over is not None:
             reason, banner = _gate_size_message(over)
             return _deny(reason, banner)
