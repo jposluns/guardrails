@@ -20,13 +20,24 @@
 # runs whose head_sha is exactly this commit. Both need only Actions: Read.
 #
 # Usage:
-#   tools/ci-status.sh                 # current HEAD, report once
-#   tools/ci-status.sh <sha>           # a given commit, report once
-#   tools/ci-status.sh <sha> --wait    # poll until terminal, bounded and fail-loud
+#   tools/ci-status.sh                              # current HEAD, report once
+#   tools/ci-status.sh <sha>                        # a given commit, report once
+#   tools/ci-status.sh <sha> --wait                 # poll until terminal, bounded and fail-loud
+#   tools/ci-status.sh <sha> --require-base main    # additionally trust only pull_request runs
+#                                                   # recorded against base main, and require a
+#                                                   # conforming completed successful run of the
+#                                                   # workflow file .github/workflows/quality.yml (see
+#                                                   # THE BASE-BRANCH REQUIREMENT below)
+#   ... --require-base main --require-workflow PATH # the same, requiring the workflow whose file
+#                                                   # is PATH instead of the default quality.yml
 #
-# Exit codes: 0 success, 1 failed / timed out / not-yet-terminal on a one-shot check,
-# 2 no run found, API error, or the repository cannot be determined (see THE REPOSITORY IS THE
-# CHECKOUT'S OWN below). Report-once (no --wait) never returns 0 for a non-terminal run.
+# Exit codes: 0 success, 1 failed / timed out / not-yet-terminal on a one-shot check, a run that
+# does not satisfy --require-base, or no conforming completed successful run of the required
+# workflow file under --require-base (report-once refuses at once; --wait refuses after its
+# settle window), 2 no run found, API error, a malformed run record (in one-shot
+# and --wait mode alike), a missing, unusable or repeated --require-base or --require-workflow
+# value, or the repository cannot be determined (see THE REPOSITORY IS THE CHECKOUT'S OWN below).
+# Report-once (no --wait) never returns 0 for a non-terminal run.
 set -uo pipefail
 
 # Resolve whatever rev was given (short SHA, branch, tag, HEAD~1) to a FULL 40-character
@@ -35,18 +46,91 @@ set -uo pipefail
 # actually succeeded. That fails closed, blocking a merge rather than permitting one, but it
 # is still a misreport, so resolve the input rather than trusting it. Fail loudly when the
 # rev does not resolve, because an unresolvable rev is an error, not an absent run.
-# Accept the flag in any position, so `ci-status.sh --wait` means "HEAD, and wait" rather
-# than treating the flag as a rev. The first non-flag argument is the rev; anything starting
-# with a hyphen is a flag.
+# Accept the flags in any position, so `ci-status.sh --wait` means "HEAD, and wait" rather
+# than treating the flag as a rev. The one non-flag argument is the rev; a second non-flag
+# argument is refused (exit 2), never read last-wins, because a stray positional that resolves
+# (a branch name) would silently change which commit is checked. Anything starting
+# with a hyphen is a flag, except the one argument that follows --require-base or
+# --require-workflow, which is its value. Each value is validated AS IT IS CONSUMED, before any
+# git or API read: a missing, empty, whitespace-only or hyphen-led value is refused (exit 2),
+# because an empty or whitespace-only value would silently mean "no requirement", the exact
+# fail-open these options exist to prevent, and a hyphen-led one is a swallowed flag, not a
+# name. A repeated --require-base or --require-workflow is also refused (exit 2), never read
+# last-wins: under last-wins a forgotten earlier value would silently replace the requirement
+# the caller believes is in force. --require-workflow without --require-base is refused too,
+# because alone it would be a silent no-op.
 SHA_IN="HEAD"
+SHA_IN_SET=0
 WAIT=""
+REQUIRE_BASE=""
+REQUIRE_BASE_SET=0
+# The workflow FILE whose conforming completed successful run --require-base additionally
+# demands, matched against each run's recorded workflow path (the runs API's .path), never its
+# display name: any workflow can carry name: Quality, so a name match would let a same-named
+# run from another file stand in. quality.yml is this repository's aggregated workflow, the one
+# required status the merge lane reads.
+REQUIRE_WORKFLOW=".github/workflows/quality.yml"
+REQUIRE_WORKFLOW_SET=0
+EXPECT_VALUE=""
 for arg in "$@"; do
+  if [ -n "$EXPECT_VALUE" ]; then
+    option="$EXPECT_VALUE"
+    EXPECT_VALUE=""
+    label="branch name"
+    [ "$option" = "--require-workflow" ] && label="workflow path"
+    case "$arg" in
+      -*)
+        printf 'ERROR: %s needs a %s; a hyphen-led value is refused (a swallowed flag, not a name).\n' "$option" "$label" >&2
+        exit 2
+        ;;
+      *[![:space:]]*) ;;
+      *)
+        printf 'ERROR: %s needs a %s; an empty or whitespace-only value is refused.\n' "$option" "$label" >&2
+        exit 2
+        ;;
+    esac
+    if [ "$option" = "--require-base" ]; then
+      if [ "$REQUIRE_BASE_SET" -eq 1 ]; then
+        printf 'ERROR: --require-base is given more than once; a repeated option is refused rather than read last-wins.\n' >&2
+        exit 2
+      fi
+      REQUIRE_BASE="$arg"
+      REQUIRE_BASE_SET=1
+    else
+      if [ "$REQUIRE_WORKFLOW_SET" -eq 1 ]; then
+        printf 'ERROR: --require-workflow is given more than once; a repeated option is refused rather than read last-wins.\n' >&2
+        exit 2
+      fi
+      REQUIRE_WORKFLOW="$arg"
+      REQUIRE_WORKFLOW_SET=1
+    fi
+    continue
+  fi
   case "$arg" in
     --wait) WAIT="--wait" ;;
-    -*) printf 'ERROR: unknown option %s (only --wait is supported).\n' "$arg" >&2; exit 2 ;;
-    *) SHA_IN="$arg" ;;
+    --require-base) EXPECT_VALUE="--require-base" ;;
+    --require-workflow) EXPECT_VALUE="--require-workflow" ;;
+    -*) printf 'ERROR: unknown option %s (only --wait, --require-base BRANCH and --require-workflow PATH are supported).\n' "$arg" >&2; exit 2 ;;
+    *)
+      if [ "$SHA_IN_SET" -eq 1 ]; then
+        printf 'ERROR: more than one rev was given; a repeated rev is refused rather than read last-wins.\n' >&2
+        exit 2
+      fi
+      SHA_IN="$arg"
+      SHA_IN_SET=1
+      ;;
   esac
 done
+if [ -n "$EXPECT_VALUE" ]; then
+  label="branch name"
+  [ "$EXPECT_VALUE" = "--require-workflow" ] && label="workflow path"
+  printf 'ERROR: %s needs a %s and none was given.\n' "$EXPECT_VALUE" "$label" >&2
+  exit 2
+fi
+if [ "$REQUIRE_WORKFLOW_SET" -eq 1 ] && [ "$REQUIRE_BASE_SET" -ne 1 ]; then
+  printf 'ERROR: --require-workflow is read only under --require-base; alone it would be a silent no-op.\n' >&2
+  exit 2
+fi
 if ! SHA="$(git rev-parse --verify --quiet "${SHA_IN}^{commit}")"; then
   printf 'ERROR: %s does not resolve to a commit in this repository.\n' "${SHA_IN}" >&2
   exit 2
@@ -227,12 +311,81 @@ SETTLE_OBSERVATIONS=5
 # payload plus a complete GitHub workflow YAML, event-filter, and glob implementation; the SHA and
 # repository files alone cannot answer that question for pull_request base branches or paths.
 
+# THE BASE-BRANCH REQUIREMENT (--require-base BRANCH). The merge lane trusts
+# a green run for a merge into BRANCH only when that run evaluated its pull request against BRANCH: a
+# run that passed while the PR targeted another branch says nothing about a merge into BRANCH, and
+# quality.yml no longer carries `edited`, so a base retarget alone schedules no fresh run. Under this
+# option a run counts only when its event is pull_request AND the pull request GitHub recorded ON THE
+# RUN names BRANCH as its base (the runs API's pull_requests[].base.ref). That stored record, not the
+# PR's current base read from the pulls API for the run's head SHA, is the authoritative source:
+# GitHub fills workflow_run.pull_requests when the run is created and does not rewrite it on later PR
+# edits (observed behaviour: a run created before its PR opens keeps an empty array forever, which a
+# matched-by-head recomputation would backfill), so it names the base the run actually evaluated (its
+# GITHUB_BASE_REF), while the PR's current base reflects a retarget made AFTER the run and would
+# accept exactly the stale pre-retarget run this option exists to refuse. EVERY run of the commit
+# must satisfy the requirement, not just one: skipping nonconforming runs instead would let a
+# conforming green sibling (for example the msg-leaks.yml run a retarget does re-trigger) stand in
+# for the missing pre-retarget Quality run. AND a conforming run set alone is not enough: after a
+# retarget to main the only run on the head can be that msg-leaks.yml run (quality.yml filters
+# pull_request on branches: [main] and does not list edited, so the retarget schedules no fresh
+# Quality run), and that lone conforming sibling would otherwise read green with no Quality
+# evidence at all. The option therefore ALSO requires at least one completed, successful,
+# conforming run whose workflow FILE is the one --require-workflow names (default
+# .github/workflows/quality.yml, the aggregated workflow whose status the merge lane reads),
+# matched by the run's recorded workflow path (the runs API's .path), never by its display
+# name: any workflow can carry name: Quality, so a name match would let a same-named run from
+# another file stand in; absent such a run the result is unmet (exit 1, naming the missing
+# workflow file): report-once refuses on its single snapshot, and --wait keeps polling within
+# the settle window first, because a qualifying run can still be registered late on this head
+# (a reopen schedules one). A run recorded against another
+# base (a pre-retarget run), a run of another event (a push run), and a run whose base cannot be
+# established (an empty pull_requests array, or an entry naming no base branch, which GitHub also
+# leaves for a run created before its PR) are each reported by name and end the check with exit 1,
+# in one-shot and --wait mode alike: a run's recorded base never changes, so no amount of waiting
+# turns that read green. RECOVERY: when a nonconforming run (a pre-retarget run) is RETAINED
+# on this head, a reopen does add a conforming run on the same head, but the retained run still fails the
+# every-run rule, so only a refresh push, which moves the head SHA this script pins, earns a
+# run set this option trusts; a MISSING run of the required workflow file beside an otherwise
+# conforming set needs no new head: a qualifying run on this same head (which a reopen
+# schedules) satisfies it. A record of this commit that under this option lacks a usable
+# event, pull_requests or path field entirely is a malformed run record (exit 2, API error),
+# in one-shot and --wait mode alike:
+# malformed evidence is a property of the stored record, which polling re-reads unchanged, not a
+# retryable API condition.
+# RESIDUAL (disclosed, not closed): that the stored array is never rewritten is observed GitHub
+# behaviour, not a documented contract; if GitHub recomputed it from the PR's current state, a
+# pre-retarget run could read as conforming. Server-side branch protection remains the backstop.
+# RESIDUAL (disclosed, not closed): the required-workflow match reads the runs API's .path as the
+# BARE repository-relative workflow file path (observed live 2026-10-13 on this repository's runs:
+# exactly .github/workflows/quality.yml, with no ref suffix); that format is observed GitHub
+# behaviour, not a documented contract. Should GitHub ever return another format (an @ref suffix,
+# say), the exact raw-JSON comparison fails for every run, so every --require-base check exits 1
+# and the merge lane is blocked: fail closed, never a pass.
+# NOT CHECKED (disclosed): only each recorded entry's base.ref is read, never its base.repo or its
+# head.sha, so an entry naming the required branch of another repository reads as conforming;
+# whether GitHub ever records such an entry on a pull_request run is unverified. AVAILABILITY COST
+# (disclosed, unverified): GitHub can leave pull_requests empty for a run created from a fork PR;
+# such a run never satisfies the requirement, so under this option a fork PR may always be refused
+# (exit 1). CALLER (disclosed): no production caller in this repository passes --require-base (its
+# behaviour self-test exercises the option); the merge-lane
+# invocation lives in the merge lane's own tooling, outside this tree.
+#
 # One jq program, two modes. "step" validates ONE raw page of the unfiltered listing, prints "stop" or
 # "more", then the page reduced to the fields used here as one compact JSON line. "verdict" receives the
 # head_sha query's pages and the reduced scan pages, re-checks every completeness condition, and emits
-# the run rows. Status and conclusion come FIRST in every TSV row. jq's @tsv escaping keeps tabs,
+# the run rows. Status, conclusion, the base-requirement verdict (a fixed token: "-", "met" or
+# "unmet") and the required-workflow verdict (a fixed token: "-", "match" or "other") come FIRST
+# in every TSV row, then the base verdict's display detail, then the run's recorded workflow path
+# (display-only; anything but a nonempty string reads as "-", so an empty or non-string path in
+# plain mode can neither shift later columns nor abort the row), then id, name and URL.
+# The required-workflow match is computed INSIDE jq, on the run's raw JSON .path
+# against the required path passed in as --arg require_workflow, and only the fixed token reaches
+# Bash. An earlier revision compared Bash's @tsv-escaped path column with the unescaped required
+# path, so two different paths that escape alike (a recorded real tab versus a requested literal
+# backslash-t) read as equal, and identical paths holding a tab, newline, carriage return or
+# backslash never matched. jq's @tsv escaping keeps tabs,
 # newlines, and backslashes in display fields from becoming record delimiters, so a workflow name cannot
-# move either gating field. Name and URL remain display-only. The no-run case gets an explicit sentinel
+# move the gating fields. Name, URL and the path column remain display-only. The no-run case gets an explicit sentinel
 # rather than a rendered "null", because a real run's .status is nullable in the schema and must not be
 # mistaken for "no run yet".
 #
@@ -300,7 +453,14 @@ def malformed_run:
   or ((.name | type) != "string")
   or ((.name | length) == 0)
   or ((.html_url | type) != "string")
-  or ((.html_url | length) == 0);
+  or ((.html_url | length) == 0)
+  or (($require_base != "")
+      and (((.event | type) != "string")
+           or ((.event | length) == 0)
+           or ((.path | type) != "string")
+           or ((.path | length) == 0)
+           or ((.pull_requests | type) != "array")
+           or any(.pull_requests[]; (type != "object") or ((.base | type) != "object"))));
 def terminal_page:
   ((.workflow_runs | length) < 100)
   or all(.workflow_runs[]; (.created_at | fromdateiso8601) < $lower_bound);
@@ -314,7 +474,28 @@ def explained_shift($previous):
         and (.workflow_runs[:$repeats] == $previous.workflow_runs[-$repeats:]));
 def scan_page_overrun($index):
   .total_count < (100 * $index + (.workflow_runs | length));
-def projection: [.head_sha, .status, .conclusion, .name, .html_url];
+def projection:
+  [.head_sha, .status, .conclusion, .name, .html_url]
+  + (if $require_base == "" then [] else [.event, .path, [.pull_requests[] | .base.ref]] end);
+def base_requirement:
+  if $require_base == "" then ["-", "-"]
+  elif .event != "pull_request" then
+    ["unmet", "its event is " + (.event | tojson) + ", not pull_request"]
+  elif (.pull_requests | length) == 0 then
+    ["unmet", "no pull request is recorded on the run, so its base cannot be established"]
+  elif any(.pull_requests[]; ((.base.ref | type) != "string") or ((.base.ref | length) == 0)) then
+    ["unmet", "a pull request recorded on the run names no base branch, so its base cannot be established"]
+  elif all(.pull_requests[]; .base.ref == $require_base) then
+    ["met", "-"]
+  else
+    ["unmet", "its recorded base is " + ([.pull_requests[].base.ref] | unique | join(", "))]
+  end;
+def workflow_requirement:
+  if $require_base == "" then "-"
+  elif .path == $require_workflow then "match"
+  else "other" end;
+def display_path:
+  if ((.path | type) == "string") and ((.path | length) > 0) then .path else "-" end;
 if $mode == "step" then
   if (length != 1) or (.[0] | malformed_page) then
     error("malformed workflow-runs response")
@@ -325,7 +506,8 @@ if $mode == "step" then
     | (if terminal_page then "stop" else "more" end),
       ({total_count,
         workflow_runs: [.workflow_runs[]
-                        | {id, head_sha, status, conclusion, name, html_url, created_at}]}
+                        | {id, head_sha, status, conclusion, name, html_url, created_at}
+                          + (if $require_base == "" then {} else {event, path, pull_requests} end)]}
        | tojson)
   end
 elif $mode != "verdict" then
@@ -387,7 +569,10 @@ else
                   (if ($scan_kept | length) < ($scan_all | length) then "__SHIFTED__" else empty end),
                   ($runs[]
                    | .[0]
-                   | [(.status // "-"), (.conclusion // "-"), (.id | tostring), .name, .html_url]
+                   | [(.status // "-"), (.conclusion // "-")]
+                     + base_requirement
+                     + [workflow_requirement, display_path,
+                        (.id | tostring), .name, .html_url]
                    | @tsv)
                 end
             end
@@ -397,7 +582,8 @@ end'
 
 ci_jq() {
   jq -s -r --arg mode "$1" --arg requested_sha "$SHA" --argjson lower_bound "$LOWER_BOUND" \
-    --argjson max_pages "$SCAN_MAX_PAGES" "$CI_STATUS_JQ"
+    --argjson max_pages "$SCAN_MAX_PAGES" --arg require_base "$REQUIRE_BASE" \
+    --arg require_workflow "$REQUIRE_WORKFLOW" "$CI_STATUS_JQ"
 }
 
 query() {
@@ -442,8 +628,9 @@ while :; do
   lines="$(query)"
   query_rc=$?
   # A failed query is an API error even if its output resembles a valid sentinel or run row.
-  # Report-once fails with exit 2. Under --wait, ride through a transient query failure until the
-  # deadline, keeping API diagnostics separate from display fields in successful run rows.
+  # Report-once fails with exit 2. Under --wait, ride through a TRANSIENT query failure until the
+  # deadline, keeping API diagnostics separate from display fields in successful run rows; a
+  # malformed run record or response is not transient and exits 2 in both modes (see below).
   if [ "$query_rc" -ne 0 ] || [ -z "$lines" ]; then
     case "$lines" in
       *"conflicting duplicate workflow-run records"*|*"workflow-runs listing shrank during the scan"*|\
@@ -464,6 +651,12 @@ while :; do
     echo "  raw: ${lines}"
     case "$lines" in
       *"Resource not accessible"*|*"Not Found"*|*"404"*) exit 2 ;;
+      # Malformed evidence (the jq program's own error()s) is a property of the stored record, not
+      # a retryable API condition: polling re-reads the same record, so under --wait it exits 2
+      # here too, instead of polling to a timeout that misreports malformed evidence as a
+      # not-yet-terminal verdict. The conflicting/shrank/duplicate signatures above stay retryable:
+      # each is the signature of the listing changing between requests, which a re-read can settle.
+      *"malformed workflow run record"*|*"malformed workflow-runs response"*) exit 2 ;;
     esac
     [ "$WAIT" != "--wait" ] && exit 2
     if [ "$(date +%s)" -ge "$DEADLINE" ]; then
@@ -500,14 +693,30 @@ while :; do
   fi
 
   settled=0
+  require_workflow_met=0
   run_ids=()
   failure_names=()
   failure_conclusions=()
   nonterminal_names=()
   unknown_statuses=()
-  while IFS=$'\t' read -r status concl id name url; do
+  base_unmet=()
+  while IFS=$'\t' read -r status concl base_state base_detail wf_state path id name url; do
     report "$status" "$concl" "$name" "$url"
     run_ids+=("$id")
+    # The gating tokens come from the jq program's fixed sets ("-", "met", "unmet" for the base
+    # requirement; "-", "match", "other" for the required workflow), never from a display field;
+    # under the requirement anything other than "met" or "match" fails closed, so an unexpected
+    # token never passes. base_detail is display-only (@tsv-escaped); path is display-only too:
+    # the required-workflow match is wf_state, computed in jq on the run's raw JSON
+    # .path (validated nonempty under the requirement), never on this escaped column; name stays
+    # display-only.
+    if [ -n "$REQUIRE_BASE" ] && [ "$base_state" != "met" ]; then
+      base_unmet+=("${name}: ${base_detail}")
+    fi
+    if [ -n "$REQUIRE_BASE" ] && [ "$base_state" = "met" ] && [ "$status" = "completed" ] \
+        && [ "$concl" = "success" ] && [ "$wf_state" = "match" ]; then
+      require_workflow_met=1
+    fi
     case "$status" in
       completed)
         if [ "$concl" != "success" ]; then
@@ -528,6 +737,18 @@ while :; do
     echo "RESULT: CI concluded with non-success workflow runs:"
     for ((i = 0; i < ${#failure_names[@]}; i++)); do
       printf '  %s: %s\n' "${failure_names[i]}" "${failure_conclusions[i]}"
+    done
+    exit 1
+  fi
+
+  # THE BASE-BRANCH REQUIREMENT (see above): an unmet run is refused by name with exit 1 in both
+  # modes, because a run's recorded base never changes: this RETAINED nonconforming run fails the
+  # every-run rule on this head forever, so only a refresh push, under a NEW head SHA, escapes it
+  # (a reopen adds runs on the same head but cannot remove this one).
+  if [ "${#base_unmet[@]}" -ne 0 ]; then
+    echo "RESULT: run(s) do not satisfy --require-base ${REQUIRE_BASE} (a run counts only when its event is pull_request and the pull request recorded on the run names ${REQUIRE_BASE} as its base):"
+    for item in "${base_unmet[@]}"; do
+      printf '  %s\n' "$item"
     done
     exit 1
   fi
@@ -568,7 +789,23 @@ while :; do
     fi
     echo "RESULT: ${last_summary}; reading again."
   else
+    # THE BASE-BRANCH REQUIREMENT (see above): a conforming run set without a completed successful
+    # run of the required workflow file is unmet (exit 1), but the two modes refuse at different
+    # times. Report-once refuses on its single snapshot. Under --wait a qualifying run can still
+    # be REGISTERED LATE on this same head (a reopen schedules one, and registration also lags
+    # the event), so the poll keeps watching and refuses only once the run set has been stable
+    # for the whole settle window and still holds no qualifying run. Only a RETAINED
+    # nonconforming run (the base_unmet refusal above) needs a NEW head SHA to recover.
+    missing_required=0
+    if [ -n "$REQUIRE_BASE" ] && [ "$require_workflow_met" -ne 1 ]; then
+      missing_required=1
+    fi
+    missing_message="RESULT: no completed successful run of the workflow file ${REQUIRE_WORKFLOW} satisfies --require-base ${REQUIRE_BASE}; a conforming run of that workflow file on this head is required for a green verdict (a reopen schedules one on the same head; a refresh push under a new head SHA also earns one)."
     if [ "$WAIT" != "--wait" ]; then
+      if [ "$missing_required" -eq 1 ]; then
+        echo "$missing_message"
+        exit 1
+      fi
       exit 0
     fi
     fingerprint="$(IFS=,; printf '%s' "${run_ids[*]}")"
@@ -579,7 +816,14 @@ while :; do
       SETTLE_COUNT=1
     fi
     last_summary="all ${#run_ids[@]} observed workflow run(s) successful; settle observation ${SETTLE_COUNT}/${SETTLE_OBSERVATIONS}"
+    if [ "$missing_required" -eq 1 ]; then
+      last_summary+=" (no completed successful run of the workflow file ${REQUIRE_WORKFLOW} yet)"
+    fi
     if [ "$SETTLE_COUNT" -ge "$SETTLE_OBSERVATIONS" ]; then
+      if [ "$missing_required" -eq 1 ]; then
+        echo "$missing_message"
+        exit 1
+      fi
       settled=1
     else
       echo "RESULT: ${last_summary}; waiting for late-created runs."
