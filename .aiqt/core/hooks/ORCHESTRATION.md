@@ -472,9 +472,13 @@ beginning with a backslash, other than git's exact marker, right after a hunk's 
 their marker. Not every such form is refused: an added-line marker that a removed line follows and an
 empty line read as context are read. After a hunk's counted lines, git's exact no-newline marker is
 read as the marker; any other line beginning with a backslash there is refused; a hunk header, a
-`diff --git` line or a `---` line naming a path goes on to the next hunk or section; a line that
-begins as another diff header is refused as outside a file section; and any other line is read as
-prose. Either way each hunk is still consumed by the line counts in its header, so no path is hidden.
+`diff --git` line or a `---` line naming a path goes on to the next hunk or section; a `diff --cc`
+or `diff --combined` line is refused as a combined diff; a line that begins as another diff header is
+refused as outside a file section; a `Content-Transfer-Encoding:` line naming an encoding other than
+7bit or 8bit is refused as a transfer-encoded mailbox part; a `Submodule` line that shows a
+submodule's own changes inline (as `--submodule=log` or `--submodule=diff` writes it) is refused as a
+submodule shown inline; and any other line is read as prose. Whatever line follows it, each hunk is
+consumed by the line counts in its own header, so no path is hidden.
 A file section opens at a `diff --git` line, or at a `---` line naming a path, which a `+++` line
 and a hunk header must follow. Each hunk is consumed by the line counts in its own header, so an
 added line that reads `++ b/x` (shown as `+++ b/x`) is content, not a header. Git's exact
