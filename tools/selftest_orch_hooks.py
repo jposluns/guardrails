@@ -4221,12 +4221,20 @@ def _main_isolated(report_path=None):
         check("wl/handler-deny-rib-true",
               _verdict(wl("while true; do gh pr checks 42; sleep 30; done &", rib=True)), "deny")
         # The shared command reading (aiqt_hooks._command_argv, _substitution_lines): a body command read past
-        # a leading `time`, and a poll loop inside a backquote substitution read as a line of its own, match.
-        # This classifier still reads a for header's loop variable as its command word, so a variable named gh
-        # or curl reads as a probe (a kept over-match). The truncation guard reads a sink stage past a brace
-        # and inside a double-quoted substitution.
+        # a leading `time` (and past one `--` after it), and a poll loop inside a backquote substitution read as
+        # a line of its own, match. In each `time --` row the sleep or the probe after `time --` is the loop's
+        # only one, so the row fails if the reading stops at the `--`. This classifier still reads a for
+        # header's loop variable as its command word, so a variable named gh or curl reads as a probe (a kept
+        # over-match). The truncation guard reads a sink stage past a brace and inside a double-quoted
+        # substitution.
         check("wl/time-prefixed-sleep-match",
               clf("while true; do gh pr checks 42; time sleep 30; done &"), "match")
+        TIME_DD_SLEEP = "while true; do gh pr checks 42; time -- sleep 30; done &"
+        TIME_DD_PROBE = "while true; do time -- gh pr checks 42; sleep 30; done &"
+        check("wl/time-dashdash-sleep-match", clf(TIME_DD_SLEEP), "match")
+        check("wl/time-dashdash-probe-match", clf(TIME_DD_PROBE), "match")
+        check("wl/handler-deny-time-dashdash-sleep", _verdict(wl(TIME_DD_SLEEP)), "deny")
+        check("wl/handler-deny-time-dashdash-probe", _verdict(wl(TIME_DD_PROBE)), "deny")
         check("wl/backquote-line-match", clf("x=`while true; do gh pr checks 42; sleep 30; done &`"), "match")
         check("wl/for-header-variable-probe-match",
               (clf("for gh in 1 2; do sleep 5; done &"), clf("for curl in a; do sleep 5; done &")),

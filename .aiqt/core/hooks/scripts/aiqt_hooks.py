@@ -973,12 +973,15 @@ def _command_word(tokens):
 # _command_flow (one list in execution order, for a guard that tracks state across segments). Bash
 # recognizes a reserved word only unquoted and in command position; the decoded argv cannot tell a quoted
 # '"if"' from an unquoted one, so a quoted reserved word at the head of a segment is skipped too, an
-# over-read in the safe direction (bash would look up a command of that name instead). Not read,
-# the existing residuals: an eval or sh -c/bash -c body (one quoted word), a function or alias that renames
-# the command, a $(...) command substitution inside double quotes (the lexer keeps it in one quoted word and
-# only backquote substitutions are read, so echo "$(git diff)" is judged as the outer command while bash also
-# runs the inner one), a substitution nested more than _SUBSTITUTION_DEPTH deep, and the rest of a
-# substitution body after a construct the lexer cannot parse (its complete prefix is read).
+# over-read in the safe direction (bash would look up a command of that name instead). For the same reason
+# a repeated -p after 'time' and a quoted '--' after 'time' or 'time -p' ('time "--" git diff') are read
+# past too, where bash runs that -p or '--' as the command: over-reads in the safe direction as well. Not
+# read, the existing residuals: an eval or sh -c/bash -c body (one quoted word), a function or alias that
+# renames the command, a $(...) command substitution inside double quotes (the lexer keeps it in one quoted
+# word, so echo "$(git diff)" is judged as the outer command while bash also runs the inner one; an unquoted
+# $(...) is read, as the lexer splits it at its parentheses and its inner command is read as a segment of
+# its own), a substitution nested more than _SUBSTITUTION_DEPTH deep, and the rest of a substitution body
+# after a construct the lexer cannot parse (its complete prefix is read).
 # Words after which bash reads a command in the same simple-command position: the conditional and loop
 # keywords whose next word starts a command list, brace grouping, the '!' pipeline negation and the 'time'
 # pipeline prefix (with its -p option, and one '--' after 'time' or 'time -p').
@@ -1005,7 +1008,7 @@ def _command_start(argv):
             while word == "time" and i < n and argv[i] == "-p":
                 i += 1
             if word == "time" and i < n and argv[i] == "--":
-                i += 1  # 'time --' and 'time -p --': bash reads the command after one '--'
+                i += 1  # 'time --' and 'time -p --': bash reads the command after one '--' (quoted: see above)
             continue
         if word == "coproc":
             i += 1
@@ -3165,10 +3168,12 @@ def git_stash_ref(data):
     opener, `!`, `time`, and control keywords such as `if`, `then`, `elif`, `else`, `while`, `until` and
     `do`) and each backquote substitution as a command line of its own (_command_flow), so a bare
     pop/apply inside a compound command or a backquote substitution warns as the bare form does. Not
-    read: an eval or sh -c body, a function or alias, a $(...) command substitution inside double quotes
-    (the lexer keeps it in one quoted word and only backquote substitutions are read, so
-    echo "$(git diff)" is judged as the outer command while bash also runs the inner one), and the rest
-    of a substitution after a construct the lexer cannot parse.
+    read: an eval or sh -c/bash -c body (one quoted word), a function or alias that renames the command,
+    a $(...) command substitution inside double quotes (the lexer keeps it in one quoted word, so
+    echo "$(git diff)" is judged as the outer command while bash also runs the inner one; an unquoted
+    $(...) is read, as the lexer splits it at its parentheses and its inner command is read as a segment
+    of its own), a substitution nested more than _SUBSTITUTION_DEPTH deep, and the rest of a
+    substitution body after a construct the lexer cannot parse (its complete prefix is read).
     Only the current no-value pop/apply option grammar (-q/--quiet/--index) is modelled: a future
     value-taking option can make its value look like an operand and falsely allow; re-validate on a
     git upgrade. No git calls or filesystem probes: every recognized bare pop/apply warns regardless
