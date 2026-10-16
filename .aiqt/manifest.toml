@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "83a13a6bfd75a9cae89f6552e05c6b121bee0920a31096a705abdabd24be5143"
+tree-sha256 = "0b31e82b3b0a8afd7344f0fefcaed452cd5aa117778fb488f908dc431cfcf702"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3231,8 +3231,8 @@ sha256 = "385dc36013a49036e40c8b2c9f26db811ae20189ff6a49508988bf0ffe6a0468"
 
 [[sources]]
 path = "tools/_entry_restore_selftest.py"
-bytes = 12623
-sha256 = "e3421ff1699f404e29cd59c956743484a14b97074558ed57bf8db99465e8d718"
+bytes = 14011
+sha256 = "acaec729e3cc51968d125470ae4f049755c678c322ca392d282c765b07649e22"
 
 [[sources]]
 path = "tools/_gen_common.py"

@@ -15,9 +15,13 @@ entry point delegates to with a stand-in, calls the entry point in-process, and 
 to equal its snapshot from before the call exactly. The stand-in replaces the inner work because the
 full suite is too long to run twice, and running it again from inside its own self-test would
 recurse; what is under test is the wrapper. The stand-in also records the environment it sees and
-requires the complete fixture scrub to be in effect there (HOME and XDG_CONFIG_HOME at the scratch
-home, the global and system config pinned to os.devnull with GIT_CONFIG_NOSYSTEM=1, the maintenance
-pins set, no other GIT_* variable) and the lifecycle's git wrapper in effect, as
+requires the complete fixture scrub to be in effect there and the lifecycle's git wrapper in effect.
+The scrub values are checked against literals written here, never against git_fixture_env() itself,
+so a wrong value in the shared scrub is not both applied and expected: HOME and XDG_CONFIG_HOME at a
+fixture scratch home the probe creates and installs as the scrub's scratch home, GIT_CONFIG_GLOBAL
+and GIT_CONFIG_SYSTEM equal to os.devnull, GIT_CONFIG_NOSYSTEM equal to "1", the maintenance pins
+GIT_CONFIG_COUNT=3 with gc.auto=0, gc.autoDetach=false and maintenance.auto=false, and no other
+GIT_* variable. The git wrapper must be in effect as
 fixture_git_lifecycle() sets it: PATH is a fresh directory in front of the caller's PATH, git
 resolves to the executable wrapper there, and the wrapper reasserts the system-config pins and runs
 the caller's git with the auto-maintenance -c pins. So an entry point that drops the scrub, or saves,
@@ -44,6 +48,21 @@ PROBE_VALUE = "kept"
 _RESULT_TAG = "ENTRY-RESTORE "
 _CHILD_BOOTSTRAP = ("import sys; sys.path.insert(0, sys.argv[1]); import _entry_restore_selftest; "
                     "sys.exit(_entry_restore_selftest._child_main(sys.argv[2:]))")
+# The scrub values the lifecycle must apply, written out independently of _git_fixture_env so a
+# wrong value there fails the probe instead of being expected by it. HOME and XDG_CONFIG_HOME are
+# added per run: they must equal the fixture scratch home the probe creates.
+_EXPECTED_PINS = (
+    ("GIT_CONFIG_GLOBAL", os.devnull),
+    ("GIT_CONFIG_SYSTEM", os.devnull),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_CONFIG_COUNT", "3"),
+    ("GIT_CONFIG_KEY_0", "gc.auto"),
+    ("GIT_CONFIG_VALUE_0", "0"),
+    ("GIT_CONFIG_KEY_1", "gc.autoDetach"),
+    ("GIT_CONFIG_VALUE_1", "false"),
+    ("GIT_CONFIG_KEY_2", "maintenance.auto"),
+    ("GIT_CONFIG_VALUE_2", "false"),
+)
 
 
 def entry_restore_failures(tool, entry, inner, timeout=300):
@@ -155,6 +174,7 @@ def _child(tool, entry, inner):
     import importlib.util
     problems = []
     home = tempfile.mkdtemp(prefix="aiqt-entry-restore-home-")
+    fixture_home = tempfile.mkdtemp(prefix="aiqt-entry-restore-fixture-home-")
     try:
         for key in [k for k in os.environ if k.startswith("GIT_")]:
             del os.environ[key]
@@ -168,11 +188,15 @@ def _child(tool, entry, inner):
         import _git_fixture_env
         if not callable(getattr(module, inner, None)):
             return ["{} has no function {}".format(tool, inner)]
+        # The scrub's scratch home is the directory this probe created, so HOME and XDG_CONFIG_HOME
+        # inside the lifecycle can be compared with a path known here rather than with the scrub's
+        # own output.
+        _git_fixture_env._SCRATCH_HOME = fixture_home
         seen = []
         raising = []
 
         def stand_in(*_args, **_kwargs):
-            seen.append((dict(os.environ), _git_fixture_env.git_fixture_env(), _wrapper_view()))
+            seen.append((dict(os.environ), _wrapper_view()))
             if raising:
                 raise raising[0]
             return 0
@@ -188,12 +212,13 @@ def _child(tool, entry, inner):
             problems.append("the entry point called its isolated main {} times, expected 1".format(
                 len(seen)))
         else:
-            inside, expected, view = seen[0]
-            pinned = ("HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL",
-                      "GIT_CONFIG_SYSTEM") + _git_fixture_env._MAINTENANCE_PIN_VARS
+            inside, view = seen[0]
+            expected = dict((("HOME", fixture_home), ("XDG_CONFIG_HOME", fixture_home))
+                            + _EXPECTED_PINS)
+            pinned = tuple(expected)
             for key in pinned:
                 if inside.get(key) != expected[key]:
-                    problems.append("inside the lifecycle, {} is {!r}, the scrub sets {!r}".format(
+                    problems.append("inside the lifecycle, {} is {!r}, expected {!r}".format(
                         key, inside.get(key), expected[key]))
             if inside.get("HOME") == home:
                 problems.append("inside the lifecycle, HOME is still the caller's home")
@@ -223,6 +248,7 @@ def _child(tool, entry, inner):
                             "{} times, expected 1".format(len(seen)))
     finally:
         shutil.rmtree(home, ignore_errors=True)
+        shutil.rmtree(fixture_home, ignore_errors=True)
     return problems
 
 
