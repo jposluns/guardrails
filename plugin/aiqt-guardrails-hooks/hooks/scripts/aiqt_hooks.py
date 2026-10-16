@@ -974,9 +974,10 @@ def _command_word(tokens):
 # recognizes a reserved word only unquoted and in command position; the decoded argv cannot tell a quoted
 # '"if"' from an unquoted one, so a quoted reserved word at the head of a segment is skipped too, an
 # over-read in the safe direction (bash would look up a command of that name instead). For the same reason
-# a repeated -p after 'time' and a quoted '--' after 'time' or 'time -p' ('time "--" git diff') are read
-# past too, where bash runs that -p or '--' as the command: over-reads in the safe direction as well. Not
-# read, the existing residuals: an eval or sh -c/bash -c body (one quoted word), a function or alias that
+# a quoted or repeated -p after 'time' ('time "-p" git diff') and a quoted '--' after 'time' or 'time -p'
+# ('time "--" git diff') are read past too, where bash runs that -p or '--' as the command: over-reads in
+# the safe direction as well.
+# Not read, the existing residuals: an eval or sh -c/bash -c body (one quoted word), a function or alias that
 # renames the command, a $(...) command substitution inside double quotes (the lexer keeps it in one quoted
 # word, so echo "$(git diff)" is judged as the outer command while bash also runs the inner one; an unquoted
 # $(...) is read, as the lexer splits it at its parentheses and its inner command is read as a segment of
