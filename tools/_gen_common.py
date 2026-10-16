@@ -309,9 +309,9 @@ def precheck_special_files(root):
     reads every file under it with a plain blocking read except a FIFO (shutil raises on a FIFO
     before opening it), so an ignored link to a directory that holds a link to a character
     device such as /dev/ptmx hangs that gate; and, while git can list the tracked paths, a
-    GIT-IGNORED symlink to an in-root directory that is, lies inside or holds the repository's
-    own git dir, which this walk does not enter (SCOPE below), for the same reason. ACCEPTED
-    (except on a TRACKED
+    GIT-IGNORED symlink to an in-root directory that is, lies inside or holds a directory this
+    walk does not enter (THE UNWALKED SET and THE RULE, SCOPE below), for the same reason.
+    ACCEPTED (except on a TRACKED
     path while git can list the tracked paths,
     whose route is then held to the stricter tracked-path rule below: a tracked path through a link
     leaving the root is refused even when it dangles or reaches a regular file; without the list
@@ -333,16 +333,16 @@ def precheck_special_files(root):
     m3): an in-root directory link at a GIT-IGNORED logical path (the link ignored, or under an
     ignored directory) is NOT walked under that path and does not count toward the bound: every
     rule below that path is already the lenient ignored one, its target (a target that is, lies
-    inside or holds the repository's own git dir, which the walk does not enter, is refused
-    instead; REFUSED above) is walked under its own
+    inside or holds a directory in the unwalked set is refused instead; THE RULE, SCOPE below)
+    is walked under its own
     path and classification, and every tracked path through it is resolved by the tracked-path
     layer, so walking it again adds no refusal (a pnpm-style ignored node_modules with many
     in-root links passes). QA round 13 (claude MEDIUM 1): that skip applies ONLY when git can list
     the tracked paths; when it cannot (the index query ls-files fails, or HEAD's ls-tree fails on a
     HEAD not proven unborn, while the ignore query answers; QA round 14, below) the tracked-path
     layer does not run, so such a link is walked under its logical path and counted like any
-    other, and a target the physical walk prunes (the repository's own git dir) is still
-    examined. The bound still refuses more than 64 link-walks at non-ignored logical
+    other, and what the physical walk prunes (the root .git entry, SCOPE below) is still
+    examined through it. The bound still refuses more than 64 link-walks at non-ignored logical
     paths, a tracked workspace-link layout of that size included. And a GIT-IGNORED symlink
     that cannot be resolved (a loop, or a target no stat call can reach), accepted un-walked.
     The EXEMPTIONS, exactly (the tracked-path rule below aside): a git-ignored unresolvable
@@ -353,9 +353,10 @@ def precheck_special_files(root):
     a local filesystem does not block (on a FUSE or network filesystem it can, which this walk
     does not detect); and, while git can list the tracked paths, an in-root directory link at a
     git-ignored logical path is not walked under that path (its target is walked under its own
-    path), unless that target is, lies inside or holds the repository's own git dir, which is
-    refused. No symlink to a directory outside the root is exempt, whether or not git ignores
-    it. Independently of the walk, every TRACKED logical path (index or HEAD)
+    path), unless that target is, lies inside or holds a directory in the unwalked set (THE
+    RULE, SCOPE below), which is refused. No symlink to a directory outside the root is
+    exempt, whether or not git ignores it. Independently of the walk, every TRACKED logical
+    path (index or HEAD)
     is resolved COMPONENT BY COMPONENT, lstat and readlink only (nothing is opened, so the
     classification itself cannot block), and REFUSED BY THE LOGICAL PATH when any link step leaves
     the root, when resolution exceeds 40 link steps (a loop), or when the object it resolves to is
@@ -383,13 +384,27 @@ def precheck_special_files(root):
     symbolic-ref or for-each-ref query fails also lapses the rule), or a malformed answer
     from either.
 
-    SCOPE: the whole tree under root, except the repository's OWN git dir (the one `git rev-parse
-    --absolute-git-dir` names), which the walk does not enter, so nothing in it is certified: git
-    itself reads it, so a FIFO planted at for example .git/config still hangs the gates that
-    invoke git, and so does any direct read of a path there; removing such a plant needs the
-    operator. A symlink in the tree to a directory that is, lies inside or holds that git dir is
-    walked under the link's own logical path, except a git-ignored one while git can list the
-    tracked paths, which is refused (REFUSED above). Every OTHER entry named .git, at any depth, is
+    SCOPE: the whole tree under root, except the ROOT .git entry when it is, or is a symlink to,
+    the repository's OWN git dir (the one `git rev-parse --absolute-git-dir` names, resolved):
+    both walks prune that one entry. THE UNWALKED SET, derived once per run from the same test
+    that prunes that entry, is the directories this walk does not enter, by resolved path: the
+    own git dir unless the walk enters it, and then, when the walk prunes the root .git entry in
+    front of that git dir, the entry's own path too (the same path for a .git directory; for a
+    root .git symlink to a git dir outside the tree, the link's path beside its target). The
+    walk enters an own git dir that lies in the tree outside the pruned entry (a root gitfile,
+    or a root .git symlink, naming an in-tree directory, which is descended under its own path)
+    and one that holds the root (the root is walked inside it), so neither, nor a root .git
+    entry in front of it, is in the set. Nothing in
+    the set is certified: git itself reads the own git dir, so a FIFO planted at for example
+    .git/config still hangs the gates that invoke git, and so does any direct read of a path
+    there; removing such a plant needs the operator. THE RULE: while git can list the tracked
+    paths, a git-ignored in-root directory link whose resolved target is, lies inside or holds a
+    directory in the unwalked set is refused (REFUSED above), because a tree copy follows it into
+    a directory this walk never entered (an ignored opf/up -> .. reaches the git dir behind a
+    symlinked root .git that way), and every other git-ignored in-root directory link is skipped,
+    its target walked under its own path; an in-root directory link git does not ignore, and any
+    such link while the list is unavailable, is walked under its own logical path instead. Every
+    OTHER entry named .git, at any depth, is
     DESCENDED like any directory (QA round 6, claude B1: a gate's tree scan reads into a nested
     tools/qa/.git like any other path, so a special file there is refused by name), and INCLUDING
     the contents of every git-ignored directory (QA round 5): the walk DESCENDS into ignored
@@ -400,8 +415,8 @@ def precheck_special_files(root):
     checks, by name, which is the fail-closed direction; remove the special file to proceed. Git's
     ignore judgement governs only two SYMLINK leniencies (REFUSED/ACCEPTED above): an ignored
     unresolvable link is accepted, and an in-root directory link at an ignored logical path is
-    not walked under that path while git can list the tracked paths (refused instead when its
-    target is, lies inside or holds the repository's own git dir). A symlink to a directory
+    not walked under that path while git can list the tracked paths (refused instead under THE
+    RULE above). A symlink to a directory
     outside the root is refused whether or not git ignores it, so a developer's .venv kept as
     such a link stops the checks by name too; keep it as a real directory, or outside the tree
     with no link to it in the tree.
@@ -415,11 +430,12 @@ def precheck_special_files(root):
     with a plain blocking read except a FIFO, which shutil raises on before opening it. This walk
     refuses every symlink to a directory outside the root, ignored or not, and, while git can
     list the tracked paths, every git-ignored symlink to a directory that is, lies inside or
-    holds the repository's own git dir; every other symlink to an in-root directory is walked
-    under its own logical path, or its target under the target's own path. So a directory link
-    in the tree leads such a read only into a directory this walk has walked, as of the walk
-    (the race below aside). What stays outside this walk: a path a configuration declares
-    outside the root, the repository's own git dir (SCOPE above), and a special file created, or a link retargeted,
+    holds a directory in the unwalked set (THE RULE, SCOPE above); every other symlink to an
+    in-root directory is walked under its own logical path, or its target under the target's own
+    path. So a directory link in the tree leads such a read only into a directory this walk has
+    walked, as of the walk (the race below aside). What stays outside this walk: a path a
+    configuration declares outside the root, the unwalked set (SCOPE above), and a special file
+    created, or a link retargeted,
     after this walk; there only a read behind a converted reader refuses a non-regular file by
     name. Before git is asked for the
     ignore list, a first pass refuses any in-tree .gitignore that is, or resolves to, a special file,
@@ -460,7 +476,7 @@ def precheck_special_files(root):
     the tool's modules, their __pycache__/<module>.pyc above all, before any in-process precheck
     call can run, so a FIFO already planted there hangs a direct invocation at import time; the
     runners and CI run this precheck first as a separate process whose own imports are stdlib
-    only); everything under .git and the ignored paths, both as above; a special file CREATED, or a
+    only); the unwalked set and the ignored paths, both as above; a special file CREATED, or a
     symlink RETARGETED, after this walk (one walk cannot close a race against a hostile co-writer of
     the tree); a vanished entry (skipped); and the per-tool residuals the tools' own docstrings
     carry. The shared reader (read_source_bytes) stays on the corpus and manifest paths as defence in
@@ -482,11 +498,15 @@ def precheck_special_files(root):
     def _refuse(path, why):
         print("error: {}: refused, {}; remove it; fail-closed".format(path, why), file=sys.stderr)
         raise SystemExit(2)
-    # QA round 6 (claude B1): only the repository's OWN git dir (the one `git rev-parse
-    # --absolute-git-dir` names) is outside the walk; every OTHER entry named .git, at any depth,
-    # is an ordinary directory a gate's tree scan can read into, so it is descended (lstat only)
-    # and a special file inside it is refused by name. When git cannot answer, or answers
-    # malformed, NOTHING named .git is skipped: strictly more refusals, never fewer.
+
+    def _within(path, top):
+        return path == top or path.startswith(top + os.sep)
+    # Only the root .git entry, when it is (or is a symlink to) the repository's OWN git dir (the
+    # one `git rev-parse --absolute-git-dir` names), is pruned from the walk; the unwalked set
+    # below names what that leaves unentered. Every OTHER entry named .git, at any depth, is an
+    # ordinary directory a gate's tree scan can read into, so it is descended (lstat only) and a
+    # special file inside it is refused by name. When git cannot answer, or answers malformed,
+    # NOTHING named .git is skipped: strictly more refusals, never fewer.
     own_git_dir = None
     _dir_out = _git_lines(root, ["rev-parse", "--absolute-git-dir"])
     if _dir_out is not None:
@@ -501,7 +521,8 @@ def precheck_special_files(root):
 
     def _own_git(path):
         # QA round 7 (claude m-b): the exemption is applied ONLY at the repository root (the
-        # canonical <root>/.git location; both call sites also require that position). A root
+        # canonical <root>/.git location, asked once below; both prune sites act on that one
+        # answer, and only at that position). A root
         # .git FILE (a gitfile with gitdir: tools/qa/.git) must not exempt an IN-TREE nested
         # directory from the walk: that directory is descended with lstat like any other and a
         # special file inside it is refused by name (git's own reads of such a layout are
@@ -580,10 +601,37 @@ def precheck_special_files(root):
 
     try:
         real_root = os.path.realpath(root)
+        # THE UNWALKED SET and THE RULE (SCOPE in the docstring), in one place. Both walks below
+        # prune the root .git entry exactly when root_git_pruned holds, so the directories this
+        # walk does not enter, by resolved path, are the own git dir unless the walk enters it
+        # (it enters an in-root git dir outside the pruned entry, under that dir's own path, and
+        # a git dir that holds the root), and then, when it is pruned, the root .git entry in
+        # front of that git dir (the same path for a .git directory; for a root .git symlink to
+        # a git dir outside the tree, the link's own path, through which a tree copy of the root
+        # reaches its target). THE RULE, applied where an ignored in-root directory link is skipped
+        # below: such a link whose resolved target is, lies inside or holds a directory in this
+        # set is refused.
+        root_git = os.path.join(real_root, ".git")
+        root_git_pruned = _own_git(root_git)
+        unwalked = []
+        if own_git_dir is not None and not (
+                (_within(own_git_dir, real_root)
+                 and not (root_git_pruned and _within(own_git_dir, root_git)))
+                or _within(real_root, own_git_dir)):
+            unwalked.append(own_git_dir)
+            if root_git_pruned and root_git != own_git_dir:
+                unwalked.append(root_git)
+
+        def _unwalked_reached(real):
+            for top in unwalked:
+                if _within(real, top) or _within(top, real):
+                    return top
+            return None
+
         for dirpath, dirnames, filenames in os.walk(root, onerror=_raise, followlinks=False):
             dirnames[:] = [d for d in dirnames
-                           if not (d == ".git" and os.path.realpath(dirpath) == real_root
-                                   and _own_git(os.path.join(dirpath, d)))]
+                           if not (d == ".git" and root_git_pruned
+                                   and os.path.realpath(dirpath) == real_root)]
             for name in dirnames + filenames:
                 if name == ".gitignore":
                     _screen_pre_git(os.path.join(dirpath, name),
@@ -747,7 +795,7 @@ def precheck_special_files(root):
                 continue
             for item in entries:
                 name = item.name
-                if name == ".git" and relbase == "" and _own_git(item.path):
+                if name == ".git" and relbase == "" and root_git_pruned:
                     continue
                 rel = os.path.join(relbase, name) if relbase else name
                 skipped = under_ignored or (ignored is not None and rel in ignored)
@@ -815,18 +863,17 @@ def precheck_special_files(root):
                         # paths, so the skip applies only then; without the list (ls-files
                         # fails, or ls-tree fails on a HEAD not proven unborn, or an answer is
                         # malformed, while the ignore query answers) the link is walked and
-                        # counted below like any other, so a target the physical walk prunes
-                        # (the repository's own git dir) is still examined. A target that is,
-                        # lies inside or holds the repository's own git dir is the exception: the
-                        # walk does not enter that git dir, and a tree copy (shutil.copytree,
-                        # symlinks=False) follows the link into it, so the link is refused.
-                        if own_git_dir is not None and (
-                                real == own_git_dir or real.startswith(own_git_dir + os.sep)
-                                or own_git_dir.startswith(real + os.sep)):
-                            _refuse(path, "a git-ignored symlink to a directory that is, lies "
-                                          "inside or holds the repository's own git dir (to {}); "
-                                          "this walk does not enter that git dir, and a tree copy "
-                                          "follows the link into it".format(real))
+                        # counted below like any other, so what the physical walk prunes (the
+                        # root .git entry) is still examined through it. THE RULE (above, with
+                        # the unwalked set) is the exception: a target that is, lies inside or
+                        # holds a directory this walk does not enter is refused, because a tree
+                        # copy (shutil.copytree, symlinks=False) follows the link into it.
+                        reached = _unwalked_reached(real)
+                        if reached is not None:
+                            _refuse(path, "a git-ignored symlink to a directory ({}) that is, "
+                                          "lies inside or holds a directory this walk does not "
+                                          "enter ({}); a tree copy follows the link into "
+                                          "it".format(real, reached))
                         continue
                     if real == real_root or real.startswith(real_root + os.sep):
                         # QA round 11 (codex MAJOR): descend through an in-root directory link

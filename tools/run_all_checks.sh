@@ -27,14 +27,17 @@ failed_names=""
 # FIFO above all: a plain read of a FIFO with no writer blocks forever), a symlink to one (a
 # git-ignored link included), an unresolvable (looping) non-ignored symlink, a symlink to a
 # directory outside the repository root, git-ignored or not, or, while git can list the tracked
-# paths, a git-ignored symlink to an in-root directory that is, lies inside or holds the repository's
-# own git dir (a tree copy follows a directory link and reads every file under it but a FIFO, a
-# character device included, with a plain blocking read), is refused by name and the run STOPS here
-# with exit 2. Its link exemptions, exactly: a dangling symlink and a git-ignored unresolvable symlink
-# pass (every read open of either fails at once); a symlink to a regular file passes (a plain read of
-# a regular file on a local filesystem does not block; FUSE or network storage can); and, while git
-# can list the tracked paths, a git-ignored in-root directory link is not walked under its own path
-# (its target is walked under the target's path). The walk
+# paths, a git-ignored symlink to an in-root directory that is, lies inside or holds a directory the
+# walk does not enter (the repository's own git dir unless the walk enters it, and the pruned root
+# .git entry in front of it), is refused by name and the run STOPS here with exit 2: a tree copy
+# follows a directory link and reads every file under it with a plain blocking read except a FIFO,
+# which shutil raises on before opening it, so a character device there can block the copy. Its link
+# exemptions, exactly: a dangling symlink and a git-ignored unresolvable symlink pass (every read
+# open of either fails at once; a write open through a dangling link creates its target instead); a
+# symlink to a regular file passes (a plain read of a regular file on a local filesystem does not
+# block; FUSE or network storage can); and, while git can list the tracked paths, any other
+# git-ignored in-root directory link is not walked under its own path (its target is walked under
+# the target's path). The walk
 # DESCENDS git-ignored directories (a stray .venv, editor or build output) and every nested .git directory that
 # is not the repository's own git dir (and, QA round 7, the own git dir is exempt only at the
 # repository ROOT: a root gitfile naming an in-tree directory gets that directory walked), refusing

@@ -3095,7 +3095,7 @@ def _raw_read_lint(root):
     return failures, (len(modules), len(got_all), total, finding_total)
 
 
-_RAW_READ_PENDING = ("unconverted pre-existing raw read(s), pending conversion and tracked by this pin, which\n                     only shrinks. The special-file precheck walk (which descends ignored directories and nested\n                     .git directories and refuses every symlink to a directory outside the root) certifies\n                     IN-ROOT inputs as defence in depth, but it can never certify a configuration-declared\n                     out-of-root path, the repository's own git dir or a post-walk write, so\n                     this pin is NOT a per-site certification; sites with a verified per-site reason are\n                     in RAW_READ_SITE_REASONS instead")
+_RAW_READ_PENDING = ("unconverted pre-existing raw read(s), pending conversion and tracked by this pin, which\n                     only shrinks. The special-file precheck walk (which descends ignored directories and nested\n                     .git directories and refuses every symlink to a directory outside the root) certifies\n                     IN-ROOT inputs as defence in depth, but it can never certify a configuration-declared\n                     out-of-root path, a directory the walk does not enter or a post-walk write, so\n                     this pin is NOT a per-site certification; sites with a verified per-site reason are\n                     in RAW_READ_SITE_REASONS instead")
 
 RAW_READ_ALLOWLIST = dict((
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_commit_run::os.read", 1),

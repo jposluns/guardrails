@@ -23,14 +23,17 @@ failed_names=""
 # git when git can answer, never from an upward .git search) BEFORE any gate runs; a special file, a
 # symlink to one, an unresolvable symlink that git does not ignore, a symlink to a directory outside
 # the root, git-ignored or not, or, while git can list the tracked paths, a git-ignored symlink to an
-# in-root directory that is, lies inside or holds the repository's own git dir (a tree copy follows a
-# directory link and reads every file under it but a FIFO, a character device included, with a plain
-# blocking read), is refused by name and the run STOPS here with exit 2, so no gate or self-test
-# below can block on a plain read of a FIFO. Its link exemptions, exactly: a dangling symlink and a
-# git-ignored unresolvable symlink pass (every read open of either fails at once); a symlink to a
-# regular file passes (a plain read of a regular file on a local filesystem does not block; FUSE or
-# network storage can); and, while git can list the tracked paths, a git-ignored in-root directory
-# link is not walked under its own path (its target is walked under the target's path). The shell
+# in-root directory that is, lies inside or holds a directory the walk does not enter (the
+# repository's own git dir unless the walk enters it, and the pruned root .git entry in front of
+# it), is refused by name and the run STOPS here with exit 2, so no gate or self-test below can
+# block on a plain read of a FIFO: a tree copy follows a directory link and reads every file under
+# it with a plain blocking read except a FIFO, which shutil raises on before opening it, so a
+# character device there can block the copy. Its link exemptions, exactly: a dangling symlink and a
+# git-ignored unresolvable symlink pass (every read open of either fails at once; a write open
+# through a dangling link creates its target instead); a symlink to a regular file passes (a plain
+# read of a regular file on a local filesystem does not block; FUSE or network storage can); and,
+# while git can list the tracked paths, any other git-ignored in-root directory link is not walked
+# under its own path (its target is walked under the target's path). The shell
 # test on the first line is the BOOTSTRAP: python3 would
 # block LOADING the precheck
 # script itself if that path were a FIFO. Residual: the interpreter binary and THIS runner script are
