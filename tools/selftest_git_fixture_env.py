@@ -15,9 +15,10 @@ the fixture class is statically confirmed to call its scrub (per member, so remo
 routing fails at that member's own named check), tightened by function-SCOPED checks (the named
 self-test entry itself calls the in-place scrub as a top-level statement with no process-launching
 call before it, or, for an entry wrapped in fixture_git_lifecycle(), matches a closed allowlist:
-only permitted statements before a top-level with that enters the lifecycle alone and returns the
-isolated main's call, and nothing after it), explicit hook-fixture env checks, an OPF inherited-env
-probe, and TRUST checks
+no decorator, annotation, type parameter or non-constant default, only permitted statements before
+a top-level with that enters the lifecycle alone and returns the isolated main's call on the
+entry's own parameters or constants, and nothing after it), explicit hook-fixture env checks, an
+OPF inherited-env probe, and TRUST checks
 (every literal `git ... archive ...` launch in the two members that read the checkout under test
 passes env=caller_env_without_git(), so the scrub cannot regress
 a foreign-owned checkout to a rc=128 refusal). Third, an end-to-end leak probe: the originally
@@ -42,7 +43,8 @@ later git call in the same process still runs under it; for the scrub form, laun
 indirect helper calls, early returns and control-flow reachability are outside this syntactic
 check's coverage, and for the lifecycle form, which refuses every statement not on its allowlist,
 what the permitted statements do when run is outside it (the restore probe in each checked
-entry point's own self-test is the runtime evidence for that). The
+entry point's own self-test runs them around a stand-in isolated main, with a listed helper call
+replaced by a recorder, so what that helper itself does is outside both). The
 config-injection lane derives registered self-test commands and runs them under caller hooks and ignore
 files, attributes and fsmonitor, with separate malformed-config probes. Selection is by
 selftest_ script name or --self-test/--selftest/--suite flag, not by behaviour: a
@@ -371,26 +373,53 @@ def _statement_label(stmt):
 
 def _lifecycle_scoped_first(owner, func_name, isolated, member=""):
     """The lifecycle form of _scrub_scoped_first, an allowlist over the whole entry point: True
-    when its body is only permitted statements, then one with statement that enters a plain
-    fixture_git_lifecycle() call and nothing else and whose body ends with return isolated(...),
-    the isolated main, and then nothing. The with may instead sit in the body of a top-level try:
-    that try's statements before the with are held to the same allowlist, nothing follows the with
-    in it, it has no except handler and no else body, and its finally body holds only statements
-    the closed table lists for this entry point. Permitted before the with: the docstring, the
-    statements in _LIFECYCLE_COMMON_BEFORE (the lifecycle import among them is required), global
-    statements, and the "before" statements _LIFECYCLE_ENTRY_STATEMENTS lists for this entry point
-    (member is its file name); permitted in the with body before the call: that table's "with"
-    statements. isolated is named nowhere else in the function. Anything else is refused by name,
-    whatever it does: any return or raise, any try with an except handler, finally or else body,
-    any assignment, expression or other call, and any other import. The lifecycle saves the
-    caller's environment and only then scrubs, so a scrub, a launch, or a read or change of the
-    environment before it would make it save, and so restore, the wrong values. Syntactic: what
-    the permitted statements do when run (the lifecycle itself, an imported module's code, the
-    listed helper call) is outside it, and is what the restore probe in each checked entry point's
-    own self-test covers (tools/_entry_restore_selftest.py)."""
+    when the entry point has no decorator, annotation or type parameter and each default is a
+    constant, and its body is only permitted statements, then one with statement that enters a
+    plain fixture_git_lifecycle() call (a bare name, no arguments) and nothing else, binding at
+    most a plain name, and whose body ends with return isolated(...), the isolated main, and then
+    nothing. The with may instead sit in the body of a top-level try: that try's statements before
+    the with are held to the same allowlist, nothing follows the with in it, it has no except
+    handler (so no else body either, which Python allows only with one), and its finally body
+    holds only statements the closed table lists for this entry point. Permitted before the with:
+    the docstring, the statements in _LIFECYCLE_COMMON_BEFORE (the lifecycle import among them is
+    required), global statements, and the "before" statements _LIFECYCLE_ENTRY_STATEMENTS lists
+    for this entry point (member is its file name); permitted in the with body before the call:
+    that table's "with" statements. Statements are matched whole, by their parsed shape. Each
+    argument and keyword value of the isolated main's call is a parameter of the entry point or a
+    constant (a starred or ** argument is neither), and isolated is named nowhere else in the
+    function. So every expression the entry point evaluates is in a permitted statement, the
+    lifecycle call, that call of the isolated main, or a constant default; any other statement,
+    decorator, annotation, type parameter, default or argument is refused by a message that names
+    it. The lifecycle saves the caller's environment and only then scrubs, so a scrub, a launch, or
+    a read or change of the environment before it would make it save, and so restore, the wrong
+    values. Syntactic: what the permitted statements do when run (the lifecycle itself, an
+    imported module's code, the listed statements) is outside it. The restore probe in each
+    checked entry point's own self-test (tools/_entry_restore_selftest.py) runs the entry point
+    around a stand-in isolated main and checks the environment and the module's global bindings
+    after each call; it runs the listed helper call (selftest_orch_hooks.main's
+    _selftest_exit_report.arm) with a recorder in its place, so what that helper itself does is
+    outside both."""
     lead = "{}(): ".format(func_name)
     if not isolated:
         return lead + "the lifecycle form needs the isolated main's name"
+    if owner.decorator_list:
+        return lead + "a decorator ({!r}) wraps the entry point, which may have none".format(
+            ast.unparse(owner.decorator_list[0]))
+    signature = owner.args
+    parameters = [arg for arg in signature.posonlyargs + signature.args + signature.kwonlyargs
+                  + [signature.vararg, signature.kwarg] if arg is not None]
+    for default in signature.defaults + [d for d in signature.kw_defaults if d is not None]:
+        if not isinstance(default, ast.Constant):
+            return lead + "a default argument ({!r}) is not a constant".format(
+                ast.unparse(default))
+    annotations = [arg.annotation for arg in parameters if arg.annotation is not None] + (
+        [owner.returns] if owner.returns is not None else [])
+    if annotations:
+        return lead + ("an annotation ({!r}) is on the entry point's signature, which may carry "
+                       "none".format(ast.unparse(annotations[0])))
+    if owner.type_params:
+        return lead + ("a type parameter ({!r}) is on the entry point's signature, which may "
+                       "carry none".format(ast.unparse(owner.type_params[0])))
     listed = {(place, _statement_shape(text))
               for name, entry, place, text in _LIFECYCLE_ENTRY_STATEMENTS
               if (name, entry) == (member, func_name)}
@@ -425,10 +454,9 @@ def _lifecycle_scoped_first(owner, func_name, isolated, member=""):
         return lead + ("no {!r} precedes {}, so the name it enters is not shown to be the "
                        "lifecycle".format(_LIFECYCLE_IMPORT, where))
     if holder is not None:
+        # An else body needs an except handler, so this also refuses any else body.
         if holder.handlers:
             return lead + "the try holding {} has an except handler".format(where)
-        if holder.orelse:
-            return lead + "the try holding {} has an else body".format(where)
         for stmt in holder.finalbody:
             if ("finally", _statement_shape(stmt)) not in listed:
                 return lead + ("{} in the finally body of the try holding {} is not on the "
@@ -462,6 +490,16 @@ def _lifecycle_scoped_first(owner, func_name, isolated, member=""):
     if named != 1:
         return lead + "{} is named {} times; only the return in {} may name it".format(
             isolated, named, where)
+    names = {arg.arg for arg in parameters}
+    passed = [(node, node) for node in last.value.args] + [
+        (keyword, keyword.value if keyword.arg is not None else keyword)
+        for keyword in last.value.keywords]
+    for shown, value in passed:
+        if not (isinstance(value, ast.Constant)
+                or (isinstance(value, ast.Name) and value.id in names)):
+            return lead + ("{} passes {!r} to {}(); each argument may only be a parameter of "
+                           "{}() or a constant".format(where, ast.unparse(shown), isolated,
+                                                        func_name))
     return True
 
 
@@ -4447,12 +4485,13 @@ _SCAN_ALLOWED_UNPINNED = (
      " _opf_observe._scrubbed_env; its callers pass plumbing subcommands only, never a"
      " maintenance-triggering one"),
     # Cannot-evaluate launches (argv or head outside the resolver's bounds), each audited:
-    ("tools/_entry_restore_selftest.py", "_run_wrapper", ("unresolved",),
-     "cannot-evaluate head: the restore probe runs the lifecycle's PATH-front git wrapper by"
-     " its path with the fixed _WRAPPER_ARGS (status and two operands); the probe puts its own"
-     " stand-in git first on the caller's PATH, so the wrapper execs that stand-in, a script"
-     " that prints its arguments and environment and exits 0, never a real git, and status is"
-     " not maintenance-triggering either way"),
+    ("tools/_entry_restore_selftest.py", "_launch_wrapper", ("unresolved",),
+     "cannot-evaluate head: the function's one statement runs a git wrapper by its path with"
+     " the fixed _WRAPPER_ARGS (status and two operands): the lifecycle's PATH-front wrapper, or"
+     " a mutant copy of it the wrapper check must refuse; the probe puts its own stand-in git"
+     " first on the caller's PATH before the lifecycle, so either wrapper execs that stand-in, a"
+     " script that records its arguments and environment and exits 0, never a real git, and"
+     " status is not maintenance-triggering either way"),
     ("tools/check_git_option_table.py", "_git", ("unresolved",),
      "cannot-evaluate funnel: the argv tail is the caller's *args; every caller passes"
      " option-table introspection forms (init -q --template= of a scratch probe repo,"

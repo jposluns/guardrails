@@ -6797,10 +6797,16 @@ def _main_isolated(report_path=None):
 
     # An in-process call of main() hands the caller's environment back exactly (HOME,
     # XDG_CONFIG_HOME, the GIT_CONFIG_* pins and the caller's own GIT_* variables), with the git
-    # fixture scrub in effect inside: the entry point is run in a child around a stand-in main.
+    # fixture scrub in effect inside: the entry point is run in a child around a stand-in main,
+    # once without a report path and once with one, so the branch that arms the execution report
+    # before the lifecycle runs too. There _selftest_exit_report.arm is a recorder that must be
+    # called once, with the caller's environment unchanged; the path is handed only to it.
     from _entry_restore_selftest import entry_restore_failures
     check("harness/entry-restores-caller-env",
-          entry_restore_failures(__file__, "main", "_main_isolated"), [])
+          entry_restore_failures(__file__, "main", "_main_isolated")
+          + entry_restore_failures(__file__, "main", "_main_isolated",
+                                   args=("entry-restore-report.json",),
+                                   helpers=(("_selftest_exit_report", "arm"),)), [])
 
     # In-run execution-set self-guard (defence in depth beside tools/check_selftest_execution.py): the
     # executed set reconciles against the hand-authored expectation manifest even on a direct developer
