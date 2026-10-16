@@ -944,11 +944,12 @@ def _segments(command):
 # APPEND '+=' form (OLDPWD+=..) is a real bash assignment prefix too, so it is recognized here; missing it
 # left the append-assignment mistaken for the command word, so the following cd was never examined. The
 # any-segment identity-assignment scan still inspects these same tokens for an AI name
-# (GIT_AUTHOR_NAME=Claude ...). Best-effort, per the manifest residue: the 'env VAR=x git ...' command form
-# and the 'command git ...' builtin remain out of scope. This matches the DECODED token, so an
-# assignment-SHAPED token whose NAME was quoted or escaped ("OLDPWD"=.. -> decoded OLDPWD=..) also matches;
-# bash would treat that as a command, not an assignment, so recognizing it is a deliberate conservative
-# over-fire (disclosed in the manifest residue), never an under-block.
+# (GIT_AUTHOR_NAME=Claude ...). Best-effort, per the manifest residue: for the checks that resolve the
+# command word here, the 'env VAR=x git ...' command form and the 'command git ...' builtin remain out of
+# scope; the commit-identity check reads both through its own finder (_cmtidn_git_commands). This matches
+# the DECODED token, so an assignment-SHAPED token whose NAME was quoted or escaped ("OLDPWD"=.. -> decoded
+# OLDPWD=..) also matches; bash would treat that as a command, not an assignment, so recognizing it is a
+# deliberate conservative over-fire (disclosed in the manifest residue), never an under-block.
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 
 
@@ -1877,8 +1878,12 @@ def diff_source_pretool(data):
 # --- cmtidn: AI identity in a git authoring command --------------------------------------------------
 # Quote-aware and token-based. The commit-MESSAGE contexts (a Co-Authored-By trailer, an --author value)
 # are judged only on a segment that runs a git command whose subcommand is a commit-creating verb (the git
-# command is found behind leading reserved words, VAR=value words and wrapper words, _cmtidn_git_commands),
-# so a read-side use of the same tokens (git log --author=Claude) never trips. Separately, an identity
+# command is found behind leading reserved words, a function or coprocess name, VAR=value words and wrapper
+# words, _cmtidn_git_commands), so a read-side use of the same tokens (git log --author=Claude) does not trip,
+# bare or wrapped, and a git word after a read-side git command's subcommand is that command's operand (env
+# git log --grep git commit --author=Claude). The read-side form that still trips is the disclosed
+# over-deny at _CMTIDN_GIT_WRAPPERS: a wrapped git word right after a wrapper option, which the finder cannot
+# tell from that option's value (sudo -E git log --grep git commit --author=Claude). Separately, an identity
 # ASSIGNMENT (a git-identity env var, or a user.name/user.email config value) is a violation on ANY
 # segment, to harden the common 'set the identity then commit' form. Because the tokens are quote-aware,
 # a trailer hiding inside a quoted -m message (e.g. -m "fix; Co-authored-by: Claude", which the old
@@ -1906,24 +1911,49 @@ _RAW_IDENTITY_CONTEXTS = (
 )
 
 
+# The options of the commit-family verbs that take the next word as their value, so the commit-message reader
+# reads that word as the value and never as an --author option ('git commit -m --author=X' records the
+# message '--author=X' and no author). A message option's value is message text, which a co-author trailer can
+# live in, so it is still scanned for one; the value of an option in _CMTIDN_VALUE_OPTS is a file, a commit, a
+# template, a date or a mode, so it is passed over. A short option cluster that ends in a value-taking letter
+# (-am MESSAGE) is not split, so its value is read as a word of its own: a safe-direction over-deny when that
+# message is spelled as an AI --author option.
+_CMTIDN_MESSAGE_OPTS = frozenset(("-m", "--message", "--trailer"))
+_CMTIDN_VALUE_OPTS = frozenset((
+    "-F", "--file", "-C", "--reuse-message", "-c", "--reedit-message", "-t", "--template", "--fixup",
+    "--squash", "--date", "--cleanup", "--pathspec-from-file"))
+
+
 def _commit_message_and_author_ai(tokens):
     """A hit label if this git commit segment names an AI identity in an --author value or in a
-    Co-Authored-By trailer (scanned as a substring of any token, so the trailer that lives inside the
-    single quoted -m message token is caught), else None. The bare message body is deliberately NOT
-    matched against the identity set: a legitimate message that merely mentions an AI product name
-    (e.g. -m 'fix claude adapter') is not a recorded AI identity, and denying it would be a false
-    positive; only a trailer or an --author value records identity."""
+    Co-Authored-By trailer (scanned as a substring of a token, so the trailer that lives inside the
+    single quoted -m message token is caught), else None. A value-taking option's value word is read as that
+    value before anything else: an --author value is judged, a message value (_CMTIDN_MESSAGE_OPTS) is scanned
+    for a trailer but never read as an --author option, and any other value (_CMTIDN_VALUE_OPTS) is passed
+    over. The bare message body is deliberately NOT matched against the identity set: a legitimate message
+    that merely mentions an AI product name (e.g. -m 'fix claude adapter') is not a recorded AI identity, and
+    denying it would be a false positive; only a trailer or an --author value records identity."""
     n = len(tokens)
-    for i, tok in enumerate(tokens):
+    i = 0
+    while i < n:
+        tok = tokens[i]
+        if i + 1 < n and (tok == "--author" or tok in _CMTIDN_VALUE_OPTS):
+            if tok == "--author" and AI_IDENTITY_RE.search(tokens[i + 1]):
+                return "--author value {!r}".format(tokens[i + 1].strip()[:80])
+            i += 2  # the option and its value word
+            continue
+        message = i + 1 < n and tok in _CMTIDN_MESSAGE_OPTS
+        if message:
+            i += 1
+            tok = tokens[i]  # message text: scanned for a trailer, never read as an option
         m = CO_AUTHOR_RE.search(tok)
         if m and AI_IDENTITY_RE.search(m.group(1)):
             return "co-author trailer {!r}".format(m.group(1).strip()[:80])
-        if tok.startswith("--author="):
+        if not message and tok.startswith("--author="):
             value = tok[len("--author="):]
             if AI_IDENTITY_RE.search(value):
                 return "--author value {!r}".format(value.strip()[:80])
-        elif tok == "--author" and i + 1 < n and AI_IDENTITY_RE.search(tokens[i + 1]):
-            return "--author value {!r}".format(tokens[i + 1].strip()[:80])
+        i += 1
     return None
 
 
@@ -1946,39 +1976,63 @@ def _identity_assignment_ai(tokens):
 
 
 # The wrapper words that run the command after them (their own options and operands first) for the
-# commit-identity check: when one is a segment's command word, every later word that is git starts a git
-# command the check reads (_cmtidn_git_commands). One bounded rule rather than an option grammar per wrapper,
-# so a wrapper option or operand that is not git is passed over whatever its arity (sudo -u ci, timeout -s
-# KILL 60, nice -n 10, xargs -I{}). The cost is a safe-direction over-deny when a wrapped command that is not
-# git carries git, a commit verb and an AI --author or trailer as its own operands ('xargs echo git commit
-# --author=...'). 'command -v NAME' and 'command -V NAME' only look a name up, so a command word 'command'
-# whose options carry v or V runs no git command. The list and the reserved words below are this check's
-# own (the _CMTIDN_ prefix), so one shared wrapper-aware finder can later replace them.
+# commit-identity check: when one is a segment's command word, a later word that is git starts a candidate
+# git command the check reads (_cmtidn_git_commands). One bounded rule rather than an option grammar per
+# wrapper, so a wrapper option or operand that is not git is passed over whatever its arity (sudo -u ci,
+# timeout -s KILL 60, nice -n 10, xargs -I{}), and a wrapper option value spelled git (sudo -u git git commit)
+# starts a candidate that does not hide the git command after it. A candidate whose git word does not stand
+# right after a word that may be an option taking it as a value (a word that starts with '-' other than '-',
+# '--' or an option carrying '=') is held to be the git command the segment runs: once it has its
+# subcommand, a later git word is that command's operand and starts no candidate (env git log --grep git
+# commit). The cost is a safe-direction over-deny when a wrapped command that is not git carries git, a
+# commit verb and an AI --author or trailer as its own operands ('xargs echo git commit --author=...'), and
+# when a read-side git word stands right after a wrapper option, so the finder cannot tell it from that
+# option's value and keeps reading later git words ('sudo -E git log --grep git commit --author=...').
+# 'command -v NAME' and 'command -V NAME' only look a name up, so a command word 'command' whose options carry
+# v or V runs no git command. A wrapper off this list (builtin, doas, ionice, ...) is not read. The list and
+# the reserved words below are this check's own (the _CMTIDN_ prefix), so one shared wrapper-aware finder can
+# later replace them.
 _CMTIDN_GIT_WRAPPERS = frozenset((
     "env", "timeout", "command", "exec", "nohup", "xargs", "sudo", "nice", "setsid", "stdbuf", "time"))
 # The shell reserved words that can stand before a segment's command word ('! git ...', 'if git ...',
 # 'then git ...', '{ git ...; }'); the same words the gate-discipline check passes over (_GATE_RESERVED).
 _CMTIDN_RESERVED = frozenset(("{", "}", "!", "if", "then", "else", "elif", "fi", "for", "while", "until",
                               "do", "done", "case", "esac", "select", "function", "in", "[[", "]]", "coproc"))
+# The reserved words that open a compound command. 'function NAME' and 'coproc NAME' followed by one of them
+# define a function or start a named coprocess whose body is that compound command, so NAME is a name and the
+# body's command word comes after it (function f { git commit ...; }, coproc C while git commit ...; do :;
+# done). 'coproc NAME' followed by any other word is a simple command whose command word is NAME (coproc C
+# env git ... runs C). A '(' or '((' body ends the segment in the lexer, so that body is judged as a segment
+# of its own.
+_CMTIDN_COMPOUND_OPENERS = frozenset(("{", "if", "while", "until", "for", "case", "select", "[["))
 
 
 def _cmtidn_git_commands(tokens):
-    """Yield the index of the subcommand word of each git command one segment runs, in ONE pass over the
-    tokens: no suffix is sliced or re-scanned per git word, so a long wrapped segment costs time linear in its
-    length. Leading reserved words (_CMTIDN_RESERVED) and VAR=value words are passed over to the command word.
-    When it is git (a path to git included), that one git command is read; when it is a wrapper
-    (_CMTIDN_GIT_WRAPPERS), every later word that is git and not a VAR=value word starts a git command, except
-    that a 'command' whose options carry v or V (command -v git, command -V git) is a lookup and runs none;
-    otherwise the segment runs no git command. A git command's subcommand is its first word that is not a git
-    global option, an arg-consuming global option (_GIT_ARG_OPTS: -C DIR, -c NAME=VALUE) passing over its
-    value too, as _git_subcommand_rest reads it. Every git command still reading its global options sees the
-    same next word, so the pass keeps two flags (one of them expects an option or its subcommand here, one of
-    them expects an option value here), and a word that is the subcommand of two git commands is yielded
-    once. Purely lexical: a git word the shell builds at run time is not seen (the residue lists them)."""
+    """Yield the index of each word that one segment's git commands may read as their subcommand, in ONE pass
+    over the tokens: no suffix is sliced or re-scanned per git word, so a long wrapped segment costs time
+    linear in its length. Leading reserved words (_CMTIDN_RESERVED) and VAR=value words are passed over to the
+    command word, and so is the NAME after 'function' or 'coproc' when a compound opener follows it
+    (_CMTIDN_COMPOUND_OPENERS). When the command word is git (a path to git included), that one git command
+    is read and the index of its subcommand is yielded. When it is a wrapper (_CMTIDN_GIT_WRAPPERS), the finder
+    yields CANDIDATES: a later word that is git and not a VAR=value word starts a candidate git command, a
+    git-named option value or operand included, until a candidate held to be the command the segment runs (its
+    git word does not stand right after a word that may be an option taking it as a value) has its
+    subcommand; a later git word is that command's operand (the subcommand word itself, when it is git, still
+    starts one: sudo flock git git commit runs git commit). A 'command' whose options carry v or V (command -v
+    git, command -V git) is a lookup and runs none; otherwise the segment runs no git command. A git command's
+    subcommand is its first word that is not a git global option, an arg-consuming global option
+    (_GIT_ARG_OPTS: -C DIR, -c NAME=VALUE) passing over its value too, as _git_subcommand_rest reads it. Every
+    candidate still reading its global options sees the same next word, so the pass keeps three flags (the
+    candidates expect an option or their subcommand here, they expect an option value here, one of them is
+    held), and a word that is the subcommand of two candidates is yielded once. Purely lexical: a git word the
+    shell builds at run time is not seen (the residue lists them)."""
     n = len(tokens)
     i = 0
     while i < n and tokens[i] in _CMTIDN_RESERVED:
+        named = tokens[i] in ("function", "coproc")
         i += 1
+        if named and i + 1 < n and tokens[i + 1] in _CMTIDN_COMPOUND_OPENERS:
+            i += 1  # the NAME of a function definition or a named coprocess, before its compound body
     while i < n and _ENV_ASSIGN_RE.match(tokens[i]):
         i += 1
     if i >= n:
@@ -1993,24 +2047,34 @@ def _cmtidn_git_commands(tokens):
             if "v" in tokens[i] or "V" in tokens[i]:
                 return  # command -v / -V NAME looks NAME up and runs nothing
             i += 1
-    reading = not wrapped  # a git command expects a global option or its subcommand at this word
-    value = False          # a git command expects the value of an arg-consuming global option at this word
+    reading = not wrapped  # the candidates expect a global option or their subcommand at this word
+    value = False          # the candidates expect the value of an arg-consuming global option at this word
+    held = not wrapped     # one of the candidates is held to be the git command the segment runs
+    ended = False          # a held candidate has its subcommand, so a later git word is its operand
+    last = tokens[i - 1]
     while i < n:
         tok = tokens[i]
-        next_reading = value  # an option value is passed over and its git command reads on
+        starts = (wrapped and not ended and tok.rsplit("/", 1)[-1] == "git"
+                  and not _ENV_ASSIGN_RE.match(tok))
+        next_reading = value  # an option value is passed over and its candidates read on
+        next_held = held and value
         next_value = False
         if reading:
             if not tok.startswith("-"):
                 yield i
+                ended = ended or held
             elif tok in _GIT_ARG_OPTS:
-                next_value = True
+                next_value, next_held = True, held
             else:
-                next_reading = True
-        if wrapped and tok.rsplit("/", 1)[-1] == "git" and not _ENV_ASSIGN_RE.match(tok):
+                next_reading, next_held = True, held
+        if starts:
             next_reading = True
-        reading, value = next_reading, next_value
-        if not (wrapped or reading or value):
-            return  # the one unwrapped git command has its subcommand
+            if not last.startswith("-") or last in ("-", "--") or "=" in last:
+                next_held = True  # no option before this git word can take it as its value
+        reading, value, held = next_reading, next_value, next_held
+        if ended and not (reading or value):
+            return  # the git command the segment runs has its subcommand
+        last = tok
         i += 1
 
 
@@ -2018,9 +2082,9 @@ def find_ai_authorship(command):
     """Return '<context> <value>' when a segment sets an AI identity for a recorded change, else None:
     an identity-assignment (env var / git config) on ANY segment, or a commit-message context (co-author
     trailer, --author value) on a segment that runs a git commit-family command, found by
-    _cmtidn_git_commands behind leading reserved words, VAR=value words and wrapper words (env, sudo, ...).
-    Raises ValueError on a shell parse error (via _segments), which the handler turns into the conservative
-    fallback."""
+    _cmtidn_git_commands behind leading reserved words, a function or coprocess name, VAR=value words and
+    wrapper words (env, sudo, ...). Raises ValueError on a shell parse error (via _segments), which the
+    handler turns into the conservative fallback."""
     for tokens, _sep in _segments(command):
         hit = _identity_assignment_ai(tokens)
         if hit is not None:

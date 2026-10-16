@@ -10127,12 +10127,15 @@ def _main_isolated(monitor):
         # commit subcommand (which had made the AI --author invisible) -> DENY.
         ciexpect("(ci-b1) backslash-newline AI-author commit does not slip via an empty argv element, denies",
                  "git \\\n commit --author='Claude <c@x>' -m y", "deny")
-        # A git commit behind leading reserved words, VAR=value words or a wrapper word (env, timeout, command,
-        # exec, nohup, xargs, sudo, nice, setsid, stdbuf, time) is judged like the bare form: behind a wrapper
-        # every later git word starts a git command, whatever the wrapper's own options and operands. Every deny
-        # vector but ci-wr25 (a path to git as the command word, already read as git) allowed when only a
-        # segment whose command word is git was read; the controls pin what the rule must not widen (an allowed
-        # identity, a lookup, a read-side verb, a word off the wrapper list).
+        # A git commit behind leading reserved words, a function or coprocess name, VAR=value words or a wrapper
+        # word (env, timeout, command, exec, nohup, xargs, sudo, nice, setsid, stdbuf, time) is judged like the
+        # bare form: behind a wrapper a git word starts a candidate git command, whatever the wrapper's own
+        # options and operands, until a candidate held to be the command (its git word not right after a word
+        # that may be an option taking it as a value) has its subcommand; a later git word is that command's
+        # operand. Every deny vector from ci-wr1 to ci-wr26 but ci-wr25 (a path to git as the command word,
+        # already read as git) allowed when only a segment whose command word is git was read; the controls pin
+        # what the rule must not widen (an allowed identity, a lookup, a read-side verb, a word off the wrapper
+        # list, a coprocess whose command word is its first word, an option value the commit verb consumes).
         ciexpect("(ci-wr1) env before git commit does not hide an AI --author, denies",
                  'env git commit --author="Claude <c@x>" -m x', "deny")
         ciexpect("(ci-wr2) env with options, an unset name and assignments before git commit denies",
@@ -10208,25 +10211,105 @@ def _main_isolated(monitor):
                  'echo commit --author="Claude <c@x>"', "allow")
         ciexpect("(ci-wr-c10) a wrapped program named like a commit verb is not git, allows",
                  'nohup commit --author="Claude <c@x>"', "allow")
+        # A function definition or a named coprocess whose body is a compound command: the NAME after function
+        # or coproc is a name, and the body's git commit is read. ci-wr27, ci-wr29 and ci-wr30 allowed when the
+        # NAME was taken as the command word; ci-wr28's '(' already ended the segment before the body.
+        ciexpect("(ci-wr27) a function NAME { ... } body that runs git commit denies",
+                 'function f { git commit --author="Claude <c@x>" -m x; }; f', "deny")
+        ciexpect("(ci-wr28) a function NAME () { ... } body that runs git commit denies",
+                 'function f () { git commit --author="Claude <c@x>" -m x; }; f', "deny")
+        ciexpect("(ci-wr29) a coproc NAME { ... } body that runs git commit denies",
+                 'coproc C { git commit --author="Claude <c@x>" -m x; }', "deny")
+        ciexpect("(ci-wr30) a coproc NAME whose body is a while loop that runs git commit denies",
+                 'coproc C while git commit --author="Claude <c@x>" -m x; do :; done', "deny")
+        ciexpect("(ci-wr-c11) coproc NAME before a simple command makes NAME the command word, so C runs and "
+                 "env is its operand, allows",
+                 'coproc C env git commit --author="Claude <c@x>" -m x', "allow")
+        # A -v after command's '--' is the program command runs, not a lookup option.
+        ciexpect("(ci-wr31) command -- -v runs the program -v, not a lookup, so the git words are read, denies",
+                 'command -- -v git commit --author="Claude <c@x>"', "deny")
+        # Behind a wrapper, a git word after the subcommand of the git command held to be the one the segment
+        # runs is that command's operand (ci-wr-c12 to ci-wr-c17 denied when every later git word started a
+        # git command); a git word right after a wrapper option may be that option's value, so its candidate
+        # does not end the scan (ci-wr32); a git word that a held candidate reads as its subcommand still starts
+        # a candidate, since a wrapped program off the list can run it (ci-wr33); and the read-side form behind
+        # a wrapper option still denies (ci-wr34, the disclosed over-deny). '-', '--' and an option carrying '='
+        # take no following value (ci-wr-c15 to ci-wr-c17).
+        ciexpect("(ci-wr32) a wrapper option value spelled git whose candidate reads a later word as its "
+                 "subcommand does not hide the git commit after it, denies",
+                 'sudo -u git -g wheel git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr33) a git word read as a held candidate's subcommand still starts a candidate (sudo runs "
+                 "flock, whose lock file is named git and whose command is git commit), denies",
+                 'sudo flock git git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr34) a wrapped read-side git right after a wrapper option keeps the later git words read, "
+                 "denies (the disclosed over-deny)",
+                 'sudo -E git log --grep git commit --author="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr-c12) a git word that is a wrapped git log's --grep value is its operand, allows",
+                 'env git log --grep git commit --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr-c13) a git word after a wrapped git log's --author and --grep options is its operand, "
+                 "allows",
+                 'sudo git log --author=Claude --grep git merge', "allow")
+        ciexpect("(ci-wr-c14) a pathspec named git after a wrapped git log's -- is its operand, allows",
+                 'env git log --author="Claude <c@x>" -- tools/git commit', "allow")
+        ciexpect("(ci-wr-c15) env's '-' takes no value, so the git log after it is the command, allows",
+                 'env - git log --grep git commit --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr-c16) the git log after a wrapper's '--' is the command, allows",
+                 'sudo -- git log --grep git commit --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr-c17) the git log after a wrapper option carrying '=' is the command, allows",
+                 'env --chdir=/repo git log --grep git commit --author="Claude <c@x>"', "allow")
+        # The commit-message reader reads a value-taking option's value word as that value: an --author word
+        # given as -m's message or -F's file name records no author (ci-wr-c18 to ci-wr-c20 denied when every
+        # word was read as an option); the word after a consumed value is read again (ci-wr35), and a --trailer
+        # value is message text scanned for a co-author trailer (ci-wr36).
+        ciexpect("(ci-wr-c18) a wrapped commit whose -m message is spelled as an AI --author records no author, "
+                 "allows",
+                 'env git commit -m --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr-c19) a commit whose -m message is spelled as an AI --author records no author, allows",
+                 'git commit -m --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr-c20) a commit whose -F file name is spelled as an AI --author records no author, allows",
+                 'git commit -F --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr35) an AI --author after an -F file name is read, denies",
+                 'git commit -F msg.txt --author="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr36) an AI co-author trailer in a --trailer value denies",
+                 'git commit -m x --trailer "Co-authored-by: Claude <c@x>"', "deny")
 
         # The wrapper scan is ONE pass: each word of a wrapped segment is read a bounded number of times. Every
-        # -c value below is spelled git, so each one also starts a git command still reading its options; a
-        # per-candidate suffix slice or re-scan would read the segment's words a quadratic number of times.
-        class _CiCountingTokens(list):
-            """A token list that counts the words read through indexing, slicing and iteration."""
-            reads = 0
+        # -c value below is spelled git, so each one also starts a candidate still reading its options; a
+        # per-candidate suffix slice or re-scan would read the segment's words a quadratic number of times. The
+        # sequence counts every word read through indexing and slicing (a slice is a counted sequence too), and
+        # refuses iteration, so a copy taken first (list(tokens), tokens[:]) and then sliced or re-scanned
+        # cannot hide its reads from the count.
+        class _CiCountingTokens:
+            """A read-only token sequence that counts the words read through indexing and slicing into one
+            counter its slices share, and refuses iteration, so no whole-sequence conversion escapes it."""
+
+            def __init__(self, words, counter=None):
+                self._words = list(words)
+                self._counter = [0] if counter is None else counter
+
+            @property
+            def reads(self):
+                return self._counter[0]
+
+            def __len__(self):
+                return len(self._words)
 
             def __getitem__(self, key):
-                self.reads += len(range(*key.indices(len(self)))) if isinstance(key, slice) else 1
-                return list.__getitem__(self, key)
+                if isinstance(key, slice):
+                    part = self._words[key]
+                    self._counter[0] += len(part)
+                    return _CiCountingTokens(part, self._counter)
+                self._counter[0] += 1
+                return self._words[key]
 
             def __iter__(self):
-                for item in list.__iter__(self):
-                    self.reads += 1
-                    yield item
+                raise TypeError("the counted token sequence refuses iteration, so a copy cannot hide its reads")
 
         _ci_long = _CiCountingTokens(["env"] + ["git", "-c"] * 2000 + ["x=1", "commit"])
-        _ci_subs = list(aiqt_hooks._cmtidn_git_commands(_ci_long))
+        try:
+            _ci_subs = list(aiqt_hooks._cmtidn_git_commands(_ci_long))
+        except (TypeError, AttributeError) as exc:
+            _ci_subs = ["{}: {}".format(type(exc).__name__, exc)]
         if _ci_subs != [len(_ci_long) - 1] or _ci_long.reads > 8 * len(_ci_long):
             failures.append("(ci-wr-lin) the wrapper scan over a {}-word segment yielded {!r} (want [{}]) after "
                             "{} word reads (want at most {})".format(len(_ci_long), _ci_subs[:4],
