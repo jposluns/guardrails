@@ -259,9 +259,10 @@ def tracked_files(root):
     Pinned like gen_manifest's index read: the GIT_* environment is dropped (a repository-selecting variable
     cannot redirect the read), core.fsmonitor=false (a repository-configured hook never runs under a gate
     read), protocol.allow=never and GIT_NO_LAZY_FETCH=1. Like that read, a real-checkout scan keeps the
-    caller's on-disk git configuration (where safe.directory trust for the checkout lives); the self-test
-    runs every call here inside the fixture git lifecycle (self_test_main), so it reads no caller home, XDG
-    or system configuration. No git, a nonzero exit, a timeout, an empty listing
+    caller's on-disk git configuration (where safe.directory trust for the checkout lives). A self-test
+    entered through self_test_main (the --self-test entry point) runs every call here inside the fixture git
+    lifecycle, so it reads no caller home, XDG or system configuration; a direct _self_test() call bypasses
+    that isolation. No git, a nonzero exit, a timeout, an empty listing
     or an undecodable path raises OSError or UnicodeDecodeError to the fail-closed caller (exit 2), never an
     empty tree that would read as clean."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
@@ -366,13 +367,14 @@ def main():
 
 def self_test_main():
     """Run the self-test with every git call it makes, including the gate's own tracked-file read on its
-    fixture repository, isolated from the caller's git configuration: the shared fixture scrub points HOME
-    and XDG_CONFIG_HOME at a scratch directory and pins the global and system config away, and the fixture
-    git lifecycle's PATH wrapper reasserts the system-config pin after tracked_files drops the GIT_*
+    fixture repository, isolated from the caller's git configuration: the fixture git lifecycle applies the
+    shared fixture scrub (HOME and XDG_CONFIG_HOME at a scratch directory, the global and system config
+    pinned away), and its PATH wrapper reasserts the system-config pin after tracked_files drops the GIT_*
     environment. A caller's home, XDG or system configuration (malformed or hostile) therefore cannot change
-    a self-test verdict or run a configured program."""
-    from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
-    scrub_git_environment()
+    a self-test verdict or run a configured program. The lifecycle saves the environment before its scrub
+    and restores it on exit, so no scrub runs here first: an in-process call leaves the caller's environment
+    exactly as it found it (self-test case 22)."""
+    from _git_fixture_env import fixture_git_lifecycle
     with fixture_git_lifecycle():
         return _self_test()
 
@@ -564,7 +566,7 @@ def _self_test():
         # enumeration and its wiring into the gate are exercised, not only the helpers. Fixture git calls use
         # the shared hermetic fixture environment (no caller config, no auto-maintenance); only init and add
         # run, and the gate's own ls-files read is pinned in tracked_files and runs inside the fixture git
-        # lifecycle self_test_main enters, so it reads no caller home, XDG or system configuration.
+        # lifecycle self_test_main enters, so it reads no caller home, XDG or system configuration (case 21).
         import contextlib
         import io
         import _git_fixture_env
@@ -624,11 +626,13 @@ def _self_test():
             if "blob.zip" in report or "untracked.md" in report:
                 failures.append("a non-text-suffix non-UTF-8 file and an untracked file expected to be outside "
                                 "the role rule, got {!r}".format(report))
-            # DISCRIMINATING (no git call reads a global configuration): GIT_CONFIG_GLOBAL pointed at a
-            # malformed file must not change the gate's result. A control first proves the file breaks a git
+            # DISCRIMINATING (the tracked-file read drops the GIT_* environment): GIT_CONFIG_GLOBAL pointed at
+            # a malformed file must not change the gate's result. A control first proves the file breaks a git
             # read that honours it; then the gate runs with it set in the process environment and must give
             # the same exit code and report as the run above. A tracked-file read that inherits the caller's
             # GIT_* environment instead of dropping it fails on the malformed file (exit 2) and fails this.
+            # This guards the drop in tracked_files only; case 21 guards the home, XDG and system isolation
+            # of the self-test entry point.
             malformed = tmp / "malformed-global-gitconfig"
             malformed.write_text("[core\n\tbroken\n", encoding="utf-8")
             control = subprocess.run(["git", "-C", str(repo), "ls-files", "-z", "--cached"], capture_output=True,
@@ -758,6 +762,110 @@ def _self_test():
                                     "err={!r}".format(proc.returncode, proc.stdout, proc.stderr))
             finally:
                 shutil.rmtree(sib, ignore_errors=True)
+
+            # 21. DISCRIMINATING (the self-test entry point isolates the gate's tracked-file read from the
+            #     caller's git configuration): a child --self-test runs under each of three poisoned caller
+            #     configurations, each a malformed config file where git reads it when the isolation is
+            #     absent: .gitconfig under a scratch HOME, git/config under a scratch XDG_CONFIG_HOME, and a
+            #     system configuration. tracked_files drops every GIT_* variable, so GIT_CONFIG_SYSTEM cannot
+            #     carry the system case: a PATH shim in front of git instead points git at the malformed file
+            #     whenever neither GIT_CONFIG_NOSYSTEM=1 nor GIT_CONFIG_SYSTEM is set (where git reads the
+            #     host's system file), and only the fixture git lifecycle's PATH wrapper reasserts that pin
+            #     after the drop. Each child must pass. Reverting self_test_main to a bare _self_test() lets
+            #     the child's tracked-file read load the malformed file, so its cases 14 to 17 exit 2 and the
+            #     child fails all three; applying the scrub without the lifecycle fails the system case. A
+            #     control first proves each poisoned configuration breaks a git read that honours it; the home
+            #     and XDG controls pin the host's system configuration away (the shim supplies the system
+            #     control's), so no control reads the host's system file.
+            import shlex
+            caller = _git_fixture_env.caller_env_without_git()
+            real_git = shutil.which("git", path=caller.get("PATH", os.defpath))
+            poison = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-poison-"))
+            try:
+                clean_home = poison / "clean-home"
+                clean_home.mkdir()
+                bad_home = poison / "bad-home"
+                bad_home.mkdir()
+                (bad_home / ".gitconfig").write_text("[core\n\tbroken\n", encoding="utf-8")
+                bad_xdg = poison / "bad-xdg"
+                (bad_xdg / "git").mkdir(parents=True)
+                (bad_xdg / "git" / "config").write_text("[core\n\tbroken\n", encoding="utf-8")
+                bad_system = poison / "bad-system-gitconfig"
+                bad_system.write_text("[core\n\tbroken\n", encoding="utf-8")
+                shim_dir = poison / "system-config-shim"
+                shim_dir.mkdir()
+                base = dict(caller, HOME=str(clean_home), XDG_CONFIG_HOME=str(clean_home))
+                no_system = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_SYSTEM": os.devnull}
+                lanes = [("home", dict(base, HOME=str(bad_home)), no_system),
+                         ("XDG", dict(base, XDG_CONFIG_HOME=str(bad_xdg)), no_system)]
+                if real_git is None:
+                    failures.append("no git on the caller's PATH; the system-configuration isolation case "
+                                    "cannot run")
+                else:
+                    (shim_dir / "git").write_text(
+                        "#!/bin/sh\n"
+                        'if [ "${{GIT_CONFIG_NOSYSTEM:-}}" != 1 ] && [ "${{GIT_CONFIG_SYSTEM+x}}" != x ]; then\n'
+                        "  export GIT_CONFIG_SYSTEM={}\n"
+                        "fi\n"
+                        "exec {} \"$@\"\n".format(shlex.quote(str(bad_system)), shlex.quote(real_git)),
+                        encoding="utf-8")
+                    (shim_dir / "git").chmod(0o700)
+                    lanes.append(("system", dict(base, PATH=str(shim_dir) + os.pathsep
+                                                 + base.get("PATH", os.defpath)), {}))
+                for label, lane_env, control_pins in lanes:
+                    control = subprocess.run(["git", "-C", str(poison), "config", "--list"], capture_output=True,
+                                             text=True, env=dict(lane_env, **control_pins), timeout=60)
+                    if control.returncode == 0 or "bad config" not in control.stderr:
+                        failures.append("a malformed caller {} git configuration expected to break a git read "
+                                        "that honours it (the isolation case would be vacuous), got rc={} "
+                                        "{!r}".format(label, control.returncode, control.stderr))
+                    try:
+                        child = subprocess.run([sys.executable, "-I", "-B", selfpath, "--self-test"],
+                                               capture_output=True, text=True, timeout=600,
+                                               env=dict(lane_env, AIQT_INTERNAL_NAMES_SELFTEST_CHILD="1"))
+                    except subprocess.TimeoutExpired:
+                        failures.append("a child self-test under a malformed caller {} git configuration "
+                                        "timed out".format(label))
+                        continue
+                    if child.returncode != 0 or "SELF-TEST PASS" not in child.stdout:
+                        failures.append("a malformed caller {} git configuration changed the self-test verdict "
+                                        "(the gate's tracked-file read must not read it): rc={} out={!r} "
+                                        "err={!r}".format(label, child.returncode, child.stdout, child.stderr))
+
+                # 22. DISCRIMINATING (an in-process self_test_main() restores the caller's environment
+                #     exactly): a child imports this module, sets a caller environment (HOME at a scratch
+                #     directory, XDG_CONFIG_HOME and the GIT_CONFIG_* pins unset, a caller GIT_* variable
+                #     set), calls self_test_main() and compares os.environ with its snapshot from before the
+                #     call. A scrub applied before the fixture git lifecycle saves the environment makes the
+                #     lifecycle restore the scrubbed values (HOME at the fixture scratch, XDG_CONFIG_HOME and
+                #     GIT_CONFIG_GLOBAL set, the caller's GIT_* variable gone) and fails this.
+                probe = (
+                    "import os\n"
+                    "import sys\n"
+                    "sys.path.append({tools!r})\n"
+                    "import check_internal_names as cin\n"
+                    "os.environ['HOME'] = {home!r}\n"
+                    "for key in ('XDG_CONFIG_HOME', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', "
+                    "'GIT_CONFIG_NOSYSTEM'):\n"
+                    "    os.environ.pop(key, None)\n"
+                    "os.environ['GIT_AIQT_CALLER_PROBE'] = 'kept'\n"
+                    "before = dict(os.environ)\n"
+                    "rc = cin.self_test_main()\n"
+                    "changed = sorted(k for k in set(before) | set(os.environ) if before.get(k) != os.environ.get(k))\n"
+                    "print('ENVIRONMENT CHANGED: {{}}'.format(changed))\n"
+                    "sys.exit(0 if rc == 0 and not changed else 3)\n"
+                ).format(tools=toolsdir, home=str(clean_home))
+                try:
+                    proc = subprocess.run([sys.executable, "-I", "-B", "-c", probe], capture_output=True, text=True,
+                                          timeout=600, env=dict(caller, AIQT_INTERNAL_NAMES_SELFTEST_CHILD="1"))
+                    if proc.returncode != 0 or "ENVIRONMENT CHANGED: []" not in proc.stdout:
+                        failures.append("an in-process self_test_main() expected to pass and restore the caller's "
+                                        "environment exactly, got rc={} out={!r} err={!r}".format(
+                                            proc.returncode, proc.stdout, proc.stderr))
+                except subprocess.TimeoutExpired:
+                    failures.append("the in-process self_test_main() environment probe timed out")
+            finally:
+                shutil.rmtree(poison, ignore_errors=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -776,7 +884,12 @@ def _self_test():
           "decodes as UTF-8, skips a non-UTF-8 file with a non-text suffix and an untracked file, and exits 2 "
           "(cannot evaluate) on a tracked non-UTF-8 text file, a tracked file absent from the working tree and "
           "a root that is not a git repository; a GIT_CONFIG_GLOBAL pointed at a malformed file does not "
-          "change the gate result (no git call reads a global configuration); a malformed hashes file is reported, never a silent empty denylist; a "
+          "change the gate result (the gate's tracked-file read drops the GIT_* environment); a child "
+          "self-test still passes with a malformed .gitconfig under the caller's HOME, a malformed git/config "
+          "under the caller's XDG_CONFIG_HOME, or a malformed system configuration (supplied through a PATH "
+          "shim, since the gate drops GIT_CONFIG_SYSTEM), so the gate's tracked-file read does not read the "
+          "caller's home, XDG or system configuration during the self-test; an in-process self_test_main() "
+          "restores the caller's environment exactly; a malformed hashes file is reported, never a silent empty denylist; a "
           "non-UTF-8 in-scope surface fails closed as unscannable, never a silent skip; a broken symlink "
           "(a present dentry with a missing target) at a scoped path and at the hash-file path each fails "
           "closed (re-raised), never read as absent; a scoped file "
