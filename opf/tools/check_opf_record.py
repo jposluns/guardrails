@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T84)
+  check_opf_record.py --self-test                    the fixture suite (T1-T85)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -103,7 +103,8 @@ Each case runs on its own copy of that template; the root is removed in a finall
       .aiqt (flip: route homes 2 to the legacy journal root)
   T22 on a homes-2 store the verb claims through the live reservation seam: create records end to end
       with ONE irrevocable id reservation published under the COMPLETE transaction's own run id, its
-      claims exactly the counters advance, and an unreadable, malformed, conflicting or misnamed
+      claims exactly the counters advance, and a non-regular, unreadable (an injected permission
+      error), malformed, wrong-type (a string or a boolean claims value), conflicting or misnamed
       reservation refuses exit 2 with every byte untouched, never a silent fallback to the homes-1
       counters (flips: the reviewed head's refusing seam; a publication that skips the reservation;
       the retired validate_manifest patch, under which the run refuses at the manifest)
@@ -393,7 +394,8 @@ Each case runs on its own copy of that template; the root is removed in a finall
       stale-plan comparison)
   T81 the homes-2 high-water reads every journal kind's reservations, the homes enumerated from
       JOURNAL_KINDS: an import-kind reservation of BI-1 and WL-1 moves the next create to BI-2 and
-      WL-2, and a malformed reservation in each other kind's home, plus an unreadable, a conflicting
+      WL-2, and a malformed reservation in each other kind's home, plus a non-regular, an unreadable
+      (an injected permission error), a wrong-type (a string or a boolean claims value), a conflicting
       (another kind's payload) and a misnamed entry in the import home, refuse exit 2 with every byte
       untouched (flip: the reviewed head's single record home)
   T82 the homes-2 publication boundary requires the reservation of the run id it publishes under: a
@@ -407,9 +409,22 @@ Each case runs on its own copy of that template; the root is removed in a finall
       1001-part key under the emulated 3.14.8 key-part cap) is malformed: recovery refuses it with the
       held-lease refusal, every byte untouched (flip: the pre-fix lease parse, under which the
       RecursionError escapes to the record verb's unexpected-error backstop)
+  T85 a broken allocations home refuses the homes-2 reservation scan, never read as holding no
+      reservations, each leg its own test, for the import kind and for the record kind: the home a
+      symlink, a regular file, under a parent that is a regular file, a mode-0 directory, a directory
+      whose listing fails (an injected EIO), and a kind whose home cannot be derived (_allocations_rel
+      raising) each refuse exit 2 with the scan's own message and every byte untouched. The record
+      kind's file-parent leg refuses first at the record journal inspection end to end, so its scan
+      refusal is also asserted by a direct scan call; under uid 0 the mode-0 legs are named as not
+      evaluated, exit 2, never a pass (flip, applied to each leg: the scan's broken-home handlers
+      turned into return {}, under which each import leg records over the broken home; the record
+      kind's symlink, regular-file, mode-0 and unlistable legs refuse later, at the reservation
+      publication, with another message; its file-parent leg's direct scan reads {}; and its
+      underivable leg publishes its reservation and then fails, with bytes changed)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
-or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
+or unusable, temporary storage unusable, or any unexpected harness fault), or a check this environment
+cannot build (T85's mode-0 legs under uid 0) is named as not evaluated; never a clean skip.
 """
 import sys
 
@@ -485,6 +500,11 @@ def kill_points(n):
 
 class Harness(Exception):
     """A harness fault: the gate cannot evaluate (exit 2), never an assertion verdict."""
+
+
+class CannotEvaluate(Exception):
+    """One check this environment cannot build (a mode-bit vector under uid 0): the check is named as not
+    evaluated and the run exits 2, never a pass; the other checks still run."""
 
 
 class Env:
@@ -2539,10 +2559,12 @@ def t22_homes2_claim_reserves(fx):
     """On a homes-2 store the verb claims through the live reservation seam: create records end to
     end, publishing ONE irrevocable id reservation at the allocation record of the COMPLETE
     transaction's own run id, byte-exact (reservation_payload) with claims equal to exactly the
-    counters advance; no legacy journal home is created. Fail-closed: an unreadable (non-regular),
-    a malformed, and a conflicting (content not the canonical reservation its name declares)
-    reservation each refuse exit 2 with every byte untouched, never a silent fallback to the
-    homes-1 counters path."""
+    counters advance; no legacy journal home is created. Fail-closed, in seven cases: a non-regular
+    entry (a directory), an unreadable one (a regular file holding a canonical reservation whose open
+    fails with an injected permission error), a malformed one, a claims value of the wrong type (a
+    string, and separately a boolean), a conflicting one (content not the canonical reservation its
+    name declares), and a misnamed entry each refuse exit 2 with every byte untouched, never a silent
+    fallback to the homes-1 counters path."""
     env = fx.env
     base = fx.case("t22-homes2-base")
     with _self_test_homes2_active(base):
@@ -2564,10 +2586,20 @@ def t22_homes2_claim_reserves(fx):
                                                "WL": pre_counters["WL"] + 1}, (payload, advance)
         assert reservation.read_bytes() == record._opf_journal.reservation_payload(
             "record", run_id, payload["operation_id"], payload["claims"]), "T22 canonical payload"
-        damaged = "record-20260927T000009Z-0000000000000009.toml"
+        damaged_run = "record-20260927T000009Z-0000000000000009"
+        damaged = damaged_run + ".toml"
+        rel = "{}/{}".format(record._ALLOCATIONS_REL, damaged)
+        canonical = record._opf_journal.reservation_payload("record", damaged_run, "op", {"BI": 1})
         for label, plant, needle in (
-                ("unreadable", lambda d: d.mkdir(), "cannot read the id reservation"),
+                ("non-regular", lambda d: d.mkdir(), "cannot read the id reservation {} (contained path {!r} "
+                 "is not a regular file)".format(rel, rel)),
+                ("unreadable", lambda d: d.write_bytes(canonical), "cannot read the id reservation {} ([Errno {}] "
+                 "{}".format(rel, errno.EACCES, UNREADABLE_RESERVATION)),
                 ("malformed", lambda d: d.write_bytes(b"not toml ["), "is malformed"),
+                ("wrong-type-string", lambda d: d.write_bytes(_claims_retyped(canonical, b'"1"')),
+                 "the id reservation {} is malformed (id reservation claims must be".format(rel)),
+                ("wrong-type-boolean", lambda d: d.write_bytes(_claims_retyped(canonical, b"true")),
+                 "the id reservation {} is malformed (id reservation claims must be".format(rel)),
                 ("conflicting", lambda d: d.write_bytes(record._opf_journal.reservation_payload(
                     "record", "record-20260927T000008Z-0000000000000008", "op", {"BI": 1})),
                  "conflicts with the exact canonical reservation"),
@@ -2577,7 +2609,37 @@ def t22_homes2_claim_reserves(fx):
                 "junk.txt" if label == "misnamed" else damaged)
             target.parent.mkdir(parents=True)
             plant(target)
-            refused_untouched(env, sub, CREATE, needle)
+            with _unreadable_entry(damaged) if label == "unreadable" else contextlib.nullcontext():
+                refused_untouched(env, sub, CREATE, needle)
+
+
+UNREADABLE_RESERVATION = "synthetic unreadable id reservation"
+
+
+@contextlib.contextmanager
+def _unreadable_entry(name):
+    """os.open raising EACCES for a reservation entry `name` opened beneath a directory descriptor, every
+    other open unchanged: the entry is a regular file, unreadable only through the injected error. The
+    wrapper forwards dir_fd, so it is listed in os.supports_dir_fd while it stands, as the containment
+    probe requires of os.open."""
+    real = os.open
+
+    def opening(path, flags, *args, **kwargs):
+        if path == name and kwargs.get("dir_fd") is not None:
+            raise PermissionError(errno.EACCES, UNREADABLE_RESERVATION, name)
+        return real(path, flags, *args, **kwargs)
+    with patch.object(os, "open", opening), \
+            patch.object(os, "supports_dir_fd", set(os.supports_dir_fd) | {opening}):
+        yield
+
+
+def _claims_retyped(payload, literal):
+    """`payload`, a canonical reservation claiming BI = 1, with that claims value re-spelled as the TOML
+    `literal` (a value of the wrong type)."""
+    retyped = payload.replace(b"\nBI = 1\n", b"\nBI = " + literal + b"\n")
+    if retyped == payload:
+        raise Harness("the canonical reservation payload carries no BI = 1 claim to retype")
+    return retyped
 
 
 def flip_t22_refuse():
@@ -6180,9 +6242,11 @@ def t81_cross_kind_reservations(fx):
     import-kind reservation of {BI: 1, WL: 1} moves the next create to BI-2 and WL-2 (its own
     reservation says so, the import one is never touched), and that run is held at the
     post-publication gate as T79's is. Fail-closed in every other kind's home: a malformed
-    reservation in each non-record kind's home, and in the import home an unreadable (non-regular)
-    entry, an ingest payload under an import name, and a record-grammar name, each refuse exit 2
-    with every byte untouched."""
+    reservation in each non-record kind's home, and in the import home a non-regular entry (a
+    directory), an unreadable one (a regular file holding a canonical import reservation whose open
+    fails with an injected permission error), a claims value of the wrong type (a string, and
+    separately a boolean), an ingest payload under an import name, and a record-grammar name, each
+    refuse exit 2 with every byte untouched. A broken import home itself is T85's."""
     env = fx.env
     base = fx.case("t81-homes2-base")
     with _self_test_homes2_active(base):
@@ -6217,8 +6281,17 @@ def t81_cross_kind_reservations(fx):
             target.write_bytes(b"not toml [")
             refused_untouched(env, sub, CREATE, "is malformed")
         damaged = "imp" + stamp + ".toml"
+        rel = "{}/{}".format(record._allocations_rel("import"), damaged)
+        canonical = record._opf_journal.reservation_payload("import", "imp" + stamp, "op", {"BI": 1})
         for label, name, plant, needle in (
-                ("unreadable", damaged, lambda d: d.mkdir(), "cannot read the id reservation"),
+                ("non-regular", damaged, lambda d: d.mkdir(), "cannot read the id reservation {} (contained "
+                 "path {!r} is not a regular file)".format(rel, rel)),
+                ("unreadable", damaged, lambda d: d.write_bytes(canonical), "cannot read the id reservation "
+                 "{} ([Errno {}] {}".format(rel, errno.EACCES, UNREADABLE_RESERVATION)),
+                ("wrong-type-string", damaged, lambda d: d.write_bytes(_claims_retyped(canonical, b'"1"')),
+                 "the id reservation {} is malformed (id reservation claims must be".format(rel)),
+                ("wrong-type-boolean", damaged, lambda d: d.write_bytes(_claims_retyped(canonical, b"true")),
+                 "the id reservation {} is malformed (id reservation claims must be".format(rel)),
                 ("conflicting", damaged, lambda d: d.write_bytes(record._opf_journal.reservation_payload(
                     "ingest", "imp" + stamp, "op", {"BI": 1})),
                  "conflicts with the exact canonical reservation"),
@@ -6229,7 +6302,8 @@ def t81_cross_kind_reservations(fx):
             target = Path(sub) / record._allocations_rel("import") / name
             target.parent.mkdir(parents=True)
             plant(target)
-            refused_untouched(env, sub, CREATE, needle)
+            with _unreadable_entry(damaged) if label == "unreadable" else contextlib.nullcontext():
+                refused_untouched(env, sub, CREATE, needle)
 
 
 def flip_t81():
@@ -6354,6 +6428,158 @@ def flip_t83():
             return {}
         return original(root, rel)
     return patch.object(sys.modules[__name__], "journal_states", shortcut)
+
+
+# --- T85: a broken allocations home refuses the reservation scan (spec 8.2) ------------------------------
+
+@contextlib.contextmanager
+def _t85_unlistable(home):
+    """os.listdir raising EIO for a descriptor of `home` alone (matched by device and inode on the
+    descriptor), every other listing unchanged: the scan's open succeeds and its listing fails. The
+    wrapper takes a descriptor as os.listdir does, so it is listed in os.supports_fd while it stands."""
+    st = home.stat()
+    ident = (st.st_dev, st.st_ino)
+    real = os.listdir
+
+    def listdir(*args, **kwargs):
+        target = args[0] if args else kwargs.get("path")
+        if isinstance(target, int):
+            fst = os.fstat(target)
+            if (fst.st_dev, fst.st_ino) == ident:
+                raise OSError(errno.EIO, "synthetic unlistable allocations home")
+        return real(*args, **kwargs)
+    with patch.object(os, "listdir", listdir), \
+            patch.object(os, "supports_fd", set(os.supports_fd) | {listdir}):
+        yield
+
+
+def _t85_scan_refuses(root, needle):
+    """The reservation scan itself, called over the resolved store as the planner calls it: it must
+    refuse with `needle`, every byte of the store unchanged."""
+    before = snapshot(root)
+    res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
+    assert res.status == record._opf_store.RESOLVED, res
+    root_fd = record._opf_store._open_dir_nofollow(res.store_root)
+    try:
+        try:
+            high = record._reservation_high(record.Context(res, str(root), root_fd))
+        except record.RecordError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError(("the reservation scan refuses", needle, high))
+    finally:
+        os.close(root_fd)
+    assert snapshot(root) == before, ("bytes untouched by the scan", needle)
+    assert needle in message, ("the scan's refusal text", needle, message)
+
+
+def _t85_leg(fx, kind, shape):
+    """One T85 leg: the `kind` allocations home is broken as `shape` on a homes-2 store, and a create
+    refuses exit 2 with the scan's own message and every byte of the store unchanged, never reading the
+    broken home as holding no reservations. symlink, regular-file and mode-0 refuse at the home's own
+    no-follow directory open (a mode-0 directory cannot be opened for reading, so it refuses there,
+    never at the listing); file-parent refuses at the contained walk to the home's parent (the record
+    kind's home shares that parent with the record journal home, whose inspection refuses first end to
+    end, so that leg also calls the scan directly, _t85_scan_refuses); unlistable refuses at the
+    listing (an injected EIO after a successful open); underivable refuses before any home is opened
+    (_allocations_rel patched to raise, KeyError for the import kind and ValueError for the record
+    kind, so both caught classes are exercised). Under uid 0 the mode-0 leg cannot be built and is
+    reported as cannot-evaluate, never a pass."""
+    if shape == "mode-0" and os.geteuid() == 0:
+        raise CannotEvaluate("uid 0 is not bound by mode bits, so a mode-0 {} allocations home cannot be "
+                             "made unreadable".format(kind))
+    env = fx.env
+    rel = record._allocations_rel(kind)
+    root = fx.case("t85-{}-{}".format(kind, shape))
+    home = Path(root) / rel
+    opened = "cannot open the {} allocations home {} (".format(kind, rel)
+    with _self_test_homes2_active(root):
+        if shape == "symlink":
+            home.parent.mkdir(parents=True, exist_ok=True)
+            (home.parent / "elsewhere").mkdir()
+            home.symlink_to("elsewhere")
+            refused_untouched(env, root, CREATE, opened + "[Errno ")
+        elif shape == "regular-file":
+            home.parent.mkdir(parents=True, exist_ok=True)
+            home.write_bytes(b"")
+            refused_untouched(env, root, CREATE, opened + "[Errno ")
+        elif shape == "file-parent":
+            home.parent.parent.mkdir(parents=True, exist_ok=True)
+            home.parent.write_bytes(b"")
+            walk = opened + "cannot open contained directory component"
+            if kind == "record":
+                # The record kind's home shares its parent with the record journal home, whose
+                # inspection refuses first end to end; the scan's own refusal is pinned directly.
+                refused_untouched(env, root, CREATE, "cannot inspect the record journal")
+                _t85_scan_refuses(root, walk)
+            else:
+                refused_untouched(env, root, CREATE, walk)
+        elif shape == "mode-0":
+            home.mkdir(parents=True)
+            os.chmod(home, 0)
+            try:
+                refused_untouched(env, root, CREATE, opened + "[Errno {}]".format(errno.EACCES))
+            finally:
+                os.chmod(home, 0o755)
+        elif shape == "unlistable":
+            home.mkdir(parents=True)
+            with _t85_unlistable(home):
+                refused_untouched(env, root, CREATE, "cannot list the {} allocations home {} ([Errno {}] "
+                                  "synthetic unlistable allocations home".format(kind, rel, errno.EIO))
+        elif shape == "underivable":
+            real = record._allocations_rel
+            error = KeyError if kind == "import" else ValueError
+
+            def underivable(k):
+                if k == kind:
+                    raise error("synthetic underivable {} home".format(kind))
+                return real(k)
+            with patch.object(record, "_allocations_rel", underivable):
+                refused_untouched(env, root, CREATE, "the journal kind {!r} has no reservation home this "
+                                  "build can derive (".format(kind))
+        else:
+            raise Harness("T85 has no leg {!r}".format(shape))
+
+
+def _t85(kind, shape):
+    def test(fx):
+        _t85_leg(fx, kind, shape)
+    test.__name__ = "t85_{}_{}".format(kind, shape.replace("-", "_"))
+    return test
+
+
+# The reservation scan's broken-home refusals, by message: the two open handlers and the listing handler
+# of _kind_reservation_high, and the derivation handler of _reservation_high.
+T85_HOME_REFUSALS = ("cannot open the ", "cannot list the ")
+T85_DERIVE_REFUSAL = "has no reservation home this build can derive"
+
+
+@contextlib.contextmanager
+def flip_t85():
+    """The scan's broken-home handlers turned into `return {}`: a home that cannot be opened or listed,
+    and a kind whose home cannot be derived, read as holding no reservations. Each wrapper returns {}
+    exactly where its handler raises (the refusals are told apart by their messages, which no entry
+    refusal shares) and leaves every other outcome as it is."""
+    kind_high, high = record._kind_reservation_high, record._reservation_high
+
+    def open_kind_high(ctx, kind, home):
+        try:
+            return kind_high(ctx, kind, home)
+        except record.RecordError as exc:
+            if str(exc).startswith(T85_HOME_REFUSALS):
+                return {}
+            raise
+
+    def open_high(ctx):
+        try:
+            return high(ctx)
+        except record.RecordError as exc:
+            if T85_DERIVE_REFUSAL in str(exc):
+                return {}
+            raise
+    with patch.object(record, "_kind_reservation_high", open_kind_high), \
+            patch.object(record, "_reservation_high", open_high):
+        yield
 
 
 TESTS = (
@@ -6481,6 +6707,18 @@ TESTS = (
     ("T82-homes2-publication-requires-reservation", t82_publication_requires_reservation, flip_t82),
     ("T83-journal-states-confirmed-absence", t83_journal_states_confirmed_absence, flip_t83),
     ("T84-recovery-recursion-lease-refused-as-held", t84_recursion_lease_refused_as_held, flip_t84),
+    ("T85-homes2-allocations-home-import-symlink", _t85("import", "symlink"), flip_t85),
+    ("T85-homes2-allocations-home-import-regular-file", _t85("import", "regular-file"), flip_t85),
+    ("T85-homes2-allocations-home-import-file-parent", _t85("import", "file-parent"), flip_t85),
+    ("T85-homes2-allocations-home-import-mode-0", _t85("import", "mode-0"), flip_t85),
+    ("T85-homes2-allocations-home-import-unlistable", _t85("import", "unlistable"), flip_t85),
+    ("T85-homes2-allocations-home-import-underivable", _t85("import", "underivable"), flip_t85),
+    ("T85-homes2-allocations-home-record-symlink", _t85("record", "symlink"), flip_t85),
+    ("T85-homes2-allocations-home-record-regular-file", _t85("record", "regular-file"), flip_t85),
+    ("T85-homes2-allocations-home-record-file-parent", _t85("record", "file-parent"), flip_t85),
+    ("T85-homes2-allocations-home-record-mode-0", _t85("record", "mode-0"), flip_t85),
+    ("T85-homes2-allocations-home-record-unlistable", _t85("record", "unlistable"), flip_t85),
+    ("T85-homes2-allocations-home-record-underivable", _t85("record", "underivable"), flip_t85),
 )
 
 
@@ -6512,7 +6750,7 @@ def self_test(red_on_revert=False):
 
 def _self_test_isolated():
     red_on_revert = _red_on_revert[0]
-    ran, failures = [], []
+    ran, failures, unevaluated = [], [], []
 
     def check(name, test):
         ran.append(name)
@@ -6520,6 +6758,9 @@ def _self_test_isolated():
             test()
         except AssertionError as exc:
             failures.append("{}: {}".format(name, exc))
+        except CannotEvaluate as exc:
+            ran.remove(name)
+            unevaluated.append("{}: {}".format(name, exc))
 
     def discriminate(name, test, flip):
         """The flip must turn the test red with an assertion (never an unrelated harness fault), and the
@@ -6562,10 +6803,16 @@ def _self_test_isolated():
     finally:
         shutil.rmtree(base, ignore_errors=True)
     print("OPF-RECORD SELF-TEST: exercised " + ", ".join(ran))
+    for reason in unevaluated:
+        print("CANNOT EVALUATE: " + reason, file=sys.stderr)
     if failures:
         for failure in failures:
             print("FAIL: " + failure, file=sys.stderr)
         return 1
+    if unevaluated:
+        print("OPF-RECORD SELF-TEST CANNOT EVALUATE: {} check(s) not evaluated, never a pass".format(
+            len(unevaluated)), file=sys.stderr)
+        return 2
     print("OPF-RECORD SELF-TEST PASSED")
     return 0
 

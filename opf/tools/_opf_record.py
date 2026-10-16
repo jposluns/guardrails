@@ -120,7 +120,10 @@ plan's claims. An unreadable, malformed or conflicting reservation refuses (exit
 never a silent fallback to the homes-1 counters path; a run killed after reserving and before
 publishing leaves its reservation standing, its numbers conservatively still reserved (the final doctor
 does not yet read reservations, so a store carrying such an orphan grades the orphan's numbers as
-missing records until that later change). A legacy
+missing records until that later change). This homes-2 path is reached only once activation sets
+_opf_store.SUPPORTED_HOMES to 2 (and _load_manifest admits the homes-2 spec_version); while
+SUPPORTED_HOMES is 1, every subcommand refuses a store declaring homes 2 before any reconciliation or
+write (_probe_homes), so the shipped verb claims through homes 1 only. A legacy
 .aiqt/record/journal found on a homes-2 store is refused and never recovered: homes 2 has no homes
 migration to carry it (spec 4.2).
 
@@ -2753,7 +2756,9 @@ def _publish_homes2(ctx, plan, subcommand, cap=None, run_id=None):
     held capability, before the transaction opens, _require_reservation re-reads that run's
     canonical reservation and requires its claims to be this plan's. A call naming no run id, or one
     whose reservation is absent, unreadable, non-canonical or claims other numbers, refuses with no
-    transaction opened."""
+    transaction opened. _run_operation reaches this only once activation sets
+    _opf_store.SUPPORTED_HOMES to 2 (and _load_manifest admits the homes-2 spec_version); while
+    SUPPORTED_HOMES is 1, _probe_homes refuses a store declaring homes 2 first."""
     try:
         _journal.require_containment()
     except (_journal.JournalError, OSError) as exc:

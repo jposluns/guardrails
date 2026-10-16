@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a0da424892f442921b4a5ac0fea3dc38a2a473469ea6125a5847886b37e35451"
+tree-sha256 = "55cfe3ca4b39e9dd8a0932b971b4ec36c2bb6a861d4a968a8bab429c137a1f26"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2746,8 +2746,8 @@ sha256 = "d4b90336a805745829e733a6ad04ffbd7b271855d149f008b40160aff1c62326"
 
 [[sources]]
 path = "opf/tools/_opf_journal.py"
-bytes = 28005
-sha256 = "a84ce5d99538f8e66070e4dcccb95a7719495afec228455cf01d49ef600641af"
+bytes = 28268
+sha256 = "386b5f8136cfd85117bf9019391b516cdf4327e0056c539a9377b2478feec8c5"
 
 [[sources]]
 path = "opf/tools/_opf_manifest_regressions.py"
@@ -2771,8 +2771,8 @@ sha256 = "0d9e538618029fbc77e6e92abcf327013eb4f4245cbd4ddf6767ccaabda67af2"
 
 [[sources]]
 path = "opf/tools/_opf_record.py"
-bytes = 269369
-sha256 = "d6be8b1b3771503aa9aec71fda97ae8bb7e20feb219393cb41ddf6c09f7a366c"
+bytes = 269919
+sha256 = "aa300c236085e63fab27a71efa34102959c23e26cd776e5bb185819ac7e84cdb"
 
 [[sources]]
 path = "opf/tools/_opf_release.py"
@@ -3011,8 +3011,8 @@ sha256 = "b089b183c86fb696cb9b967efd7409c925204a1b2860c22ad9914e3b1c54db7e"
 
 [[sources]]
 path = "opf/tools/check_opf_record.py"
-bytes = 371580
-sha256 = "cdb859735e112bdde544085f9118af690b303addc2bf575c6c4d7452986db4e9"
+bytes = 385917
+sha256 = "01f9a0f38e2359557f59fada37db7011261468bfed566738a95e5ee40557f6aa"
 
 [[sources]]
 path = "opf/tools/check_opf_upgrade.py"
