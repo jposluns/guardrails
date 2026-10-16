@@ -10333,9 +10333,10 @@ def _main_isolated(monitor):
         # operands of git submodule foreach (its first operand is shell text) and git bisect run, and the value
         # of git rebase --exec or -x in any spelling git accepts (ci-wr49 to ci-wr59 allowed when the operands
         # of a held git command were never read; ci-wr49, ci-wr52 to ci-wr54 and ci-wr56 to ci-wr59 also
-        # allowed at the parent commit). A nest deeper than the bound is judged by the raw-string fallback
-        # (ci-wr60, ci-wr-c30). The controls keep a read-side command run from the operands allowed, and the
-        # value of another rebase option spelled -x is not an exec value (ci-wr-c29).
+        # allowed when every git word behind a wrapper started a git command). A nest deeper than the bound is
+        # judged by the raw-string fallback (ci-wr60, ci-wr-c30). The controls keep a read-side command run from
+        # the operands allowed, and the value of another rebase option spelled -x is not an exec value
+        # (ci-wr-c29).
         ciexpect("(ci-wr49) git submodule foreach runs its operands as a git commit, denies",
                  'git submodule foreach git commit --author="Claude <c@x>" -m x', "deny")
         ciexpect("(ci-wr50) a wrapped git submodule foreach runs its operands as a git commit, denies",
@@ -10390,6 +10391,62 @@ def _main_isolated(monitor):
         ciexpect("(ci-wr-c31) the git log that chroot runs is held at its subcommand, so a later git word is its "
                  "operand, allows",
                  'sudo chroot /srv/git git log --grep git commit --author="Claude <c@x>"', "allow")
+        # A nest past a run-line bound does not open a way past the author check. The raw-string fallback reads
+        # every prefix that git reads as --author (ci-wr64 to ci-wr68, a git commit in the same segment as the
+        # nest, left unread), and past a bound the reader still judges every other segment of the command and of
+        # each line it reads, and the other run lines within the bounds (ci-wr69 to ci-wr74). ci-wr64 to ci-wr74
+        # allowed when the fallback read only the literal --author and the first line past a bound ended the
+        # read. When nothing read sets an AI identity, the fallback judges the whole command, so a read-side
+        # --author elsewhere in it denies (ci-wr75, the disclosed over-deny). Controls: a nest past the bound
+        # with a human --auth value, in the same segment or a later one, allows (ci-wr-c32, ci-wr-c33).
+        _ci_deep = "git submodule foreach " * 10
+        ciexpect("(ci-wr64) an AI --auth= value after a foreach nest past the bound denies",
+                 _ci_deep + 'git commit --auth="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr65) an AI --auth value given as the next word after a foreach nest past the bound denies",
+                 _ci_deep + 'git commit --auth "Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr66) an AI --auth= value after an -am -m cluster and a foreach nest past the bound denies",
+                 _ci_deep + 'git commit -am -m --auth="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr67) an AI --autho= value of a wrapped git commit after a foreach nest past the bound "
+                 "denies",
+                 _ci_deep + 'env git commit -m x --autho="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr68) an AI value of --au, the shortest prefix git reads as --author, after a foreach nest "
+                 "past the bound denies",
+                 _ci_deep + 'git commit --au "Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr69) an AI --auth= value in the segment after a foreach nest past the bound denies",
+                 _ci_deep + 'true; git commit -m x --auth="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr70) an AI --auth value given as the next word in the segment after a foreach nest past "
+                 "the bound denies",
+                 _ci_deep + 'true && git commit -m x --auth "Claude <c@x>"', "deny")
+        ciexpect("(ci-wr71) an AI --auth= value after an -am -m cluster in the segment after a foreach nest past "
+                 "the bound denies",
+                 _ci_deep + 'true; git commit -am -m --auth="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr72) an AI --autho= value of a wrapped git commit in the segment after a foreach nest past "
+                 "the bound denies",
+                 _ci_deep + 'true; env git commit -m x --autho="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr73) an AI --auth= value in a later segment of a run line whose nest passes the bound "
+                 "denies",
+                 "git submodule foreach '" + _ci_deep + "true; git commit -m x --auth=\"Claude <c@x>\"'", "deny")
+        ciexpect("(ci-wr74) an AI --auth= value in a rebase exec line after an exec line whose nest passes the "
+                 "bound denies",
+                 "git rebase -x '" + _ci_deep + "true' -x 'git commit --amend --auth=\"Claude <c@x>\"' main",
+                 "deny")
+        ciexpect("(ci-wr75) a read-side AI --author beside a foreach nest past the bound denies (the disclosed "
+                 "over-deny)",
+                 _ci_deep + 'true; git log --author="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr-c32) a human --auth= value after a foreach nest past the bound allows",
+                 _ci_deep + 'git commit --auth="Maint Ainer <m@example.invalid>" -m x', "allow")
+        ciexpect("(ci-wr-c33) a human --auth= value in the segment after a foreach nest past the bound allows",
+                 _ci_deep + 'true; git commit -m x --auth="Maint Ainer <m@example.invalid>"', "allow")
+        # git submodule foreach hands its operands to git submodule--helper foreach, which runs them the same
+        # way after an optional '--', so the helper's foreach is read like submodule foreach, bare or wrapped
+        # (ci-wr76, ci-wr77 allowed when only submodule foreach was read); a read-side command it runs allows
+        # (ci-wr-c34).
+        ciexpect("(ci-wr76) git submodule--helper foreach runs its operands after -- as a git commit, denies",
+                 'git submodule--helper foreach -- git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr77) a wrapped git submodule--helper foreach runs its shell text as a git commit, denies",
+                 "env git submodule--helper foreach -- 'git commit --author=\"Claude <c@x>\" -m x'", "deny")
+        ciexpect("(ci-wr-c34) git submodule--helper foreach running git log --author allows",
+                 'git submodule--helper foreach -- git log --author="Claude <c@x>"', "allow")
 
         # The wrapper scan is ONE pass: each word of a wrapped segment is read a bounded number of times. Every
         # -c value below is spelled git, so each one also starts a candidate still reading its options; a
@@ -10435,47 +10492,76 @@ def _main_isolated(monitor):
                                                                      8 * len(_ci_long)))
 
         # The command lines that git runs from its operands are read within two bounds, so a command built to nest
-        # or repeat them costs time linear in its length: past _CMTIDN_RUN_DEPTH nested lines, or past
-        # _CMTIDN_RUN_SCALE times the command's length plus _CMTIDN_RUN_FLOOR characters of run lines in all,
-        # find_ai_authorship raises ValueError and the handler judges the command with its raw-string fallback.
-        # Each bound is pinned just inside, at and just past its limit (the length bound with the scale set to 0,
-        # so the floor alone is the limit), and 300 wrapped git bisect run candidates, whose run lines each repeat
-        # the rest of the command one level deep, are pinned past the length bound.
+        # or repeat them costs time linear in its length: a line past _CMTIDN_RUN_DEPTH nested lines, or past
+        # _CMTIDN_RUN_SCALE times the command's length plus _CMTIDN_RUN_FLOOR characters of run lines in all, is
+        # left unread, and when nothing read sets an AI identity find_ai_authorship raises ValueError with the
+        # _CMTIDN_RUN_BOUNDS message, so the handler judges the command with its raw-string fallback. Only that
+        # message counts as the bound; any other ValueError (a lexer error) fails these checks. The depth and
+        # length bounds are each pinned just inside, at and just past their limit (the length bound with the
+        # scale set to 0, so the floor alone is the limit), and 300 wrapped git bisect run candidates, whose run
+        # lines each repeat the rest of the command one level deep, are pinned past the length bound.
+        _ci_bounds = aiqt_hooks._CMTIDN_RUN_BOUNDS
+
+        def _ci_find(command):
+            """find_ai_authorship's hit, or ValueError for the run-line bounds error, or the other exception."""
+            try:
+                return aiqt_hooks.find_ai_authorship(command)
+            except ValueError as exc:
+                return ValueError if str(exc) == _ci_bounds else exc
+
         _ci_depth = aiqt_hooks._CMTIDN_RUN_DEPTH
         for _ci_nest in (_ci_depth - 1, _ci_depth, _ci_depth + 1):
-            _ci_cmd = "git submodule foreach " * _ci_nest + 'git commit --author="Claude <c@x>" -m x'
-            try:
-                _ci_got = aiqt_hooks.find_ai_authorship(_ci_cmd)
-            except ValueError:
-                _ci_got = ValueError
-            if (_ci_got is ValueError) != (_ci_nest > _ci_depth) or _ci_got is None:
+            _ci_got = _ci_find("git submodule foreach " * _ci_nest + 'git commit --author="Claude <c@x>" -m x')
+            if not (_ci_got is ValueError if _ci_nest > _ci_depth else isinstance(_ci_got, str)):
                 failures.append("(ci-wr-run-depth) a foreach nest {} deep gave {!r} (want {})".format(
-                    _ci_nest, _ci_got, "ValueError" if _ci_nest > _ci_depth else "an --author hit"))
+                    _ci_nest, _ci_got, "the bounds ValueError" if _ci_nest > _ci_depth else "an --author hit"))
         _ci_saved = (aiqt_hooks._CMTIDN_RUN_SCALE, aiqt_hooks._CMTIDN_RUN_FLOOR)
         try:
             aiqt_hooks._CMTIDN_RUN_SCALE = 0
             # the one run line of this command is 'git commit -m x', 15 characters
-            for _ci_floor, _ci_want in ((16, False), (15, False), (14, True)):
+            for _ci_floor, _ci_want in ((16, None), (15, None), (14, ValueError)):
                 aiqt_hooks._CMTIDN_RUN_FLOOR = _ci_floor
-                try:
-                    aiqt_hooks.find_ai_authorship("git submodule foreach git commit -m x")
-                    _ci_raised = False
-                except ValueError:
-                    _ci_raised = True
-                if _ci_raised != _ci_want:
+                _ci_got = _ci_find("git submodule foreach git commit -m x")
+                if _ci_got is not _ci_want:
                     failures.append("(ci-wr-run-length) a 15-character run line under a {}-character bound "
-                                    "raised {} (want {})".format(_ci_floor, _ci_raised, _ci_want))
+                                    "gave {!r} (want {!r})".format(_ci_floor, _ci_got, _ci_want))
         finally:
             aiqt_hooks._CMTIDN_RUN_SCALE, aiqt_hooks._CMTIDN_RUN_FLOOR = _ci_saved
-        _ci_saved = aiqt_hooks._CMTIDN_RUN_DEPTH
+        # Once the length bound is spent no further run line is built: the characters of run lines built stay
+        # within the bound plus one line (here no longer than the command), where building every candidate's
+        # line would cost time quadratic in the command's length.
+        _ci_saved = (aiqt_hooks._CMTIDN_RUN_DEPTH, aiqt_hooks._cmtidn_run_lines)
+        _ci_built = [0]
+
+        def _ci_counted_run_lines(tokens, k):
+            for line in _ci_saved[1](tokens, k):
+                _ci_built[0] += len(line)
+                yield line
+
         try:
             aiqt_hooks._CMTIDN_RUN_DEPTH = 1  # so only the length bound can raise
-            aiqt_hooks.find_ai_authorship("sudo" + " -E git bisect run x" * 300 + " -E git commit -m x")
-            failures.append("(ci-wr-run-repeat) 300 wrapped git bisect run lines did not pass the length bound")
-        except ValueError:
-            pass
+            aiqt_hooks._cmtidn_run_lines = _ci_counted_run_lines
+            _ci_cmd = "sudo" + " -E git bisect run x" * 300 + " -E git commit -m x"
+            _ci_got = _ci_find(_ci_cmd)
+            _ci_limit = (aiqt_hooks._CMTIDN_RUN_SCALE + 1) * len(_ci_cmd) + aiqt_hooks._CMTIDN_RUN_FLOOR
+            if _ci_got is not ValueError or _ci_built[0] > _ci_limit:
+                failures.append("(ci-wr-run-repeat) 300 wrapped git bisect run lines gave {!r} (want the bounds "
+                                "ValueError) after building {} characters of run lines (want at most {})"
+                                .format(_ci_got, _ci_built[0], _ci_limit))
         finally:
-            aiqt_hooks._CMTIDN_RUN_DEPTH = _ci_saved
+            aiqt_hooks._CMTIDN_RUN_DEPTH, aiqt_hooks._cmtidn_run_lines = _ci_saved
+        # A line left unread past a bound does not end the read: the other segments of the command and of each
+        # line being read, and the other run lines within the bounds, are still judged, so find_ai_authorship
+        # returns their AI identity rather than the bounds error (each of these raised it when the first line
+        # past a bound ended the read).
+        _ci_deep = "git submodule foreach " * 10
+        for _ci_cmd in (_ci_deep + 'true; git commit -m x --auth="Claude <c@x>"',
+                        "git submodule foreach '" + _ci_deep + "true; git commit -m x --auth=\"Claude <c@x>\"'",
+                        "git rebase -x '" + _ci_deep + "true' -x 'git commit --auth=\"Claude <c@x>\"' main"):
+            _ci_got = _ci_find(_ci_cmd)
+            if not isinstance(_ci_got, str):
+                failures.append("(ci-wr-run-after) {!r} gave {!r} (want the --author hit read past the bound)"
+                                .format(_ci_cmd[-60:], _ci_got))
 
         # secsec (EN-5 PR-C): decision-signal battery for the secrets-shift-left guard.
         # === secrets_shift_left (secsec): an obvious hardcoded secret in a Write/Edit/Bash write-form ==

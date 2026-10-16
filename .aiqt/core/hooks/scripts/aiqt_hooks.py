@@ -1883,8 +1883,8 @@ def diff_source_pretool(data):
 # bare or wrapped, and a git word after the subcommand of a read-side git command taken to be the one the
 # segment runs (a held candidate whose subcommand is a git command name) is that command's operand (env git
 # log --grep git commit --author=Claude). A command that git itself runs from its operands (git submodule
-# foreach CMD, git bisect run CMD, git rebase --exec CMD) is read as a command line of its own
-# (_cmtidn_run_lines). The read-side forms that still trip are the disclosed over-denies at
+# foreach CMD, git submodule--helper foreach CMD, git bisect run CMD, git rebase --exec CMD) is read as a
+# command line of its own (_cmtidn_run_lines). The read-side forms that still trip are the disclosed over-denies at
 # _CMTIDN_GIT_WRAPPERS: a wrapped git word right after a wrapper option, which the finder cannot tell from that
 # option's value (sudo -E git log --grep git commit --author=Claude), and a wrapped git command whose
 # subcommand is not a git command name (an alias). Separately, an identity
@@ -1904,12 +1904,15 @@ CO_AUTHOR_RE = re.compile(r"(?i)co[- ]?authored[- ]?by\s*:?\s*([^\n]{1,160})")
 # value in the '-c user.name=VALUE' inline shape.
 GIT_ENV_RE = re.compile(r"(?is)^GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)=(.*)$")
 USER_CONF_EQ_RE = re.compile(r"(?is)^user\.(?:name|email)=(.*)$")
-# Fallback-only raw-string contexts, used when the shared tokenizer cannot parse the command (see
-# _commit_identity_fallback). A value runs to whitespace or a shell separator/quote.
+# Fallback-only raw-string contexts, used when the shared tokenizer cannot parse the command or a command line
+# that git runs from its operands is left unread past the run-line bounds (see _commit_identity_fallback). A
+# value runs to whitespace or a shell separator/quote. The --author context matches every prefix that git
+# reads as --author (--au, --aut, --auth, --autho, --author; no other git commit option starts with 'au'),
+# with '=' or whitespace before the value, so the fallback is no weaker on that option than the token reader.
 _VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s\"';|&]+)"
 _RAW_IDENTITY_CONTEXTS = (
     (re.compile(r"(?i)co[- ]?authored[- ]?by\s*:?\s*([^\n\"']{1,160})"), "co-author trailer"),
-    (re.compile(r"(?i)--author[= ]\s*" + _VALUE), "--author value"),
+    (re.compile(r"(?i)--au(?:t(?:h(?:o(?:r)?)?)?)?[=\s]\s*" + _VALUE), "--author value"),
     (re.compile(r"(?i)\bGIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)\s*=\s*" + _VALUE), "git identity variable"),
     (re.compile(r"(?i)\buser\.(?:name|email)\s*[= ]\s*" + _VALUE), "user.name/user.email value"),
 )
@@ -2168,12 +2171,15 @@ _CMTIDN_REBASE_LONG = {
     "reschedule-failed-exec": None, "reapply-cherry-picks": None}
 # How deep the command lines that git runs from its operands may nest (a foreach that runs a foreach) and how
 # many characters of such lines one command may make the check read, as a multiple of its own length plus a
-# floor, so a command built to nest or repeat them costs time linear in its length. Past either bound
-# find_ai_authorship raises ValueError, so the handler judges the command with its conservative raw-string
-# fallback.
+# floor, so a command built to nest or repeat them costs time linear in its length. A line past either bound
+# is left unread, and every other segment of the command and every run line within the bounds is still
+# judged, so a nest past a bound cannot hide an AI identity that the reader can read. Only when none of them
+# sets one does find_ai_authorship raise ValueError with _CMTIDN_RUN_BOUNDS, so the handler judges the
+# command with its conservative raw-string fallback.
 _CMTIDN_RUN_DEPTH = 8
 _CMTIDN_RUN_SCALE = 8
 _CMTIDN_RUN_FLOOR = 4096
+_CMTIDN_RUN_BOUNDS = "git runs command lines nested or repeated past the commit-identity bounds"
 
 
 def _cmtidn_run_lines(tokens, k):
@@ -2182,14 +2188,16 @@ def _cmtidn_run_lines(tokens, k):
     submodule foreach CMD runs its first operand as shell text followed by the other operands as its arguments
     (foreach 'git commit ...' and foreach git commit ... both run git commit); the options of submodule
     (--quiet, --cached) and of foreach (--quiet, --recursive) take no value, so the first word after them that
-    does not start with '-' is that first operand. git bisect run CMD runs its operands as the words of one
+    does not start with '-' is that first operand. git submodule foreach hands its operands to git
+    submodule--helper foreach after a '--', and git runs the helper's operands the same way, after an optional
+    '--', so the helper's foreach is read the same way. git bisect run CMD runs its operands as the words of one
     command. git rebase runs the value of each --exec or -x as a shell command line (_cmtidn_option reads the
-    rebase options up to '--'). Only these three forms are read: the residue lists the commands git runs
-    from elsewhere (an interactive rebase's edited todo list, an alias, a configured editor)."""
+    rebase options up to '--'). Only these forms are read: the residue lists the commands git runs from
+    elsewhere (an interactive rebase's edited todo list, an alias, a configured editor)."""
     n = len(tokens)
     verb = tokens[k]
     j = k + 1
-    if verb == "submodule":
+    if verb in ("submodule", "submodule--helper"):
         while j < n and tokens[j].startswith("-"):
             j += 1
         if j < n and tokens[j] == "foreach":
@@ -2219,14 +2227,21 @@ def find_ai_authorship(command):
     _cmtidn_git_commands behind leading reserved words, a function or coprocess name, VAR=value words and
     wrapper words (env, sudo, ...), and the same on each command line that a git command runs from its
     operands (_cmtidn_run_lines). Raises ValueError on a shell parse error (via _segments), in a run line too,
-    or when run lines pass their bounds (_CMTIDN_RUN_DEPTH), which the handler turns into the conservative
-    fallback."""
-    return _cmtidn_line_ai(command, 0, [_CMTIDN_RUN_SCALE * len(command) + _CMTIDN_RUN_FLOOR])
+    and ValueError(_CMTIDN_RUN_BOUNDS) when a run line past the bounds (_CMTIDN_RUN_DEPTH) was left unread and
+    nothing read sets an AI identity; the handler turns either into the conservative fallback."""
+    unread = [False]
+    hit = _cmtidn_line_ai(command, 0, [_CMTIDN_RUN_SCALE * len(command) + _CMTIDN_RUN_FLOOR], unread)
+    if hit is None and unread[0]:
+        raise ValueError(_CMTIDN_RUN_BOUNDS)
+    return hit
 
 
-def _cmtidn_line_ai(command, depth, budget):
+def _cmtidn_line_ai(command, depth, budget, unread):
     """find_ai_authorship over one command line at a run-line nesting depth, with budget a one-item list of the
-    characters of run lines still to be read, shared by every nested line of the command."""
+    characters of run lines still to be read, shared by every nested line of the command, and unread a one-item
+    list set to True when a run line past the bounds is left unread. Such a line is not read, but the other
+    segments of the command and of every line being read still are, and so are the other run lines within the
+    bounds; once the length bound is spent no further run line is built, so the cost stays linear."""
     for tokens, _sep in _segments(command):
         hit = _identity_assignment_ai(tokens)
         if hit is not None:
@@ -2237,31 +2252,37 @@ def _cmtidn_line_ai(command, depth, budget):
             if hit is not None:
                 return hit
         for k in subs:
+            if budget[0] < 0:
+                break  # the length bound is spent: no further run line is built
             for line in _cmtidn_run_lines(tokens, k):
                 budget[0] -= len(line)
                 if depth >= _CMTIDN_RUN_DEPTH or budget[0] < 0:
-                    raise ValueError("git runs command lines nested or repeated past the commit-identity bounds")
-                hit = _cmtidn_line_ai(line, depth + 1, budget)
+                    unread[0] = True  # left to the raw-string fallback unless something read sets an identity
+                    break
+                hit = _cmtidn_line_ai(line, depth + 1, budget, unread)
                 if hit is not None:
                     return hit
     return None
 
 
 def _commit_identity_fallback(command):
-    """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): scan the RAW
-    string for an AI identity in a Co-Authored-By trailer, an --author value, a git-identity env var, or
-    a user.name/user.email value; deny on a hit. Never silent-allow a plausibly-violating command on a
-    parse failure."""
+    """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an
+    unsupported construct), or when a command line that git runs from its operands was left unread past the
+    run-line bounds and nothing read set an AI identity: scan the RAW string of the whole command for an AI
+    identity in a Co-Authored-By trailer, an --author value (any prefix git reads as --author), a git-identity
+    env var, or a user.name/user.email value; deny on a hit. Never silent-allow a plausibly-violating command
+    the check could not read in full."""
     for regex, label in _RAW_IDENTITY_CONTEXTS:
         for match in regex.finditer(command):
             if AI_IDENTITY_RE.search(match.group(1)):
                 hit = "{} {!r}".format(label, match.group(1).strip()[:80])
-                reason = ("AIQT rule cmtidn (commit-identity): the command could not be parsed by the "
-                          "shell lexer (likely unbalanced quotes) and it appears to set an AI identity "
+                reason = ("AIQT rule cmtidn (commit-identity): the command could not be read in full (a shell "
+                          "parse error such as unbalanced quotes, or command lines that git runs nested or "
+                          "repeated past the check's bounds) and it appears to set an AI identity "
                           "({}); failing closed. Remove it and commit as the maintainer.".format(hit))
                 return _deny(reason,
-                             "AIQT guardrail: denied an unparseable git command that appears to record "
-                             "an AI commit identity (rule cmtidn, fail-safe).")
+                             "AIQT guardrail: denied a git command the check could not read in full that "
+                             "appears to record an AI commit identity (rule cmtidn, fail-safe).")
     return _allow()
 
 
