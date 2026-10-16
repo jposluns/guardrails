@@ -661,6 +661,11 @@ DYNAMIC_IMPORT_SITES = (
     (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_orch_chained_rows",
      ("#1: __import__('hashlib').sha256",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_orch_lease_hb_flock",
+     ("#1: __import__('fcntl')",),
+     "binds __import__ of the standard-library module fcntl, a string literal, to a local name: equivalent to a "
+     "plain import fcntl in this function, not a dynamic load (fcntl is POSIX-only and no module-level import "
+     "loads it)"),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_commit_command_syntax",
      ("#1: _CommitSyntax('help', records, steps, commits, 'exact lone help form')",),
      "the string help names a commit-command form (its status), data, not the builtin help"),
@@ -915,6 +920,11 @@ DYNAMIC_IMPORT_SITES = (
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_orch_chained_rows",
      ("#1: __import__('hashlib').sha256",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_orch_lease_hb_flock",
+     ("#1: __import__('fcntl')",),
+     "binds __import__ of the standard-library module fcntl, a string literal, to a local name: equivalent to a "
+     "plain import fcntl in this function, not a dynamic load (fcntl is POSIX-only and no module-level import "
+     "loads it)"),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_commit_command_syntax",
      ("#1: _CommitSyntax('help', records, steps, commits, 'exact lone help form')",),
      "the string help names a commit-command form (its status), data, not the builtin help"),
@@ -1070,6 +1080,66 @@ DYNAMIC_IMPORT_SITES = (
      ("#1: '__import__'",),
      "the string names a reflective builtin the close-probe oracle refuses (fail closed); it is compared against "
      "the probed child's own names, never called or resolved"),
+    ("tools/selftest_orch_hooks.py", "_leasehb_cases",
+     ("#1: __import__('fcntl')",),
+     "binds __import__ of the standard-library module fcntl, a string literal, to a local name: equivalent to a "
+     "plain import fcntl in this function, not a dynamic load"),
+    ("tools/selftest_orch_hooks.py", "_leasehb_cases",
+     ("#1: __import__('time')",),
+     "binds __import__ of the standard-library module time, a string literal, to a local name: equivalent to a "
+     "plain import time as mm_time in this function, not a dynamic load"),
+    ("tools/selftest_orch_hooks.py", "_leasehb_fix2_cases",
+     ("#1: __import__('errno')",),
+     "binds __import__ of the standard-library module errno, a string literal, to a local name: equivalent to a "
+     "plain import errno as errno_mod in this function, not a dynamic load"),
+    ("tools/selftest_orch_hooks.py", "_leasehb_fix2_cases",
+     ("#2: __import__('errno')",),
+     "binds __import__ of the standard-library module errno, a string literal, to a local name: equivalent to a "
+     "plain import errno as errno_mod2 in this function, not a dynamic load"),
+    ("tools/selftest_orch_hooks.py", "_leasehb_fix2_cases",
+     ("#1: __import__('fcntl')",),
+     "binds __import__ of the standard-library module fcntl, a string literal, to a local name: equivalent to a "
+     "plain import fcntl as fcntl7 in this function, not a dynamic load"),
+    ("tools/selftest_orch_hooks.py", "_leasehb_fix2_cases",
+     ("#2: __import__('fcntl')",),
+     "binds __import__ of the standard-library module fcntl, a string literal, to a local name: equivalent to a "
+     "plain import fcntl as fcntl8 in this function, not a dynamic load"),
+    ("tools/selftest_orch_hooks.py", "_leasehb_fix2_cases",
+     ("#3: __import__('fcntl')",),
+     "binds __import__ of the standard-library module fcntl, a string literal, to a local name: equivalent to a "
+     "plain import fcntl as fcntl9 in this function, not a dynamic load"),
+    ("tools/selftest_orch_hooks.py", "_leasehb_fix2_cases",
+     ("#3: __import__('errno')",),
+     "binds __import__ of the standard-library module errno, a string literal, to a local name: equivalent to a "
+     "plain import errno as errno9d in this function, not a dynamic load"),
+    ("tools/selftest_orch_hooks.py", "_leasehb_fix2_cases",
+     ("#4: __import__('errno')",),
+     "binds __import__ of the standard-library module errno, a string literal, to a local name: equivalent to a "
+     "plain import errno as errno9 in this function, not a dynamic load"),
+    ("tools/selftest_orch_hooks.py", "_leasehb_fix2_cases",
+     ("#5: __import__('errno')",),
+     "binds __import__ of the standard-library module errno, a string literal, to a local name: equivalent to a "
+     "plain import errno as errno10 in this function, not a dynamic load"),
+    ("tools/selftest_orch_hooks.py", "_leasehb_fix2_cases",
+     ("#4: __import__('fcntl')",),
+     "binds __import__ of the standard-library module fcntl, a string literal, to a local name: equivalent to a "
+     "plain import fcntl as fcntl9f in this function, not a dynamic load"),
+    ("tools/selftest_orch_hooks.py", "_leasehb_fix2_cases",
+     ("#5: __import__('fcntl')",),
+     "binds __import__ of the standard-library module fcntl, a string literal, to a local name: equivalent to a "
+     "plain import fcntl as fcntl11 in this function, not a dynamic load"),
+    ("tools/selftest_orch_hooks.py", "_leasehb_fix2_cases",
+     ("#6: __import__('errno')",),
+     "binds __import__ of the standard-library module errno, a string literal, to a local name: equivalent to a "
+     "plain import errno as errno11 in this function, not a dynamic load"),
+    ("tools/selftest_orch_hooks.py", "_leasehb_write_integrity_cases",
+     ("#1: __import__('errno')",),
+     "binds __import__ of the standard-library module errno, a string literal, to a local name: equivalent to a "
+     "plain import errno as errno_wi in this function, not a dynamic load"),
+    ("tools/selftest_orch_hooks.py", "_leasehb_status_and_parse_cases",
+     ("#1: __import__('errno')",),
+     "binds __import__ of the standard-library module errno, a string literal, to a local name: equivalent to a "
+     "plain import errno as errno_sp in this function, not a dynamic load"),
     ("tools/selftest_orch_hooks.py", "_main_isolated",
      ("#1: import importlib",
       "#1: importlib.import_module('orch_doctor')",
