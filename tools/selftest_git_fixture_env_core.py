@@ -56,7 +56,8 @@ from selftest_git_fixture_env import (  # noqa: E402
     _archive_reads_use_caller_env, _auto_maintenance_children, _binding_calls, _build_decoy,
     _call_name, _caller_env_archive_only, _calls_any, _close_lock_sites, _command_identity,
     _closing_refusal_control, _config_member_bound, _handshake_expired, _is_timeout,
-    _kill_recorded, _lane_return_fail_closed, _lifecycle_finding, _main_verdict_scenarios,
+    _kill_recorded, _lane_return_fail_closed, _lifecycle_finding, _lifecycle_scoped_first,
+    _main_verdict_scenarios,
     _maintenance_pin_scan,
     _member_group_empty, _member_timeout_timely, _opf_lifecycle_delegates, _oracle_down_sites,
     _partial_timeout_cause, _pid_state, _pidfd_group_signal_supported, _poison_environ,
@@ -2032,6 +2033,86 @@ def _opf_lifecycle_graph_checks():
     check("env/opf-lifecycle-bypass-denied", denial, expected_denial)
 
 
+def _lifecycle_scope_cases():
+    """The lifecycle form of the scope check over synthetic entry points: (check id, the source of
+    a def entry() that delegates to iso(), the expected result). The first is the conforming shape
+    the others are built from and is accepted; each other shape is refused, and the refusal names
+    what was refused. They cover an early return or raise, try statements with an except handler,
+    a finally body or an else body, an os.environb write, an aliased from-import, environment
+    access through getattr, a scrub, a path-setup variant, another entry point's listed statement
+    and an aliased lifecycle before the with; a missing lifecycle import; a bare lifecycle call; an
+    unreachable isolated main; a second context; a statement after the with; and an except handler
+    or an unlisted finally statement on the try holding the with."""
+    head = "def entry():\n    from _git_fixture_env import fixture_git_lifecycle\n"
+    tail = "    with fixture_git_lifecycle():\n        return iso()\n"
+    held = "    try:\n        with fixture_git_lifecycle():\n            return iso()\n"
+    where = "the fixture_git_lifecycle() with"
+
+    def before(kind, statement):
+        return "entry(): {} ({!r}) precedes {} and is not on the lifecycle allowlist".format(
+            kind, statement, where)
+    return (
+        ("scope/lifecycle-conforming-accepted", head + tail, True),
+        ("scope/lifecycle-refuses-early-return", head + "    return 0\n" + tail,
+         before("a return statement", "return 0")),
+        ("scope/lifecycle-refuses-raise", head + "    raise SystemExit(0)\n" + tail,
+         before("a raise statement", "raise SystemExit(0)")),
+        ("scope/lifecycle-refuses-try-except",
+         head + "    try:\n        pass\n    except OSError:\n        scrub_git_environment()\n"
+         + tail, before("a try statement with an except handler", "try:")),
+        ("scope/lifecycle-refuses-try-finally",
+         head + "    try:\n        pass\n    finally:\n        os.environ['HOME'] = '/x'\n" + tail,
+         before("a try statement with a finally body", "try:")),
+        ("scope/lifecycle-refuses-try-else",
+         head + "    try:\n        pass\n    except OSError:\n        pass\n    else:\n"
+         "        subprocess.run(['true'])\n" + tail,
+         before("a try statement with an except handler and an else body", "try:")),
+        ("scope/lifecycle-refuses-environb", head + "    os.environb[b'HOME'] = b'/x'\n" + tail,
+         before("an assignment", "os.environb[b'HOME'] = b'/x'")),
+        ("scope/lifecycle-refuses-from-import-alias",
+         head + "    from os import environ as E\n    E['HOME'] = '/x'\n" + tail,
+         before("an import", "from os import environ as E")),
+        ("scope/lifecycle-refuses-getattr",
+         head + "    getattr(os, 'env' + 'iron')['HOME'] = '/x'\n" + tail,
+         before("an assignment", "getattr(os, 'env' + 'iron')['HOME'] = '/x'")),
+        ("scope/lifecycle-refuses-scrub-first", head + "    scrub_git_environment()\n" + tail,
+         before("an expression statement", "scrub_git_environment()")),
+        ("scope/lifecycle-refuses-path-setup-variant",
+         head + "    sys.path.insert(0, os.environ['HOME'])\n" + tail,
+         before("an expression statement", "sys.path.insert(0, os.environ['HOME'])")),
+        ("scope/lifecycle-refuses-other-entry-statement", head + "    saved_git = _GIT\n" + tail,
+         before("an assignment", "saved_git = _GIT")),
+        ("scope/lifecycle-refuses-lifecycle-alias",
+         "def entry():\n    from contextlib import nullcontext as fixture_git_lifecycle\n" + tail,
+         before("an import", "from contextlib import nullcontext as fixture_git_lifecycle")),
+        ("scope/lifecycle-refuses-missing-import", "def entry():\n" + tail,
+         "entry(): no 'from _git_fixture_env import fixture_git_lifecycle' precedes {}, so the "
+         "name it enters is not shown to be the lifecycle".format(where)),
+        ("scope/lifecycle-refuses-bare-call",
+         head + "    fixture_git_lifecycle()\n    return iso()\n",
+         "entry(): no top-level with fixture_git_lifecycle()"),
+        ("scope/lifecycle-refuses-unreachable-main",
+         head + "    with fixture_git_lifecycle():\n        return 0\n        return iso()\n",
+         "entry(): a return statement ('return 0') precedes the iso() call in {} and is not on "
+         "the lifecycle allowlist".format(where)),
+        ("scope/lifecycle-refuses-isolated-named-twice",
+         head + "    with fixture_git_lifecycle():\n        return iso(lambda: iso())\n",
+         "entry(): iso is named 2 times; only the return in {} may name it".format(where)),
+        ("scope/lifecycle-refuses-second-context",
+         head + "    with fixture_git_lifecycle(), open(os.devnull):\n        return iso()\n",
+         "entry(): {} enters 2 contexts; it may enter only the lifecycle".format(where)),
+        ("scope/lifecycle-refuses-statement-after", head + tail + "    scrub_git_environment()\n",
+         "entry(): an expression statement ('scrub_git_environment()') follows {}".format(where)),
+        ("scope/lifecycle-refuses-holder-except",
+         head + held + "    except Exception:\n        return 0\n",
+         "entry(): the try holding {} has an except handler".format(where)),
+        ("scope/lifecycle-refuses-holder-finally",
+         head + held + "    finally:\n        scrub_git_environment()\n",
+         "entry(): an expression statement ('scrub_git_environment()') in the finally body of "
+         "the try holding {} is not on the lifecycle allowlist".format(where)),
+    )
+
+
 def _core_lanes(base):
     """Everything outside the three config-injection lanes, in the original suite order; see
     the module docstring. Returns None on completion, 2 for a harness error (cannot evaluate,
@@ -2264,12 +2345,12 @@ def _core_lanes(base):
              "_suite_isolated", "fixture_env", "_scrubbed_env", False),
     ):
         check(check_id, _binding_calls(ROOT / member, owner, binding, factory, launches), True)
-    # Each entry enters fixture_git_lifecycle() as the first context of a top-level with whose
-    # body calls the named isolated main as a top-level statement, and calls that main nowhere
-    # else; no statement before the with calls scrub_git_environment(), launches a process,
-    # touches os.environ or calls the lifecycle without entering it. The lifecycle saves the
-    # caller's environment and then scrubs, so a scrub before it would make it restore the
-    # scrubbed values.
+    # Each entry matches the lifecycle allowlist: only permitted statements (the lifecycle import,
+    # module-path setup and the statements listed for that entry) before a top-level with that
+    # enters fixture_git_lifecycle() alone and returns the named isolated main's call, and nothing
+    # after it. The lifecycle saves the caller's environment and then scrubs, so a scrub before it
+    # would make it restore the scrubbed values. The synthetic shapes after these rows show the
+    # allowlist refusing what it must.
     for check_id, member, owner, isolated in (
             ("scope/check-manifest", "tools/check_manifest.py", "self_test_main",
              "_self_test_main_isolated"),
@@ -2291,6 +2372,9 @@ def _core_lanes(base):
     ):
         check(check_id, _scrub_scoped_first(ROOT / member, owner, "fixture_git_lifecycle",
                                             isolated), True)
+    for check_id, source, want in _lifecycle_scope_cases():
+        check(check_id, _lifecycle_scoped_first(ast.parse(source).body[0], "entry", "iso",
+                                                "fixture.py"), want)
     check("trust/caller-env-archive-only", _caller_env_archive_only(), True)
 
     check("route/selftest-aiqt-hooks-fixture-env",

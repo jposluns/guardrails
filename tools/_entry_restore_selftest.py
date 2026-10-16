@@ -21,13 +21,25 @@ so a wrong value in the shared scrub is not both applied and expected: HOME and 
 fixture scratch home the probe creates and installs as the scrub's scratch home, GIT_CONFIG_GLOBAL
 and GIT_CONFIG_SYSTEM equal to os.devnull, GIT_CONFIG_NOSYSTEM equal to "1", the maintenance pins
 GIT_CONFIG_COUNT=3 with gc.auto=0, gc.autoDetach=false and maintenance.auto=false, and no other
-GIT_* variable. The git wrapper must be in effect as
-fixture_git_lifecycle() sets it: PATH is a fresh directory in front of the caller's PATH, git
-resolves to the executable wrapper there, and the wrapper reasserts the system-config pins and runs
-the caller's git with the auto-maintenance -c pins. So an entry point that drops the scrub, or saves,
-scrubs and restores by hand without the lifecycle, fails. The call is then repeated around a stand-in
-that raises: the caller's environment must again come back exactly, and the stand-in's own exception
-must come out of the entry point.
+GIT_* variable. The git wrapper must be in effect as fixture_git_lifecycle() sets it: PATH is a
+fresh directory in front of the caller's PATH and git resolves to the wrapper there. The wrapper is
+then run, not read: the caller's git is a stand-in the probe writes in its own scratch directory at
+the front of the caller's PATH, so the wrapper's exec line points at it, and it prints the arguments
+and the GIT_CONFIG* environment it received. The stand-in main runs the wrapper with fixed arguments
+under its own environment stripped of every GIT_* variable (as a production helper that scrubs GIT_*
+leaves it) and with GIT_CONFIG_NOSYSTEM=0 and GIT_CONFIG_SYSTEM at a decoy path, and requires the
+stand-in git to be reached exactly once with the -c pins gc.auto=0, gc.autoDetach=false and
+maintenance.auto=false, in that order, then the fixed arguments unchanged, and with
+GIT_CONFIG_NOSYSTEM=1 and GIT_CONFIG_SYSTEM=os.devnull: these too are literals written here, not
+_git_fixture_env._NO_AUTO_MAINTENANCE. So a wrapper that exits before its exec line, or overrides a
+pin after setting it, fails, and so does an entry point that drops the scrub, or saves, scrubs and
+restores by hand without the lifecycle. The call is then repeated around a stand-in that raises: the
+caller's environment must again come back exactly, the stand-in's own exception must come out of the
+entry point, and the scrub and the working wrapper are checked inside that call as inside the first,
+so a lifecycle that isolates only its first use fails.
+
+Residual: the probe installs its own scratch home (_git_fixture_env._SCRATCH_HOME), so the branch of
+_scratch_home() that creates that directory and registers its removal is not exercised here.
 
 The child is this module's _child_main, reached through a fixed -c bootstrap that puts this
 directory on the module path; the module has no __main__ block of its own.
@@ -63,15 +75,23 @@ _EXPECTED_PINS = (
     ("GIT_CONFIG_KEY_2", "maintenance.auto"),
     ("GIT_CONFIG_VALUE_2", "false"),
 )
+# What the git wrapper must hand the caller's git, also written out independently: the
+# auto-maintenance -c pins, in this order, ahead of the arguments the wrapper was given, and the
+# system-config pins in its environment whatever the environment it was started with.
+_EXPECTED_ARGV_PINS = ("gc.auto=0", "gc.autoDetach=false", "maintenance.auto=false")
+_EXPECTED_WRAPPER_ENV = (("GIT_CONFIG_NOSYSTEM", "1"), ("GIT_CONFIG_SYSTEM", os.devnull))
+# The arguments the probe runs the wrapper with; they must reach the caller's git unchanged.
+_WRAPPER_ARGS = ("status", "--probe-argument", "two words")
+_STAND_IN_TAG = "GIT-STAND-IN "
 
 
 def entry_restore_failures(tool, entry, inner, timeout=300):
     """Run the restore probe for tool's entry point (a function name) whose isolated main is inner
     (the module-level function name the entry point calls inside the lifecycle). Returns a list of
     failure strings, empty when the caller's environment came back exactly, both after a return and
-    after the stand-in's exception came through, and the scrub and the git wrapper were in effect
-    inside. A child that cannot be launched, times out, or reports no result is a failure, never a
-    silent pass."""
+    after the stand-in's exception came through, and inside each of the two calls the scrub was in
+    effect and the git wrapper ran the caller's git with the pins. A child that cannot be launched,
+    times out, or reports no result is a failure, never a silent pass."""
     label = "{} {}()".format(os.path.basename(str(tool)), entry)
     argv = [sys.executable, "-I", "-B", "-c", _CHILD_BOOTSTRAP,
             os.path.dirname(os.path.abspath(__file__)), str(tool), entry, inner]
@@ -113,58 +133,107 @@ class _StandInRaised(Exception):
     """What the raising stand-in throws; the entry point must let this very exception through."""
 
 
+def _write_stand_in_git(directory):
+    """Write the caller's stand-in git into directory: an executable that prints one record, tagged
+    _STAND_IN_TAG, of the arguments and the GIT_CONFIG* environment it received, and exits 0."""
+    code = ("import json, os, sys; print({!r} + json.dumps({{'argv': sys.argv[1:], 'env': "
+            "{{k: v for k, v in os.environ.items() if k.startswith('GIT_CONFIG')}}}}))").format(
+                _STAND_IN_TAG)
+    path = Path(directory) / "git"
+    path.write_text("#!/bin/sh\nexec {} -I -B -c {} \"$@\"\n".format(
+        shlex.quote(sys.executable), shlex.quote(code)), encoding="utf-8")
+    path.chmod(0o700)
+
+
 def _wrapper_view():
-    """Inside the lifecycle: the PATH in effect, what git resolves to on it, the git file in PATH's
-    first directory, and that file's text (None when it is not a readable executable file)."""
+    """Inside the lifecycle: the PATH in effect, what git resolves to on it, and the git file in
+    PATH's first directory, where the lifecycle's wrapper must be."""
     path = os.environ.get("PATH", "")
     candidate = os.path.join(path.split(os.pathsep, 1)[0], "git")
-    text = None
-    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-        try:
-            text = Path(candidate).read_text(encoding="utf-8")
-        except (OSError, ValueError):
-            text = None
-    return {"path": path, "candidate": candidate, "which": shutil.which("git"), "text": text}
+    return {"path": path, "candidate": candidate, "which": shutil.which("git")}
 
 
-def _wrapper_problems(view, caller, fixture_env):
-    """How the git wrapper seen inside the lifecycle (view, from _wrapper_view) differs from what
-    fixture_git_lifecycle() sets up for the caller environment caller: a fresh directory in front
-    of the caller's PATH, holding the executable git that git resolves to, which exports
-    GIT_CONFIG_NOSYSTEM=1 and GIT_CONFIG_SYSTEM=os.devnull and execs the caller's git with every
-    _NO_AUTO_MAINTENANCE pin as a -c option."""
+def _run_wrapper(candidate, inside, decoy):
+    """Inside the lifecycle: run the git wrapper candidate with _WRAPPER_ARGS under the environment
+    inside stripped of every GIT_* variable, with GIT_CONFIG_NOSYSTEM=0 and GIT_CONFIG_SYSTEM=decoy
+    added, so only the wrapper itself can supply the system-config pins. Returns the stand-in git's
+    record (a dict), or a string saying why the stand-in git was not reached exactly once."""
+    env = {key: value for key, value in inside.items() if not key.startswith("GIT_")}
+    env["GIT_CONFIG_NOSYSTEM"] = "0"
+    env["GIT_CONFIG_SYSTEM"] = decoy
+    try:
+        run = subprocess.run([candidate] + list(_WRAPPER_ARGS), env=env, capture_output=True,
+                             text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "the git wrapper {!r} could not run: {}".format(candidate, exc)
+    records = [line[len(_STAND_IN_TAG):] for line in run.stdout.splitlines()
+               if line.startswith(_STAND_IN_TAG)]
+    if run.returncode != 0 or len(records) != 1:
+        return ("the git wrapper did not run the caller's git exactly once (rc={}, {} records): "
+                "{}".format(run.returncode, len(records),
+                            (run.stdout + run.stderr).strip()[-300:] or "no output"))
+    try:
+        record = json.loads(records[0])
+    except ValueError:
+        record = None
+    if not (isinstance(record, dict) and isinstance(record.get("env"), dict)):
+        return "the caller's stand-in git printed a malformed record: {}".format(records[0][-300:])
+    return record
+
+
+def _wrapper_problems(view, caller, record):
+    """How the git wrapper seen inside the lifecycle (view, from _wrapper_view, and record, from
+    _run_wrapper) differs from what fixture_git_lifecycle() sets up for the caller environment
+    caller: a fresh directory in front of the caller's PATH, holding the git that git resolves to,
+    which runs the caller's git with _EXPECTED_ARGV_PINS as -c options ahead of its own arguments
+    and with _EXPECTED_WRAPPER_ENV in that git's environment."""
     caller_path = caller.get("PATH", os.defpath)
     directory, sep, rest = view["path"].partition(os.pathsep)
+    problems = []
     if not sep or rest != caller_path or not directory or directory in caller_path.split(
             os.pathsep):
-        return ["inside the lifecycle, PATH is {!r}, not a fresh git wrapper directory in front of "
-                "the caller's PATH {!r}".format(view["path"], caller_path)]
-    problems = []
-    if view["which"] != view["candidate"]:
+        problems.append("inside the lifecycle, PATH is {!r}, not a fresh git wrapper directory in "
+                        "front of the caller's PATH {!r}".format(view["path"], caller_path))
+    elif view["which"] != view["candidate"]:
         problems.append("inside the lifecycle, git resolves to {!r}, not the wrapper {!r}".format(
             view["which"], view["candidate"]))
-    if view["text"] is None:
-        return problems + ["inside the lifecycle, the git wrapper {!r} is not a readable "
-                           "executable file".format(view["candidate"])]
-    lines = view["text"].splitlines()
-    for line in ("export GIT_CONFIG_NOSYSTEM=1",
-                 "export GIT_CONFIG_SYSTEM=" + shlex.quote(os.devnull)):
-        if line not in lines:
-            problems.append("the git wrapper has no {!r} line".format(line))
-    real_git = shutil.which("git", path=caller.get("PATH"))
-    want = ["exec", os.path.abspath(real_git) if real_git else None]
-    for key, value in fixture_env._NO_AUTO_MAINTENANCE:
-        want += ["-c", "{}={}".format(key, value)]
-    want.append("$@")
-    execs = [line for line in lines if line.startswith("exec ")]
-    try:
-        got = [shlex.split(line) for line in execs]
-    except ValueError:
-        got = None
-    if got != [want]:
-        problems.append("the git wrapper's exec lines {!r} do not run the caller's git {!r} with "
-                        "the auto-maintenance pins".format(execs, want[1]))
+    if not isinstance(record, dict):
+        return problems + [record]
+    want = []
+    for pin in _EXPECTED_ARGV_PINS:
+        want += ["-c", pin]
+    want += list(_WRAPPER_ARGS)
+    if record.get("argv") != want:
+        problems.append("the git wrapper ran the caller's git with arguments {!r}, expected "
+                        "{!r}".format(record.get("argv"), want))
+    for key, value in _EXPECTED_WRAPPER_ENV:
+        if record["env"].get(key) != value:
+            problems.append("the git wrapper ran the caller's git with {} {!r}, expected "
+                            "{!r}".format(key, record["env"].get(key), value))
     return problems
+
+
+def _seen_problems(seen, caller, home, fixture_home):
+    """What the stand-in main saw during one call of the entry point (seen: one entry per call of
+    the isolated main) against what the lifecycle must set up for the caller environment caller:
+    one call, the literal scrub pins and nothing else GIT_*, and the git wrapper in effect and
+    working."""
+    if len(seen) != 1:
+        return ["the entry point called its isolated main {} times, expected 1".format(len(seen))]
+    inside, view, record = seen[0]
+    problems = []
+    expected = dict((("HOME", fixture_home), ("XDG_CONFIG_HOME", fixture_home)) + _EXPECTED_PINS)
+    for key, value in expected.items():
+        if inside.get(key) != value:
+            problems.append("inside the lifecycle, {} is {!r}, expected {!r}".format(
+                key, inside.get(key), value))
+    if inside.get("HOME") == home:
+        problems.append("inside the lifecycle, HOME is still the caller's home")
+    extra = sorted(k for k in inside if k.startswith("GIT_") and k not in expected)
+    if extra:
+        problems.append("inside the lifecycle, caller GIT_* variables survive the scrub: "
+                        "{}".format(", ".join(extra)))
+    return problems + _wrapper_problems(view, caller, record)
 
 
 def _child(tool, entry, inner):
@@ -175,6 +244,7 @@ def _child(tool, entry, inner):
     problems = []
     home = tempfile.mkdtemp(prefix="aiqt-entry-restore-home-")
     fixture_home = tempfile.mkdtemp(prefix="aiqt-entry-restore-fixture-home-")
+    stand_in_bin = tempfile.mkdtemp(prefix="aiqt-entry-restore-git-")
     try:
         for key in [k for k in os.environ if k.startswith("GIT_")]:
             del os.environ[key]
@@ -192,11 +262,18 @@ def _child(tool, entry, inner):
         # inside the lifecycle can be compared with a path known here rather than with the scrub's
         # own output.
         _git_fixture_env._SCRATCH_HOME = fixture_home
+        # The caller's git is the stand-in, first on the caller's PATH, so the wrapper the
+        # lifecycle writes execs it and what reaches the caller's git can be read back.
+        _write_stand_in_git(stand_in_bin)
+        os.environ["PATH"] = stand_in_bin + os.pathsep + os.environ.get("PATH", os.defpath)
+        decoy = os.path.join(stand_in_bin, "decoy-system-gitconfig")
         seen = []
         raising = []
 
         def stand_in(*_args, **_kwargs):
-            seen.append((dict(os.environ), _wrapper_view()))
+            inside = dict(os.environ)
+            view = _wrapper_view()
+            seen.append((inside, view, _run_wrapper(view["candidate"], inside, decoy)))
             if raising:
                 raise raising[0]
             return 0
@@ -208,28 +285,10 @@ def _child(tool, entry, inner):
         if rc != 0:
             problems.append("the entry point returned {!r} around a stand-in returning 0".format(rc))
         problems.extend("after the call, " + d for d in _diff(caller, after))
-        if len(seen) != 1:
-            problems.append("the entry point called its isolated main {} times, expected 1".format(
-                len(seen)))
-        else:
-            inside, view = seen[0]
-            expected = dict((("HOME", fixture_home), ("XDG_CONFIG_HOME", fixture_home))
-                            + _EXPECTED_PINS)
-            pinned = tuple(expected)
-            for key in pinned:
-                if inside.get(key) != expected[key]:
-                    problems.append("inside the lifecycle, {} is {!r}, expected {!r}".format(
-                        key, inside.get(key), expected[key]))
-            if inside.get("HOME") == home:
-                problems.append("inside the lifecycle, HOME is still the caller's home")
-            extra = sorted(k for k in inside if k.startswith("GIT_") and k not in pinned)
-            if extra:
-                problems.append("inside the lifecycle, caller GIT_* variables survive the scrub: "
-                                "{}".format(", ".join(extra)))
-            problems.extend(_wrapper_problems(view, caller, _git_fixture_env))
+        problems.extend(_seen_problems(seen, caller, home, fixture_home))
         # The same call around a stand-in that raises: the environment comes back exactly on the
-        # way out, and the stand-in's own exception, not a return value or another exception,
-        # comes out of the entry point.
+        # way out, the stand-in's own exception, not a return value or another exception, comes
+        # out of the entry point, and the scrub and the wrapper are checked inside this call too.
         raising.append(_StandInRaised("raised by the restore probe's stand-in"))
         del seen[:]
         caller = dict(os.environ)
@@ -243,12 +302,12 @@ def _child(tool, entry, inner):
             problems.append("around a raising stand-in, the entry point returned {!r} instead "
                             "of letting the exception through".format(rc))
         problems.extend("after a raising call, " + d for d in _diff(caller, dict(os.environ)))
-        if len(seen) != 1:
-            problems.append("around a raising stand-in, the entry point called its isolated main "
-                            "{} times, expected 1".format(len(seen)))
+        problems.extend("around a raising stand-in, " + problem
+                        for problem in _seen_problems(seen, caller, home, fixture_home))
     finally:
         shutil.rmtree(home, ignore_errors=True)
         shutil.rmtree(fixture_home, ignore_errors=True)
+        shutil.rmtree(stand_in_bin, ignore_errors=True)
     return problems
 
 

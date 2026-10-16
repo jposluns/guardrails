@@ -14,9 +14,10 @@ GIT_* variable and leaving the process environment scrubbed. Second, ROUTING che
 the fixture class is statically confirmed to call its scrub (per member, so removing one member's
 routing fails at that member's own named check), tightened by function-SCOPED checks (the named
 self-test entry itself calls the in-place scrub as a top-level statement with no process-launching
-call before it, or, for an entry wrapped in fixture_git_lifecycle(), enters the lifecycle as a
-top-level with whose body calls the isolated main, with no scrub, launch or os.environ access
-before it), explicit hook-fixture env checks, an OPF inherited-env probe, and TRUST checks
+call before it, or, for an entry wrapped in fixture_git_lifecycle(), matches a closed allowlist:
+only permitted statements before a top-level with that enters the lifecycle alone and returns the
+isolated main's call, and nothing after it), explicit hook-fixture env checks, an OPF inherited-env
+probe, and TRUST checks
 (every literal `git ... archive ...` launch in the two members that read the checkout under test
 passes env=caller_env_without_git(), so the scrub cannot regress
 a foreign-owned checkout to a rc=128 refusal). Third, an end-to-end leak probe: the originally
@@ -37,8 +38,11 @@ fails this suite instead of racing CI.
 
 Verdicts use child return codes and byte comparisons, never output tokens. DISCLOSED RESIDUAL: a
 routing/scope check proves the scrub call site and its position in the named entry, not that every
-later git call in the same process still runs under it; launch aliases, indirect helper calls,
-early returns and control-flow reachability are outside this syntactic check's coverage. The
+later git call in the same process still runs under it; for the scrub form, launch aliases,
+indirect helper calls, early returns and control-flow reachability are outside this syntactic
+check's coverage, and for the lifecycle form, which refuses every statement not on its allowlist,
+what the permitted statements do when run is outside it (the restore probe in each checked
+entry point's own self-test is the runtime evidence for that). The
 config-injection lane derives registered self-test commands and runs them under caller hooks and ignore
 files, attributes and fsmonitor, with separate malformed-config probes. Selection is by
 selftest_ script name or --self-test/--selftest/--suite flag, not by behaviour: a
@@ -268,9 +272,9 @@ def _scrub_scoped_first(member_path, func_name, scrub_name, isolated=None):
     or duplicated function, a missing top-level scrub, an earlier launch call, or an unreadable
     or unparseable member is a loud failure value, never a silent pass.
 
-    A scrub_name of fixture_git_lifecycle selects the stricter lifecycle form instead
-    (_lifecycle_scoped_first), which also needs isolated, the name of the isolated main the
-    entry point delegates to."""
+    A scrub_name of fixture_git_lifecycle selects the lifecycle form instead
+    (_lifecycle_scoped_first), an allowlist over the whole entry point, which also needs isolated,
+    the name of the isolated main the entry point delegates to."""
     try:
         tree = ast.parse(member_path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError, ValueError) as exc:
@@ -292,7 +296,7 @@ def _scrub_scoped_first(member_path, func_name, scrub_name, isolated=None):
     if not isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return "{} is not a function".format(func_name)
     if scrub_name == _LIFECYCLE_NAME:
-        return _lifecycle_scoped_first(owner, func_name, isolated)
+        return _lifecycle_scoped_first(owner, func_name, isolated, member_path.name)
     body = owner.body
     # A call or context inside a top-level try/finally (extra restoration) counts as top level.
     body = [inner for stmt in body
@@ -312,69 +316,152 @@ def _scrub_scoped_first(member_path, func_name, scrub_name, isolated=None):
     return "{}(): no top-level {}() call".format(func_name, scrub_name)
 
 
-def _lifecycle_scoped_first(owner, func_name, isolated):
-    """The lifecycle form of _scrub_scoped_first: True when the first top-level with statement
-    (one in a top-level try body counts) that names fixture_git_lifecycle() enters it as its
-    first context, and the body of that with calls isolated, the isolated main, as a top-level
-    statement and the function calls it nowhere else. The lifecycle saves the caller's environment
-    and only then scrubs, so no statement before that with may call scrub_git_environment(), make
-    a recognized process-launching call, read or change os.environ (putenv and unsetenv
-    included), call fixture_git_lifecycle() outside that with, or call isolated; imports,
-    module-path setup and other statements that do none of these may come first. A bare
-    fixture_git_lifecycle() call never enters the context, so it isolates nothing and cannot
-    satisfy this. Syntactic, with the residuals documented above (a helper, alias or indirect
-    call that does any of these is outside it); any other shape is a loud failure value, never a
-    silent pass."""
-    if not isolated:
-        return "{}(): the lifecycle form needs the isolated main's name".format(func_name)
-    body = [inner for stmt in owner.body
-            for inner in (stmt.body if isinstance(stmt, ast.Try) else [stmt])]
-    for stmt in body:
-        if isinstance(stmt, ast.With) and any(
-                isinstance(item.context_expr, ast.Call)
-                and _call_name(item.context_expr) == _LIFECYCLE_NAME for item in stmt.items):
-            entered = stmt
-            break
-        for node in ast.walk(stmt):
-            if ((isinstance(node, ast.Attribute) and node.attr == "environ")
-                    or (isinstance(node, ast.Name) and node.id == "environ")):
-                return "{}(): a statement before the {}() with touches os.environ".format(
-                    func_name, _LIFECYCLE_NAME)
-            if not isinstance(node, ast.Call):
-                continue
-            name = _call_name(node)
-            if name == "scrub_git_environment":
-                return "{}(): a scrub_git_environment() call precedes the {}() with".format(
-                    func_name, _LIFECYCLE_NAME)
-            if name in _LAUNCH_NAMES:
-                return "{}(): a process-launching call ({}) precedes the {}() with".format(
-                    func_name, name, _LIFECYCLE_NAME)
-            if name in ("putenv", "unsetenv"):
-                return "{}(): a {}() call before the {}() with changes the environment".format(
-                    func_name, name, _LIFECYCLE_NAME)
-            if name == _LIFECYCLE_NAME:
-                return "{}(): {}() is called without being entered by a top-level with".format(
-                    func_name, _LIFECYCLE_NAME)
-            if name == isolated:
-                return "{}(): {}() is called before the {}() with".format(
-                    func_name, isolated, _LIFECYCLE_NAME)
+# What every lifecycle entry point may lead with, besides a docstring and global statements: the
+# lifecycle's own import, which is also required (so the name the with enters is the lifecycle),
+# and the module-path setup that makes it importable.
+_LIFECYCLE_IMPORT = "from _git_fixture_env import fixture_git_lifecycle"
+_LIFECYCLE_COMMON_BEFORE = (
+    _LIFECYCLE_IMPORT,
+    "sys.path.insert(0, str(Path(__file__).resolve().parent))",
+    "sys.path.append(str(Path(__file__).resolve().parent))",
+)
+# The closed table of further statements a lifecycle entry point needs around its with, each
+# accepted for its own entry point only: (member file name, entry point, place, statement). A
+# "before" statement precedes the with, a "with" statement precedes the isolated main's call in
+# the with body, and a "finally" statement is in the finally body of the top-level try that holds
+# the with. Statements are compared parsed, so layout and comments do not matter.
+_LIFECYCLE_ENTRY_STATEMENTS = (
+    # The execution report is armed before the lifecycle; it is written at interpreter exit.
+    ("selftest_orch_hooks.py", "main", "before",
+     "if report_path is not None:\n    _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)"),
+    # The module's cached git executable is rebound to the lifecycle's wrapper and put back.
+    ("_qa_adapter.py", "_self_test", "before", "saved_git = _GIT"),
+    ("_qa_adapter.py", "_self_test", "with", "_GIT = fixture_git"),
+    ("_qa_adapter.py", "_self_test", "finally", "_GIT = saved_git"),
+)
+_STATEMENT_KINDS = (
+    (ast.Return, "a return statement"), (ast.Raise, "a raise statement"),
+    ((ast.Import, ast.ImportFrom), "an import"),
+    ((ast.Assign, ast.AugAssign, ast.AnnAssign), "an assignment"),
+    (ast.Expr, "an expression statement"), (ast.If, "an if statement"),
+    ((ast.With, ast.AsyncWith), "a with statement"),
+    ((ast.For, ast.AsyncFor, ast.While), "a loop"), (ast.Delete, "a del statement"),
+    ((ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef), "a nested definition"),
+)
+
+
+def _statement_shape(stmt):
+    """A statement (an AST node, or the source of exactly one statement) as a comparable string
+    without positions."""
+    return ast.dump(ast.parse(stmt).body[0] if isinstance(stmt, str) else stmt)
+
+
+def _statement_label(stmt):
+    """A statement named for a refusal message: its kind and its first source line."""
+    if isinstance(stmt, (ast.Try, ast.TryStar)):
+        kind = "a try statement with " + " and ".join(
+            part for part, present in (("an except handler", stmt.handlers),
+                                       ("an else body", stmt.orelse),
+                                       ("a finally body", stmt.finalbody)) if present)
     else:
-        return "{}(): no top-level with {}()".format(func_name, _LIFECYCLE_NAME)
-    first = entered.items[0].context_expr
-    if not (isinstance(first, ast.Call) and _call_name(first) == _LIFECYCLE_NAME):
-        return "{}(): {}() is not the first context its with enters".format(
-            func_name, _LIFECYCLE_NAME)
-    inside = sum(1 for stmt in entered.body
-                 if isinstance(stmt, (ast.Expr, ast.Return, ast.Assign))
-                 and isinstance(stmt.value, ast.Call) and _call_name(stmt.value) == isolated)
-    if not inside:
-        return "{}(): the {}() with does not call {}() as a top-level statement".format(
-            func_name, _LIFECYCLE_NAME, isolated)
-    anywhere = sum(1 for node in ast.walk(owner)
-                   if isinstance(node, ast.Call) and _call_name(node) == isolated)
-    if anywhere != inside:
-        return "{}(): {}() is also called outside the {}() with".format(
-            func_name, isolated, _LIFECYCLE_NAME)
+        kind = next((label for types, label in _STATEMENT_KINDS if isinstance(stmt, types)),
+                    "a statement")
+    return "{} ({!r})".format(kind, ast.unparse(stmt).partition("\n")[0])
+
+
+def _lifecycle_scoped_first(owner, func_name, isolated, member=""):
+    """The lifecycle form of _scrub_scoped_first, an allowlist over the whole entry point: True
+    when its body is only permitted statements, then one with statement that enters a plain
+    fixture_git_lifecycle() call and nothing else and whose body ends with return isolated(...),
+    the isolated main, and then nothing. The with may instead sit in the body of a top-level try:
+    that try's statements before the with are held to the same allowlist, nothing follows the with
+    in it, it has no except handler and no else body, and its finally body holds only statements
+    the closed table lists for this entry point. Permitted before the with: the docstring, the
+    statements in _LIFECYCLE_COMMON_BEFORE (the lifecycle import among them is required), global
+    statements, and the "before" statements _LIFECYCLE_ENTRY_STATEMENTS lists for this entry point
+    (member is its file name); permitted in the with body before the call: that table's "with"
+    statements. isolated is named nowhere else in the function. Anything else is refused by name,
+    whatever it does: any return or raise, any try with an except handler, finally or else body,
+    any assignment, expression or other call, and any other import. The lifecycle saves the
+    caller's environment and only then scrubs, so a scrub, a launch, or a read or change of the
+    environment before it would make it save, and so restore, the wrong values. Syntactic: what
+    the permitted statements do when run (the lifecycle itself, an imported module's code, the
+    listed helper call) is outside it, and is what the restore probe in each checked entry point's
+    own self-test covers (tools/_entry_restore_selftest.py)."""
+    lead = "{}(): ".format(func_name)
+    if not isolated:
+        return lead + "the lifecycle form needs the isolated main's name"
+    listed = {(place, _statement_shape(text))
+              for name, entry, place, text in _LIFECYCLE_ENTRY_STATEMENTS
+              if (name, entry) == (member, func_name)}
+    common = {_statement_shape(text) for text in _LIFECYCLE_COMMON_BEFORE}
+    where = "the {}() with".format(_LIFECYCLE_NAME)
+
+    def enters_lifecycle(stmt):
+        return isinstance(stmt, ast.With) and any(
+            isinstance(item.context_expr, ast.Call)
+            and _call_name(item.context_expr) == _LIFECYCLE_NAME for item in stmt.items)
+
+    body = owner.body
+    at = next((index for index, stmt in enumerate(body) if enters_lifecycle(stmt) or (
+        isinstance(stmt, ast.Try) and any(enters_lifecycle(inner) for inner in stmt.body))), None)
+    if at is None:
+        return lead + "no top-level with {}()".format(_LIFECYCLE_NAME)
+    before, holder, entered, trailing = body[:at], None, body[at], []
+    if isinstance(entered, ast.Try):
+        holder = entered
+        inner_at = next(index for index, stmt in enumerate(holder.body) if enters_lifecycle(stmt))
+        before, entered = before + holder.body[:inner_at], holder.body[inner_at]
+        trailing = holder.body[inner_at + 1:]
+    for stmt in before:
+        docstring = (stmt is body[0] and isinstance(stmt, ast.Expr)
+                     and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str))
+        shape = _statement_shape(stmt)
+        if not (docstring or isinstance(stmt, ast.Global) or shape in common
+                or ("before", shape) in listed):
+            return lead + "{} precedes {} and is not on the lifecycle allowlist".format(
+                _statement_label(stmt), where)
+    if _statement_shape(_LIFECYCLE_IMPORT) not in {_statement_shape(stmt) for stmt in before}:
+        return lead + ("no {!r} precedes {}, so the name it enters is not shown to be the "
+                       "lifecycle".format(_LIFECYCLE_IMPORT, where))
+    if holder is not None:
+        if holder.handlers:
+            return lead + "the try holding {} has an except handler".format(where)
+        if holder.orelse:
+            return lead + "the try holding {} has an else body".format(where)
+        for stmt in holder.finalbody:
+            if ("finally", _statement_shape(stmt)) not in listed:
+                return lead + ("{} in the finally body of the try holding {} is not on the "
+                               "lifecycle allowlist".format(_statement_label(stmt), where))
+    if trailing:
+        return lead + "{} follows {} in its try body".format(_statement_label(trailing[0]), where)
+    if body[at + 1:]:
+        return lead + "{} follows {}".format(_statement_label(body[at + 1]), where)
+    if len(entered.items) != 1:
+        return lead + "{} enters {} contexts; it may enter only the lifecycle".format(
+            where, len(entered.items))
+    context = entered.items[0]
+    call = context.context_expr
+    if not (isinstance(call.func, ast.Name) and not call.args and not call.keywords):
+        return lead + "{} enters {!r}, not a plain {}() call".format(
+            where, ast.unparse(call), _LIFECYCLE_NAME)
+    if context.optional_vars is not None and not isinstance(context.optional_vars, ast.Name):
+        return lead + "{} binds {!r}, not a plain name".format(
+            where, ast.unparse(context.optional_vars))
+    *leading, last = entered.body
+    for stmt in leading:
+        if ("with", _statement_shape(stmt)) not in listed:
+            return lead + ("{} precedes the {}() call in {} and is not on the lifecycle "
+                           "allowlist".format(_statement_label(stmt), isolated, where))
+    if not (isinstance(last, ast.Return) and isinstance(last.value, ast.Call)
+            and isinstance(last.value.func, ast.Name) and last.value.func.id == isolated):
+        return lead + "{} does not end with return {}(...)".format(where, isolated)
+    named = sum(1 for node in ast.walk(owner)
+                if (isinstance(node, ast.Name) and node.id == isolated)
+                or (isinstance(node, ast.Attribute) and node.attr == isolated))
+    if named != 1:
+        return lead + "{} is named {} times; only the return in {} may name it".format(
+            isolated, named, where)
     return True
 
 
@@ -4360,6 +4447,12 @@ _SCAN_ALLOWED_UNPINNED = (
      " _opf_observe._scrubbed_env; its callers pass plumbing subcommands only, never a"
      " maintenance-triggering one"),
     # Cannot-evaluate launches (argv or head outside the resolver's bounds), each audited:
+    ("tools/_entry_restore_selftest.py", "_run_wrapper", ("unresolved",),
+     "cannot-evaluate head: the restore probe runs the lifecycle's PATH-front git wrapper by"
+     " its path with the fixed _WRAPPER_ARGS (status and two operands); the probe puts its own"
+     " stand-in git first on the caller's PATH, so the wrapper execs that stand-in, a script"
+     " that prints its arguments and environment and exits 0, never a real git, and status is"
+     " not maintenance-triggering either way"),
     ("tools/check_git_option_table.py", "_git", ("unresolved",),
      "cannot-evaluate funnel: the argv tail is the caller's *args; every caller passes"
      " option-table introspection forms (init -q --template= of a scratch probe repo,"
