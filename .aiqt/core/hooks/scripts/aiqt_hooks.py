@@ -797,12 +797,15 @@ def _lex_command(command, partial=False):
     heredoc prose. Linear, non-recursive, stdlib-only.
 
     When partial is True the raise-on-error contract is replaced by a best-effort one: instead of raising,
-    the lexer returns (segments, complete), where segments are the COMPLETE segments recovered before the
-    first unparseable construct and complete is False when such a construct truncated the scan (True when
-    the whole command parsed). This lets the Bash abspth floor still inspect a resolvable PREFIX (an
-    earlier relative cd/redirect) even when a LATER segment is unparseable, rather than discarding every
-    parsed segment on the first heredoc/here-string/process-substitution. The default partial=False keeps
-    the list-returning, raise-on-error contract every other caller relies on."""
+    the lexer returns (segments, complete, in_progress), where segments are the segments recovered before the
+    first unparseable construct, complete is False when such a construct truncated the scan (True when the
+    whole command parsed), and in_progress is True only when the LAST of those segments is the one the lexer
+    was still inside when it stopped (its words and redirects parsed before the construct are kept, but its
+    unseen tokens could change it). A construct that begins a new segment (a lone quote after ';') leaves
+    in_progress False: every recovered segment is then complete. This lets the Bash abspth floor still
+    inspect a resolvable PREFIX (an earlier relative cd/redirect) even when a LATER segment is unparseable,
+    rather than discarding every parsed segment on the first heredoc/here-string/process-substitution. The
+    default partial=False keeps the list-returning, raise-on-error contract every other caller relies on."""
     n = len(command)
     segments = []
     argv = []
@@ -913,17 +916,20 @@ def _lex_command(command, partial=False):
         # positions of the IN-PROGRESS segment that were fully parsed BEFORE it (an earlier relative
         # cd/redirect in the SAME, still-open segment - e.g. the 'out.txt' of 'cat > out.txt <<EOF' - is
         # thereby still inspected by the Bash abspth floor); a position WITHIN or AFTER the unparseable
-        # construct stays uninspected, a disclosed residual. The default contract re-raises for every
-        # other caller.
+        # construct stays uninspected, a disclosed residual. The in_progress flag tells a caller that the
+        # last recovered segment is that still-open one, so a caller that must judge only complete segments
+        # drops exactly it and never a segment the scan had already closed. The default contract re-raises
+        # for every other caller.
         if partial:
-            if argv or redirects:
+            in_progress = bool(argv or redirects)
+            if in_progress:
                 segments.append(_Segment(list(argv), "", list(redirects),
                                          command[seg_start[0]:], opaque[0], list(argv_opaque),
                                          list(argv_leading_tilde)))
-            return segments, False
+            return segments, False, in_progress
         raise
     if partial:
-        return segments, True
+        return segments, True, False
     return segments
 
 
@@ -6422,7 +6428,7 @@ def _commit_command_syntax(command):
         records = tuple(_lex_command(command))
     except ValueError:
         # Partial records improve detection only. They can NEVER establish a proof.
-        partial, _complete = _lex_command(command, partial=True)
+        partial, _complete, _in_progress = _lex_command(command, partial=True)
         apparent = bool(_RAW_COMMIT_RE.search(command))
         apparent = apparent or not _commit_quote_bytes_known(command)
         apparent = apparent or any(_commit_apparent_segment(seg) for seg in partial)
@@ -8704,10 +8710,11 @@ def gate_weakening(data):
     except ValueError:
         # DENY outranks the parse error (the branch_root precedent): the COMPLETE segments recovered before
         # the unparseable construct are judged first for a verification run piped into a truncating sink;
-        # otherwise the raw fallback stands. The in-progress segment the lexer was inside is dropped, since
-        # its unseen tokens could change it.
-        recovered, complete = _lex_command(command, partial=True)
-        if not complete:
+        # otherwise the raw fallback stands. Only the in-progress segment the lexer was inside is dropped,
+        # since its unseen tokens could change it; a construct that begins a new segment (a lone quote after
+        # 'pytest | head;') leaves every recovered segment complete, so none is dropped.
+        recovered, _complete, in_progress = _lex_command(command, partial=True)
+        if in_progress:
             recovered = recovered[:-1]
         hit = _verification_sink(recovered)
         if hit is not None:
