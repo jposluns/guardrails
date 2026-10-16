@@ -207,7 +207,9 @@ HOMES2_CHECKS = ("C-EVIDENCE-ENUM",)
 # legitimate-looking alternative such as an imported-keyed roster) reads red, which fails
 # closed: a red on a legitimate alternative, never a green on a wiring nothing grades.
 # C-IMPORTED-PROVENANCE is already implemented (_check_imported_provenance): the driver runs it exactly
-# when the bound roster carries it, so it starts grading when this wiring lands, and not before.
+# when the bound roster carries it, so it starts grading when this wiring lands, and not before. It grades
+# only a series imported_series_active admits (homes 2); on a homes-1 store that declares the imported
+# series under supporting tooling it records CANNOT-EVALUATE, never a pass on records it did not read.
 IMPORTED_CONTENT_CHECKS = ()
 # The exact imported-check id grammar, matched in full: the C-IMPORTED- prefix, then one or more
 # runs of upper-case ASCII letters joined by single hyphens. The class is the one every id in
@@ -235,9 +237,14 @@ def imported_series_active(manifest_data):
     it). The 1.3.0 imported-series content activates only inside the 2.0.0 declaration, so a homes-1
     store never activates it, whatever spec_version it declares, and raising either tooling constant
     alone activates nothing. False for every store this tooling validates today (SUPPORTED_HOMES is
-    1). The doctor driver (the roster, C-IMPORTED-SCHEMA and the containment registration) and the
-    write guard (_opf_write_guard.plan_write_scope) read this ONE flag, so they cannot disagree on
-    the imported managed set."""
+    1). The doctor driver derives it once for the per-series imported id checks (C-COUNTERS,
+    C-ID-SPACE, C-NO-DELETION, C-CONTIGUITY and the across-time checks) and for
+    C-IMPORTED-PROVENANCE's grading; the prior imported baseline (_opf_observe) and the record verb's
+    counter proof (_opf_record) read it too. Containment's registration (classify_containment) and the
+    write guard (_opf_write_guard.plan_write_scope) read _opf_store.imported_series_declared instead,
+    which a homes-1 store can satisfy: there the imported leaves and the import bundles register while
+    no imported record is graded, so C-IMPORTED-PROVENANCE, once a roster carries it, records that
+    store as CANNOT-EVALUATE rather than a pass."""
     return (_opf_store.homes_generation(manifest_data) >= 2
             and _opf_store.imported_series_declared(manifest_data))
 
@@ -2351,17 +2358,25 @@ def _is_preserved_original(run_id, source):
     return source.startswith(originals + "/")
 
 
-def _read_import_inventory(root_fd, run_id, check_id, rep):
-    """Read the inventory.toml of import bundle `run_id` through the contained reader and validate it with the
-    shared evidence-row rules (_evidence_rows: the closed opf.evidence.inventory/v1 shape and the paths the bundle
-    may claim). Returns (rows by path, "ok"), (None, "absent"), or (None, "error") with a CANNOT-EVALUATE already
-    recorded under `check_id`: an unreadable or malformed inventory, a recognized legacy ingest inventory, or a
-    path claimed twice leaves the bundle's claims unknown (spec 4.2)."""
-    rel = _opf_store.evidence_inventory("import", run_id)
+def _read_import_inventory(root_fd, run_id, check_id, rep, rel=None, listed=None):
+    """Read one inventory of import bundle `run_id`, its inventory.toml unless `rel` names a phase inventory at
+    the bundle root, through the contained reader and validate it with the shared evidence-row rules
+    (_evidence_rows: the closed opf.evidence.inventory/v1 shape and the paths the bundle may claim). Its rows
+    join `listed` when given, so a bundle's inventories share one claim map. Returns (rows by path, "ok"),
+    (None, "absent"), or (None, "error") with a CANNOT-EVALUATE already recorded under `check_id`: an unreadable
+    or malformed inventory, a recognized legacy ingest inventory, or a path claimed twice leaves the bundle's
+    claims unknown (spec 4.2).
+
+    A legacy ingest inventory is a CANNOT-EVALUATE here, where C-EVIDENCE-ENUM records the named
+    legacy-ingest-inventory finding. That finding is C-EVIDENCE-ENUM's own, a homes-2 check this reader does not
+    stand in for, and spec 4.2 sets no homes-1 grade for such a bundle. These readers need the bundle's claims
+    to register or verify its files, and a refused legacy inventory has none they can read, so they fail
+    closed on an unknown rather than record another check's finding."""
+    rel = _opf_store.evidence_inventory("import", run_id) if rel is None else rel
     doc, state = _read_toml(root_fd, rel, rep)
     if state != "ok":
         return None, state
-    listed = {}
+    listed = {} if listed is None else listed
     try:
         for row in _evidence_rows(_opf_store.evidence_run("import", run_id), "import", run_id, doc):
             if row["path"] in listed:
@@ -2382,8 +2397,10 @@ def _check_imported_provenance(root_fd, rows, unread, rep):
     read once, contained, no-follow and under the product-file cap (_read_bytes), every distinct source_sha256 its
     rows record must equal the digest of those bytes, and the original must be listed by its bundle's
     inventory.toml. Each cited bundle's inventory.toml is re-read, and every file it lists is re-read against its
-    recorded size and digest: the doctor carries this itself because C-EVIDENCE-ENUM reads nothing on homes 1
-    (spec 4.2/14.1), and on homes 2 that check also reconciles the whole evidence tree.
+    recorded size and digest, so the check needs no other layer: C-EVIDENCE-ENUM reads nothing on homes 1 (spec
+    4.2/14.1), and on homes 2 it also reconciles the whole evidence tree. The driver calls this only for a series
+    imported_series_active admits (homes 2), and records a homes-1 store that declares the series as
+    CANNOT-EVALUATE instead.
 
     Mismatched evidence is a finding. Missing or unreadable evidence (an absent original or listed file, a
     symlink or other non-regular entry, an oversize file, or an absent, unreadable or malformed inventory) is a
@@ -2456,8 +2473,8 @@ def _check_imported_provenance(root_fd, rows, unread, rep):
 # `imports_root` the derived structures the walk needs; `homes` the store's active homes generation and
 # `control_roots` / `evidence_roots` the store control and homes-2 evidence roots it registers.
 # `worklog_errors` holds generation failures separately from malformed [unmanaged] entries.
-# `import_home` is the import evidence home a homes-1 store registers once the imported series is active
-# (the walk registers its bundles from their inventories), or None.
+# `import_home` is the import evidence home a homes-1 store registers once it declares the imported series
+# under supporting tooling (the walk registers its bundles from their inventories), or None.
 ContainmentClassification = collections.namedtuple(
     "ContainmentClassification",
     ("view_targets", "valid_unmanaged", "malformed", "colliding", "managed_file", "layout",
@@ -2684,10 +2701,10 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
     documents; the walk itself needs no imported awareness (the imported leaves are plain managed
     leaves directly in the machine store, spec 8.2/4.2), except that on a homes-1 store the flag also
     registers the import evidence home: each .working/imported/import/<run-id>/ bundle registers its
-    inventory.toml and the bundle files that inventory lists, and every other path under
-    .working/imported/ stays unregistered (spec 4.2/8.8). While IMPORTED_CONTENT_CHECKS is empty, an
-    ACTIVE imported series is routed to CANNOT-EVALUATE (the activation tripwire below):
-    registration without content grading never certifies."""
+    inventory.toml, each inventory-<phase>.toml at its root, and the bundle files those inventories list,
+    and every other path under .working/imported/ stays unregistered (spec 4.2/8.8). While
+    IMPORTED_CONTENT_CHECKS is empty, an ACTIVE imported series is routed to CANNOT-EVALUATE (the
+    activation tripwire below): registration without content grading never certifies."""
     cls = classify_containment(manifest_data, machine_rel, imported=imported)
     # The activation tripwire (spec 8.2/4.2): an ACTIVE imported series while every imported-content
     # check (C-IMPORTED-*) is still deferred must never certify, or the imported leaves would be
@@ -2729,11 +2746,12 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
     bundle_files, bundle_dirs, unread_bundles = set(), set(), set()
 
     def register_bundles(runs):
-        # Each import bundle registers from its own inventory.toml (spec 4.2/8.8): the inventory, the bundle
-        # files it lists, and their directories. A bundle with no inventory registers nothing, so the walk grades
-        # it as one unregistered entry; one whose inventory is unreadable or malformed has unknown claims, so it
-        # is a CANNOT-EVALUATE and never graded on a guess. A row naming a path outside the bundle registers
-        # nothing here, and a phase inventory is no member of an import bundle, so it stays unregistered.
+        # Each import bundle registers from its own inventories (spec 4.2/8.8): inventory.toml, each
+        # inventory-<phase>.toml at the bundle root, the bundle files they list, and their directories. A bundle
+        # with no inventory.toml registers nothing, so the walk grades it as one unregistered entry: a phase
+        # inventory never stands in for the first. One whose inventories are unreadable or malformed, or claim a
+        # path twice between them, has unknown claims, so it is a CANNOT-EVALUATE and never graded on a guess.
+        # A row naming a path outside the bundle registers nothing here.
         for run_id in runs:
             if not _is_import_run_id(run_id):
                 continue
@@ -2743,8 +2761,26 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
                 unread_bundles.add(bundle)
             if listed is None:
                 continue
+            inventories = [_opf_store.evidence_inventory("import", run_id)]
+            try:
+                _subdirs, names = _list_contained(root_fd, bundle)
+            except StoreError:
+                names = None     # registers no phase inventory; the walk lists the bundle and records the cant
+            for name in names or ():
+                if name == "inventory.toml" or not _opf_store.is_evidence_inventory_name(name):
+                    continue
+                phase = _rel(bundle, name)
+                _rows, state = _read_import_inventory(root_fd, run_id, "C-CONTAINMENT", rep, phase, listed)
+                if state != "ok":
+                    if state == "absent":
+                        rep.cant("C-CONTAINMENT: listed inventory {!r} vanished".format(phase))
+                    unread_bundles.add(bundle)
+                    break
+                inventories.append(phase)
+            if bundle in unread_bundles:
+                continue
             bundle_dirs.add(bundle)
-            bundle_files.add(_opf_store.evidence_inventory("import", run_id))
+            bundle_files.update(inventories)
             for path in listed:
                 if not path.startswith(bundle + "/"):
                     continue
@@ -3575,18 +3611,27 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # --- C-IMPORTED-PROVENANCE: re-read each cited original and bundle inventory (spec 8.3/14.1) -------
     # It runs exactly when the bound roster carries it, the way C-EVIDENCE-ENUM runs with the homes-2 roster,
     # so the id and its run cannot disagree. No roster carries it until the spec 1.3.0 activation wires the
-    # imported-content checks into required_checks, so it ships inert. Where it runs, it grades only an active
-    # imported series, from the rows C-ID-SPACE gathered under the same flag.
+    # imported-content checks into required_checks, so it ships inert. Where it runs, it grades an active
+    # imported series (imported_series_active, homes 2) from the rows C-ID-SPACE gathered under the same flag.
+    # A store that declares the imported series under supporting tooling at homes 1 has its leaves and bundles
+    # registered by containment, but no imported row is gathered there, so the check cannot evaluate it.
+    # Whether homes 1 is graded is open; until then the check fails closed rather than pass unread records.
     if "C-IMPORTED-PROVENANCE" in rep.required:
         rep.ran("C-IMPORTED-PROVENANCE")
         if imported:
             _check_imported_provenance(root_fd, imported_rows, imported_unread, rep)
+        elif _opf_store.imported_series_declared(manifest_data):
+            rep.cant("C-IMPORTED-PROVENANCE: the store declares the imported series (spec_version {!r}) but this "
+                     "tooling does not grade imported records at homes generation {}, so their provenance is not "
+                     "evaluated (spec 4.2/8.3)".format(dp.get("spec_version"), homes))
 
     # --- C-CONTAINMENT: whole-tree path / unmanaged-path containment (spec 14.2/11) -------------------
     rep.ran("C-CONTAINMENT")
-    # The explicit imported-series activation flag (spec 8.2/4.2), derived through
-    # _opf_store.imported_series_declared: the declared spec_version AND this tooling's own
-    # support. False for every store this tooling validates: the helper itself answers False until
+    # The imported-series registration flag (spec 8.2/4.2), _opf_store.imported_series_declared: the
+    # store declares the imported series under supporting tooling (the declared spec_version AND this
+    # tooling's own support). It is not the driver's `imported` (imported_series_active, homes 2 only),
+    # so a homes-1 store can register here while C-IMPORTED-PROVENANCE above records it as not
+    # evaluated. False for every store this tooling validates: the helper itself answers False until
     # activation raises SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION, which
     # C-MANIFEST alone does not guarantee (it accepts the reserved 2.0.0 / homes = 2 declaration
     # today, spec 4.2).
@@ -5491,26 +5536,104 @@ def self_test():
             _p_g["required_checks"] = _p_prev_rc
             _opf_store.SUPPORTED_HOMES = _p_prev_homes
             _opf_store.SUPPORTED_SPEC_VERSION = _p_prev_ssv
-        # The inventory re-read is the provenance check's own evidence coverage on homes 1, where C-EVIDENCE-ENUM
-        # reads nothing (spec 4.2/14.1). Driven directly over a bundle with no other check present: the matching
-        # original passes, and a listed file whose bytes differ from its row is the one finding (red when the
-        # re-read of the listed files is removed).
-        _p_root = build(clean_machine(), None, _p_bundle_files(
-            {_p_src: _p_text, _p_other: "edited\n"}, listed=[(_p_src, _p_text), (_p_other, "other\n")]))
-        _p_rep = _Report()
-        _p_rep.ran("C-IMPORTED-PROVENANCE")
-        _p_fd = os.open(str(_p_root), os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            _check_imported_provenance(_p_fd, [("imported:BI", "imported:BI-1", _p_row(1))], set(), _p_rep)
-        finally:
-            os.close(_p_fd)
+        # The inventory re-read is the provenance check's own evidence coverage, since C-EVIDENCE-ENUM reads nothing
+        # on homes 1 (spec 4.2/14.1). Driven directly over a bundle with no other check present, one imported row
+        # citing the original.
+
+        def _p_direct(working, row):
+            root = build(clean_machine(), None, working)
+            rep = _Report()
+            rep.ran("C-IMPORTED-PROVENANCE")
+            fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                _check_imported_provenance(fd, [("imported:BI", "imported:BI-1", row)], set(), rep)
+            finally:
+                os.close(fd)
+            return rep
+
+        def _p_mismatch(path):
+            return ("C-IMPORTED-PROVENANCE: {!r} does not match the size and digest {!r} records for it (spec "
+                    "4.2/14.1)".format(path, _p_inv))
+
+        # The matching original passes, and a listed file whose bytes differ from its row is the one finding (red
+        # when the re-read of the listed files is removed).
+        _p_rep = _p_direct(_p_bundle_files({_p_src: _p_text, _p_other: "edited\n"},
+                                           listed=[(_p_src, _p_text), (_p_other, "other\n")]), _p_row(1))
         check("provenance-inventory-payload-mismatch-finding",
-              _p_rep.cannot == [] and _p_rep.findings == [
-                  "C-IMPORTED-PROVENANCE: {!r} does not match the size and digest {!r} records for it (spec "
-                  "4.2/14.1)".format(_p_other, _p_inv)])
-        # Import-bundle registration (spec 4.2/8.8). On a homes-1 store whose imported series is active, the
-        # containment walk registers each .working/imported/import/<run-id>/ bundle's inventory.toml and the files
-        # it lists, and everything else under .working/imported/ stays unregistered. SUPPORTED_SPEC_VERSION is
+              _p_rep.cannot == [] and _p_rep.findings == [_p_mismatch(_p_other)])
+        # A listed file whose digest matches its row but whose size does not is the same finding (red when the
+        # re-read compares the digest alone).
+        _p_sz_w = _p_bundle_files({_p_src: _p_text, _p_other: "other\n"})
+        for _p_sz_row in _p_sz_w[_p_w(_p_inv)]["file"]:
+            if _p_sz_row["path"] == _p_other:
+                _p_sz_row["size"] += 1
+        _p_sz = _p_direct(_p_sz_w, _p_row(1))
+        check("provenance-inventory-size-mismatch-finding",
+              _p_sz.cannot == [] and _p_sz.findings == [_p_mismatch(_p_other)])
+        # An inventory that claims one path twice has unknown claims: CANNOT-EVALUATE naming it, even though the
+        # original it lists twice matches (red when the claimed-twice refusal is removed and the later row wins).
+        _p_tw = _p_direct(_p_bundle_files(listed=[(_p_src, _p_text), (_p_src, _p_text)]), _p_row(1))
+        check("provenance-inventory-claimed-twice-cannot-evaluate",
+              _p_tw.findings == [] and _p_tw.cannot == [
+                  "C-IMPORTED-PROVENANCE: malformed import bundle inventory {!r}: {!r} is claimed more than "
+                  "once".format(_p_inv, _p_src)])
+        # A source spelled through a parent component, <bundle>/originals/../inventory.toml, is no canonical path
+        # inside the originals folder however it starts: a provenance finding, and nothing is read (red when the
+        # canonical-path test is reduced to a prefix match: the path is then read and graded instead).
+        _p_dd = _p_direct(_p_bundle_files(), _p_row(1, source=_p_bundle + "/originals/../inventory.toml"))
+        check("provenance-source-parent-component-finding",
+              _p_dd.cannot == [] and _p_dd.findings == [
+                  "C-IMPORTED-PROVENANCE: imported record 'imported:BI-1' carries no verifiable provenance: its "
+                  "import table must name an imp-<YYYYMMDD>T<HHMMSS>Z-<hash16> run, a source under that run's "
+                  ".working/imported/import/<run-id>/originals/ folder, and a 64-hex source_sha256 (spec "
+                  "8.3/8.8)"])
+        # A homes-1 store that declares the imported series under supporting tooling (imported_series_declared)
+        # registers its imported leaves and bundles, but the driver gathers no imported row there
+        # (imported_series_active needs homes 2). With the roster carrying the check and the activation tripwire
+        # disarmed, as activation would leave them (both patched, restored in finally), the check records
+        # CANNOT-EVALUATE naming the generation, never a pass, whatever the evidence holds: a stale original
+        # digest, and a cited run with no evidence at all (red when the check passes a series it did not read).
+        _h1_prev_rc = required_checks
+        _h1_prev_icc = IMPORTED_CONTENT_CHECKS
+        _h1_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
+        _h1_msg = ("C-IMPORTED-PROVENANCE: the store declares the imported series (spec_version {!r}) but this "
+                   "tooling does not grade imported records at homes generation 1, so their provenance is not "
+                   "evaluated (spec 4.2/8.3)".format(_opf_store.IMPORTED_SPEC_VERSION))
+
+        def _h1_machine(*rows):
+            m = clean_machine()
+            m["manifest.toml"]["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
+            m["backlog_item.imported.index.toml"] = idx(list(rows))
+            return m
+
+        def _h1_only_provenance(r):
+            return (r is not None and r.status == CANNOT_EVALUATE and _i3_bad(r) == {"C-IMPORTED-PROVENANCE"}
+                    and not r.findings and r.cannot_evaluate == [_h1_msg]
+                    and _i3_msgs(r, "C-IMPORTED-PROVENANCE") == [_h1_msg])
+
+        try:
+            _p_g["required_checks"] = lambda homes, _rc=_h1_prev_rc: _rc(homes) + ("C-IMPORTED-PROVENANCE",)
+            _p_g["IMPORTED_CONTENT_CHECKS"] = ("C-IMPORTED-PROVENANCE",)
+            # The control, at the shipped support constant: a store that does not declare the series under
+            # supporting tooling has nothing to grade, so the check passes and the store is VALID (red when the
+            # CANNOT-EVALUATE ignores the declaration).
+            _h1_plain = run(clean_machine())
+            check("provenance-homes1-undeclared-passes",
+                  _h1_plain is not None and _h1_plain.status == VALID
+                  and _h1_plain.checks.get("C-IMPORTED-PROVENANCE") == "PASS")
+            _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
+            _h1_stale = run(_h1_machine(_p_row(1)), working=_p_bundle_files({_p_src: _p_new}))
+            check("provenance-homes1-stale-digest-cannot-evaluate", _h1_only_provenance(_h1_stale))
+            _h1_none = run(_h1_machine(_p_row(1)))
+            check("provenance-homes1-no-evidence-cannot-evaluate", _h1_only_provenance(_h1_none))
+        finally:
+            _p_g["required_checks"] = _h1_prev_rc
+            _p_g["IMPORTED_CONTENT_CHECKS"] = _h1_prev_icc
+            _opf_store.SUPPORTED_SPEC_VERSION = _h1_prev_ssv
+        # Import-bundle registration (spec 4.2/8.8). On a homes-1 store that declares the imported series under
+        # supporting tooling, the containment walk registers each .working/imported/import/<run-id>/ bundle's
+        # inventory.toml, its root inventory-<phase>.toml files and the files they list, and everything else under
+        # .working/imported/ stays unregistered. SUPPORTED_SPEC_VERSION is
         # patched to IMPORTED_SPEC_VERSION inside the block (restored in finally), so the 1.3.0 store validates
         # and the containment flag is True; the activation tripwire then holds the store at CANNOT-EVALUATE, and
         # the vectors judge the C-CONTAINMENT findings.
@@ -5537,18 +5660,58 @@ def self_test():
                   _r_ok is not None and not _r_ok.findings and len(_r_ok.cannot_evaluate) == 1
                   and _i3_msgs(_r_ok, "C-CONTAINMENT") == _r_ok.cannot_evaluate
                   and "C-IMPORTED" in _r_ok.cannot_evaluate[0])
-            # Only what the inventory lists registers: an unlisted original, a loose bundle file, an unlisted
-            # directory and a phase inventory are each an unregistered path (red when the bundle registers
-            # wholesale).
+            # Only what the inventories list registers: an unlisted original, a loose bundle file, an unlisted
+            # directory, and an inventory-shaped file outside the phase grammar (an upper-case phase) are each an
+            # unregistered path (red when the bundle registers wholesale, or any inventory-* name as a phase).
             _r_un_w = _p_bundle_files()
             for _r_extra in ("/originals/notes/extra.md", "/notes.txt", "/scratch/a.txt"):
                 _r_un_w[_p_w(_p_bundle + _r_extra)] = "x\n"
-            _r_un_w[_p_w(_p_bundle + "/inventory-later.toml")] = {"format": EVIDENCE_FORMAT, "file": []}
+            _r_un_w[_p_w(_p_bundle + "/inventory-Later.toml")] = {"format": EVIDENCE_FORMAT, "file": []}
             _r_un = run(_r_machine(), working=_r_un_w)
             check("import-bundle-unlisted-file-finding",
                   _r_un is not None and _r_unregistered(_r_un) == _r_paths(
                       _p_bundle + "/originals/notes/extra.md", _p_bundle + "/notes.txt", _p_bundle + "/scratch",
-                      _p_bundle + "/inventory-later.toml"))
+                      _p_bundle + "/inventory-Later.toml"))
+            # A phase inventory (spec 4.2) registers as the base inventory does: inventory-promote.toml and the
+            # promotion receipt it lists register, so the store has no finding and the tripwire is its only
+            # CANNOT-EVALUATE (red when a phase inventory and its listed files stay unregistered).
+            _r_receipt = _p_bundle + "/receipt.toml"
+            _r_phase_inv = _p_bundle + "/inventory-promote.toml"
+
+            def _r_phase_files(phase_doc, receipt=True):
+                out = _p_bundle_files()
+                if receipt:
+                    out[_p_w(_r_receipt)] = "schema = 1\n"
+                out[_p_w(_r_phase_inv)] = phase_doc
+                return out
+
+            def _r_phase_doc(*rows):
+                return {"format": EVIDENCE_FORMAT, "file": [
+                    {"path": p, "size": len(t.encode("utf-8")), "sha256": _p_sha(t)} for p, t in rows]}
+
+            _r_ph = run(_r_machine(), working=_r_phase_files(_r_phase_doc((_r_receipt, "schema = 1\n"))))
+            check("import-bundle-phase-inventory-registered",
+                  _r_ph is not None and not _r_ph.findings and len(_r_ph.cannot_evaluate) == 1
+                  and _i3_msgs(_r_ph, "C-CONTAINMENT") == _r_ph.cannot_evaluate
+                  and "C-IMPORTED" in _r_ph.cannot_evaluate[0])
+            # A malformed phase inventory leaves the bundle's claims unknown: a C-CONTAINMENT CANNOT-EVALUATE
+            # naming it, and the bundle is not graded on a guess, so the receipt is no finding (red when the
+            # phase inventory is skipped, which leaves it and the receipt unregistered).
+            _r_phb = run(_r_machine(), working=_r_phase_files(
+                {"format": EVIDENCE_FORMAT, "file": [{"path": _r_receipt}]}))
+            check("import-bundle-malformed-phase-inventory-cannot-evaluate",
+                  _r_phb is not None and not _r_phb.findings and len(_r_phb.cannot_evaluate) == 2
+                  and all(m in _i3_msgs(_r_phb, "C-CONTAINMENT") for m in _r_phb.cannot_evaluate)
+                  and "C-CONTAINMENT: malformed import bundle inventory {!r}: file rows require exactly path, "
+                      "size and sha256".format(_r_phase_inv) in _r_phb.cannot_evaluate)
+            # A bundle's inventories share one claim map: a phase inventory claiming the original inventory.toml
+            # already lists claims it twice, a CANNOT-EVALUATE naming the phase inventory (red when the
+            # claimed-twice refusal is removed, which registers the bundle and passes it).
+            _r_phd = run(_r_machine(), working=_r_phase_files(_r_phase_doc((_p_src, _p_text)), receipt=False))
+            check("import-bundle-phase-inventory-claim-twice-cannot-evaluate",
+                  _r_phd is not None and not _r_phd.findings and len(_r_phd.cannot_evaluate) == 2
+                  and "C-CONTAINMENT: malformed import bundle inventory {!r}: {!r} is claimed more than "
+                      "once".format(_r_phase_inv, _p_src) in _i3_msgs(_r_phd, "C-CONTAINMENT"))
             # A bundle with no inventory registers nothing: the bundle is one unregistered entry (red when an
             # absent inventory registers the bundle folder).
             _r_ni_w = _p_bundle_files()
@@ -5587,9 +5750,10 @@ def self_test():
                   _r_st is not None and _r_unregistered(_r_st) == _r_paths(
                       ".working/imported/adoption", ".working/imported/import/not-a-run",
                       ".working/imported/loose.md", ".working/imported/import/loose.md"))
-            # A symlinked import home is never followed: the walk names it as a C-CONTAINMENT CANNOT-EVALUATE,
-            # and the registration that runs first neither follows it nor faults the run (red when its listing
-            # failure escapes the check).
+            # A symlinked import home: the walk names it as a C-CONTAINMENT CANNOT-EVALUATE, and the listing failure
+            # the registration meets first does not escape the check or fault the run (red when it escapes). That
+            # the link is never followed rests on _list_contained's no-follow open, which this vector does not
+            # discriminate: a registration that followed it would meet the same listing CANNOT-EVALUATE.
 
             def _r_symlink_home(root):
                 home = root / _IMPORT_EVIDENCE_HOME
@@ -5597,7 +5761,7 @@ def self_test():
                 os.symlink(str(root / "elsewhere"), str(home))
 
             _r_sl = _p_doctor(_r_machine(), _p_bundle_files(), after=_r_symlink_home)
-            check("import-home-symlink-cannot-evaluate-not-followed",
+            check("import-home-symlink-listing-failure-does-not-escape",
                   _r_sl is not None and _r_sl.checks.get("C-CONTAINMENT") == "CANNOT-EVALUATE"
                   and not _r_sl.findings
                   and not any(m.startswith("internal:") for m in _r_sl.cannot_evaluate)
@@ -5610,9 +5774,10 @@ def self_test():
         check("import-bundle-registration-inert-when-inactive",
               _r_off is not None and _r_off.status == INVALID
               and _r_unregistered(_r_off) == _r_paths(".working/imported"))
-        # The import home is a graded container once active on homes 1: an [unmanaged] declaration inside it or
-        # containing it collides, and the same declarations stay valid while inactive (red when the home is not
-        # added to the graded containers).
+        # The import home is a graded container on homes 1 once the store declares the imported series under
+        # supporting tooling (the `imported` flag classify_containment receives): an [unmanaged] declaration
+        # inside it or containing it collides, and the same declarations stay valid while inactive (red when
+        # the home is not added to the graded containers).
         _r_um = base_manifest()
         _r_um["unmanaged"] = dict(paths=[_p_bundle + "/originals", ".working/imported"])
         _r_um_on = classify_containment(_r_um, ".working/toml", imported=True)
