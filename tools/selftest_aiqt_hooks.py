@@ -204,8 +204,9 @@ def _decision(handler, command, tool="Bash", cwd=None):
 # The decision of every console-diff vector (each dexpect command below) at commit a9923dbf, the base of the
 # change that ended the diff option scans at the first '--', recorded by running that commit's
 # diff_source_pretool over each command. The self-test holds every vector to at least that strictness (deny
-# over allow-note over allow), so neither reading of the option region can lose a denial the base made; a
-# new vector needs its decision at that commit here.
+# over allow-note over allow), so neither reading of the option region can lose a denial the base made,
+# except the deliberate relaxations listed in _CNSDIF_RELAXATIONS; a new vector needs its decision at that
+# commit here.
 _CNSDIF_BASE_DECISIONS = {
     "git diff --help": "allow",
     "git diff -- file --help": "deny",
@@ -375,6 +376,28 @@ _CNSDIF_BASE_DECISIONS = {
     "git diff > proc/self/fd/1": "allow-note",
     "git diff > /dev/stdout": "deny",
     "git diff > foo/dev/x": "allow",
+    "git diff --output=real.txt --output=/dev/stderr": "allow-note",
+    "git diff --output real.txt --output /dev/stderr": "allow-note",
+    "git diff -S -o": "allow-note",
+    "git diff -S --output --output=/dev/stderr": "allow-note",
+    "git diff --output=a.txt --output=b.txt": "allow-note",
+    "git diff --no-index --stat --unif=3 a b": "allow-note",
+    "git diff --no-index --stat --u a b": "allow-note",
+    "git diff --no-index -S -- --output=/dev/stderr a b | less": "deny",
+    "git diff -p -- --output=/dev/tty > f.txt": "deny",
+}
+
+# The deliberate relaxations: each console-diff vector that decides less strictly than its base decision in
+# _CNSDIF_BASE_DECISIONS, mapped to (that base decision, the decision it now makes, the git 2.55.0 observation
+# that justifies it). The self-test holds this list exact: a vector weaker than its base must be listed here
+# and make exactly the listed decision, every entry must name a vector that runs and match its recorded base
+# decision, and an entry no weaker than its base fails.
+_CNSDIF_RELAXATIONS = {
+    "git diff -p -- --output=/dev/tty > f.txt": (
+        "deny", "allow",
+        "with a tracked file at the path --output=/dev/tty changed, git diff -p -- --output=/dev/tty > f.txt "
+        "wrote that file's patch to f.txt: the '--' after -p ends the options under both readings (-p takes no "
+        "value), so --output=/dev/tty is a pathspec, not a diversion"),
 }
 
 
@@ -3683,6 +3706,11 @@ def _main_isolated(monitor):
                "git reset --pathspec-from-file list --hard", "deny", cwd=rp)
         expect("(pfr-reset-list-c) reset --pathspec-from-file list allows with a note (a mixed reset of the paths)",
                "git reset --pathspec-from-file list", "allow-note", cwd=rp)
+        # An abbreviation git resolves to --pathspec-from-file names the file too (git 2.55.0: git reset
+        # --pathspec-from --soft, with a staged change to a path the file named --soft lists, unstaged it), so on
+        # this dirty tree it takes the scoped outcome; it was allowed silently before, reading --soft as the mode.
+        expect("(pfr-reset-abbr) reset --pathspec-from --soft allows with a note (--soft is the file, not the mode)",
+               "git reset --pathspec-from --soft", "allow-note", cwd=rp)
         # An inline git alias that expands to a work-losing verb cannot be resolved -> ASK.
         # CLAUDE-F1 (round-7): an inline '-c alias.<name>=' invoking a NON-builtin subcommand ('x') enters the
         # view-override branch ('-c' makes the command not dir-simple); its raw scan flags 'reset' but the
@@ -3854,6 +3882,18 @@ def _main_isolated(monitor):
             (("reset", ["--pathspec-from-file", "list", "--keep"]), "scoped"),
             (("reset", ["--pathspec-from-file", "--hard"]), "scoped"),
             (("reset", ["--pathspec-from-file", "list", "--hard", "--mixed"]), "scoped"),
+            # An abbreviation git resolves to --pathspec-from-file is that option, so its separated value names
+            # the file, never a mode (git 2.55.0: git reset --pathspec-from --soft and --pathspec-fr --soft, with
+            # a staged change to a path the file named --soft lists, unstaged it; git reset --pathspec-from
+            # --hard reset the path the file named --hard lists, mixed, and left the other change). The soft
+            # ones allowed and the hard one was a clobber before. A prefix that begins two reset options is
+            # refused by git (ambiguous option: pathspec-f), so it is no --pathspec-from-file and decides
+            # nothing: the --soft after it stays the mode.
+            (("reset", ["--pathspec-from", "--soft"]), "scoped"),
+            (("reset", ["--pathspec-fr", "--soft"]), "scoped"),
+            (("reset", ["--pathspec-from", "--hard"]), "scoped"),
+            (("reset", ["--pathspec-from=list", "--hard"]), "clobber"),
+            (("reset", ["--pathspec-f", "--soft"]), "allow"),
         ]
         for (sub, args), want_role in role_cases:
             got_role = aiqt_hooks._discard_role(sub, args)[0]
@@ -3863,11 +3903,46 @@ def _main_isolated(monitor):
         # The index-only test of a --work-tree-redirected discard reads a '--' that is the value of a
         # value-taking option as that value (git restore -S --pathspec-from-file -- -W restored the worktree
         # too, git 2.55.0): it returned True before; the control keeps a '--' that ends the options.
-        for _io_args, _io_want in ((["-S", "--pathspec-from-file", "--", "-W", "a.txt"], False),
-                                   (["-S", "--", "-W"], True)):
-            if aiqt_hooks._discard_index_only("restore", _io_args) is not _io_want:
-                failures.append("(role-index-only) _discard_index_only('restore', {!r}): expected {}"
-                                .format(_io_args, _io_want))
+        # A worktree-touching long option counts in every spelling git resolves to it, its last spelling deciding
+        # (git 2.55.0: git restore --staged --work restored the worktree too, and git rm --cached --no-cached
+        # removed the worktree file): each returned True before. The controls keep the index-only forms.
+        for _io_sub, _io_args, _io_want in (
+                ("restore", ["-S", "--pathspec-from-file", "--", "-W", "a.txt"], False),
+                ("restore", ["-S", "--", "-W"], True),
+                ("restore", ["--staged", "--work", "a.txt"], False),
+                ("restore", ["--staged", "--w", "a.txt"], False),
+                ("restore", ["--staged", "a.txt"], True),
+                ("rm", ["--cached", "--no-cached", "a.txt"], False),
+                ("rm", ["--cached", "--no-c", "a.txt"], False),
+                ("rm", ["--no-cached", "--cached", "a.txt"], True),
+                ("rm", ["--cached", "a.txt"], True)):
+            if aiqt_hooks._discard_index_only(_io_sub, _io_args) is not _io_want:
+                failures.append("(role-index-only) _discard_index_only({!r}, {!r}): expected {}"
+                                .format(_io_sub, _io_args, _io_want))
+        # _git_long_option resolves a long option word as git 2.55.0's option parser did: a full name, the one
+        # name a prefix begins, and None for a prefix that begins several (git: ambiguous option) or none.
+        for _lo_cmd, _lo_word, _lo_want in (
+                ("reset", "--pathspec-from-file", "pathspec-from-file"),
+                ("reset", "--pathspec-fr", "pathspec-from-file"),
+                ("reset", "--pathspec-from=list", "pathspec-from-file"),
+                ("reset", "--pathspec-f", None),
+                ("reset", "--pa", None),
+                ("reset", "--h", "hard"),
+                ("reset", "--m", None),
+                ("restore", "--w", "worktree"),
+                ("restore", "--s", None),
+                ("rm", "--no-c", "no-cached"),
+                ("diff --no-index", "--u", "unified"),
+                ("diff --no-index", "--unif=3", "unified"),
+                ("diff --no-index", "--patc", None),
+                ("diff --no-index", "--outp=x", None),
+                ("diff --no-index", "--output=x", "output"),
+                ("reset", "--", None),
+                ("reset", "-p", None)):
+            if aiqt_hooks._git_long_option(_lo_cmd, _lo_word) != _lo_want:
+                failures.append("(git-long-option) _git_long_option({!r}, {!r}): expected {!r}, got {!r}"
+                                .format(_lo_cmd, _lo_word, _lo_want,
+                                        aiqt_hooks._git_long_option(_lo_cmd, _lo_word)))
 
         # === EN-6 recovery/snapshot layer ============================================================
         # The layer takes an INERT snapshot (a private refs/aiqt-recovery/* ref over a temp-index tree)
@@ -7227,6 +7302,44 @@ def _main_isolated(monitor):
                 "with a note", "git diff --no-index -S -- --output=real.txt a b > out.txt", "allow-note")
         dexpect("(cnsdif-ni-c2) a --no-index summary followed by paths allows with a note",
                 "git diff --no-index --stat -- a b", "allow-note")
+        # Proof D trusts the pipe only when no diversion is found under either reading: git 2.55.0 wrote the
+        # patch of git diff --no-index -S -- --output=/dev/stderr a b to stderr and nothing to the pipe, so the
+        # pager is a decoy and the console target denies. It allowed at the commit before the option-parser
+        # reading, and allows again if the pager proof reads the revision-walk reading only.
+        dexpect("(cnsdif-ni-pager) a --output=/dev/stderr after the -S value under --no-index, piped to less, "
+                "denies", "git diff --no-index -S -- --output=/dev/stderr a b | less", "deny")
+        # git writes the diff to the LAST --output (git 2.55.0: git diff --output=real.txt --output=/dev/stderr
+        # wrote the patch to stderr and left real.txt empty, and the separated spelling did the same), and a word
+        # spelled as a diversion may be the value of the option before it, so a console target among several
+        # denies: both allowed with a note before, judging only the first. No producer takes -o as a diversion
+        # (git diff -S -o gave -o to -S and printed the patch on stdout), so a -o word no longer makes stdout a
+        # decoy: allowed with a note before. The control, two diversions to files, allows with a note.
+        dexpect("(cnsdif-out-last1) a later --output=/dev/stderr after one to a real file denies",
+                "git diff --output=real.txt --output=/dev/stderr", "deny")
+        dexpect("(cnsdif-out-last2) the separated spelling of a later --output /dev/stderr denies",
+                "git diff --output real.txt --output /dev/stderr", "deny")
+        dexpect("(cnsdif-out-o) a -o that is the -S value diverts nothing, so the console patch denies",
+                "git diff -S -o", "deny")
+        # A --output word may itself be the value of the option before it (git 2.55.0: git diff -S --output
+        # --output=/dev/stderr gave the first --output to -S and wrote the patch to stderr), so the word after a
+        # separated --output is read as a diversion too: allowed with a note before, as a file named by it.
+        dexpect("(cnsdif-out-val) a --output=/dev/stderr after a --output that is the -S value denies",
+                "git diff -S --output --output=/dev/stderr", "deny")
+        dexpect("(cnsdif-out-c) two --output diversions to real files allow with a note",
+                "git diff --output=a.txt --output=b.txt", "allow-note")
+        # Under --no-index git's option parser accepts a long option abbreviated to a prefix of exactly one name,
+        # which the revision walk refuses (git 2.55.0: git diff --no-index --stat --unif=3 a b, and the same with
+        # --u, printed the patch; git diff --stat --unif=3 is an invalid option), so an abbreviated --unified is a
+        # patch enabler under the option-parser reading: both allowed with a note before.
+        dexpect("(cnsdif-abbr1) an abbreviated --unif=3 beside --stat under --no-index denies",
+                "git diff --no-index --stat --unif=3 a b", "deny")
+        dexpect("(cnsdif-abbr2) the one-letter abbreviation --u of --unified under --no-index denies",
+                "git diff --no-index --stat --u a b", "deny")
+        # A deliberate relaxation (_CNSDIF_RELAXATIONS): a '--' right after -p, -u or -U ends the options under
+        # both readings, so an option-looking word after it is a pathspec and the real-file redirect proves the
+        # patch lands in f.txt (git 2.55.0 wrote it there and opened no /dev/tty); a9923dbf denied it.
+        dexpect("(cnsdif-relax-eoo-p) a --output pathspec after a -- that follows -p, redirected to a file, allows",
+                "git diff -p -- --output=/dev/tty > f.txt", "allow")
         # The option-parser predicate: a short word ending in a patch letter takes no value (-p and -u take
         # none, -U one only attached, and a letter that is an earlier letter's attached value leaves nothing to
         # take), so a '--' after it ends the options under that reading too; git 2.55.0 read the word after the
@@ -12908,20 +13021,38 @@ def _main_isolated(monitor):
 
     # (cnsdif-base-*) Every console-diff vector decides at least as strictly (deny over allow-note over allow) as
     # its base decision in _CNSDIF_BASE_DECISIONS, and the table names exactly the vectors run, so a vector that
-    # loses a denial the base made, or one added without its base decision, fails.
+    # loses a denial the base made, or one added without its base decision, fails. (cnsdif-relax-*) The only
+    # exceptions are the deliberate relaxations of _CNSDIF_RELAXATIONS, held exact: each makes exactly its
+    # listed decision, records the same base decision as the table, is weaker than that base, and runs.
     _cb_rank = {"allow": 0, "allow-note": 1, "deny": 2}
     for _cb_label, _cb_command, _cb_got in dexpect_seen:
         _cb_base = _CNSDIF_BASE_DECISIONS.get(_cb_command)
+        _cb_relax = _CNSDIF_RELAXATIONS.get(_cb_command)
         if _cb_base is None:
             failures.append("(cnsdif-base-missing) {}: no base decision recorded for {!r}"
                             .format(_cb_label, _cb_command))
+        elif _cb_relax is not None:
+            if _cb_relax[0] != _cb_base:
+                failures.append("(cnsdif-relax-base) {}: the relaxation records base {}, the table {}"
+                                .format(_cb_label, _cb_relax[0], _cb_base))
+            if _cb_got != _cb_relax[1]:
+                failures.append("(cnsdif-relax-decision) {}: decides {}, not the listed relaxation {}"
+                                .format(_cb_label, _cb_got, _cb_relax[1]))
+            if _cb_rank.get(_cb_relax[1], -1) >= _cb_rank.get(_cb_relax[0], -1):
+                failures.append("(cnsdif-relax-not-weaker) {}: the listed decision {} is no weaker than base {}"
+                                .format(_cb_label, _cb_relax[1], _cb_relax[0]))
         elif _cb_rank.get(_cb_got, -1) < _cb_rank[_cb_base]:
             failures.append("(cnsdif-base-weaker) {}: decides {}, less strictly than the base decision {}"
                             .format(_cb_label, _cb_got, _cb_base))
-    _cb_stale = sorted(set(_CNSDIF_BASE_DECISIONS) - {_cb_command for _l, _cb_command, _g in dexpect_seen})
+    _cb_ran = {_cb_command for _l, _cb_command, _g in dexpect_seen}
+    _cb_stale = sorted(set(_CNSDIF_BASE_DECISIONS) - _cb_ran)
     if _cb_stale:
         failures.append("(cnsdif-base-stale) base decisions recorded for commands no vector runs: {!r}"
                         .format(_cb_stale))
+    _cr_stale = sorted(set(_CNSDIF_RELAXATIONS) - _cb_ran)
+    if _cr_stale:
+        failures.append("(cnsdif-relax-stale) relaxations listed for commands no vector runs: {!r}"
+                        .format(_cr_stale))
 
     # === GLOBAL NO-ASK INVARIANT (maintainer directive) =========================================
     # These enforcement hooks must NEVER return permissionDecision "ask": an unattended orchestrator must

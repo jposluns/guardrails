@@ -1545,46 +1545,60 @@ def _diff_parser_ends_options(argv, j):
 _DIFF_OPTION_READINGS = (_diff_ends_options, _diff_parser_ends_options)
 
 
-# git diff/log write the diff to a --output/-o file instead of stdout, so a shell redirect or a pipe is a
-# DECOY when --output is present (proofs C and D must not apply). --output/-o takes a file value, inline
-# (--output=X / -oX) or separated (--output X / -o X).
-def _diff_output_diversion(argv, ends=_diff_ends_options):
-    """Return (present, target) for a git --output/-o diff-output diversion before the end of the options
-    under one reading (ends, one of _DIFF_OPTION_READINGS; the revision-walk one by default), or (False,
-    None). The target decides console vs file: the diff lands there, not on stdout. The callers judge both
-    readings and keep the stricter outcome: a diversion to a console target under either one is a console
-    dump, and a diversion under either one keeps proofs C and D from applying, while a file diversion under
-    one reading never outweighs a console patch under the other. Under the revision-walk reading the scan
-    stops at the first '--', exactly where the revision walk does, and goes on past an '--end-of-options'
-    only right after an option word. Where that option takes a value, git agrees. Where it takes none, git
-    ends the options there and must read the next word as a revision: a word spelled as a diversion names
-    one only through a ref created with that name by git update-ref (git branch and git tag refuse a name
-    starting with '-'), and otherwise git refuses the command (git diff -p --end-of-options
-    --output=real.txt, git 2.55.0). Under the option-parser reading, the one --no-index uses, a '--' right
-    after an option word that may take a value does not end the scan either (_diff_parser_ends_options: git
-    diff --no-index -S -- --output=/dev/stderr a b writes the patch to stderr)."""
+# git diff/log write the diff to a --output file instead of stdout, so a shell redirect or a pipe is a DECOY
+# when --output is present (proofs C and D must not apply). --output takes a file value, inline (--output=X)
+# or separated (--output X), and git writes to the LAST one: git 2.55.0 wrote the patch to stderr and left
+# real.txt empty for git diff --output=real.txt --output=/dev/stderr, for the separated spelling and for both
+# under --no-index. No producer takes -o as a diversion: git 2.55.0 refused -oX for git diff, log, show,
+# diff-tree, diff-index, diff-files and range-diff, and git diff -S -o gave -o to -S and printed the patch on
+# stdout. Every abbreviation of --output begins the --output-indicator-* names too, so git refuses it (git
+# diff --no-index --outp=x: 'ambiguous option'). A -o word is still read for its target, so one naming a
+# console target denies as before, but it never makes stdout a decoy. A --output to a file that is really the
+# value of the option before it still makes stdout a decoy, a disclosed under-read (git diff --line-prefix
+# --output=real.txt prints the patch on stdout, git 2.55.0).
+def _diff_output_diversions(argv, ends=_diff_ends_options):
+    """The (is_output, target) of every diversion word before the end of the options under one reading (ends,
+    one of _DIFF_OPTION_READINGS; the revision-walk one by default), in order: is_output is True for a
+    --output word and False for a -o word, and target is None for a separated value missing at the end. Every
+    word spelled as a diversion counts, the word after a separated --output included, since any of them may
+    be the value of the option before it (git diff -S --output --output=/dev/stderr gives the first --output
+    to -S and writes the patch to stderr). The callers judge both readings and keep the stricter outcome: a
+    console target among the diversions under either one is a console dump, and a diversion under either one
+    keeps proofs C and D from applying, while a file diversion under one reading never outweighs a console
+    patch under the other. Under the revision-walk reading the scan stops at the first '--', exactly where the revision walk does,
+    and goes on past an '--end-of-options' only right after an option word. Where that option takes a value,
+    git agrees. Where it takes none, git ends the options there and must read the next word as a revision: a
+    word spelled as a diversion names one only through a ref created with that name by git update-ref (git
+    branch and git tag refuse a name starting with '-'), and otherwise git refuses the command (git diff -p
+    --end-of-options --output=real.txt, git 2.55.0). Under the option-parser reading, the one --no-index uses,
+    a '--' right after an option word that may take a value does not end the scan either
+    (_diff_parser_ends_options: git diff --no-index -S -- --output=/dev/stderr a b writes the patch to
+    stderr)."""
     end = len(argv)
     for j in range(len(argv)):
         if ends(argv, j):
             end = j
             break
+    found = []
     i = 0
     while i < end:
         word = argv[i]
-        if word in ("--output", "-o"):
-            return True, (argv[i + 1] if i + 1 < len(argv) else None)
-        if word.startswith("--output="):
-            return True, word[len("--output="):]
-        if word.startswith("-o") and not word.startswith("--") and len(word) > 2:
-            return True, word[2:]
+        if word == "--output":
+            found.append((True, argv[i + 1] if i + 1 < len(argv) else None))
+        elif word.startswith("--output="):
+            found.append((True, word[len("--output="):]))
+        elif word == "-o":
+            found.append((False, argv[i + 1] if i + 1 < len(argv) else None))
+        elif word.startswith("-o") and len(word) > 2:
+            found.append((False, word[2:]))
         i += 1
-    return False, None
+    return found
 
 
 def _diff_any_diversion(argv):
-    """True when a --output/-o diversion is found under either option reading (_DIFF_OPTION_READINGS), so
-    the shell redirect or pipe may be a decoy and proofs C and D, which trust stdout, do not apply."""
-    return any(_diff_output_diversion(argv, ends)[0] for ends in _DIFF_OPTION_READINGS)
+    """True when a --output or -o word is found under either option reading (_DIFF_OPTION_READINGS), so the
+    shell redirect or pipe may be a decoy and proofs C and D, which trust stdout, do not apply."""
+    return any(_diff_output_diversions(argv, ends) for ends in _DIFF_OPTION_READINGS)
 
 
 def _final_stdout_dest(redirects):
@@ -1607,6 +1621,10 @@ def _final_stdout_dest(redirects):
 # residual (the guard cannot see whether the ref is a merge), not chased here. -U is an enabler whatever its
 # attached value (`-U`, `-U3`); git rejects the separated `-U 3` form outright, so no separated value is skipped.
 _SUMMARY_PATCH_SHORT = frozenset(("p", "u", "U"))
+# The long patch-enabling names of git's diff options (_GIT_LONG_OPTS["diff --no-index"]), the --patch* and
+# --unified* family _SHOW_LONG_PATCH_PREFIXES matches as spelled, which an abbreviation resolves to under the
+# option-parser reading (_argv_has_patch_enabler).
+_DIFF_LONG_PATCH_NAMES = frozenset(("patch", "patch-with-raw", "patch-with-stat", "unified"))
 
 
 def _argv_has_patch_enabler(argv, ends=_diff_ends_options):
@@ -1629,7 +1647,13 @@ def _argv_has_patch_enabler(argv, ends=_diff_ends_options):
     on past it, which can only find an enabler more often. Under the option-parser reading, the one
     --no-index uses, a '--' right after an option word that may take a value does not end it either
     (_diff_parser_ends_options: git diff --no-index --stat --word-diff-regex -- -p a b prints the patch, git
-    2.55.0). A listed value-taking option consumes its separated value before that test, a '--' included."""
+    2.55.0). A listed value-taking option consumes its separated value before that test, a '--' included.
+    That option parser also accepts a long option abbreviated to a prefix of exactly one of its names, which
+    git's revision walk refuses (git diff --stat --unif=3: 'invalid option'), so under that reading a long
+    word git resolves to a patch enabler (_git_long_option, _DIFF_LONG_PATCH_NAMES) is one too: git diff
+    --no-index --stat --unif=3 a b, and the same with --u, prints the patch (git 2.55.0). An abbreviated
+    value-taking option is not read as consuming its value under either reading, so the word after it is
+    still judged, which can only find an enabler more often."""
     i = 0
     n = len(argv)
     while i < n:
@@ -1643,6 +1667,9 @@ def _argv_has_patch_enabler(argv, ends=_diff_ends_options):
             base = tok.split("=", 1)[0]
             if any(base.startswith(p) for p in _SHOW_LONG_PATCH_PREFIXES):
                 return True                      # --patch* / --unified* long enabler
+            if (ends is _diff_parser_ends_options
+                    and _git_long_option("diff --no-index", tok) in _DIFF_LONG_PATCH_NAMES):
+                return True                      # an abbreviated enabler git's option parser resolves
             if base in _SHOW_LONG_REQ_VALUE:
                 i += 1 if "=" in tok else 2      # skip a recognized required-value option's separated value
                 continue
@@ -1714,11 +1741,14 @@ def _is_console_dump(seg, segments, index):
     (a literal 'git' or a path to it, so an opaque/expansion command word this guard cannot resolve is never
     a confirmed dump - it routes to ASK instead), it is a git diff producer, it does not emit only a summary
     listing, and its output is proven to reach a console. When the producer diverts its output with
-    --output/-o, THAT target decides (a /dev,/proc console target is a dump; a file or dynamic target is not
-    a confirmed dump, so it ASKS) and any shell redirect or pipe is a decoy. Otherwise stdout governs. The
-    option region is read under both readings (_DIFF_OPTION_READINGS), each judged on its own, and a console
-    patch under either one is a dump. Used only to choose DENY over ASK; its absence never establishes an
-    ALLOW."""
+    --output, the diversion targets decide (_diff_output_diversions): a /dev,/proc console target among them is
+    a dump, since git writes to the last one and a word spelled as one may be the value of the option before
+    it, so the guard cannot tell which one git reads last; with none, the diff goes to a file or dynamic
+    target, which is not a confirmed dump, so it ASKS, and any shell redirect or pipe is a decoy. A -o word
+    diverts nothing (no producer takes one), so it decides only through a console target. Otherwise stdout
+    governs. The option region is read under both readings (_DIFF_OPTION_READINGS), each judged on its own,
+    and a console patch under either one is a dump. Used only to choose DENY over ASK; its absence never
+    establishes an ALLOW."""
     if _command_word(seg.argv) != "git":
         return False  # an opaque/wrapped command word is not a proven git dump -> ASK, never DENY
     if not _is_diff_producer(seg.argv):
@@ -1726,12 +1756,11 @@ def _is_console_dump(seg, segments, index):
     for ends in _DIFF_OPTION_READINGS:
         if _diff_emits_only_summary(seg.argv, ends):
             continue
-        diverted, out_target = _diff_output_diversion(seg.argv, ends)
-        if diverted:
-            # the diff is written to the --output target, not stdout; the shell redirect/pipe is a decoy
-            if out_target is not None and _target_class(out_target, False) == "file-dev":
-                return True
-            continue
+        diversions = _diff_output_diversions(seg.argv, ends)
+        if any(target is not None and _target_class(target, False) == "file-dev" for _o, target in diversions):
+            return True
+        if any(is_output for is_output, _target in diversions):
+            continue  # the diff is written to an --output file, not stdout; the shell redirect/pipe is a decoy
         if _seg_stdout_reaches_console(seg, segments, index) == "console":
             return True
     return False
@@ -1858,7 +1887,7 @@ def _diff_proof_realfile(segments):
     if not _is_possible_producer(seg):
         return False
     if _diff_any_diversion(seg.argv):
-        return False  # --output/-o governs where the diff lands; the shell redirect is a decoy
+        return False  # --output governs where the diff lands (a -o word too, read safe); the redirect is a decoy
     return _final_stdout_dest(seg.redirects) == "file-real"
 
 
@@ -1877,7 +1906,7 @@ def _diff_proof_pager(segments):
     if not stage1.argv or stage1.argv[0] != "git" or not _is_possible_producer(stage1):
         return False
     if _diff_any_diversion(stage1.argv):
-        return False  # --output/-o diverts the diff off the pipe; the pager is a decoy
+        return False  # --output diverts the diff off the pipe (a -o word too, read safe); the pager is a decoy
     if stage2.redirects or stage2.opaque_shell:
         return False
     return len(stage2.argv) == 1 and stage2.argv[0] in _PAGERS
@@ -3112,6 +3141,68 @@ def _has_long_prefix(tokens, full):
     return False
 
 
+# The long options git 2.55's option parser reads for each command whose reading here resolves a long option
+# word to its name (_git_long_option), as git <command> --git-completion-helper-all lists them, the negated
+# --no- names included; "diff --no-index" is the git diff list plus --no-index itself, the options git's option
+# parser reads under --no-index. git accepts a long option spelled in full or abbreviated to a prefix that
+# begins exactly one listed name, and refuses a prefix that begins several (git reset --pathspec-f: "ambiguous
+# option: pathspec-f (could be --pathspec-from-file or --pathspec-file-nul)"), so a reading that decides from a
+# word matched only in full misses the abbreviation git runs: git reset --pathspec-from --soft reads its
+# pathspecs from a file named --soft and does a mixed reset of the paths it lists (git 2.55.0). Every prefix of
+# every listed name was run through git 2.55.0 and resolved as _git_long_option resolves it.
+_GIT_LONG_OPTS = {
+    "reset": frozenset((
+        "auto-advance", "hard", "intent-to-add", "inter-hunk-context", "keep", "merge", "mixed",
+        "no-auto-advance", "no-intent-to-add", "no-patch", "no-pathspec-file-nul", "no-pathspec-from-file",
+        "no-quiet", "no-recurse-submodules", "no-refresh", "patch", "pathspec-file-nul",
+        "pathspec-from-file", "quiet", "recurse-submodules", "refresh", "soft", "unified")),
+    "restore": frozenset((
+        "conflict", "ignore-skip-worktree-bits", "ignore-unmerged", "inter-hunk-context", "merge",
+        "no-conflict", "no-ignore-skip-worktree-bits", "no-ignore-unmerged", "no-merge", "no-overlay",
+        "no-patch", "no-pathspec-file-nul", "no-pathspec-from-file", "no-progress", "no-quiet",
+        "no-recurse-submodules", "no-source", "no-staged", "no-worktree", "ours", "overlay", "patch",
+        "pathspec-file-nul", "pathspec-from-file", "progress", "quiet", "recurse-submodules", "source",
+        "staged", "theirs", "unified", "worktree")),
+    "rm": frozenset((
+        "cached", "dry-run", "force", "ignore-unmatch", "no-cached", "no-dry-run", "no-force",
+        "no-ignore-unmatch", "no-pathspec-file-nul", "no-pathspec-from-file", "no-quiet", "no-sparse",
+        "pathspec-file-nul", "pathspec-from-file", "quiet", "sparse")),
+    "diff --no-index": frozenset((
+        "abbrev", "anchored", "binary", "break-rewrites", "check", "color", "color-moved", "color-moved-ws",
+        "color-words", "compact-summary", "cumulative", "default-prefix", "diff-algorithm", "diff-filter",
+        "dirstat", "dirstat-by-file", "dst-prefix", "exit-code", "ext-diff", "find-copies",
+        "find-copies-harder", "find-object", "find-renames", "follow", "full-index", "function-context",
+        "histogram", "ignore-all-space", "ignore-blank-lines", "ignore-cr-at-eol", "ignore-matching-lines",
+        "ignore-space-at-eol", "ignore-space-change", "ignore-submodules", "indent-heuristic",
+        "inter-hunk-context", "irreversible-delete", "ita-invisible-in-index", "ita-visible-in-index",
+        "line-prefix", "max-depth", "minimal", "name-only", "name-status", "no-abbrev", "no-color",
+        "no-color-moved", "no-color-moved-ws", "no-compact-summary", "no-exit-code", "no-ext-diff",
+        "no-find-copies-harder", "no-follow", "no-full-index", "no-function-context",
+        "no-ignore-matching-lines", "no-indent-heuristic", "no-index", "no-patch", "no-prefix", "no-quiet",
+        "no-relative", "no-rename-empty", "no-renames", "no-text", "no-textconv", "numstat", "output",
+        "output-indicator-context", "output-indicator-new", "output-indicator-old", "patch",
+        "patch-with-raw", "patch-with-stat", "patience", "pickaxe-all", "pickaxe-regex", "quiet", "raw",
+        "relative", "rename-empty", "rotate-to", "shortstat", "skip-to", "src-prefix", "stat", "stat-count",
+        "stat-graph-width", "stat-name-width", "stat-width", "submodule", "summary", "text", "textconv",
+        "unified", "word-diff", "word-diff-regex", "ws-error-highlight")),
+}
+
+
+def _git_long_option(command, word):
+    """The listed name (_GIT_LONG_OPTS[command]) git's option parser resolves the long option word to, the
+    part before any '=' compared: the name it spells in full, else the one name it begins. None when word is
+    no long option, or begins several names or none: git refuses the command then (an ambiguous or unknown
+    option), so the word decides nothing."""
+    if not word.startswith("--") or word == "--":
+        return None
+    name = word[2:].split("=", 1)[0]
+    names = _GIT_LONG_OPTS[command]
+    if name in names:
+        return name
+    hits = [full for full in names if full.startswith(name)]
+    return hits[0] if len(hits) == 1 else None
+
+
 # --- the one probe kept: the coarse whole-tree clean signal ------------------------------------------
 
 # The ambient git environment could redirect a real-state git call (the clean probe, the recovery
@@ -3424,10 +3515,13 @@ def _reset_role(args):
     --pathspec-from-file list --hard, with an empty list file, reset the whole tree --hard, and with a
     listed path stopped with 'Cannot do hard reset with paths'), so that reset is a clobber, and the same
     with --soft moves HEAD only. The separated value of --pathspec-from-file names the file, never a mode,
-    so it is skipped (git reset --pathspec-from-file --hard reads the file named --hard and resets the paths
-    it lists, mixed); the value of an abbreviated spelling is read like any word, which can only find a mode
-    more often. A pathspec-file reset with no mode, the default mixed reset of the listed paths, stays
-    scoped."""
+    so it is skipped, in every spelling git resolves to that option (_git_long_option: git reset
+    --pathspec-from-file --hard and git reset --pathspec-from --hard each read the file named --hard and
+    reset the paths it lists, mixed, and git reset --pathspec-from --soft, with a staged change to a path the
+    file named --soft lists, unstaged it, git 2.55.0; reading that value as a mode let it allow as --soft). A
+    prefix that begins several reset options (--pathspec-f, --pa) is refused by git, so it is no
+    --pathspec-from-file and its next word is read like any word. A pathspec-file reset with no mode, the
+    default mixed reset of the listed paths, stays scoped."""
     pre, _post, _had_sep = _split_pre_post(args, lambda word: _discard_takes_value("reset", word))
     pathspec_file = False
     mode = None  # "clobber" / "soft" / "scoped"
@@ -3436,9 +3530,9 @@ def _reset_role(args):
         if skip_value:
             skip_value = False
             continue  # the separated --pathspec-from-file value names the file, never a mode
-        if a == "--pathspec-from-file" or a.startswith("--pathspec-from-file="):
+        if _git_long_option("reset", a) == "pathspec-from-file":
             pathspec_file = True
-            skip_value = a == "--pathspec-from-file"
+            skip_value = "=" not in a
             continue
         if not (a.startswith("--") and "=" not in a):
             continue
@@ -3891,13 +3985,17 @@ def _discard_index_only(sub, args):
     --hard/--merge/--keep (the default/mixed reset touches the index only; --hard/--merge/--keep update the
     worktree); rm --cached (index-only removal). checkout/switch/clean and every other form touch the
     worktree. A '--' that is the value of a value-taking option of the verb (_discard_takes_value) does not
-    end the options: git restore -S --pathspec-from-file -- -W restores the worktree too."""
+    end the options: git restore -S --pathspec-from-file -- -W restores the worktree too. The worktree-touching
+    long options count in every spelling git resolves to them (_git_long_option): git restore --staged --work
+    restores the worktree too, and git rm --cached --no-cached removes the worktree file, its last spelling
+    deciding (git 2.55.0). The index-only spellings stay exact: an abbreviated --staged or --cached reads as
+    touching the worktree, a safe-direction over-read."""
     pre, _post, _had = _split_pre_post(args, lambda word: _discard_takes_value(sub, word))
     if sub == "restore":
         staged = any(a == "--staged" or (a.startswith("-") and not a.startswith("--") and "S" in a[1:])
                      for a in pre)
-        worktree = any(a == "--worktree" or (a.startswith("-") and not a.startswith("--") and "W" in a[1:])
-                       for a in pre)
+        worktree = any(_git_long_option("restore", a) == "worktree"
+                       or (a.startswith("-") and not a.startswith("--") and "W" in a[1:]) for a in pre)
         return staged and not worktree
     if sub == "reset":
         for a in pre:
@@ -3908,7 +4006,13 @@ def _discard_index_only(sub, args):
                     return False
         return True                                    # default/mixed reset: index-only
     if sub == "rm":
-        return any(a == "--cached" for a in pre)       # --cached: index-only removal (strict, fail-closed)
+        cached = False
+        for a in pre:
+            if a == "--cached":
+                cached = True                          # --cached: index-only removal (strict, fail-closed)
+            elif _git_long_option("rm", a) == "no-cached":
+                cached = False                         # a later --no-cached removes the worktree file too
+        return cached
     return False                                       # checkout/switch/clean/etc. touch worktree content
 
 
