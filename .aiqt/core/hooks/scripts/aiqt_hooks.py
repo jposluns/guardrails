@@ -13710,21 +13710,22 @@ def citation_read_recorder(data):
 # records and of the range against the rows of its file (ledgers within their bound); the parse of a diff
 # probe's output (what git printed in the time it was given); the lexing of the command and the parse of
 # its here-documents, once each, at whatever size the payload gives them, with the join of a body file or
-# git -C path to the directory it is relative to; for a command that holds a backslash-newline, the search
-# of its text for a here-document delimiter one splits; for a command that does not lex, the search of its
-# text for arithmetic expansions and for here-documents with an unquoted delimiter; the split of each text
-# into lines before its scan (at the text's size); and the orchestration registry read that locates the
-# state directory (read whole, as every hook here reads it) and the guard-events append. A command's
+# git -C path to the directory it is relative to; for a command that lexes and holds a backslash-newline,
+# the search of its text for a here-document delimiter one splits, and one further lexing of the command
+# for each such delimiter, at most _CITECHK_SPLIT_PROBES; for a command that does not lex, the search of
+# its text for arithmetic expansions and for here-documents with an unquoted delimiter; the split of each
+# text into lines before its scan (at the text's size); and the orchestration registry read that locates
+# the state directory (read whole, as every hook here reads it) and the guard-events append. A command's
 # standard input (-F -) is the here-document bash gives it, its last standard-input redirection (a later
 # one that duplicates fd 0 onto itself, such as <&0, leaves it), read once however many -F - options name
 # it; where that redirection is no here-document of the command, standard input is named as not read (so
 # is a here-document moved there through another descriptor, as in <<'A' 3<&0 <&3, which bash gives the
-# command: a note, never a hidden citation). A command that does not lex, or whose here-document delimiter
-# a backslash-newline splits and bash reads as unquoted, is scanned as written, and the expansion of each
-# here-document with an unquoted delimiter in it is named as not read. A command is found after the
-# reserved words that begin its segment, so one in a brace group, after '!', 'if' or 'then', or after
-# time -- or coproc is read. Each text is scanned once, in the order the command's options name it, and a
-# cited or body-file path longer than _CITECHK_PATH_SHOWN characters is shown in the note and the row
+# command: a note, never a hidden citation). A command that does not lex, or whose lexing reaches a
+# here-document delimiter that a backslash-newline splits, quoted or not, is scanned as written, and the
+# expansion of each here-document with an unquoted delimiter in it is named as not read. A command is found
+# after the reserved words that begin its segment, so one in a brace group, after '!', 'if' or 'then', or
+# after time -- or coproc is read. Each text is scanned once, in the order the command's options name it,
+# and a cited or body-file path longer than _CITECHK_PATH_SHOWN characters is shown in the note and the row
 # shortened to that many characters (_citechk_short).
 _CITECHK_BODY_MAX = 1024 * 1024          # a message or body file larger than this is not read (noted)
 _CITECHK_LEDGER_MAX = 2 * _CITE_CAP      # a ledger generation larger than this is not read (noted)
@@ -13733,6 +13734,7 @@ _CITECHK_MAX_FILES = 50                  # at most this many distinct cited file
 _CITECHK_READ_MAX = 64 * 1024 * 1024     # at most this many bytes of cited files are read per Bash call
 _CITECHK_SHOWN = 10                      # at most this many ranges are listed in the note
 _CITECHK_PATH_SHOWN = 200                # at most this many characters of a cited or body-file path are shown
+_CITECHK_SPLIT_PROBES = 8                # at most this many split here-document delimiters are tried per command
 _CITECHK_BUDGET = 6.0                    # seconds for every probe, read and digest of a call (hook timeout 10)
 _CITECHK_HEAD = "AIQT guardrail (rules citint/refcap, BAKE: warning only, nothing is blocked): "
 _CITECHK_OUT_OF_TIME = "the check ran out of its time budget"
@@ -13750,8 +13752,8 @@ _CITECHK_EXPANDED = ("its delimiter is unquoted, so bash expands parameters, com
 # if git commit, then, elif, else, while, until, do, time and coproc): passed over to the command, with
 # time's -p and a '--' after time or its -p, and with coproc's NAME where bash reads one, before a compound
 # command (_CITECHK_COMPOUND; coproc NAME git commit runs NAME). The words are lexed, so a quoted spelling
-# ('{'), which bash runs as a command name, is passed over too. A command in a function definition
-# (f() { git commit ...; }) is read, although defining the function runs nothing.
+# ('{', or time's '-p' or '--'), which bash runs as a command name, is passed over too. A command in a
+# function definition (f() { git commit ...; }) is read, although defining the function runs nothing.
 _CITECHK_LEADING = frozenset(("{", "!", "if", "then", "elif", "else", "while", "until", "do", "time", "coproc"))
 # The words that begin a compound command, before which bash reads the word after coproc as its NAME ('(' and
 # '((' end a segment here, so the command inside them begins its own).
@@ -13901,15 +13903,20 @@ def _citechk_read_body(path, deadline):
 
 
 def _citechk_arith_spans(text):
-    """The (start, end) spans of the arithmetic expansions $((...)) in text that hold no quote, backslash or
-    backtick (whose parentheses this count does not follow as bash does) and no $( (a command substitution,
-    inside which a '<<' can be a here-document), each closing with '))': a '$((' that closes otherwise, as in
-    $((cat) ), bash reads as a command substitution of a subshell. Bash reads a '<<' inside such a span as a
-    shift, never as a here-document. A scan stops at the next '$(', so the text is read about once."""
+    """The (start, end) spans of the arithmetic expansions $((...)) in text that hold no newline, quote,
+    backslash or backtick (whose parentheses this count does not follow as bash does) and no $( (a command
+    substitution, inside which a '<<' can be a here-document), each closing with '))' on the line it opens:
+    a '$((' that closes otherwise, as in $((cat) ), bash reads as a command substitution of a subshell.
+    Bash reads a '<<' inside such a span as a shift. The '$((' is not checked to be one bash expands: one in
+    a comment or in a line of a quoted here-document's body is text, and so is a '<<' after it on that
+    line, but a span from it that ran across a newline could reach a real here-document operator on a later
+    line. So a span ends at a newline, and the '<<' of an arithmetic expansion that spans lines is not
+    passed over (it is named: a note the command did not earn, never a hidden citation). A scan stops at the
+    next '$(', so the text is read about once."""
     spans, at, n = [], text.find("$(("), len(text)
     while at != -1:
         depth, k, end = 2, at + 3, at + 3
-        while k < n and text[k] not in "'\"`\\" and not text.startswith("$(", k):
+        while k < n and text[k] not in "'\"`\\\n" and not text.startswith("$(", k):
             if text[k] == "(":
                 depth += 1
             elif text[k] == ")":
@@ -13940,16 +13947,17 @@ def _citechk_operators(text):
 
 def _citechk_expanded_heredocs(command):
     """The delimiters, in order, of the here-documents whose delimiter is unquoted in command, a command that
-    does not lex or whose delimiter a backslash-newline splits (_citechk_split_delim): each '<<' or '<<-'
-    whose delimiter word _parse_heredoc_delim reads as unquoted (a here-string's '<<<' has none, its third
-    '<' being no word), found in the text with each backslash-newline removed (bash removes it before it
-    reads the operator, so '<\\', a newline and '<EOF' is one too). Found in the text as written, not lexed,
-    so an operator that bash does not read as one, inside quotes or a comment, for example, is named too
-    where the word after it reads as an unquoted delimiter ("x <<EOF y" in double quotes); where that word
-    runs into the closing quote it does not parse and none is named ('x <<EOF', whose closing quote opens a
-    quote that does not close), and bash reads no here-document there. A '<<' inside an arithmetic
-    expansion $((...)) that holds no quote, backslash, backtick or $( is a shift and is passed over
-    (_citechk_operators); one in another arithmetic form, ((x<<2)), let or $[...], is named."""
+    does not lex or whose lexing reaches a here-document delimiter that a backslash-newline splits
+    (_citechk_split_delim): each '<<' or '<<-' whose delimiter word _parse_heredoc_delim reads as unquoted
+    (a here-string's '<<<' has none, its third '<' being no word), found in the text with each
+    backslash-newline removed (bash removes it before it reads the operator, so '<\\', a newline and '<EOF'
+    is one too). Found in the text as written, not lexed, so an operator that bash does not read as one,
+    inside quotes or a comment, for example, is named too where the word after it reads as an unquoted
+    delimiter ("x <<EOF y" in double quotes); where that word runs into the closing quote it does not parse
+    and none is named ('x <<EOF', whose closing quote opens a quote that does not close), and bash reads no
+    here-document there. A '<<' inside an arithmetic expansion $((...)) that holds no newline, quote,
+    backslash, backtick or $( is a shift and is passed over (_citechk_operators); one in a $((...)) that
+    spans lines, or in another arithmetic form, ((x<<2)), let or $[...], is named."""
     text, out = command.replace("\\\n", ""), []
     for at in _citechk_operators(text):
         parsed = _parse_heredoc_delim(text, at + 2, len(text))
@@ -13959,32 +13967,35 @@ def _citechk_expanded_heredocs(command):
 
 
 def _citechk_split_delim(command):
-    """Whether a '<<' or '<<-' in command has a delimiter word that a backslash-newline splits and that reads
-    as unquoted once each backslash-newline is removed, as bash removes them before it reads the word: for
-    <<E\\, a newline and OF, bash reads the unquoted delimiter EOF and expands the body. _parse_heredoc_delim,
-    which the lexer uses, reads that backslash as quoting the newline, so the command lexes with the body
-    taken as literal, and since the delimiter it reads holds that newline, which no line can, the body runs
-    to the end of the command, later commands included. The operators are those _citechk_expanded_heredocs
-    finds, each at its place in the text as written; a split delimiter that bash reads as quoted (<<E\\, a
-    newline and 'OF') is not one."""
+    """Whether lexing command, a command that lexes, reaches a '<<' or '<<-' whose delimiter word, as
+    _parse_heredoc_delim reads it, holds a backslash-newline, quoted or not. Bash removes each
+    backslash-newline outside single quotes before it reads the word: for <<E\\, a newline and OF it reads
+    the unquoted delimiter EOF and expands the body, and for <<E\\, a newline and 'OF', <<$\\, a newline and
+    'EOF', <<"E"\\, a newline and OF, or <<"E\\, a newline and OF" it reads the quoted EOF.
+    _parse_heredoc_delim, which the lexer uses, reads that backslash as quoting the newline (inside double
+    quotes it keeps both), so the delimiter it reads holds a newline, which no line can: the body runs to the
+    end of the command, and a later command in it gives no item. A backslash-newline inside single quotes
+    ('E\\, a newline and OF'), which bash keeps, counts too, although bash also runs that body to the end (a
+    note the command did not earn, never a hidden citation), and so does a '<<' inside $((...)), which the
+    lexer reads as an operator. Whether the lexer reaches a '<<' is found by lexing command again with that
+    '<<' made '<(', which the lexer refuses where it reads it as an operator; it passes over text inside
+    quotes, a comment or a here-document's body, so a look-alike there does not count (where the change
+    makes a line close a here-document that it did not, the command can count: a note it did not earn). At
+    most _CITECHK_SPLIT_PROBES such operators are tried, and a command with more counts."""
     if "\\\n" not in command:
         return False
-    joins, k = [], command.find("\\\n")
-    while k != -1:
-        joins.append(k - 2 * len(joins))  # where the backslash-newline was, in the text without them
-        k = command.find("\\\n", k + 2)
-    text, j = command.replace("\\\n", ""), 0
-    for at in _citechk_operators(text):
-        while j < len(joins) and joins[j] <= at:
-            j += 1
-        start = at + 2 * j  # the operator's index in command
-        if not command.startswith("<<", start):
-            continue  # '<', a backslash-newline and '<': no '<<' for the lexer, which does not lex such a command
-        parsed = _parse_heredoc_delim(command, start + 2, len(command))
-        if parsed is not None and "\\\n" in command[start + 2:parsed[3]]:
-            joined = _parse_heredoc_delim(text, at + 2, len(text))
-            if joined is not None and not joined[0]:
+    tried, at = 0, command.find("<<")
+    while at != -1:
+        parsed = _parse_heredoc_delim(command, at + 2, len(command))
+        if parsed is not None and "\\\n" in command[at + 2:parsed[3]]:
+            if tried == _CITECHK_SPLIT_PROBES:
                 return True
+            tried += 1
+            try:
+                _lex_command(command[:at] + "<(" + command[at + 2:])
+            except ValueError:
+                return True  # the lexer reads this '<<' as an operator
+        at = command.find("<<", at + 1)  # one on, so the operator after an escaped '<' (\<<<) is tried too
     return False
 
 
@@ -14000,26 +14011,26 @@ def _citechk_commands(command, cwd, deadline):
     gh-pr-create or gh-pr-edit), parse ("lexed", or "raw" where the command does not lex and its whole text
     is scanned as body text), texts [(label, text)] in the order the command's options name them, unread
     [(label, reason)], repo (the directory the command runs in, after a git -C; None without an absolute
-    session cwd) and base (a gh --base value). A command with a here-document delimiter that a
-    backslash-newline splits and that bash reads as unquoted (_citechk_split_delim) is not lexed and is
-    scanned as one that does not lex: the lexer would take that body as literal and run it to the end of
-    the command. A raw command names, as not read, the expansion of each here-document with an unquoted
-    delimiter that its text shows (_citechk_expanded_heredocs): bash expands parameters, command
-    substitutions and arithmetic in such a body, and the scan saw only the text as written. A command is
-    found after any reserved words that begin its segment (_CITECHK_LEADING), so one inside a brace group,
-    after '!', 'if' or 'then', or after time -- or coproc is read; a redirection of the group as a whole
-    (after its '}') is not the command's own. A message or body file resolves against repo and is read by
-    _citechk_read_body within the check's deadline. "-" is standard input, one stream however many -F -
-    options name it, so it is taken once, at the first: the body of the here-document bash gives the
-    command, which is its last standard-input redirection (_lex_command; a later <&0 that duplicates fd 0
-    onto itself leaves it), and otherwise, where that last redirection is a file, a descriptor or none of
-    the command's own (a pipe, or a redirection of its group, for example), named as unseen. A
-    here-document is read only by the command it redirects."""
+    session cwd) and base (a gh --base value). A command whose lexing reaches a here-document delimiter
+    that a backslash-newline splits, quoted or not (_citechk_split_delim), is scanned as one that does not
+    lex: the lexer reads a delimiter that no line can match there and runs that body to the end of the
+    command, later commands included. A raw command names, as not read, the expansion of each
+    here-document with an unquoted delimiter that its text shows (_citechk_expanded_heredocs): bash expands
+    parameters, command substitutions and arithmetic in such a body, and the scan saw only the text as
+    written. A command is found after any reserved words that begin its segment (_CITECHK_LEADING), so one
+    inside a brace group, after '!', 'if' or 'then', or after time -- or coproc is read; a redirection of
+    the group as a whole (after its '}') is not the command's own. A message or body file resolves against
+    repo and is read by _citechk_read_body within the check's deadline. "-" is standard input, one stream
+    however many -F - options name it, so it is taken once, at the first: the body of the here-document
+    bash gives the command, which is its last standard-input redirection (_lex_command; a later <&0 that
+    duplicates fd 0 onto itself leaves it), and otherwise, where that last redirection is a file, a
+    descriptor or none of the command's own (a pipe, or a redirection of its group, for example), named as
+    unseen. A here-document is read only by the command it redirects."""
     heredocs = []
     try:
-        if _citechk_split_delim(command):
-            raise ValueError("a here-document delimiter split by a backslash-newline, which bash reads unquoted")
         segments = _lex_command(command, heredocs=heredocs)
+        if _citechk_split_delim(command):
+            raise ValueError("a here-document delimiter split by a backslash-newline, which the lexer misreads")
     except ValueError:
         hits = sorted((found.start(), kind) for regex, kind in _CITECHK_RAW_KINDS
                       for found in [regex.search(command)] if found)

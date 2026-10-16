@@ -4456,13 +4456,13 @@ def _citecheck_step_cases(tmp):
     command reads only the here-document its own standard input receives (bash gives it the last of its
     standard-input redirections, and a later one of fd 0 onto itself leaves it), its sources keep their
     option order in the note, the row and under the citation cap, and where its standard input is not its
-    own here-document it is named as not read. A command that does not lex, or whose here-document
-    delimiter a backslash-newline splits and bash reads as unquoted, names the expansion of each
-    here-document with an unquoted delimiter as not read (a shift inside $((...)) is none), and a command is
-    read after the reserved words that begin its segment (a brace group's '{', '!', 'if', 'then', 'do',
-    'time -p', 'time --', 'coproc'). The scan of a message stops at the deadline: a stand-in pattern moves
-    the clock on at line 2 of the masking or of the search, line 3 is not scanned, and the note says no
-    citation was checked, naming the budget."""
+    own here-document it is named as not read. A command that does not lex, or whose lexing reaches a
+    here-document delimiter that a backslash-newline splits, quoted or not, is scanned as written and names
+    the expansion of each here-document with an unquoted delimiter as not read (a shift inside a one-line
+    $((...)) is none), and a command is read after the reserved words that begin its segment (a brace
+    group's '{', '!', 'if', 'then', 'do', 'time -p', 'time --', 'coproc'). The scan of a message stops at
+    the deadline: a stand-in pattern moves the clock on at line 2 of the masking or of the search, line 3
+    is not scanned, and the note says no citation was checked, naming the budget."""
     steps = _CiteRepo(tmp / "citecheck-steps", {"tools/a.py": b"a1\na2\n", "msg.txt": b"see tools/a.py:1\n",
                                                 "a.txt": b"a1\n", "b.txt": b"b1\n"}, links=(("tools/l.py", "a.py"),))
     root, budget = steps.top, aiqt_hooks._CITECHK_BUDGET
@@ -4639,9 +4639,12 @@ def _citecheck_step_cases(tmp):
     # <<- form; an operator split by a backslash-newline, which bash joins; and two such here-documents, each
     # named. A here-string, and a quoted here-document in a command that does not lex for a process
     # substitution, name none. A '<<' inside $((...)) is a shift and is not named, while one inside a
-    # $((...) ) that bash reads as a command substitution of a subshell is a here-document and is named. The
-    # operators are found without lexing: inside single quotes, as in 'x <<EOF', the closing quote leaves no
-    # delimiter and none is named, while "x <<EOF y" in double quotes is named.
+    # $((...) ) that bash reads as a command substitution of a subshell is a here-document and is named. A
+    # '$((' that bash does not expand, in a comment or in a quoted here-document's body, does not hide a
+    # here-document with an unquoted delimiter on a later line before a later '))': its expansion is named.
+    # A $((...)) that spans lines is not passed over, so its '<<' is named (a note the command did not
+    # earn). The operators are found without lexing: inside single quotes, as in 'x <<EOF', the closing
+    # quote leaves no delimiter and none is named, while "x <<EOF y" in double quotes is named.
     reason = ("its delimiter is unquoted, so bash expands parameters, command substitutions and arithmetic in its "
               "body, and the command does not lex, so only its text as written was scanned")
     unquoted = {}
@@ -4654,6 +4657,10 @@ def _citecheck_step_cases(tmp):
                           ("quoted", "cat <(true); git commit -F - <<'EOF'\nsee tools/a.py:1\nEOF\n"),
                           ("arith", "x=$((1<<2)); git commit -F - <<A\nsee tools/a.py:1\nA\n"),
                           ("arith-subshell", "echo $((cat <<B\nx\nB\n) ); git commit -F - <<A\nsee tools/a.py:1\nA\n"),
+                          ("arith-comment", "# $((x\ngit commit -F - <<A\nsee tools/${F}.py:1\nA\n# ))"),
+                          ("arith-quoted-body", "cat <<'Q'\nuse $((n\nQ\ngit commit -F - <<A\nsee tools/${F}.py:1\n"
+                                                "A\n# ))"),
+                          ("arith-lines", "x=$((1 <<A\n)); git commit -m 'see tools/a.py:1'"),
                           ("in-single-quotes", "git commit -m 'see tools/a.py:1 <<EOF' <(true)"),
                           ("in-double-quotes", "git commit -m \"see tools/a.py:1 <<EOF y\" <(true)")):
         verdict, note, rows = _citecheck_run(steps.root, command, "unquoted-" + name)
@@ -4673,30 +4680,65 @@ def _citecheck_step_cases(tmp):
            "quoted": ("warn", [("raw", ["tools/a.py:1"], ["command text"], [])], False),
            "arith": ("warn", [("raw", ["tools/a.py:1"], ["command text"], named("A"))], True),
            "arith-subshell": ("warn", [("raw", ["tools/a.py:1"], ["command text"], named("B", "A"))], True),
+           "arith-comment": ("warn", [("raw", [], ["command text"], named("A"))], True),
+           "arith-quoted-body": ("warn", [("raw", [], ["command text"], named("A"))], True),
+           "arith-lines": ("warn", [("raw", ["tools/a.py:1"], ["command text"], named("A"))], True),
            "in-single-quotes": ("warn", [("raw", ["tools/a.py:1"], ["command text"], [])], False),
            "in-double-quotes": ("warn", [("raw", ["tools/a.py:1"], ["command text"], named("EOF"))], True)})
     # A here-document delimiter that a backslash-newline splits is the word bash reads once it is removed:
     # <<E\, a newline and OF, <<\, a newline and EOF, and <<-\, a newline and EOF are the unquoted EOF, so
     # bash expands the body, and the command is scanned as one that does not lex, with that expansion named,
-    # with or without a $ in the body. A later command, which the lexer would take as part of that body, is
-    # scanned too. A split delimiter that bash reads as quoted (<<E\, a newline and 'OF') leaves the command
-    # lexed, as before.
-    split = {}
+    # with or without a $ in the body. The lexer reads each split delimiter it reaches as one that holds a
+    # newline, which no line matches, so it would take the rest of the command as that body: a later
+    # command is scanned too, and so is one after a split delimiter that bash reads as quoted (<<E\, a
+    # newline and 'OF'; <<$\, a newline and 'EOF'; <<"E"\, a newline and OF; <<"E\, a newline and OF"), for
+    # which no expansion is named, or after a split '<<' inside $((...)), which the lexer reads as an
+    # operator and bash as a shift. Inside single quotes bash keeps the backslash-newline and also runs the
+    # body to the end, so the later command scanned there is a note the command did not earn. A look-alike
+    # the lexer does not reach, inside quotes, a comment or a quoted here-document's body, or after an
+    # escaped '<', leaves the command lexed, so its -F file is read. The lexer is given at most
+    # _CITECHK_SPLIT_PROBES such operators to try: with one more, the command is scanned as written.
+    split, later = {}, "git commit -m 'see tools/a.py:1'\n"
     for name, command in (("mid", "git commit -F - <<E\\\nOF\nsee tools/a.py:1\nEOF\n"),
                           ("mid-dollar", "git commit -F - <<E\\\nOF\nsee $(printf tools/a.py):1\nEOF\n"),
                           ("lead", "git commit -F - <<\\\nEOF\nsee tools/a.py:1\nEOF\n"),
                           ("dash", "git commit -F - <<-\\\nEOF\n\tsee tools/a.py:1\n\tEOF\n"),
-                          ("later", "cat <<E\\\nOF\nx\nEOF\ngit commit -m 'see tools/a.py:1'\n"),
-                          ("quoted", "git commit -F - <<E\\\n'OF'\nsee tools/a.py:1\nEOF\n")):
+                          ("later", "cat <<E\\\nOF\nx\nEOF\n" + later),
+                          ("quoted", "git commit -F - <<E\\\n'OF'\nsee tools/a.py:1\nEOF\n"),
+                          ("later-quoted", "cat <<E\\\n'OF'\nx\nEOF\n" + later),
+                          ("later-ansi-c", "cat <<$\\\n'EOF'\nx\nEOF\n" + later),
+                          ("later-quoted-part", "cat <<\"E\"\\\nOF\nx\nEOF\n" + later),
+                          ("later-in-double-quotes", "cat <<\"E\\\nOF\"\nx\nEOF\n" + later),
+                          ("later-arith", "echo $((x<<\\\n2))\n" + later),
+                          ("later-in-single-quotes", "cat <<'E\\\nOF'\nx\nEOF\n" + later),
+                          ("look-alike-single", "git commit -F msg.txt; echo 'x <<E\\\nOF y'"),
+                          ("look-alike-double", "git commit -F msg.txt; echo \"x <<E\\\nOF y\""),
+                          ("look-alike-comment", "git commit -F msg.txt # x <<E\\\nOF\n"),
+                          ("look-alike-body", "git commit -F msg.txt; cat <<'Q'\nx <<E\\\nOF y\nQ\n"),
+                          ("look-alike-escaped", "echo a\\<<E\\\nOF\n" + later)):
         verdict, note, rows = _citecheck_run(steps.root, command, "split-delim-" + name)
         split[name] = (verdict, [(r["detail"]["parse"], [c["cite"] for c in r["detail"]["citations"]],
                                   r["detail"]["sources"], r["detail"]["sources_unread"]) for r in rows],
                        "The git commit message expanded <<" in note)
+    probes = aiqt_hooks._CITECHK_SPLIT_PROBES
+    for name, count in (("probes-inside", probes - 1), ("probes-at", probes), ("probes-past", probes + 1)):
+        command = "git commit -F msg.txt; echo" + " \"x <<E\\\nOF y\"" * count
+        _verdict_, _note, rows = _citecheck_run(steps.root, command, "split-delim-" + name)
+        split[name] = [(r["detail"]["parse"], r["detail"]["sources"]) for r in rows]
     by_raw = [("raw", ["tools/a.py:1"], ["command text"], named("EOF"))]
+    by_quoted = [("raw", ["tools/a.py:1"], ["command text"], [])]
+    by_file = ("warn", [("lexed", ["tools/a.py:1"], ["-F msg.txt"], [])], False)
     check("citeledger/check-split-heredoc-delim", split,
           {"mid": ("warn", by_raw, True), "mid-dollar": ("warn", [("raw", [], ["command text"], named("EOF"))], True),
            "lead": ("warn", by_raw, True), "dash": ("warn", by_raw, True), "later": ("warn", by_raw, True),
-           "quoted": ("warn", [("lexed", ["tools/a.py:1"], ["here-document"], [])], False)})
+           "quoted": ("warn", by_quoted, False), "later-quoted": ("warn", by_quoted, False),
+           "later-ansi-c": ("warn", by_quoted, False), "later-quoted-part": ("warn", by_quoted, False),
+           "later-in-double-quotes": ("warn", by_quoted, False), "later-arith": ("warn", by_quoted, False),
+           "later-in-single-quotes": ("warn", by_quoted, False), "look-alike-single": by_file,
+           "look-alike-double": by_file, "look-alike-comment": by_file, "look-alike-body": by_file,
+           "look-alike-escaped": ("warn", [("lexed", ["tools/a.py:1"], ["-m value"], [])], False),
+           "probes-inside": [("lexed", ["-F msg.txt"])], "probes-at": [("lexed", ["-F msg.txt"])],
+           "probes-past": [("raw", ["command text"])]})
     # A command after the reserved words that begin its segment is read: in a brace group, after '!', 'if'
     # or 'then', after 'do', after 'time -p', after a '--' that follows time or its -p, and after coproc,
     # with the NAME bash reads before a compound command. Where bash runs another command, none is read: a
