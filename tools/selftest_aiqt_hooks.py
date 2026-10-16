@@ -141,6 +141,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -10447,6 +10448,39 @@ def _main_isolated(monitor):
                  "env git submodule--helper foreach -- 'git commit --author=\"Claude <c@x>\" -m x'", "deny")
         ciexpect("(ci-wr-c34) git submodule--helper foreach running git log --author allows",
                  'git submodule--helper foreach -- git log --author="Claude <c@x>"', "allow")
+        # Past a run-line bound with nothing read setting an AI identity, the fallback denies an AI identity
+        # anywhere in the command once its backslash-newlines, backslashes and quotes are removed, so quoting or
+        # escaping in the unread line that splits or builds the option name or value does not hide it (ci-wr78
+        # to ci-wr81), and a parse error met after such a line keeps that judgment (ci-wr82); each allowed when
+        # the raw-string contexts alone judged the command past a bound. A nest past the bound whose text merely
+        # names an AI product denies (ci-wr83, the disclosed over-deny). Controls: the quoted spelling with a
+        # human name past the bound allows (ci-wr-c35, red when a bound overflow denies outright), and an
+        # ordinary parse error whose message merely names an AI product keeps the raw-string contexts and allows
+        # (ci-wr-c36, red when a parse error takes the scan for an AI identity anywhere).
+        ciexpect("(ci-wr78) an AI --author value behind a quoted option name past the bound denies",
+                 _ci_deep + 'git commit --"auth"="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr79) an AI --author value that a quote splits past the bound denies",
+                 _ci_deep + 'git commit --author=C"laude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr80) an AI --author= value after a backslash-newline past the bound denies",
+                 _ci_deep + "git commit --author=\\\nClaude -m x", "deny")
+        ciexpect("(ci-wr81) an AI --author value after a space and a backslash-newline past the bound denies",
+                 _ci_deep + "git commit --author \\\nClaude -m x", "deny")
+        ciexpect("(ci-wr82) a run-line parse error after a line left unread past the bound keeps the bound "
+                 "judgment, denies",
+                 _ci_deep + 'git commit --"auth"="Claude <c@x>" -m x; git submodule foreach \'echo "x\'', "deny")
+        ciexpect("(ci-wr83) a nest past the bound whose message merely names an AI product denies (the "
+                 "disclosed over-deny)",
+                 _ci_deep + 'git commit -m "fix claude adapter"', "deny")
+        ciexpect("(ci-wr-c35) a human --author value behind a quoted option name past the bound allows",
+                 _ci_deep + 'git commit --"auth"="Maint Ainer <m@example.invalid>" -m x', "allow")
+        ciexpect("(ci-wr-c36) an unbalanced quote in a message that merely names an AI product allows",
+                 'git commit -m "fix claude adapter', "allow")
+        _ci_out = cig({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                       "tool_input": {"command": _ci_deep + 'git commit --"auth"="Claude <c@x>" -m x'}})[1]
+        _ci_reason = ((_ci_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+        if "past the check's bounds" not in _ci_reason or "'Claude'" not in _ci_reason:
+            failures.append("(ci-wr-bounds-reason) the deny past a run-line bound gave the reason {!r} (want one "
+                            "that names the bounds and the AI identity 'Claude')".format(_ci_reason))
 
         # The wrapper scan is ONE pass: each word of a wrapped segment is read a bounded number of times. Every
         # -c value below is spelled git, so each one also starts a candidate still reading its options; a
@@ -10495,7 +10529,7 @@ def _main_isolated(monitor):
         # or repeat them costs time linear in its length: a line past _CMTIDN_RUN_DEPTH nested lines, or past
         # _CMTIDN_RUN_SCALE times the command's length plus _CMTIDN_RUN_FLOOR characters of run lines in all, is
         # left unread, and when nothing read sets an AI identity find_ai_authorship raises ValueError with the
-        # _CMTIDN_RUN_BOUNDS message, so the handler judges the command with its raw-string fallback. Only that
+        # _CMTIDN_RUN_BOUNDS message, so the handler judges the command with its conservative fallback. Only that
         # message counts as the bound; any other ValueError (a lexer error) fails these checks. The depth and
         # length bounds are each pinned just inside, at and just past their limit (the length bound with the
         # scale set to 0, so the floor alone is the limit), and 300 wrapped git bisect run candidates, whose run
@@ -10533,8 +10567,8 @@ def _main_isolated(monitor):
         _ci_saved = (aiqt_hooks._CMTIDN_RUN_DEPTH, aiqt_hooks._cmtidn_run_lines)
         _ci_built = [0]
 
-        def _ci_counted_run_lines(tokens, k):
-            for line in _ci_saved[1](tokens, k):
+        def _ci_counted_run_lines(*args):
+            for line in _ci_saved[1](*args):
                 _ci_built[0] += len(line)
                 yield line
 
@@ -10562,6 +10596,25 @@ def _main_isolated(monitor):
             if not isinstance(_ci_got, str):
                 failures.append("(ci-wr-run-after) {!r} gave {!r} (want the --author hit read past the bound)"
                                 .format(_ci_cmd[-60:], _ci_got))
+        # Each rebase reads its options only up to the next rebase subcommand that the segment's git commands
+        # read, so a segment of many wrapped rebase commands costs time linear in its length, where reading the
+        # rest of the segment for each of them cost time quadratic in it (about 3 s of CPU time at 64 KiB).
+        # The bound is the handler's CPU time in this process over 'sudo -E git rebase x ...' padded to 64 KiB
+        # and to 1 MiB: 0.5 s at 64 KiB and 8 s at 1 MiB, the same bound per character, against about 0.03 s
+        # and 0.4 s measured, a margin of about 15 times. The 1 MiB command runs only when the 64 KiB one is
+        # within its bound, so a quadratic reader fails in seconds rather than running for many minutes.
+        for _ci_size, _ci_cap in ((64 << 10, 0.5), (1 << 20, 8.0)):
+            _ci_cmd = "sudo" + " -E git rebase x" * ((_ci_size - 4) // 16)
+            _ci_cmd += " " * (_ci_size - len(_ci_cmd))
+            _ci_start = time.process_time()
+            _ci_got = _decision(cig, _ci_cmd)
+            _ci_spent = time.process_time() - _ci_start
+            if _ci_got != "allow" or _ci_spent > _ci_cap:
+                failures.append("(ci-wr-rebase-cpu) {} characters of wrapped git rebase commands gave {} after "
+                                "{:.2f} s of CPU time (want allow within {} s){}".format(
+                                    len(_ci_cmd), _ci_got, _ci_spent, _ci_cap,
+                                    "; the 1 MiB command was not run" if _ci_size < 1 << 20 else ""))
+                break
 
         # secsec (EN-5 PR-C): decision-signal battery for the secrets-shift-left guard.
         # === secrets_shift_left (secsec): an obvious hardcoded secret in a Write/Edit/Bash write-form ==
