@@ -172,7 +172,8 @@ directory below, and a declaration there arms slice confinement.
   "review_dispatch": {"commands": ["orch-dispatch"], "brief_option": "--brief",
                       "labels": {"target": "Review-target:", "revision": "Reviewed-revision:",
                                  "path": "Review-path:", "repo": "Review-repo:",
-                                 "branch": "Review-branch:"},
+                                 "branch": "Review-branch:", "draft": "Review-draft:",
+                                 "skip": "Review-skip:"},
                       "authority": {"argv": ["python3", "tools/task_revision.py"], "timeout": 5},
                       "max_brief_bytes": 1048576},
   "mistakes_register": "path",
@@ -367,7 +368,8 @@ malformed.
 
 - `commands` lists the basenames of the commands that dispatch a review.
 - `brief_option` is the option that names the brief file, as `--brief PATH` or `--brief=PATH`.
-- `labels` names the five brief labels. They must be distinct.
+- `labels` names the five brief labels, and optionally two more, `draft` and `skip`, declared
+  together or not at all, which turn on the worker draft census below. They must be distinct.
 - `authority.argv` is a fixed argv, never a shell string. The hook runs it from the repository root
   with the brief's absolute path appended and every `GIT_*` variable removed from its environment, as
   for the hook's own git reads, and it must print exactly one full commit id: the
@@ -421,15 +423,21 @@ boundary other than a physical newline.
   defaults to the session repository root.
 - `Review-branch:` (optional) is informational. If it does not resolve to the pin, the dispatch is
   allowed with a note.
+- `Review-draft:` (optional, only where the binding declares the `draft` label) is the absolute path
+  of the worker draft the commit applies, once.
+- `Review-skip:` lines (only with the `skip` label) each name one drafted path deliberately left out
+  of the commit, kept exactly as written.
 
 For a `revision` target, the hook checks the following in order. The first failure decides.
 
 1. The pin resolves to exactly that commit. A tag object id is not accepted.
 2. The authority prints the same commit id.
 3. Every parent named in the raw commit is present.
-4. The commit's changed set equals the declared paths. The base is the sole parent, the first parent
+4. Where the brief names a draft, the worker draft census below passes, and the paths the draft's
+   headers name, less the skipped ones, join the declared paths.
+5. The commit's changed set equals the declared paths. The base is the sole parent, the first parent
    of a merge, or the empty tree for a root commit.
-5. No declared path is staged against the pin, and the working tree matches the pin at every
+6. No declared path is staged against the pin, and the working tree matches the pin at every
    declared path. The working tree is compared by content: the hook hashes each declared file, or
    reads each symlink target, and compares the result and the file mode with the pin's tree entry.
    An assume-unchanged or skip-worktree flag, `core.ignoreStat`, the stat cache, an fsmonitor answer
@@ -442,6 +450,43 @@ fsmonitor, the untracked cache and submodule recursion, and takes no optional lo
 and the staged state are read with `--ignore-submodules=none`, so a `.gitmodules` `ignore` value
 cannot hide a submodule change. A file the pin replaces with a directory holding the pin's own
 entries counts as clean.
+
+### The worker draft census
+
+A hand-written `Review-path:` list is checked against the commit, so a drafted file that the apply
+left out, and that the list leaves out too, shows no divergence. Where the binding declares the
+`draft` and `skip` labels, a revision brief can name the worker draft the commit applies, and the
+declared review set is then built from the draft's own diff headers, less the paths the brief
+records as skipped, together with any `Review-path:` lines (for paths the commit changes beyond the
+draft). A drafted path that is neither committed nor recorded as skipped is refused, and the refusal
+names it as drafted. The hook reads the draft once, by its absolute path, under `max_brief_bytes`,
+split on LF only, as `git apply` reads a patch. Unlike a brief, a draft under `/proc` or `/dev` (such
+as `/dev/shm`) is not withheld, since the census is made from what the hook itself reads there.
+
+The draft is a git diff (`git diff`, `git diff --cached` or `git format-patch` output). A file section
+opens at a `diff --git` line, or at a `---` line followed by a `+++` line and a hunk header. Each hunk
+is consumed by the line counts in its own header, so an added line that reads `++ b/x` (shown as
+`+++ b/x`) is content, not a header. A rename names both of its paths (`rename from` and
+`rename to`), a copy only its destination (`copy to`), a deletion or a creation the one path that is
+not `/dev/null`, and a section with no path header (a mode change, an empty file, a binary change)
+the one path its `diff --git` line names twice. C-quoted names are decoded, and a name is read up to
+a tab. Lines outside a section are prose and are skipped.
+
+- More than one `Review-draft:` line, a relative draft path, a draft that cannot be read (missing, a
+  symlink, not a regular file, over the cap, not UTF-8, a NUL), an empty `Review-skip:` value, and a
+  draft that names no file in a diff header are withheld as `UNVERIFIABLE:`.
+- A draft the census cannot read is withheld as `UNVERIFIABLE:`: a combined diff (`diff --cc`), a header
+  path without git's default `a/` or `b/` prefix (written with `--no-prefix`, `diff.noprefix`,
+  `diff.mnemonicPrefix` or custom prefixes), a `---` line with no `+++` line, a `diff --git` line
+  naming two paths with no rename or copy header, an unreadable quoted name, and a hunk header that
+  cannot be read or a hunk whose lines do not match its counts.
+- A `Review-skip:` line that names a path the draft does not name, or a path the commit changes, is
+  refused, and so are `Review-skip:` lines in a brief with no `Review-draft:` line.
+
+The census applies to a `revision` target only. It reads paths, not content: a draft that names a file
+only in prose, a partial apply inside one file (a hunk dropped from a file the commit still changes),
+and a file named only in a context-format (`diff -c`) section, which is read as prose, are not caught,
+and neither is an apply whose brief does not name its draft.
 
 The hook refuses with a deny that names the reason. When it cannot evaluate, it denies with the
 reason prefixed `UNVERIFIABLE:`, so that outcome stays distinct. Cannot-evaluate cases include a
@@ -536,6 +581,9 @@ Limits:
   redirect output another way.
 - Uncommitted edits inside a checked-out submodule whose HEAD is at the pinned commit are not read. A declared file whose checkout was converted (line
   endings or a filter) differs by content from the pin and is refused.
+- A path the change needs that is missing from both the commit and the declaration is caught only
+  where the brief names the worker draft that drafts it; the census reads the draft's diff headers,
+  so a file the draft names only in prose and a partial apply inside one file are not caught.
 
 ## Platforms without hooks
 

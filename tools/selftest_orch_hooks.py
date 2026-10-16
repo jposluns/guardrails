@@ -1236,7 +1236,168 @@ def _rdp_cases(tmp):
     finally:
         aiqt_hooks._rdp_decide, sys.stdin = saved_decide, saved_stdin
     check("rdp/handler-crash-fails-closed", rc, 2)
+    _rdp_draft_cases(base)
     _rdp_scope_cases(base, bare)
+
+
+def _rdp_draft_diff(root, base, head):
+    """A worker draft as git writes it: the diff from base to head with git's default a/ and b/ prefixes
+    and rename detection, whatever the ambient configuration says."""
+    return _rdp_git(root, "diff", "--no-color", "--no-ext-diff", "-M", "--src-prefix=a/", "--dst-prefix=b/",
+                    base, head) + "\n"
+
+
+def _rdp_draft_cases(base):
+    """The worker draft census vectors (rdp/draft-*): where the binding declares the draft and skip labels,
+    a revision brief naming the draft a commit applies declares every path the draft's diff headers name,
+    less the paths it records as skipped, so a drafted path neither committed nor skipped is refused; a
+    rename names both of its paths; a draft whose headers cannot be read is a cannot-evaluate."""
+    labels = dict(target="Review-target:", revision="Reviewed-revision:", path="Review-path:",
+                  repo="Review-repo:", branch="Review-branch:", draft="Review-draft:", skip="Review-skip:")
+    dr = RdpFixture(base, "draft")
+    dr.binding = dict(dr.binding, labels=labels)
+    dr.write_registry(dr.binding)
+
+    def _draft(fixture, name, text):
+        path = fixture.briefs / name
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def _named(result, needle):
+        reason = result[1]["hookSpecificOutput"].get("permissionDecisionReason", "") if result[1] else ""
+        return (_rdp_kind(result), needle in reason)
+    real = _rdp_draft_diff(dr.root, dr.seed, dr.pin)
+    real_d = _draft(dr, "real.diff", real)
+    c_section = ("diff --git a/src/c.py b/src/c.py\nnew file mode 100644\nindex 0000000..2ad4f87\n"
+                 "--- /dev/null\n+++ b/src/c.py\n@@ -0,0 +1 @@\n+c = 1\n")
+    unapplied = _draft(dr, "unapplied.diff", real + c_section)
+    # The draft supplies the declared set: no Review-path line, all of them, or some of them. A draft is
+    # split on LF only, so a form feed in it (as some source files hold) is content, not a line boundary.
+    feed = _draft(dr, "feed.diff", real + "notes\x0c\n")
+    check("rdp/draft-census-declares-drafted-paths", [_rdp_kind(dr.dispatch(dr.good(
+        paths=p, extra=["Review-draft: " + d]))) for p, d in (
+        ((), real_d), (dr.CHANGED, real_d), (("src/a.py",), real_d), ((), feed))], ["allow"] * 4)
+    # A drafted file the apply left out is in neither the commit nor the hand list, yet it is refused.
+    check("rdp/draft-unapplied-path-denies", [_named(dr.dispatch(dr.good(
+        paths=p, extra=["Review-draft: " + unapplied])), "drafted in {} but neither changed".format(unapplied))
+        for p in (dr.CHANGED, ())], [("deny", True)] * 2)
+    check("rdp/draft-recorded-skip-allows", [_rdp_kind(dr.dispatch(dr.good(
+        paths=p, extra=["Review-draft: " + unapplied, "Review-skip: src/c.py"]))) for p in (dr.CHANGED, ())],
+        ["allow"] * 2)
+    check("rdp/draft-skip-of-undrafted-path-denies", _named(dr.dispatch(dr.good(
+        extra=["Review-draft: " + real_d, "Review-skip: src/zzz.py"])), "names no such path"), ("deny", True))
+    check("rdp/draft-skip-of-committed-path-denies", _named(dr.dispatch(dr.good(
+        extra=["Review-draft: " + real_d, "Review-skip: src/a.py"])), "changes it"), ("deny", True))
+    check("rdp/draft-skip-without-draft-denies", _named(dr.dispatch(dr.good(
+        extra=["Review-skip: src/c.py"])), "no 'Review-draft:' line"), ("deny", True))
+    # A second draft line, a relative draft path (here one that resolves from the hook's own cwd) and an
+    # empty skip value are cannot-evaluate.
+    check("rdp/draft-label-values-checked", [_rdp_kind(dr.dispatch(dr.good(extra=e))) for e in (
+        ["Review-draft: " + real_d, "Review-draft: " + real_d], ["Review-draft: " + os.path.relpath(real_d)],
+        ["Review-draft: " + unapplied, "Review-skip: "])], ["unverifiable"] * 3)
+    link = dr.briefs / "link.diff"
+    link.symlink_to(real_d)
+    big = _draft(dr, "big.diff", real + "\n" * 5000)
+    check("rdp/draft-unreadable-unverifiable", [_rdp_kind(dr.dispatch(dr.good(extra=["Review-draft: " + d])))
+                                                for d in (str(dr.briefs / "absent.diff"), str(link), big,
+                                                          str(dr.briefs))], ["unverifiable"] * 4)
+    # The draft is read under the brief's max_brief_bytes cap: one byte inside it, exactly at it, and one
+    # byte past it.
+    cap = dr.binding["max_brief_bytes"]
+    sized = [_draft(dr, "size{}.diff".format(n), real + "\n" * (n - len(real.encode("utf-8"))))
+             for n in (cap - 1, cap, cap + 1)]
+    check("rdp/draft-size-cap-boundary", [(os.path.getsize(d), _rdp_kind(dr.dispatch(dr.good(
+        extra=["Review-draft: " + d])))) for d in sized],
+        [(cap - 1, "allow"), (cap, "allow"), (cap + 1, "unverifiable")])
+    # Each section the census cannot read, appended to a draft whose other sections are all applied: a
+    # combined diff, git's --no-prefix and mnemonic prefixes, a --- line with no +++ line, a truncated
+    # hunk, a hunk line that is no context, removed or added line, an unreadable hunk header, a hunk with
+    # more removed lines than it counts, a diff --git line naming two paths with no rename or copy header,
+    # and a quoted name with an unknown escape.
+    bad_sections = (
+        "diff --cc src/a.py\nindex 1,2..3\n--- a/src/a.py\n+++ b/src/a.py\n@@@ -1,1 -1,1 +1,1 @@@\n- a = 1\n"
+        " -a = 3\n++a = 2\n",
+        "diff --git src/a.py src/a.py\n--- src/a.py\n+++ src/a.py\n@@ -1 +1 @@\n-a = 1\n+a = 2\n",
+        "diff --git c/src/a.py i/src/a.py\n--- c/src/a.py\n+++ i/src/a.py\n@@ -1 +1 @@\n-a = 1\n+a = 2\n",
+        "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n@@ -1 +1 @@\n-a = 1\n+a = 2\n",
+        "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1,2 +1,2 @@\n-a = 1\n+a = 2\n",
+        "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n*a = 1\n+a = 2\n",
+        "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -x +1 @@\n-a = 1\n+a = 2\n",
+        "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1,2 @@\n-a = 1\n-b = 1\n"
+        "+a = 2\n+b = 2\n",
+        "diff --git a/src/a.py b/src/d.py\nindex 1337a53..31197d5 100644\n",
+        'diff --git "a/src/a\\q.py" "b/src/a\\q.py"\nindex 1337a53..31197d5 100644\n')
+    check("rdp/draft-unparseable-unverifiable", [_rdp_kind(dr.dispatch(dr.good(extra=["Review-draft: " + _draft(
+        dr, "bad{}.diff".format(k), real + s)]))) for k, s in enumerate(bad_sections)],
+        ["unverifiable"] * len(bad_sections))
+    prose = _draft(dr, "prose.diff", "The worker changed src/a.py and src/b.py and removed old.txt.\n"
+                   "--- a/src/a.py is the main file\n")
+    check("rdp/draft-without-headers-unverifiable", _rdp_kind(dr.dispatch(dr.good(
+        extra=["Review-draft: " + prose]))), "unverifiable")
+    # The paths are read from the headers alone: hunks are consumed by their counts (so content lines that
+    # read as --- and +++ headers are content), C-quoted and tab-ended names are decoded, a copy names its
+    # destination only, a rename both paths, a section with no path header the name its diff --git line
+    # repeats, a plain unified section its a/ and b/ names, and prose around the sections is skipped.
+    parse_rows = (
+        ("From 1 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] x\n\n---\n x.py | 2 +-\n\ndiff --git a/x.py b/x.py\n"
+         "index 1..2 100644\n--- a/x.py\n+++ b/x.py\n@@ -1,2 +1,2 @@\n x\n--- a/phantom.py\n+++ b/ghost.py\n"
+         "@@ -9 +9 @@\n-y\n+z\n-- \n2.43.0\n", ["x.py"]),
+        ('diff --git "a/caf\\303\\251.txt" "b/caf\\303\\251.txt"\n--- "a/caf\\303\\251.txt"\n'
+         '+++ "b/caf\\303\\251.txt"\n@@ -1 +1 @@\n-c\n+d\ndiff --git a/with space.txt b/with space.txt\n'
+         "--- a/with space.txt\t\n+++ b/with space.txt\t\n@@ -1 +1 @@\n-s\n+t\n",
+         ["caf\u00e9.txt", "with space.txt"]),
+        ("diff --git a/a.txt b/c.txt\nsimilarity index 90%\ncopy from a.txt\ncopy to c.txt\n--- a/a.txt\n"
+         "+++ b/c.txt\n@@ -1 +1 @@\n-a\n+c\n", ["c.txt"]),
+        ("diff --git a/o.txt b/n.txt\nsimilarity index 100%\nrename from o.txt\nrename to n.txt\n",
+         ["n.txt", "o.txt"]),
+        ("diff --git a/m.sh b/m.sh\nold mode 100644\nnew mode 100755\ndiff --git a/bin.dat b/bin.dat\n"
+         "index 1..2 100644\nBinary files a/bin.dat and b/bin.dat differ\ndiff --git a/e.txt b/e.txt\n"
+         "new file mode 100644\nindex 0000000..e69de29\n", ["bin.dat", "e.txt", "m.sh"]),
+        ('diff --git "a/caf\\303\\251.sh" "b/caf\\303\\251.sh"\nold mode 100644\nnew mode 100755\n',
+         ["caf\u00e9.sh"]),
+        ("--- a/p.txt\t2026-10-15 10:00:00\n+++ b/p.txt\t2026-10-15 10:01:00\n@@ -1 +1 @@\n-p\n+q\n", ["p.txt"]),
+        ("diff --git a/k.txt b/k.txt\n--- a/k.txt\n+++ b/k.txt\n@@ -1,3 +1,3 @@\n k\n\n-x\n"
+         "\\ No newline at end of file\n+y\n\\ No newline at end of file\n", ["k.txt"]))
+    check("rdp/draft-paths-read-from-headers", [sorted(aiqt_hooks._rdp_draft_paths(t)[0] or ["(error)"])
+                                                 for t, _w in parse_rows], [w for _t, w in parse_rows])
+    # A pure rename has no --- or +++ line: its rename headers name both paths, so a commit that copies the
+    # file instead of moving it leaves the source drafted but unapplied, unless that skip is recorded.
+    dn = RdpFixture(base, "draftrename")
+    dn.binding = dict(dn.binding, labels=labels)
+    dn.write_registry(dn.binding)
+    _rdp_git(dn.root, "checkout", "-q", "-b", "mv")
+    _rdp_git(dn.root, "mv", "seed.txt", "kept.txt")
+    (dn.root / "src" / "a.py").write_text("a = 3\n", encoding="utf-8")
+    _rdp_git(dn.root, "commit", "-q", "-am", "rename")
+    moved = _rdp_git(dn.root, "rev-parse", "HEAD")
+    renamed = _draft(dn, "rename.diff", _rdp_draft_diff(dn.root, dn.pin, moved))
+    dn.authority(moved + "\n")
+    rn_text = Path(renamed).read_text(encoding="utf-8")
+    rn = [_named(dn.dispatch(dn.good(pin=moved, paths=(), extra=["Review-draft: " + renamed])), "'seed.txt'")]
+    _rdp_git(dn.root, "checkout", "-q", "-b", "cp", dn.pin)
+    shutil.copyfile(str(dn.root / "seed.txt"), str(dn.root / "kept.txt"))
+    (dn.root / "src" / "a.py").write_text("a = 3\n", encoding="utf-8")
+    _rdp_git(dn.root, "add", "kept.txt", "src/a.py")
+    _rdp_git(dn.root, "commit", "-q", "-m", "copy instead of rename")
+    copied = _rdp_git(dn.root, "rev-parse", "HEAD")
+    dn.authority(copied + "\n")
+    for extra in ([], ["Review-skip: seed.txt"]):
+        rn.append(_named(dn.dispatch(dn.good(pin=copied, paths=("kept.txt", "src/a.py"), extra=[
+            "Review-draft: " + renamed] + extra)), "'seed.txt'"))
+    check("rdp/draft-rename-names-both-paths", (
+        "\nrename from seed.txt\nrename to kept.txt\n" in rn_text and "a/seed.txt\n" not in rn_text, rn),
+        (True, [("allow", False), ("deny", True), ("allow", False)]))
+    # The draft and skip labels are declared together or not at all, and their values join the labels
+    # that must be distinct: a malformed binding withholds every Bash call.
+    lb = RdpFixture(base, "draftlabels")
+    lb_got = []
+    for extra in (dict(draft="Review-draft:"), dict(skip="Review-skip:"), dict(draft="Review-draft:",
+                                                                                skip="Review-path:")):
+        lb.write_registry(dict(lb.binding, labels=dict(lb.binding["labels"], **extra)))
+        lb_got.append(_rdp_kind(lb.run("ls")))
+    lb.write_registry(dict(lb.binding, labels=labels))
+    lb_got.append(_rdp_kind(lb.run("ls")))
+    check("rdp/draft-labels-declared-together", lb_got, ["unverifiable"] * 3 + ["allow"])
 
 
 def _rdp_ls(cwd, background):
