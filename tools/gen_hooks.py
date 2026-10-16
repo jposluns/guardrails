@@ -236,19 +236,24 @@ def cross_check(hooks, corpus_ids, script_text, name):
 def _name_bindings(tree, name):
     """The line of every binding of `name` the parse shows, wherever it sits: an assignment target of any
     form (plain, augmented, annotated, walrus, for, with, a tuple or starred element), a del, an import, an
-    except or match capture, a def or class, and a global or nonlocal declaration, which lets a function
-    rebind the module's name. A write the parse cannot see (a star import, globals() or setattr) is outside
-    it."""
+    except or match capture, a def or class, a parameter of a function or lambda of any kind (positional,
+    positional-only, keyword-only, *args or **kwargs), which shadows the module's name inside it, a type
+    parameter (a TypeVar, ParamSpec or TypeVarTuple of a def, class or type alias), and a global or
+    nonlocal declaration, which lets a function rebind the module's name. A write the parse cannot see (a
+    star import, globals() or setattr) is outside it."""
     lines = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Name):
             bound = node.id == name and not isinstance(node.ctx, ast.Load)
         elif isinstance(node, ast.alias):
             bound = (node.asname or node.name.partition(".")[0]) == name
+        elif isinstance(node, ast.arg):
+            bound = node.arg == name
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
             bound = name in node.names
         elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar, ast.FunctionDef,
-                               ast.AsyncFunctionDef, ast.ClassDef)):
+                               ast.AsyncFunctionDef, ast.ClassDef, ast.TypeVar, ast.ParamSpec,
+                               ast.TypeVarTuple)):
             bound = node.name == name
         elif isinstance(node, ast.MatchMapping):
             bound = node.rest == name
@@ -764,8 +769,23 @@ def self_test_main():
                              ("budget-tuple", "PRETOOL_BUDGET_SECONDS, _other = 30, 0\n"),
                              ("budget-global", "def _rebind():\n    global PRETOOL_BUDGET_SECONDS\n"
                                                "    PRETOOL_BUDGET_SECONDS = 30\n"),
-                             ("timeout-augmented", "HOOK_TIMEOUT_SECONDS += 50\n")):
+                             ("timeout-augmented", "HOOK_TIMEOUT_SECONDS += 50\n"),
+                             ("budget-param", "def _probe(argv, PRETOOL_BUDGET_SECONDS=30):\n    return argv\n"),
+                             ("budget-posonly-param", "def _probe(PRETOOL_BUDGET_SECONDS, /):\n    return 0\n"),
+                             ("budget-kwonly-param", "def _probe(*, PRETOOL_BUDGET_SECONDS=30):\n    return 0\n"),
+                             ("budget-vararg", "def _probe(*PRETOOL_BUDGET_SECONDS):\n    return 0\n"),
+                             ("budget-kwarg", "def _probe(**PRETOOL_BUDGET_SECONDS):\n    return 0\n"),
+                             ("budget-async-param",
+                              "async def _probe(PRETOOL_BUDGET_SECONDS=30):\n    return 0\n"),
+                             ("budget-lambda-param", "_PROBE = lambda PRETOOL_BUDGET_SECONDS=30: 0\n"),
+                             ("budget-typevar", "def _probe[PRETOOL_BUDGET_SECONDS]():\n    return 0\n"),
+                             ("budget-paramspec", "class _Probe[**PRETOOL_BUDGET_SECONDS]:\n    pass\n"),
+                             ("budget-typevartuple", "type _Probe[*PRETOOL_BUDGET_SECONDS] = tuple\n"),
+                             ("timeout-param", "def _probe(HOOK_TIMEOUT_SECONDS=50):\n    return 0\n")):
             deadline_case(label, accepted + extra, 2)
+        # A parameter whose default only reads the budget is no binding of it, so it generates.
+        deadline_case("budget-param-default-read",
+                      accepted + "def _probe(budget=PRETOOL_BUDGET_SECONDS):\n    return budget\n", 0)
         deadline_case("budget-line-in-string", "HOOK_TIMEOUT_SECONDS = {}\n_TEXT = '''\nPRETOOL_BUDGET_SECONDS = "
                       "HOOK_TIMEOUT_SECONDS - 2.0\n'''\nPRETOOL_BUDGET_SECONDS = 30\n".format(TIMEOUT), 2)
         deadline_case("budget-read-only", accepted + "_BUDGET_COPY = PRETOOL_BUDGET_SECONDS\n", 0)

@@ -166,6 +166,9 @@ DELIBERATE decision where the platform documents exit 2 as the block (the orches
 manufactured wind-down that way, doc-confirmed 2026-08-29, bounded by its own loop bound so it cannot wedge
 the chain). Outside that deliberate deny, only a PreToolUse handler fails closed via exit 2, and only a
 genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on a bad invocation.
+A handler result whose exit code is not 0 or 2, or whose stderr text is neither a str nor None, is a
+handler crash with that same posture, and an exception's text in a diagnostic is built so that its own
+str() raising cannot end main() early.
 
 These exits, and the floor guard's on an older interpreter that can start this file, hold even when a
 standard stream cannot be written or flushed (a closed descriptor, a full
@@ -16842,13 +16845,29 @@ class _DeadlineWindow:
     __exit__ (or __enter__'s cleanup) raises it in place of the deadline. Where this window's expiry lands
     at the entry of __exit__, the held exception reaches the caller only as the __cause__ of the deadline.
 
+    The restore survives its own errors. It runs in steps (cancel this window's timer, reinstall the
+    caller's disposition, re-arm the caller's timer, deliver a caller expiry that came due), and _step
+    records a step as done only once its call has returned. A step that raises (the operation failing, or
+    another signal's handler raising as the call returns) is tried once more before the restore goes on,
+    so one such exception still leaves the caller its disposition and timer, and the first one is raised
+    after the last step. A step that raises twice stops the restore there with `armed` still True, so a
+    later _give_back (from __exit__ after _fire, or the caller's own call) runs the remaining steps. The
+    delivery is recorded before its call, so it is made at most once: an exception out of raise_signal can
+    come from the caller's handler, which has then run. An enclosing window's _HookDeadline out of a step
+    ends the restore with no further step, because that window's _fire has given its own caller back the
+    timer and disposition, which a further step here would undo.
+
     The take is guarded too. A caller expiry that trips during setitimer(ITIMER_REAL, 0) runs the caller's
     handler as soon as that call returns, before its result could be bound to a name, so the take appends
-    its result to a list inside the call (list.extend over a map); a caller handler that raises there, or
-    inside signal.signal() before the swap, gets its timer back before the exception goes on. A periodic
-    timer taken between an expiry and the delivery of its signal reads (0, interval), and the kernel no
-    longer re-arms it once taken; that expiry is still delivered as the take returns, so the window counts
-    the timer as due one interval after the take.
+    its result to a list inside the call (list.extend over a map), and the swap appends the disposition it
+    replaced the same way. A caller handler, or another signal's handler, that raises as the take or the
+    swap returns, or inside signal.signal() before the swap, gets the caller its timer and disposition back
+    before the exception goes on. An enclosing window's _HookDeadline delivered there goes on with no
+    restore: that window's _fire has already given its caller back the timer and disposition, and what this
+    window took was that window's expired countdown. A periodic timer taken between an expiry and the
+    delivery of its signal reads (0, interval), and the kernel no longer re-arms it once taken; that expiry
+    is still delivered as the take returns, so the window counts the timer as due one interval after the
+    take.
 
     The borrow is refused, and the window runs with no deadline at all (armed stays False, nothing is
     changed), where it cannot be done faithfully: no finite positive `seconds` (the fail-open modes pass
@@ -16856,13 +16875,14 @@ class _DeadlineWindow:
     the main thread (Python runs signal handlers only there), a caller that blocks SIGALRM (a deadline
     could not fire, and its pending notification could not be kept apart from ours), or a SIGALRM
     disposition not installed from Python (getsignal returns None, which cannot be reinstalled)."""
-    __slots__ = ("seconds", "armed", "_live", "_handler", "_timer", "_began", "_held")
+    __slots__ = ("seconds", "armed", "_live", "_handler", "_timer", "_began", "_held", "_step")
 
     def __init__(self, seconds):
         self.seconds = seconds
         self.armed = False
         self._live = False
         self._handler = self._timer = self._began = self._held = None
+        self._step = 0
 
     def _fire(self, signum, frame):
         if not self._live:
@@ -16906,29 +16926,36 @@ class _DeadlineWindow:
             return self
         # The clock is read just before the take, so the window's use is never undercounted (a caller
         # timer comes back at most microseconds early, never late). The take appends its result to `took`
-        # inside the call, so a caller handler that runs as the call returns cannot lose it.
+        # and the swap appends the disposition it replaced to `swapped`, each inside its call, so an
+        # exception raised as either call returns cannot lose them; the restore state is then recorded in
+        # one statement, which sets `recorded` with it.
         began = time.monotonic()
-        took = []
+        took, swapped, recorded = [], [], False
         try:
             took.extend(map(signal.setitimer, (signal.ITIMER_REAL,), (0,)))
-            handler = signal.signal(signal.SIGALRM, self._fire)
-        except BaseException:
-            # A caller expiry ran the caller's own handler, as the take returned or inside signal.signal()
-            # before its swap, and that handler raised: the swap did not happen, so give the caller its
-            # timer back (nothing was taken when the exception came before the take).
-            if took:
-                self._handler, self._began = signal.getsignal(signal.SIGALRM), began
-                self._timer = self._as_taken(took[0])
-                self.armed = True
-                self._give_back()
-            raise
-        self._handler, self._timer, self._began = handler, self._as_taken(took[0]), began
-        self.armed = True
-        try:
+            swapped.extend(map(signal.signal, (signal.SIGALRM,), (self._fire,)))
+            timer = self._as_taken(took[0])
+            self._handler, self._timer, self._began, self._step, self.armed, recorded = (
+                swapped[0], timer, began, 0, True, True)
             self._live = True
-            left = self._timer[0]
+            left = timer[0]
             signal.setitimer(signal.ITIMER_REAL, self.seconds if left <= 0 else min(self.seconds, left))
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, _HookDeadline) and exc.args[:1] != (self,):
+                # An enclosing window's deadline, delivered as the take or the swap returned: that window's
+                # _fire has given its caller back the timer and disposition, and what this window took was
+                # its expired countdown, so a restore here would cancel or replace the caller's timer.
+                self.armed = False
+                raise
+            if took and not recorded:
+                # A caller handler, or another signal's handler, raised as the take or the swap returned, or
+                # inside signal.signal() before its swap: give the caller back what was taken and, when the
+                # swap happened, the disposition it replaced (nothing was taken when the exception came
+                # before the take).
+                handler = swapped[0] if swapped else signal.getsignal(signal.SIGALRM)
+                timer = self._as_taken(took[0])
+                self._handler, self._timer, self._began, self._step, self.armed = (
+                    handler, timer, began, 0, True)
             self._give_back()
             self._raise_held()
             raise
@@ -16943,22 +16970,51 @@ class _DeadlineWindow:
         return False
 
     def _give_back(self):
-        if not self.armed:
-            return
-        self.armed = False
+        # The restore, in the steps the class docstring lists: `armed` stays True until the last step has
+        # returned, each failed step is tried once more, and the first exception is raised at the end.
         self._live = False
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, self._handler)
-        value, interval = self._timer
-        if value <= 0:
+        first = failed = None
+        while self.armed:
+            step = self._step
+            try:
+                self._restore_step(step)
+            except _HookDeadline:
+                self.armed = False
+                raise  # an enclosing window's deadline: that window has given its caller back the state
+            except BaseException as exc:
+                if first is None:
+                    first = exc
+                if failed == step:
+                    break
+                failed = step
+        if first is not None:
+            raise first
+
+    def _restore_step(self, step):
+        """Run one step of the restore and record it in _step (or clear `armed` after the last one): 0
+        cancels this window's timer, 1 reinstalls the caller's disposition, 2 re-arms the caller's timer
+        (with what it had left, or for a periodic one that came due, at the phase it would have reached),
+        and 3 delivers a caller expiry that came due. Steps 0 to 2 can run again with the same effect; step
+        3 is recorded before its call."""
+        if step == 0:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        elif step == 1:
+            signal.signal(signal.SIGALRM, self._handler)
+        elif step == 2:
+            value, interval = self._timer
+            left = value - (time.monotonic() - self._began)
+            if value <= 0 or left > 0:
+                if value > 0:
+                    signal.setitimer(signal.ITIMER_REAL, left, interval)
+                self.armed = False
+                return
+            if interval > 0:
+                signal.setitimer(signal.ITIMER_REAL, interval - (-left % interval), interval)
+        else:
+            self.armed = False
+            signal.raise_signal(signal.SIGALRM)
             return
-        left = value - (time.monotonic() - self._began)
-        if left > 0:
-            signal.setitimer(signal.ITIMER_REAL, left, interval)
-            return
-        if interval > 0:
-            signal.setitimer(signal.ITIMER_REAL, interval - (-left % interval), interval)
-        signal.raise_signal(signal.SIGALRM)
+        self._step = step + 1
 
 
 def _deadline_message(handler_name, seconds, payload):
@@ -17002,6 +17058,24 @@ def _stderr_note(line):
         sys.stderr.flush()
     except BaseException:
         pass
+
+
+def _exception_text(exc):
+    """'<type name>: <message>' for a diagnostic, built so that it cannot raise out of main(): an exception
+    whose str() raises (or whose type name cannot be formatted) gets a placeholder in its place, so main()
+    still returns its mode's exit. A _HookDeadline that comes due while it formats goes on as it is."""
+    try:
+        return "{}: {}".format(type(exc).__name__, exc)
+    except _HookDeadline:
+        raise
+    except BaseException:
+        pass
+    try:
+        return "{}: <its message could not be read>".format(type(exc).__name__)
+    except _HookDeadline:
+        raise
+    except BaseException:
+        return "<an exception whose type and message could not be read>"
 
 
 def main(argv):
@@ -17052,7 +17126,7 @@ def main(argv):
                 # ALSO a RecursionError (deeply nested JSON) or a MemoryError: the old narrow except let those
                 # escape as a traceback with exit 1, which the platform treats as non-blocking. Every exception
                 # is named.
-                detail = "{}: {}".format(type(exc).__name__, exc)
+                detail = _exception_text(exc)
                 if is_fail_open:
                     # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so
                     # no Stop payload (including a bare '{' or any garbage) can ever wedge the session. The
@@ -17068,6 +17142,14 @@ def main(argv):
                 return 2
             try:
                 code, stdout_obj, stderr_text = HANDLERS[handler_name](data)
+                # The result is checked here, inside the window and this crash branch, so a malformed one
+                # gets the mode's posture: an exit code other than 0 or 2 (one os._exit cannot take, or one
+                # the platform reads as non-blocking) or a stderr text neither a str nor None (whose truth
+                # test below could raise). The stdout object is checked by its json.dumps below.
+                if type(code) is not int or code not in (0, 2) or not (
+                        stderr_text is None or type(stderr_text) is str):
+                    raise TypeError("the handler result is not an exit code of 0 or 2 with a str or None "
+                                    "stderr text")
             except Exception as exc:  # a handler crash is an unreadable result
                 if is_fail_open:
                     # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws
@@ -17075,12 +17157,12 @@ def main(argv):
                     # stdout that cannot be written or flushed) loses the warning and keeps the 0.
                     try:
                         return _dispatcher_fail_open_warn(
-                            handler_name, "handler crash: {}: {}".format(type(exc).__name__, exc))
+                            handler_name, "handler crash: {}".format(_exception_text(exc)))
                     except BaseException:
                         return 0
                 # A PreToolUse handler crash fails closed (block), not pass.
-                _stderr_note("aiqt_hooks: handler {} failed ({}: {}); failing closed".format(
-                    handler_name, type(exc).__name__, exc))
+                _stderr_note("aiqt_hooks: handler {} failed ({}); failing closed".format(
+                    handler_name, _exception_text(exc)))
                 return 2
     except _HookDeadline as exc:
         if exc.args[:1] != (window,):
@@ -17092,7 +17174,7 @@ def main(argv):
         # own alarm handler raising when its expiry is delivered during the take or on the way out), or a
         # BaseException from the read or the handler that no branch above catches. Left to escape, it
         # would end the run with a traceback and status 1, which the platform treats as non-blocking.
-        detail = "{}: {}".format(type(exc).__name__, exc)
+        detail = _exception_text(exc)
         if is_fail_open:
             try:
                 return _dispatcher_fail_open_warn(handler_name, "dispatcher error: {}".format(detail))
@@ -17115,8 +17197,8 @@ def main(argv):
             # so a lost decision blocks rather than allows.
             if is_fail_open:
                 return 0
-            _stderr_note("aiqt_hooks: {}: the decision could not be written to stdout ({}: {}); "
-                         "failing closed".format(handler_name, type(exc).__name__, exc))
+            _stderr_note("aiqt_hooks: {}: the decision could not be written to stdout ({}); "
+                         "failing closed".format(handler_name, _exception_text(exc)))
             return 2
     if stderr_text:
         _stderr_note(stderr_text)
