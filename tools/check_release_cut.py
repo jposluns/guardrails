@@ -712,7 +712,8 @@ def local_report(root, protected=None, before=None):
 # carries the guarantee.
 
 _RAW_READ_REGISTRATIONS = ("tools/run_all_checks.sh", "opf/tools/run_all_checks.sh",
-                           ".github/workflows/quality.yml", ".github/workflows/currency.yml")
+                           ".github/workflows/quality.yml", ".github/workflows/msg-leaks.yml",
+                           ".github/workflows/currency.yml")
 _RAW_READ_ENTRY_RE = re.compile(
     r"(?:(?:\.github|opf/tools|tools)/[A-Za-z0-9_.]+\.py)|(?:\$here/[A-Za-z0-9_.]+\.py)")
 
@@ -3835,7 +3836,7 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/selftest_aiqt_hooks.py::_stop_field_claim_failures::read_text", 1),
     ("tools/selftest_aiqt_hooks.py::_test_note_shape_pins::read_text", 1),
     ("tools/selftest_ci_status.py::_run_checks::read_text", 2),
-    ("tools/selftest_ci_status.py::invoke::read_text", 3),
+    ("tools/selftest_ci_status.py::invoke::read_text", 4),
     ("tools/selftest_git_fixture_env.py::_auto_maintenance_children::read_text", 1),
     ("tools/selftest_git_fixture_env.py::_await_holder_ready::os.read", 1),
     ("tools/selftest_git_fixture_env.py::_close_lock_sites::open", 1),
