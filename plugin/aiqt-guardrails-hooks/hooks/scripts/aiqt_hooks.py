@@ -12726,13 +12726,20 @@ def _orch_raw_unquoted_words(raw):
 def _orch_body_cmd(seg):
     """(word, unquoted) for a loop segment's effective command word: basenamed, read past the leading
     reserved and grouping words by the shared reading every guard uses (_command_argv: `do sleep` -> `sleep`,
-    `until curl` -> `curl`; a `for NAME in ...` header runs no command, so its loop variable is no command
-    word) and a leading env-assignment prefix skipped, paired with whether that command-word TOKEN was
-    written UNQUOTED in the raw source. Soundness of the sleep/probe conjuncts rests on this being the
-    command WORD (an argument that merely spells 'sleep'/'gh' is not the command word, so it never fabricates
-    a match); the raw-unquoted gate only tightens it further. ('', False) when the segment resolves to no
-    command word."""
+    `until curl` -> `curl`) and a leading env-assignment prefix skipped, paired with whether that
+    command-word TOKEN was written UNQUOTED in the raw source. A `for NAME [in WORDS]` header, where the
+    shared reading finds no command, keeps this classifier's earlier reading instead: the word after
+    `for`, its loop variable, is taken as the command word, so `for gh in 1 2` reads `gh` as a probe.
+    That is an over-match kept on purpose until the maintainer decides on it, because dropping it moves
+    this guard's decision toward allow. A `select` header keeps the shared reading (no command word): the
+    earlier reading never stripped `select` and read that word itself, which is neither sleep nor a probe,
+    so its decision is unchanged. Apart from that over-match, soundness of the sleep/probe conjuncts rests
+    on this being the command WORD (an argument that merely spells 'sleep'/'gh' is not the command word, so
+    it never fabricates a match); the raw-unquoted gate only tightens it further. ('', False) when the
+    segment resolves to no command word."""
     argv = _command_argv(seg.argv)
+    if not argv and seg.argv and seg.argv[0] == "for":
+        argv = seg.argv[1:]                 # the for header's loop variable, read as the command word
     if not argv:
         return "", False
     idx = _command_word_index(argv)

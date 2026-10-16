@@ -340,7 +340,7 @@ expected-check-ids = [
   "wl/handler-deny-rib-true",
   "wl/time-prefixed-sleep-match",
   "wl/backquote-line-match",
-  "wl/for-header-variable-not-probe-none",
+  "wl/for-header-variable-probe-match",
   "trunc/brace-group-sink-denies",
   "trunc/quoted-backquote-sink-denies",
   "wl/handler-allow-foreground",

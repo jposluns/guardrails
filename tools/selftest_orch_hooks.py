@@ -4221,13 +4221,16 @@ def _main_isolated(report_path=None):
         check("wl/handler-deny-rib-true",
               _verdict(wl("while true; do gh pr checks 42; sleep 30; done &", rib=True)), "deny")
         # The shared command reading (aiqt_hooks._command_argv, _substitution_lines): a body command read past
-        # a leading `time`, and a poll loop inside a backquote substitution read as a line of its own, match; a
-        # for header runs no command, so its loop variable is no command word and a variable named gh is no
-        # probe. The truncation guard reads a sink stage past a brace and inside a double-quoted substitution.
+        # a leading `time`, and a poll loop inside a backquote substitution read as a line of its own, match.
+        # This classifier still reads a for header's loop variable as its command word, so a variable named gh
+        # or curl reads as a probe (a kept over-match). The truncation guard reads a sink stage past a brace
+        # and inside a double-quoted substitution.
         check("wl/time-prefixed-sleep-match",
               clf("while true; do gh pr checks 42; time sleep 30; done &"), "match")
         check("wl/backquote-line-match", clf("x=`while true; do gh pr checks 42; sleep 30; done &`"), "match")
-        check("wl/for-header-variable-not-probe-none", clf("for gh in 1 2; do sleep 5; done &"), "none")
+        check("wl/for-header-variable-probe-match",
+              (clf("for gh in 1 2; do sleep 5; done &"), clf("for curl in a; do sleep 5; done &")),
+              ("match", "match"))
         check("trunc/brace-group-sink-denies", _verdict(tg("pytest | { head -5; }", rib=True)), "deny")
         check("trunc/quoted-backquote-sink-denies", _verdict(tg('echo "`pytest | head -5`"', rib=True)), "deny")
         # handler ALLOW: a foreground poll loop (no detach) and a bounded watch acquire no deny here.
