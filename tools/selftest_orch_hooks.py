@@ -1253,7 +1253,8 @@ def _rdp_draft_cases(base):
     a revision brief naming the draft a commit applies declares every path the draft's diff headers name,
     less the paths it records as skipped, so a drafted path neither committed nor skipped is refused; a
     rename names both of its paths; a draft whose headers cannot be read, a section it does not complete,
-    a diff header outside a section, a CRLF line, a transfer-encoded mailbox part and a submodule shown
+    a section whose headers disagree, a diff header or no-newline marker outside a section, a marker that
+    is not git's exact one in its place, a CRLF line, a transfer-encoded mailbox part and a submodule shown
     inline are each a cannot-evaluate whose reason names its cause."""
     labels = dict(target="Review-target:", revision="Reviewed-revision:", path="Review-path:",
                   repo="Review-repo:", branch="Review-branch:", draft="Review-draft:", skip="Review-skip:")
@@ -1299,23 +1300,34 @@ def _rdp_draft_cases(base):
         paths=p, extra=["Review-draft: " + unapplied, "Review-skip: src/c.py"]))) for p in (dr.CHANGED, ())],
         ["allow"] * 2)
     # Every skip line counts: with two drafted paths left out, both skips allow, and either one alone
-    # leaves the other path refused as drafted.
+    # leaves the other path refused as drafted. Coverage only: skip handling does not depend on the diff
+    # grammar, and a reader without that grammar passes this check too.
     two = _draft(dr, "two.diff", real + c_section + c_section.replace("c.py", "d.py"))
     check("rdp/draft-several-skips-allow", [_named(dr.dispatch(dr.good(paths=(), extra=[
         "Review-draft: " + two] + ["Review-skip: " + s for s in skips])), "neither changed", w)
         for skips, w in ((("src/c.py", "src/d.py"), ""), (("src/c.py",), "line: 'src/d.py')"),
                          (("src/d.py",), "line: 'src/c.py')"))], [("allow", False), ("deny", True), ("deny", True)])
-    check("rdp/draft-skip-of-undrafted-path-denies", _named(dr.dispatch(dr.good(
-        extra=["Review-draft: " + real_d, "Review-skip: src/zzz.py"])), "names no such path"), ("deny", True))
-    check("rdp/draft-skip-of-committed-path-denies", _named(dr.dispatch(dr.good(
-        extra=["Review-draft: " + real_d, "Review-skip: src/a.py"])), "changes it"), ("deny", True))
-    check("rdp/draft-skip-without-draft-denies", _named(dr.dispatch(dr.good(
-        extra=["Review-skip: src/c.py"])), "no 'Review-draft:' line"), ("deny", True))
+    # Each skip refusal beside its control, a skip of a drafted path the commit leaves out, which allows.
+    skip_ok = ["Review-draft: " + unapplied, "Review-skip: src/c.py"]
+    check("rdp/draft-skip-of-undrafted-path-denies", [_named(dr.dispatch(dr.good(extra=e)), w) for e, w in (
+        (skip_ok, "names no such path"), (["Review-draft: " + real_d, "Review-skip: src/zzz.py"],
+                                          "names no such path"))], [("allow", False), ("deny", True)])
+    check("rdp/draft-skip-of-committed-path-denies", [_named(dr.dispatch(dr.good(extra=e)), w) for e, w in (
+        (skip_ok, "changes it"), (["Review-draft: " + real_d, "Review-skip: src/a.py"], "changes it"))],
+        [("allow", False), ("deny", True)])
+    check("rdp/draft-skip-without-draft-denies", [_named(dr.dispatch(dr.good(extra=e)), w) for e, w in (
+        (skip_ok, "no 'Review-draft:' line"), (["Review-skip: src/c.py"], "no 'Review-draft:' line"))],
+        [("allow", False), ("deny", True)])
     # A second draft line, a relative draft path (here one that resolves from the hook's own cwd) and an
-    # empty skip value are cannot-evaluate.
-    check("rdp/draft-label-values-checked", [_rdp_kind(dr.dispatch(dr.good(extra=e))) for e in (
-        ["Review-draft: " + real_d, "Review-draft: " + real_d], ["Review-draft: " + os.path.relpath(real_d)],
-        ["Review-draft: " + unapplied, "Review-skip: "])], ["unverifiable"] * 3)
+    # empty skip value are cannot-evaluate, each with its reason; the controls, one absolute draft line
+    # alone and with a skip, allow.
+    check("rdp/draft-label-values-checked", [_named(dr.dispatch(dr.good(extra=e)), w) for e, w in (
+        (["Review-draft: " + real_d], "(control)"), (skip_ok, "(control)"),
+        (["Review-draft: " + real_d, "Review-draft: " + real_d], "has 2 'Review-draft:' lines; at most one"),
+        (["Review-draft: " + os.path.relpath(real_d)], "{!r} is not an absolute path".format(
+            os.path.relpath(real_d))),
+        (["Review-draft: " + unapplied, "Review-skip: "], "has an empty 'Review-skip:' value"))],
+        [("allow", False)] * 2 + [("unverifiable", True)] * 3)
     # Each draft the hook cannot read names the draft and its cause; the control, the valid draft with no
     # Review-path line, allows only where the binding is valid and the draft is read.
     link = dr.briefs / "link.diff"
@@ -1438,8 +1450,11 @@ def _rdp_draft_cases(base):
                                                   _read_as(stray_rows, "stray")),
           (True, [("allow", False)] * 2 + [("unverifiable", True)] * (len(stray_rows) - 2)))
     # A header or hunk line ending in a carriage return before its LF is refused with a reason naming CRLF:
-    # the whole draft saved with CRLF line ends, one CRLF hunk line, a CRLF mode change section, and a CRLF
-    # --- or +++ line that would otherwise be refused for its own cause.
+    # the whole draft saved with CRLF line ends, one CRLF hunk line, a CRLF mode change section, a CRLF
+    # --- or +++ line that would otherwise be refused for its own cause, and a CRLF no-newline marker
+    # inside a hunk and after its last counted line, which would otherwise be refused as no exact marker
+    # (coverage rows: the CRLF check on a marker predates the exact marker reading).
+    a_old = "\n-a = 1\n+a = 2\n"
     crlf_rows = (
         (real, "(control)"),
         (real.replace("\n", "\r\n"), "carriage return before its LF (CRLF)"),
@@ -1447,8 +1462,11 @@ def _rdp_draft_cases(base):
         (real + "diff --git a/src/a.py b/src/a.py\r\nold mode 100644\r\nnew mode 100755\r\n",
          "carriage return before its LF (CRLF)"),
         (real + "--- a/src/c.py\r\n", "carriage return before its LF (CRLF)"),
-        (real + "+++ b/src/c.py\r\n", "carriage return before its LF (CRLF)"))
-    check("rdp/draft-crlf-unverifiable", ("+a = 2\n" in real, _read_as(crlf_rows, "crlf")),
+        (real + "+++ b/src/c.py\r\n", "carriage return before its LF (CRLF)"),
+        (real.replace(a_old, "\n-a = 1\n\\ No newline at end of file\r\n+a = 2\n"),
+         "carriage return before its LF (CRLF)"),
+        (real.replace(a_old, a_old + "\\ No newline at end of file\r\n"), "carriage return before its LF (CRLF)"))
+    check("rdp/draft-crlf-unverifiable", ("+a = 2\n" in real and a_old in real, _read_as(crlf_rows, "crlf")),
           (True, [("allow", False)] + [("unverifiable", True)] * (len(crlf_rows) - 1)))
 
     # A mailbox part transfer-encoded other than 7bit or 8bit hides the headers git am decodes and applies:
@@ -1480,20 +1498,103 @@ def _rdp_draft_cases(base):
         (real + "Submodule sub contains modified content\n", "--submodule=short"))
     check("rdp/draft-submodule-inline-unverifiable", _read_as(sub_rows, "sub"),
           [("allow", False)] * 2 + [("unverifiable", True)] * (len(sub_rows) - 2))
+    # A line of a mailbox draft's commit message is read as prose only where it could not be what the census
+    # refuses elsewhere: a message line that reads as an inline submodule header, a transfer encoding
+    # other than 7bit or 8bit, a diff header or a no-newline marker is refused like one, since telling a
+    # message line from a part header or a section's line needs the mailbox structure a draft can mangle.
+    # The control is git format-patch output of the commit with a plain message line; the Submodule,
+    # Content-Transfer-Encoding and index rows are coverage of refusals the census already made.
+    msg_rows = [(mbox.replace("\n---\n", "\n" + line + "\n---\n", 1), w) for line, w in (
+        ("Bump the submodule and note the encoding.", "(control)"),
+        ("Submodule sub 1234567..89abcde: bumped", "--submodule=short"),
+        ("Content-Transfer-Encoding: base64 is unsupported", "is transfer-encoded"),
+        ("index 1234567..89abcde is the new blob", "stands outside a file section"),
+        ("\\ No newline at end of file, as the old file had", "follows no hunk line"))]
+    check("rdp/draft-message-lines-unverifiable", ("\n\n---\n" in mbox, _read_as(msg_rows, "msg")),
+          (True, [("allow", False)] + [("unverifiable", True)] * (len(msg_rows) - 1)))
     # A hunk that ends in a \ No newline marker is followed by the next section, inside a full dispatch: the
-    # deletion's marker before the src/a.py section, and a marker closing the draft.
+    # deletion's marker before the src/a.py section, and a marker closing the draft. Coverage: a reader
+    # that left the marker as prose passed this too, and only with a marker outside a hunk refused (the
+    # next check) does it fail where the hunk reader does not consume the marker after its counted lines.
     marked = ((real.replace("\n-old\n", "\n-old\n\\ No newline at end of file\n"), "(marker)"),
               (real.replace("\n+b = 1\n", "\n+b = 1\n\\ No newline at end of file\n"), "(marker)"))
     check("rdp/draft-marker-then-section", ([t.count("\\ No newline") for t, _w in marked],
                                             _read_as(marked, "marker")),
           ([1, 1], [("allow", False)] * 2))
+    # A line that begins as git's no-newline marker does is never prose: outside a hunk it is refused (after
+    # a section that ends with no hunk, after prose, at the start, after a hunk's own marker), so the
+    # control with the deletion's marker before the next section allows only because the hunk reader
+    # consumes the marker after the deletion's counted line.
+    no_nl = "\\ No newline at end of file\n"
+    mode_a = "diff --git a/src/a.py b/src/a.py\nold mode 100644\nnew mode 100755\n"
+    follows = "follows no hunk line"
+    stray_marks = (
+        (real, "(control)"),
+        (real.replace("\n-old\n", "\n-old\n" + no_nl), "(control)"),
+        (real + mode_a + no_nl, follows),
+        (real + "Notes.\n" + no_nl, follows),
+        ("\\ No newline here, as a message line\n" + real, follows),
+        (real.replace("\n-old\n", "\n-old\n" + no_nl + no_nl), "follows no context, removed or added line"))
+    check("rdp/draft-stray-marker-unverifiable", ("\n-old\ndiff --git a/src/a.py" in real,
+                                                  _read_as(stray_marks, "nomark")),
+          (True, [("allow", False)] * 2 + [("unverifiable", True)] * (len(stray_marks) - 2)))
+    # Inside a hunk and after its counted lines, only git's exact marker is read, after a context, removed
+    # or added line, at most once for each side of the file (a marker after a context line marks both):
+    # a section for src/a.py appended to the valid draft is read with each side marked once (the
+    # controls) and refused with any other backslash line, a localized marker, a marker after the hunk
+    # header or after another marker, and a second marker for one side, inside or after the hunk.
+    a_head = "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n"
+    not_exact = "not git's no-newline marker"
+    no_line = "follows no context, removed or added line"
+    twice = "a side of the file already marked"
+    bad_marks = (
+        ("@@ -1 +1 @@\n-a = 1\n" + no_nl + "+a = 2\n" + no_nl, "(control)"),
+        ("@@ -1,2 +1,2 @@\n-a = 1\n+a = 2\n b\n" + no_nl, "(control)"),
+        ("@@ -1 +1 @@\n-a = 1\n\\ garbage\n+a = 2\n", not_exact),
+        ("@@ -1 +1 @@\n-a = 1\n+a = 2\n\\ garbage\n", not_exact),
+        ("@@ -1 +1 @@\n-a = 1\n+a = 2\n\\No newline at end of file\n", not_exact),
+        ("@@ -1 +1 @@\n-a = 1\n\\ Kein Zeilenumbruch am Dateiende.\n+a = 2\n", not_exact),
+        ("@@ -1 +1 @@\n" + no_nl + "-a = 1\n+a = 2\n", no_line),
+        ("@@ -1 +1 @@\n-a = 1\n" + no_nl + no_nl + "+a = 2\n", no_line),
+        ("@@ -1 +1 @@\n-a = 1\n+a = 2\n" + no_nl + no_nl, no_line),
+        ("@@ -1,2 +1 @@\n-a = 1\n" + no_nl + "-b\n" + no_nl + "+a = 2\n", twice + " (old)"),
+        ("@@ -1,2 +1 @@\n a = 1\n" + no_nl + "-b\n" + no_nl, twice + " (old)"),
+        ("@@ -1 +1,2 @@\n-a = 1\n+a = 2\n" + no_nl + "+b\n" + no_nl, twice + " (new)"),
+        ("@@ -1 +1 @@\n-a = 1\n" + no_nl + "+a = 2\n@@ -3 +3 @@\n-c\n" + no_nl + "+d\n", twice + " (old)"))
+    check("rdp/draft-marker-malformed-unverifiable", _read_as([(real + a_head + h, w) for h, w in bad_marks],
+                                                               "badmark"),
+          [("allow", False)] * 2 + [("unverifiable", True)] * (len(bad_marks) - 2))
+    # A section names at most one old path and one new path, and its diff --git line names exactly those, as
+    # git writes them from one pair; a section whose headers disagree is refused, not counted by one of
+    # them. The controls are the valid draft and a pure rename section whose headers agree; refused are
+    # path headers naming another path than the diff --git line (a change, a creation, a deletion), rename
+    # or copy headers naming other paths than it, and rename headers naming other paths than the +++ line.
+    git_c = "diff --git a/src/c.py b/src/c.py\n"
+    git_line = "disagree with its diff --git line"
+    disagree_rows = (
+        (real, "(control)"),
+        (real + "diff --git a/old.txt b/src/b.py\nsimilarity index 100%\nrename from old.txt\nrename to src/b.py\n",
+         "(control)"),
+        (real + git_c + "--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-a = 1\n+a = 2\n", git_line),
+        (real + git_c + "new file mode 100644\n--- /dev/null\n+++ b/src/b.py\n@@ -0,0 +1 @@\n+b = 1\n", git_line),
+        (real + git_c + "deleted file mode 100644\n--- a/old.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n", git_line),
+        (real + git_c + "similarity index 100%\nrename from old.txt\nrename to src/b.py\n", git_line),
+        (real + "diff --git a/src/c.py b/src/b.py\nsimilarity index 90%\ncopy from src/a.py\ncopy to src/b.py\n",
+         git_line),
+        (real + "diff --git a/old.txt b/src/b.py\nsimilarity index 90%\nrename from old.txt\nrename to src/b.py\n"
+         "--- a/old.txt\n+++ b/src/a.py\n@@ -1 +1 @@\n-old\n+a = 2\n", "disagree with each other"))
+    check("rdp/draft-section-headers-disagree-unverifiable", _read_as(disagree_rows, "disagree"),
+          [("allow", False)] * 2 + [("unverifiable", True)] * (len(disagree_rows) - 2))
     # The paths are read from the headers alone: hunks are consumed by their counts (so content lines that
     # read as --- and +++ headers are content), C-quoted and tab-ended names are decoded, a copy names its
     # destination only, a rename both paths, a section with no path header the name its diff --git line
     # repeats, a plain unified section its a/ and b/ names, a binary patch's encoded lines are prose, and
     # prose around the sections is skipped: the mailbox headers and message, the --- separator (also with
     # trailing blanks), the diffstat, the -- signature, and a section indented from column 0, which git
-    # apply does not read either.
+    # apply does not read either. The last three rows are coverage of readings the census already made: a
+    # rename whose diff --git line quotes one name and not the other, names holding ` b/` (read against
+    # the names the other headers give), and lines after a hunk's counted lines, read as prose after the
+    # section, as git apply reads them.
     parse_rows = (
         ("From 1 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] x\n\n---\n x.py | 2 +-\n\ndiff --git a/x.py b/x.py\n"
          "index 1..2 100644\n--- a/x.py\n+++ b/x.py\n@@ -1,2 +1,2 @@\n x\n--- a/phantom.py\n+++ b/ghost.py\n"
@@ -1519,7 +1620,13 @@ def _rdp_draft_cases(base):
         ("--- a/p.txt\t2026-10-15 10:00:00\n+++ b/p.txt\t2026-10-15 10:01:00\n@@ -1 +1 @@\n-p\n+q\n", ["p.txt"]),
         ("diff --git a/k.txt b/k.txt\n--- a/k.txt\n+++ b/k.txt\n@@ -1,3 +1,3 @@\n k\n\n-x\n"
          "\\ No newline at end of file\n+y\n\\ No newline at end of file\ndiff --git a/l.txt b/l.txt\n"
-         "--- a/l.txt\n+++ b/l.txt\n@@ -1 +1 @@\n-l\n+m\n", ["k.txt", "l.txt"]))
+         "--- a/l.txt\n+++ b/l.txt\n@@ -1 +1 @@\n-l\n+m\n", ["k.txt", "l.txt"]),
+        ('diff --git a/plain.txt "b/caf\\303\\251.txt"\nsimilarity index 100%\nrename from plain.txt\n'
+         'rename to "caf\\303\\251.txt"\n', ["caf\u00e9.txt", "plain.txt"]),
+        ("diff --git a/x b/y b/x b/y\n--- a/x b/y\t\n+++ b/x b/y\t\n@@ -1 +1 @@\n-a\n+b\n"
+         "diff --git a/u b/v.txt b/w b/v.txt\nsimilarity index 100%\nrename from u b/v.txt\nrename to w b/v.txt\n",
+         ["u b/v.txt", "w b/v.txt", "x b/y"]),
+        ("diff --git a/x.txt b/x.txt\n--- a/x.txt\n+++ b/x.txt\n@@ -1 +1 @@\n-a\n+b\n+c\n-d\n e\n", ["x.txt"]))
     check("rdp/draft-paths-read-from-headers", [sorted(aiqt_hooks._rdp_draft_paths(t)[0] or ["(error)"])
                                                  for t, _w in parse_rows], [w for _t, w in parse_rows])
     # A pure rename has no --- or +++ line: its rename headers name both paths, so a commit that copies the

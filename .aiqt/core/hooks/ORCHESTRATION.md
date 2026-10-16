@@ -467,38 +467,53 @@ as `/dev/shm`) is not withheld, since the census is made from what the hook itse
 The draft is a git diff (`git diff`, `git diff --cached` or `git format-patch` output), read by git's
 own grammar, as `git mailinfo` and `git apply` read one. A file section opens at a `diff --git` line,
 or at a `---` line naming a path, which a `+++` line and a hunk header must follow. Each hunk is
-consumed by the line counts in its own header, and by the one `\ No newline at end of file` marker
-that may follow its last line, so an added line that reads `++ b/x` (shown as `+++ b/x`) is content,
-not a header. A section completes with a hunk, a binary marker (`Binary files ... differ` or
-`GIT binary patch`), or a creation, deletion, mode change, rename or copy header. A rename names both
-of its paths (`rename from` and `rename to`), a copy only its destination (`copy to`), a deletion or a
-creation the one path that is not `/dev/null`, and a section with no path header (a mode change, an
-empty file, a binary change) the one path its `diff --git` line names twice. C-quoted names are
-decoded, and a name is read up to a tab.
+consumed by the line counts in its own header, so an added line that reads `++ b/x` (shown as
+`+++ b/x`) is content, not a header, and by git's exact `\ No newline at end of file` marker wherever
+one follows a context, removed or added line, at most once for each side of the file (a marker after
+a context line marks both sides). A line after a hunk's counted lines and its marker is not part of
+the hunk: as `git apply` reads it, it is prose unless it opens a section or begins as a diff header or
+a marker does, so a hunk with extra lines after its counted ones is not refused for them. A section
+completes with a hunk, a binary marker (`Binary files ... differ` or `GIT binary patch`), or a
+creation, deletion, mode change, rename or copy header. A section names at most one old path (its
+`---`, `rename from` and `copy from` headers) and one new path (its `+++`, `rename to` and `copy to`
+headers), and its `diff --git` line names exactly those, `a/` then `b/`, as git writes them from one
+pair. A rename names both of its paths (`rename from` and `rename to`), a copy only its destination
+(`copy to`), a deletion or a creation the one path that is not `/dev/null`, and a section with no
+path header (a mode change, an empty file, a binary change) the one path its `diff --git` line names
+twice. C-quoted names are decoded, and a name is read up to a tab.
 
-Outside a section, a line is prose and is skipped unless it begins as a diff header does. Prose covers
-what git writes around its sections (the mailbox headers and the commit message, the `---` separator,
-alone or with trailing blanks, the diffstat and its summary, the `-- ` signature and the version line
-after it, and a binary patch's encoded lines) and blank or indented lines. A line that begins as a
-diff header does is not prose, wherever it stands (after a section, at the end, or before prose),
-since a section cut short or mangled would otherwise drop out of the census unseen: a `+++` line, a
-hunk header, an extended header such as `index` or `rename from` (including the older `rename old`
-and `rename new`), a binary marker, and a `diff -` line other than `diff --git` (git writes no other,
-so `diff -ruN` output is refused too). A `---` line naming a path always opens a section.
+Outside a section, a line is prose and is skipped unless it begins as a diff header or a no-newline
+marker does. Prose covers what git writes around its sections (the mailbox headers and the commit
+message, the `---` separator, alone or with trailing blanks, the diffstat and its summary, the `-- `
+signature and the version line after it, and a binary patch's encoded lines) and blank or indented
+lines. A line that begins as a diff header or a marker does is not prose, wherever it stands (after a
+section, at the end, or before prose), since a section cut short or mangled would otherwise drop out
+of the census unseen: a `+++` line, a hunk header, an extended header such as `index` or
+`rename from` (including the older `rename old` and `rename new`), a binary marker, a line beginning
+with a backslash and a space (which `git apply` reads as a no-newline marker), and a `diff -` line
+other than `diff --git` (besides it, git writes only `diff --cc` and `diff --combined`, for a merge,
+which are refused as combined diffs, so `diff -ruN` output is refused too). A `---` line naming a
+path always opens a section.
 
 - More than one `Review-draft:` line, a relative draft path, a draft that cannot be read (missing, a
   symlink, not a regular file, over the cap, not UTF-8, a NUL), an empty `Review-skip:` value, and a
   draft that names no file in a diff header are withheld as `UNVERIFIABLE:`, with a reason naming the
   draft and the cause.
 - A draft the census cannot read is withheld as `UNVERIFIABLE:`, with a reason naming the cause: a
-  combined diff (`diff --cc`), a header path without git's default `a/` or `b/` prefix (written with
-  `--no-prefix`, `diff.noprefix`, `diff.mnemonicPrefix` or custom prefixes), a `---` line naming a
-  path with no `+++` line after it (the `---` line of a context-format `diff -c` section among them), a
-  `+++` line with no hunk after it, a section that ends with no hunk, binary marker, or creation,
-  deletion, mode, rename or copy header (a draft cut short inside a section), a rename, copy or mode
-  header without its pair, a `diff --git` line naming two paths with no rename or copy header, an
-  unreadable quoted name, a hunk header that cannot be read or a hunk whose lines do not match its
-  counts, and a diff header line outside a section.
+  combined diff (`diff --cc` or `diff --combined`), a header path without git's default `a/` or `b/`
+  prefix in its place (written with `--no-prefix`, `diff.noprefix`, `diff.mnemonicPrefix` or custom
+  prefixes, or by `git diff -R`, which swaps them), a `---` line naming a path with no `+++` line after
+  it (the `---` line of a context-format `diff -c` section among them), a `+++` line with no hunk after
+  it, a section that ends with no hunk, binary marker, or creation, deletion, mode, rename or copy
+  header (a draft cut short inside a section), a rename, copy or mode header without its pair, a
+  `diff --git` line naming two paths with no rename or copy header, a section whose `---`, `+++`,
+  rename or copy headers name two old or two new paths, or other paths than its `diff --git` line
+  names (a mangled or hand-edited section, which is refused rather than counted by one of its
+  headers), an unreadable quoted name, a hunk header that cannot be read, a hunk that ends before its
+  header's counts are met or holds more lines for one side than its header counts while the other
+  side's count is not yet met, a hunk line beginning with a backslash that is not git's exact
+  `\ No newline at end of file` marker after a context, removed or added line, a second marker for
+  one side of the file, and a diff header or marker line outside a section.
 - A header or hunk line that ends in a carriage return before its LF is withheld as `UNVERIFIABLE:`,
   with a reason naming CRLF, since a header's names would end in the return. This covers a draft
   saved with CRLF line ends, which must be written again with LF line ends, and a draft holding a
@@ -519,8 +534,12 @@ and a section indented from column 0 (which GNU `patch` reads and `git apply` do
 as prose, are not caught, and neither is an apply whose brief does not name its draft. The census
 reads the draft the brief names, and nothing proves that draft is the one the commit applied: a
 trimmed copy, or a draft cut short between two complete sections, reads as a complete draft of fewer
-files. A commit message line in a mailbox draft that begins as a diff header does (such as one
-starting `index `) is refused with the rest, which can withhold a correct draft.
+files. A commit message line in a mailbox draft that begins as a diff header or a no-newline marker
+does (such as one starting `index ` or `\ `), that reads as an inline submodule header (such as
+`Submodule sub 1234567..89abcde: bumped`), or that reads as a `Content-Transfer-Encoding:` header with
+a value other than `7bit` or `8bit` is refused with the rest, which can withhold a correct draft:
+telling a message line from a part header or a section's line needs the mailbox structure, which a
+draft can mangle, so the census refuses such a line wherever it stands.
 
 The hook refuses with a deny that names the reason. When it cannot evaluate, it denies with the
 reason prefixed `UNVERIFIABLE:`, so that outcome stays distinct. Cannot-evaluate cases include a
