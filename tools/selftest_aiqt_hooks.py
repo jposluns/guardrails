@@ -1420,6 +1420,36 @@ def _test_note_literal_sites(failures, tmp):
                             .format((code, obj)))
     finally:
         aiqt_hooks._orch_save_turn_state = saved_save
+    # (nl-*-scope-cannot) the three scope-cannot note sites: an unusable DECLARED lease horizon
+    # keeps the recorders armed (the row is recorded, the stamp written, the wake classified) and
+    # surfaces the cannot-evaluate, never a silent _allow().
+    sch = orch.Fixture(base, "scope-cannot")
+    sch_reg_path = sch.root / ".aiqt" / "orchestration.local.json"
+    sch_reg = json.loads(sch_reg_path.read_text(encoding="utf-8"))
+    sch_reg["lease"]["max_age_hours"] = 0
+    sch_reg_path.write_text(json.dumps(sch_reg), encoding="utf-8")
+    note("(nl-ledger-scope-cannot) a dispatch row under an unusable lease horizon is recorded and "
+         "the cannot-evaluate is surfaced with a note",
+         aiqt_hooks.orch_dispatch_ledger(sch.payload("PostToolUse", "Bash", dict(
+             command="python3 build.py", run_in_background=True))),
+         "this dispatch row was recorded anyway")
+    note("(nl-stamp-scope-cannot) a genuine prompt under an unusable lease horizon is stamped and "
+         "the cannot-evaluate is surfaced with a note",
+         aiqt_hooks.orch_prompt_stamp(sch.payload("UserPromptSubmit",
+                                                  extra=dict(prompt="hello cannot"))),
+         "this prompt was stamped anyway")
+    sch.set_turn_state(dict(wake_digests=[hashlib.sha256(b"wake cannot").hexdigest()]))
+    code, obj, _err = aiqt_hooks.orch_prompt_stamp(
+        sch.payload("UserPromptSubmit", extra=dict(prompt="wake cannot")))
+    hso = obj.get("hookSpecificOutput") if isinstance(obj, dict) else None
+    if not (code == 0 and isinstance(obj, dict) and set(obj) == {"hookSpecificOutput", "systemMessage"}
+            and isinstance(hso, dict) and set(hso) == {"hookEventName", "additionalContext"}
+            and hso["hookEventName"] == "UserPromptSubmit"
+            and "TIMER-ORIGINATED" in hso["additionalContext"]
+            and "this wake was classified anyway" in obj["systemMessage"]):
+        failures.append("(nl-stamp-timer-scope-cannot) a timer-originated wake under an unusable "
+                        "lease horizon returns model context plus an operator note naming the "
+                        "cannot-evaluate, got {!r}".format((code, obj)))
     s = orch.Fixture(base, "stop")
     s.set_items([orch.item("NL-3")])
     s.set_turn_state(dict(stop_denials=aiqt_hooks._ORCH_LOOP_BOUND))
@@ -2063,6 +2093,26 @@ def _test_stop_dispatch_note_sites(failures, tmp):
              dispatch("{}"), "ns-handler-crash")
     finally:
         aiqt_hooks.HANDLERS["orch_stop_guard"] = saved_handler
+
+    # (ns-lease-heartbeat) the ONE note site of the lease-heartbeat Stop binding, reached from a
+    # real fixture (a held lines-format lease aged past warn_after under a warn-mode declaration),
+    # so the an-coverage inventory sees it execute and a silent-allow mutant at the site fails here.
+    lease_fx = orch.Fixture(base, "leasehb")
+    lease_reg = json.loads((lease_fx.root / ".aiqt" / "orchestration.local.json")
+                           .read_text(encoding="utf-8"))
+    lease_reg["lease"] = {"path": str(lease_fx.lease), "max_age_hours": 24,
+                          "holder_is_session_id": True,
+                          "heartbeat": {"mode": "warn", "format": "lines",
+                                        "holder_field": "holder",
+                                        "refresh_after_minutes": 10, "warn_after_minutes": 30}}
+    (lease_fx.root / ".aiqt" / "orchestration.local.json").write_text(
+        json.dumps(lease_reg), encoding="utf-8")
+    lease_fx.lease.write_text("holder: s1\n", encoding="utf-8")
+    lease_aged = datetime.datetime.now(datetime.timezone.utc).timestamp() - 7200
+    os.utime(lease_fx.lease, times=(lease_aged, lease_aged))
+    note("(ns-lease-heartbeat) a held lease past warn_after warns at Stop (the lease-heartbeat "
+         "note site)",
+         aiqt_hooks.orch_lease_heartbeat_stop(lease_fx.payload("Stop")), "heartbeat gap")
 
 
 def _git(repo, *args, env_identity=False):
