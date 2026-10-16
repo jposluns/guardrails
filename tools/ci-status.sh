@@ -49,7 +49,11 @@
 # value, the repository cannot be determined (see THE REPOSITORY IS THE CHECKOUT'S OWN below), or a
 # --wait whose pull-request probe is refused the pull requests, reads a malformed response, or at its
 # bound still reads UNKNOWN, a pull request that changed between the listing and its own read, or a
-# failed read (a response that is not valid JSON included).
+# failed read (a response that is not valid JSON included). So a head with no open pull request is
+# refused (exit 1) only when the last read also reads its associated pull requests: where that
+# associated read fails at every read, and in none of the PERMANENT forms, the probe makes all 12
+# reads (11 re-reads) and exits 2 (before the probe read the associated pull requests, such a head
+# was refused at once, exit 1).
 # Report-once (no --wait) never returns 0 for a non-terminal run.
 set -uo pipefail
 
@@ -711,7 +715,8 @@ report() {
 # retargeted or turns CONFLICTING; the probe refuses that head anyway, because it cannot merge as it
 # stands, so a wait that run could have satisfied is refused; report-once still reads it.
 # AVAILABILITY COST (disclosed, accepted): a head with no open pull request is refused only at the
-# last of the probe's reads, up to 55 seconds of re-reads after the first.
+# last of the probe's reads: up to 55 seconds of sleep after the first, plus the 11 re-reads' own
+# time, each re-read making two paginated API reads (the listing and the associated pull requests).
 # RESIDUAL (disclosed, not closed): neither the poll sleep nor the probe's re-reads consult
 # CI_STATUS_TIMEOUT, so a wait can end up to about 70 seconds past its deadline (the POLL_SECONDS
 # sleep of 15 seconds after the last deadline check, then up to 55 seconds of probe re-reads), plus

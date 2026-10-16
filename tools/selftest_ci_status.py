@@ -1809,6 +1809,8 @@ def _run_checks():
                        [{"error": "gh: HTTP 404 (https://api.github.com/repos/fixture/repository/pulls)"},
                         probe_read(pull(12, head_sha))],
                        [{"error": "gh: HTTP 404"}],
+                       # Coverage of a rule the script already had before lines were matched whole (it
+                       # also refused any text naming Not Found at once): this vector passes there too.
                        [{"error": "gh: Not Found (HTTP 404)\ngh: This API operation needs the \"repo\" "
                                   "scope. To request it, run:  gh auth refresh -h github.com -s repo"}]):
             rc, output, calls = fixture.invoke(green_polls, wait=True, probes=probes)
@@ -1819,7 +1821,8 @@ def _run_checks():
         # on the listing and on the associated read alike: 401 (bad credentials, authentication
         # required, or no message), 403 not accessible, and 403 SAML enforcement. Another 403 (a rate
         # limit), a 502 whose message says bad credentials, and a 502 line carrying the SAML form are
-        # failed reads, re-read once before a MERGEABLE read waits.
+        # failed reads, re-read once before a MERGEABLE read waits. So is text naming "Resource not
+        # accessible" that is not gh's whole 403 line: without its status, or inside a 502's line.
         saml = ("gh: Resource protected by organization SAML enforcement. You must grant your Personal "
                 "Access token access to this organization. (HTTP 403)")
         permanent = []
@@ -1827,19 +1830,34 @@ def _run_checks():
                        [{"error": "gh: Requires authentication (HTTP 401)"}],
                        [{"error": "gh: HTTP 401"}],
                        [{"error": saml}],
+                       # Coverage of a rule the script already had before lines were matched whole (it
+                       # also refused any text naming Resource not accessible at once): passes there too.
                        [{"error": "gh: Resource not accessible by integration (HTTP 403)"}],
                        [dict(probe_read(), associated_error=saml)],
                        [dict(probe_read(), associated_error="gh: Resource not accessible by personal "
                                                            "access token (HTTP 403)")],
+                       # Coverage of a rule the script already had (any other 403 was re-read there
+                       # too): this vector passes there too.
                        [{"error": "gh: API rate limit exceeded for user ID 1. (HTTP 403)"},
                         probe_read(pull(12, head_sha))],
+                       # Coverage of a rule the script already had (a 401 message inside another line
+                       # was re-read there too): this vector passes there too.
                        [{"error": "gh: Bad Gateway: upstream replied Bad credentials (HTTP 502)"},
                         probe_read(pull(12, head_sha))],
                        [dict(probe_read(), associated_error="gh: HTTP 502: " + saml),
+                        probe_read(pull(12, head_sha))],
+                       [dict(probe_read(), associated_error="gh: Bad credentials (HTTP 401)")],
+                       [dict(probe_read(), associated_error="gh: Requires authentication (HTTP 401)")],
+                       [dict(probe_read(), associated_error="gh: HTTP 401")],
+                       [{"error": "gh: Resource not accessible by personal access token"},
+                        probe_read(pull(12, head_sha))],
+                       [{"error": "gh: HTTP 502: upstream replied Resource not accessible by integration "
+                                  "(HTTP 403)"},
                         probe_read(pull(12, head_sha))]):
             rc, output, calls = fixture.invoke(green_polls, wait=True, probes=probes)
             permanent.append((rc, calls, fixture.probe_reads, "cannot evaluate" in output))
-        check("ci/wait-pr-probe-permanent-forms", permanent, [(2, 0, 1, True)] * 7 + [(0, 5, 6, False)] * 3)
+        check("ci/wait-pr-probe-permanent-forms", permanent,
+              [(2, 0, 1, True)] * 7 + [(0, 5, 6, False)] * 3 + [(2, 0, 1, True)] * 3 + [(0, 5, 6, False)] * 2)
 
         # Combining the reads keeps only a pull request still open at this head into the base: one listed
         # into main whose own read, though MERGEABLE, shows it retargeted to dev, or at another head,
@@ -1903,6 +1921,8 @@ def _run_checks():
         # holding such a pull request rather than an array of them, and a pull request numbered 1e300,
         # which jq prints as 1E+300 and the script refuses before it builds a URL from it. Each is
         # cannot-evaluate (exit 2) at once, although the pull request it carries reads MERGEABLE.
+        # Coverage of rules the script already had before it read the associated pull requests: every
+        # vector here passes there too, so this check guards those rules and does not show that change.
         listed_at_head = {key: value for key, value in pull(24, head_sha).items() if key != "mergeable"}
         listing_malformed = "malformed pull-request response: the open pull-request listing"
         shapes = []
@@ -1984,7 +2004,8 @@ def _run_checks():
         # time check (absent, not a string, or empty) and of the record check (number not a number), and
         # a response of no pages at all, are each cannot-evaluate (exit 2) at once, never read as merged
         # or unmerged. A failed associated read other than a permanent form is re-read: once, then a
-        # MERGEABLE read waits.
+        # MERGEABLE read waits; at every read, with no open pull request listed, cannot-evaluate (exit 2)
+        # at the 12th read with no runs read, never the exit 1 refusal of no open pull request.
         merged_record = closed_pull(25, head_sha)
         associated_malformed = ("malformed pull-request response: the pull requests associated with "
                                 "{}".format(head_sha))
@@ -2001,8 +2022,12 @@ def _run_checks():
             green_polls, wait=True,
             probes=[dict(probe_read(), associated_error="gh: HTTP 502"), probe_read(pull(25, head_sha))])
         associated_cases.append((rc, calls, fixture.probe_reads, "cannot evaluate" in output))
+        rc, output, calls = fixture.invoke(
+            green_polls, wait=True, probes=[dict(probe_read(), associated_error="gh: HTTP 502")])
+        associated_cases.append((rc, calls, fixture.probe_reads,
+                                 "cannot evaluate: the pull-request read failed" in output))
         check("ci/wait-pr-probe-associated-read", associated_cases,
-              [(2, 0, 1, True)] * 5 + [(0, 5, 6, False)])
+              [(2, 0, 1, True)] * 5 + [(0, 5, 6, False), (2, 0, 12, True)])
 
     # Round 7: main() must print every collected failure and map the exit code by the module docstring's
     # rule on every path. Each case runs a nested main() on seeded state and restores the real state.
