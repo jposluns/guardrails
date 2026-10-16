@@ -1710,6 +1710,9 @@ without a process running.
 section 14.1 with a live full doctor VALID, or that a pre-1.3.0 legacy import finished and its
 preserved legacy run evidence substantiates it; the
 section 9.2 upgrade preserves that legacy status without fabricating an approval or receipt.
+That live full doctor VALID is subject to the open question of section 17: until homes-1
+grading is decided and added, no activated 1.3.0 store reaches it, so no source completes
+under section 14.1.
 A partial or complete status that neither an adoption receipt with completion results nor
 preserved legacy import evidence substantiates MUST fail closed, as does a missing, unreadable
 or contradictory input. Elapsed time and a staging directory MUST NOT be taken as proof of status.
@@ -1739,6 +1742,8 @@ Defaults: scaffolding and clean-start adoption MUST write `posture = "required"`
 `import_status = "none"`. An adoption with migrate-disposed sources keeps `required` and MUST
 hold `import_status = "partial"` until each source's completion result is recorded green
 (section 14.1), then `"complete"`.
+That green result is subject to the open question of section 17: until homes-1 grading is decided
+and added, no activated 1.3.0 store reaches doctor VALID, so no import completes (section 14.1).
 Import status MUST NOT weaken posture. Reports MUST carry `migration_incomplete` while an approved
 source or detected file remains unresolved. Weakening the posture (`required` toward `warn`
 or `off`) is a guardrail-configuration change: it MUST take effect only through the
@@ -2531,7 +2536,10 @@ included, MUST stay byte-identical to the state the command found where the pre-
 otherwise to the state that the lease reconciliation and recovery above left, apart from that claim
 and release. A fresh-only implementation that provides an upgrade command MUST refuse an older store
 with the same finding and MUST NOT report a successful upgrade; it MAY report a no-op on a supported
-store only after full doctor VALID. Admission MUST NOT substitute for any other applicable check.
+store only after full doctor VALID.
+That VALID is subject to the open question of section 17: until homes-1 grading is decided and
+added, no activated 1.3.0 store reaches it, so no such no-op is reported on a 1.3.0 store.
+Admission MUST NOT substitute for any other applicable check.
 
 For a store its admission check refuses, a report MUST give the base result as `indeterminate`,
 naming the class, the supported version and generations, and the finding; it MUST NOT give
