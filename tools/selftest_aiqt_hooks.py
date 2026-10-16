@@ -3588,13 +3588,190 @@ def _deadline_discard_failures():
     return out
 
 
+def _alarm_then_own_expiry(window, pending):
+    """Run window with a body that raises SIGALRM at once, which _fire handles while the window's timer still
+    runs, and with the first instruction of _give_back (in _fire's close, every signal blocked) waiting, up
+    to 1 s, until the window's own expiry is pending, which pending records. What escaped, and where the
+    wait ran."""
+    give_back = aiqt_hooks._DeadlineWindow._give_back.__code__
+
+    def wait_pending():
+        waited = time.monotonic() + 1.0
+        while signal.SIGALRM not in signal.sigpending() and time.monotonic() < waited:
+            time.sleep(1e-3)
+        pending.append(signal.SIGALRM in signal.sigpending())
+
+    tracer, at = _window_tracer(window, (lambda frame: frame.f_code is give_back, wait_pending))
+    escaped = None
+    try:
+        with window:
+            sys.settrace(tracer)
+            signal.raise_signal(signal.SIGALRM)
+    except aiqt_hooks._HookDeadline as exc:
+        escaped = "the window's deadline" if exc.args[:1] == (window,) else "another deadline"
+    except BaseException as exc:
+        escaped = type(exc).__name__
+    finally:
+        sys.settrace(None)
+    return escaped, at
+
+
+def _deadline_alarm_default_child():
+    """The dl-own-expiry-after-alarm-default run, in this (child) process with SIGALRM at SIG_DFL, as main()
+    runs the window: writes what escaped, the wait, and whether SIGALRM and the timer came back, as JSON. A
+    delivery of the window's own expiry ends this process by SIGALRM before it writes anything."""
+    signal.signal(signal.SIGALRM, signal.SIG_DFL)
+    pending = []
+    escaped, at = _alarm_then_own_expiry(aiqt_hooks._DeadlineWindow(0.2), pending)
+    sys.stdout.write(json.dumps({"escaped": escaped, "at": at, "pending": pending,
+                                 "back": (signal.getsignal(signal.SIGALRM) == signal.SIG_DFL
+                                          and signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0))}))
+
+
+def _deadline_alarm_failures():
+    """(dl-own-expiry-after-alarm, -nested, -default, -held) The window's own expiry is still discarded
+    after _fire has handled a SIGALRM from elsewhere. Under a caller with a counting SIGALRM handler and a
+    periodic 30-second timer, a 0.2-second window runs through _alarm_then_own_expiry: its body raises
+    SIGALRM, which _fire takes as the window's deadline while the window's timer still runs, and the restore
+    of _fire's close waits until the window's own expiry is pending, as when it falls due in those
+    microseconds.
+    dl-own-expiry-after-alarm: the window's deadline must escape, with no caller delivery and the caller's
+    handler and periodic timer back.
+    dl-own-expiry-after-alarm-nested: the same window nested in a 600-second one: the inner deadline must
+    escape the inner window, the outer window must get back its handler and countdown and its body run on,
+    and there must be no caller delivery.
+    dl-own-expiry-after-alarm-default: the unnested run in a child process with SIGALRM at SIG_DFL, as main()
+    runs the window (_deadline_alarm_default_child): the child must exit 0 having caught the window's
+    deadline, with SIGALRM back at SIG_DFL and the timer inactive.
+    dl-own-expiry-after-alarm-held: _fire runs inside the call that sets the mask for __exit__'s first close
+    attempt, as for a SIGALRM that arrived just before that call, with the window's own expiry pending by
+    then. A 0.2-second window's body ends at once with aiqt_hooks.signal replaced by a namespace of the
+    signal module's attributes whose pthread_sigmask, on its first call that blocks a nonempty set, sets
+    that mask through the C function, waits (up to 1 s) until the window's expiry is pending, and then calls
+    the window's handler as Python would inside that call. Nothing may escape (the exit had begun), with
+    no caller delivery and the caller's state back.
+    All four fail where _fire takes any SIGALRM it handles for the window's expiry; the held case fails too
+    where _fire reads only the timer, not the pending signals."""
+    out = []
+    calls = []
+
+    def counting(signum, frame):
+        calls.append(signum)
+
+    def caller_back(handler, timer):
+        return handler is counting and timer[1] == 30.0 and 29.0 < timer[0] <= 30.0
+
+    def outer_back(handler, timer, outer):
+        # The outer window's countdown is the caller's 30 seconds, sooner than its own 600.
+        return getattr(handler, "__self__", None) is outer and timer[1] == 0.0 and 29.0 < timer[0] <= 30.0
+
+    def state():
+        return signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+
+    def stand_in(pending):
+        names = types.SimpleNamespace(**vars(signal))
+
+        def pthread_sigmask(how, mask):
+            if how != signal.SIG_BLOCK or not mask:
+                return signal.pthread_sigmask(how, mask)
+            names.pthread_sigmask = signal.pthread_sigmask
+            previous = _signal.pthread_sigmask(signal.SIG_BLOCK, mask)
+            waited = time.monotonic() + 1.0
+            while signal.SIGALRM not in signal.sigpending() and time.monotonic() < waited:
+                time.sleep(1e-3)
+            pending.append(signal.SIGALRM in signal.sigpending())
+            signal.getsignal(signal.SIGALRM)(signal.SIGALRM, sys._getframe())
+            return previous
+        names.pthread_sigmask = pthread_sigmask
+        return names
+
+    def run(case):
+        calls.clear()
+        pending = []
+        signal.signal(signal.SIGALRM, counting)
+        signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
+        window = aiqt_hooks._DeadlineWindow(0.2)
+        outer = aiqt_hooks._DeadlineWindow(600.0) if case == "nested" else None
+        at = inside = None
+        ran_on = False
+        escaped = None
+        try:
+            try:
+                if case == "nested":
+                    with outer:
+                        escaped, at = _alarm_then_own_expiry(window, pending)
+                        inside = state()
+                        ran_on = True
+                elif case == "held":
+                    try:
+                        with window:
+                            aiqt_hooks.signal = stand_in(pending)
+                    finally:
+                        aiqt_hooks.signal = signal
+                else:
+                    escaped, at = _alarm_then_own_expiry(window, pending)
+            except aiqt_hooks._HookDeadline as exc:
+                escaped = "the outer deadline" if exc.args[:1] == (outer,) else "another deadline"
+            except BaseException as exc:
+                escaped = type(exc).__name__
+            final = state()
+        finally:
+            aiqt_hooks.signal = signal
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        problems = []
+        if pending != [True] or (case != "held" and not at):
+            problems.append("the window's expiry was not pending at the restore (wait at {!r}, pending {!r})"
+                            .format(at, pending))
+        want = None if case == "held" else "the window's deadline"
+        if escaped != want:
+            problems.append("escaped {}, want {}".format(escaped, want))
+        if calls:
+            problems.append("caller deliveries {}".format(len(calls)))
+        if not caller_back(*final):
+            problems.append("caller left {!r}".format(final))
+        if case == "nested" and not (ran_on and outer_back(*inside, outer)):
+            problems.append("the outer body ran on {}, the outer window left {!r}".format(ran_on, inside))
+        if window.armed or getattr(window, "broken", False) or (outer is not None and outer.armed):
+            problems.append("a window left armed or broken")
+        return problems
+
+    for case in ("unnested", "nested", "held"):
+        problems = run(case)
+        if problems:
+            out.append("(dl-own-expiry-after-alarm{}) the window's own expiry pending at the restore after _fire "
+                       "handled a SIGALRM from elsewhere must reach no handler, got {}".format(
+                           "" if case == "unnested" else "-" + case, "; ".join(problems)))
+    code = ("import sys; sys.path.insert(0, sys.argv[1]); import selftest_aiqt_hooks as m; "
+            "m._deadline_alarm_default_child()")
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(Path(__file__).resolve().parent)],
+                              capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        returncode, text, found = "none (no exit within 120s)", "", None
+    else:
+        returncode, text = proc.returncode, proc.stdout + proc.stderr
+        try:
+            found = json.loads(proc.stdout)
+        except ValueError:
+            found = None
+    if not (returncode == 0 and isinstance(found, dict) and found.get("escaped") == "the window's deadline"
+            and found.get("at") and found.get("pending") == [True] and found.get("back") is True):
+        out.append("(dl-own-expiry-after-alarm-default) under SIG_DFL the window's own expiry pending at the "
+                   "restore after _fire handled a SIGALRM from elsewhere must not reach the process, got exit "
+                   "{}{} and {!r}".format(returncode, " (killed by SIGALRM)" if returncode == -signal.SIGALRM
+                                          else "", text[-1000:]))
+    return out
+
+
 def _deadline_mask_failures():
     """(dl-mask-back-exit, dl-mask-back-enter) Controls, which also pass on the pinned base commit: the
     mask in force before the take or the restore is put back when a handler raises inside the call that
     sets the mask and leaves another pending. On Python 3.14.4 the handler left pending runs inside the next call that checks
     for signals (observed: inside the C call of the signal module's wrapper, with the mask already back),
     so these runs do not reach the case the direct C call of _SET_MASK closes, where something else makes
-    Python run that handler at the entry of the wrapper, before the mask is set. SIGUSR1 and
+    Python run that handler at the entry of the wrapper, before the mask is set (dl-mask-back-thread-* in
+    _deadline_mask_thread_failures reaches it). SIGUSR1 and
     SIGUSR2 get handlers that raise. aiqt_hooks.signal is replaced by a namespace of the signal module's
     attributes whose pthread_sigmask, on its first call that blocks a nonempty set (the window's call that
     blocks every signal), queues SIGUSR1 and SIGUSR2 with both blocked and then sets the mask to that set
@@ -3670,6 +3847,149 @@ def _deadline_mask_failures():
     return out
 
 
+def _deadline_mask_thread_failures():
+    """(dl-mask-back-thread-exit, dl-mask-back-thread-enter) The mask is put back when a handler raises
+    inside the blocked section and another is pending behind it, the case the direct C call of _SET_MASK
+    closes. SIGUSR1 and SIGUSR2 get handlers that raise. A helper thread, started before anything is blocked
+    so it leaves both unblocked, waits until the main thread holds every signal blocked and then sends both
+    to itself with signal.pthread_kill, so it takes both before the main thread goes on, and their Python
+    handlers run in the main thread at its next check for signals, as for a signal another thread takes
+    (the thread limit the class docstring states). The window is a subclass whose _give_back (exit) or
+    _take (enter) runs the real one and then waits for the helper and loops with no call: SIGUSR1's handler
+    raises at the end of that wait or at the loop's back edge, and SIGUSR2's is left pending for the call
+    that puts the mask back. The C function sets the mask before that handler runs; the signal module's
+    Python wrapper would run it at its entry, before the mask is set, and leave every signal blocked. The
+    mask after the with statement must be the one before it, with both handlers run once, a raising
+    handler's exception escaping, the window neither armed nor broken and the caller's handler and periodic
+    timer back. Both fail where _SET_MASK is signal.pthread_sigmask."""
+    out = []
+    ran = []
+    pair = (signal.SIGUSR1, signal.SIGUSR2)
+
+    def raising(signum, frame):
+        ran.append(signum)
+        raise _CallerAlarm("signal {}".format(signum))
+
+    def counting(signum, frame):
+        pass
+
+    for where in ("exit", "enter"):
+        ran.clear()
+        go, sent = threading.Lock(), threading.Lock()
+        go.acquire()
+        sent.acquire()
+        waited, stopped = [], []
+
+        def send():
+            go.acquire()
+            if not stopped:
+                for signum in pair:
+                    signal.pthread_kill(threading.get_ident(), signum)
+            sent.release()
+
+        def wait():
+            if waited:
+                return
+            waited.append(True)
+            go.release()
+            sent.acquire(timeout=10)
+            count = 0
+            while count < 20000000:
+                count += 1
+
+        class Waiting(aiqt_hooks._DeadlineWindow):
+            __slots__ = ()
+
+            def _take(self):
+                super()._take()
+                if where == "enter":
+                    wait()
+
+            def _give_back(self):
+                armed = self.armed
+                super()._give_back()
+                if where == "exit" and armed:
+                    wait()
+
+        helper = threading.Thread(target=send, daemon=True)
+        helper.start()
+        before = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+        saved = {signum: signal.signal(signum, raising) for signum in pair}
+        signal.signal(signal.SIGALRM, counting)
+        signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
+        window = Waiting(5.0)
+        escaped = None
+        try:
+            try:
+                with window:
+                    pass
+            except _CallerAlarm:
+                escaped = "a raising handler's exception"
+            except BaseException as exc:
+                escaped = type(exc).__name__
+            after = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+            handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+        finally:
+            _signal.pthread_sigmask(signal.SIG_SETMASK, before)
+            if not waited:
+                stopped.append(True)
+                go.release()
+            helper.join(10)
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+            for signum, previous in saved.items():
+                signal.signal(signum, previous)
+        if not (waited and set(after) == set(before) and sorted(ran) == sorted(pair)
+                and escaped == "a raising handler's exception" and handler is counting and timer[1] == 30.0
+                and 29.0 < timer[0] <= 30.0 and not window.armed and not getattr(window, "broken", False)):
+            out.append("(dl-mask-back-thread-{}) the mask must come back as it was when a handler raises in the "
+                       "blocked section and another is pending behind it, got {} signals left blocked, handlers "
+                       "run {!r}, escaped {}, handler {!r}, timer {!r}, armed {}".format(
+                           where, len(set(after) - set(before)), ran, escaped, handler, timer, window.armed))
+    return out
+
+
+def _deadline_no_c_mask_failures():
+    """(dl-refused-no-c-mask) A window without a callable _SET_MASK refuses the borrow. With _SET_MASK set
+    to None on the class, a 5-second window under a caller with a counting SIGALRM handler and a periodic
+    30-second timer must run its body unarmed, with nothing escaping, the mask as before and the caller's
+    handler and timer as they were. Fails where _can_borrow does not check _SET_MASK: the take's call that
+    puts the mask back then raises TypeError and leaves every signal blocked."""
+    out = []
+    saved = aiqt_hooks._DeadlineWindow._SET_MASK
+
+    def counting(signum, frame):
+        pass
+
+    before = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+    signal.signal(signal.SIGALRM, counting)
+    signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
+    window = aiqt_hooks._DeadlineWindow(5.0)
+    armed = escaped = None
+    try:
+        aiqt_hooks._DeadlineWindow._SET_MASK = None
+        try:
+            with window:
+                armed = window.armed
+        except BaseException as exc:
+            escaped = type(exc).__name__
+        finally:
+            aiqt_hooks._DeadlineWindow._SET_MASK = saved
+        after = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+        handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+    finally:
+        aiqt_hooks._DeadlineWindow._SET_MASK = saved
+        _signal.pthread_sigmask(signal.SIG_SETMASK, before)
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+    if not (armed is False and escaped is None and set(after) == set(before) and handler is counting
+            and timer[1] == 30.0 and 29.0 < timer[0] <= 30.0):
+        out.append("(dl-refused-no-c-mask) a window without a callable _SET_MASK must refuse the borrow, got "
+                   "armed {} in the body, escaped {}, {} signals left blocked, handler {!r}, timer {!r}".format(
+                       armed, escaped, len(set(after) - set(before)), handler, timer))
+    return out
+
+
 def _deadline_outer_deadline_failures():
     """(dl-defer-twice-outer-deadline) Two raising handlers at an inner window's first two close attempts
     leave an enclosing window its deadline. A 0.3-second window encloses a 5-second one; from a
@@ -3727,11 +4047,14 @@ def _deadline_outer_deadline_failures():
 
 class _FaultySignal:
     """A stand-in for aiqt_hooks.signal: the signal module, with the function `name` raising
-    signal.ItimerError on its next `times` calls that `matches` accepts, before the call runs or, with
-    `after`, once it has returned."""
+    signal.ItimerError on its next `times` calls that `matches` accepts and that the function whose code is
+    `caller` makes (by default _DeadlineWindow._twice, which makes each restore operation and no other call,
+    so _fire's read of the pending signals is left alone), before the call runs or, with `after`, once it
+    has returned."""
 
-    def __init__(self, name, matches, times, after=False):
+    def __init__(self, name, matches, times, after=False, caller=None):
         self.name, self.matches, self.times, self.after = name, matches, times, after
+        self.caller = aiqt_hooks._DeadlineWindow._twice.__code__ if caller is None else caller
 
     def __getattr__(self, attr):
         real = getattr(signal, attr)
@@ -3739,7 +4062,7 @@ class _FaultySignal:
             return real
 
         def faulty(*args):
-            if not (self.times and self.matches(args)):
+            if not (self.times and self.matches(args) and sys._getframe(1).f_code is self.caller):
                 return real(*args)
             if self.after:
                 real(*args)
@@ -3885,6 +4208,85 @@ def _deadline_restore_fault_failures():
                     problems.append("caller left {!r}".format(first))
             if problems:
                 out.append("{} {}".format(case, "; ".join(problems)))
+    finally:
+        sys.settrace(None)
+        aiqt_hooks.signal = signal
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+    return out
+
+
+def _deadline_unknown_failures():
+    """(dl-take-arm-fails-kept, dl-cancel-retry-kept, dl-fire-read-fails-kept) The restore discards no
+    SIGALRM where it cannot know that the SIGALRM pending is the window's own expiry. Under a caller with a
+    counting SIGALRM handler and a periodic 30-second timer, a window runs with a SIGALRM queued with
+    signal.raise_signal at the first instruction of _give_back (every signal blocked, from an opcode trace
+    stage), as a caller's SIGALRM sent while the restore holds the mask:
+    dl-take-arm-fails-kept: a 5-second window, with a _FaultySignal installed before the with statement
+    that makes the take's setitimer that arms the window's timer raise signal.ItimerError before it runs,
+    so the restore finds the timer inactive. Fails where the take sets _unheard before that setitimer.
+    dl-cancel-retry-kept: a 5-second window, with a _FaultySignal installed inside it that makes the
+    restore's cancel raise once, after it has run, so the retry reads the cancelled timer as inactive.
+    Fails where the restore counts the retry's reading as the window's timer run out.
+    dl-fire-read-fails-kept: a 0.05-second window whose body sleeps past its deadline, with a _FaultySignal
+    installed inside it that makes _fire's read of the pending signals raise, so whether the window's
+    expiry was delivered is unknown. Fails where an unknown read leaves _unheard set.
+    Each case's injected error must leave the with statement and the queued SIGALRM must reach the caller's
+    handler once, with the caller's handler and periodic timer back and the window neither armed nor
+    broken."""
+    out = []
+    calls = []
+    give_back = aiqt_hooks._DeadlineWindow._give_back.__code__
+    take = aiqt_hooks._DeadlineWindow._take.__code__
+    fire = aiqt_hooks._DeadlineWindow._fire.__code__
+
+    def counting(signum, frame):
+        calls.append(signum)
+
+    cases = (
+        ("dl-take-arm-fails-kept", lambda: _FaultySignal("setitimer", lambda args: args[1:] != (0,), 1,
+                                                         caller=take), True, 5.0, 0.0),
+        ("dl-cancel-retry-kept", lambda: _FaultySignal("setitimer", lambda args: args[1:] == (0,), 1,
+                                                       after=True), False, 5.0, 0.0),
+        ("dl-fire-read-fails-kept", lambda: _FaultySignal("sigpending", lambda args: True, 1, caller=fire),
+         False, 0.05, 1.0),
+    )
+    try:
+        for label, make, before_with, seconds, sleep in cases:
+            calls.clear()
+            window = aiqt_hooks._DeadlineWindow(seconds)
+            faulty = make()
+            tracer, at = _window_tracer(window, (lambda frame: frame.f_code is give_back,
+                                                 lambda: signal.raise_signal(signal.SIGALRM)))
+            signal.signal(signal.SIGALRM, counting)
+            signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
+            try:
+                sys.settrace(tracer)
+                if before_with:
+                    aiqt_hooks.signal = faulty
+                with window:
+                    aiqt_hooks.signal = faulty
+                    time.sleep(sleep)
+            except signal.ItimerError as exc:
+                escaped = str(exc)
+            except BaseException as exc:
+                escaped = type(exc).__name__
+            else:
+                escaped = None
+            finally:
+                sys.settrace(None)
+                aiqt_hooks.signal = signal
+            handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+            if not (at and not faulty.times and escaped == "injected {} fault".format(faulty.name)
+                    and calls == [signal.SIGALRM] and handler is counting and timer[1] == 30.0
+                    and 29.0 < timer[0] <= 30.0 and not window.armed and not getattr(window, "broken", False)):
+                out.append("({}) a caller's SIGALRM pending at a restore that cannot know whether the SIGALRM "
+                           "pending is the window's own expiry must reach the caller's handler once, got stage at "
+                           "{!r}, faults left {}, escaped {}, caller deliveries {}, handler {!r}, timer {!r}, armed "
+                           "{}".format(
+                               label, at, faulty.times, escaped, len(calls), handler, timer, window.armed))
     finally:
         sys.settrace(None)
         aiqt_hooks.signal = signal
@@ -4144,9 +4546,10 @@ def _deadline_child(tmp):
     process; returns their failures."""
     return (_deadline_path_failures() + _deadline_restore_failures() + _deadline_race_failures()
             + _deadline_take_failures() + _deadline_defer_failures() + _deadline_enclosing_restore_failures()
-            + _deadline_rearm_failures() + _deadline_discard_failures() + _deadline_mask_failures()
+            + _deadline_rearm_failures() + _deadline_discard_failures() + _deadline_alarm_failures()
+            + _deadline_mask_failures() + _deadline_mask_thread_failures() + _deadline_no_c_mask_failures()
             + _deadline_outer_deadline_failures() + _deadline_restore_fault_failures()
-            + _deadline_window_error_failures() + _deadline_result_failures()
+            + _deadline_unknown_failures() + _deadline_window_error_failures() + _deadline_result_failures()
             + _deadline_entry_message_failures() + _deadline_shape_failures(Path(tmp)))
 
 

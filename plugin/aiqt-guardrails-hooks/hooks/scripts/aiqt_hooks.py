@@ -16860,11 +16860,12 @@ class _DeadlineWindow:
     owner.
 
     The restore (_give_back) cancels the window's timer, reading what it had left; installs SIG_IGN, which
-    discards a pending SIGALRM, only when that timer had run out and the window's handler has not run since
-    the timer was armed, so the window's own expiry is pending and can never reach the caller; reinstalls
-    the caller's disposition; reads the clock and decides, once, whether the caller's timer came due;
-    re-arms the caller's timer; and, for a due expiry, queues a SIGALRM with signal.raise_signal unless one
-    is pending already, so the expiry is delivered once, to the caller's handler, as the mask is put back.
+    discards a pending SIGALRM, only when that timer had run out and the window's own expiry has not been
+    delivered since the timer was armed (`_unheard`, which _fire clears as below), so the SIGALRM pending is
+    that expiry and it never reaches the caller; reinstalls the caller's disposition; reads the clock and
+    decides, once, whether the caller's timer came due; re-arms the caller's timer; and, for a due expiry,
+    queues a SIGALRM with signal.raise_signal unless one is pending already, so the expiry is delivered
+    once, to the caller's handler, as the mask is put back.
     Any other SIGALRM pending at the restore (one sent while the mask was held, say) is left pending and
     reaches the caller's handler the same way. The kernel keeps at most one pending instance of a standard
     signal, which leaves two merges: a SIGALRM sent while the window's own expiry is pending merges with it
@@ -16875,7 +16876,11 @@ class _DeadlineWindow:
     before Python runs any handler, and Python runs a signal's handler once for all the deliveries it has
     received since it last ran handlers (observed on Linux with Python 3.14.4: a timer expiry and a
     raise_signal both pending ran the handler once). An enclosing window's expiry that falls due during the
-    restore is delivered the same way, after the inner window has fully finished.
+    restore is delivered the same way, after the inner window has fully finished. The restore discards
+    nothing where it cannot know that the SIGALRM pending is the window's own expiry: after an arming
+    setitimer that raised (`_unheard` is set only once it has returned), after a cancel whose first run
+    raised (_twice says why), or after a read in _fire that raised; a window's own expiry then pending
+    reaches the caller's handler.
 
     An operation of the restore that raises (setitimer, signal.signal, sigpending or raise_signal failing)
     is tried once more inside the same blocked section; the restore then goes on, and the first exception
@@ -16900,15 +16905,25 @@ class _DeadlineWindow:
     __enter__'s cleanup) raises it in place of the deadline. Once the window's exit has begun, its own
     expiry raises no deadline: _fire then only closes the window, if it is still armed.
 
+    Before its close attempts _fire reads whether the SIGALRM it handles is the window's own expiry, and
+    clears `_unheard` only when the window's timer reads as run out and no SIGALRM is pending. A SIGALRM
+    from elsewhere that _fire handles while the window's timer still runs therefore leaves the window's
+    expiry, if it comes pending later in the restore, to be discarded; an expiry already pending when _fire
+    runs inside the call that sets the mask (for a SIGALRM that arrived just before it) is discarded the
+    same way. A read that raises counts the expiry as delivered, and its exception is kept like a close
+    attempt's. One SIGALRM is still taken for that expiry wrongly, and discarded: one sent once the mask is
+    set, when the window's expiry arrived just before the call that sets it and _fire runs inside that call.
+
     CPython runs a Python handler only where it checks for signals: at the entry of a function, at the
-    back edge of a loop, and inside or on return from a call. So a handler can still run before the mask
-    is set: at the entry of _close and in the calls that read and set the mask. A handler that raises there
-    runs before anything is taken, or before anything is given back (the restore starts only once the call
-    that sets the mask has returned), and leaves the window armed. __exit__, _fire and __enter__'s cleanup
-    therefore each make three close attempts (each a call of _close, which does nothing once the window is
-    closed), one after another with no call, loop or function entry between them, and keep the first
-    exception an attempt raised, raising it once the attempts are over. The window is left armed only when
-    a raising handler interrupts each of the three attempts before it has set the mask. Its own timer then
+    back edge of a loop, and inside or on return from a call. So a handler can still run before the take or
+    the restore begins: at the entry of _close, and in the calls that read and set the mask (in the one that
+    sets it, once the mask is set). A handler that raises there runs before anything is taken, or before
+    anything is given back (the restore starts only once the call that sets the mask has returned), and
+    leaves the window armed. __exit__, _fire and __enter__'s cleanup therefore each make three close
+    attempts (each a call of _close, which does nothing once the window is closed), one after another with
+    no call, loop or function entry between them, and keep the first exception an attempt (or _fire's read
+    before them) raised, raising it once the attempts are over. The window is left armed only when a
+    raising handler interrupts each of the three attempts before _give_back begins. Its own timer then
     still runs (only the restore cancels it), and _fire closes the window when that expiry is delivered:
     once an attempt has marked the exit begun, with three more attempts that raise no deadline of their
     own, the caller's disposition and timer coming back and an enclosing window's expiry that came due
@@ -16930,11 +16945,14 @@ class _DeadlineWindow:
 
     The borrow is refused, and the window runs with no deadline at all (armed stays False, nothing is
     changed), where it cannot be done faithfully: no finite positive `seconds` (the fail-open modes pass
-    None), a platform without setitimer, pthread_sigmask, sigpending, valid_signals or raise_signal
-    (Windows), a thread other than the main thread (Python runs signal handlers only there, and the mask
-    it sets would not be the main thread's), a caller that blocks SIGALRM (a deadline could not fire, and
-    its pending notification could not be kept apart from ours), or a SIGALRM disposition not installed
-    from Python (getsignal returns None, which cannot be reinstalled)."""
+    None), a platform without setitimer, getitimer, pthread_sigmask, sigpending, valid_signals or
+    raise_signal (Windows) or without a callable _SET_MASK (the signal module defines its pthread_sigmask
+    wrapper only when _signal has the C function, so _SET_MASK is there whenever signal.pthread_sigmask is;
+    it is checked as well, so a borrow never starts without it), a thread other than the main thread
+    (Python runs signal handlers only there, and the mask it sets would not be the main thread's), a caller
+    that blocks SIGALRM (a deadline could not fire, and its pending notification could not be kept apart
+    from ours), or a SIGALRM disposition not installed from Python (getsignal returns None, which cannot be
+    reinstalled)."""
     __slots__ = ("seconds", "armed", "broken", "pending_at_entry", "_live", "_ending", "_unheard", "_handler",
                  "_timer", "_began", "_held")
     # Every signal the take and the restore hold back (the kernel never blocks SIGKILL or SIGSTOP).
@@ -16948,17 +16966,28 @@ class _DeadlineWindow:
         self._handler = self._timer = self._began = self._held = None
 
     def _fire(self, signum, frame):
-        self._unheard = False  # an expiry of the window's timer is no longer pending for the restore
+        # Whether the SIGALRM handled is the window's own expiry, read as the class docstring describes: a
+        # read that raises leaves it unknown, counted as delivered, and its exception is kept.
+        heard = True
+        try:
+            heard = (signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+                     and signal.SIGALRM not in signal.sigpending())
+        except BaseException as error:
+            first = error
+        else:
+            first = None
+        if heard:
+            self._unheard = False  # the window's own expiry has been delivered: none is pending for the restore
         live = self._live
         if not (live or self._ending):
+            if first is not None:
+                raise first
             return
         # The close attempts the class docstring describes, the first exception kept.
         try:
             self._close()
         except BaseException as error:
-            first = error
-        else:
-            first = None
+            first = error if first is None else first
         try:
             self._close()
         except BaseException as error:
@@ -16995,9 +17024,11 @@ class _DeadlineWindow:
                 or not math.isfinite(seconds) or seconds <= 0):
             return False
         if not all(hasattr(signal, name) for name in (
-                "setitimer", "ITIMER_REAL", "SIGALRM", "pthread_sigmask", "sigpending", "valid_signals",
-                "raise_signal")):
+                "setitimer", "getitimer", "ITIMER_REAL", "SIGALRM", "pthread_sigmask", "sigpending",
+                "valid_signals", "raise_signal")):
             return False
+        if not callable(self._SET_MASK):
+            return False  # there whenever signal.pthread_sigmask is (the class docstring says why)
         if threading.current_thread() is not threading.main_thread():
             return False
         if signal.SIGALRM in signal.pthread_sigmask(signal.SIG_BLOCK, ()):
@@ -17102,8 +17133,8 @@ class _DeadlineWindow:
                 self._give_back()
                 raise _HookDeadline(self)
             left = timer[0]
-            self._unheard = True  # from here on an expiry of the window's timer can be pending at the restore
             signal.setitimer(signal.ITIMER_REAL, self.seconds if left <= 0 else min(self.seconds, left))
+            self._unheard = True  # from here on an expiry of the window's timer can be pending at the restore
             self._live = True
         except BaseException:
             self._give_back()
@@ -17118,9 +17149,10 @@ class _DeadlineWindow:
             return
         errors = []
         try:
-            expired = self._twice(errors, signal.setitimer, signal.ITIMER_REAL, 0) == (0.0, 0.0)
-            if expired and self._unheard:
-                # The window's timer ran out and its handler has not run since: the SIGALRM pending is its own.
+            reading = self._twice(errors, signal.setitimer, signal.ITIMER_REAL, 0)
+            if not errors and reading == (0.0, 0.0) and self._unheard:
+                # The window's timer ran out (read by a cancel whose first run returned, as _twice says) and
+                # its expiry has not been delivered since: the SIGALRM pending is its own.
                 self._twice(errors, signal.signal, signal.SIGALRM, signal.SIG_IGN)
             self._unheard = False
             self._twice(errors, signal.signal, signal.SIGALRM, self._handler)
@@ -17146,7 +17178,11 @@ class _DeadlineWindow:
         """One restore operation, tried once more when it raises, returning what the run that returned gave:
         the first exception is appended to errors, and a second one goes on. Each operation can run twice
         with the effect of once: setitimer and signal.signal set the same state again, sigpending only
-        reads, and a second queued SIGALRM joins the one already pending."""
+        reads, and a second queued SIGALRM joins the one already pending. What the cancel reads is the one
+        exception: a first run that cancels the window's timer and then raises leaves the retry reading an
+        inactive timer that was running, so _give_back counts that timer as run out only from a cancel whose
+        first run returned, and after a retried cancel it discards nothing (it never discards on an
+        unknown)."""
         try:
             return operation(*args)
         except BaseException as exc:
