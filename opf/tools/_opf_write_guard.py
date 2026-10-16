@@ -81,8 +81,8 @@ def plan_write_scope(machine_rel, manifest_model, store_paths, verb):
     # _opf_store.imported_series_declared (spec 8.2/4.2), passed to the SAME single authority
     # (F10-1): once activation makes the flag true, an [unmanaged] declaration naming an imported
     # leaf refuses here exactly as the doctor flags it, so the writer and the doctor cannot diverge
-    # on the imported managed set. It is not _opf_check.imported_series_active, which the per-series
-    # imported id checks read and which a homes-1 store never satisfies.
+    # on the imported managed set. The doctor grades the imported series under the same flag, on homes
+    # 1 as on homes 2.
     classification = _opf_check.classify_containment(
         manifest_model, machine_rel,
         imported=_opf_store.imported_series_declared(manifest_model))

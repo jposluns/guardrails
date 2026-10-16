@@ -752,12 +752,7 @@ conformance claim (checklist item 19) until the maintainer rules.
     9.2 says the upgrade MUST refuse "Where a withdrawn authority would leave the post-upgrade
     doctor below VALID", and names one case, the receipt-stripped `done` item, and one general
     remedy, "a maintainer-authored clean record that restores or supersedes the withdrawn authority
-    under section 8.6". It does not list the other cases.
-    Each statement below that a store at 1.3.0 is valid or reaches VALID is about your own
-    validator, whose C-IMPORTED-PROVENANCE follows section 8.3; section 17 says the reference
-    validator in `opf/tools/` refuses a 1.3.0 declaration at its shipped 1.2.0 ceiling and, as
-    written for its 1.3.0 activation, does not grade imported-record provenance on homes 1, so under
-    it no 1.3.0 store reaches doctor VALID. This prompt's readings follow, from
+    under section 8.6". It does not list the other cases. This prompt's readings follow, from
     sections 8.5 and 8.6, except for the decision-chain bullet, which sets out two readings for the
     maintainer to choose between:
     - A ratified `done` backlog item whose only receipt is legacy importer-authored fails the clean
@@ -1579,18 +1574,10 @@ containment.
   throwaway stores, the step 8 fixtures included. A throwaway store at 1.3.0 whose imported series
   must grade valid uses `import_status = "none"` and a preserved original for each imported record
   whose `source_sha256` matches, under the reading step 10 labels for its check (a) of re-sends that
-  supersede immutable history. Section 17 says that the reference validator in `opf/tools/`
-  refuses a 1.3.0 declaration at its shipped 1.2.0 ceiling, and that as written for its 1.3.0
-  activation it does not grade imported-record provenance on homes 1, where every 1.3.0 store is:
-  there its C-IMPORTED-PROVENANCE reports cannot-evaluate, an empty imported series included, so
-  under it neither your fresh store nor that throwaway store reaches doctor VALID. Your validator
-  is not the reference validator: your C-IMPORTED-PROVENANCE follows section 8.3, which says it
-  "re-reads each preserved original and verifies `source_sha256`", on homes 1 as well. Whether the
-  reference tooling will grade homes 1 is an open question. Treat a missing imported leaf of an
-  enabled type other than `legacy_fragment` as a finding, and an imported leaf for
-  `legacy_fragment` as one too: section 4.2 requires init and the upgrade to create the imported
-  leaves "for every enabled type except `legacy_fragment`" (this is a reading of that rule, not a
-  check the specification names).
+  supersede immutable history. Treat a missing imported leaf of an enabled type other than
+  `legacy_fragment` as a finding, and an imported leaf for `legacy_fragment` as one too: section 4.2
+  requires init and the upgrade to create the imported leaves "for every enabled type except
+  `legacy_fragment`" (this is a reading of that rule, not a check the specification names).
 - The section 8.6 authority firewall covers "every record whose `actor.kind` is `importer`, in the
   imported series or written into the clean series by the pre-1.3.0 legacy importer", and
   C-IMPORTED-SEGREGATION enforces it over importer-authored records in both series (section 8.6);
@@ -1633,11 +1620,6 @@ containment.
   statuses the verb has just written. The standalone write mode accepts it only on the terms of
   open point 22 (this prompt's choice), so a render between a writer transition and its commit
   still works.
-
-Each check below in which a 1.3.0 store, a valid store built from sections 4 and 9 included,
-produces valid, is valid or makes the validator report valid rests on your validator, whose
-C-IMPORTED-PROVENANCE follows section 8.3; under the reference validator no 1.3.0 store reaches
-doctor VALID (section 17).
 
 Acceptance checks, each as an automated test over a throwaway store the test builds:
 
@@ -1847,8 +1829,6 @@ in your fixtures until it is resolved; the remedy writer below refuses to author
   replacement of existing files, create-only writes for new files, and views regenerated through
   exclusively created temporary files followed by atomic rename. The upgrade is idempotent, and a
   repeated upgrade is a verified no-op only after a full validator VALID.
-  That VALID is your validator's (step 6), whose C-IMPORTED-PROVENANCE follows section 8.3; under
-  the reference validator no 1.3.0 store reaches it (section 17).
 - **Preconditions.** Claim the step 7 lease and hold it across the whole mutation, and verify that
   the working tree is clean, ignored files included, over the planned schema and render
   destinations and the index collision candidates. Fail closed on an unresolvable store, a declared
@@ -1868,9 +1848,6 @@ in your fixtures until it is resolved; the remedy writer below refuses to author
   write the adoption archive. The files and views the upgrade creates therefore stay outside the
   git index, and the step 6 tracked-store check accepts them only on the terms of open point 20
   (this prompt's reading), which is what lets the required VALID be reached without staging.
-  That VALID is your validator's, whose C-IMPORTED-PROVENANCE follows section 8.3; under the
-  reference validator no upgrade into 1.3.0 reaches it, so none offers its change (sections 9.2
-  and 17).
 - **Authority report and the repair route.** The upgrade report MUST enumerate every legacy
   importer-authored clean record whose current authority the section 8.6 firewall withdraws, "naming
   each backlog item that leaves the actionability join, each block that stops granting a stop, each
@@ -1919,10 +1896,7 @@ in your fixtures until it is resolved; the remedy writer below refuses to author
   upgrade keeps the status, writes no adoption approval, receipt, provenance or `init.toml`, and
   requires the full validator VALID, whose substantiation re-reads the preserved legacy run
   evidence and digest-matches every file it enumerates, failing closed on a missing, unreadable or
-  digest-mismatched item (sections 11 and 14.1). That VALID is your validator's, whose
-  C-IMPORTED-PROVENANCE follows section 8.3; under the reference validator no upgrade into 1.3.0
-  reaches it, so none offers its change for a completed legacy import (sections 9.2 and 17). The
-  evidence format is open point 25: until it is
+  digest-mismatched item (sections 11 and 14.1). The evidence format is open point 25: until it is
   resolved, substantiation is cannot-evaluate and the upgrade refuses such a store before any
   write.
 - **An unresolved legacy import.** Section 9.2: "An unresolved legacy import MUST be reconciled
@@ -2012,10 +1986,6 @@ in your fixtures until it is resolved; the remedy writer below refuses to author
 - **Legacy records.** "legacy LF records and evidence remain readable and MUST NOT be silently
   converted" (section 9.2): keep their bytes and never convert them. Their schemas, and those of
   the other module types, are open point 25.
-
-Each check below in which a store upgraded to 1.3.0 gets a valid report from the validator, or a
-repeated upgrade is a verified no-op, rests on your validator, whose C-IMPORTED-PROVENANCE follows
-section 8.3; under the reference validator no 1.3.0 store reaches doctor VALID (section 17).
 
 Acceptance checks, over synthetic fixtures the test builds:
 
@@ -2215,11 +2185,6 @@ Initialization creates the store sources and pointer for a fresh start, under th
   requirement your tests must cover, never as evidence that it holds anywhere. Fill the formats'
   gaps under open point 17.
 
-Each check below in which init exits 0 with its success sentence, which says "the whole store is
-VALID", or the validator reports valid rests on your validator, whose C-IMPORTED-PROVENANCE follows
-section 8.3: init creates a 1.3.0 store, and under the reference validator no 1.3.0 store reaches
-doctor VALID (section 17).
-
 Acceptance checks:
 
 - In an empty git repository, init exits 0 and prints exactly the success sentence. Afterwards,
@@ -2370,11 +2335,6 @@ Exit status: 0 when the change is recorded and the store validates (or carries o
 cannot-evaluate), 2 on every refusal or cannot-evaluate (section 8.8). Section 8.8 names no status
 for a final validation that fails after the change is written; this prompt's choice is 2 (open
 point 10).
-
-Each check below in which a writer operation on a 1.3.0 store exits 0, its final validation is
-valid, or the validator reports valid on that store, the rerun of the step 8 checks included, rests
-on your validator, whose C-IMPORTED-PROVENANCE follows section 8.3; under the reference validator
-no 1.3.0 store reaches doctor VALID (section 17).
 
 Acceptance checks:
 
@@ -2561,9 +2521,7 @@ Acceptance checks:
 
 - A release whose `version` already exists in the ledger is refused.
 - After a release cut, the validator reports valid (under your open point 9 choice), and the new
-  release's worklog span is frozen. That valid report is your validator's, whose
-  C-IMPORTED-PROVENANCE follows section 8.3; under the reference validator no 1.3.0 store reaches
-  doctor VALID (section 17).
+  release's worklog span is frozen.
 - A release cut run while a record's working-tree status differs from `HEAD`, with every other file
   committed, `worklog.toml` and the rendered views included, so that only that record's index
   differs from `HEAD` and no planned destination of the cut is dirty, refuses and writes nothing
@@ -2936,10 +2894,6 @@ platform." Wire all four, not only the platform you run on.
   maintainer, never by an assistant's own operation (open point 30). Copy the relevant residuals of
   section 17 into your project's documentation as well.
 
-Each check below in which a change leaves a 1.3.0 store valid, the validator reports valid on it,
-or an operation on it exits 0 rests on your validator, whose C-IMPORTED-PROVENANCE follows
-section 8.3; under the reference validator no 1.3.0 store reaches doctor VALID (section 17).
-
 Acceptance checks:
 
 - Each of the four platforms has an evidence record showing a verified deny hook or the
@@ -3042,9 +2996,7 @@ not do:
 4. Operational readiness: the store resolves to the identity recorded at init, CI asserts store
    presence and identity (step 13), and on the live tree the validator reports valid and no
    declared view drifts. Its last sentence, "Consumer repointings match the plan.", is not
-   applicable when a fresh start repoints no consumer; say so. That valid report is your
-   validator's, whose C-IMPORTED-PROVENANCE follows section 8.3; under the reference validator no
-   1.3.0 store, your fresh store included, reaches doctor VALID (section 17).
+   applicable when a fresh start repoints no consumer; say so.
 5. Wiring: the step 14 evidence for all four platforms, with each probe reported as run or not run,
    and, kept apart from those locally observed results, the maintainer's attestation of
    server-side branch protection, which section 14.1 places "explicitly outside the local probe's
@@ -3288,23 +3240,11 @@ maintainer's ruling on an open point, report the ruling with it.
     unresolved-import check over every location and `import_status` value of step 8, is implemented
     and passed every step 8 check on synthetic fixtures before initialization and the record writer
     accepted the 1.3.0 format (section 4.2); every detail of open point 25 is resolved, and no step
-    8 check was left not run. The step 8 valid results are your validator's, whose
-    C-IMPORTED-PROVENANCE follows section 8.3; under the reference validator no 1.3.0 store reaches
-    doctor VALID (section 17). While that holds, report the step 8 results you observed as your
-    validator's alone, never as confirmed by the reference tooling; if your validator reports
-    C-IMPORTED-PROVENANCE cannot-evaluate on homes 1, as the reference validator as written for its
-    1.3.0 activation does, report that observed result, and this item as not passed, naming that
-    check and section 17.
+    8 check was left not run.
 11. Initialization implements `opf.init.coupled/v1` (this prompt's scope choice; see "Choices to
     make before you start"): exit 0 only on fresh observations, with the exact success sentence;
     init-created sources staged as exact entries; views unstaged; no commit created; final
     validation after the lease removal; a finalization or lock-release failure prevents exit 0.
-    That exit 0 and success sentence rest on your validator's final validation, whose
-    C-IMPORTED-PROVENANCE follows section 8.3; under the reference validator no 1.3.0 store reaches
-    doctor VALID (section 17). While that holds, report init's observed exit status and sentence as
-    your validator's result alone; if your validator reports C-IMPORTED-PROVENANCE cannot-evaluate
-    on homes 1, report init's observed exit status, and this item as not passed, naming that check
-    and section 17.
 12. The record writer enforces the `/proposed` rule, the per-type transition table and rules of
     section 8.5 (with the handoff supersession as the maintainer-performed replacement of open point
     23, as ratified, completing the supersession in the same act and refusing an assistant or

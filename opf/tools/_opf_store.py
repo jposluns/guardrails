@@ -371,8 +371,10 @@ def imported_series_supported():
 def imported_series_declared(manifest_data):
     """True when the [opf] base table declares a spec_version of IMPORTED_SPEC_VERSION or later AND
     this tooling itself supports that series (imported_series_supported: SUPPORTED_SPEC_VERSION
-    at or above IMPORTED_SPEC_VERSION), the activation gate the imported-series registrations
-    read (spec 8.2/4.2).
+    at or above IMPORTED_SPEC_VERSION), the one imported-series gate (spec 8.2/4.2): containment's
+    registration, the write guard, the doctor's imported grading, the prior imported baseline and
+    the record verb's counter proof all read it, at either homes generation, so a store whose
+    containment registers the imported leaves also has them graded.
     Graded through the house SemVer parser; an absent, non-string, or unparseable spec_version reads
     False (manifest validation, not this helper, reports it). The tooling-support condition mirrors
     homes_generation's gate on SUPPORTED_HOMES: validate_manifest does NOT fail every newer

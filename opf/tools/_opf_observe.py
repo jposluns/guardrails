@@ -941,13 +941,13 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
 
 def _reconstruct_imported(git, store_root, machine_rel, prefix, manifest, types_tbl, notes):
     """The prior imported baseline {imported id: canonical body digest} for the across-time immutability of
-    the imported leaves (spec 8.3). It is read only where the HEAD manifest activates the imported series
-    (_opf_check.imported_series_active, the flag the doctor's imported grading reads: the graded 2.0.0 /
-    homes = 2 declaration and this tooling's imported-series support), and any other HEAD manifest yields
-    the honest empty baseline. A leaf absent from the HEAD machine-store tree contributes no
+    the imported leaves (spec 8.3). It is read only where the HEAD manifest declares the imported series
+    (_opf_store.imported_series_declared, the flag the doctor's imported grading reads: the declared
+    spec_version and this tooling's imported-series support, at either homes generation), and any other HEAD
+    manifest yields the honest empty baseline. A leaf absent from the HEAD machine-store tree contributes no
     rows; a listed leaf that cannot be read or parsed, a non-array row list, or a row with no string id omits
     the WHOLE prior, as for the clean files. Returns the dict, or None (omit + note)."""
-    if not _opf_check.imported_series_active(manifest):
+    if not _opf_store.imported_series_declared(manifest):
         return {}
     listing = _run_git(git, store_root, ["ls-tree", "--name-only", "HEAD:{}{}".format(prefix, machine_rel)])
     if not listing.completed or listing.rc != 0:
@@ -1076,9 +1076,10 @@ def self_test_isolated():
     extracted from a committed HEAD (records and the immutable-body digest matching the engine's own
     _record_digest over the same committed content); an unborn HEAD -> the honest empty prior; a
     non-repository directory -> the remote and prior fields OMITTED with a note while tracked reads
-    "untracked"; and the imported baseline of a homes-2 HEAD (empty unless the imported series is active,
-    the committed leaf rows under the engine's digest once it is, the whole prior omitted on a row with no
-    id). Judged ONLY on gather's RETURNED structure (never by grepping git's stdout for verdicts).
+    "untracked"; and the imported baseline of a homes-2 HEAD and of a homes-1 1.3.0 HEAD (empty unless
+    the imported series is active, the committed leaf rows under the engine's digest once it is, the whole
+    prior omitted on a row with no id). Judged ONLY on gather's RETURNED structure (never by grepping git's
+    stdout for verdicts).
     Returns 0 clean, 1 on a failed check, 2 on a harness error. When git is not on PATH at all it SKIPs
     clean, like the POSIX-signal watchdogs, since every path depends on git."""
     import shutil as _shutil
@@ -1233,8 +1234,9 @@ def self_test_isolated():
                   and prior.get("records", {}).get("DN-1") == ("done", "recorded"))
             check("prior-releases", isinstance(prior.get("releases"), list) and len(prior["releases"]) == 1)
             check("prior-counters", prior.get("counters_high", {}).get("BI") == 1)
-            # A HEAD below homes 2 carries no imported series: the imported baseline is the empty one.
-            check("prior-imported-empty-below-homes2", prior.get("imported") == {})
+            # A HEAD that does not declare the imported series (this one declares 1.0.0) carries none: the
+            # imported baseline is the empty one.
+            check("prior-imported-empty-when-undeclared", prior.get("imported") == {})
             # Digest honesty: gather's digest for the immutable done record must equal the engine's own
             # _record_digest over the SAME committed body (parsed here independently from the working tree).
             with open(str(tracked_repo / machine_rel / ("done" + _INDEX_SUFFIX)), "rb") as fh:
@@ -1342,6 +1344,36 @@ def self_test_isolated():
         finally:
             _opf_store.SUPPORTED_HOMES = prev_homes
             _opf_store.SUPPORTED_SPEC_VERSION = prev_ssv
+
+        # 8. The imported baseline of a homes-1 HEAD (spec 8.3): a committed 1.3.0 store with no homes key and
+        # the same backlog_item leaf. The doctor grades the imported series on homes 1 under the same flag, so
+        # with the imported series supported the baseline holds the leaf's row at the shipped SUPPORTED_HOMES
+        # (red when the branch is keyed on homes 2 again: the baseline is then empty and a vanished or edited
+        # imported record passes the across-time check); at the shipped constants it stays the empty one.
+        homes1_repo = base / "homes1"
+        homes1_repo.mkdir()
+        _git_setup(homes1_repo, home, "init")
+        _write_store(homes1_repo)
+        manifest_path = homes1_repo / machine_rel / _MANIFEST_NAME
+        manifest_path.write_text(manifest_path.read_text(encoding="utf-8").replace(
+            'spec_version = "1.0.0"\n', 'spec_version = "{}"\n'.format(
+                _opf_store.IMPORTED_SPEC_VERSION)), encoding="utf-8")
+        _write(homes1_repo, leaf_rel, 'schema = 1\n\n' + leaf_row.replace(
+            '[[record]]\n', '[[record]]\nid = "imported:BI-1"\n'))
+        _git_setup(homes1_repo, home, "add", "-A")
+        _git_setup(homes1_repo, home, "commit", "-m", "seed homes-1 1.3.0 store")
+        prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
+        try:
+            obs, notes = gather(_Res(homes1_repo, machine_rel))
+            check("homes1-prior-imported-inert-at-shipped-support",
+                  isinstance(obs.get("prior"), dict) and obs["prior"].get("imported") == {})
+            _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
+            obs, notes = gather(_Res(homes1_repo, machine_rel))
+            check("homes1-prior-imported-baseline",
+                  _opf_store.SUPPORTED_HOMES == 1 and isinstance(obs.get("prior"), dict)
+                  and obs["prior"].get("imported") == {"imported:BI-1": leaf_digest})
+        finally:
+            _opf_store.SUPPORTED_SPEC_VERSION = prev_ssv
     except OSError as exc:
         print("opf observe self-test: harness error: could not build a git fixture ({}); fail-closed".format(
             exc), file=sys.stderr)
@@ -1355,7 +1387,7 @@ def self_test_isolated():
         return 1
     print("opf observe self-test: PASS (tracked/untracked; 0/1/multiple remotes; prior from a committed "
           "HEAD with an engine-matching immutable-body digest; unborn HEAD -> empty prior; a non-repo dir "
-          "omits remote and prior with a note; a homes-2 HEAD's imported baseline)")
+          "omits remote and prior with a note; a homes-2 and a homes-1 HEAD's imported baseline)")
     return 0
 
 
