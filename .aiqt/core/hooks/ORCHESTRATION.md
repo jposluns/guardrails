@@ -210,7 +210,13 @@ onto `<key>.jsonl.1`, replacing the older generation (a later reader reads both)
 span, digest and revision) is skipped only while the file is under 256 KiB; creating a session file (a new
 session's, or the fresh one after a rotation) removes up to 50 regular files of
 the ledger name shape in the directory last modified more than 14 days earlier. A failed append is named
-in a non-blocking note, never swallowed. No check reads this ledger yet. The whole-file JSON records (`turn-state.json`,
+in a non-blocking note, never swallowed. The citation read check (the `citation-read-check` hook, a
+PreToolUse Bash hook in its warning-only bake) reads both generations of the session's ledger when a
+`git commit` message or a `gh pr create` or `gh pr edit` body cites a path with a line or line range,
+notes each cited range no row covers at its current content, and appends one `guard-events.jsonl` row of
+kind `citint` per checked command (decision `warn` or `allow`, with each citation's class), the evidence a
+later promotion to deny is decided on; a failed append of a `warn` row is named in its note, and a failed
+append of an `allow` row, the over-fire metric only, is not reported. The whole-file JSON records (`turn-state.json`,
 `backlog-checkpoint.json`, its `checkpoint-init.marker`, `attestations-validated.json` and
 `forced-exit-surfaced.json`) are each saved by one writer: it opens the state directory once as a
 directory descriptor (with `O_PATH` where the platform has it, so the open needs no permission on that

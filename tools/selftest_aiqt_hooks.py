@@ -1315,8 +1315,8 @@ def _test_note_literal_sites(failures, tmp):
     _allow_note(...)`), reached from their handlers and judged by _reduce_result: allow-note is required,
     so a silent mutant (allow) and an explicit permissionDecision "allow" mutant (explicit-allow) at the
     site both fail. The PreToolUse sites are orch_yield_tool's two note returns, orch_resume_barrier's two
-    (an armed barrier, and one that is unreadable or malformed, which reads as armed) and
-    review_dispatch_pin's;
+    (an armed barrier, and one that is unreadable or malformed, which reads as armed),
+    review_dispatch_pin's and citation_read_check's;
     the UserPromptSubmit stamp's unwritten-stamp note and its timer-path _context_note (judged by its own
     shape: model context plus an operator systemMessage, no permissionDecision), the PostToolUse ledger
     returns and the citation recorder's failed-write note, the Stop loop-bound
@@ -1408,6 +1408,11 @@ def _test_note_literal_sites(failures, tmp):
              "citation-ledger write failed (QA write fault)")
     finally:
         aiqt_hooks._cite_append = saved_cite
+    note("(nl-citecheck-unread) a commit message citing a line no recorded read covers allows with a note naming "
+         "the range (the citation check's bake posture)",
+         aiqt_hooks.citation_read_check(r.payload("PreToolUse", "Bash", dict(command="git commit -m 'see seed.txt:1'"),
+                                                  extra=dict(session_id="nl-citecheck"))),
+         "seed.txt:1 (no read or write recorded this session covers these lines)")
     saved_save = aiqt_hooks._orch_save_turn_state
     try:
         aiqt_hooks._orch_save_turn_state = lambda root, state: "PermissionError"

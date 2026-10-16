@@ -2937,6 +2937,614 @@ def _citeledger_timing_cases(tmp):
            ("huge-grep-output-recorded", True)])
 
 
+def _citecheck_cases(tmp):
+    """The citation read check (aiqt_hooks.citation_read_check) over ledgers the recorder writes: the warned
+    and silent verdicts, the class of each citation in its guard-events row, the message and body sources,
+    the five exclusions with their paired positives, the fail-closed notes (an unreadable ledger, a missing
+    session id, an unreadable body), and each bound tried just inside, at and just outside it."""
+    root = tmp / "citecheck"
+    tools_dir = root / "tools"
+    tools_dir.mkdir(parents=True)
+    a_py, d_py = tools_dir / "a.py", tools_dir / "d.py"
+    a_py.write_text("".join("line{} = {}\n".format(n, n) for n in range(1, 13)), encoding="utf-8")
+    d_py.write_text("".join("d{}\n".format(n) for n in range(1, 7)), encoding="utf-8")
+    (root / "Makefile").write_text("all:\n\ttrue\n", encoding="utf-8")
+    for args in (["init", "-q", "-b", "main"], ["add", "."],
+                 ["-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                  "commit", "-q", "-m", "seed"]):
+        subprocess.run(["git", "-C", str(root)] + args, check=True, capture_output=True, timeout=30)
+    state = Path(aiqt_hooks._orch_state_dir_for_root(str(root)))
+    events = state / "guard-events.jsonl"
+    ledger_dir = state / "citation-ledger"
+    verdicts = []
+
+    def ledger(session):
+        return ledger_dir / (hashlib.sha256(session.encode("utf-8")).hexdigest()[:16] + ".jsonl")
+
+    def read(session, start, end, path=a_py):
+        shown = path.read_text(encoding="utf-8").split("\n")[start - 1:end]
+        aiqt_hooks.citation_read_recorder({
+            "hook_event_name": "PostToolUse", "cwd": str(root), "session_id": session, "tool_name": "Read",
+            "tool_input": {"file_path": str(path)},
+            "tool_response": {"type": "text", "file": {"filePath": str(path), "content": "\n".join(shown),
+                                                        "startLine": start, "numLines": end - start + 1}}})
+
+    def event_rows():
+        if not events.is_file():
+            return []
+        return [json.loads(x) for x in events.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+    def run(command, session="cc", cwd=None, event="PreToolUse", tool="Bash"):
+        data = {"hook_event_name": event, "cwd": str(cwd or root), "tool_name": tool,
+                "tool_input": {"command": command}}
+        if session is not None:
+            data["session_id"] = session
+        before = len(event_rows())
+        try:
+            result = aiqt_hooks.citation_read_check(data)
+        except Exception as exc:  # a handler crash fails the check that made it rather than ending the run
+            result = (2, None, "crash: {}".format(type(exc).__name__))
+        verdicts.append(_verdict(result))
+        note = result[1].get("systemMessage", "") if isinstance(result[1], dict) else ""
+        return _verdict(result), note, [r for r in event_rows()[before:] if r.get("kind") == "citint"]
+
+    def judged(command, session="cc", **kw):
+        verdict, _note, new = run(command, session, **kw)
+        return (verdict, [(c["cite"], c["class"]) for r in new for c in r["detail"]["citations"]],
+                [r["decision"] for r in new])
+
+    def classes(command, session="cc", **kw):
+        return judged(command, session, **kw)[1]
+
+    # Unread and read: a commit message citing a range no row covers warns (a note, never a decision) and its
+    # row says warn; after reading lines 1-10 the same citation is silent and its row says allow.
+    verdict, note, new = run("git commit -m 'see tools/a.py:3'", "unread")
+    check("citeledger/commit-m-unread-warns",
+          (verdict, "tools/a.py:3 (no read or write recorded this session covers these lines)" in note,
+           [(r["decision"], r["detail"]["cmd"], r["detail"]["citations"]) for r in new]),
+          ("warn", True, [("warn", "git-commit", [{"cite": "tools/a.py:3", "class": "unread", "form": "A"}])]))
+    read("read", 1, 10)
+    check("citeledger/commit-m-read-silent", judged("git commit -m 'see tools/a.py:3-5'", "read"),
+          ("allow", [("tools/a.py:3-5", "covered")], ["allow"]))
+    # A row covers a range only to its own ends: read 4-6, then 4-6 and 5 are covered, 3-6 and 4-7 are not.
+    read("edge", 4, 6)
+    check("citeledger/coverage-boundary",
+          classes("git commit -m 'tools/a.py:4-6 tools/a.py:5 tools/a.py:3-6 tools/a.py:4-7'", "edge"),
+          [("tools/a.py:4-6", "covered"), ("tools/a.py:5", "covered"), ("tools/a.py:3-6", "unread"),
+           ("tools/a.py:4-7", "unread")])
+    # Two adjacent reads cover a range across them; a one-line gap between them does not.
+    read("union", 1, 5)
+    read("union", 6, 10)
+    read("gap", 1, 5)
+    read("gap", 7, 10)
+    check("citeledger/union-covers",
+          (classes("git commit -m 'tools/a.py:4-7'", "union"), classes("git commit -m 'tools/a.py:4-7'", "gap")),
+          ([("tools/a.py:4-7", "covered")], [("tools/a.py:4-7", "unread")]))
+    # A read whose lines changed afterwards is stale (an untracked file, so no diff credits the change).
+    u_py = tools_dir / "u.py"
+    u_py.write_text("u1\nu2\nu3\nu4\nu5\n", encoding="utf-8")
+    read("stale", 1, 5, path=u_py)
+    u_py.write_text("u1\nu2\nU3\nu4\nu5\n", encoding="utf-8")
+    verdict, note, new = run("git commit -m 'tools/u.py:3'", "stale")
+    check("citeledger/stale-warns",
+          (verdict, [(c["cite"], c["class"]) for r in new for c in r["detail"]["citations"]],
+           "those lines have changed since" in note),
+          ("warn", [("tools/u.py:3", "stale")], True))
+    # A row ending at the file's last line can be current; one ending a line past it never is, even when
+    # its digest equals that of the lines the file does hold.
+    read("whole", 1, 12)
+    whole = classes("git commit -m 'tools/a.py:12'", "whole")
+    pieces = a_py.read_bytes()
+    ledger("past").write_bytes((json.dumps({"v": 1, "ts": "t", "kind": "read", "via": "Read",
+                                            "path": os.path.realpath(str(a_py)), "rel": "tools/a.py", "start": 1,
+                                            "end": 13, "sha256": hashlib.sha256(pieces).hexdigest(),
+                                            "rev": None}) + "\n").encode("utf-8"))
+    check("citeledger/row-end-bound", (whole, classes("git commit -m 'tools/a.py:12'", "past")),
+          ([("tools/a.py:12", "covered")], [("tools/a.py:12", "stale")]))
+
+    # Message and body sources: -F and --file= files, a relative path under git -C, the option spellings,
+    # gh pr create --body-file and gh pr edit --body, and one row per command of a compound command.
+    msg = tmp / "cite-msg.txt"
+    msg.write_text("see tools/a.py:7\n", encoding="utf-8")
+    (root / "rel-msg.txt").write_text("see tools/a.py:8\n", encoding="utf-8")
+    other = tmp / "citecheck-other"
+    (other / "lib").mkdir(parents=True)
+    (other / "lib" / "x.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(other)], check=True, capture_output=True, timeout=30)
+    check("citeledger/commit-F-file",
+          (classes("git commit -F {}".format(msg), "files"), classes("git commit --file={}".format(msg), "files"),
+           classes("git -C .. commit -qF rel-msg.txt", "files", cwd=tools_dir),
+           classes("git -C {} commit -m 'lib/x.py:1'".format(other), "files")),
+          ([("tools/a.py:7", "unread")], [("tools/a.py:7", "unread")], [("tools/a.py:8", "unread")],
+           [("lib/x.py:1", "unread")]))
+    check("citeledger/option-forms",
+          [classes(command, "forms") for command in (
+              "git commit -am 'tools/a.py:1'", "git commit -m'tools/a.py:2'", "git commit --message='tools/a.py:3'",
+              "git commit --message 'tools/a.py:4'", "git commit --author '-mtools/a.py:5' -m x",
+              "git commit -m x -- '-mtools/a.py:6'", "git commit -Smtools/a.py:7 -m x")],
+          [[("tools/a.py:1", "unread")], [("tools/a.py:2", "unread")], [("tools/a.py:3", "unread")],
+           [("tools/a.py:4", "unread")], [], [], []])
+    body = tmp / "cite-body.md"
+    body.write_text("Touches tools/a.py:9.\n", encoding="utf-8")
+    check("citeledger/gh-body-file-and-inline",
+          [judged(command, "gh") for command in (
+              "gh pr create --title t --body-file {}".format(body), "gh pr create -F={}".format(body),
+              "gh pr edit 12 --body 'see tools/a.py:10'", "gh pr create -db 'see tools/a.py:11'",
+              "gh pr view 12 --body 'tools/a.py:1'")],
+          [("warn", [("tools/a.py:9", "unread")], ["warn"]), ("warn", [("tools/a.py:9", "unread")], ["warn"]),
+           ("warn", [("tools/a.py:10", "unread")], ["warn"]), ("warn", [("tools/a.py:11", "unread")], ["warn"]),
+           ("allow", [], [])])
+    verdict, note, new = run("git add tools && git commit -m 'tools/a.py:3' && gh pr create --body 'tools/a.py:4'",
+                             "multi")
+    check("citeledger/multi-command",
+          (verdict, [r["detail"]["cmd"] for r in new], "this gh pr create body and git commit message" in note),
+          ("warn", ["git-commit", "gh-pr-create"], True))
+    check("citeledger/lines-of-form",
+          [[(c["cite"], c["class"], c["form"]) for r in run(command, "form-b")[2] for c in r["detail"]["citations"]]
+           for command in ("git commit -m 'per lines 2-4 of tools/a.py.'", "git commit -m 'line 5 in `tools/a.py`'",
+                           "git commit -m 'Lines 6 - 7 of tools/a.py'", "git commit -m 'line 3 of tools/a.py:5'")],
+          [[("tools/a.py:2-4", "unread", "B")], [("tools/a.py:5", "unread", "B")], [("tools/a.py:6-7", "unread", "B")],
+           [("tools/a.py:5", "unread", "A")]])
+    # A body that cannot be read is named, never skipped: a directory, a missing file, a FIFO (held open here
+    # so a read could not block the suite), a path under /dev, and standard input with no here-document.
+    fifo = tmp / "cite-fifo"
+    os.mkfifo(str(fifo))
+    holder = os.open(str(fifo), os.O_RDWR | os.O_NONBLOCK)
+    try:
+        unreadable = [run(command, "bodies")[:2] for command in (
+            "git commit -F {}".format(tmp), "git commit -F {}".format(tmp / "absent.txt"),
+            "gh pr create --body-file {}".format(fifo), "git commit -F /dev/null",
+            "printf x | git commit -F -")]
+    finally:
+        os.close(holder)
+    check("citeledger/unreadable-body-noted",
+          [(verdict, phrase in note) for (verdict, note), phrase in zip(unreadable, (
+              "was not read: it is not a regular file", "was not read: it cannot be opened (FileNotFoundError",
+              "was not read: it is not a regular file", "was not read: it is under /dev or /proc",
+              "was not read: it is read from standard input, which this check cannot see"))],
+          [("warn", True)] * 5)
+    # A command the lexer refuses (an unquoted here-document) is scanned whole; a quoted here-document on
+    # -F - is read as the message.
+    verdict, _note, new = run("git commit -F - <<EOF\nsee tools/a.py:3\nEOF", "heredoc")
+    raw = (verdict, [(r["detail"]["parse"], r["detail"]["citations"][0]["class"]) for r in new])
+    verdict, _note, new = run("git commit -F - <<'EOF'\nsee tools/a.py:4\nEOF\necho tools/a.py:9\n", "heredoc")
+    quoted = (verdict, [(r["detail"]["parse"], r["detail"]["sources"], [c["cite"] for c in r["detail"]["citations"]])
+                        for r in new])
+    check("citeledger/raw-fallback", raw, ("warn", [("raw", "unread")]))
+    check("citeledger/heredoc-body-read", quoted, ("warn", [("lexed", ["here-document"], ["tools/a.py:4"])]))
+
+    # Exclusion 1, quoted logs and tracebacks: a fenced log, an unfenced log line and a traceback frame are
+    # silent; the same citation in plain prose warns.
+    fenced = "git commit -m 'Fails:\n```\ntools/a.py:3: AssertionError\ntools/a.py:4\n```\nfixed'"
+    check("citeledger/excl-fence-log",
+          [judged(command, "excl")[:2] for command in (
+              fenced, "git commit -m 'tools/a.py:3: AssertionError raised'",
+              "git commit -m 'tools/a.py:3:7: error: bad'", "git commit -m 'tools/a.py:3: see the loop'")],
+          [("allow", []), ("allow", []), ("allow", []), ("warn", [("tools/a.py:3", "unread")])])
+    # FORM_B needs only whitespace between the line number and "of" or "in", so a frame's ", in NAME" never
+    # reads as a citation of NAME, even where NAME is a file.
+    check("citeledger/excl-traceback",
+          [judged("git commit -m 'File \"tools/a.py\", line 3, in {}'".format(name), "excl")[:2]
+           for name in ("f", "Makefile")], [("allow", [])] * 2)
+    # Fences open with three or more backticks or tildes indented at most three spaces; a closing run shorter
+    # than the opening one does not close it, and an unclosed fence runs to the end.
+    check("citeledger/fence-bounds",
+          [classes("git commit -m 'x\n{}\ntools/a.py:3\n{}'".format(fence, fence.strip()), "excl")
+           for fence in ("```", "  ```", "   ```", "    ```", "``", "````", "~~~")]
+          + [classes("git commit -m '````\n```\ntools/a.py:3\n````'", "excl"),
+             classes("git commit -m '```\n~~~\ntools/a.py:3\n```'", "excl"),
+             classes("git commit -m '```\ntools/a.py:3'", "excl"),
+             classes("git commit -m '```inline``` tools/a.py:3'", "excl")],
+          [[], [], [], [("tools/a.py:3", "unread")], [("tools/a.py:3", "unread")], [], [], [], [], [],
+           [("tools/a.py:3", "unread")]])
+    # Block quotes are indented at most three spaces; an indented block needs four spaces or a tab after a
+    # blank line (or at the start).
+    check("citeledger/quote-indent-bounds",
+          [classes("git commit -m {}".format(_single_quoted(text)), "excl") for text in (
+              "x\n> tools/a.py:3", "x\n   > tools/a.py:3", "x\n    > tools/a.py:3", "x\n\n    tools/a.py:3",
+              "x\n\n   tools/a.py:3", "x\n\n\ttools/a.py:3", "x\n    tools/a.py:3")],
+          [[], [], [("tools/a.py:3", "unread")], [], [("tools/a.py:3", "unread")], [],
+           [("tools/a.py:3", "unread")]])
+    # Exclusion 2, URLs and #L anchors.
+    verdict, _note, new = run("git commit -m 'https://github.com/o/r/blob/main/tools/a.py#L3-L5 "
+                              "https://h.example/tools/a.py:3 <https://h.example/tools/a.py:4> tools/a.py#L3 "
+                              "https://h.example/view?f=tools/a.py:5'", "excl")
+    check("citeledger/excl-url-anchor", (verdict, [r["detail"]["citations"] for r in new],
+                                         [r["detail"]["masked"]["url"] for r in new]), ("allow", [[]], [4]))
+    # Exclusion 3, times and versions: none names a file or is path-shaped, so each is dropped and counted;
+    # a cited file with no slash and no extension still counts where it exists.
+    verdict, _note, new = run("git commit -m 'at 12:30 and 12:30:45, v1:2 python3.14:2 1.2.3:4 node:18 "
+                              "localhost:8080 example.com:8080'", "excl")
+    check("citeledger/excl-time-version",
+          ((verdict, [(r["detail"]["citations"], r["detail"]["dropped_not_citation"]) for r in new]),
+           classes("git commit -m 'tools/a.py:3 Makefile:1'", "excl")),
+          (("allow", [([], 8)]), [("tools/a.py:3", "unread"), ("Makefile:1", "unread")]))
+    # A path-shaped citation (a slash and a lettered extension of one to ten characters) that names no file
+    # is nofile; an eleven-character extension or none is not path-shaped and is dropped.
+    check("citeledger/ext-length-bound",
+          classes("git commit -m 'x/a.abcdefghi:3 x/a.abcdefghij:3 x/a.abcdefghijk:3 x/abc:3'", "excl"),
+          [("x/a.abcdefghi:3", "nofile"), ("x/a.abcdefghij:3", "nofile")])
+    # A line number has one to nine digits and no leading zero; a reversed range is dropped and counted.
+    verdict, _note, new = run("git commit -m 'tools/a.py:12345678 tools/a.py:123456789 tools/a.py:1234567890 "
+                              "tools/a.py:0 tools/a.py:5-3'", "excl")
+    check("citeledger/line-number-bound",
+          ([(c["cite"], c["class"]) for r in new for c in r["detail"]["citations"]],
+           [r["detail"]["masked"]["reversed"] for r in new]),
+          ([("tools/a.py:12345678", "unread"), ("tools/a.py:123456789", "unread")], [1]))
+    # Exclusion 4, verifier-supplied ranges: exempt and counted under a verifier or reviewer heading (to the
+    # next heading of the same or a higher level) or on a Verifier-cited: line; the same citation unlabelled
+    # warns.
+    check("citeledger/excl-verifier-label",
+          [judged("git commit -m {}".format(_single_quoted(text)), "excl")[:2] for text in (
+              "x\n\n## Verifier report\ntools/a.py:3", "x\n\ntools/a.py:3", "Verifier-cited: tools/a.py:3")],
+          [("allow", [("tools/a.py:3", "exempt-verifier")]), ("warn", [("tools/a.py:3", "unread")]),
+           ("allow", [("tools/a.py:3", "exempt-verifier")])])
+    check("citeledger/verifier-section-bounds",
+          [classes("git commit -m {}".format(_single_quoted(text)), "excl") for text in (
+              "###### Reviewer findings\ntools/a.py:3", "####### Verifier report\ntools/a.py:3",
+              "## Verifier report\n### Detail\ntools/a.py:3\n## Next\ntools/a.py:4",
+              "## Verifier report\n# Top\ntools/a.py:5")],
+          [[("tools/a.py:3", "exempt-verifier")], [("tools/a.py:3", "unread")],
+           [("tools/a.py:3", "exempt-verifier"), ("tools/a.py:4", "unread")], [("tools/a.py:5", "unread")]])
+    # Exclusion 5, lines the author wrote: a Write row covers like a read, and lines the diff from HEAD to the
+    # working tree adds count as authored at each end of the hunk, but not one line outside it.
+    new_py = tools_dir / "new.py"
+    new_py.write_text("n1\nn2\n", encoding="utf-8")
+    aiqt_hooks.citation_read_recorder({
+        "hook_event_name": "PostToolUse", "cwd": str(root), "session_id": "wrote", "tool_name": "Write",
+        "tool_input": {"file_path": str(new_py), "content": "n1\nn2\n"},
+        "tool_response": {"filePath": str(new_py), "success": True}})
+    check("citeledger/excl-authored-write", judged("git commit -m 'adds tools/new.py:2'", "wrote")[:2],
+          ("allow", [("tools/new.py:2", "covered")]))
+    d_py.write_text("d1\nd2\nd3\nn1\nn2\nn3\nd4\nD5\nd6\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "tools/d.py"], check=True, capture_output=True, timeout=30)
+    verdict, _note, new = run("git commit -m 'tools/d.py:4 tools/d.py:5 tools/d.py:6 tools/d.py:3 tools/d.py:7 "
+                              "tools/d.py:8'", "diff")
+    check("citeledger/excl-authored-diff",
+          (verdict, [(c["cite"], c["class"]) for r in new for c in r["detail"]["citations"]],
+           [r["detail"]["diff"] for r in new]),
+          ("warn", [("tools/d.py:4", "authored-in-diff"), ("tools/d.py:5", "authored-in-diff"),
+                    ("tools/d.py:6", "authored-in-diff"), ("tools/d.py:3", "unread"), ("tools/d.py:7", "unread"),
+                    ("tools/d.py:8", "authored-in-diff")], ["used"]))
+    # A pull request's diff starts at the merge base of its --base and HEAD, not at the base itself (here a
+    # branch that already holds the change); with no resolvable base the exemption is skipped and the row
+    # says so.
+    pr_base = run("gh pr create --base main --body 'tools/d.py:5'", "diff")[2]
+    pr_none = run("gh pr create --body 'tools/d.py:5'", "diff")[2]
+    for args in (["-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                  "commit", "-q", "-m", "ahead"], ["branch", "ahead"], ["reset", "-q", "--soft", "HEAD~1"]):
+        subprocess.run(["git", "-C", str(root)] + args, check=True, capture_output=True, timeout=30)
+    pr_ahead = run("gh pr create --base ahead --body 'tools/d.py:5'", "diff")[2]
+    check("citeledger/gh-diff-base",
+          [[(c["class"], r["detail"]["diff"]) for r in rows for c in r["detail"]["citations"]]
+           for rows in (pr_base, pr_none, pr_ahead)],
+          [[("authored-in-diff", "used")], [("unread", "unavailable")], [("authored-in-diff", "used")]])
+
+    # Ledger reading: rows held only in the older generation (.1) cover; a cited path that is a suffix of
+    # exactly one recorded path resolves to it; two recorded paths with that suffix do not resolve.
+    read("rotated", 1, 4)
+    os.replace(str(ledger("rotated")), str(ledger("rotated")) + ".1")
+    (tools_dir / "sub").mkdir()
+    (root / "other" / "sub").mkdir(parents=True)
+    for path in (tools_dir / "sub" / "x.py", root / "other" / "sub" / "x.py"):
+        path.write_text("x1\nx2\n", encoding="utf-8")
+    read("suffix", 1, 2, path=tools_dir / "sub" / "x.py")
+    read("suffix-two", 1, 2, path=tools_dir / "sub" / "x.py")
+    read("suffix-two", 1, 2, path=root / "other" / "sub" / "x.py")
+    check("citeledger/rotated-generation-and-suffix",
+          (classes("git commit -m 'tools/a.py:2'", "rotated"), classes("git commit -m 'sub/x.py:2'", "suffix"),
+           classes("git commit -m 'sub/x.py:2'", "suffix-two")),
+          ([("tools/a.py:2", "covered")], [("sub/x.py:2", "covered")], [("sub/x.py:2", "nofile")]))
+    # Fail closed on a ledger that cannot be read: a directory or a symlink at the session file, a regular
+    # file where the ledger directory belongs, and lines that are not rows each name the fault in a note,
+    # even where the rows that remain cover every citation.
+    read("faulty", 1, 12)
+    with open(str(ledger("faulty")), "ab") as handle:
+        handle.write(b"not json\n[1]\n")
+    faults = [run("git commit -m 'tools/a.py:2'", "faulty")]
+    os.mkdir(str(ledger("dir-gen")))
+    faults.append(run("git commit -m 'tools/a.py:2'", "dir-gen"))
+    os.symlink(str(ledger("faulty")), str(ledger("link-gen")))
+    faults.append(run("git commit -m 'tools/a.py:2'", "link-gen"))
+    saved_xdg = os.environ.get("XDG_STATE_HOME")
+    try:
+        os.environ["XDG_STATE_HOME"] = str(tmp / "citecheck-alt-xdg")
+        alt = Path(aiqt_hooks._orch_state_dir_for_root(str(root)))
+        alt.mkdir(parents=True)
+        (alt / "citation-ledger").write_bytes(b"not a directory\n")
+        faults.append(run("git commit -m 'tools/a.py:2'", "faulty")[:2] + ([],))
+    finally:
+        if saved_xdg is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = saved_xdg
+    check("citeledger/unreadable-ledger-noted",
+          [(verdict, "could not be read in full" in note and phrase in note,
+            [(r["decision"], r["detail"]["ledger"]) for r in new])
+           for (verdict, note, new), phrase in zip(faults, (
+               "2 line(s) are not ledger rows", "it is not a regular file", "it cannot be opened (OSError",
+               "the ledger directory"))],
+          [("warn", True, [("warn", "unreadable")])] * 3 + [("warn", True, [])])
+    # A row is a ledger row only with 1 <= start <= end: start 1 and end == start are rows, start 0 and an
+    # end before the start are not.
+    ledger("shape").write_bytes(b"".join((json.dumps({"v": 1, "kind": "read", "path": os.path.realpath(str(a_py)),
+                                                      "start": start, "end": end, "sha256": "0" * 64}) + "\n")
+                                         .encode("utf-8") for start, end in ((1, 1), (2, 2), (0, 3), (5, 4))))
+    check("citeledger/row-shape-bounds",
+          "2 line(s) are not ledger rows" in run("git commit -m 'tools/a.py:2'", "shape")[1], True)
+    # No rows at all, and no session id: each is named, and its row says which.
+    empty = run("git commit -m 'tools/a.py:2'", "never-recorded")
+    nosession = run("git commit -m 'tools/a.py:2'", None)
+    clean_nosession = run("git commit -m 'at 12:30'", None)
+    check("citeledger/ledger-empty-and-no-session",
+          ((empty[0], "no citation-ledger rows at all" in empty[1], [r["detail"]["ledger"] for r in empty[2]]),
+           (nosession[0], "carries no session id" in nosession[1], [r["detail"]["ledger"] for r in nosession[2]]),
+           clean_nosession[:2]),
+          (("warn", True, ["empty"]), ("warn", True, ["no-session"]), ("allow", "")))
+    # A file the recorder never records (a notebook, a file over its size bound) is named as such.
+    (root / "docs").mkdir()
+    (root / "docs" / "n.ipynb").write_text("{}\n{}\n{}\n", encoding="utf-8")
+    saved_max = aiqt_hooks._CITE_MAX_FILE
+    try:
+        aiqt_hooks._CITE_MAX_FILE = 4
+        big = run("git commit -m 'tools/a.py:1'", "blind")
+    finally:
+        aiqt_hooks._CITE_MAX_FILE = saved_max
+    notebook = run("git commit -m 'docs/n.ipynb:2'", "blind")
+    check("citeledger/unrecordable-noted",
+          ([(c["class"]) for r in notebook[2] + big[2] for c in r["detail"]["citations"]],
+           "records nothing for a notebook, PDF or image read" in notebook[1], "records nothing for a file over 4 bytes"
+           in big[1]),
+          (["unrecordable", "unrecordable"], True, True))
+
+    # Bounds of the check itself, each just inside, at and just outside.
+    read("bounds", 1, 12)
+    saved = (aiqt_hooks._CITECHK_MAX_CITES, aiqt_hooks._CITECHK_MAX_FILES, aiqt_hooks._CITECHK_SHOWN,
+             aiqt_hooks._CITECHK_BODY_MAX, aiqt_hooks._CITECHK_LEDGER_MAX, aiqt_hooks.time,
+             aiqt_hooks._CITECHK_READ_MAX, aiqt_hooks._recovery_toplevel)
+    try:
+        aiqt_hooks._CITECHK_MAX_CITES = 2
+        caps = []
+        for k in (1, 2, 3):
+            verdict, note, new = run("git commit -m '{}'".format(
+                " ".join("tools/a.py:{}".format(n) for n in range(1, k + 1))), "bounds")
+            caps.append((verdict, [(c["cite"], c["class"]) for r in new for c in r["detail"]["citations"]],
+                         [(r["decision"], r["detail"]["not_judged_past_cap"]) for r in new],
+                         "1 citation(s) past the first 2 were not judged" in note))
+        aiqt_hooks._CITECHK_MAX_CITES = saved[0]
+        check("citeledger/cite-cap-boundary", caps,
+              [("allow", [("tools/a.py:1", "covered")], [("allow", 0)], False),
+               ("allow", [("tools/a.py:1", "covered"), ("tools/a.py:2", "covered")], [("allow", 0)], False),
+               ("warn", [("tools/a.py:1", "covered"), ("tools/a.py:2", "covered")], [("warn", 1)], True)])
+        read("bounds", 1, 2, path=tools_dir / "sub" / "x.py")
+        read("bounds", 1, 2, path=root / "other" / "sub" / "x.py")
+        aiqt_hooks._CITECHK_MAX_FILES = 2
+        names = ("tools/a.py:1", "tools/sub/x.py:1", "other/sub/x.py:1")
+        files_cap = [judged("git commit -m '{}'".format(" ".join(names[:k])), "bounds")[:2] for k in (1, 2, 3)]
+        aiqt_hooks._CITECHK_MAX_FILES = saved[1]
+        check("citeledger/file-cap-boundary", files_cap,
+              [("allow", [(names[0], "covered")]), ("allow", [(names[0], "covered"), (names[1], "covered")]),
+               ("warn", [(names[0], "covered"), (names[1], "covered"), (names[2], "unjudged")])])
+        held_bytes = os.path.getsize(str(a_py)) + os.path.getsize(str(tools_dir / "sub" / "x.py"))
+        read_bound = []
+        for bound in (held_bytes + 1, held_bytes, held_bytes - 1):
+            aiqt_hooks._CITECHK_READ_MAX = bound
+            verdict, note, new = run("git commit -m '{}'".format(" ".join(names[:2])), "bounds")
+            read_bound.append((verdict, [c["class"] for r in new for c in r["detail"]["citations"]],
+                               "the cited files hold more than {} bytes".format(bound) in note))
+        aiqt_hooks._CITECHK_READ_MAX = saved[6]
+        check("citeledger/read-bytes-boundary", read_bound,
+              [("allow", ["covered", "covered"], False), ("allow", ["covered", "covered"], False),
+               ("warn", ["covered", "unjudged"], True)])
+        aiqt_hooks._CITECHK_SHOWN = 2
+        shown = [run("git commit -m '{}'".format(" ".join("tools/d.py:{}".format(n) for n in (1, 2, 3)[:k])),
+                     "never-recorded")[1] for k in (1, 2, 3)]
+        aiqt_hooks._CITECHK_SHOWN = saved[2]
+        check("citeledger/shown-bound",
+              [(note.count("\n  tools/d.py:"), "\n  and " in note, "\n  and 1 more" in note) for note in shown],
+              [(1, False, False), (2, False, False), (2, True, True)])
+        size = len(msg.read_bytes())
+        sized = []
+        for bound in (size + 1, size, size - 1):
+            aiqt_hooks._CITECHK_BODY_MAX = bound
+            sized.append(judged("git commit -F {}".format(msg), "bounds")[:2])
+        aiqt_hooks._CITECHK_BODY_MAX = saved[3]
+        check("citeledger/body-max-boundary", sized,
+              [("allow", [("tools/a.py:7", "covered")]), ("allow", [("tools/a.py:7", "covered")]),
+               ("warn", [])])
+        held = os.path.getsize(str(ledger("bounds")))
+        gens = []
+        for bound in (held + 1, held, held - 1):
+            aiqt_hooks._CITECHK_LEDGER_MAX = bound
+            verdict, note, _new = run("git commit -m 'tools/a.py:2'", "bounds")
+            gens.append((verdict, "it is larger than {} bytes".format(bound) in note))
+        aiqt_hooks._CITECHK_LEDGER_MAX = saved[4]
+        check("citeledger/ledger-max-boundary", gens, [("allow", False), ("allow", False), ("warn", True)])
+        # The deadline, set from the handler's first clock reading (a stand-in clock): with the clock moved
+        # just inside, at or just past it once the toplevel probe has returned, is a range judged (one in a
+        # file, and a path-shaped one that names no file, which needs no read); and with the clock there
+        # before the probe, is the probe started at all (one not started is named in a note, with no row,
+        # since no state directory is known without it).
+        budget, probed = {"tools/a.py:2": [], "x/none.py:1": []}, []
+        for offset in (-0.001, 0.0, 0.001):
+            for step, cited in ((False, "tools/a.py:2"), (False, "x/none.py:1"), (True, "tools/a.py:2")):
+                clock = aiqt_hooks.time = _CiteClock(1000.0, 1000.0 + aiqt_hooks._CITECHK_BUDGET + offset, step)
+                calls = []
+                aiqt_hooks._recovery_toplevel = lambda *args, **kwargs: calls.append(clock.advance()) or str(root)
+                verdict, note, new = run("git commit -m '{}'".format(cited), "bounds")
+                aiqt_hooks.time, aiqt_hooks._recovery_toplevel = saved[5], saved[7]
+                if step:
+                    probed.append((bool(calls), verdict, "before it resolved the repository" in note, len(new)))
+                else:
+                    budget[cited].append((verdict, [(c["class"], r["detail"]["budget_exhausted"]) for r in new
+                                                    for c in r["detail"]["citations"]], "incomplete (budget)" in note))
+        check("citeledger/budget-noted", budget,
+              {"tools/a.py:2": [("allow", [("covered", False)], False), ("warn", [("unjudged", True)], True),
+                                ("warn", [("unjudged", True)], True)],
+               "x/none.py:1": [("warn", [("nofile", False)], False), ("warn", [("unjudged", True)], True),
+                               ("warn", [("unjudged", True)], True)]})
+        check("citeledger/check-deadline-probe-boundary", probed,
+              [(True, "allow", False, 1), (False, "warn", True, 0), (False, "warn", True, 0)])
+    finally:
+        (aiqt_hooks._CITECHK_MAX_CITES, aiqt_hooks._CITECHK_MAX_FILES, aiqt_hooks._CITECHK_SHOWN,
+         aiqt_hooks._CITECHK_BODY_MAX, aiqt_hooks._CITECHK_LEDGER_MAX, aiqt_hooks.time,
+         aiqt_hooks._CITECHK_READ_MAX, aiqt_hooks._recovery_toplevel) = saved
+
+    # Inert outside its scope (no row): another command, event or tool, a payload with no command, a cwd
+    # outside any git repository; a commit with no message source still earns its allow row.
+    outside = tmp / "citecheck-not-a-repo"
+    outside.mkdir()
+    inert = [run("git status", "inert"), run("git commit -m 'tools/a.py:3'", "inert", event="PostToolUse"),
+             run("git commit -m 'tools/a.py:3'", "inert", tool="Read"),
+             run("git commit -m 'tools/a.py:3'", "inert", cwd=outside)]
+    before = len(event_rows())
+    no_command = aiqt_hooks.citation_read_check({"hook_event_name": "PreToolUse", "cwd": str(root),
+                                                 "tool_name": "Bash", "tool_input": {}, "session_id": "inert"})
+    verdicts.append(_verdict(no_command))
+    inert.append((_verdict(no_command), "", event_rows()[before:]))
+    amend = run("git commit --amend --no-edit", "inert")
+    check("citeledger/inert-outside-scope",
+          ([(verdict, note, new) for verdict, note, new in inert],
+           (amend[0], [(r["decision"], r["detail"]["citations"]) for r in amend[2]])),
+          ([("allow", "", [])] * 5, ("allow", [("allow", [])])))
+    # A fault inside the check is caught and named; a guard-events row that cannot be written is named too.
+    saved_run = aiqt_hooks._citechk_run
+    try:
+        def broken(data):
+            raise RuntimeError("injected")
+        aiqt_hooks._citechk_run = broken
+        crashed = run("git commit -m 'tools/a.py:3'", "fault")
+    finally:
+        aiqt_hooks._citechk_run = saved_run
+    events.rename(events.with_name("guard-events.saved"))
+    events.mkdir()
+    try:
+        unrecorded = run("git commit -m 'tools/a.py:3'", "fault")
+    finally:
+        events.rmdir()
+        events.with_name("guard-events.saved").rename(events)
+    check("citeledger/check-fault-noted",
+          ((crashed[0], "could not run (RuntimeError)" in crashed[1]),
+           (unrecorded[0], "the guard-events row for this warn (citint) could not be written" in unrecorded[1])),
+          (("warn", True), ("warn", True)))
+
+    # The check never decides a permission: every call above allowed, silently or with a note.
+    check("citeledger/bake-never-denies", sorted(set(verdicts)), ["allow", "warn"])
+
+
+def _citecheck_run(root, command, session):
+    """One citation_read_check call on a Bash command run at root: (verdict, note, the citint guard-events
+    rows it appended)."""
+    events = Path(aiqt_hooks._orch_state_dir_for_root(str(root))) / "guard-events.jsonl"
+
+    def rows():
+        if not events.is_file():
+            return []
+        return [json.loads(x) for x in events.read_text(encoding="utf-8").splitlines() if x.strip()]
+    before = len(rows())
+    result = aiqt_hooks.citation_read_check({"hook_event_name": "PreToolUse", "cwd": str(root), "tool_name": "Bash",
+                                             "tool_input": {"command": command}, "session_id": session})
+    note = result[1].get("systemMessage", "") if isinstance(result[1], dict) else ""
+    return _verdict(result), note, [r for r in rows()[before:] if r.get("kind") == "citint"]
+
+
+def _citecheck_show_cases(tmp):
+    """A git show row counts for a citation as any row does, where the working tree's lines still hold the
+    bytes it digested, whatever revision it named: a row of HEAD whose lines the working tree has since
+    changed is stale, and a row of an older revision whose bytes the working tree holds again covers. A row
+    is matched at the repository path it names, so a citation of a path the working tree has replaced by a
+    symlink resolves to the link's target and that row does not count for it."""
+    repo = _CiteRepo(tmp / "citecheck-show", {"tools/g.py": b"g1\ng2\ng3\n", "tools/h.py": b"h1\nh2\n",
+                                              "tools/t.py": b"t1\n", "tools/l.py": b"l1\n"})
+    tools_dir = repo.root / "tools"
+    (tools_dir / "h.py").write_bytes(b"h1\nH2\n")
+    subprocess.run(["git", "-C", str(repo.root), "-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c",
+                    "commit.gpgsign=false", "commit", "-q", "-am", "next"], check=True, capture_output=True, timeout=30)
+    (tools_dir / "h.py").write_bytes(b"h1\nh2\n")
+    (tools_dir / "g.py").write_bytes(b"g1\nG2\ng3\n")
+    os.unlink(str(tools_dir / "l.py"))
+    os.symlink("t.py", str(tools_dir / "l.py"))
+    repo.bash("git show HEAD:tools/g.py", "g1\ng2\ng3\n", "show")
+    repo.bash("git show HEAD~1:tools/h.py", "h1\nh2\n", "show")
+    repo.bash("git show HEAD:tools/l.py", "l1\n", "show")
+    verdict, _note, new = _citecheck_run(repo.root, "git commit -m 'tools/g.py:1 tools/h.py:2 tools/l.py:1'", "show")
+    check("citeledger/git-show-row-judged-at-working-tree",
+          ([(r["via"], r["rel"], r["start"], r["end"], r["rev"]) for r in repo.rows("show")], verdict,
+           [(c["cite"], c["class"]) for r in new for c in r["detail"]["citations"]]),
+          ([("git-show", "tools/g.py", 1, 3, "HEAD"), ("git-show", "tools/h.py", 1, 2, "HEAD~1"),
+            ("git-show", "tools/l.py", 1, 1, "HEAD")], "warn",
+           [("tools/g.py:1", "stale"), ("tools/h.py:2", "covered"), ("tools/l.py:1", "unread")]))
+
+
+def _citecheck_deadline_cases(tmp):
+    """One deadline bounds every git probe and cited-file read of the check: with the budget cut to half a
+    second and one kind of probe slowed by two seconds (a stub git on PATH that sleeps when one of its
+    arguments is the slowed word), or a cited file of 8 MiB read in chunks slowed by a quarter second each,
+    each of the session's toplevel probe, a git -C repository's toplevel probe, the base resolution, the
+    merge base, the diff probe and the file read returns within the budget plus one second, and what it
+    could not finish is named: the repository not resolved, or the range not judged (budget)."""
+    budget, slack = 0.5, 1.0
+    repo = _CiteRepo(tmp / "citecheck-slow", {"tools/a.py": b"a1\na2\n", "big.txt": b"x\n" * (4 * 1024 * 1024)})
+    other = _CiteRepo(tmp / "citecheck-slow-other", {"lib/x.py": b"x1\n"})
+    real_read = os.read
+
+    def slow_read(fd, size):  # a regular file's read is slowed; a pipe's (a git probe's output) is not
+        try:
+            regular = (os.fstat(fd).st_mode & 0o170000) == 0o100000
+        except OSError:
+            regular = False
+        if regular:
+            time.sleep(0.25)
+        return real_read(fd, size)
+    real_git = shutil.which("git")
+    stub_dir = tmp / "citecheck-stub-bin"
+    stub_dir.mkdir()
+    (stub_dir / "git").write_text(
+        "#!{} -I\nimport os, sys, time\nif set(sys.argv[1:]) & set(os.environ.get('CITECHK_SLOW', '').split('\\n')):\n"
+        "    time.sleep(2.0)\nos.execv({!r}, [{!r}] + sys.argv[1:])\n".format(sys.executable, real_git, real_git),
+        encoding="utf-8")
+    os.chmod(str(stub_dir / "git"), 0o755)
+    shapes = (("toplevel", "--show-toplevel", "git commit -m 'tools/a.py:1'"),
+              ("other-toplevel", str(other.root), "git -C {} commit -m 'lib/x.py:1'".format(other.root)),
+              ("base", "--verify", "git commit -m 'tools/a.py:1'"),
+              ("merge-base", "merge-base", "gh pr create --base main --body 'tools/a.py:1'"),
+              ("diff", "-U0", "git commit -m 'tools/a.py:1'"),
+              ("file-read", None, "git commit -m 'big.txt:1'"))
+    saved_budget, saved_path = aiqt_hooks._CITECHK_BUDGET, os.environ.get("PATH", "")
+    got = []
+    try:
+        aiqt_hooks._CITECHK_BUDGET = budget
+        os.environ["PATH"] = str(stub_dir) + os.pathsep + saved_path
+        for name, word, command in shapes:
+            os.environ["CITECHK_SLOW"] = word or ""
+            began = time.monotonic()
+            try:
+                if word is None:
+                    os.read = slow_read
+                verdict, note, new = _citecheck_run(repo.root, command, "slow-" + name)
+            finally:
+                os.read = real_read
+            got.append((name, time.monotonic() - began <= budget + slack, verdict,
+                        "before it resolved the repository" in note, "incomplete (budget)" in note,
+                        [(c["cite"], c["class"]) for r in new for c in r["detail"]["citations"]]))
+    finally:
+        aiqt_hooks._CITECHK_BUDGET = saved_budget
+        os.environ["PATH"] = saved_path
+        os.environ.pop("CITECHK_SLOW", None)
+    check("citeledger/check-deadline-bounds-slow-probes", got,
+          [("toplevel", True, "warn", True, False, []),
+           ("other-toplevel", True, "warn", False, True, [("lib/x.py:1", "unjudged")]),
+           ("base", True, "warn", False, True, [("tools/a.py:1", "unjudged")]),
+           ("merge-base", True, "warn", False, True, [("tools/a.py:1", "unjudged")]),
+           ("diff", True, "warn", False, True, [("tools/a.py:1", "unjudged")]),
+           ("file-read", True, "warn", False, True, [("big.txt:1", "unjudged")])])
+
+
+def _single_quoted(text):
+    """text as one single-quoted shell word."""
+    return "'" + text.replace("'", "'\"'\"'") + "'"
+
+
 def main(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -7506,6 +8114,9 @@ def _main_isolated(report_path=None):
         _citeledger_dedup_cases(tmp)
         _citeledger_bound_cases(tmp)
         _citeledger_timing_cases(tmp)
+        _citecheck_cases(tmp)
+        _citecheck_show_cases(tmp)
+        _citecheck_deadline_cases(tmp)
     finally:
         aiqt_hooks._orch_dirfd_has_registry = saved_probe
         shutil.rmtree(tmp, ignore_errors=True)

@@ -19,6 +19,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
   gensrc_guard        PreToolUse  gensrc  a Write/Edit/MultiEdit that hand-edits a registered generated artefact
   citation_read_recorder PostToolUse citint record (never block) the line spans a Read, Grep, plain Bash read, Write or Edit returned
+  citation_read_check PreToolUse  citint  allow+note (BAKE, never deny) a cited path:line range in a commit message or PR body that no recorded read covers
 
 Contract (doc-confirmed 2026-08-17 against code.claude.com/docs/en/hooks): the hook payload arrives
 as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
@@ -13351,6 +13352,726 @@ def citation_read_recorder(data):
     return _allow()
 
 
+# --- citation read check (citint/refcap) -------------------------------------------------------------
+# PreToolUse Bash, stage BAKE: it surfaces a note and never denies. Where a git commit message (-m, -F) or a
+# gh pr create or edit body (--body, --body-file) cites a path with a line or a line range, it reads this
+# session's citation ledger (both generations, as citation_read_recorder writes them) and names each cited
+# range that no recorded read or write row covers at the cited lines with the content those lines hold now.
+# Quoted logs and tracebacks, URLs, times and versions, ranges a body labels as verifier-supplied, and lines
+# the author wrote (Write and Edit rows, and lines the relevant diff adds) are excluded by construction. Each
+# checked command earns one guard-events row (kind citint) recording every citation's class, the bake
+# evidence a later promotion is decided on. As in the recorder, one deadline set when the handler starts
+# covers the toplevel probes, every git probe (each given only the time left, none started once it is
+# reached) and every cited-file read; a range not judged by then is named as such.
+_CITECHK_BODY_MAX = 1024 * 1024          # a message or body file larger than this is not read (noted)
+_CITECHK_LEDGER_MAX = 2 * _CITE_CAP      # a ledger generation larger than this is not read (noted)
+_CITECHK_MAX_CITES = 200                 # at most this many citations are judged per Bash call
+_CITECHK_MAX_FILES = 50                  # at most this many distinct cited files are read per Bash call
+_CITECHK_READ_MAX = 64 * 1024 * 1024     # at most this many bytes of cited files are read per Bash call
+_CITECHK_SHOWN = 10                      # at most this many ranges are listed in the note
+_CITECHK_BUDGET = 6.0                    # seconds for every probe and read of a call (hook timeout 10)
+_CITECHK_HEAD = "AIQT guardrail (rules citint/refcap, BAKE: warning only, nothing is blocked): "
+_CITECHK_OUT_OF_TIME = "the check ran out of its time budget"
+_CITECHK_PREFILTER = re.compile(r"\bcommit\b|\bpr\b")
+# A command the lexer cannot read (an unquoted here-document, for example) is scanned whole as body text
+# when it names one of these.
+_CITECHK_RAW_KINDS = ((re.compile(r"\bgit\b[^\n;&|]*\bcommit\b"), "git-commit"),
+                      (re.compile(r"\bgh\b[^\n;&|]*\bpr\s+create\b"), "gh-pr-create"),
+                      (re.compile(r"\bgh\b[^\n;&|]*\bpr\s+edit\b"), "gh-pr-edit"))
+# Option tables: the short options that take a value (attached, or the next word), the short options whose
+# value is optional and only ever attached, and the long options that take the next word as their value.
+_CITECHK_GIT_SHORT = "mFCct"
+_CITECHK_GIT_OPTIONAL = "uS"
+_CITECHK_GIT_LONG = frozenset(("--message", "--file", "--author", "--date", "--cleanup", "--reuse-message",
+                               "--reedit-message", "--fixup", "--squash", "--template", "--trailer",
+                               "--pathspec-from-file"))
+_CITECHK_GH_SHORT = "aBbFHlmprRTt"
+_CITECHK_GH_LONG = frozenset(("--assignee", "--base", "--body", "--body-file", "--head", "--label",
+                              "--milestone", "--project", "--reviewer", "--template", "--title", "--repo",
+                              "--recover", "--add-assignee", "--add-label", "--add-project", "--add-reviewer",
+                              "--remove-assignee", "--remove-label", "--remove-project", "--remove-reviewer"))
+_CITECHK_SOURCES = {"git-commit": (("-m", "--message"), ("-F", "--file")),
+                    "gh-pr-create": (("-b", "--body"), ("-F", "--body-file")),
+                    "gh-pr-edit": (("-b", "--body"), ("-F", "--body-file"))}
+_CITECHK_LABELS = {"git-commit": "git commit message", "gh-pr-create": "gh pr create body",
+                   "gh-pr-edit": "gh pr edit body"}
+# The citation grammar. FORM_A is PATH:N, PATH:N-M or PATH:N:COL; FORM_B is "line N of PATH" or "lines N-M in
+# PATH". A line number has one to nine digits and no leading zero.
+_CITECHK_PATH = r"(?<![A-Za-z0-9_./:-])(/?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_-][A-Za-z0-9_.-]*)"
+_CITECHK_N = r"([1-9][0-9]{0,8})"
+_CITECHK_FORM_A = re.compile(_CITECHK_PATH + ":" + _CITECHK_N + "(?:-" + _CITECHK_N
+                             + r")?(?::[0-9]+)?(?![0-9A-Za-z_-])")
+_CITECHK_FORM_B = re.compile(r"(?i:\blines?\s+)" + _CITECHK_N + r"(?:\s*-\s*" + _CITECHK_N
+                             + r")?\s+(?i:of|in)\s+`?" + _CITECHK_PATH)
+_CITECHK_EXT = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,9}$")  # a lettered extension, one to ten characters
+_CITECHK_LOG = re.compile(r": (?:(?:[A-Z][A-Za-z]*)?(?:Error|Exception|Warning|Failure)|error|warning)\b")
+_CITECHK_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+|<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\s]*>")
+_CITECHK_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
+_CITECHK_FENCE_CLOSE = re.compile(r" {0,3}(`{3,}|~{3,})[ \t]*")
+_CITECHK_QUOTE = re.compile(r" {0,3}>")
+_CITECHK_HEADING = re.compile(r"(#{1,6})(?:\s|$)")
+_CITECHK_VERIFIER = re.compile(r".*\b(?i:verifier|reviewer)\s+(?i:report|findings?)\b")  # after a heading's #
+_CITECHK_HUNK = re.compile(rb"@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@")
+_CITECHK_BLIND = (".ipynb", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp")  # a Read of these records nothing
+_CITECHK_FLAGGED = frozenset(("unread", "stale", "nofile", "unrecordable", "unjudged"))
+
+
+def _citechk_options(args, short, optional, long_names):
+    """The (name, value) pairs of a command's value-taking options, in order, up to a '--' word: a long option
+    written --name=VALUE, a long name in long_names followed by its value word, and a short option in short,
+    attached (-mVALUE) or followed by its value word, alone or ending a cluster of flags (-am VALUE). A short
+    option in optional takes only an attached value. A value missing at the end of the words is None."""
+    out, i = [], 0
+    while i < len(args):
+        word = args[i]
+        i += 1
+        if word == "--":
+            break
+        if word.startswith("--"):
+            name, eq, value = word.partition("=")
+            if eq:
+                out.append((name, value))
+            elif word in long_names:
+                out.append((word, args[i] if i < len(args) else None))
+                i += 1
+        elif word.startswith("-"):
+            for j in range(1, len(word)):
+                if word[j] in optional:
+                    break
+                if word[j] in short:
+                    if j + 1 < len(word):
+                        out.append(("-" + word[j], word[j + 1:]))
+                    else:
+                        out.append(("-" + word[j], args[i] if i < len(args) else None))
+                        i += 1
+                    break
+    return out
+
+
+def _citechk_heredocs(command):
+    """The bodies of the here-documents in command, in order: for each << (not <<<) whose delimiter parses,
+    the lines after the end of its line up to the delimiter line (leading tabs stripped for <<-), or to the
+    end of the command."""
+    bodies, i, n = [], 0, len(command)
+    while True:
+        i = command.find("<<", i)
+        if i == -1:
+            return bodies
+        if command.startswith("<<<", i):
+            i += 3
+            continue
+        parsed = _parse_heredoc_delim(command, i + 2, n)
+        newline = -1 if parsed is None else command.find("\n", parsed[3])
+        if newline == -1:
+            i += 2
+            continue
+        _quoted, delim, strip_tabs, _next = parsed
+        body, j = [], newline + 1
+        while j < n:
+            end = command.find("\n", j)
+            line = command[j:(n if end == -1 else end)]
+            j = n if end == -1 else end + 1
+            if (line.lstrip("\t") if strip_tabs else line) == delim:
+                break
+            body.append(line)
+        bodies.append("\n".join(body))
+        i = j
+
+
+def _citechk_read_body(path):
+    """(text, None) for a message or body file, else (None, reason): resolved through symlinks, never a path
+    under /dev or /proc, opened non-blocking (a FIFO is refused at the fstat, never waited on), a regular file
+    of at most _CITECHK_BODY_MAX bytes, strict UTF-8; one leading byte-order mark is dropped."""
+    real = _cite_real(path)
+    if real is None:
+        return None, "it cannot be resolved"
+    if real in ("/dev", "/proc") or real.startswith(("/dev/", "/proc/")):
+        return None, "it is under /dev or /proc, which this check does not read"
+    try:
+        fd = os.open(real, _CITE_OPEN_FLAGS)
+    except (OSError, ValueError) as exc:
+        return None, "it cannot be opened ({})".format(_cite_fail(exc))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None, "it is not a regular file"
+        chunks, total = [], 0
+        while total <= _CITECHK_BODY_MAX:
+            chunk = os.read(fd, min(1 << 20, _CITECHK_BODY_MAX + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    except OSError as exc:
+        return None, "it cannot be read ({})".format(_cite_fail(exc))
+    finally:
+        try:
+            os.close(fd)  # once: after a failed close the descriptor number may already be reused
+        except OSError:
+            pass
+    if total > _CITECHK_BODY_MAX:
+        return None, "it is larger than {} bytes".format(_CITECHK_BODY_MAX)
+    try:
+        text = b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError:
+        return None, "it is not valid UTF-8"
+    return text.removeprefix("\ufeff"), None
+
+
+def _citechk_commands(command, cwd):
+    """The git commit and gh pr create or edit commands of a Bash command, each a dict: cmd (git-commit,
+    gh-pr-create or gh-pr-edit), parse ("lexed", or "raw" where the command does not lex and its whole text
+    is scanned as body text), texts [(label, text)], unread [(label, reason)], repo (the directory the command
+    runs in, after a git -C; None without an absolute session cwd) and base (a gh --base value). A message or
+    body file resolves against repo; "-" is standard input, read from the command's here-documents where the
+    command carries one and otherwise named as unseen."""
+    try:
+        segments = _lex_command(command)
+    except ValueError:
+        hits = sorted((found.start(), kind) for regex, kind in _CITECHK_RAW_KINDS
+                      for found in [regex.search(command)] if found)
+        if not hits:
+            return []
+        return [{"cmd": hits[0][1], "parse": "raw", "texts": [("command text", command)], "unread": [],
+                 "repo": cwd, "base": None}]
+    out, heredocs = [], None
+    for seg in segments:
+        argv, at = seg.argv, _command_word_index(seg.argv)
+        word, repo = _command_word(argv), cwd
+        if word == "git":
+            sub, args = _git_sub_and_args(argv)
+            if sub != "commit":
+                continue
+            kind = "git-commit"
+            i = at + 1
+            while i < len(argv) and argv[i].startswith("-"):
+                if argv[i] == "-C" and i + 1 < len(argv):
+                    target = argv[i + 1]
+                    repo = target if os.path.isabs(target) else (os.path.join(repo, target) if repo else None)
+                i += 2 if "=" not in argv[i] and argv[i] in _GIT_ARG_OPTS else 1
+            options = _citechk_options(args, _CITECHK_GIT_SHORT, _CITECHK_GIT_OPTIONAL, _CITECHK_GIT_LONG)
+        elif word == "gh":
+            rest = argv[at + 1:]
+            if len(rest) < 2 or rest[0] != "pr" or rest[1] not in ("create", "edit"):
+                continue
+            kind = "gh-pr-" + rest[1]
+            options = [(name, value[1:] if len(name) == 2 and value and value.startswith("=") else value)
+                       for name, value in _citechk_options(rest[2:], _CITECHK_GH_SHORT, "", _CITECHK_GH_LONG)]
+        else:
+            continue
+        inline_names, file_names = _CITECHK_SOURCES[kind]
+        item = {"cmd": kind, "parse": "lexed", "texts": [], "unread": [], "repo": repo, "base": None}
+        for name, value in options:
+            if value is None:
+                continue
+            if name in ("-B", "--base") and kind != "git-commit":
+                item["base"] = value
+            elif name in inline_names:
+                item["texts"].append(("{} value".format(name), value))
+            elif name in file_names and value == "-":
+                if "<<" in seg.raw:
+                    heredocs = _citechk_heredocs(command) if heredocs is None else heredocs
+                    item["texts"].extend(("here-document", body) for body in heredocs)
+                else:
+                    item["unread"].append(("{} -".format(name), "it is read from standard input, which this "
+                                           "check cannot see"))
+            elif name in file_names:
+                if not os.path.isabs(value) and repo is None:
+                    item["unread"].append(("{} {}".format(name, value), "it is relative and the session has "
+                                           "no absolute cwd to resolve it against"))
+                    continue
+                text, reason = _citechk_read_body(os.path.join(repo or "/", value))
+                if text is None:
+                    item["unread"].append(("{} {}".format(name, value), reason))
+                else:
+                    item["texts"].append(("{} {}".format(name, value), text))
+        out.append(item)
+    return out
+
+
+def _citechk_blank(match):
+    """A regex match replaced by as many spaces, so the columns of the rest of the line hold."""
+    return " " * len(match.group(0))
+
+
+def _citechk_cite(path, first, last, form, exempt, counts):
+    """One citation (path, first, last, form, exempt), or None for a reversed range (counted) or an empty
+    path."""
+    first, last = int(first), int(last or first)
+    if last < first:
+        counts["reversed"] += 1
+        return None
+    return (path, first, last, form, exempt) if path else None
+
+
+def _citechk_extract(text):
+    """The line citations in one message or body text: (cites, counts), each cite (path, first, last, form,
+    exempt). The text splits into lines on LF (a CR before it reads as a space). Masked to spaces first, so the
+    columns of the rest hold: a fenced block (an opening run of three or more backticks or tildes indented at
+    most three spaces, through the closing run of the same character at least as long, or to the end), an
+    indented block (four spaces or a tab, opened only after a blank line or at the start), a block-quote line
+    (> indented at most three spaces), and each URL or autolink. A FORM_A citation followed by ': ' and an
+    error name is a quoted log line and is passed over. A citation is exempt in a section under a heading of
+    one to six # that names a verifier or reviewer report or findings, to the next heading of the same or a
+    higher level, and on a line starting 'Verifier-cited: '. A reversed range is dropped. A FORM_B path loses
+    trailing dots (a sentence's full stop)."""
+    counts = {"fence": 0, "indent": 0, "quote": 0, "url": 0, "log": 0, "reversed": 0}
+    masked, fence, blank, indented = [], None, True, False
+    for line in text.split("\n"):
+        line = line[:-1] + " " if line.endswith("\r") else line
+        hide, opened = None, _CITECHK_FENCE.match(line)
+        if fence is not None:
+            close = _CITECHK_FENCE_CLOSE.fullmatch(line)
+            if close and close.group(1)[0] == fence[0] and len(close.group(1)) >= fence[1]:
+                fence = None
+            hide = "fence"
+        elif opened and not (opened.group(1)[0] == "`" and "`" in line[opened.end():]):
+            fence, hide = (opened.group(1)[0], len(opened.group(1))), "fence"
+        elif not line.strip():
+            blank = True
+            masked.append(line)
+            continue
+        elif line.startswith(("\t", "    ")) and (blank or indented):
+            hide = "indent"
+        elif _CITECHK_QUOTE.match(line):
+            hide = "quote"
+        indented, blank = hide == "indent", False
+        if hide is not None:
+            counts[hide] += 1
+            line = " " * len(line)
+        masked.append(line)
+    cites, level = [], None
+    for line in masked:
+        heading = _CITECHK_HEADING.match(line)
+        if heading:
+            depth = len(heading.group(1))
+            if level is not None and depth <= level:
+                level = None
+            if level is None and _CITECHK_VERIFIER.match(line, heading.end()):
+                level = depth
+        exempt = level is not None or line.startswith("Verifier-cited: ")
+        counts["url"] += len(_CITECHK_URL.findall(line))
+        line = _CITECHK_URL.sub(_citechk_blank, line)
+        spans = []
+        for found in _CITECHK_FORM_A.finditer(line):
+            spans.append(found.span())
+            if _CITECHK_LOG.match(line, found.end()):
+                counts["log"] += 1
+                continue
+            cites.append(_citechk_cite(found.group(1), found.group(2), found.group(3), "A", exempt, counts))
+        for found in _CITECHK_FORM_B.finditer(line):
+            if any(found.start() < end and start < found.end() for start, end in spans):
+                continue
+            cites.append(_citechk_cite(found.group(3).rstrip("."), found.group(1), found.group(2), "B", exempt,
+                                       counts))
+    return [cite for cite in cites if cite is not None], counts
+
+
+def _citechk_generation(dirfd, name):
+    """(bytes, None) for one ledger generation in the open ledger directory, (None, None) when it is absent,
+    or (None, reason) when it cannot be read: opened without following a symlink and non-blocking, refused
+    unless a regular file of at most _CITECHK_LEDGER_MAX bytes."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=dirfd)
+    except FileNotFoundError:
+        return None, None
+    except (OSError, ValueError) as exc:
+        return None, "it cannot be opened ({})".format(_cite_fail(exc))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None, "it is not a regular file"
+        chunks, total = [], 0
+        while total <= _CITECHK_LEDGER_MAX:
+            chunk = os.read(fd, min(1 << 20, _CITECHK_LEDGER_MAX + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    except OSError as exc:
+        return None, "it cannot be read ({})".format(_cite_fail(exc))
+    finally:
+        try:
+            os.close(fd)  # once: after a failed close the descriptor number may already be reused
+        except OSError:
+            pass
+    if total > _CITECHK_LEDGER_MAX:
+        return None, "it is larger than {} bytes".format(_CITECHK_LEDGER_MAX)
+    return b"".join(chunks), None
+
+
+def _citechk_row(line):
+    """(path, start, end, sha256) of one ledger line holding a recorder row (v 1, kind read or wrote, a
+    non-empty path, 1 <= start <= end, a 64-character digest), else None."""
+    try:
+        row = json.loads(line)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(row, dict) or row.get("v") != 1 or row.get("kind") not in ("read", "wrote"):
+        return None
+    path, start, end, digest = row.get("path"), row.get("start"), row.get("end"), row.get("sha256")
+    if isinstance(path, str) and path and type(start) is int and type(end) is int and 1 <= start <= end \
+            and isinstance(digest, str) and len(digest) == 64:
+        return (path, start, end, digest)
+    return None
+
+
+def _citechk_ledger(directory, key):
+    """This session's ledger rows: (rows, faults), rows from <key>.jsonl.1 then <key>.jsonl, faults naming
+    each part that could not be read (the directory, a generation, or lines that are not rows). An absent
+    directory or generation is no fault; it holds no rows."""
+    rows, faults = [], []
+    try:
+        dirfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except FileNotFoundError:
+        return rows, faults
+    except (OSError, ValueError) as exc:
+        return rows, ["the ledger directory {} cannot be opened ({})".format(directory, _cite_fail(exc))]
+    try:
+        for name in (key + ".jsonl.1", key + ".jsonl"):
+            blob, reason = _citechk_generation(dirfd, name)
+            if reason is not None:
+                faults.append("{}: {}".format(os.path.join(directory, name), reason))
+            bad = 0
+            for line in (blob or b"").split(b"\n"):
+                if line.strip():
+                    row = _citechk_row(line)
+                    bad += row is None
+                    rows += [] if row is None else [row]
+            if bad:
+                faults.append("{}: {} line(s) are not ledger rows".format(os.path.join(directory, name), bad))
+    finally:
+        try:
+            os.close(dirfd)  # once: after a failed close the descriptor number may already be reused
+        except OSError:
+            pass
+    return rows, faults
+
+
+def _citechk_covers(spans, first, last):
+    """Whether the union of the inclusive line spans covers every line first..last."""
+    reach = first
+    for start, end in sorted(spans):
+        if start > reach:
+            break
+        reach = max(reach, end + 1)
+    return reach > last
+
+
+def _citechk_base(repo, spec, merge, deadline):
+    """The commit a command's diff starts from: spec itself (HEAD for git commit) or, for a pull request,
+    the merge base of spec and HEAD; None where either does not resolve, spec reads as an option, or the
+    check's deadline leaves no time for a probe (each probe is given only the time left)."""
+    if not spec or spec.startswith("-"):
+        return None
+    left = _cite_left(deadline)
+    probe = None if left is None else _review_git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options",
+                                                  spec + "^{commit}", timeout=left)
+    if probe is None or probe.returncode != 0:
+        return None
+    commit = probe.stdout.decode("ascii", "replace").strip() or None
+    if commit is None or not merge:
+        return commit
+    left = _cite_left(deadline)
+    probe = None if left is None else _review_git(repo, "merge-base", commit, "HEAD", timeout=left)
+    if probe is None or probe.returncode != 0:
+        return None
+    return probe.stdout.decode("ascii", "replace").strip() or None
+
+
+def _citechk_added(repo, base, real, deadline):
+    """The inclusive line spans of real, as the working tree holds it, that the diff from commit base to the
+    working tree adds (its -U0 hunk headers), or None where real is outside repo, the probe fails, or the
+    check's deadline leaves no time for it (the probe is given only the time left)."""
+    top = os.path.realpath(repo).rstrip("/") + "/"
+    left = _cite_left(deadline)
+    if not real.startswith(top) or left is None:
+        return None
+    probe = _review_git(repo, "diff", "-U0", "--no-ext-diff", "--no-textconv", "--no-color", base, "--",
+                        real[len(top):], timeout=left)
+    if probe is None or probe.returncode != 0:
+        return None
+    spans = []
+    for line in probe.stdout.split(b"\n"):
+        hunk = _CITECHK_HUNK.match(line)
+        if hunk:
+            first, count = int(hunk.group(1)), int(hunk.group(2) if hunk.group(2) is not None else 1)
+            if count > 0:
+                spans.append((first, first + count - 1))
+    return spans
+
+
+def _citechk_resolve(token, repo, index):
+    """The resolved regular file a cited path names: under repo (an absolute path kept), else the one ledger
+    path ending in /token where exactly one does; None otherwise."""
+    real = _cite_real(token if os.path.isabs(token) else os.path.join(repo, token))
+    try:
+        if real is not None and stat.S_ISREG(os.stat(real).st_mode):
+            return real
+    except (OSError, ValueError):
+        pass
+    if os.path.isabs(token):
+        return None
+    suffix = "/" + token.removeprefix("./")
+    hits = {path for path in index if path.endswith(suffix)}
+    return hits.pop() if len(hits) == 1 else None
+
+
+def _citechk_class(cite, item, index, state):
+    """(class, detail) of one citation, or (None, None) for a token that names no file and is not
+    path-shaped (not a citation): covered, authored-in-diff (the rest of the range is lines the relevant diff
+    adds), stale (only rows whose lines changed since cover it), unread, nofile (path-shaped, with a / and a
+    lettered extension, but no such file), unrecordable (a file the recorder never records), or unjudged.
+    A row is current where the file's lines start..end hash, as _cite_bytes gives them, to the row's digest:
+    the bytes the recorder digested, so a git show row of any revision counts where the working tree holds
+    the blob's bytes at those lines. A read or a diff probe the check's deadline cuts short is unjudged, and
+    state["budget"] says so."""
+    token, first, last = cite[0], cite[1], cite[2]
+    real = _citechk_resolve(token, item["root"], index)
+    if real is None:
+        shaped = "/" in token and _CITECHK_EXT.search(token.rsplit("/", 1)[-1])
+        return ("nofile", None) if shaped else (None, None)
+    files = state["files"]
+    if real not in files:
+        if len(files) >= _CITECHK_MAX_FILES:
+            return "unjudged", "more than {} distinct files are cited".format(_CITECHK_MAX_FILES)
+        try:
+            size = os.stat(real).st_size
+        except (OSError, ValueError):
+            size = 0
+        if size > _CITE_MAX_FILE:
+            return "unrecordable", "a file over {} bytes".format(_CITE_MAX_FILE)
+        if state["bytes"] + size > _CITECHK_READ_MAX:
+            return "unjudged", "the cited files hold more than {} bytes".format(_CITECHK_READ_MAX)
+        state["bytes"] += size
+    entry = _cite_read(real, files, state["deadline"])
+    if entry is None and _cite_over(state["deadline"]):
+        state["budget"] = True
+        return "unjudged", _CITECHK_OUT_OF_TIME
+    if entry is None:
+        return "unjudged", "the file could not be read"
+    rows = index.get(real, ())
+    current = []
+    for start, end, digest in rows:
+        known = state["current"].get((real, start, end, digest))
+        if known is None:
+            known = end <= len(entry["lines"]) and _cite_sha256(_cite_bytes(entry, start, end)) == digest
+            state["current"][(real, start, end, digest)] = known
+        if known:
+            current.append((start, end))
+    if _citechk_covers(current, first, last):
+        return "covered", None
+    added = _citechk_diff(item, real, state)
+    if added is None and _cite_over(state["deadline"]):
+        state["budget"] = True
+        return "unjudged", _CITECHK_OUT_OF_TIME
+    if added and _citechk_covers(current + added, first, last):
+        return "authored-in-diff", None
+    if _citechk_covers([(start, end) for start, end, _digest in rows], first, last):
+        return "stale", None
+    if real.lower().endswith(_CITECHK_BLIND):
+        return "unrecordable", "a notebook, PDF or image read"
+    return "unread", None
+
+
+def _citechk_diff(item, real, state):
+    """The lines of real the command's diff adds (see _citechk_added), cached; the command's diff status
+    becomes "used", or "unavailable" where the base or the probe fails."""
+    merge = item["cmd"] != "git-commit"
+    spec = (item["base"] or "origin/HEAD") if merge else "HEAD"
+    base_key = (item["root"], spec, merge)
+    if base_key not in state["bases"]:
+        state["bases"][base_key] = _citechk_base(item["root"], spec, merge, state["deadline"])
+    base = state["bases"][base_key]
+    key = base_key + (real,)
+    if key not in state["diffs"]:
+        state["diffs"][key] = None if base is None else _citechk_added(item["root"], base, real,
+                                                                       state["deadline"])
+    added = state["diffs"][key]
+    if added is None:
+        item["diff"] = "unavailable"
+    elif item["diff"] != "unavailable":
+        item["diff"] = "used"
+    return added
+
+
+def _citechk_phrase(result, root):
+    """The note's text for one flagged citation."""
+    cls, detail = result["class"], result.get("detail")
+    if cls == "unread":
+        return "no read or write recorded this session covers these lines"
+    if cls == "stale":
+        return "recorded as read or written this session, but those lines have changed since"
+    if cls == "nofile":
+        return "no such file under {}, and no file this session recorded ends with that path".format(root)
+    if cls == "unrecordable":
+        return "the recorder records nothing for {}, so this range cannot be matched; re-check it by hand" \
+            .format(detail)
+    return "not judged: {}".format(detail)
+
+
+def _citechk_run(data):
+    """The note citation_read_check surfaces for this payload, or None for a silent allow (see there)."""
+    if data.get("hook_event_name") != PRETOOL or data.get("tool_name") != "Bash":
+        return None
+    deadline = time.monotonic() + _CITECHK_BUDGET
+    tool_input, cwd = data.get("tool_input"), data.get("cwd")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str) or not _CITECHK_PREFILTER.search(command):
+        return None
+    commands = _citechk_commands(command, cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None)
+    if not commands or not (isinstance(cwd, str) and cwd):
+        return None
+    left = _cite_left(deadline)
+    root = None if left is None else _recovery_toplevel(cwd, timeout=left)
+    if root is None and _cite_over(deadline):
+        return ("{}the citation check ran out of its {} second budget before it resolved the repository, so "
+                "no citation in this {} was checked.".format(_CITECHK_HEAD, _CITECHK_BUDGET, " and ".join(
+                    sorted({_CITECHK_LABELS[item["cmd"]] for item in commands}))))
+    if root is None:
+        return None
+    session = data.get("session_id")
+    key = _cite_sha256(session.encode("utf-8", "replace"))[:16] if isinstance(session, str) and session else None
+    for item in commands:
+        item["cites"], item["counts"], item["results"], item["dropped"], item["diff"] = [], {}, [], 0, "not-needed"
+        if item["repo"] is None or os.path.realpath(item["repo"]) == os.path.realpath(cwd):
+            item["root"] = root
+        else:
+            left = _cite_left(deadline)
+            item["root"] = (None if left is None else _recovery_toplevel(item["repo"], timeout=left)) or root
+        for _label, text in item["texts"]:
+            found, counts = _citechk_extract(text)
+            item["cites"].extend(found)
+            for name, value in counts.items():
+                item["counts"][name] = item["counts"].get(name, 0) + value
+    rows, faults, status = [], [], "not-read"
+    if any(not cite[4] for item in commands for cite in item["cites"]):
+        if key is None:
+            status = "no-session"
+        else:
+            rows, faults = _citechk_ledger(os.path.join(_orch_state_dir_for_root(root), _CITE_DIR), key)
+            status = "unreadable" if faults else ("ok" if rows else "empty")
+    index = {}
+    for path, start, end, digest in rows:
+        index.setdefault(path, []).append((start, end, digest))
+    state = {"files": {}, "current": {}, "bases": {}, "diffs": {}, "bytes": 0, "deadline": deadline,
+             "budget": False}
+    judged, over_cap = 0, 0
+    for item in commands:
+        item["over_cap"] = 0
+        for cite in item["cites"]:
+            if judged >= _CITECHK_MAX_CITES:  # counted, never listed, so a row stays bounded
+                over_cap += 1
+                item["over_cap"] += 1
+                continue
+            judged += 1
+            shown = "{}:{}".format(cite[0], cite[1]) + ("-{}".format(cite[2]) if cite[2] != cite[1] else "")
+            result = {"cite": shown, "form": cite[3]}
+            if cite[4]:
+                result["class"] = "exempt-verifier"
+            elif _cite_over(deadline):
+                state["budget"] = True
+                result["class"], result["detail"] = "unjudged", _CITECHK_OUT_OF_TIME
+            else:
+                result["class"], result["detail"] = _citechk_class(cite, item, index, state)
+                if result["class"] is None:
+                    item["dropped"] += 1
+                    continue
+            item["results"].append(result)
+    budget = state["budget"]
+    flagged = [(item, result) for item in commands for result in item["results"]
+               if result["class"] in _CITECHK_FLAGGED]
+    considered = sum(1 for item in commands for result in item["results"] if result["class"] != "exempt-verifier")
+    ledger_faulty = considered > 0 and status in ("no-session", "unreadable")
+    lines = []
+    for item, result in flagged[:_CITECHK_SHOWN]:
+        lines.append("  {} ({})".format(result["cite"], _citechk_phrase(result, item["root"])))
+    if len(flagged) > _CITECHK_SHOWN:
+        lines.append("  and {} more".format(len(flagged) - _CITECHK_SHOWN))
+    labels = " and ".join(sorted({_CITECHK_LABELS[item["cmd"]] for item in commands}))
+    head = _CITECHK_HEAD
+    parts = []
+    if flagged:
+        parts.append(head + "{} of {} cited line range(s) in this {} matched no read or write recorded this "
+                     "session at their current content:\n{}".format(len(flagged), considered, labels,
+                                                                     "\n".join(lines)))
+    for item in commands:
+        for label, reason in item["unread"]:
+            parts.append("The {} {} was not read: {}.".format(_CITECHK_LABELS[item["cmd"]], label, reason))
+    if ledger_faulty and status == "no-session":
+        parts.append("The payload carries no session id, so this session's citation ledger cannot be found and "
+                     "no cited range can be matched to a read.")
+    elif ledger_faulty:
+        parts.append("This session's citation ledger could not be read in full ({}), so a range it holds may "
+                     "show here as unread.".format("; ".join(faults)))
+    elif status == "empty" and flagged:
+        parts.append("This session has no citation-ledger rows at all (session key {}): nothing was recorded "
+                     "for it, or its session id changed (after a compaction or a resume, for example)."
+                     .format(key))
+    if budget:
+        parts.append("The citation check is incomplete (budget): it ran out of its {} second budget before "
+                     "every range was judged.".format(_CITECHK_BUDGET))
+    if over_cap:
+        parts.append("The citation check is incomplete: {} citation(s) past the first {} were not judged."
+                     .format(over_cap, _CITECHK_MAX_CITES))
+    if flagged:
+        parts.append("The ledger records Read (text), Grep in content mode, one plain git show REV:PATH, grep or "
+                     "rg with a line-number flag, sed -n 'A,Bp' PATH, Write and Edit; it records nothing for any "
+                     "other tool (cat, head, tail, less, a pipeline or compound command, bash -c, a script), for "
+                     "an image, PDF or notebook read, or for another session's or a subagent's reads, so a range "
+                     "read that way shows here as unmatched. Re-open each range (Read with offset and limit, or "
+                     "git show REV:PATH) and re-check the claim before citing it, or cite the symbol alone "
+                     "without a line number. A range a verifier supplied can be placed under a \"Verifier "
+                     "report\" heading or on a \"Verifier-cited:\" line.")
+    if parts and not parts[0].startswith(head):
+        parts[0] = head + parts[0]
+    transcript = data.get("transcript_path")
+    failure = ""
+    for item in commands:
+        warn = bool(item["unread"]) or any(r["class"] in _CITECHK_FLAGGED for r in item["results"]) \
+            or (ledger_faulty and any(r["class"] != "exempt-verifier" for r in item["results"])) \
+            or item["over_cap"] > 0
+        detail = {"v": 1, "control": "citation-read-check", "cmd": item["cmd"], "parse": item["parse"],
+                  "session": key, "ledger": status, "ledger_rows": len(rows), "budget_exhausted": budget,
+                  "citations": [{"cite": r["cite"], "class": r["class"], "form": r["form"]}
+                                for r in item["results"]],
+                  "not_judged_past_cap": item["over_cap"], "dropped_not_citation": item["dropped"],
+                  "masked": item["counts"],
+                  "sources": [label for label, _text in item["texts"]],
+                  "sources_unread": ["{}: {}".format(label, reason) for label, reason in item["unread"]],
+                  "diff": item["diff"], "transcript": transcript if isinstance(transcript, str) else None}
+        if warn:
+            failure = _orch_event_warn(root, "citint", "warn", detail) or failure
+        else:
+            _orch_guard_event(root, "citint", "allow", detail)  # a clean row is the over-fire metric only
+    if not parts:
+        return None
+    return "\n".join(parts) + ("\n" + failure if failure else "")
+
+
+def citation_read_check(data):
+    """citint/refcap, PreToolUse Bash (stage BAKE: it surfaces and never denies): where a git commit message
+    (-m, --message, -F, --file, a here-document on -F -) or a gh pr create or edit body (--body, -b,
+    --body-file, -F) cites a path with a line or line range, note each cited range that this session's
+    citation ledger (both generations) does not cover at the cited lines with matching content, naming the
+    range and why (unread, stale, no such file, a file the recorder never records, or not judged), and
+    append one guard-events row (kind citint) per checked command, decision warn or allow. Inert (a silent
+    allow, no row) on any other event, tool or command, a payload with no command string, and a session cwd
+    that resolves to no git toplevel (a toplevel probe the deadline cuts short is named in a note instead).
+    A ledger that cannot be read, a missing session id, a body file that cannot be read, a body on standard
+    input it cannot see, and an exhausted budget, citation cap, file cap or read bound are each named in the
+    note, never a silent clean. Any fault inside the check is caught and named in a note, so during the bake
+    no path of this handler blocks; the dispatcher's own PreToolUse error paths (an unreadable payload, a bad
+    invocation, an interpreter below the floor) still exit 2 as for every PreToolUse mode."""
+    try:
+        message = _citechk_run(data)
+    except Exception as exc:  # a fault in the check never blocks during the bake; it is named instead
+        message = ("AIQT guardrail (rules citint/refcap, BAKE: warning only, nothing is blocked): the citation "
+                   "read check could not run ({}), so no citation in this command was checked."
+                   .format(_cite_fail(exc)))
+    if message is None:
+        return _allow()
+    return _allow_note(message)
+
+
 # --- review dispatch pin (vfxcmt) --------------------------------------------------------------------
 # PreToolUse Bash, registry scoped. Inert unless the orchestration registry declares a `review_dispatch`
 # binding (ORCHESTRATION.md, "The review dispatch binding"). A Bash call that names a declared dispatch
@@ -17354,6 +18075,7 @@ HANDLERS = {
     "orch_resume_audit": orch_resume_audit,
     "orch_resume_barrier": orch_resume_barrier,
     "citation_read_recorder": citation_read_recorder,
+    "citation_read_check": citation_read_check,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
@@ -17392,6 +18114,7 @@ HANDLER_EVENT = {
     "orch_resume_audit": "SessionStart",
     "orch_resume_barrier": PRETOOL,
     "citation_read_recorder": "PostToolUse",
+    "citation_read_check": PRETOOL,
 }
 
 
