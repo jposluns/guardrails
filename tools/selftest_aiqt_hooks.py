@@ -69,7 +69,10 @@ handler's structured decision.
 
 It also covers the gate-weakening guard (gate_weakening, gatdis): a git verification-hook bypass
 (--no-verify on commit/merge/push/pull/rebase/am, exact or abbreviated; the short -n only on
-commit/am, where -n IS --no-verify), bare or behind a command-word wrapper, denies; a checker-shaped
+commit/am, where -n IS --no-verify), bare or behind a command-word wrapper (not behind a command -v or
+-V lookup), denies, judged in linear time and held equal to a line-by-line judge on generated segments; a
+command beyond the size bound denies, failing closed, and the worst shapes found finish under a time limit
+as whole hook processes; a checker-shaped
 segment whose failure is swallowed (|| true, || :) or piped into an adjacent head or tail allows with a
 note, except that a narrow verification run on the allow-list whose output reaches a sink on the
 allow-list (head or tail with one positive line count, grep -m N/-q/-c/-l/-L, rg -q/-c/-l) denies;
@@ -136,11 +139,13 @@ import hashlib
 import io
 import json
 import os
+import random
 import re
 import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -192,6 +197,54 @@ def _decision(handler, command, tool="Bash", cwd=None):
         data["cwd"] = cwd
     code, stdout_obj, _stderr = handler(data)
     return _reduce_result(code, stdout_obj)
+
+
+def _gw_line_by_line(tokens):
+    """The hook-bypass verdict of one lexed segment with each git command line judged on its own, sliced and
+    scanned from its start (time quadratic in the number of git words): the reference that the linear
+    aiqt_hooks._gate_git_bypass is held equal to. The command lines are found as that function finds them
+    (reserved words and a function or coproc NAME, VAR=value words, the wrapper rule and its lookup form); each
+    is judged by _git_sub_and_args, _has_info_flag, _split_pre_post, _has_long_prefix and _gate_short_n_step."""
+    h = aiqt_hooks
+    k = 0
+    while k < len(tokens) and tokens[k] in h._GATE_RESERVED:
+        if tokens[k] in ("function", "coproc") and k + 2 < len(tokens) and tokens[k + 2] in h._GATE_RESERVED:
+            k += 1
+        k += 1
+    argv = tokens[k:]
+    i = h._command_word_index(argv)
+    if i >= len(argv):
+        return None
+    word = argv[i].rsplit("/", 1)[-1]
+    if word == "git":
+        lines = [argv]
+    elif word in h._GATE_GIT_WRAPPERS and not (word == "command" and h._gate_command_lookup(argv, i)):
+        lines = [argv[m:] for m in range(i + 1, len(argv))
+                 if argv[m].rsplit("/", 1)[-1] == "git" and not h._ENV_ASSIGN_RE.match(argv[m])]
+    else:
+        return None
+    for line in lines:
+        sub, args = h._git_sub_and_args(line)
+        if sub not in h._NOVERIFY_VERBS or h._has_info_flag(line):
+            continue
+        pre, _post, _had_sep = h._split_pre_post(args)
+        if h._has_long_prefix(pre, "no-verify"):
+            return sub, "a --no-verify spelling"
+        if sub in h._NOVERIFY_SHORT_N_VERBS:
+            skip = False
+            for tok in pre:
+                if skip:
+                    skip = False
+                    continue
+                hit, skip = h._gate_short_n_step(sub, tok)
+                if hit:
+                    return sub, "the short -n (--no-verify) in {!r}".format(tok[:40])
+    return None
+
+
+def _gw_fill(prefix, unit, suffix, size):
+    """prefix, then unit repeated as often as fits, then suffix: a command of at most size characters."""
+    return prefix + unit * max(0, (size - len(prefix) - len(suffix)) // len(unit)) + suffix
 
 
 def _declared_names(tree, name):
@@ -8259,7 +8312,7 @@ def _main_isolated(monitor):
         gexpect("(qa-b1-gw) backslash-newline no-verify does not slip via an empty argv element, denies",
                 "git \\\n commit --no-verify -m x", "deny")
 
-        # === the hook bypass behind a command-word wrapper (_gate_git_commands) ==========================
+        # === the hook bypass behind a command-word wrapper (_gate_git_bypass) ============================
         # A wrapper word (env, timeout, command, exec, nohup, xargs, sudo, nice, setsid, stdbuf, time) is the
         # command word, so the git command after it was never judged: every deny below allowed before the
         # rule. Every later git word after a wrapper starts a judged command, whatever the wrapper's own
@@ -8311,6 +8364,164 @@ def _main_isolated(monitor):
                 "env git commit --help --no-verify", "allow")
         gexpect("(gw-wr-c6) a bare commit --help shows the manual and commits nothing, allows",
                 "git commit --help --no-verify", "allow")
+
+        # 'command -v' and 'command -V' print how a name resolves and run nothing (bash(1)), so their operands
+        # are not judged (gw-lk*); the controls keep a plain or -p 'command' a wrapper (lk-c1, lk-c2) and a
+        # lookup behind another wrapper judged (lk-c3, the disclosed over-deny). The NAME after 'function' or
+        # 'coproc' before a reserved word is a name, not a command, so the body after it is judged (gw-nm*);
+        # before a simple command the word after coproc is the command itself (nm-c1), and a function named
+        # like a wrapper is not a wrapper (nm-c2).
+        gexpect("(gw-lk1) command -v looks git up and runs nothing, allows", "command -v git commit --no-verify",
+                "allow")
+        gexpect("(gw-lk2) command -V looks git up and runs nothing, allows", "command -V git commit -n -m x",
+                "allow")
+        gexpect("(gw-lk3) a clustered -pv lookup allows", "command -pv git push --no-verify", "allow")
+        gexpect("(gw-lk4) a lookup ended by -- allows", "command -v -- git commit -n", "allow")
+        gexpect("(gw-lk-c1) a plain command wrapper still denies", "command git commit --no-verify -m x", "deny")
+        gexpect("(gw-lk-c2) command -p runs git, denies", "command -p git commit -n -m x", "deny")
+        gexpect("(gw-lk-c3) a lookup behind another wrapper is judged (disclosed over-deny), denies",
+                "sudo command -v git commit -n", "deny")
+        gexpect("(gw-nm1) a function body after its NAME is judged, denies",
+                "function f { git commit -n -m x; }; f", "deny")
+        gexpect("(gw-nm2) a coproc body after its NAME is judged, denies",
+                "coproc C { git commit --no-verify -m x; }", "deny")
+        gexpect("(gw-nm3) a wrapped git in a function body denies", "function f { env git commit -n -m x; }", "deny")
+        gexpect("(gw-nm-c1) coproc before a simple command runs that command (C), allows",
+                "coproc C env git commit -n -m x", "allow")
+        gexpect("(gw-nm-c2) a function named like a wrapper is a name; its echo body allows",
+                "function sudo { echo git commit -n; }", "allow")
+
+        # (gw-lin) The linear judge (_gate_git_bypass) gives every generated segment the verdict that judging
+        # each git command line on its own gives (_gw_line_by_line); (gw-raw) the linear fallback probe
+        # (_raw_git_then) finds a git word followed by a verb word exactly when the lazy pattern does.
+        _gw_words = ("git", "/usr/bin/git", "commit", "am", "push", "merge", "pull", "rebase", "-n", "-an", "-m",
+                     "-mn", "--message", "--message=x", "-S", "-Sn", "-u", "-un", "--no-verify", "--no-ver",
+                     "--no-verify-signatures", "--", "--end-of-options", "--help", "-h", "-C", "-c", "--git-dir",
+                     "--git-dir=x", "x", "A=1", "A=git", "env", "sudo", "xargs", "command", "-v", "-V", "-p", "-pv",
+                     "!", "{", "if", "do", "function", "coproc", "f", "-F", "--author", "--whitespace")
+        _gw_rng = random.Random(20261015)
+        _gw_lin_bad = []
+        for _ in range(20000):
+            _gw_seg = [_gw_rng.choice(_gw_words) for _ in range(_gw_rng.randint(0, 14))]
+            if aiqt_hooks._gate_git_bypass(_gw_seg) != _gw_line_by_line(_gw_seg):
+                _gw_lin_bad.append(_gw_seg)
+        if _gw_lin_bad:
+            failures.append("(gw-lin) the linear judge differs from the line-by-line judge on {} segments, first {!r}"
+                            .format(len(_gw_lin_bad), _gw_lin_bad[0]))
+        _gw_frags = ("git", "GIT", "commit", "am", "push", "pull", "merge", "rebase", "x", "_", "-", "/", " ", "\n",
+                     "'", "gitcommit", "am_")
+        _gw_lazy = ((re.compile(r"\bgit\b.*?\b(?:commit|merge|push|pull|rebase|am)\b", re.I | re.S),
+                     aiqt_hooks._RAW_NOVERIFY_VERB_RE),
+                    (re.compile(r"\bgit\b.*?\b(?:commit|am)\b", re.I | re.S), aiqt_hooks._RAW_SHORT_NOVERIFY_VERB_RE))
+        _gw_raw_bad = []
+        for _ in range(20000):
+            _gw_text = "".join(_gw_rng.choice(_gw_frags) for _ in range(_gw_rng.randint(0, 10)))
+            for lazy, verb_re in _gw_lazy:
+                if bool(lazy.search(_gw_text)) != aiqt_hooks._raw_git_then(_gw_text, verb_re):
+                    _gw_raw_bad.append(_gw_text)
+        if _gw_raw_bad:
+            failures.append("(gw-raw) the linear fallback probe differs from the lazy pattern on {} texts, first {!r}"
+                            .format(len(_gw_raw_bad), _gw_raw_bad[0]))
+
+        # The size bound (_gate_size_over): a command beyond it is refused, failing closed, with a deny naming the
+        # bound; one character, segment or word inside it and exactly at it is judged (sz-*1, sz-*2), one over
+        # it is refused (sz-*3), on the parse-error path too (sz-p*), and the three 1 MB hook-bypass inputs the
+        # linear judge was written for are refused before they are lexed (sz-mb*).
+        _gw_c = aiqt_hooks._GATE_MAX_CHARS
+        _gw_s = aiqt_hooks._GATE_MAX_SEGMENTS
+        _gw_w = aiqt_hooks._GATE_MAX_WORDS
+
+        def gsize(label, command, bound):
+            """bound: the bound the deny must name ('characters', 'segments' or 'words'), or None for a command
+            the bound admits, which must reach the judgement (not be refused by the bound)."""
+            code, stdout_obj, _stderr = gwg({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                               "tool_input": {"command": command}})
+            got = _reduce_result(code, stdout_obj)
+            reason = ""
+            if isinstance(stdout_obj, dict) and isinstance(stdout_obj.get("hookSpecificOutput"), dict):
+                reason = str(stdout_obj["hookSpecificOutput"].get("permissionDecisionReason", ""))
+            named = "The bounds are {} characters, {} segments".format(_gw_c, _gw_s) in reason
+            if bound is None and named:
+                failures.append("{}: refused by the size bound, expected it judged".format(label))
+            elif bound is not None and not (got == "deny" and named and "{} (the bound is".format(bound) in reason):
+                failures.append("{}: expected a deny naming the {} bound, got {} {!r}".format(
+                    label, bound, got, reason[:160]))
+
+        gsize("(gw-sz-c1) one character inside the character bound is judged", "echo " + "a" * (_gw_c - 6), None)
+        gsize("(gw-sz-c2) exactly the character bound is judged", "echo " + "a" * (_gw_c - 5), None)
+        gsize("(gw-sz-c3) one character over the character bound is refused", "echo " + "a" * (_gw_c - 4),
+              "characters")
+        gsize("(gw-sz-s1) one segment inside the segment bound is judged", ";".join(["true"] * (_gw_s - 1)), None)
+        gsize("(gw-sz-s2) exactly the segment bound is judged", ";".join(["true"] * _gw_s), None)
+        gsize("(gw-sz-s3) one segment over the segment bound is refused", ";".join(["true"] * (_gw_s + 1)),
+              "segments")
+        gsize("(gw-sz-w1) one word inside the word bound is judged", "echo" + " a" * (_gw_w - 2), None)
+        gsize("(gw-sz-w2) exactly the word bound is judged", "echo" + " a" * (_gw_w - 1), None)
+        gsize("(gw-sz-w3) one word over the word bound is refused", "echo" + " a" * _gw_w, "words")
+        gsize("(gw-sz-p1) an unparseable command whose lexed prefix is at the segment bound is judged",
+              ";".join(["true"] * (_gw_s + 1)) + " '", None)
+        gsize("(gw-sz-p2) an unparseable command whose lexed prefix is over the segment bound is refused",
+              ";".join(["true"] * (_gw_s + 2)) + " '", "segments")
+        _gw_mb_inputs = (
+            ("(gw-sz-mb1) the 1 MB env -u padded bypass is refused by the size bound",
+             _gw_fill("env ", "-u git -u commit ", "-- git commit --no-verify -m x", 1000000)),
+            ("(gw-sz-mb2) the 1 MB git-commit padded bypass is refused by the size bound",
+             _gw_fill("env true ", "git commit ", "; git commit --no-verify -m y", 1000000)),
+            ("(gw-sz-mb3) the 1 MB wrapped run of git commit words is refused by the size bound",
+             _gw_fill("env ", "git commit ", "", 1000000)))
+        for _gw_label, _gw_command in _gw_mb_inputs:
+            gsize(_gw_label, _gw_command, "characters")
+
+        # (gw-time) The worst shapes found, each run as a whole hook process as the platform runs it: the three
+        # 1 MB inputs above, the slowest shapes the bounds admit (a wrapped run of sink words after a check, and
+        # wrapped long words at the character bound), and the shapes the bounds refuse only after lexing (empty
+        # lines with an unparseable end, a wrapped run of words over the word bound) or that reach the parse-error
+        # fallback (repeated git words after an unbalanced quote). Measured 2026-10-15 on the measuring host, the
+        # slowest took at most 1.19 seconds across runs; a run over _gw_time_limit (5 seconds, about four times
+        # that and half the 10-second hook timeout) fails, and one still running at _gw_time_kill seconds is
+        # stopped and fails.
+        _gw_time_limit = 5.0
+        _gw_time_kill = 60
+        _gw_hook = os.path.abspath(aiqt_hooks.__file__)
+        _gw_time_inputs = tuple((label, command, "bound") for label, command in _gw_mb_inputs) + (
+            ("(gw-time-sink) a wrapped run of sink words after a check, at the word bound",
+             "pytest | env " + "head " * (_gw_w - 3), "note"),
+            ("(gw-time-long) wrapped 63-character words at the character bound",
+             "env " + ("x" * 63 + " ") * min(_gw_w - 1, (_gw_c - 8) // 64), "allow"),
+            ("(gw-time-lines) empty lines to the character bound with an unparseable end",
+             "\n" * (_gw_c - 1) + "'", "bound"),
+            ("(gw-time-words) a wrapped run of words over the word bound, within the character bound",
+             _gw_fill("env ", "x ", "", _gw_c), "bound"),
+            ("(gw-time-fallback) repeated git words after an unbalanced quote, at the character bound",
+             _gw_fill("'", "git ", "", _gw_c), "allow"))
+        for _gw_label, _gw_command, _gw_want in _gw_time_inputs:
+            _gw_payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                      "tool_input": {"command": _gw_command}})
+            _gw_t0 = time.perf_counter()
+            try:
+                _gw_proc = subprocess.run([sys.executable, "-I", "-B", _gw_hook, "gate_weakening"],
+                                          input=_gw_payload, capture_output=True, text=True,
+                                          timeout=_gw_time_kill)
+            except subprocess.TimeoutExpired:
+                failures.append("{}: the hook process was still running after {} seconds".format(
+                    _gw_label, _gw_time_kill))
+                continue
+            _gw_elapsed = time.perf_counter() - _gw_t0
+            _gw_out = _gw_proc.stdout.strip()
+            try:
+                _gw_obj = json.loads(_gw_out) if _gw_out else None
+            except ValueError:
+                _gw_obj = "unreadable stdout {!r}".format(_gw_out[:120])
+            _gw_got = _reduce_result(_gw_proc.returncode, _gw_obj)
+            if _gw_got == "deny" and "The bounds are {} characters".format(_gw_c) in json.dumps(_gw_obj):
+                _gw_got = "bound"
+            elif _gw_got == "allow-note":
+                _gw_got = "note"
+            if _gw_got != _gw_want:
+                failures.append("{}: expected {}, got {}".format(_gw_label, _gw_want, _gw_got))
+            if _gw_elapsed > _gw_time_limit:
+                failures.append("{}: the hook process took {:.2f} seconds, over the {} second limit".format(
+                    _gw_label, _gw_elapsed, _gw_time_limit))
 
         # === gatdis deny tier: a VERIFICATION RUN whose output reaches a truncating sink =====================
         # Two tiers: the narrow verification-run predicate piped into a truncating sink DENIES; everything else
@@ -12499,7 +12710,8 @@ def _main_isolated(monitor):
           "unclassifiable form and DENIES), and ALLOWS-WITH-NOTE only a redirect whose worktree it cannot pin "
           "(a --git-dir/GIT_DIR/-c form or an opaque -C/--work-tree) (finding 12); a rooted creation and "
           "non-creation commands ALLOW. "
-          "gatdis (gate_weakening) DENIES a --no-verify bypass and a known verification run whose output reaches "
+          "gatdis (gate_weakening) DENIES a --no-verify bypass (bare or behind a command-word wrapper), a "
+          "command beyond its size bound (fail-closed), and a known verification run whose output reaches "
           "a truncating sink on its allow-list (head or tail with one positive line count, grep -m N/-q/-c/-l/-L, "
           "rg -q/-c/-l; cut, any other spelling and a sed or awk program only note), and "
           "ALLOWS-WITH-NOTE every other checker-shaped segment whose failure is swallowed (|| true) or "

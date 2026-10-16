@@ -944,11 +944,12 @@ def _segments(command):
 # APPEND '+=' form (OLDPWD+=..) is a real bash assignment prefix too, so it is recognized here; missing it
 # left the append-assignment mistaken for the command word, so the following cd was never examined. The
 # any-segment identity-assignment scan still inspects these same tokens for an AI name
-# (GIT_AUTHOR_NAME=Claude ...). Best-effort, per the manifest residue: the 'env VAR=x git ...' command form
-# and the 'command git ...' builtin remain out of scope. This matches the DECODED token, so an
-# assignment-SHAPED token whose NAME was quoted or escaped ("OLDPWD"=.. -> decoded OLDPWD=..) also matches;
-# bash would treat that as a command, not an assignment, so recognizing it is a deliberate conservative
-# over-fire (disclosed in the manifest residue), never an under-block.
+# (GIT_AUTHOR_NAME=Claude ...). Best-effort, per the manifest residue: this skip itself resolves neither the
+# 'env VAR=x git ...' command form nor the 'command git ...' builtin; a consumer that reads git behind such a
+# wrapper does so itself (the gate-weakening check through _gate_git_bypass), as its residue states. This
+# matches the DECODED token, so an assignment-SHAPED token whose NAME was quoted or escaped ("OLDPWD"=.. ->
+# decoded OLDPWD=..) also matches; bash would treat that as a command, not an assignment, so recognizing it
+# is a deliberate conservative over-fire (disclosed in the manifest residue), never an under-block.
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 
 
@@ -7964,9 +7965,13 @@ _GATE_ALTS = (
 # mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. '--no-ver'
 # deliberately also hits '--no-verbose' (an over-deny on the unparseable path only); the short cluster
 # probe requires a whitespace-preceded single-dash token so a long option ('--amend') never matches.
-_RAW_NOVERIFY_VERB_RE = re.compile(r"(?is)\bgit\b.*?\b(?:commit|merge|push|pull|rebase|am)\b")
+# A verb word is looked for only after the FIRST git word (_RAW_GIT_RE, _raw_git_then): a verb after any git
+# word is after the first, so this finds a git word followed by a verb word exactly when the one lazy pattern
+# git.*?verb would, in time linear in the command's length; the lazy pattern rescanned the rest of the
+# command from every git word, so a long run of git words with no verb after them took quadratic time.
+_RAW_NOVERIFY_VERB_RE = re.compile(r"(?i)\b(?:commit|merge|push|pull|rebase|am)\b")
 _RAW_NOVERIFY_RE = re.compile(r"(?i)--no-ver")
-_RAW_SHORT_NOVERIFY_VERB_RE = re.compile(r"(?is)\bgit\b.*?\b(?:commit|am)\b")
+_RAW_SHORT_NOVERIFY_VERB_RE = re.compile(r"(?i)\b(?:commit|am)\b")
 _RAW_SHORT_N_RE = re.compile(r"(?:^|\s)-[A-Za-z]*n\b")
 _RAW_CHECKER_RE = re.compile(
     r"(?i)\b(?:pytest|tox|nox|unittest|mypy|pyright|ruff|flake8|pylint|bandit|eslint|tsc|jest|"
@@ -7983,46 +7988,35 @@ _RAW_COMMIT_MSG_GIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
 _RAW_COMMIT_MSG_MARKER_RE = re.compile(r"`|\$\(")
 
 
-def _no_verify_spelling(sub, args):
-    """The matched hook-bypass spelling on this git segment, or None. The long form: a --no-verify
-    token in the option region (before '--'/'--end-of-options', via the shipped _split_pre_post),
-    matched exact or by CONSERVATIVE LONG PREFIX (_has_long_prefix, exactly as protected_line matches
-    'force'): an ambiguous abbreviation git itself would reject ('--no-ver') matches ANYWAY, and a
-    separated option VALUE in pre is scanned too - both err toward a deny, never an allow, while a
-    LONGER distinct option (--no-verify-signatures, --no-verbose) never matches because its full name
-    is not a prefix of 'no-verify'. The short form: a bare or clustered -n, ONLY on the verbs where -n
-    IS --no-verify (commit, am), with the value-taking short and long options skipped (mirroring
-    _push_parse) so an attached value ('-m-n ...'), a separated value ('--message -n'), or a stuck
-    optional value ('-Skeyid') is never char-scanned as the flag."""
-    pre, _post, _had_sep = _split_pre_post(args)
-    if _has_long_prefix(pre, "no-verify"):
-        return "a --no-verify spelling"
-    if sub not in _NOVERIFY_SHORT_N_VERBS:
-        return None
+def _raw_git_then(command, verb_re):
+    """True when the raw command holds a git word (_RAW_GIT_RE) and, after the first one, a word verb_re
+    matches: the linear form of the lazy git.*?verb probe (see _RAW_NOVERIFY_VERB_RE)."""
+    git = _RAW_GIT_RE.search(command)
+    return git is not None and verb_re.search(command, git.end()) is not None
+
+
+def _gate_short_n_step(sub, tok):
+    """(hit, skip_next) for one token of the option region of a git commit or am (sub) in the short -n scan of
+    the hook-bypass check (_gate_git_bypass): hit when the token is a bare or clustered -n; skip_next when the
+    token is a value-taking option whose value is the NEXT token, which the scan then passes over unread. The
+    value-taking short and long options are skipped (mirroring _push_parse) so an attached value ('-m-n ...'),
+    a separated value ('--message -n'), or a stuck optional value ('-Skeyid') is never char-scanned as the
+    flag; a long option is never char-scanned (the long form is judged by _has_long_prefix)."""
+    if tok.startswith("--"):
+        return False, "=" not in tok and tok in _GATE_LONG_ARG_OPTS[sub]  # its value is the next token
+    if not tok.startswith("-") or len(tok) < 2:
+        return False, False
+    body = tok[1:]
     value_opts = _GATE_SHORT_VALUE_OPTS[sub]
     stuck_opts = _GATE_SHORT_STUCK_OPTS[sub]
-    long_arg_opts = _GATE_LONG_ARG_OPTS[sub]
-    skip_value = False  # the previous token was a separated value-taking option: skip its value
-    for tok in pre:
-        if skip_value:
-            skip_value = False
-            continue  # this token is a prior option's VALUE, not a flag
-        if tok.startswith("--"):
-            if "=" not in tok and tok in long_arg_opts:
-                skip_value = True  # its value is the next token
-            continue  # long options were judged by _has_long_prefix above, never char-scanned
-        if tok.startswith("-") and len(tok) > 1:
-            body = tok[1:]
-            for i, ch in enumerate(body):
-                if ch in value_opts:  # mandatory value: attached remainder, or the next token if bare
-                    if i == len(body) - 1:
-                        skip_value = True
-                    break  # the remainder of this token is the value, not flags
-                if ch in stuck_opts:  # optional value is attached-only: bare form consumes NOTHING
-                    break
-                if ch == "n":
-                    return "the short -n (--no-verify) in {!r}".format(tok[:40])
-    return None
+    for i, ch in enumerate(body):
+        if ch in value_opts:  # mandatory value: attached remainder, or the next token if bare
+            return False, i == len(body) - 1  # the remainder of this token is the value, not flags
+        if ch in stuck_opts:  # optional value is attached-only: bare form consumes NOTHING
+            return False, False
+        if ch == "n":
+            return True, False
+    return False, False
 
 
 def _name_parts_hit(name):
@@ -8622,14 +8616,14 @@ def _gate_weakening_fallback(command):
     or truncating-pipe spelling ASKS; anything else ALLOWS (the true boundary). Over-matching by
     design, the documented posture of the sibling fallbacks (_diff_source_fallback,
     _commit_identity_fallback, _protected_line_fallback): re-issue the command parseable."""
-    if _RAW_NOVERIFY_VERB_RE.search(command) and _RAW_NOVERIFY_RE.search(command):
+    if _raw_git_then(command, _RAW_NOVERIFY_VERB_RE) and _RAW_NOVERIFY_RE.search(command):
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
             "(likely unbalanced quotes) and it appears to bypass verification hooks with a --no-verify "
             "spelling; failing closed. {}".format(_GATE_ALTS),
             "AIQT guardrail: denied an unparseable command that appears to bypass git verification "
             "hooks (rule gatdis, fail-safe).")
-    if _RAW_SHORT_NOVERIFY_VERB_RE.search(command) and _RAW_SHORT_N_RE.search(command):
+    if _raw_git_then(command, _RAW_SHORT_NOVERIFY_VERB_RE) and _RAW_SHORT_N_RE.search(command):
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
             "(likely unbalanced quotes) and it appears to run git commit or git am with a short -n, "
@@ -8655,37 +8649,164 @@ def _gate_weakening_fallback(command):
     return _allow()
 
 
+# The size bound of the gate-weakening check, a fail-closed refusal (_gate_size_over): a command of more than
+# _GATE_MAX_CHARS characters is refused before it is lexed, and one that lexes (wholly, or up to its first
+# unparseable construct) into more than _GATE_MAX_SEGMENTS segments or _GATE_MAX_WORDS words is refused before
+# it is judged. Lexing is linear in the length (about 1 second per million characters of empty lines, the
+# costliest shape measured, and an unparseable command is lexed twice), and the note tier's scan of every
+# wrapped command (_gate_suffixes) is quadratic in a segment's words, so a longer command could outlast the
+# 10-second hook timeout, and a hook stopped at its timeout prints no decision at all. The bounds are set so
+# that the slowest shape measured within them is judged in under a tenth of the hook timeout on the measuring
+# host, leaving room for a slower or loaded one; the residue gives the measurements.
+_GATE_MAX_CHARS = 262144
+_GATE_MAX_SEGMENTS = 4096
+_GATE_MAX_WORDS = 4096
+
+
+def _gate_size_over(command, records=()):
+    """What a command carries beyond the gate-weakening size bound, or None: more than _GATE_MAX_CHARS
+    characters, or, among its lexed records, more than _GATE_MAX_SEGMENTS segments or _GATE_MAX_WORDS
+    words."""
+    if len(command) > _GATE_MAX_CHARS:
+        return "{} characters (the bound is {})".format(len(command), _GATE_MAX_CHARS)
+    if len(records) > _GATE_MAX_SEGMENTS:
+        return "{} segments (the bound is {})".format(len(records), _GATE_MAX_SEGMENTS)
+    words = sum(len(seg.argv) for seg in records)
+    if words > _GATE_MAX_WORDS:
+        return "{} words (the bound is {})".format(words, _GATE_MAX_WORDS)
+    return None
+
+
+def _gate_size_message(over):
+    """The (reason, banner) of the fail-closed deny for a command beyond the gate-weakening size bound."""
+    return (
+        "AIQT rule gatdis (gate-discipline): this Bash command has {}, more than the gate-weakening check "
+        "can judge within its share of the hook timeout, so it is refused, failing closed, rather than "
+        "judged in part. The bounds are {} characters, {} segments (the simple commands between ;, &&, ||, "
+        "| and newlines) and {} words in all. Re-issue it as shorter commands, each within those bounds."
+        .format(over, _GATE_MAX_CHARS, _GATE_MAX_SEGMENTS, _GATE_MAX_WORDS),
+        "AIQT guardrail: denied a Bash command too long for the gate-weakening check to judge in time "
+        "(rule gatdis, fail-closed); re-issue it as shorter commands.")
+
+
 # The wrapper words that run the command after them (their own options and operands first) for the hook-bypass
 # check: when one is a segment's command word, every later word that is git starts a command the check judges
-# (_gate_git_commands). One bounded rule rather than an option grammar per wrapper, so a wrapper option or operand
+# (_gate_git_bypass). One bounded rule rather than an option grammar per wrapper, so a wrapper option or operand
 # that is not git is passed over whatever its arity (sudo -u ci, timeout -s KILL 60, nice -n 10, xargs -I{}). The
 # cost is a safe-direction over-deny when a wrapped command that is not git carries git, a verb that accepts
-# --no-verify and a bypass spelling as its own operands ('xargs echo git commit -n').
+# --no-verify and a bypass spelling as its own operands ('xargs echo git commit -n'). 'command -v' and
+# 'command -V' print how a name resolves and run nothing (bash(1)), so their operands are not judged
+# (_gate_command_lookup). Wrappers outside this list (doas, builtin, ionice, chrt, taskset, flock, busybox, watch,
+# script, unshare, chroot, runuser, setpriv, nsenter, systemd-run, fakeroot, eatmydata, strace, gtimeout,
+# parallel, find -exec, a wrapper script) are not read; the residue lists them.
 _GATE_GIT_WRAPPERS = frozenset((
     "env", "timeout", "command", "exec", "nohup", "xargs", "sudo", "nice", "setsid", "stdbuf", "time"))
 
 
-def _gate_git_commands(argv):
-    """Yield the git command lines of one segment that the hook-bypass check judges, one at a time, so a long
-    wrapped segment never holds every suffix at once. Leading reserved words (_GATE_RESERVED: '!', 'if', 'then',
-    'do', '{' and the rest) and VAR=value words are passed over first; then the segment itself when its command
-    word is git; when its command word is a wrapper (_GATE_GIT_WRAPPERS), every later suffix that starts at a
-    word whose basename is git and that is not a VAR=value word; otherwise none. Purely lexical: a git word the
-    shell builds at run time is not seen (the residue lists them)."""
+def _gate_command_lookup(argv, i):
+    """True when the command word argv[i] is 'command' in its lookup form: its leading options (up to its first
+    operand or '--') are clusters of its own letters p, v and V, and one carries v or V ('command -v git',
+    'command -pV git'). That form prints a description of each name and runs nothing (bash(1), the command
+    builtin). Any other option leaves the segment judged as a wrapper: bash refuses an unknown option and runs
+    nothing either, so judging it costs at most a safe-direction over-deny."""
+    lookup = False
+    for j in range(i + 1, len(argv)):
+        word = argv[j]
+        if word == "--" or len(word) < 2 or not word.startswith("-"):
+            break
+        if not set(word[1:]) <= {"p", "v", "V"}:
+            return False
+        lookup = lookup or "v" in word or "V" in word
+    return lookup
+
+
+def _gate_git_bypass(argv):
+    """(subcommand, spelling) for the first git command line of one segment that carries a hook-bypass
+    spelling, or None. Leading reserved words (_GATE_RESERVED: '!', 'if', 'then', 'do', '{' and the rest, with
+    the NAME after 'function' or 'coproc' when a reserved word follows that NAME, as in 'function f { ...; }'
+    and 'coproc C { ...; }', where bash reads it as a name, not a command) and VAR=value words are passed over
+    first. When the command word is then git, that command line is judged; when it is a wrapper
+    (_GATE_GIT_WRAPPERS), every later word whose basename is git and that is not a VAR=value word starts a
+    command line running to the end of the segment, judged the same way, unless the wrapper is a 'command -v'
+    or 'command -V' lookup (_gate_command_lookup); otherwise none.
+
+    A command line is judged as one git command: its subcommand is the first word after git that git's
+    global options (_GIT_ARG_OPTS take a value) do not cover; a genuine help flag before the first
+    end-of-options word (_has_info_flag) means git shows a manual and runs nothing; on a subcommand that
+    accepts --no-verify (_NOVERIFY_VERBS), the bypass is a --no-verify token in the option region (before
+    '--'/'--end-of-options'), matched exact or by CONSERVATIVE LONG PREFIX (_has_long_prefix, exactly as
+    protected_line matches 'force': an ambiguous abbreviation git itself would reject ('--no-ver') matches
+    ANYWAY, and a separated option VALUE is scanned too - both err toward a deny, never an allow, while a
+    LONGER distinct option (--no-verify-signatures, --no-verbose) never matches because its full name is not
+    a prefix of 'no-verify'), or, ONLY on the verbs where -n IS --no-verify (commit, am), a bare or clustered
+    -n that is not an option's value (_gate_short_n_step).
+
+    LINEAR in the length of the segment, however many git words it holds: one pass from the right end records,
+    for every position, where the subcommand falls when git's global options are skipped from there, whether a
+    help flag or a --no-verify long prefix comes before the next end-of-options word, and where the first
+    short -n of commit and of am falls when the scan starts there; each command line then reads its verdict
+    from those records, so no command line is sliced or rescanned (judging each line on its own took time
+    quadratic in the number of git words). Purely lexical: a git word the shell builds at run time is not seen
+    (the residue lists them)."""
+    n = len(argv)
     k = 0
-    while k < len(argv) and argv[k] in _GATE_RESERVED:
+    while k < n and argv[k] in _GATE_RESERVED:
+        if argv[k] in ("function", "coproc") and k + 2 < n and argv[k + 2] in _GATE_RESERVED:
+            k += 1  # the NAME of the function or coprocess, not a command word
         k += 1
-    argv = argv[k:]
-    i = _command_word_index(argv)
-    if i >= len(argv):
-        return
+    i = k
+    while i < n and _ENV_ASSIGN_RE.match(argv[i]):
+        i += 1
+    if i >= n:
+        return None
     word = argv[i].rsplit("/", 1)[-1]
     if word == "git":
-        yield argv
-    elif word in _GATE_GIT_WRAPPERS:
-        for m in range(i + 1, len(argv)):
-            if argv[m].rsplit("/", 1)[-1] == "git" and not _ENV_ASSIGN_RE.match(argv[m]):
-                yield argv[m:]
+        starts = [i]
+    elif word in _GATE_GIT_WRAPPERS and not (word == "command" and _gate_command_lookup(argv, i)):
+        starts = [m for m in range(i + 1, n)
+                  if argv[m].rsplit("/", 1)[-1] == "git" and not _ENV_ASSIGN_RE.match(argv[m])]
+    else:
+        return None
+    if not starts:
+        return None
+    # Filled from the right end, each over positions j at or after the first command line's first argument:
+    # sub_at[j], the subcommand's index when git's global options are skipped from j (None past the end);
+    # info_at[j] and long_at[j], a help flag or a --no-verify long prefix at j or later, before the next
+    # end-of-options word; short_at[verb][j], the index of the first short -n of the scan of that verb from j.
+    sub_at = [None] * (n + 2)
+    info_at = [False] * (n + 1)
+    long_at = [False] * (n + 1)
+    short_at = dict((verb, [None] * (n + 2)) for verb in _NOVERIFY_SHORT_N_VERBS)
+    for j in range(n - 1, starts[0], -1):
+        tok = argv[j]
+        if not tok.startswith("-"):
+            sub_at[j] = j
+        elif "=" not in tok and tok in _GIT_ARG_OPTS:
+            sub_at[j] = sub_at[j + 2]
+        else:
+            sub_at[j] = sub_at[j + 1]
+        if tok in _EOO_TOKENS:
+            continue  # the option region ends here: nothing at or after it counts
+        info_at[j] = info_at[j + 1] or (tok in _INFO_FLAGS and _has_info_flag((argv[j - 1], tok)))
+        long_at[j] = long_at[j + 1] or _has_long_prefix((tok,), "no-verify")
+        for verb, at in short_at.items():
+            hit, skip_next = _gate_short_n_step(verb, tok)
+            if hit:
+                at[j] = j
+            elif not skip_next:
+                at[j] = at[j + 1]
+            elif j + 1 < n and argv[j + 1] not in _EOO_TOKENS:
+                at[j] = at[j + 2]  # the next token is this option's value, passed over unread
+    for c in starts:
+        s = sub_at[c + 1]
+        if s is None or argv[s] not in _NOVERIFY_VERBS or info_at[c + 1]:
+            continue
+        if long_at[s + 1]:
+            return argv[s], "a --no-verify spelling"
+        hit = short_at[argv[s]][s + 1] if argv[s] in short_at else None
+        if hit is not None:
+            return argv[s], "the short -n (--no-verify) in {!r}".format(argv[hit][:40])
+    return None
 
 
 def gate_weakening(data):
@@ -8694,10 +8815,14 @@ def gate_weakening(data):
     that accepts it (commit, merge, push, pull, rebase, am), or the short -n on the two verbs where
     -n IS --no-verify (commit, am; on push -n is --dry-run and on merge/pull it is --no-stat, so it
     is deliberately not flagged there); the CONFIRMED --no-verify bypass DENIES (certain, returned
-    immediately). The git command is found after leading reserved words and VAR=value words, and behind a
-    wrapper word (_GATE_GIT_WRAPPERS: env, timeout, command, exec, nohup, xargs, sudo, nice, setsid, stdbuf,
-    time) every later git word starts a command judged the same way (_gate_git_commands), so 'env git commit
-    --no-verify' and 'sudo -u ci git commit -n' deny as the bare forms do. The checker-output check has TWO
+    immediately). The git command is found after leading reserved words (and the NAME of a 'function NAME {'
+    or 'coproc NAME {') and VAR=value words, and behind a wrapper word (_GATE_GIT_WRAPPERS: env, timeout,
+    command, exec, nohup, xargs, sudo, nice, setsid, stdbuf, time) every later git word starts a command judged
+    the same way, in time linear in the segment (_gate_git_bypass), so 'env git commit --no-verify' and 'sudo
+    -u ci git commit -n' deny as the bare forms do, while a 'command -v' or 'command -V' lookup runs nothing and
+    is not judged. A command beyond the SIZE BOUND (_gate_size_over: more than _GATE_MAX_CHARS characters, or
+    more than _GATE_MAX_SEGMENTS segments or _GATE_MAX_WORDS words as lexed) is DENIED, failing closed, before
+    any judgement, since judging it could outlast the hook timeout. The checker-output check has TWO
     TIERS. DENY tier, held to one canonical shape whose two
     ends are ALLOW-LISTS (_verification_sink): the first simple command of a pipeline is a KNOWN VERIFICATION
     INVOCATION (_is_verification_run: a run form in _GATE_VERIFY_RUNS, or a python script form) and pipes
@@ -8722,9 +8847,12 @@ def gate_weakening(data):
     xargs body; R2 an alias or shell function; R3 a gate whose name and options carry no checker part
     (tools/doctor.py, sha256sum -c, a build); R4 a plain '| grep PATTERN' filter or '| wc', which are not
     counted as truncating sinks; R5 a hook bypass the lexer cannot see as words after a listed wrapper: a
-    wrapper outside _GATE_GIT_WRAPPERS (doas, ionice, chrt, taskset, flock, busybox), a command string a
-    wrapper splits at run time (env -S), or a bypass spelling a wrapper reads at run time (xargs from its
-    input)."""
+    wrapper outside _GATE_GIT_WRAPPERS (doas, builtin, ionice, chrt, taskset, flock, busybox, watch, script,
+    unshare, chroot, runuser, setpriv, nsenter, systemd-run, fakeroot, eatmydata, strace, gtimeout, parallel,
+    find -exec, a wrapper script), a command string a wrapper splits at run time (env -S), or a bypass spelling
+    a wrapper reads at run time (xargs from its input); R6 a git command inside a substitution the lexer reads
+    as part of one word (a backquote, or a $( inside double quotes, as in x="$(git commit -n)"), which no tier
+    judges."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: gate_weakening wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -8739,6 +8867,12 @@ def gate_weakening(data):
             "AIQT rule gatdis (gate-discipline): the Bash payload carried no readable command string, "
             "so the gate-weakening check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule gatdis, fail-closed).")
+    # The size bound (_gate_size_over) is checked before the lexer runs and again on what it lexed, so no
+    # command reaches a judgement whose cost could outlast the hook timeout.
+    over = _gate_size_over(command)
+    if over is not None:
+        reason, banner = _gate_size_message(over)
+        return _deny(reason, banner)
     try:
         records = _lex_command(command)
     except ValueError:
@@ -8749,27 +8883,30 @@ def gate_weakening(data):
         recovered, complete = _lex_command(command, partial=True)
         if not complete:
             recovered = recovered[:-1]
+        over = _gate_size_over(command, recovered)
+        if over is not None:
+            reason, banner = _gate_size_message(over)
+            return _deny(reason, banner)
         hit = _verification_sink(recovered)
         if hit is not None:
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
         return _gate_weakening_fallback(command)
+    over = _gate_size_over(command, records)
+    if over is not None:
+        reason, banner = _gate_size_message(over)
+        return _deny(reason, banner)
     segments = [(seg.argv, seg.sep_after) for seg in records]
     pending_note = None  # the first heuristic gate-weakening allow-note; a certain --no-verify deny wins first
     for index, (tokens, sep_after) in enumerate(segments):
-        for git_argv in _gate_git_commands(tokens):
-            # The subcommand is read before the full scans, so a git word that starts no bypass-capable verb
-            # (the many operands of 'xargs echo git git ...') costs no help-flag or spelling scan.
-            sub, args = _git_sub_and_args(git_argv)
-            if sub in _NOVERIFY_VERBS and not _has_info_flag(git_argv):
-                spelling = _no_verify_spelling(sub, args)
-                if spelling is not None:
-                    return _deny(
-                        "AIQT rule gatdis (gate-discipline): this git {} carries {}, a deliberate "
-                        "bypass of the verification hooks that gate it. Never weaken a gate to obtain "
-                        "a pass; fix the artefact instead. {}".format(sub, spelling, _GATE_ALTS),
-                        "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) "
-                        "(rule gatdis).")
+        bypass = _gate_git_bypass(tokens)
+        if bypass is not None:
+            return _deny(
+                "AIQT rule gatdis (gate-discipline): this git {} carries {}, a deliberate "
+                "bypass of the verification hooks that gate it. Never weaken a gate to obtain "
+                "a pass; fix the artefact instead. {}".format(bypass[0], bypass[1], _GATE_ALTS),
+                "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) "
+                "(rule gatdis).")
         if not _is_checker_segment(tokens):
             continue
         # The "immediately following" segment, advancing PAST any EMPTY segments (a bare
