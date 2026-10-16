@@ -2944,11 +2944,12 @@ def _main_isolated(report_path=None):
         check("trunc/fg-metachar-comment-quote-shift-denies",
               _verdict(bg("echo a;# it's\nsleep 5 & echo done # '", rib=False)), "deny")
         # The shared '#' comment rule (bash 5.3 reaches the `&` or the pipe in each non-control row below): a
-        # `)` that closes a parenthesis opened inside a word ends no word, so `x=$(true)#;` keeps the `#`
-        # literal under the bash rule and the later carriage-return `#` is no comment to bash either; a `#`
-        # inside an unquoted ${...} is expansion text; a comment inside a backquote substitution ends at the
-        # closing backquote. Each was a silent allow (or an allow-note) before this fix. The blank-led `#` rows
-        # are CONTROLS: a real word-start comment still drops the rest of the line, as it does in bash.
+        # `#` opens a comment only in a certain context, and a `#` whose reading depends on context (right
+        # after a `)`, or after a blank inside an open ${...} or backquote substitution) is cannot-evaluate:
+        # the foreground scan denies it like an unbalanced quote, and the background branch denies it
+        # because a truncating sink could follow it. Each was a silent allow (or an allow-note) at the base
+        # commit. The blank-led `#` rows are CONTROLS: a `#` after a blank with nothing open is a comment
+        # that drops the rest of the line, as it does in bash.
         check("trunc/fg-subst-glued-hash-detach-denies",
               _verdict(bg("x=$(true)#;\r# ; sleep 5 &", rib=False)), "deny")
         check("trunc/fg-param-expansion-hash-detach-denies",
@@ -2961,6 +2962,27 @@ def _main_isolated(report_path=None):
               _verdict(bg("x=$(true)#; python3 build.py | head")), "deny")
         check("trunc/bg-subst-spaced-hash-head-allows-note",
               _verdict(bg("x=$(true) #; python3 build.py | head")), "warn")
+        # The lexer vectors of the shared comment rule, run as foreground commands: bash 5.3.9 runs the RUN
+        # or RAN command in each (vectors a and b detach it with a bare `&`), and each `#` is right after a
+        # `)` or at a word start inside an open ${...}, so the foreground scan denies every one as
+        # unbalanced. At the base commit a and b denied as a detach and c to i allowed; the earlier comment
+        # rule allowed all nine.
+        _fg_hash_vectors = (
+            'case x in x)# "\n :;; esac; printf RUN & # "\nwait',
+            'echo ${x:-$(true # "\n)} & printf RUN # "\nwait',
+            "case a in a)# it's\n echo RAN;; esac # '",
+            "echo case; (true)# it's\n echo RAN # '",
+            "echo ${x:-$(echo a # it's\n)}; echo RAN # '",
+            "${ true; # it's\n}; echo RAN # '",
+            "${| true; # it's\n}; echo RAN # '",
+            "f()# it's\n{ echo RAN; }\nf # '",
+            "[[ x =~ (a)#b ]] || echo RAN",
+        )
+        check("trunc/fg-hash-lexer-vectors-deny",
+              [_verdict(bg(v, rib=False)) for v in _fg_hash_vectors], ["deny"] * len(_fg_hash_vectors))
+        check("trunc/fg-hash-lexer-vectors-unbalanced",
+              [aiqt_hooks._orch_foreground_detach_kind(v) for v in _fg_hash_vectors],
+              ["unbalanced"] * len(_fg_hash_vectors))
         # A scan that ends inside an open quote denies with a reason about the quote, not a false claim
         # that a bare '&' was found (before this fix it reused the bare-& detach reason).
         uq = bg("cat > f <<'EOF'\nthe user's file\nEOF", rib=False)
@@ -4191,18 +4213,21 @@ def _main_isolated(report_path=None):
         # a redirect on the `done` terminator makes its raw not a bare `done`: 'none', not a wrong match.
         check("wl/done-redirect-none",
               clf("while true; do gh x; sleep 1; done >log &"), "none")
-        # The shared '#' comment rule: a `#` inside an unquoted ${...} is expansion text and a comment inside
-        # a backquote substitution ends at its closing backquote, so the detached `done &` after either is
-        # seen (bash runs it); before the fix the `#` hid the rest of the line and the loop read 'none'. The
-        # raw word scan reads its own segment by the same rule; a blank-led `#` stays a comment (control).
-        check("wl/param-expansion-hash-match",
-              clf("while true; do gh pr checks 42; sleep 30; echo ${x:- #}; done &"), "match")
-        check("wl/backquote-comment-match",
-              clf("while true; do gh pr checks 42; sleep 30; x=`true #`; done &"), "match")
-        check("wl/raw-words-param-expansion-hash-literal",
-              aiqt_hooks._orch_raw_unquoted_words("echo ${x:- #} done"), ["echo", "${x:-", "#}", "done"])
-        check("wl/raw-words-backquote-comment-ends",
-              aiqt_hooks._orch_raw_unquoted_words("echo `true # c` done"), ["echo", "`true", "`", "done"])
+        # The shared '#' comment rule: a `#` after a blank inside an open ${...} or backquote substitution
+        # is cannot-evaluate (an ordinary ${...} reads it as text, a ${ cmd; } as a comment), so the loop is
+        # 'indeterminate' and defers to the truncation guard, whose foreground scan denies such a `#` as
+        # unbalanced (trunc/fg-param-expansion-hash-detach-denies) and whose background branch denies it
+        # (trunc/bg-subst-glued-hash-head-denies); at the base commit the `#` hid the rest of the line and the
+        # loop read 'none'. The raw word scan reads its own segment by the same rule and returns no words for
+        # such a `#`; a blank-led `#` with nothing open stays a comment.
+        check("wl/param-expansion-hash-indeterminate",
+              clf("while true; do gh pr checks 42; sleep 30; echo ${x:- #}; done &"), "indeterminate")
+        check("wl/backquote-hash-indeterminate",
+              clf("while true; do gh pr checks 42; sleep 30; x=`true #`; done &"), "indeterminate")
+        check("wl/raw-words-param-expansion-hash-uncertain",
+              aiqt_hooks._orch_raw_unquoted_words("echo ${x:- #} done"), [])
+        check("wl/raw-words-backquote-hash-uncertain",
+              aiqt_hooks._orch_raw_unquoted_words("echo `true # c` done"), [])
         check("wl/raw-words-spaced-comment-dropped",
               aiqt_hooks._orch_raw_unquoted_words("echo x # done"), ["echo", "x"])
         # run_in_background true with an inner trailing `done &` is still 'match' (predicate ignores rib).

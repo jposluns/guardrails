@@ -7365,54 +7365,116 @@ def _main_isolated(monitor):
                 ([["git", "diff"]], []))
         texpect("(tok-17b) mid-word '#' stays literal",
                 _argv("git commit -m ticket#123"), [["git", "commit", "-m", "ticket#123"]])
-        # A '#' opens a comment only at the START of a word (bash 5.3: 'x=$(true)#; echo SECOND' prints
-        # SECOND). A ')' that closes a parenthesis opened directly after a word character ends no word, so the
-        # '#' after it is literal and the next command stays visible; so is a '#' inside an unquoted ${...},
-        # and a comment inside a backquote substitution ends at the closing backquote.
-        texpect("(tok-17c) '#' after a command substitution's ')' is literal, the next command is seen",
-                _argv("x=$(true)#; git commit --no-verify -m x"),
-                [["x=$"], ["true"], ["#"], ["git", "commit", "--no-verify", "-m", "x"]])
-        texpect("(tok-17d) '#' after an arithmetic expansion's '))' is literal",
-                _argv("x=$((1))#; git x"), [["x=$"], [], ["1"], [], ["#"], ["git", "x"]])
-        texpect("(tok-17e) '#' after an array assignment's ')' is literal",
-                _argv("a=(1 2)#; git x"), [["a="], ["1", "2"], ["#"], ["git", "x"]])
-        texpect("(tok-17f) a continuation between the ')' and the '#' keeps the '#' literal",
-                _argv("x=$(true)\\\n#; git x"), [["x=$"], ["true"], ["#"], ["git", "x"]])
-        texpect("(tok-17g) '#' after a blank inside an unquoted ${...} is expansion text",
-                _argv("echo ${x:- #}; git x"), [["echo", "${x:-", "#}"], ["git", "x"]])
-        texpect("(tok-17h) a comment inside a backquote substitution ends at the closing backquote",
-                _argv("x=`true #`; git x"), [["x=`true", "`"], ["git", "x"]])
-        texpect("(tok-17i) after a 'case' word a ')' is not paired, so the '#' after it stays literal",
-                _argv("(x=$(case a in a) true;; esac)#; git x)"),
-                [[], ["x=$"], ["case", "a", "in", "a"], ["true"], [], ["esac"], ["#"], ["git", "x"], []])
-        try:
-            _t17j = _argv("echo ${x:- >#}; git x")
-        except ValueError as exc:
-            _t17j = "ValueError: {}".format(exc)
-        texpect("(tok-17j) a redirect target '#' inside an open ${...} follows the same rule (no raise)",
-                _t17j, [["echo", "${x:-"], ["git", "x"]])
-        _t17 = aiqt_hooks._lex_command("x=$(true)#")[2]
-        texpect("(tok-17k) the glued '#' word is opaque (part of a word that carried a substitution)",
-                (_t17.argv, _t17.argv_opaque, _t17.opaque_shell), (["#"], [True], True))
-        texpect("(tok-17l) a '~' that continues a glued word is not a leading tilde",
+        # A '#' opens a comment ONLY in a certain context (the comment rule above aiqt_hooks._nest_track): at
+        # the start, or after an unquoted blank, newline or one of ; & | < >, with no parenthesis, ${...} or
+        # backquote substitution open. Bash 5.3 reads a '#' right after a ')' as word text in
+        # 'x=$(true)#; echo SECOND' (it prints SECOND) but as a comment in '(true)#; echo SECOND', so any
+        # other unquoted '#' (right after a '(' or ')' or a backquote, or at a word start while something is
+        # open) is cannot-evaluate: _lex_command raises ValueError and each caller takes its fallback.
+        _hash_uncertain = "ValueError: cannot evaluate a '#' whose comment reading depends on context"
+
+        def _argv_or_error(command):
+            try:
+                return _argv(command)
+            except ValueError as exc:
+                return "ValueError: {}".format(exc)
+
+        texpect("(tok-17c) '#' after a command substitution's ')' is cannot-evaluate",
+                _argv_or_error("x=$(true)#; git commit --no-verify -m x"), _hash_uncertain)
+        texpect("(tok-17d) '#' after an arithmetic expansion's '))' is cannot-evaluate",
+                _argv_or_error("x=$((1))#; git x"), _hash_uncertain)
+        texpect("(tok-17e) '#' after an array assignment's ')' is cannot-evaluate",
+                _argv_or_error("a=(1 2)#; git x"), _hash_uncertain)
+        texpect("(tok-17f) a continuation between the ')' and the '#' changes nothing (cannot-evaluate)",
+                _argv_or_error("x=$(true)\\\n#; git x"), _hash_uncertain)
+        texpect("(tok-17g) '#' after a blank inside an unquoted ${...} is cannot-evaluate",
+                _argv_or_error("echo ${x:- #}; git x"), _hash_uncertain)
+        texpect("(tok-17h) '#' after a blank inside a backquote substitution is cannot-evaluate",
+                _argv_or_error("x=`true #`; git x"), _hash_uncertain)
+        texpect("(tok-17i) '#' after a ')' is cannot-evaluate whatever the case words before it",
+                _argv_or_error("(x=$(case a in a) true;; esac)#; git x)"), _hash_uncertain)
+        texpect("(tok-17j) a redirect target '#' inside an open ${...} has no certain target (cannot-evaluate)",
+                _argv_or_error("echo ${x:- >#}; git x"), _hash_uncertain)
+        texpect("(tok-17k) a '#' glued after a substitution's ')' is cannot-evaluate, not an opaque word",
+                _argv_or_error("x=$(true)#"), _hash_uncertain)
+        texpect("(tok-17l) a '~' in a word read right after a ')' is not a leading tilde",
                 [s.argv_leading_tilde for s in aiqt_hooks._lex_command("x=$(true)~/a")],
                 [[False], [False], [False]])
-        # Controls: a '#' at a real word start stays a comment.
+        # Controls: a '#' in a certain context stays a comment.
         texpect("(tok-17m) control: a blank before the '#' keeps it a comment",
                 _argv("x=$(true) #; git x"), [["x=$"], ["true"], []])
-        texpect("(tok-17n) control: '#' after a subshell's ')' is a comment",
-                _argv("(true)#; git x"), [[], ["true"], []])
-        texpect("(tok-17o) control: '#' after an arithmetic command's '))' is a comment",
-                _argv("((1))#; git x"), [[], [], ["1"], [], []])
+        texpect("(tok-17n) '#' after a subshell's ')' is cannot-evaluate (bash reads a comment there)",
+                _argv_or_error("(true)#; git x"), _hash_uncertain)
+        texpect("(tok-17o) '#' after an arithmetic command's '))' is cannot-evaluate (bash reads a comment)",
+                _argv_or_error("((1))#; git x"), _hash_uncertain)
         texpect("(tok-17p) control: '#' after ';' is a comment",
                 _argv("true;# git x"), [["true"], []])
         texpect("(tok-17q) control: a continuation then a blank before the '#' keeps it a comment",
                 _argv("x=$(true)\\\n #; git x"), [["x=$"], ["true"], []])
-        texpect("(tok-17r) control: inside a backquote a comment still ends at a newline that comes first",
-                _argv("x=`true #c\necho in`; git x"), [["x=`true"], ["echo", "in`"], ["git", "x"]])
-        # Every guard that reads the lexer output: each shape denies bare (git_stash_ref notes) and must still
-        # do so behind a word-glued '#' (each of these prefixes let the shape through before the fix), while
-        # the same prefix with a blank before the '#' comments the shape out, as bash does.
+        texpect("(tok-17r) '#' after a blank inside a backquote substitution is cannot-evaluate",
+                _argv_or_error("x=`true #c\necho in`; git x"), _hash_uncertain)
+        # The lexer vectors: bash 5.3.9 runs the RAN or RUN command in each (bash -c printed RUN for a and b,
+        # RAN for c to i), and before this rule the lexer read each one without an error while the command
+        # sat inside a misread quote or comment. Each '#' here is right after a ')' (a case pattern, a
+        # subshell, a function name's '()', a regex group) or at a word start inside an open ${...} (the
+        # ordinary form, a command substitution inside it, and the ${ cmd; } and ${| cmd; } forms).
+        _hash_vectors = (
+            ("a", 'case x in x)# "\n :;; esac; printf RUN & # "\nwait'),
+            ("b", 'echo ${x:-$(true # "\n)} & printf RUN # "\nwait'),
+            ("c", "case a in a)# it's\n echo RAN;; esac # '"),
+            ("d", "echo case; (true)# it's\n echo RAN # '"),
+            ("e", "echo ${x:-$(echo a # it's\n)}; echo RAN # '"),
+            ("f", "${ true; # it's\n}; echo RAN # '"),
+            ("g", "${| true; # it's\n}; echo RAN # '"),
+            ("h", "f()# it's\n{ echo RAN; }\nf # '"),
+            ("i", "[[ x =~ (a)#b ]] || echo RAN"),
+        )
+        for _vname, _vcmd in _hash_vectors:
+            texpect("(tok-17s-{}) lexer vector {!r} is cannot-evaluate".format(_vname, _vcmd),
+                    _argv_or_error(_vcmd), _hash_uncertain)
+        # The word reader leaves a '#' that begins a word to its caller and records the '${' it reads on the
+        # caller's nesting stack, so the lexer sees vectors f and g inside an open ${...}.
+        for _vname, _vcmd in _hash_vectors[5:7]:
+            _wnest = []
+            _wread = aiqt_hooks._read_word(_vcmd, 0, len(_vcmd), _wnest)
+            texpect("(tok-17t-{}) the word reader records the open '${{' of vector {}".format(_vname, _vname),
+                    (_wread[0], _wread[2], _wnest), ("${", True, ["${"]))
+        _wcmd = _hash_vectors[0][1]
+        _wat = _wcmd.index("#")
+        texpect("(tok-17u) the word reader reads nothing at a '#' that begins a word (its caller decides)",
+                aiqt_hooks._read_word(_wcmd, _wat, len(_wcmd), []), ("", False, False, True, False, _wat))
+        # Certain-context controls: each still lexes, with the comment (and the quote inside it) dropped.
+        for _ccmd, _cwant in (("echo a # it's", [["echo", "a"]]),
+                              ("echo a;# it's", [["echo", "a"], []]),
+                              ("echo a &# it's", [["echo", "a"], []]),
+                              ("echo a |# it's", [["echo", "a"], []]),
+                              ('echo a # say "hi', [["echo", "a"]]),
+                              ('echo a;# say "hi', [["echo", "a"], []]),
+                              ('echo a &# say "hi', [["echo", "a"], []]),
+                              ('echo a |# say "hi', [["echo", "a"], []])):
+            texpect("(tok-17v) control {!r} lexes with the comment dropped".format(_ccmd),
+                    _argv_or_error(_ccmd), _cwant)
+        # The here-string controls raise before their '#' is reached: the lexer does not model a here-string
+        # ('<<<') at all, at this commit as at the base commit, so they stay cannot-evaluate for that reason.
+        for _ccmd in ("echo a <<<b # it's", 'echo a <<<b # say "hi'):
+            texpect("(tok-17w) here-string control {!r} raises for the here-string, not the '#'".format(_ccmd),
+                    _argv_or_error(_ccmd), "ValueError: unsupported shell construct: <<")
+        # The two other uncertain shapes and the in-word control. Bash 5.3.9 prints RAN for the first two: a
+        # '#' that opens a backquote substitution's text is a comment there (the apostrophe is inside it), and
+        # a '#' after a blank inside a regex group is regex text (the parenthesis is no subshell).
+        texpect("(tok-17x) '#' right after a backquote is cannot-evaluate",
+                _argv_or_error("echo `#'`; echo RAN # '"),
+                "ValueError: cannot evaluate a '#' right after a backquote")
+        texpect("(tok-17y) '#' after a blank inside any open parenthesis is cannot-evaluate",
+                _argv_or_error("[[ x =~ (a #b) ]] || echo RAN"), _hash_uncertain)
+        texpect("(tok-17z) control: a '#' inside a word of ${...} is word text",
+                _argv_or_error("echo ${#x} ${x#a}"), [["echo", "${#x}", "${x#a}"]])
+        # Every guard that reads the lexer output: each shape denies bare (git_stash_ref notes) and must
+        # decide at least as strictly behind each of six prefixes that hid it at the base commit, four with a
+        # '#' right after a ')' and two with a '#' after a blank inside an open ${...} or backquote
+        # substitution (each now cannot-evaluate: the guard takes its fallback, or keeps its strict decision
+        # where that fallback would let the shape it names through), while the same prefix with a blank
+        # before the '#' and nothing open comments the shape out, as bash does.
         _hash_rows = [
             (aiqt_hooks.gate_weakening, "", "git commit --no-verify -m x", "deny", "allow"),
             (aiqt_hooks.diff_source_pretool, "", "git diff", "deny", "allow-note"),
@@ -7428,18 +7490,29 @@ def _main_isolated(monitor):
         ]
         _hash_prefixes = ("x=$(true)#; ", "x=$((1))#; ", "a=(1 2)#; ", "x=$(true)\\\n#; ",
                           "echo ${x:- #}; ", "x=`true #`; ")
+        _hash_rank = {"allow": 0, "allow-note": 1, "deny": 2}  # deny > note > allow; anything else fails
         for _hg, _hlead, _hshape, _hwant, _hcontrol in _hash_rows:
             for _hp in ("",) + _hash_prefixes:
                 _hcmd = _hlead + _hp + _hshape
                 _hgot = _decision(_hg, _hcmd)
-                if _hgot != _hwant:
-                    failures.append("(hash-glued) {} on {!r}: expected {}, got {}".format(
+                if _hash_rank.get(_hgot, -1) < _hash_rank[_hwant]:
+                    failures.append("(hash-glued) {} on {!r}: expected {} or stricter, got {}".format(
                         _hg.__name__, _hcmd, _hwant, _hgot))
             _hcmd = _hlead + "x=$(true) #; " + _hshape
             _hgot = _decision(_hg, _hcmd)
             if _hgot != _hcontrol:
                 failures.append("(hash-control) {} on {!r}: the blank-led '#' must comment the shape out, "
                                 "expected {}, got {}".format(_hg.__name__, _hcmd, _hcontrol, _hgot))
+        # The same guard rows called with each lexer vector as the whole command. At the base commit
+        # fc11d9bc every row returned allow on every vector (computed by calling that commit's hook functions
+        # with these strings; none carries a row's git shape), and each must decide at least as strictly.
+        _hash_base = {_vname: "allow" for _vname, _vcmd in _hash_vectors}
+        for _hg, _hlead, _hshape, _hwant, _hcontrol in _hash_rows:
+            for _vname, _vcmd in _hash_vectors:
+                _hgot = _decision(_hg, _vcmd)
+                if _hash_rank.get(_hgot, -1) < _hash_rank[_hash_base[_vname]]:
+                    failures.append("(hash-vector) {} on vector {}: expected {} or stricter, got {}".format(
+                        _hg.__name__, _vname, _hash_base[_vname], _hgot))
         # A '..'-normalized device target and a decoy-real target under '..' do not classify file-real.
         texpect("(tok-18a) '/tmp/../dev/stdout' normalizes to a /dev device target",
                 _redir("git diff > /tmp/../dev/stdout"),
