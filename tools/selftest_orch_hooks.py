@@ -2983,6 +2983,26 @@ def _main_isolated(report_path=None):
         check("trunc/fg-hash-lexer-vectors-unbalanced",
               [aiqt_hooks._orch_foreground_detach_kind(v) for v in _fg_hash_vectors],
               ["unbalanced"] * len(_fg_hash_vectors))
+        # A backslash-newline changes nothing about the comment rule (bash removes it first): after
+        # `echo a \<newline>` a `#` with nothing open is a comment, so its apostrophe does not hide the
+        # bare `&` on the next line (bash 5.3.9 starts a background job there). Inside a double-quoted
+        # "$(...)" or backquote substitution a `#` after a blank is a comment to bash that runs past the
+        # string's closing quote (bash starts a background job in both), so the scan denies it as
+        # unbalanced; a `#` inside a single-quoted span there, or inside a "${...}", stays text.
+        check("trunc/fg-continuation-hash-comment-detach-denies",
+              [_verdict(bg("echo a \\\n# it's\nsleep 5 & # '", rib=False)),
+               aiqt_hooks._orch_foreground_detach_kind("echo a \\\n# it's\nsleep 5 & # '")],
+              ["deny", "detach"])
+        check("trunc/fg-dq-subst-hash-denies",
+              [_verdict(bg('echo "$(echo a # "\n)" & sleep 5 # "', rib=False)),
+               aiqt_hooks._orch_foreground_detach_kind('echo "$(echo a # "\n)" & sleep 5 # "')],
+              ["deny", "unbalanced"])
+        check("trunc/fg-dq-backquote-hash-denies",
+              aiqt_hooks._orch_foreground_detach_kind('echo "`echo a # "`" & sleep 5 # "'), "unbalanced")
+        check("trunc/fg-dq-quoted-hash-allows",
+              [_verdict(bg("echo \"$(git log --format='%h #%s' -1)\"", rib=False)),
+               _verdict(bg('echo "${x#y}" "$(basename ${f#x})"', rib=False))],
+              ["allow", "allow"])
         # A scan that ends inside an open quote denies with a reason about the quote, not a false claim
         # that a bare '&' was found (before this fix it reused the bare-& detach reason).
         uq = bg("cat > f <<'EOF'\nthe user's file\nEOF", rib=False)
@@ -4213,17 +4233,21 @@ def _main_isolated(report_path=None):
         # a redirect on the `done` terminator makes its raw not a bare `done`: 'none', not a wrong match.
         check("wl/done-redirect-none",
               clf("while true; do gh x; sleep 1; done >log &"), "none")
-        # The shared '#' comment rule: a `#` after a blank inside an open ${...} or backquote substitution
-        # is cannot-evaluate (an ordinary ${...} reads it as text, a ${ cmd; } as a comment), so the loop is
-        # 'indeterminate' and defers to the truncation guard, whose foreground scan denies such a `#` as
-        # unbalanced (trunc/fg-param-expansion-hash-detach-denies) and whose background branch denies it
-        # (trunc/bg-subst-glued-hash-head-denies); at the base commit the `#` hid the rest of the line and the
-        # loop read 'none'. The raw word scan reads its own segment by the same rule and returns no words for
-        # such a `#`; a blank-led `#` with nothing open stays a comment.
-        check("wl/param-expansion-hash-indeterminate",
-              clf("while true; do gh pr checks 42; sleep 30; echo ${x:- #}; done &"), "indeterminate")
-        check("wl/backquote-hash-indeterminate",
-              clf("while true; do gh pr checks 42; sleep 30; x=`true #`; done &"), "indeterminate")
+        # The shared '#' comment rule: a `#` after a blank inside an open ${...} is uncertain (an ordinary
+        # ${...} reads it as text, a ${ cmd; } as a comment), so the classifier judges each reading of it on
+        # its own and keeps the strictest answer: the word-text reading, the one bash takes here, is the
+        # canonical poll loop, so it is a 'match' (at the base commit the `#` hid the rest of the line and the
+        # loop read 'none'). A `#` inside a backquote substitution is not enumerated (bash ends that comment
+        # at the closing backquote); there the classifier reads the command's text and finds every word of
+        # the canonical shape, so it is a 'match' too, which is what bash runs. The raw word scan reads its
+        # own segment by the same rule and returns no words for such a `#`; a blank-led `#` with nothing open
+        # stays a comment.
+        check("wl/param-expansion-hash-match",
+              clf("while true; do gh pr checks 42; sleep 30; echo ${x:- #}; done &"), "match")
+        check("wl/backquote-hash-match",
+              clf("while true; do gh pr checks 42; sleep 30; x=`true #`; done &"), "match")
+        check("wl/backquote-hash-no-probe-indeterminate",
+              clf("while true; do sleep 30; x=`true #`; done &"), "indeterminate")
         check("wl/raw-words-param-expansion-hash-uncertain",
               aiqt_hooks._orch_raw_unquoted_words("echo ${x:- #} done"), [])
         check("wl/raw-words-backquote-hash-uncertain",
