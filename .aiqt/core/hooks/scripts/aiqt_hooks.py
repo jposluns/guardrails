@@ -927,16 +927,6 @@ def _lex_command(command, partial=False):
     return segments
 
 
-def _segments(command):
-    """Compatibility projection over _lex_command: a list of (argv, sep_after) tuples, argv being the
-    quote-decoded words with shell REDIRECTION removed (so a leading/interspersed/trailing redirect no
-    longer pollutes the token stream) and sep_after the ending operator or "". Raises ValueError on a
-    parse error or unsupported construct so callers fall back conservatively. Existing consumers
-    (protected_line, gate_weakening, git_explicit_binding, git_discard, find_ai_authorship) read
-    redirect-free argv automatically; diff_source_pretool uses the richer _Segment records directly."""
-    return [(seg.argv, seg.sep_after) for seg in _lex_command(command)]
-
-
 # A leading inline shell env-var assignment (FOO=bar or the APPEND form FOO+=bar) that PREFIXES a command,
 # e.g. the GIT_PAGER=cat in 'GIT_PAGER=cat git diff'. Such assignments are SKIPPED when resolving a
 # segment's command word and its git subcommand, so that form resolves to command word 'git' / subcommand
@@ -971,6 +961,221 @@ def _command_word(tokens):
     if idx >= len(tokens):
         return ""
     return tokens[idx].rsplit("/", 1)[-1]
+
+
+# --- the shared command reading: past reserved and grouping words, and into backquote substitutions -------
+# The lexer splits a command at its separators but knows no shell grammar, so a compound command leaves a
+# reserved or grouping word at the head of the segment that holds the real command ('then git push', '{ git
+# push', '! git push', 'do git push'), and a backquote substitution stays inside a word ('x=`git push`').
+# Every guard that judges a segment's command word reads it through _command_start (or _command_argv /
+# _command_segment), which skips those words as bash does, and reads each backquote substitution as a command
+# line of its own through _command_lines (separate lines, for a guard that reads a segment's neighbours) or
+# _command_flow (one list in execution order, for a guard that tracks state across segments). Bash
+# recognizes a reserved word only unquoted and in command position; the decoded argv cannot tell a quoted
+# '"if"' from an unquoted one, so a quoted reserved word at the head of a segment is skipped too, an
+# over-read in the safe direction (bash would look up a command of that name instead). Not read,
+# the existing residuals: an eval or sh -c/bash -c body (one quoted word), a function or alias that renames
+# the command, a substitution nested more than _SUBSTITUTION_DEPTH deep, and the rest of a substitution body
+# after a construct the lexer cannot parse (its complete prefix is read).
+# Words after which bash reads a command in the same simple-command position: the conditional and loop
+# keywords whose next word starts a command list, brace grouping, the '!' pipeline negation and the 'time'
+# pipeline prefix (with its -p option).
+_COMMAND_LEAD_WORDS = frozenset(("!", "{", "if", "then", "elif", "else", "do", "while", "until", "time"))
+# The words that open a compound command: after 'coproc', a NAME is read only when one of these follows it.
+_COMPOUND_OPENERS = frozenset(("{", "if", "while", "until", "for", "select", "case", "[["))
+_SUBSTITUTION_DEPTH = 16
+
+
+def _command_start(argv):
+    """Index in a lexed segment's argv of the first word of the simple command it runs, past the leading
+    reserved and grouping words bash reads before a command (_COMMAND_LEAD_WORDS, 'time -p', 'coproc [NAME]',
+    'function NAME'). A 'for NAME' or 'select NAME' header followed by 'do' in the same segment continues
+    after the 'do'; any other for/select header and a 'case WORD in PATTERN' header run no command, so they
+    return len(argv). Leading assignments are NOT skipped here: _command_word_index skips them afterwards, as
+    bash reads 'FOO=1 git' after '!' or 'then'. A word after an assignment is never read as reserved."""
+    i = 0
+    n = len(argv)
+    while i < n:
+        word = argv[i]
+        if word in _COMMAND_LEAD_WORDS:
+            i += 1
+            while word == "time" and i < n and argv[i] == "-p":
+                i += 1
+            continue
+        if word == "coproc":
+            i += 1
+            if (i + 1 < n and argv[i] not in _COMPOUND_OPENERS and argv[i + 1] in _COMPOUND_OPENERS
+                    and argv[i + 1] != "[["):
+                i += 1  # 'coproc NAME { ...': the NAME names the coprocess, the compound command follows
+            continue
+        if word == "function":
+            i += 2  # 'function NAME' then the body, read as a command
+            continue
+        if word in ("for", "select"):
+            if i + 2 < n and argv[i + 2] == "do":
+                i += 3  # 'for NAME do COMMAND': the body starts in this segment
+                continue
+            return n
+        if word == "case":
+            return n
+        break
+    return min(i, n)
+
+
+def _command_argv(argv):
+    """The argv of the simple command a lexed segment runs (see _command_start), assignments included."""
+    return argv[_command_start(argv):]
+
+
+def _command_segment(seg):
+    """The lexed segment read past its leading reserved and grouping words: argv and its parallel per-word
+    lists start at _command_start; the raw text, the redirections and the separator are the segment's own."""
+    start = _command_start(seg.argv)
+    if not start:
+        return seg
+    return seg._replace(argv=seg.argv[start:], argv_opaque=seg.argv_opaque[start:],
+                        argv_leading_tilde=seg.argv_leading_tilde[start:])
+
+
+def _backquote_body(text, i, in_double):
+    """(body, next index) for the backquote substitution whose text starts at index i (just past the opening
+    backquote): bash ends it at the first backquote not preceded by a backslash, and inside it a backslash
+    keeps its literal meaning except before '$', a backquote or a backslash (and, inside double quotes, a
+    double quote), where it is removed. An unterminated substitution runs to the end of the text."""
+    out = []
+    n = len(text)
+    escapable = "$`\\\"" if in_double else "$`\\"
+    while i < n:
+        c = text[i]
+        if c == "\\" and i + 1 < n and text[i + 1] in escapable:
+            out.append(text[i + 1])
+            i += 2
+            continue
+        if c == "`":
+            return "".join(out), i + 1
+        out.append(c)
+        i += 1
+    return "".join(out), n
+
+
+def _backquote_bodies(text):
+    """(offset, body) for each top-level backquote substitution bash runs in text, in order, where offset is
+    the index of its opening backquote. Quote-aware as the lexer is: a single-quoted or ANSI-C $'...' span,
+    a backslash-escaped backquote and a word-start '#' comment hold none; a double-quoted span does, as bash
+    runs a backquote substitution inside double quotes. A substitution nested in a body is found when that
+    body is read in turn."""
+    out = []
+    i = 0
+    n = len(text)
+    in_double = False
+    word_start = True
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            i += 2
+            word_start = False
+            continue
+        if in_double:
+            if c == '"':
+                in_double = False
+            elif c == "`":
+                start = i
+                body, i = _backquote_body(text, i + 1, True)
+                out.append((start, body))
+                continue
+            i += 1
+            continue
+        if c == "'":
+            j = text.find("'", i + 1)
+            i = n if j < 0 else j + 1
+            word_start = False
+            continue
+        if c == "$" and text[i + 1:i + 2] == "'":
+            j = i + 2
+            while j < n and text[j] != "'":
+                j += 2 if text[j] == "\\" else 1
+            i = j + 1
+            word_start = False
+            continue
+        if c == "#" and word_start:
+            nl = text.find("\n", i)
+            i = n if nl < 0 else nl
+            continue
+        if c == '"':
+            in_double = True
+            word_start = False
+            i += 1
+            continue
+        if c == "`":
+            start = i
+            body, i = _backquote_body(text, i + 1, False)
+            out.append((start, body))
+            word_start = False
+            continue
+        word_start = c in " \t\n;&|()<>"
+        i += 1
+    return out
+
+
+def _substitution_records(records):
+    """[(index, body records)] for each top-level backquote substitution in one lexed command line, in source
+    order: index is the record whose raw text opens it, and the body is lexed as a command line of its own
+    (best effort: the complete segments before a construct the lexer cannot parse). The line's text is
+    rebuilt from the records' raw slices and separators, so a quoted heredoc body, which the lexer drops as
+    literal data, is never read as a substitution."""
+    starts = []
+    parts = []
+    pos = 0
+    for seg in records:
+        starts.append(pos)
+        sep = seg.sep_after or "\n"
+        parts.append(seg.raw)
+        parts.append(sep)
+        pos += len(seg.raw) + len(sep)
+    out = []
+    k = 0
+    for offset, body in _backquote_bodies("".join(parts)):
+        while k + 1 < len(starts) and starts[k + 1] <= offset:
+            k += 1
+        out.append((k, _lex_command(body, partial=True)[0]))
+    return out
+
+
+def _substitution_lines(records, _depth=0):
+    """The lexed records of every backquote substitution in a command line, nested ones included (each body
+    before the substitutions inside it), each as a line of its own, unread (see _command_lines)."""
+    lines = []
+    if _depth >= _SUBSTITUTION_DEPTH:
+        return lines
+    for _index, body in _substitution_records(records):
+        lines.append(body)
+        lines.extend(_substitution_lines(body, _depth + 1))
+    return lines
+
+
+def _command_lines(records):
+    """The command lines a guard reads for one lexed command: the command's own records first, then each
+    backquote substitution as a line of its own, every record read past its leading reserved and grouping
+    words (_command_segment). For a guard that judges a segment with its neighbours (a pipe, '||'), so a
+    substitution's records never sit between two of the command's own."""
+    return [[_command_segment(seg) for seg in line] for line in [records] + _substitution_lines(records)]
+
+
+def _command_flow(records, _depth=0):
+    """The records of one lexed command in execution order, each read past its leading reserved and grouping
+    words (_command_segment): a backquote substitution's records come just before the record whose words
+    hold it, as bash runs a substitution while it expands that command's words. For a guard that tracks
+    state across segments (a directory change, a stage before a push). A directory change inside a
+    substitution runs in a subshell, yet it still counts for the records after it here: an over-read."""
+    subs = _substitution_records(records) if _depth < _SUBSTITUTION_DEPTH else []
+    flow = []
+    j = 0
+    for k, seg in enumerate(records):
+        while j < len(subs) and subs[j][0] == k:
+            flow.extend(_command_flow(subs[j][1], _depth + 1))
+            j += 1
+        flow.append(_command_segment(seg))
+    return flow
 
 
 # git global options that CONSUME a following space-separated argument, so the option's value (now its
@@ -1847,7 +2052,13 @@ def diff_source_pretool(data):
         segments = _lex_command(command)
     except ValueError:
         return _diff_source_fallback(command)
-    possibles = [(index, seg) for index, seg in enumerate(segments) if _is_possible_producer(seg)]
+    # Each backquote substitution is read as a command line of its own, and a possible producer is judged
+    # with every segment read past its leading reserved and grouping words (_command_lines), so a producer
+    # inside a compound or a substitution is judged as the bare form is; a stage's pipe neighbour is always
+    # taken from its own line. The possible-producer scope itself reads every word of the unread segment.
+    unread = [segments] + _substitution_lines(segments)
+    possibles = [(line, index, seg) for raw_line, line in zip(unread, _command_lines(segments))
+                 for index, (raw_seg, seg) in enumerate(zip(raw_line, line)) if _is_possible_producer(raw_seg)]
     if not possibles:
         return _allow()  # no producer-capable form anywhere: the bounded true boundary allows
     # AIRTIGHT-NARROW ALLOW: only when the WHOLE command is one of the five closed proofs.
@@ -1857,8 +2068,8 @@ def diff_source_pretool(data):
         return _allow()
     # Otherwise judge each possible producer: a confirmed console dump DENIES (outranking ASK across a
     # compound), and any remaining producer-capable-but-unproven form ASKS.
-    for index, seg in possibles:
-        if _is_console_dump(seg, segments, index):
+    for line, index, seg in possibles:
+        if _is_console_dump(seg, line, index):
             return _deny(
                 "AIQT rule cnsdif (no-console-diff-dumps): this command renders a version-control diff to "
                 "the console, burying the review surface under a raw dump. Use a summary form (--stat, "
@@ -1947,12 +2158,18 @@ def _identity_assignment_ai(tokens):
 def find_ai_authorship(command):
     """Return '<context> <value>' when a segment sets an AI identity for a recorded change, else None:
     an identity-assignment (env var / git config) on ANY segment, or a commit-message context (co-author
-    trailer, --author value) on a git commit segment. Raises ValueError on a shell parse error (via
-    _segments), which the handler turns into the conservative fallback."""
-    for tokens, _sep in _segments(command):
-        hit = _identity_assignment_ai(tokens)
-        if hit is not None:
-            return hit
+    trailer, --author value) on a git commit segment. Each backquote substitution is read as a command line
+    of its own; the assignment scan reads every word of every segment, and the commit contexts read each
+    segment past its leading reserved and grouping words (_command_flow). Raises ValueError on a shell parse
+    error of the command itself (via _lex_command), which the handler turns into the conservative fallback."""
+    records = _lex_command(command)
+    for line in [records] + _substitution_lines(records):
+        for seg in line:
+            hit = _identity_assignment_ai(seg.argv)
+            if hit is not None:
+                return hit
+    for seg in _command_flow(records):
+        tokens = seg.argv
         if _command_word(tokens) == "git" and _git_subcommand(tokens) in COMMIT_VERBS:
             hit = _commit_message_and_author_ai(tokens)
             if hit is not None:
@@ -2237,7 +2454,10 @@ def bash_absolute_paths(data):
     # cd/redirect in the parseable PREFIX still ASKS. Only a cd/redirect position WITHIN or AFTER the
     # unparseable construct is left to the human's own permission flow (a disclosed residual), rather than
     # over-asking on every such command. This is the conservative-floor boundary, not a proof of safety.
-    segments = _lex_command(command, partial=True)[0]
+    # Each segment is read past its leading reserved and grouping words, and each backquote substitution as
+    # a command line of its own (_command_flow), so a 'then cd rel' or a redirect inside a double-quoted
+    # substitution is judged as the bare form is.
+    segments = _command_flow(_lex_command(command, partial=True)[0])
     reasons = []       # relative/opaque cd or NON-destructive redirect: an allow-note convention nudge
     deny_reasons = []  # a DESTRUCTIVE truncating redirect to a relative/opaque target: fail-closed deny
     for seg in segments:
@@ -2854,9 +3074,12 @@ def git_explicit_binding(data):
             "its git target and scope could not be checked. This is a binding convention, not a hazard, so "
             "it is allowed; prefer an explicit '-C' target and enumerated scope.")
     try:
-        segments = _segments(command)
+        records = _lex_command(command)
     except ValueError:
         return _expbnd_fallback(command)
+    # Each segment is read past its leading reserved and grouping words, and each backquote substitution's
+    # records come in execution order just before the segment that holds it (_command_flow).
+    segments = [(seg.argv, seg.sep_after) for seg in _command_flow(records)]
 
     # ROUND-2 FINDING 11 PRE-SCAN: a whole-tree BREADTH stage ('git add -A/./:/', 'git commit -a/--all')
     # FOLLOWED BY a PUBLISH ('git push') ANYWHERE later in the command DENIES-and-educates, regardless of any
@@ -2928,14 +3151,12 @@ def git_stash_ref(data):
     options or assignments are not resolved. Simple quote fragments ARE decoded by the shared lexer;
     fragmentation/obfuscation that does not resolve to recognized command/verb tokens is not covered.
     The shared segmenter splits ordinary separators (`;`, `|`, `&&`, `||`, newlines) and `(...)`
-    subshells but does NOT structurally parse `{...}` brace groups or shell control-flow
-    constructs, so a bare pop/apply is missed only when an UNPEELED brace or shell-keyword token
-    occupies the command-word position of `git`'s segment: for example a `{` group opener, or a
-    control keyword such as `if`, `elif`, `else`, `while`, `until`, `then`, or `do` immediately
-    preceding `git` in the same segment (these examples are illustrative, not exhaustive); a `git
-    stash pop` that a `;` or newline delimits into its own segment IS seen and warns. git_discard's
-    generic fallback may still note the missed same-segment form, and extending the shared segmenter
-    to those forms is a family-wide follow-on.
+    subshells; each segment is then read past its leading reserved and grouping words (a `{` group
+    opener, `!`, `time`, and control keywords such as `if`, `then`, `elif`, `else`, `while`, `until` and
+    `do`) and each backquote substitution as a command line of its own (_command_flow), so a bare
+    pop/apply inside a compound command or a backquote substitution warns as the bare form does. Not
+    read: an eval or sh -c body, a function or alias, and the rest of a substitution after a construct
+    the lexer cannot parse.
     Only the current no-value pop/apply option grammar (-q/--quiet/--index) is modelled: a future
     value-taking option can make its value look like an operand and falsely allow; re-validate on a
     git upgrade. No git calls or filesystem probes: every recognized bare pop/apply warns regardless
@@ -2964,12 +3185,12 @@ def git_stash_ref(data):
             "its git target and scope could not be checked. This is a binding convention, not a hazard, so "
             "it is allowed; prefer an explicit '-C' target and enumerated scope.")
     try:
-        segments = _segments(command)
+        records = _lex_command(command)
     except ValueError:
         return _allow()
 
-    for tokens, _sep in segments:
-        eff = _expbnd_effective_tokens(tokens)
+    for seg in _command_flow(records):
+        eff = _expbnd_effective_tokens(seg.argv)
         if _command_word(eff) != "git":
             continue
         sub, args = _git_sub_and_args(eff)
@@ -5643,17 +5864,22 @@ def git_discard(data):
     if not isinstance(command, str):
         return _allow()  # boundary: unreadable/malformed command container
     try:
-        segments = _segments(command)
+        records = _lex_command(command)
     except ValueError:
         # Conservative raw scan, not a silent allow (D-423-NARROW): an unparseable command the raw scan
         # flags is denied outright; only a command the scan clears is allowed at the true boundary.
         return _git_discard_fallback(command)
+    segments = [(seg.argv, seg.sep_after) for seg in records]
 
     # Precisely-identified lossy git segments (the clean-parse signal). A git command-word segment whose
     # verb-form is not "allow" is a real in-scope lossy form. Used for the in-scope decision on a
-    # metacharacter-free, unwrapped command, where the segmentation can be trusted.
+    # metacharacter-free, unwrapped command, where the segmentation can be trusted. Each segment is read
+    # past its leading reserved and grouping words and each backquote substitution as a command line of its
+    # own (_command_flow); every such form also carries a character or word outside the closed allowlist
+    # grammar below, which denies it, so this reading adds scope and the named verb, never an allow.
     lossy = []  # (role, kind, tokens) for each such segment
-    for tokens, _sep in segments:
+    for seg in _command_flow(records):
+        tokens = seg.argv
         if _command_word(tokens) != "git":
             continue
         sub, args = _git_sub_and_args(tokens)
@@ -6377,8 +6603,9 @@ def _commit_apparent_segment(seg):
     This does not discover every renamed executable, alias, function, opaque script,
     or unparseable fragmentation. Detection is not a Bash interpreter.
     """
-    sub, _args = _git_sub_and_args(seg.argv)
-    if _command_word(seg.argv) == "git" and sub == "commit":
+    tokens = _command_argv(seg.argv)  # past leading reserved and grouping words, as every guard reads it
+    sub, _args = _git_sub_and_args(tokens)
+    if _command_word(tokens) == "git" and sub == "commit":
         return True
     return bool(_RAW_COMMIT_RE.search(" ".join(seg.argv))
                 or _RAW_COMMIT_RE.search(seg.raw))
@@ -7276,12 +7503,14 @@ def protected_line(data):
         return _protected_line_fallback(command)
     cwd = data.get("cwd")
     pending_deny = None
-    saw_git = False
-    for seg in seg_records:
+    # The raw fallback below keeps its trigger: no segment whose own first command word is git. A push read
+    # only past a reserved or grouping word, or inside a backquote substitution, is judged in the loop AND
+    # still reaches that fallback, so this reading adds denies and never removes the fallback's.
+    saw_git = any(_command_word(seg.argv) == "git" for seg in seg_records)
+    for seg in _command_flow(seg_records):
         tokens = seg.argv
         if _command_word(tokens) != "git":
             continue
-        saw_git = True
         if _has_info_flag(tokens):
             continue
         sub, args = _git_sub_and_args(tokens)
@@ -7770,16 +7999,19 @@ def branch_root(data):
             "command string, so branch creation could not be checked; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule brnrot, fail-closed).")
     try:
-        segments = _segments(command)
+        records = _lex_command(command)
     except ValueError:
         # An unsupported LATER construct (a heredoc, a process substitution) must not discard a
         # proven-complete creation already recovered in the prefix: partial-lex and judge the recovered
         # segments, so a canonical orphan creation still DENIES (DENY outranks the parse error). A command
         # with no recovered creation falls back to the open-grammar allow (best-effort, disclosed).
         try:
-            segments = [(seg.argv, seg.sep_after) for seg in _lex_command(command, partial=True)[0]]
+            records = _lex_command(command, partial=True)[0]
         except ValueError:
             return _allow()  # even partial recovery failed: open grammar, best-effort
+    # Each segment is read past its leading reserved and grouping words, and each backquote substitution's
+    # records come in execution order just before the segment that holds it (_command_flow).
+    segments = [(seg.argv, seg.sep_after) for seg in _command_flow(records)]
 
     # No-ask posture: branch rooting is a HAZARD class (an orphan/unrooted branch dispatches work onto a
     # retired root), so a case this guard cannot prove rooted DENIES-and-educates, naming the reachable
@@ -8553,16 +8785,21 @@ _GATE_SUBST_WORD_RE = re.compile(r"(?:\$\(|`)\s*([^\s()`|;&<>]+)")
 
 
 def _gate_suffixes(argv):
-    """The argv suffixes the note tier judges as a command: after any leading reserved words, the command
-    itself, and, when its word is a wrapper (_GATE_NOTE_WRAPPERS), every later suffix too."""
+    """The argv suffixes the note tier judges as a command: from where the command starts past the leading
+    reserved and grouping words (_command_start, the shared reading), and also from past every leading
+    _GATE_RESERVED word, the note tier's over-match by design (it judges a '[[' test's operands and a
+    for/select/case header's words as well, at the cost of a note, never a refusal); at each start the
+    command itself and, when its word is a wrapper (_GATE_NOTE_WRAPPERS), every later suffix too."""
     k = 0
     while k < len(argv) and argv[k] in _GATE_RESERVED:
         k += 1
-    if k >= len(argv):
-        return []
-    if _gate_word(argv[k]) not in _GATE_NOTE_WRAPPERS:
-        return [argv[k:]]
-    return [argv[m:] for m in range(k, len(argv))]
+    out = []
+    for start in sorted({_command_start(argv), k}):
+        if start >= len(argv):
+            continue
+        ends = [start] if _gate_word(argv[start]) not in _GATE_NOTE_WRAPPERS else range(start, len(argv))
+        out.extend(argv[m:] for m in ends if argv[m:] not in out)
+    return out
 
 
 # A '|' that is not part of '||', then head or tail, in the raw text: the substitution note's trigger.
@@ -8714,9 +8951,13 @@ def gate_weakening(data):
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
         return _gate_weakening_fallback(command)
-    segments = [(seg.argv, seg.sep_after) for seg in records]
     pending_note = None  # the first heuristic gate-weakening allow-note; a certain --no-verify deny wins first
-    for index, (tokens, sep_after) in enumerate(segments):
+    # Each segment is read past its leading reserved and grouping words, and each backquote substitution as
+    # a command line of its own (_command_lines); a segment's '||' or '|' neighbour is taken from its own
+    # line. The canonical deny tier and the flow note below keep reading the command's own records.
+    lines = [[(seg.argv, seg.sep_after) for seg in line] for line in _command_lines(records)]
+    for segments, index, (tokens, sep_after) in ((line, index, item) for line in lines
+                                                  for index, item in enumerate(line)):
         if _command_word(tokens) == "git" and not _has_info_flag(tokens):
             sub, args = _git_sub_and_args(tokens)
             if sub in _NOVERIFY_VERBS:
@@ -8800,10 +9041,12 @@ _COMMIT_MSG_ENV_VALUE_OPTS = frozenset((
 def _commit_msg_command_index(tokens):
     """Index of this hook's effective command word after recognized leading command modifiers.
 
-    This is deliberately local to commit_msg_subst: other guards rely on the shared _command_word's
-    narrower contract. Leading shell assignments are skipped first. The command/exec/builtin/nohup/time/!
-    modifiers advance one word; env additionally skips its leading option tokens, the separated values of
-    its common value-taking options, and NAME=VALUE assignments. Returns len(tokens) when no command remains.
+    This wrapper peel is deliberately local to commit_msg_subst: other guards rely on the shared
+    _command_word's narrower contract. The caller passes a segment already read past its leading reserved
+    and grouping words (_command_segment), so this peels only the wrappers after them. Leading shell
+    assignments are skipped first. The command/exec/builtin/nohup/time/! modifiers advance one word; env
+    additionally skips its leading option tokens, the separated values of its common value-taking options,
+    and NAME=VALUE assignments. Returns len(tokens) when no command remains.
     """
     i = _command_word_index(tokens)
     n = len(tokens)
@@ -8901,7 +9144,10 @@ def commit_msg_subst(data):
         segments = _lex_command(command)
     except ValueError:
         return _commit_msg_subst_fallback(command)
-    for seg in segments:
+    # Each segment is read past its leading reserved and grouping words, and each backquote substitution as
+    # a command line of its own (_command_flow), so a git commit inside a compound or a substitution is
+    # judged as the bare form is.
+    for seg in _command_flow(segments):
         hit = _commit_msg_subst_hit(seg)
         if hit is None:
             continue
@@ -11582,8 +11828,8 @@ def _orch_foreground_detach(command):
     `&&` logical-AND, the `&>` and `&>>` redirects, the `<&`, `>&`, and `|&` descriptor-duplication and
     pipe-stderr operators, any single-quoted, double-quoted, or backslash-escaped ampersand, and an `&`
     inside an unquoted, word-start `#` comment (comment text, not an operator). A dedicated quote- and
-    escape-tracking scan is used, NOT _segments: that helper strips quote and escape provenance and
-    classifies both `echo "&"` and `echo \\&` as an `&` separator, which would over-fire. It also drops a
+    escape-tracking scan over the raw text is used, NOT the shared lexer's segments, whose decoded words
+    keep no quote or escape provenance. It also drops a
     word-start `#` comment so a commented-out `&` does not prompt, but only to the END OF THAT LINE: a
     comment never suppresses a later line, so a real bare `&` on a subsequent line of a multi-line command
     is still caught rather than smuggled past. Where a `#` starts a comment is read under two rules, the
@@ -12375,11 +12621,14 @@ def orch_truncation_guard(data):
     # hazard, not a merely-unprovable capture, so it DENIES-and-educates (use full durable capture, or keep
     # it foreground) rather than allow-note. Detected lexically: any head/tail stage fed by an upstream `|`
     # producer. A parse error falls through to the unprovable allow-note below (nothing proven).
+    # Each stage is read past its leading reserved and grouping words, and each backquote substitution as a
+    # command line of its own (_command_lines), so '| { head; }' and a substitution's own pipe are judged as
+    # the bare form is; a stage's feeding neighbour is always taken from its own line.
     try:
-        _segs = _segments(command)
+        _lines = [[(seg.argv, seg.sep_after) for seg in line] for line in _command_lines(_lex_command(command))]
     except ValueError:
-        _segs = None
-    if _segs:
+        _lines = []
+    for _segs in _lines:
         for _i, (_argv, _sep) in enumerate(_segs):
             if _i == 0:
                 continue
@@ -12411,9 +12660,6 @@ def orch_truncation_guard(data):
 
 
 _ORCH_LOOP_HEADERS = frozenset(("for", "while", "until"))
-# A single leading loop reserved word is stripped to reach a construct segment's simple command: `do sleep`
-# -> `sleep`, `until curl` -> `curl`. `done` is NOT stripped (it closes the loop, never prefixes a command).
-_ORCH_LOOP_BODY_KEYWORDS = frozenset(("for", "while", "until", "do"))
 _ORCH_POLL_PROBE_CMDS = frozenset(("gh", "curl"))
 
 # Reserved words that make a loop span un-attributable to the single canonical poll shape: a conditional
@@ -12422,15 +12668,6 @@ _ORCH_POLL_PROBE_CMDS = frozenset(("gh", "curl"))
 # cannot soundly justify.
 _ORCH_POLL_FORBIDDEN = frozenset((
     "if", "then", "elif", "else", "fi", "case", "esac", "!", "{", "}"))
-
-
-def _orch_poll_body_argv(argv):
-    """The effective simple-command argv of a loop-construct segment, a single leading loop reserved word
-    (for/while/until/do) removed, so the do-segment `["do", "sleep", "10"]` resolves to command word
-    `sleep` and the until-header `["until", "curl", ...]` resolves to `curl`. `done` is left in place."""
-    if argv and argv[0] in _ORCH_LOOP_BODY_KEYWORDS:
-        return argv[1:]
-    return argv
 
 
 def _orch_token_actions_runs(token):
@@ -12487,13 +12724,15 @@ def _orch_raw_unquoted_words(raw):
 
 
 def _orch_body_cmd(seg):
-    """(word, unquoted) for a loop segment's effective command word: basenamed, with a single leading loop
-    reserved word (do/for/while/until) stripped as _orch_poll_body_argv does and a leading env-assignment
-    prefix skipped, paired with whether that command-word TOKEN was written UNQUOTED in the raw source.
-    Soundness of the sleep/probe conjuncts rests on this being the command WORD (an argument that merely
-    spells 'sleep'/'gh' is not the command word, so it never fabricates a match); the raw-unquoted gate only
-    tightens it further. ('', False) when the segment resolves to no command word."""
-    argv = _orch_poll_body_argv(seg.argv)
+    """(word, unquoted) for a loop segment's effective command word: basenamed, read past the leading
+    reserved and grouping words by the shared reading every guard uses (_command_argv: `do sleep` -> `sleep`,
+    `until curl` -> `curl`; a `for NAME in ...` header runs no command, so its loop variable is no command
+    word) and a leading env-assignment prefix skipped, paired with whether that command-word TOKEN was
+    written UNQUOTED in the raw source. Soundness of the sleep/probe conjuncts rests on this being the
+    command WORD (an argument that merely spells 'sleep'/'gh' is not the command word, so it never fabricates
+    a match); the raw-unquoted gate only tightens it further. ('', False) when the segment resolves to no
+    command word."""
+    argv = _command_argv(seg.argv)
     if not argv:
         return "", False
     idx = _command_word_index(argv)
@@ -12576,6 +12815,15 @@ def _orch_bg_poll_loop(command):
         segments = _lex_command(command)
     except ValueError:
         return "indeterminate"              # heredoc/process-sub/unbalanced-quote/NUL/malformed-redirect
+    # Each backquote substitution is read as a command line of its own (_substitution_lines): a line that
+    # is the canonical shape makes the command 'match'; otherwise the command's own line decides.
+    if any(_orch_poll_line(line) == "match" for line in _substitution_lines(segments)):
+        return "match"
+    return _orch_poll_line(segments)
+
+
+def _orch_poll_line(segments):
+    """The three-valued _orch_bg_poll_loop classification of one lexed command line."""
     if any(seg.sep_after in ("(", ")") for seg in segments):
         return "indeterminate"              # subshell or C-style for (( )) grouping: cannot attribute
     bare_amps = [i for i, seg in enumerate(segments) if seg.sep_after == "&"]

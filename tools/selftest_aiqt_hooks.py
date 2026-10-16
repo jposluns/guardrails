@@ -83,6 +83,13 @@ bare-`$`-before-escaped-paren over-ASK. The raw fallback ASKS on a coarse appare
 detected cases, deliberate over-ASKs, and selected named residual ALLOWs; they make no soundness or
 universal-coverage claim.
 
+It also covers the shared command reading every lexer-reading guard uses (cs-* cases): each guard's bare
+deny shape (git_stash_ref: its bare note shape), wrapped in a compound command (if, else, elif, for, for
+NAME do, while, until, select, case, a brace group, '!', time -p) and in a backquote substitution, must
+decide at least as strictly as the bare shape; a reserved word as a plain argument, a git command inside a
+quoted string, a single-quoted backquote and a backquote in a quoted heredoc body must each keep the
+decision every guard gave it before the shared reading existed.
+
 It also covers the secrets-shift-left guard (secrets_shift_left, secsec): a Write content, an Edit
 new_string, or a Bash command that carries an obvious hardcoded secret (a provider-token prefix or a
 credential-named assignment of a real-length literal, single-sourced from tools/check_secrets.py) denies;
@@ -2156,7 +2163,12 @@ def _test_git_stash_ref(failures):
              "FOO=x command env git -C /tmp/repo stash pop"),
             ("(sr-w20) several bare segments", "git stash pop; git stash apply"),
             ("(sr-w21) quote-decoded command and verb", "g'it' stash p'op'"),
-            ("(sr-w22) brace group with a separated git segment warns", "{ true; git stash pop; }")):
+            ("(sr-w22) brace group with a separated git segment warns", "{ true; git stash pop; }"),
+            ("(sr-w23) brace group read past the opener warns", "{ git stash pop; }"),
+            ("(sr-w24) brace group with option warns", "{ git stash apply --index; }"),
+            ("(sr-w25) shell-keyword block read past the keyword warns", "if true; then git stash pop; fi"),
+            ("(sr-w26) shell-keyword condition position warns", "if git stash pop; then :; fi"),
+            ("(sr-w27) backquote substitution warns", "x=`git stash pop`")):
         expect_warn(label, command)
 
     for label, command in (
@@ -2198,10 +2210,7 @@ def _test_git_stash_ref(failures):
              'cd /abs && git stash pop "unbalanced'),
             ("(sr-a35) parse failure with sibling hazard",
              'git add -A && git push "unbalanced'),
-            ("(sr-a36) brace group is a disclosed lexical bound", "{ git stash pop; }"),
-            ("(sr-a37) brace group with option", "{ git stash apply --index; }"),
-            ("(sr-a38) shell-keyword block is a disclosed bound", "if true; then git stash pop; fi"),
-            ("(sr-a39) shell-keyword condition position is a disclosed bound", "if git stash pop; then :; fi")):
+            ("(sr-a36) single-quoted backquote text is no substitution", "echo '`git stash pop`'")):
         expect_silent(label, command)
 
     # The shared lexer keeps an unquoted brace-bearing ref as one positional token.
@@ -2252,6 +2261,101 @@ def _test_git_stash_ref(failures):
     if (aiqt_hooks.HANDLERS.get("git_stash_ref") is not aiqt_hooks.git_stash_ref or
             aiqt_hooks.HANDLER_EVENT.get("git_stash_ref") != aiqt_hooks.PRETOOL):
         failures.append("(sr-wiring) git_stash_ref handler/event wiring is missing or wrong")
+
+
+# The compound-subject table: every lexer-reading PreToolUse guard, each with the bare shape it denies
+# (git_stash_ref: the bare shape it notes) and that bare decision, wrapped in each compound command and in a
+# backquote substitution. A wrapped shape must decide at least as strictly as the bare one (deny > allow-note >
+# allow). The bare shapes need no repository: every payload carries no cwd.
+_CS_SHAPES = (
+    ("commit_identity", 'git commit -m x --author="Claude <c@x>"', "deny"),
+    ("commit_msg_subst", 'git commit -m "a$(id)"', "deny"),
+    ("branch_root", "git checkout --orphan x", "deny"),
+    ("gate_weakening", "git commit --no-verify -m x", "deny"),
+    ("gate_weakening", "git push --no-verify", "deny"),
+    ("diff_source_pretool", "git diff", "deny"),
+    ("protected_line", "git push --force origin main", "deny"),
+    ("protected_line", "git commit -m x", "deny"),
+    ("git_discard", "git reset --hard", "deny"),
+    ("git_explicit_binding", "git add -A && git push origin feature", "deny"),
+    ("git_stash_ref", "git stash pop", "allow-note"),
+    ("bash_absolute_paths", "echo x > out.txt", "deny"),
+)
+_CS_WRAPPERS = (
+    ("if", "if true; then {}; fi"),
+    ("for", "for x in 1; do {}; done"),
+    ("while", "while false; do {}; done"),
+    ("brace", "{{ {}; }}"),
+    ("bang", "! {}"),
+    ("backquote", "x=`{}`"),
+    ("case", "case a in a) {};; esac"),
+    ("until", "until false; do {}; done"),
+    ("select", "select x in a; do {}; done"),
+    ("else", "if false; then :; else {}; fi"),
+    ("elif", "if false; then :; elif {}; then :; fi"),
+    ("time", "time -p {}"),
+    ("for-do", "for x do {}; done"),
+)
+_CS_RANK = {"allow": 0, "allow-note": 1, "deny": 2}
+# Controls: a reserved word as a plain argument, a git command inside a quoted string, a single-quoted
+# backquote and a backquote in a quoted heredoc body (both literal text), each with the decision every guard
+# gave it before the shared reading existed, in _CS_GUARDS order; each must stay exactly that.
+_CS_GUARDS = ("commit_identity", "commit_msg_subst", "branch_root", "gate_weakening", "diff_source_pretool",
+              "protected_line", "git_discard", "git_explicit_binding", "git_stash_ref", "bash_absolute_paths")
+_CS_CONTROLS = (
+    ("echo if then", ("allow",) * 10),
+    ("echo do done fi esac", ("allow",) * 10),
+    ("git log --oneline -- if then do", ("allow",) * 4 + ("allow-note",) + ("allow",) * 5),
+    ('echo "git commit --no-verify -m x"', ("allow",) * 5 + ("deny",) + ("allow",) * 4),
+    ("echo 'git push --force origin main'", ("allow",) * 5 + ("deny",) + ("allow",) * 4),
+    ("echo '`git diff`'", ("allow",) * 4 + ("allow-note",) + ("allow",) * 5),
+    ("cat <<'EOF'\n`git diff`\nEOF", ("allow",) * 10),
+)
+
+
+def _test_compound_subject(failures):
+    """(cs-*) Every lexer-reading guard reads its subject past the shell's reserved and grouping words and
+    inside a backquote substitution: each bare shape decides as recorded, each wrapped form at least as
+    strictly, and each control exactly as recorded. No submitted Bash command is executed."""
+    for name, shape, bare_want in _CS_SHAPES:
+        handler = getattr(aiqt_hooks, name)
+        bare = _decision(handler, shape)
+        if bare != bare_want:
+            failures.append("(cs-bare-{}) {!r}: expected {}, got {}".format(name, shape, bare_want, bare))
+            continue
+        for label, wrapper in _CS_WRAPPERS:
+            command = wrapper.format(shape)
+            got = _decision(handler, command)
+            if _CS_RANK.get(got, -1) < _CS_RANK[bare]:
+                failures.append("(cs-{}-{}) {!r}: expected at least {} (the bare shape), got {}"
+                                .format(name, label, command, bare, got))
+    for command, wants in _CS_CONTROLS:
+        for name, want in zip(_CS_GUARDS, wants):
+            got = _decision(getattr(aiqt_hooks, name), command)
+            if got != want:
+                failures.append("(cs-control-{}) {!r}: expected {} (the decision before the shared reading), "
+                                "got {}".format(name, command, want, got))
+    # The shared reading itself: what each lexed segment's command is read as.
+    for command, want in (
+            ("if true; then git push; fi", [["true"], ["git", "push"], ["fi"]]),
+            ("for x in 1; do git diff; done", [[], ["git", "diff"], ["done"]]),
+            ("for x do git diff; done", [["git", "diff"], ["done"]]),
+            ("case a in a) git diff;; esac", [[], ["git", "diff"], [], ["esac"]]),
+            ("time -p ! FOO=1 git diff", [["FOO=1", "git", "diff"]]),
+            ("coproc git diff", [["git", "diff"]]),
+            ("coproc N { git diff; }", [["git", "diff"], ["}"]]),
+            ("function f { git diff; }", [["git", "diff"], ["}"]]),
+            ("FOO=1 if x", [["FOO=1", "if", "x"]]),
+            ("echo if then", [["echo", "if", "then"]]),
+            ("x=`git diff`", [["git", "diff"], ["x=`git", "diff`"]]),
+            ('echo "`git log`" `git diff`', [["git", "log"], ["git", "diff"], ["echo", "`git log`", "`git", "diff`"]]),
+            ("echo \"`echo \\`git diff\\``\"", [["git", "diff"], ["echo", "`git", "diff`"],
+                                                ["echo", "`echo `git diff``"]]),
+            ("echo '`git diff`' \\`git log\\`", [["echo", "`git diff`", "`git", "log`"]]),
+            ("cat <<'EOF'\n`git diff`\nEOF\n", [["cat"], []])):
+        got = [seg.argv for seg in aiqt_hooks._command_flow(aiqt_hooks._lex_command(command))]
+        if got != want:
+            failures.append("(cs-read) {!r}: expected {!r}, got {!r}".format(command, want, got))
 
 
 def main():
@@ -10081,10 +10185,10 @@ def _main_isolated(monitor):
                  'git commit -m "unbalanced', "allow")
         cmexpect("(cm-ad) present non-Bash tool allows",
                  'git commit -m "x `y`"', "allow", tool="Read")
-        # DISCLOSED residuals: the lexer does not parse through a reserved-word compound to its inner
-        # command, and an unquoted pre-subcommand $( fragments the git invocation into separate segments.
-        cmexpect("(cm-residual-compound) reserved-word compound allows (documented residual)",
-                 'if git commit -m "$(x)"; then :; fi', "allow")
+        # A reserved-word compound is read through to its inner command by the shared reading (the former
+        # residual); an unquoted pre-subcommand $( still fragments the git invocation into separate segments.
+        cmexpect("(cm-compound-read) reserved-word compound is read to its inner commit and denies",
+                 'if git commit -m "$(x)"; then :; fi', "deny")
         cmexpect("(cm-residual-global-subst) pre-subcommand unquoted $( fragments the segment and allows",
                  'git -C $(x) commit -m "$(y)"', "allow")
 
@@ -11502,6 +11606,7 @@ def _main_isolated(monitor):
                             "HANDLER_EVENT {!r}".format(aiqt_hooks.FLOOR_FAIL_OPEN_MODES, _pf_want))
 
         _test_git_stash_ref(failures)
+        _test_compound_subject(failures)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)
