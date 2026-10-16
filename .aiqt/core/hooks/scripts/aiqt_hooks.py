@@ -774,12 +774,16 @@ def _parse_heredoc_delim(command, at, n):
     return (quoted, "".join(delim_chars), strip_tabs, j)
 
 
-def _skip_heredoc_bodies(command, i, n, heredocs):
+def _skip_heredoc_bodies(command, i, n, heredocs, bodies=None):
     """Advance past the bodies of a run of QUOTED heredocs (in the order their '<<' operators appeared on the
     line), each ending at a line that is EXACTLY its delimiter (leading tabs stripped for the <<- form). An
     unterminated heredoc consumes the rest of the command (bash would still be reading input). Returns the
-    index just past the last consumed body. The bodies are literal data and are excluded from analysis."""
+    index just past the last consumed body. The bodies are literal data and are excluded from analysis.
+    Where bodies is a list, each heredoc's body is appended to it in turn, as bash supplies it: its lines
+    before the delimiter line (or to the end of the command), joined with LF, each without its leading tabs
+    for the <<- form."""
     for delim, strip_tabs in heredocs:
+        body = []
         while i < n:
             nl = command.find("\n", i)
             line = command[i:(nl if nl != -1 else n)]
@@ -787,16 +791,28 @@ def _skip_heredoc_bodies(command, i, n, heredocs):
             i = n if nl == -1 else nl + 1
             if cand == delim:
                 break
+            if bodies is not None:
+                body.append(cand)
+        if bodies is not None:
+            bodies.append("\n".join(body))
     return i
 
 
-def _lex_command(command, partial=False):
+def _lex_command(command, partial=False, heredocs=None):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
     '{fd}>' redirect, or a malformed redirect), so the caller falls back conservatively rather than acting on
     a partially-cleaned command. A QUOTED heredoc (<<'EOF'/<<"EOF"/<<\\EOF) is NOT unsupported: its literal
     body is EXCLUDED from analysis (round-2 finding 17) so a guard never fires on shell syntax quoted inside
     heredoc prose. Linear, non-recursive, stdlib-only.
+
+    Where heredocs is a list, one (segment, before, body) per QUOTED heredoc is appended to it, in the order
+    of their '<<' operators: the index in the returned list of the segment the heredoc redirects, how many
+    of that segment's redirects precede it, and its body as _skip_heredoc_bodies gives it (empty where no
+    line follows its operator's line). A heredoc carries no source fd here (an fd before '<<' is
+    unsupported), so it is that segment's standard input unless a later redirect of fd 0 replaces it: bash
+    gives a command the last of its standard-input redirections. Only the citation check (_citechk_commands)
+    passes it, and passing it changes nothing else the lexer returns.
 
     When partial is True the raise-on-error contract is replaced by a best-effort one: instead of raising,
     the lexer returns (segments, complete), where segments are the COMPLETE segments recovered before the
@@ -814,6 +830,7 @@ def _lex_command(command, partial=False):
     opaque = [False]
     seg_start = [0]
     pending_heredocs = []  # queued (delim, strip_tabs) for QUOTED heredocs whose bodies to skip (finding 17)
+    pending_places = []  # for heredocs: the (segment, before) of each queued heredoc, its body still to come
 
     def end_segment(sep, op_start, next_start):
         segments.append(_Segment(list(argv), sep, list(redirects),
@@ -855,8 +872,12 @@ def _lex_command(command, partial=False):
                 if pending_heredocs:
                     # the bodies of any QUOTED heredocs opened on this line follow the newline; skip them as
                     # literal data (finding 17), then resume lexing after the closing delimiter line(s).
-                    i = _skip_heredoc_bodies(command, i, n, pending_heredocs)
+                    bodies = None if heredocs is None else []
+                    i = _skip_heredoc_bodies(command, i, n, pending_heredocs, bodies)
+                    if heredocs is not None:
+                        heredocs.extend(place + (body,) for place, body in zip(pending_places, bodies))
                     del pending_heredocs[:]
+                    del pending_places[:]
                     seg_start[0] = i
                 continue
             if c == "#":
@@ -883,6 +904,7 @@ def _lex_command(command, partial=False):
                             # UNQUOTED heredoc (parsed[0] False) interpolates and stays the unsupported raise.
                             _quoted, _delim, _strip, _next_i = parsed
                             pending_heredocs.append((_delim, _strip))
+                            pending_places.append((len(segments), len(redirects)))
                             i = _next_i
                             continue
                     raise ValueError("unsupported shell construct: {}".format(op))
@@ -909,6 +931,8 @@ def _lex_command(command, partial=False):
                 if w_opaque:
                     opaque[0] = True
             i = j
+        if heredocs is not None:
+            heredocs.extend(place + ("",) for place in pending_places)  # no line follows: an empty body
         end_segment("", n, n)
     except ValueError:
         # partial mode recovers the COMPLETE segments lexed before the unparseable construct AND the
@@ -12716,13 +12740,13 @@ def orch_dispatch_ledger(data):
 # arithmetic, and the payload's cwd, given to the toplevel probe and joined to the relative paths a call
 # names or prints. One deadline, set when the handler starts, covers the toplevel probe and the work up to
 # the append: each git probe is given only the time left and none starts once it is reached, a file read
-# checks it between chunks, no path is resolved once it is reached and a resolution stops at it between two
-# of its components, no file is opened or given to stat once it is reached, and the split of a response into
-# lines, the comparison of shown lines with the file, the scan of grep output and of a grep or rg command's
-# words, the merge of grep hits into spans and the digest of each row check it at each line, word, line
-# number or row; the rows digested by then are still appended. A step under way when it is reached finishes
-# first, and what the deadline does not cover is bounded by size or count instead (both listed in
-# citation_read_recorder).
+# checks it before each chunk, no path is resolved once it is reached and a resolution stops at it between
+# two of its components and before each symlink it reads, no file is opened or given to stat or fstat once
+# it is reached, and the split of a response into lines, the comparison of shown lines with the file, the
+# scan of grep output and of a grep or rg command's words, the merge of grep hits into spans and the digest
+# of each row check it at each line, word, line number or row; the rows digested by then are still
+# appended. A step under way when it is reached finishes first, and what the deadline does not cover is
+# bounded by size or count instead (both listed in citation_read_recorder).
 _CITE_TOOLS = frozenset(("Read", "Grep", "Bash", "Write", "Edit"))
 _CITE_DIR = "citation-ledger"
 _CITE_NAME_RE = re.compile(r"[0-9a-f]{16}\.jsonl(?:\.1)?")
@@ -12817,14 +12841,19 @@ def _cite_sha256(blob):
 def _cite_real(path, deadline):
     """(path resolved through symlinks, None), or (None, why) where the walk stops without a result: why
     "links" where it would follow more than _CITE_MAX_LINKS symlinks, "deadline" where the call's deadline
-    is reached before it ends (checked before each component it takes), and None where the path cannot be
-    resolved (an embedded NUL, for example). The walk is os.path.realpath's own as Python 3.14 makes it
-    (non-strict, and a symlink met again at the same path is taken from its cache, not read again), so
-    where it ends its result is os.path.realpath's. Each symlink it reads counts toward the bound; Linux
-    follows at most 40 symlinks in one path lookup, counting every one it meets, so a path the kernel can
-    open never reaches the bound. The walk takes at most the path's components and those of the at most
-    _CITE_MAX_LINKS targets it reads (one lstat and one join, or one cut for '..', each), so where a
-    symlink's target holds thousands of components the bound stops the walk long before the deadline."""
+    is reached before it ends (checked before each component it takes and before each symlink it reads),
+    and None where the path cannot be resolved (an embedded NUL, for example). The walk is
+    os.path.realpath's own as Python 3.14 makes it (non-strict, and a symlink met again at the same path is
+    taken from its cache, not read again), so where it ends its result is os.path.realpath's. Every symlink
+    it meets counts toward the bound, a cached one as many times as its first resolution followed symlinks
+    (itself and those its target led through), since Linux reads it again each time it meets it and counts
+    each of those symlinks again. Linux follows at most 40 symlinks in one path lookup, counting every one
+    it meets, so for a path whose every component exists the count is the kernel's own, and a path the
+    kernel can open is never refused for the bound. The walk takes at most the path's components and those
+    of the at most _CITE_MAX_LINKS targets it reads (one lstat and one join, or one cut for '..', each).
+    The bound does not make that quick: where the targets are thousands of components long, each lstat is
+    of a path up to PATH_MAX characters, and a walk within the bound can take seconds of CPU time. The
+    deadline is what bounds such a walk."""
     try:
         rest = path.split("/")[::-1]
         current = "/" if path.startswith("/") else os.getcwd()
@@ -12833,8 +12862,11 @@ def _cite_real(path, deadline):
             if _cite_over(deadline):
                 return None, "deadline"
             name = rest.pop()
-            if name is None:  # the symlink beneath this marker has now been resolved: cache where it led
-                seen[rest.pop()] = current
+            if name is None:
+                # The symlink beneath this marker has now been resolved: cache where it led and how many
+                # symlinks its resolution followed, itself included (the count before it lies beneath it).
+                link = rest.pop()
+                seen[link] = current, followed - rest.pop()
                 continue
             left -= 1
             if not name or name == ".":
@@ -12847,19 +12879,22 @@ def _cite_real(path, deadline):
                 if not stat.S_ISLNK(os.lstat(step).st_mode):
                     current = step
                     continue
-                if step in seen:  # resolved before, or a loop (still unresolved), where the link's path is kept
-                    current = seen[step] or step
-                    continue
-                followed += 1
+                cached = seen.get(step, False)
+                followed += 1 if not cached else cached[1]  # a loop (still unresolved, None) counts once
                 if followed > _CITE_MAX_LINKS:
                     return None, "links"
+                if cached is not False:  # resolved before, or a loop, where the link's path is kept
+                    current = step if cached is None else cached[0]
+                    continue
+                if _cite_over(deadline):  # the lstat may have used the last of the time: no readlink after it
+                    return None, "deadline"
                 target = os.readlink(step)
             except OSError:
                 current = step
                 continue
             current = "/" if target.startswith("/") else current
             seen[step] = None
-            rest += [step, None]
+            rest += [followed - 1, step, None]  # the count before this symlink, the symlink, and its marker
             parts = target.split("/")[::-1]
             rest += parts
             left += len(parts)
@@ -12879,7 +12914,8 @@ def _cite_resolution(path, deadline):
     walked, else what _cite_real gives ("links", "deadline", or None where the path cannot be resolved).
     Every path the recorder or the citation check resolves goes through here, so a resolution starts only
     before the deadline, is given at most _CITE_MAX_PATH characters, follows at most _CITE_MAX_LINKS
-    symlinks, and stops at the deadline between any two of its components."""
+    symlinks (each one met counted, as Linux counts them), and stops at the deadline between any two of its
+    components and before each symlink it reads."""
     if len(path) > _CITE_MAX_PATH:
         return None, "path"
     if _cite_over(deadline):
@@ -12951,11 +12987,11 @@ def _cite_bytes(entry, start, end):
 
 def _cite_read(path, files, deadline):
     """The _cite_entry of the regular file at path, resolved through symlinks, or None: the call's deadline
-    reached (before the resolution, before the open or between the read's chunks), a path _cite_resolve does
-    not resolve, a path under /dev or /proc, a call that has already read _CITE_MAX_FILES paths, an open or
-    read fault, a file that is not regular, or one larger than _CITE_MAX_FILE bytes. The open is
-    non-blocking, so a FIFO is refused at the fstat rather than waited on; results are kept in files, keyed
-    by resolved path."""
+    reached (before the resolution, before the open, before the fstat or before any of the read's chunks), a
+    path _cite_resolve does not resolve, a path under /dev or /proc, a call that has already read
+    _CITE_MAX_FILES paths, an open or read fault, a file that is not regular, or one larger than
+    _CITE_MAX_FILE bytes. The open is non-blocking, so a FIFO is refused at the fstat rather than waited on;
+    results are kept in files, keyed by resolved path."""
     if _cite_over(deadline):
         return None
     real = _cite_resolve(path, deadline)
@@ -12973,8 +13009,8 @@ def _cite_read(path, files, deadline):
         fd = None
     if fd is not None:
         try:
-            st = os.fstat(fd)
-            if stat.S_ISREG(st.st_mode) and st.st_size <= _CITE_MAX_FILE:
+            st = None if _cite_over(deadline) else os.fstat(fd)  # the open may have used the last of the time
+            if st is not None and stat.S_ISREG(st.st_mode) and st.st_size <= _CITE_MAX_FILE:
                 chunks, total, ended = [], 0, False
                 while total <= _CITE_MAX_FILE and not ended and not _cite_over(deadline):
                     chunk = os.read(fd, min(1 << 20, _CITE_MAX_FILE + 1 - total))
@@ -13206,10 +13242,10 @@ def _cite_grep_command(argv, shown, cwd, files, deadline):
     _CITE_GREP_SHORT and _CITE_GREP_LONG give them, the deadline checked at each word; a command the tool
     would refuse (an unknown option, an ambiguous prefix, a value missing at the end) records nothing. The
     first operand is the pattern unless -e, -f, --regexp or --file gave one. Each named path is joined to
-    cwd and given to stat, the deadline checked before each, then resolved through _cite_resolve, so a path
-    it does not resolve adds nothing to the scope. Where exactly one path is named and it is a regular file
-    (its stat made only while the deadline has not been reached), N:TEXT lines are read as that file's.
-    Once the deadline is reached no further stat is made and the command records nothing."""
+    cwd and given to stat once, the deadline checked before each, then resolved through _cite_resolve, so a
+    path it does not resolve adds nothing to the scope. Where exactly one path is named and that stat found
+    a regular file, N:TEXT lines are read as that file's. Once the deadline is reached no further stat is
+    made and the command records nothing."""
     valued, flags = _CITE_GREP_SHORT[argv[0]]
     numbered, patterned, operands, take, ended = False, False, [], False, False
     for word in argv[1:]:
@@ -13243,7 +13279,7 @@ def _cite_grep_command(argv, shown, cwd, files, deadline):
     if take or not numbered:
         return []
     paths = [os.path.join(cwd, word) for word in (operands if patterned else operands[1:])]
-    named = [] if paths else [cwd]
+    named, regular = ([] if paths else [cwd]), []
     for path in paths:
         if _cite_over(deadline):
             return []
@@ -13253,10 +13289,12 @@ def _cite_grep_command(argv, shown, cwd, files, deadline):
             continue
         if stat.S_ISREG(mode) or stat.S_ISDIR(mode):
             named.append(path)
+        if stat.S_ISREG(mode):
+            regular.append(path)
     scope = tuple(real for real in (_cite_resolve(p, deadline) for p in named) if real is not None)
-    if _cite_over(deadline):  # a resolution may have used the last of the time: no stat after it
+    if _cite_over(deadline):  # a resolution may have used the last of the time: nothing is recorded
         return []
-    single = scope[0] if len(paths) == 1 and len(scope) == 1 and os.path.isfile(paths[0]) else None
+    single = scope[0] if len(paths) == 1 and len(scope) == 1 and regular else None
     return _cite_hits(shown, cwd, single, scope, "grep", files, deadline)
 
 
@@ -13577,38 +13615,38 @@ def citation_read_recorder(data):
     given to the toplevel probe and joined to each relative path a Grep, grep, rg or sed call names or
     prints (each joined path is then held to the path bound). One deadline, _CITE_BUDGET seconds from here,
     covers the toplevel probe and the work of _cite_rows: each git probe is given only the time left and
-    none starts once it is reached, and it is checked between a file read's chunks, before each path is
-    resolved and between two components of its resolution, before each file is opened and before each
-    stat of a path a Grep, grep or rg call searches, at each line of a response's split, of the comparison
-    of shown lines with the file and of the scan of grep output, at each word of a grep or rg command, at
-    each line number of the merge of grep hits into spans, before each Edit range and at each of its lines,
-    and before each row's digest; the rows digested by then are appended. A step under way when it is
-    reached finishes first: the scan of one output line for the places it could split, with the slicing of
-    its at most _CITE_MAX_SPLITS splits and the join of each split's path to cwd (at most _CITE_MAX_TEXT
-    characters); the find and slice of one line when a response text is split into lines (_cite_lines,
-    _cite_split; at most _CITE_MAX_TEXT characters) and the find of one line in an Edit range (_cite_within;
-    a file of at most _CITE_MAX_FILE bytes); the decoding of one file line and its comparison with a shown
-    line (_cite_span, and _cite_hits through _cite_text; a line of at most _CITE_MAX_FILE bytes); the parse
-    of one word of a grep or rg command (at most _CITE_MAX_COMMAND characters); one component of a path's
-    resolution (an lstat and, for a symlink, its readlink, with the join of the component to the path
-    walked so far); one stat or open; the read of one chunk; and the count of the lines before one Edit
-    range or the digest of one row (at most _CITE_MAX_FILE bytes each). Bounded by size or count instead of
-    the deadline: the payload, read and parsed whole before this handler starts; the lexing of a command,
-    the argument checks of git show and the parse of its one ls-tree line, and the join of each path a grep
-    or rg command names to cwd (a command of at most _CITE_MAX_COMMAND characters); the split of a path into
-    its components before its resolution (at most _CITE_MAX_PATH characters) and of each symlink target it
-    reads (at most _CITE_MAX_LINKS of them); the copy of a Bash output without its final line feed (at most
-    _CITE_MAX_TEXT characters); the split of a file's or blob's bytes into lines and, for a Write or Edit,
-    the decoding of the file and of the new text and a Write's comparison of the two (at most _CITE_MAX_FILE
-    bytes and _CITE_MAX_TEXT characters); the search for at most _CITE_EDIT_MAX replacements and the
-    replacement check of an Edit (texts of at most _CITE_MAX_TEXT characters); the sort of the grep hits
-    found before the deadline (at most one per output line); and, after the deadline, the append: the digest
-    of the session id that names the ledger file (as long as the payload gives it), the orchestration
-    registry read that locates the state directory (read whole, as every hook here reads it; this hook sets
-    no size bound on it), the duplicate scan (a session file under _CITE_DEDUP_BELOW bytes), at most
-    _CITE_MAX_ROWS rows of under _CITE_ROW_MAX bytes, and, when a session file is created, one listing of
-    the ledger directory (not bounded in entries) and at most _CITE_PRUNE_MAX removals. A failed write
-    SURFACES as a non-blocking systemMessage naming the error (nocncl), never a swallowed one."""
+    none starts once it is reached, and it is checked before each of a file read's chunks, before each path
+    is resolved, between two components of its resolution and before each symlink it reads, before each
+    file is opened and before its fstat, and before each stat of a path a Grep, grep or rg call searches, at
+    each line of a response's split, of the comparison of shown lines with the file and of the scan of grep
+    output, at each word of a grep or rg command, at each line number of the merge of grep hits into spans,
+    before each Edit range and at each of its lines, and before each row's digest; the rows digested by
+    then are appended. A step under way when it is reached finishes first: the scan of one output line for
+    the places it could split, with the slicing of its at most _CITE_MAX_SPLITS splits and the join of each
+    split's path to cwd (at most _CITE_MAX_TEXT characters); the find and slice of one line when a response
+    text is split into lines (_cite_lines, _cite_split; at most _CITE_MAX_TEXT characters) and the find of
+    one line in an Edit range (_cite_within; a file of at most _CITE_MAX_FILE bytes); the decoding of one
+    file line and its comparison with a shown line (_cite_span, and _cite_hits through _cite_text; a line of
+    at most _CITE_MAX_FILE bytes); the parse of one word of a grep or rg command (at most _CITE_MAX_COMMAND
+    characters); one lstat of a path's resolution, with the join of the component to the path walked so
+    far, or one readlink; one stat, open or fstat; the read of one chunk; and the count of the lines before
+    one Edit range or the digest of one row (at most _CITE_MAX_FILE bytes each). Bounded by size or count
+    instead of the deadline: the payload, read and parsed whole before this handler starts; the lexing of a
+    command, the argument checks of git show and the parse of its one ls-tree line, and the join of each
+    path a grep or rg command names to cwd (a command of at most _CITE_MAX_COMMAND characters); the split of
+    a path into its components before its resolution (at most _CITE_MAX_PATH characters) and of each
+    symlink target it reads (at most _CITE_MAX_LINKS of them); the copy of a Bash output without its final
+    line feed (at most _CITE_MAX_TEXT characters); the split of a file's or blob's bytes into lines and, for
+    a Write or Edit, the decoding of the file and of the new text and a Write's comparison of the two (at
+    most _CITE_MAX_FILE bytes and _CITE_MAX_TEXT characters); the search for at most _CITE_EDIT_MAX
+    replacements and the replacement check of an Edit (texts of at most _CITE_MAX_TEXT characters); the sort
+    of the grep hits found before the deadline (at most one per output line); and, after the deadline, the
+    append: the digest of the session id that names the ledger file (as long as the payload gives it), the
+    orchestration registry read that locates the state directory (read whole, as every hook here reads it;
+    this hook sets no size bound on it), the duplicate scan (a session file under _CITE_DEDUP_BELOW bytes),
+    at most _CITE_MAX_ROWS rows of under _CITE_ROW_MAX bytes, and, when a session file is created, one
+    listing of the ledger directory (not bounded in entries) and at most _CITE_PRUNE_MAX removals. A failed
+    write SURFACES as a non-blocking systemMessage naming the error (nocncl), never a swallowed one."""
     if data.get("hook_event_name") != "PostToolUse":
         return _allow()
     deadline = time.monotonic() + _CITE_BUDGET
@@ -13641,34 +13679,37 @@ def citation_read_recorder(data):
 # checked command earns one guard-events row (kind citint) recording every citation's class, the bake
 # evidence a later promotion is decided on. As in the recorder, one deadline set when the handler starts
 # covers the toplevel probes, every git probe (each given only the time left, none started once it is
-# reached), every path resolution, every stat or open of a resolved path, every cited-file read, the scan of
-# every message, body and here-document text (made first, before the toplevel probe), and every row
-# digest; a range not judged by then is named as such, and where the deadline stops a scan no toplevel
-# probe is started and the note says no citation was checked. Every path the check resolves goes through
-# _cite_resolution (_citechk_real): a message or body file, a cited path (joined to the repository top where
-# relative), the repository top a diff is read against, and the session cwd and a git -C directory it
-# compares. A path longer than _CITE_MAX_PATH characters, one whose resolution would follow more than
-# _CITE_MAX_LINKS symlinks, and one reached, or still being walked, once the deadline has passed are not
-# resolved: a body file is named as not read, and each range that needs the path as not judged, with the
-# bound or the budget named (where the deadline passes before the toplevel probe, that note names each body
-# file not read). The deadline is checked at each line of a text's scan, before each citation is judged,
-# before each path is resolved and between two components of its resolution, before each stat or open of
-# a resolved path, between a cited file's read chunks and before each row's digest. A step under way when
-# it is reached finishes first: one line of a scan, one component of a resolution (an lstat and, for a
-# symlink, its readlink), one stat or open, one chunk's read, or one digest (at most _CITE_MAX_FILE
-# bytes). Not checked against the deadline, and bounded by size or count instead: the message or body
-# files (at most _CITECHK_BODY_MAX bytes each, each opened only before the deadline) and the two ledger
-# generations (at most _CITECHK_LEDGER_MAX bytes each), read and parsed whole within those bounds; a cited
-# file's split into lines (at most _CITE_MAX_FILE bytes); for each of at most _CITECHK_MAX_CITES citations,
-# the match of a relative cited path against the paths the ledger records and of the range against the
-# rows of its file (ledgers within their bound); the parse of a diff probe's output (what git printed in
-# the time it was given); the lexing of the command and the parse of its here-documents, once each, at
-# whatever size the payload gives them, with the join of a body file or git -C path to the directory it is
-# relative to; the split of each text into lines before its scan (at the text's size); and the
-# orchestration registry read that locates the state directory (read whole, as every hook here reads it)
-# and the guard-events append. Each message, body or here-document text is scanned once, however many
-# commands or -F - options name it, and a cited or body-file path longer than _CITECHK_PATH_SHOWN
-# characters is shown in the note and the row shortened to that many characters (_citechk_short).
+# reached), every path resolution, every stat, open or fstat of a resolved path, every message, body and
+# cited-file read, the scan of every message, body and here-document text (made first, before the toplevel
+# probe), and every row digest; a range not judged by then is named as such, and where the deadline stops
+# a scan no toplevel probe is started and the note says no citation was checked. Every path the check
+# resolves goes through _cite_resolution (_citechk_real): a message or body file, a cited path (joined to
+# the repository top where relative), the repository top a diff is read against, and the session cwd and a
+# git -C directory it compares. A path longer than _CITE_MAX_PATH characters, one whose resolution would
+# follow more than _CITE_MAX_LINKS symlinks, and one reached, or still being walked, once the deadline has
+# passed are not resolved: a body file is named as not read, and each range that needs the path as not
+# judged, with the bound or the budget named (where the deadline passes before the toplevel probe, that
+# note names each body file not read). The deadline is checked at each line of a text's scan, before each
+# citation is judged, before each path is resolved, between two components of its resolution and before
+# each symlink it reads, before each stat, open or fstat of a resolved path, before each chunk of a message,
+# body or cited-file read and before each row's digest. A step under way when it is reached finishes
+# first: one line of a scan, one lstat or readlink of a resolution, one stat, open or fstat, one chunk's
+# read, or one digest (at most _CITE_MAX_FILE bytes). Not checked against the deadline, and bounded by size
+# or count instead: the two ledger generations (at most _CITECHK_LEDGER_MAX bytes each), read and parsed
+# whole within that bound; the decoding of a message or body file read before the deadline (at most
+# _CITECHK_BODY_MAX bytes); a cited file's split into lines (at most _CITE_MAX_FILE bytes); for each of at
+# most _CITECHK_MAX_CITES citations, the match of a relative cited path against the paths the ledger
+# records and of the range against the rows of its file (ledgers within their bound); the parse of a diff
+# probe's output (what git printed in the time it was given); the lexing of the command and the parse of
+# its here-documents, once each, at whatever size the payload gives them, with the join of a body file or
+# git -C path to the directory it is relative to; the split of each text into lines before its scan (at the
+# text's size); and the orchestration registry read that locates the state directory (read whole, as every
+# hook here reads it) and the guard-events append. A command's standard input (-F -) is the here-document
+# bash gives it, its last standard-input redirection, read once however many -F - options name it; where
+# that redirection is no here-document of the command, standard input is named as not read. Each text is
+# scanned once, in the order the command's options name it, and a cited or body-file path longer than
+# _CITECHK_PATH_SHOWN characters is shown in the note and the row shortened to that many characters
+# (_citechk_short).
 _CITECHK_BODY_MAX = 1024 * 1024          # a message or body file larger than this is not read (noted)
 _CITECHK_LEDGER_MAX = 2 * _CITE_CAP      # a ledger generation larger than this is not read (noted)
 _CITECHK_MAX_CITES = 200                 # at most this many citations are judged per Bash call
@@ -13755,36 +13796,6 @@ def _citechk_options(args, short, optional, long_names):
     return out
 
 
-def _citechk_heredocs(command):
-    """The bodies of the here-documents in command, in order: for each << (not <<<) whose delimiter parses,
-    the lines after the end of its line up to the delimiter line (leading tabs stripped for <<-), or to the
-    end of the command."""
-    bodies, i, n = [], 0, len(command)
-    while True:
-        i = command.find("<<", i)
-        if i == -1:
-            return bodies
-        if command.startswith("<<<", i):
-            i += 3
-            continue
-        parsed = _parse_heredoc_delim(command, i + 2, n)
-        newline = -1 if parsed is None else command.find("\n", parsed[3])
-        if newline == -1:
-            i += 2
-            continue
-        _quoted, delim, strip_tabs, _next = parsed
-        body, j = [], newline + 1
-        while j < n:
-            end = command.find("\n", j)
-            line = command[j:(n if end == -1 else end)]
-            j = n if end == -1 else end + 1
-            if (line.lstrip("\t") if strip_tabs else line) == delim:
-                break
-            body.append(line)
-        bodies.append("\n".join(body))
-        i = j
-
-
 def _citechk_short(path):
     """path as the note and the guard-events row show it: whole where it is at most _CITECHK_PATH_SHOWN
     characters long, else its first and last characters around "...", _CITECHK_PATH_SHOWN characters in all,
@@ -13813,9 +13824,10 @@ def _citechk_read_body(path, deadline):
     """(text, None) for a message or body file, else (None, reason): resolved through symlinks
     (_citechk_real, so a path over the length or link bound, or one reached once the check's deadline has
     passed, is not resolved and the reason names the bound or the budget), never a path under /dev or
-    /proc, opened only while the deadline has not been reached (else the reason names the budget) and
-    non-blocking (a FIFO is refused at the fstat, never waited on), a regular file of at most
-    _CITECHK_BODY_MAX bytes, strict UTF-8; one leading byte-order mark is dropped."""
+    /proc, opened, given to fstat and read chunk by chunk only while the deadline has not been reached
+    (else the reason names the budget, and a descriptor opened is closed all the same), non-blocking (a
+    FIFO is refused at the fstat, never waited on), a regular file of at most _CITECHK_BODY_MAX bytes,
+    strict UTF-8; one leading byte-order mark is dropped."""
     real, why = _citechk_real(path, "its path", deadline)
     if real is None:
         return None, why or "it cannot be resolved"
@@ -13828,10 +13840,14 @@ def _citechk_read_body(path, deadline):
     except (OSError, ValueError) as exc:
         return None, "it cannot be opened ({})".format(_cite_fail(exc))
     try:
+        if _cite_over(deadline):  # the open may have used the last of the time: no fstat after it
+            return None, _CITECHK_OUT_OF_TIME
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return None, "it is not a regular file"
         chunks, total = [], 0
         while total <= _CITECHK_BODY_MAX:
+            if _cite_over(deadline):  # checked before each chunk, so no read starts past the deadline
+                return None, _CITECHK_OUT_OF_TIME
             chunk = os.read(fd, min(1 << 20, _CITECHK_BODY_MAX + 1 - total))
             if not chunk:
                 break
@@ -13856,25 +13872,29 @@ def _citechk_read_body(path, deadline):
 def _citechk_commands(command, cwd, deadline):
     """The git commit and gh pr create or edit commands of a Bash command, each a dict: cmd (git-commit,
     gh-pr-create or gh-pr-edit), parse ("lexed", or "raw" where the command does not lex and its whole text
-    is scanned as body text), texts [(label, text)], heredocs (the Bash command's here-document bodies, where
-    the command reads standard input from them, else None), unread [(label, reason)], repo (the directory the
-    command runs in, after a git -C; None without an absolute session cwd) and base (a gh --base value). A
-    message or body file resolves against repo and is read by _citechk_read_body within the check's deadline;
-    "-" is standard input, read from the Bash command's here-documents where the command carries one and
-    otherwise named as unseen. The here-documents are parsed once per Bash command and given to a command
-    once, whatever the number of its -F - options: every command that reads them holds the one shared list,
-    never a copy, so _citechk_run scans each body once."""
+    is scanned as body text), texts [(label, text)] in the order the command's options name them, unread
+    [(label, reason)], repo (the directory the command runs in, after a git -C; None without an absolute
+    session cwd) and base (a gh --base value). A message or body file resolves against repo and is read by
+    _citechk_read_body within the check's deadline. "-" is standard input, one stream however many -F -
+    options name it, so it is taken once, at the first: the body of the here-document bash gives the
+    command, which is its last standard-input redirection (_lex_command), and otherwise, where that last
+    redirection is a file, a descriptor or none of the command's own (a pipe, for example), named as
+    unseen. A here-document is read only by the command it redirects."""
+    heredocs = []
     try:
-        segments = _lex_command(command)
+        segments = _lex_command(command, heredocs=heredocs)
     except ValueError:
         hits = sorted((found.start(), kind) for regex, kind in _CITECHK_RAW_KINDS
                       for found in [regex.search(command)] if found)
         if not hits:
             return []
-        return [{"cmd": hits[0][1], "parse": "raw", "texts": [("command text", command)], "heredocs": None,
-                 "unread": [], "repo": cwd, "base": None}]
-    out, heredocs = [], None
-    for seg in segments:
+        return [{"cmd": hits[0][1], "parse": "raw", "texts": [("command text", command)], "unread": [],
+                 "repo": cwd, "base": None}]
+    stdin = {}  # segment index: (redirects before it, body) of its last here-document
+    for index, before, body in heredocs:
+        stdin[index] = before, body
+    out = []
+    for index, seg in enumerate(segments):
         argv, at = seg.argv, _command_word_index(seg.argv)
         word, repo = _command_word(argv), cwd
         if word == "git":
@@ -13899,8 +13919,11 @@ def _citechk_commands(command, cwd, deadline):
         else:
             continue
         inline_names, file_names = _CITECHK_SOURCES[kind]
-        item = {"cmd": kind, "parse": "lexed", "texts": [], "heredocs": None, "unread": [], "repo": repo,
-                "base": None}
+        item = {"cmd": kind, "parse": "lexed", "texts": [], "unread": [], "repo": repo, "base": None}
+        here = stdin.get(index)
+        if here is not None and any(red.src_fd == 0 for red in seg.redirects[here[0]:]):
+            here = None  # a later redirect of fd 0 replaces the here-document
+        taken = False  # whether standard input has been taken
         for name, value in options:
             if value is None:
                 continue
@@ -13909,9 +13932,11 @@ def _citechk_commands(command, cwd, deadline):
             elif name in inline_names:
                 item["texts"].append(("{} value".format(name), value))
             elif name in file_names and value == "-":
-                if "<<" in seg.raw:
-                    heredocs = _citechk_heredocs(command) if heredocs is None else heredocs
-                    item["heredocs"] = heredocs  # one shared list, however many -F - options name it
+                if taken:
+                    continue
+                taken = True
+                if here is not None:
+                    item["texts"].append(("here-document", here[1]))
                 else:
                     item["unread"].append(("{} -".format(name), "it is read from standard input, which this "
                                            "check cannot see"))
@@ -14312,20 +14337,11 @@ def _citechk_run(data):
         return None
     # The texts are scanned for citations first, so no probe or resolution can use up the time a scan needs.
     # A scan stops at the deadline (_citechk_extract); the toplevel probe is then not started, and the note
-    # below says that no citation was checked, naming the budget.
-    scans = {}  # the id of a text, or of the shared here-document list: its (cites, counts), scanned once
+    # below says that no citation was checked, naming the budget. Each command's texts are scanned once
+    # each, in the order its options name them, so its citations keep that order in the note, in the row
+    # and under the citation cap.
     for item in commands:
-        item["found"], item["counts"] = [], {}
-        groups = [(id(text), (text,)) for _label, text in item["texts"]]
-        if item["heredocs"]:
-            groups.append((id(item["heredocs"]), item["heredocs"]))
-        for ident, texts in groups:
-            if ident not in scans:
-                scans[ident] = _citechk_scan(texts, deadline)
-            found, counts = scans[ident]
-            item["found"].append(found)  # the scan's own list, never copied, so a shared text costs no more
-            for name, value in counts.items():
-                item["counts"][name] = item["counts"].get(name, 0) + value
+        item["found"], item["counts"] = _citechk_scan([text for _label, text in item["texts"]], deadline)
     left = _cite_left(deadline)
     root = None if left is None else _recovery_toplevel(cwd, timeout=left)
     if root is None and _cite_over(deadline):
@@ -14357,7 +14373,7 @@ def _citechk_run(data):
             if not item["unresolved"] and here != there:
                 item["root"] = (None if left is None else _recovery_toplevel(item["repo"], timeout=left)) or root
     rows, faults, status = [], [], "not-read"
-    if any(not cite[4] for found, _counts in scans.values() for cite in found):
+    if any(not cite[4] for item in commands for cite in item["found"]):
         if key is None:
             status = "no-session"
         else:
@@ -14370,31 +14386,28 @@ def _citechk_run(data):
              "budget": False}
     judged, over_cap = 0, 0
     for item in commands:
-        item["over_cap"] = 0
-        for found in item["found"]:
-            room = max(_CITECHK_MAX_CITES - judged, 0)
-            over = max(len(found) - room, 0)  # counted, never listed, so a row stays bounded
-            over_cap += over
-            item["over_cap"] += over
-            for cite in found[:room]:
-                judged += 1
-                shown = "{}:{}".format(_citechk_short(cite[0]), cite[1]) \
-                    + ("-{}".format(cite[2]) if cite[2] != cite[1] else "")
-                result = {"cite": shown, "form": cite[3]}
-                if cite[4]:
-                    result["class"] = "exempt-verifier"
-                elif item["unresolved"]:
-                    state["budget"] = state["budget"] or _CITECHK_OUT_OF_TIME in item["unresolved"]
-                    result["class"], result["detail"] = "unjudged", "; ".join(item["unresolved"])
-                elif _cite_over(deadline):
-                    state["budget"] = True
-                    result["class"], result["detail"] = "unjudged", _CITECHK_OUT_OF_TIME
-                else:
-                    result["class"], result["detail"] = _citechk_class(cite, item, index, state)
-                    if result["class"] is None:
-                        item["dropped"] += 1
-                        continue
-                item["results"].append(result)
+        room = max(_CITECHK_MAX_CITES - judged, 0)
+        item["over_cap"] = max(len(item["found"]) - room, 0)  # counted, never listed, so a row stays bounded
+        over_cap += item["over_cap"]
+        for cite in item["found"][:room]:
+            judged += 1
+            shown = "{}:{}".format(_citechk_short(cite[0]), cite[1]) \
+                + ("-{}".format(cite[2]) if cite[2] != cite[1] else "")
+            result = {"cite": shown, "form": cite[3]}
+            if cite[4]:
+                result["class"] = "exempt-verifier"
+            elif item["unresolved"]:
+                state["budget"] = state["budget"] or _CITECHK_OUT_OF_TIME in item["unresolved"]
+                result["class"], result["detail"] = "unjudged", "; ".join(item["unresolved"])
+            elif _cite_over(deadline):
+                state["budget"] = True
+                result["class"], result["detail"] = "unjudged", _CITECHK_OUT_OF_TIME
+            else:
+                result["class"], result["detail"] = _citechk_class(cite, item, index, state)
+                if result["class"] is None:
+                    item["dropped"] += 1
+                    continue
+            item["results"].append(result)
     budget = state["budget"]
     flagged = [(item, result) for item in commands for result in item["results"]
                if result["class"] in _CITECHK_FLAGGED]
@@ -14448,16 +14461,13 @@ def _citechk_run(data):
         warn = bool(item["unread"]) or any(r["class"] in _CITECHK_FLAGGED for r in item["results"]) \
             or (ledger_faulty and any(r["class"] != "exempt-verifier" for r in item["results"])) \
             or item["over_cap"] > 0
-        heredocs = item["heredocs"] or []
         detail = {"v": 1, "control": "citation-read-check", "cmd": item["cmd"], "parse": item["parse"],
                   "session": key, "ledger": status, "ledger_rows": len(rows), "budget_exhausted": budget,
                   "citations": [{"cite": r["cite"], "class": r["class"], "form": r["form"]}
                                 for r in item["results"]],
                   "not_judged_past_cap": item["over_cap"], "dropped_not_citation": item["dropped"],
                   "masked": item["counts"],
-                  "sources": [label for label, _text in item["texts"]]
-                  + (["here-document"] if len(heredocs) == 1 else ["{} here-documents".format(len(heredocs))]
-                     if heredocs else []),
+                  "sources": [label for label, _text in item["texts"]],
                   "sources_unread": ["{}: {}".format(label, reason) for label, reason in item["unread"]],
                   "diff": item["diff"], "transcript": transcript if isinstance(transcript, str) else None}
         if warn:
@@ -14471,21 +14481,21 @@ def _citechk_run(data):
 
 def citation_read_check(data):
     """citint/refcap, PreToolUse Bash (stage BAKE: it surfaces and never denies): where a git commit message
-    (-m, --message, -F, --file, a here-document on -F -) or a gh pr create or edit body (--body, -b,
-    --body-file, -F) cites a path with a line or line range, note each cited range that this session's
-    citation ledger (both generations) does not cover at the cited lines with matching content, naming the
-    range and why (unread, stale, no such file, a file the recorder never records, or not judged), and
-    append one guard-events row (kind citint) per checked command, decision warn or allow. Inert (a silent
-    allow, no row) on any other event, tool or command, a payload with no command string, and a session cwd
-    that resolves to no git toplevel (a toplevel probe the deadline cuts short is named in a note instead).
-    A ledger that cannot be read, a missing session id, a body file that cannot be read, a body on standard
-    input it cannot see, and an exhausted budget (one that stops the scan of the message texts included),
-    citation cap, file cap, read bound, path bound or link bound (a path the check would resolve that is
-    longer than _CITE_MAX_PATH characters, or whose resolution would follow more than _CITE_MAX_LINKS
-    symlinks) are each named in the note, never a silent clean. Any fault inside the check is caught and
-    named in a note, so during the bake no path of this handler blocks; the dispatcher's own PreToolUse
-    error paths (an unreadable payload, a bad invocation, an interpreter below the floor) still exit 2 as
-    for every PreToolUse mode."""
+    (-m, --message, -F, --file, and on -F - the here-document the command's standard input receives) or a
+    gh pr create or edit body (--body, -b, --body-file, -F) cites a path with a line or line range, note
+    each cited range that this session's citation ledger (both generations) does not cover at the cited
+    lines with matching content, naming the range and why (unread, stale, no such file, a file the recorder
+    never records, or not judged), and append one guard-events row (kind citint) per checked command,
+    decision warn or allow. Inert (a silent allow, no row) on any other event, tool or command, a payload
+    with no command string, and a session cwd that resolves to no git toplevel (a toplevel probe the
+    deadline cuts short is named in a note instead). A ledger that cannot be read, a missing session id, a
+    body file that cannot be read, a body on standard input it cannot see, and an exhausted budget (one that
+    stops the scan of the message texts included), citation cap, file cap, read bound, path bound or link
+    bound (a path the check would resolve that is longer than _CITE_MAX_PATH characters, or whose
+    resolution would follow more than _CITE_MAX_LINKS symlinks) are each named in the note, never a silent
+    clean. Any fault inside the check is caught and named in a note, so during the bake no path of this
+    handler blocks; the dispatcher's own PreToolUse error paths (an unreadable payload, a bad invocation, an
+    interpreter below the floor) still exit 2 as for every PreToolUse mode."""
     try:
         message = _citechk_run(data)
     except Exception as exc:  # a fault in the check never blocks during the bake; it is named instead

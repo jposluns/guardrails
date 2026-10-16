@@ -49,6 +49,8 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import builtins
+import errno
 import json
 import os
 import subprocess
@@ -4192,34 +4194,71 @@ class _CiteCutPattern:
         return self.pattern.match(*args, **kwargs)
 
 
-def _cite_touches(targets, clock, run):
-    """run() with each os.stat and os.open of a path in targets recorded as whether the stand-in clock had
-    been advanced when it was made: those flags, in order."""
-    saved_stat, saved_open, made = os.stat, os.open, []
+def _cite_touches(targets, clock, run, cut=None):
+    """run() with each step a hook can take on a path in targets recorded as whether the stand-in clock had
+    been advanced when it was made: an os.stat, os.lstat, os.open, os.readlink or builtin open of the path,
+    and an os.fstat or os.read of a descriptor os.open gave for it (until os.close closes it). Those flags,
+    in order. With cut, the name of one of those os functions, the clock is advanced as the first such step
+    on targets returns, so the step after it is the first one the deadline can stop."""
+    saved = {"stat": os.stat, "lstat": os.lstat, "open": os.open, "readlink": os.readlink, "fstat": os.fstat,
+             "read": os.read, "close": os.close}
+    saved_builtin, made, fds = builtins.open, [], set()
 
-    def stat_(path, *args, **kwargs):
-        if isinstance(path, str) and path in targets:
-            made.append(clock.advanced)
-        return saved_stat(path, *args, **kwargs)
+    def touched(name, step):
+        made.append(clock.advanced)
+        try:
+            return step()
+        finally:
+            if name == cut:
+                clock.advance()
 
-    def open_(path, *args, **kwargs):
-        if isinstance(path, str) and path in targets:
-            made.append(clock.advanced)
-        return saved_open(path, *args, **kwargs)
+    def by_path(name):
+        def stand_in(path, *args, **kwargs):
+            if not (isinstance(path, str) and path in targets):
+                return saved[name](path, *args, **kwargs)
+            result = touched(name, lambda: saved[name](path, *args, **kwargs))
+            if name == "open":
+                fds.add(result)
+            return result
+        return stand_in
+
+    def by_fd(name):
+        def stand_in(fd, *args, **kwargs):
+            if fd not in fds:
+                return saved[name](fd, *args, **kwargs)
+            return touched(name, lambda: saved[name](fd, *args, **kwargs))
+        return stand_in
+
+    def close(fd, *args, **kwargs):
+        fds.discard(fd)
+        return saved["close"](fd, *args, **kwargs)
+
+    def builtin_open(file, *args, **kwargs):
+        if not (isinstance(file, str) and file in targets):
+            return saved_builtin(file, *args, **kwargs)
+        return touched("builtin open", lambda: saved_builtin(file, *args, **kwargs))
     try:
-        os.stat, os.open = stat_, open_
+        os.stat, os.lstat, os.open, os.readlink = by_path("stat"), by_path("lstat"), by_path("open"), by_path("readlink")
+        os.fstat, os.read, os.close, builtins.open = by_fd("fstat"), by_fd("read"), close, builtin_open
         run()
     finally:
-        os.stat, os.open = saved_stat, saved_open
+        os.stat, os.lstat, os.open, os.readlink = saved["stat"], saved["lstat"], saved["open"], saved["readlink"]
+        os.fstat, os.read, os.close, builtins.open = saved["fstat"], saved["read"], saved["close"], saved_builtin
     return made
 
 
 def _citeledger_walk_cases(tmp):
     """How far a resolution walks. It follows at most _CITE_MAX_LINKS symlinks: a chain of one under, at and
     one over that many resolves, resolves, and is refused for the link bound, and wherever it completes its
-    result is os.path.realpath's. It stops at the deadline between two components: with a stand-in clock
-    moved just inside, at or just past the deadline as the first symlink of a chain of three is read, the
-    walk reads the rest, or stops with the deadline as its reason and makes no further lstat. The link
+    result is os.path.realpath's. A symlink passed through again counts again, as many symlinks as Linux
+    follows for it each time, though the walk takes it from its cache: passes through one symlink, or
+    through a symlink to a symlink, that follow one or two under, exactly, and one or two over that many
+    resolve, resolve, and are refused for the link bound, as the kernel opens, opens, and refuses each
+    (ELOOP). It stops at the deadline between two components: with a stand-in clock moved just inside, at
+    or just past the deadline as the first symlink of a chain of three is read, the walk reads the rest, or
+    stops with the deadline as its reason and makes no further lstat. It stops at the deadline before it
+    reads a symlink: with the clock moved as the lstat of that first symlink returns, the walk reads all
+    three, or reads none and stops with the deadline as its reason. The link
     fan-out (24 symlinked directories of 700 symlinks each, every one to 819 times e/../, cited as one path
     of 162 characters joined to the repository top) ends within each hook's budget in this process's CPU
     time: the check names the link bound for the range, and for a body file reached the same way, which it
@@ -4285,6 +4324,63 @@ def _citeledger_walk_cases(tmp):
         aiqt_hooks.time, os.readlink, os.lstat = saved_time, saved_readlink, saved_lstat
     check("citeledger/resolve-stops-mid-walk", stopped,
           [((target, None), 3, 0), ((None, "deadline"), 1, 0), ((None, "deadline"), 1, 0)])
+    # The deadline before a symlink is read: a stand-in lstat moves the stand-in clock on as it finds l1 of
+    # l1 -> l2 -> l3 -> target to be a symlink; each lstat or readlink made once the clock reads at or past
+    # the deadline counts. Inside it the walk reads all three; at and past it, it reads none.
+    first, paused = os.path.join(os.path.realpath(os.path.dirname(three)), "l1"), []
+    try:
+        for offset in (-0.001, 0.0, 0.001):
+            clock = aiqt_hooks.time = _CiteClock(1000.0, 1005.0 + offset, False)
+            counts = {"readlink": 0, "late": 0}
+
+            def readlink(path, *args, clock=clock, counts=counts, **kwargs):
+                counts["readlink"] += 1
+                counts["late"] += clock.monotonic() >= 1005.0
+                return saved_readlink(path, *args, **kwargs)
+
+            def lstat(path, *args, clock=clock, counts=counts, **kwargs):
+                counts["late"] += clock.monotonic() >= 1005.0
+                try:
+                    return saved_lstat(path, *args, **kwargs)
+                finally:
+                    if path == first:
+                        clock.advance()
+            os.readlink, os.lstat = readlink, lstat
+            try:
+                got = resolved(three, 1005.0)
+            finally:
+                os.readlink, os.lstat = saved_readlink, saved_lstat
+            paused.append((got, counts["readlink"], counts["late"]))
+    finally:
+        aiqt_hooks.time, os.readlink, os.lstat = saved_time, saved_readlink, saved_lstat
+    check("citeledger/resolve-no-readlink-past-deadline", paused,
+          [((target, None), 3, 0), ((None, "deadline"), 0, 0), ((None, "deadline"), 0, 0)])
+    # Passes through one symlink, each one Linux follows again, cached or not: pass1 leads to d, so a pass
+    # through it follows one symlink, and pass2 to pass1, so a pass through it follows two. A path through
+    # either that follows one or two under, exactly, and one or two over _CITE_MAX_LINKS symlinks before
+    # naming d/f resolves to os.path.realpath's result, resolves, and is refused for the link bound, as the
+    # kernel opens, opens, and refuses it (ELOOP). Built under the resolved directory, so no symlink above
+    # it adds to the count.
+    base = os.path.realpath(str(walk))
+    for name, value in (("pass1", "d"), ("pass2", "pass1")):
+        os.symlink(value, os.path.join(base, name))
+
+    def kernel(path):
+        try:
+            os.stat(path)
+            return "opens"
+        except OSError as exc:
+            return errno.errorcode.get(exc.errno, exc.errno)
+    passes = {}
+    for name, per in (("pass1", 1), ("pass2", 2)):
+        for count in (links // per - 1, links // per, links // per + 1):
+            path = base + "/{}/..".format(name) * count + "/d/f"
+            got = resolved(path, time.monotonic() + 60)
+            passes.setdefault(name, []).append((count * per, got, got[0] in (None, os.path.realpath(path)),
+                                                kernel(path)))
+    check("citeledger/resolve-link-passes", passes,
+          {name: [(links - per, (target, None), True, "opens"), (links, (target, None), True, "opens"),
+                  (links + per, (None, "links"), True, "ELOOP")] for name, per in (("pass1", 1), ("pass2", 2))})
     # The link fan-out, built in this run's own directory: each s<i> leads through d<i>/t0 ... t699, and each
     # t<j> back to d<i> by 819 times e/../ (a target of 4,095 characters).
     fan = _CiteRepo(tmp / "cite-fan-out", {"a.py": b"a1\n", "msg.txt": b"see a.py:1\n"})
@@ -4332,21 +4428,30 @@ def _citeledger_walk_cases(tmp):
 
 def _citecheck_step_cases(tmp):
     """No step of either hook is taken on a resolved path once the deadline is reached, and the check reads
-    each message text once and stops its scan at the deadline. With a stand-in clock moved just inside, at
-    or just past the deadline as a resolution returns, no os.stat or os.open is made on the resolved path
-    after it: in the check, the body file's open (_citechk_read_body), the cited file's stat
-    (_citechk_resolve) and size stat (_citechk_class), and its open (_cite_read); in the recorder, a sed
-    read's open (_cite_read), a Grep path's stat (_cite_from_grep) and a grep command's file stat
-    (_cite_grep_command). Inside, each is made and the range judged or the row recorded; at and past it, the
-    range is not judged (budget), the body file is named as not read (budget), or nothing is recorded. The
-    here-documents of a Bash command are scanned once each, whatever the number of -F - options or of
-    commands that read them: 1,000 options over a 101,000 character here-document take one scan and end
-    within the budget in this process's CPU time, and a command's row lists each citation and source once.
-    The scan of a message stops at the deadline: a stand-in pattern moves the clock on at line 2 of the
-    masking or of the search, line 3 is not scanned, and the note says no citation was checked, naming the
+    each message text once, in its command's option order, and stops its scan at the deadline. With a
+    stand-in clock moved just inside, at or just past the deadline as one step returns, no further step is
+    made on the path (_cite_touches records each os.stat, os.lstat, os.open, os.readlink and builtin open of
+    it, and each os.fstat and os.read of a descriptor opened for it): in the check, the body file's open
+    after its resolution, its fstat after its open, its first read chunk after its fstat and its next chunk
+    after the first (_citechk_read_body), the cited file's stat after its resolution (_citechk_resolve), its
+    size stat (_citechk_class), its open after its resolution and its fstat after its open (_cite_read), and
+    a cited symlink's readlink after the lstat that finds it (_cite_real); in the recorder, a sed read's
+    open after its resolution and its fstat after its open (_cite_read), a Grep path's stat
+    (_cite_from_grep), a grep command's file stat after its resolution, and the second stat of the files a
+    grep command names after the first (_cite_grep_command). Inside, each is made and the range judged or
+    the row recorded; at and past it, the range is not judged (budget), the body file is named as not read
+    (budget), or nothing is recorded. A grep command gives each path it names one stat, a single named file
+    included. The here-document a command reads is scanned once, whatever the number
+    of its -F - options: 1,000 options over a 101,000 character here-document take one scan and end within
+    the budget in this process's CPU time, and a command's row lists each citation and source once. Each
+    command reads only the here-document its own standard input receives (bash gives it the last of its
+    standard-input redirections), its sources keep their option order in the note, the row and under the
+    citation cap, and where its standard input is not its own here-document it is named as not read. The
+    scan of a message stops at the deadline: a stand-in pattern moves the clock on at line 2 of the masking
+    or of the search, line 3 is not scanned, and the note says no citation was checked, naming the
     budget."""
     steps = _CiteRepo(tmp / "citecheck-steps", {"tools/a.py": b"a1\na2\n", "msg.txt": b"see tools/a.py:1\n",
-                                                "a.txt": b"a1\n"})
+                                                "a.txt": b"a1\n", "b.txt": b"b1\n"}, links=(("tools/l.py", "a.py"),))
     root, budget = steps.top, aiqt_hooks._CITECHK_BUDGET
 
     def spelled(rel):
@@ -4356,10 +4461,12 @@ def _citecheck_step_cases(tmp):
 
     def stepped(step, offset, budget_s, targets, call):
         """call() with a stand-in clock moved to the deadline plus offset once aiqt_hooks.<step> first
-        returns, the toplevel probe a stand-in naming the repository and no diff probe: whether an os.stat or
-        os.open of targets was made after that, and call's result."""
+        returns, or, for a step written os.NAME, once the first such call on targets returns
+        (_cite_touches), the toplevel probe a stand-in naming the repository and no diff probe: whether a
+        step on targets was made after that, and call's result."""
         clock = _CiteClock(1000.0, 1000.0 + budget_s + offset, False)
-        saved_step, out = getattr(aiqt_hooks, step), []
+        cut = step[len("os."):] if step.startswith("os.") else None
+        saved_step, out = (None if cut else getattr(aiqt_hooks, step)), []
 
         def stand_in(*args, **kwargs):
             try:
@@ -4369,17 +4476,26 @@ def _citecheck_step_cases(tmp):
         try:
             aiqt_hooks.time, aiqt_hooks._recovery_toplevel = clock, lambda *args, **kwargs: str(steps.root)
             aiqt_hooks._review_git = lambda *args, **kwargs: None
-            setattr(aiqt_hooks, step, stand_in)
-            made = _cite_touches(targets, clock, lambda: out.append(call()))
+            if cut is None:
+                setattr(aiqt_hooks, step, stand_in)
+            made = _cite_touches(targets, clock, lambda: out.append(call()), cut)
         finally:
             aiqt_hooks.time, aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git = saved
-            setattr(aiqt_hooks, step, saved_step)
+            if cut is None:
+                setattr(aiqt_hooks, step, saved_step)
         return any(made), out[0]
-    a_py, msg = spelled("tools/a.py"), spelled("msg.txt")
-    sites = (("body-open", "_citechk_real", "git commit -F " + os.path.join(root, "msg.txt"), msg),
-             ("cited-stat", "_citechk_real", "git commit -m 'see tools/a.py:1'", a_py),
-             ("cited-size", "_citechk_resolve", "git commit -m 'see tools/a.py:1'", a_py),
-             ("cited-open", "_cite_resolve", "git commit -m 'see tools/a.py:1'", a_py))
+    a_py, msg, l_py = spelled("tools/a.py"), spelled("msg.txt"), spelled("tools/l.py")
+    body_file, cites_a = "git commit -F " + os.path.join(root, "msg.txt"), "git commit -m 'see tools/a.py:1'"
+    # Per site: the step the clock is moved at, the command, and the paths whose steps are recorded. The
+    # body file is cut at the return of its resolution, its open, its fstat and its first read chunk; the
+    # cited file at the return of its resolution (before its stat), of _citechk_resolve (before its size
+    # stat), of _cite_resolve (before its open) and of its open (before its fstat); and a cited symlink
+    # (tools/l.py, to a.py) at the lstat that finds it to be one, before its readlink.
+    sites = (("body-open", "_citechk_real", body_file, msg), ("body-fstat", "os.open", body_file, msg),
+             ("body-read", "os.fstat", body_file, msg), ("body-chunk", "os.read", body_file, msg),
+             ("cited-stat", "_citechk_real", cites_a, a_py), ("cited-size", "_citechk_resolve", cites_a, a_py),
+             ("cited-open", "_cite_resolve", cites_a, a_py), ("cited-fstat", "os.open", cites_a, a_py),
+             ("cited-readlink", "os.lstat", "git commit -m 'see tools/l.py:1'", l_py))
     checked = {}
     for site, step, command, targets in sites:
         for name, offset in (("inside", -0.001), ("at", 0.0), ("outside", 0.001)):
@@ -4388,25 +4504,48 @@ def _citecheck_step_cases(tmp):
                                                                               "step-{}-{}".format(site, name)))
             checked.setdefault(site, []).append((made, [c["class"] for r in rows for c in r["detail"]["citations"]],
                                                  "budget" in note))
-    late = [(False, ["unjudged"], True)] * 2
+    judged, late, unread = [(True, ["unread"], False)], [(False, ["unjudged"], True)] * 2, [(False, [], True)] * 2
     check("citeledger/check-no-step-past-deadline", checked,
-          {"body-open": [(True, ["unread"], False)] + [(False, [], True)] * 2,
-           "cited-stat": [(True, ["unread"], False)] + late, "cited-size": [(True, ["unread"], False)] + late,
-           "cited-open": [(True, ["unread"], False)] + late})
+          {site: judged + (unread if site.startswith("body-") else late) for site, _step, _command, _targets in sites})
+    # The recorder: each tool's step cut as the first resolution returns, a sed read cut at its open (before
+    # its fstat), and a grep command naming two files cut at the first stat of the files it names (before
+    # the second stat).
     a_txt, recorded = spelled("a.txt"), {}
-    tools = (("sed", lambda s: steps.bash("sed -n 1p a.txt", "a1\n", s)),
-             ("Grep", lambda s: steps.grep(steps.root / "a.txt", "1:a1", s)),
-             ("grep", lambda s: steps.bash("grep -n a1 a.txt", "1:a1\n", s)))
-    for tool, call in tools:
+    tools = (("sed", "_cite_real", a_txt, lambda s: steps.bash("sed -n 1p a.txt", "a1\n", s)),
+             ("Grep", "_cite_real", a_txt, lambda s: steps.grep(steps.root / "a.txt", "1:a1", s)),
+             ("grep", "_cite_real", a_txt, lambda s: steps.bash("grep -n a1 a.txt", "1:a1\n", s)),
+             ("sed-fstat", "os.open", a_txt, lambda s: steps.bash("sed -n 1p a.txt", "a1\n", s)),
+             ("grep-stat", "os.stat", a_txt | spelled("b.txt"),
+              lambda s: steps.bash("grep -n a1 a.txt b.txt", "a.txt:1:a1\n", s)))
+    for tool, step, targets, call in tools:
         for name, offset in (("inside", -0.001), ("at", 0.0), ("outside", 0.001)):
             session = "step-{}-{}".format(tool, name)
-            made, _result = stepped("_cite_real", offset, aiqt_hooks._CITE_BUDGET, a_txt,
+            made, _result = stepped(step, offset, aiqt_hooks._CITE_BUDGET, targets,
                                     lambda call=call, session=session: call(session))
             recorded.setdefault(tool, []).append((made, len(steps.rows(session))))
     check("citeledger/recorder-no-step-past-deadline", recorded,
-          {tool: [(True, 1), (False, 0), (False, 0)] for tool, _call in tools})
+          {tool: [(True, 1), (False, 0), (False, 0)] for tool, _step, _targets, _call in tools})
+    # One stat per path a grep command names: the stat that admits a single named file also says it is a
+    # regular file, so it is not given to stat again.
+    named_files, saved_stat, per_path = a_txt | spelled("b.txt"), os.stat, {}
+    for name, command, shown in (("one", "grep -n a1 a.txt", "1:a1\n"), ("two", "grep -n a1 a.txt b.txt",
+                                                                         "a.txt:1:a1\n")):
+        counts = {}
+
+        def counted(path, *args, counts=counts, **kwargs):
+            if isinstance(path, str) and path in named_files:
+                counts[os.path.basename(path)] = counts.get(os.path.basename(path), 0) + 1
+            return saved_stat(path, *args, **kwargs)
+        try:
+            os.stat = counted
+            steps.bash(command, shown, "stat-" + name)
+        finally:
+            os.stat = saved_stat
+        per_path[name] = (counts, len(steps.rows("stat-" + name)))
+    check("citeledger/grep-one-stat-per-path", per_path,
+          {"one": ({"a.txt": 1}, 1), "two": ({"a.txt": 1, "b.txt": 1}, 1)})
     # Here-documents: each body scanned once (the scans of _citechk_extract counted), whatever the number of
-    # -F - options or of commands that read standard input from them.
+    # -F - options, and each command reads only the here-document its own standard input receives.
     saved_extract, scans = aiqt_hooks._citechk_extract, []
 
     def extract(text, *args, **kwargs):
@@ -4430,11 +4569,52 @@ def _citecheck_step_cases(tmp):
                             r["detail"]["masked"].get("fence", 0), r["detail"]["not_judged_past_cap"]) for r in rows])
     finally:
         aiqt_hooks._citechk_extract = saved_extract
-    both_cites = [("tools/a.py:1", "unread"), ("tools/a.py:2", "unread")]
     check("citeledger/check-heredoc-once", once,
           {"options": (1, True, "allow", [([], ["here-document"], 0, 0)]),
            "three": (1, True, "warn", [([("tools/a.py:1", "unread")], ["here-document"], 3, 0)]),
-           "two-commands": (2, True, "warn", [(both_cites, ["2 here-documents"], 0, 0)] * 2)})
+           "two-commands": (2, True, "warn", [([("tools/a.py:1", "unread")], ["here-document"], 0, 0),
+                                              ([("tools/a.py:2", "unread")], ["here-document"], 0, 0)])})
+    # A command's sources keep the order of its options: the here-document on -F - takes that option's
+    # place, before or after -m, in the note, in the row's citations and sources, and under the citation
+    # cap (lowered to one here), which judges the first source's range and counts the other's.
+    saved_cap, ordered, here = aiqt_hooks._CITECHK_MAX_CITES, {}, " <<'EOF'\nsee tools/a.py:1\nEOF\n"
+    try:
+        for cap in (saved_cap, 1):
+            aiqt_hooks._CITECHK_MAX_CITES = cap
+            for name, command in (("F-first", "git commit -F - -m 'see tools/a.py:2'" + here),
+                                  ("m-first", "git commit -m 'see tools/a.py:2' -F -" + here)):
+                _verdict_, note, rows = _citecheck_run(steps.root, command, "order-{}-{}".format(name, cap))
+                ordered["{}-{}".format(name, "capped" if cap == 1 else "all")] = (
+                    [line.split()[0] for line in note.split("\n") if line.startswith("  tools/")],
+                    [c["cite"] for r in rows for c in r["detail"]["citations"]],
+                    [r["detail"]["sources"] for r in rows], [r["detail"]["not_judged_past_cap"] for r in rows])
+    finally:
+        aiqt_hooks._CITECHK_MAX_CITES = saved_cap
+    first, second = ["tools/a.py:1", "tools/a.py:2"], ["tools/a.py:2", "tools/a.py:1"]
+    check("citeledger/check-heredoc-order", ordered,
+          {"F-first-all": (first, first, [["here-document", "-m value"]], [0]),
+           "m-first-all": (second, second, [["-m value", "here-document"]], [0]),
+           "F-first-capped": (first[:1], first[:1], [["here-document", "-m value"]], [1]),
+           "m-first-capped": (second[:1], second[:1], [["-m value", "here-document"]], [1])})
+    # Standard input is what bash gives the command, its last standard-input redirection: of two
+    # here-documents the second; a file redirected after the here-document replaces it (standard input named
+    # as not read), one before it does not; <<- strips the body's leading tabs, as bash does, so a tab does
+    # not hide a line as an indented block; and a here-document another command of a pipeline reads is not
+    # this command's (standard input named as not read).
+    unseen = ["-F -: it is read from standard input, which this check cannot see"]
+    stdin = {}
+    for name, command in (("two", "git commit -F - <<'A' <<'B'\nsee tools/a.py:1\nA\nsee tools/a.py:2\nB\n"),
+                          ("file-after", "git commit -F - <<'A' < a.txt\nsee tools/a.py:1\nA\n"),
+                          ("file-before", "git commit -F - < a.txt <<'A'\nsee tools/a.py:1\nA\n"),
+                          ("tabs", "git commit -F - <<-'A'\n\tsee tools/a.py:1\n\tA\n"),
+                          ("piped", "cat <<'A' | git commit -F -\nsee tools/a.py:1\nA\n")):
+        _verdict_, _note, rows = _citecheck_run(steps.root, command, "stdin-" + name)
+        stdin[name] = [([c["cite"] for c in r["detail"]["citations"]], r["detail"]["sources"],
+                        r["detail"]["sources_unread"]) for r in rows]
+    check("citeledger/check-heredoc-stdin", stdin,
+          {"two": [(["tools/a.py:2"], ["here-document"], [])], "file-after": [([], [], unseen)],
+           "file-before": [(["tools/a.py:1"], ["here-document"], [])],
+           "tabs": [(["tools/a.py:1"], ["here-document"], [])], "piped": [([], [], unseen)]})
     # The scan's deadline: line 2's match of the search's heading pattern, or of the masking's fence
     # pattern, moves a stand-in clock to just inside, at or just past the deadline. Inside, line 3 (the
     # second citation) is scanned too (three matches) and both ranges judged; at and past it the scan stops
