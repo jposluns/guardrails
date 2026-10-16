@@ -717,8 +717,13 @@ def _run_checks():
         check("ci/no-run-once-exit2",
               (rc, "no workflow run registered" in output), (2, True))
 
-        rc, _output, _calls = fixture.invoke([[page([])]], wait=True, timeout="0")
-        check("ci/no-run-wait-timeout-exit1", rc, 1)
+        # The exact TIMEOUT line: the read that ends the wait can come after the deadline (the poll
+        # sleep and the probe precede it), so the message says only what the latest read found.
+        rc, output, _calls = fixture.invoke([[page([])]], wait=True, timeout="0")
+        check("ci/no-run-wait-timeout-exit1",
+              (rc, [line for line in output.splitlines() if line.startswith("RESULT: TIMEOUT")]),
+              (1, ["RESULT: TIMEOUT; the latest workflow-run read found no workflow run for "
+                   + head_sha + "."]))
 
         rc, output, _calls = fixture.invoke(
             [{"error": "gh: Resource not accessible by personal access token", "exit": 1}])

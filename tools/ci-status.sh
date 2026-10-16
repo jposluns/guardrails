@@ -958,7 +958,7 @@ pr_probe() {
           ;;
         none)
           cause="no open pull request has ${SHA} as its head, and the pull requests associated with ${SHA} show none with this head merged into ${PR_BASE} (a listing read just after a push can still show the old head)"
-          refusal="RESULT: refusing to wait: no open pull request has ${SHA} as its head now, and the pull requests associated with ${SHA} show none with this head merged into ${PR_BASE} (one may have closed, never opened, or moved to another head), still after ${PR_PROBE_READS} reads ${PR_PROBE_RETRY_SECONDS}s apart, so no new pull_request run will start for it while that holds; a run that started earlier may still finish, but this head cannot merge through a pull request as it stands."
+          refusal="RESULT: refusing to wait: no open pull request has ${SHA} as its head now, and the pull requests associated with ${SHA} show none with this head merged into ${PR_BASE} (a pull request for it may have closed or moved to another head, or none was opened), still after ${PR_PROBE_READS} reads ${PR_PROBE_RETRY_SECONDS}s apart, so no new pull_request run will start for it while that holds; a run that started earlier may still finish, but this head cannot merge through a pull request as it stands."
           ;;
         base)
           echo "RESULT: refusing to wait: no open pull request for ${SHA} targets ${PR_BASE} now (${detail}), and the pull requests associated with ${SHA} show none with this head merged into ${PR_BASE}, so no new pull_request run into ${PR_BASE} will start for it while that holds; a run that started earlier may still finish, but this head cannot merge into ${PR_BASE} through a pull request as it stands."
@@ -1054,7 +1054,7 @@ while :; do
     printf '%s  no workflow run registered for this commit yet\n' "$(date -u +%H:%M:%SZ)"
     [ "$WAIT" != "--wait" ] && exit 2
     if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-      echo "RESULT: TIMEOUT; the last read before the deadline found no workflow run for ${SHA}."
+      echo "RESULT: TIMEOUT; the latest workflow-run read found no workflow run for ${SHA}."
       echo "  Check that a workflow is triggered by this event and branch."
       exit 1
     fi
