@@ -10127,6 +10127,111 @@ def _main_isolated(monitor):
         # commit subcommand (which had made the AI --author invisible) -> DENY.
         ciexpect("(ci-b1) backslash-newline AI-author commit does not slip via an empty argv element, denies",
                  "git \\\n commit --author='Claude <c@x>' -m y", "deny")
+        # A git commit behind leading reserved words, VAR=value words or a wrapper word (env, timeout, command,
+        # exec, nohup, xargs, sudo, nice, setsid, stdbuf, time) is judged like the bare form: behind a wrapper
+        # every later git word starts a git command, whatever the wrapper's own options and operands. Every deny
+        # vector but ci-wr25 (a path to git as the command word, already read as git) allowed when only a
+        # segment whose command word is git was read; the controls pin what the rule must not widen (an allowed
+        # identity, a lookup, a read-side verb, a word off the wrapper list).
+        ciexpect("(ci-wr1) env before git commit does not hide an AI --author, denies",
+                 'env git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr2) env with options, an unset name and assignments before git commit denies",
+                 'env -i -u HOME A=1 B=2 git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr3) timeout with a signal option and a duration before git commit denies",
+                 'timeout -s KILL 60 git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr4) command before git commit denies",
+                 'command git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr5) command -p runs git with the default PATH (not a lookup), denies",
+                 'command -p git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr6) exec -a NAME before git commit denies",
+                 'exec -a name git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr7) nohup before git commit denies",
+                 'nohup git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr8) xargs -0 before git commit denies",
+                 'xargs -0 git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr9) sudo -u USER before git commit denies",
+                 'sudo -u ci git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr10) nice -n before git commit denies",
+                 'nice -n 10 git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr11) setsid before git commit denies",
+                 'setsid git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr12) stdbuf -oL before git commit denies",
+                 'stdbuf -oL git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr13) time -p before git commit denies",
+                 'time -p git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr14) nested wrappers before git commit deny",
+                 'sudo -u ci env A=1 nice -n 5 timeout 60 git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr15) a path to git behind a wrapper denies",
+                 'env /usr/bin/git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr16) a path to the wrapper denies",
+                 '/usr/bin/sudo git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr17) a wrapper option value spelled git does not end the scan, denies",
+                 'sudo -u git git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr18) a git -C value behind a wrapper is not read as the subcommand, denies",
+                 'env git -C /repo commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr19) an AI co-author trailer behind a wrapper denies",
+                 'sudo git commit -m "fix" -m "Co-Authored-By: Claude <c@x>"', "deny")
+        ciexpect("(ci-wr20) a VAR=value word before a wrapper denies",
+                 'LC_ALL=C sudo git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr21) a leading ! before git commit denies",
+                 '! git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr22) an if condition that runs git commit denies",
+                 'if git commit --author="Claude <c@x>" -m x; then :; fi', "deny")
+        ciexpect("(ci-wr23) a brace group that runs git commit denies",
+                 '{ git commit --author="Claude <c@x>" -m x; }', "deny")
+        ciexpect("(ci-wr24) a loop body that runs git commit after do denies",
+                 'for f in a; do git commit --author="Claude <c@x>" -m x; done', "deny")
+        ciexpect("(ci-wr25) a path to git as the command word denies, as before",
+                 '/usr/bin/git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr26) a wrapped command that is not git but carries git commit and an AI --author "
+                 "denies (the disclosed over-deny)",
+                 'xargs echo git commit --author="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr-c1) a wrapped commit with an allowed identity allows",
+                 'sudo -u ci env A=1 nice -n 5 git commit --author="Maint Ainer <m@example.invalid>" -m x',
+                 "allow")
+        ciexpect("(ci-wr-c2) command -v git is a lookup that runs no git commit, even with commit words after it, "
+                 "allows",
+                 'command -v git commit --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr-c3) command -V looks names up and runs no git commit, allows",
+                 'command -V git commit --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr-c4) command -pv, a clustered lookup, runs no git commit, allows",
+                 'command -pv git commit --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr-c5) a wrapped read-side git log --author allows",
+                 'env git log --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr-c6) a command word off the wrapper list does not widen the scan, allows",
+                 'echo git commit --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr-c7) an assignment value that ends in git starts no git command, allows",
+                 'env GIT=/usr/bin/git commit --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr-c8) an unwrapped git command is read once and a later git word is its operand, allows",
+                 'git log --grep git commit --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr-c9) a command word that is neither git nor a wrapper runs no git command, allows",
+                 'echo commit --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr-c10) a wrapped program named like a commit verb is not git, allows",
+                 'nohup commit --author="Claude <c@x>"', "allow")
+
+        # The wrapper scan is ONE pass: each word of a wrapped segment is read a bounded number of times. Every
+        # -c value below is spelled git, so each one also starts a git command still reading its options; a
+        # per-candidate suffix slice or re-scan would read the segment's words a quadratic number of times.
+        class _CiCountingTokens(list):
+            """A token list that counts the words read through indexing, slicing and iteration."""
+            reads = 0
+
+            def __getitem__(self, key):
+                self.reads += len(range(*key.indices(len(self)))) if isinstance(key, slice) else 1
+                return list.__getitem__(self, key)
+
+            def __iter__(self):
+                for item in list.__iter__(self):
+                    self.reads += 1
+                    yield item
+
+        _ci_long = _CiCountingTokens(["env"] + ["git", "-c"] * 2000 + ["x=1", "commit"])
+        _ci_subs = list(aiqt_hooks._cmtidn_git_commands(_ci_long))
+        if _ci_subs != [len(_ci_long) - 1] or _ci_long.reads > 8 * len(_ci_long):
+            failures.append("(ci-wr-lin) the wrapper scan over a {}-word segment yielded {!r} (want [{}]) after "
+                            "{} word reads (want at most {})".format(len(_ci_long), _ci_subs[:4],
+                                                                     len(_ci_long) - 1, _ci_long.reads,
+                                                                     8 * len(_ci_long)))
 
         # secsec (EN-5 PR-C): decision-signal battery for the secrets-shift-left guard.
         # === secrets_shift_left (secsec): an obvious hardcoded secret in a Write/Edit/Bash write-form ==
