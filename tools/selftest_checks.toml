@@ -857,6 +857,8 @@ id = "git-fixture-env-core"
 runner = "tools/selftest_git_fixture_env_core.py"
 expected-check-ids = [
   "config/lane-return-fail-closed",
+  "config/member-bound-opf-selftest",
+  "config/member-bound-reaches-run",
   "config/member-bound-table",
   "config/member-close-handlers",
   "config/member-close-lock",
@@ -868,6 +870,7 @@ expected-check-ids = [
   "config/member-failure-diagnostic-stdout",
   "config/member-grandchild-after-normal-exit",
   "config/member-off-main-thread",
+  "config/member-roster-figures",
   "config/member-timeout-cannot-evaluate",
   "config/member-timeout-cleanup-failure",
   "config/member-timeout-cleanup-on-raise",
