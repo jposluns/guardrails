@@ -60,14 +60,15 @@ Exit 0 clean, 1 on any finding or a malformed hashes file, 2 on a read error or 
 rule cannot evaluate (fail-closed). `--self-test` proves the gate FAILS on a seeded internal name (a
 provenance id, a host path, a hashed codename, and the role name in a tracked file outside SCOPE_RELPATHS)
 and passes clean generic content, so removing a layer makes a case fail. The self-test exits 0 only when
-every case ran and passed, and 1 when a case failed, also when it skipped a case (it then lists the cases
-it did not run). It exits 3 only when no case failed and it skipped a case, which it does by three routes:
-a run whose child sentinel matches its parent pid (as a child a parent self-test launches does) skips cases
-19 to 23, a top-level run whose inherited-probe sentinel matches its parent pid skips case 23, and a run in
-which os.symlink raises OSError, NotImplementedError or AttributeError while case 11 or case 12 makes its
-dangling symlink (an incapable platform, but also a permission or filesystem error on a capable one) skips
-that case. A host without FIFO support has no route to exit 3: case 19 skips, case 23 then fails for the
-FIFO failures its mutated copy cannot report, and the run exits 1. A run that skipped a case never exits 0.
+every case ran and passed; 1 when any case failed (it also prints the cases it did not run); otherwise, when
+it skipped a case, 3. It never exits 0 after a skip. Skip reasons it prints include, as examples rather than
+a complete set:
+  "case 11 (a dangling symlink could not be created)"
+  "case 12 (a dangling symlink could not be created)"
+  "case 19 at the {} path (a FIFO could not be created)" ({} is hash-file or scoped-file)
+  "case 19 (os.mkfifo is unavailable)"
+  "cases 19 to 23 (the child sentinel matched the parent pid)"
+  "case 23 (the inherited-probe sentinel matched the parent pid)"
 """
 import sys
 
@@ -950,8 +951,7 @@ def _self_test():
             #     five failure messages, so honouring the inherited value (as a child) fails it. It shows this
             #     for these two values only: a value equal to the launching run's pid is honoured by design, and
             #     a run misrecognized that way skips cases 19 to 23, so it exits 3, or 1 when a case also
-            #     failed, never 0. Case 19 needs os.mkfifo, so where a FIFO cannot be made this case fails
-            #     rather than passing. The copy is launched with _INHERITED_PROBE naming this process, so it
+            #     failed, never 0. The copy is launched with _INHERITED_PROBE naming this process, so it
             #     skips this case and does not recurse. Each copy therefore fails cases and skips one, and must
             #     exit 1 with its not-run line naming this case: a failure outranks a skip. A last lane runs
             #     this script unmutated as a top-level --self-test with only _INHERITED_PROBE naming this
@@ -959,10 +959,10 @@ def _self_test():
             #     INCOMPLETE line naming this case; a top-level run that skipped a case and exited 0 fails it.
             #     A platform lane then runs a second scratch copy as a top-level --self-test with neither
             #     sentinel set, so neither sentinel route can account for its exit. That copy's case 11
-            #     symlink creation raises OSError, so it skips case 11 the way a platform without symlinks
-            #     does, and its case 23 is cut out (it launches nothing, so it cannot recurse, and adds no
-            #     not-run line). It must exit 3 with the SELF-TEST INCOMPLETE line naming case 11, so a run
-            #     that returns 0 unless it is a recognized child or an inherited-probe run fails this lane.
+            #     symlink creation raises OSError, so it skips case 11, and its case 23 is cut out (it launches
+            #     nothing, so it cannot recurse, and adds no not-run line). It must exit 3 with the SELF-TEST
+            #     INCOMPLETE line naming case 11, so a run that returns 0 unless it is a recognized child or an
+            #     inherited-probe run fails this lane.
             lifecycle_entry = ("    from _git_fixture_env import fixture_git_lifecycle\n"
                                "    with fixture_git_lifecycle():\n"
                                "        return _self_test()\n")
@@ -1121,14 +1121,13 @@ def _self_test():
           "caller's home, XDG or system configuration during the self-test; an in-process self_test_main() "
           "restores the caller's environment exactly; a top-level self-test whose environment already holds "
           "the child sentinel as an inherited value still runs cases 19 to 22, shown through a mutated copy "
-          "for the two values this host gives (\"1\" and the run's parent pid where neither the run nor its "
-          "parent is PID 1), while the replacement values used where the run or its parent is PID 1 are "
-          "covered only by four direct calls, which show each result is two distinct values other than the "
-          "run's own pid; a run that fails no case but skips one exits 3, never 0, shown for a launched child "
-          "(child line), for a top-level run whose inherited-probe sentinel matches its parent pid, and for a "
-          "top-level run with neither sentinel set whose case 11 symlink creation raises (SELF-TEST INCOMPLETE "
-          "line each); exit 3 applies only when no case failed, so a host without FIFO support, where case 19 "
-          "skips and case 23 then fails because the FIFO failure messages it requires are missing, exits 1; "
+          "for each of the two values _stale_sentinel_values gives this run (\"1\" and the run's parent pid "
+          "where neither the run nor its parent is PID 1); in such a run, the replacement values used where "
+          "the run or its parent is PID 1 are covered only by four direct calls, which show each result is "
+          "two distinct values other than the run's own pid; a run that fails no case but skips one exits 3, "
+          "never 0, shown for a launched child (child line), for a top-level run whose inherited-probe "
+          "sentinel matches its parent pid, and for a top-level run with neither sentinel set whose case 11 "
+          "symlink creation raises OSError (SELF-TEST INCOMPLETE line each); "
           "a run that fails a case and skips one exits 1 and lists the case it did not run; a malformed "
           "hashes file is reported, never a silent empty denylist; a "
           "non-UTF-8 in-scope surface fails closed as unscannable, never a silent skip; a broken symlink "

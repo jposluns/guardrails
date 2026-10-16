@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "9f16376829911a88a2909816709c23b5aa923fc5135880784612db1002d0f285"
+tree-sha256 = "abe175c3e57e5ba5c92f5e275d26b85be18439212b79db8f4a2a83eec48c823d"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3366,8 +3366,8 @@ sha256 = "b187068a7bb71efa190a29c83f12f241a285580c3305d7cc0f4a08bb58a2a7ed"
 
 [[sources]]
 path = "tools/check_internal_names.py"
-bytes = 79184
-sha256 = "cf8dfda8f43a8e9154418180354a2902aec50e2e0106ab7e5136ef7cb20ddc6b"
+bytes = 78627
+sha256 = "178e7dfd3bfe8e86b71b9c324a8e4fbb58b48808794b2f2eb88b9de3bec47372"
 
 [[sources]]
 path = "tools/check_leaks.py"
