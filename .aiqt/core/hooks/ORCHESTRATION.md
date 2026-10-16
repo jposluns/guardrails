@@ -469,29 +469,30 @@ reads it conservatively, as the diff output git writes by default, so some forms
 accepts but git does not write are refused rather than read: a localized no-newline marker, a context
 marker that only added lines follow, an added-line marker that more added lines follow, and a line
 beginning with a backslash, other than git's exact marker, right after a hunk's counted lines or
-their marker. Not every such form is refused: an added-line marker that a removed line follows, an
-empty line read as context, and lines after a hunk's counted lines are read. Either way each hunk is
-still consumed by the line counts in its header, so no path is hidden. A file section opens at a
-`diff --git` line, or at a
-`---` line naming a path, which a `+++` line and a hunk header must follow. Each hunk is consumed by
-the line counts in its own header, so an added line that reads `++ b/x` (shown as `+++ b/x`) is
-content, not a header. Git's exact `\ No newline at end of file` marker is read only where git writes
-one, after the last line of each side of the file it marks. A marker after a removed line marks the
-old side, after an added line the new side, and after a context line both. So a marker is read only
-where the hunk header's count for each side it marks is met, and only in the section's last hunk. A
-line after a hunk's counted lines and its marker is not part of the hunk: as `git apply` reads it, it
-is prose unless it opens a section or begins as a diff header or a marker does, so a hunk with extra
-lines after its counted ones is not refused for them. The exception is a line right after the
-counted lines, or right after their marker, that begins with a backslash, with or without a space
-after it: git writes nothing there but its exact marker, so any other such line is refused. A section
-completes with a hunk, a binary marker (`Binary files ... differ` or `GIT binary patch`), or a
-creation, deletion, mode change, rename or copy header. A section names at most one old path (its
-`---`, `rename from` and `copy from` headers) and one new path (its `+++`, `rename to` and `copy to`
-headers), and its `diff --git` line names exactly those, `a/` then `b/`, as git writes them from one
-pair. A rename names both of its paths (`rename from` and `rename to`), a copy only its destination
-(`copy to`), a deletion or a creation the one path that is not `/dev/null`, and a section with no
-path header (a mode change, an empty file, a binary change) the one path its `diff --git` line names
-twice. C-quoted names are decoded, and a name is read up to a tab.
+their marker. Not every such form is refused: an added-line marker that a removed line follows and an
+empty line read as context are read, and an ordinary line after a hunk's counted lines is read as
+prose, while one that begins as a diff header or a marker does is refused as outside a file section.
+Either way each hunk is still consumed by the line counts in its header, so no path is hidden. A file
+section opens at a `diff --git` line, or at a `---` line naming a path, which a `+++` line and a hunk
+header must follow. Each hunk is consumed by the line counts in its own header, so an added line
+that reads `++ b/x` (shown as `+++ b/x`) is content, not a header. Git's exact
+`\ No newline at end of file` marker is read only where git writes one, after the last line of each
+side of the file it marks. A marker after a removed line marks the old side, after an added line the
+new side, and after a context line both. So a marker is read only where the hunk header's count for
+each side it marks is met, and only in the section's last hunk. A line after a hunk's counted lines
+and its marker is not part of the hunk: as `git apply` reads it, it is prose unless it opens a section
+or begins as a diff header or a marker does, so a hunk with extra lines after its counted ones is not
+refused for them. The exception is a line right after the counted lines, or right after their
+marker, that begins with a backslash, with or without a space after it: git writes nothing there but
+its exact marker, so any other such line is refused. A section completes with a hunk, a binary
+marker (`Binary files ... differ` or `GIT binary patch`), or a creation, deletion, mode change,
+rename or copy header. A section names at most one old path (its `---`, `rename from` and
+`copy from` headers) and one new path (its `+++`, `rename to` and `copy to` headers), and its
+`diff --git` line names exactly those, `a/` then `b/`, as git writes them from one pair. A rename
+names both of its paths (`rename from` and `rename to`), a copy only its destination (`copy to`), a
+deletion or a creation the one path that is not `/dev/null`, and a section with no path header (a
+mode change, an empty file, a binary change) the one path its `diff --git` line names twice. C-quoted
+names are decoded, and a name is read up to a tab.
 
 Outside a section, a line is prose and is skipped unless it begins as a diff header or a no-newline
 marker does. Prose covers what git writes around its sections (the mailbox headers and the commit
@@ -501,11 +502,15 @@ lines. A line that begins as a diff header or a marker does is not prose, wherev
 section, at the end, or before prose), since a section cut short or mangled would otherwise drop out
 of the census unseen: a `+++` line, a hunk header, an extended header such as `index` or
 `rename from` (including the older `rename old` and `rename new`), a binary marker, a line beginning
-with a backslash and a space (which `git apply` reads as a no-newline marker when it is at least
-eleven characters long, and rejects as a corrupt patch when shorter), and a `diff -` line
-other than `diff --git` (besides it, git writes only `diff --cc` and `diff --combined`, for a merge,
-which are refused as combined diffs, so `diff -ruN` output is refused too). A `---` line naming a
-path always opens a section.
+with a backslash and a space, and a `diff -` line other than `diff --git` (besides it, git writes
+only `diff --cc` and `diff --combined`, for a merge, which are refused as combined diffs, so
+`diff -ruN` output is refused too). A `---` line naming a path always opens a section.
+
+Among a hunk's counted lines, `git apply` reads a line beginning with a backslash and a space as a
+no-newline marker when it is at least eleven characters long and rejects a shorter one as a corrupt
+patch; right after a hunk's counted lines it accepts any such line, reading one of eleven characters
+or more as a marker and passing over a shorter one. The census refuses every such line other than
+git's exact marker in both places.
 
 - More than one `Review-draft:` line, a relative draft path, a draft that cannot be read (missing, a
   symlink, not a regular file, over the cap, not UTF-8, a NUL), an empty `Review-skip:` value, and a
@@ -531,7 +536,7 @@ path always opens a section.
   beginning with a backslash right after a hunk's counted lines or their marker, and a diff header or
   marker line outside a section. Where a `diff --git` line names its paths under `b/` and then `a/`, as
   `git diff -R` writes it, in a section with no `---` line (a mode change, a binary change, an empty
-  file or a pure rename), the reason names that swap; a section with a `---` line, as most
+  file, a pure rename or a pure copy), the reason names that swap; a section with a `---` line, as most
   `git diff -R` output has, is refused first with the reason that its `---` or `+++` line names no
   path under git's prefix for its side.
 - A header or hunk line that ends in a carriage return before its LF is withheld as `UNVERIFIABLE:`,
