@@ -12711,13 +12711,16 @@ def orch_dispatch_ledger(data):
 # blob), never from tool output. A text it reads (a Read, Grep or Bash output, a Write content, an Edit's
 # new_string, old_string or originalFile) longer than _CITE_MAX_TEXT characters and a Bash command longer
 # than _CITE_MAX_COMMAND record nothing, and a path longer than _CITE_MAX_PATH is never resolved, so names
-# no file; any other field is only type-checked or compared with a fixed value. One deadline, set when the
-# handler starts, covers the toplevel probe and the work up to the append: each git probe is given only the
-# time left and none starts once it is reached, a file read checks it between chunks, no path is resolved
-# once it is reached, and the split of a response into lines, the comparison of shown lines with the file,
-# the scan of grep output and of a grep or rg command's words, the merge of grep hits into spans and the
-# digest of each row check it at each line, word, line number or row; the rows digested by then are still
-# appended. What it does not cover is bounded by size or count instead (see citation_read_recorder).
+# no file; any other field is only type-checked or compared with a fixed value, except a Read's startLine
+# and numLines, also used in arithmetic, and the payload's cwd, given to the toplevel probe and joined to the
+# relative paths a call names or prints. One deadline, set when the handler starts, covers the toplevel probe
+# and the work up to the append: each git probe is given only the time left and none starts once it is
+# reached, a file read checks it between chunks, no path is resolved once it is reached, and the split of a
+# response into lines, the comparison of shown lines with the file, the scan of grep output and of a grep or
+# rg command's words, the merge of grep hits into spans and the digest of each row check it at each line,
+# word, line number or row; the rows digested by then are still appended. A step under way when it is
+# reached finishes first, and what the deadline does not cover is bounded by size or count instead (both
+# listed in citation_read_recorder).
 _CITE_TOOLS = frozenset(("Read", "Grep", "Bash", "Write", "Edit"))
 _CITE_DIR = "citation-ledger"
 _CITE_NAME_RE = re.compile(r"[0-9a-f]{16}\.jsonl(?:\.1)?")
@@ -12822,10 +12825,11 @@ def _cite_over(deadline):
 
 
 def _cite_resolve(path, deadline):
-    """The recorder's resolution of path (_cite_real), or None without resolving it: a path longer than
-    _CITE_MAX_PATH characters, or the call's deadline reached. Every path the recorder resolves goes through
-    here, so a resolution, whose work grows with the path's components, starts only before the deadline and
-    walks at most _CITE_MAX_PATH characters."""
+    """The resolution of path (_cite_real), or None without resolving it: a path longer than _CITE_MAX_PATH
+    characters, or the call's deadline reached. Every path the recorder or the citation check resolves goes
+    through here, so a resolution, whose work grows with the path's components, starts only before the
+    deadline and is given at most _CITE_MAX_PATH characters (a symlink it meets adds its target's
+    components to the walk)."""
     if len(path) > _CITE_MAX_PATH or _cite_over(deadline):
         return None
     return _cite_real(path)
@@ -13495,31 +13499,40 @@ def citation_read_recorder(data):
     characters, and a Read, Grep or Bash output, a Write content or an Edit's new_string, old_string or
     originalFile longer than _CITE_MAX_TEXT characters, record nothing, and a path longer than
     _CITE_MAX_PATH characters is not resolved (_cite_resolve), so names no file; every other field of the
-    tool input and response is only type-checked or compared with a fixed value. One deadline, _CITE_BUDGET
-    seconds from here, covers the toplevel probe and the work of _cite_rows: each git probe is given only
-    the time left and none starts once it is reached, and it is checked between a file read's chunks,
-    before each path is resolved, at each line of a response's split, of the comparison of shown lines with
-    the file and of the scan of grep output, at each word of a grep or rg command, at each line number of
-    the merge of grep hits into spans, before each Edit range and at each of its lines, and before each
-    row's digest; the rows digested by then are appended. A step under way when it is reached finishes
-    first: the scan of one output line for the places it could split (at most _CITE_MAX_TEXT characters),
-    the resolution of one path (at most _CITE_MAX_PATH characters), the read of one chunk, and the count of
-    the lines before one Edit range or the digest of one row (at most _CITE_MAX_FILE bytes each). Bounded by
-    size or count instead of the deadline: the payload, read and parsed whole before this handler starts;
-    the lexing of a command, the argument checks of git show and the parse of its one ls-tree line, and the
-    join and stat of each path a grep or rg command names (a command of at most _CITE_MAX_COMMAND
-    characters); the copy of a Bash output without its final line feed (at most _CITE_MAX_TEXT characters);
-    the split of a file's or blob's bytes into lines and, for a Write or Edit, the decoding of the file and
-    of the new text and a Write's comparison of the two (at most _CITE_MAX_FILE bytes and _CITE_MAX_TEXT
-    characters); the search for at most _CITE_EDIT_MAX replacements and the replacement check of an Edit
-    (texts of at most _CITE_MAX_TEXT characters); the sort of the grep hits found before the deadline (at
-    most one per output line); and, after the deadline, the append: the digest of the session id that names
-    the ledger file (as long as the payload gives it), the orchestration registry read that locates the
-    state directory (read whole, as every hook here reads it; this hook sets no size bound on it), the
-    duplicate scan (a session file under _CITE_DEDUP_BELOW bytes), at most _CITE_MAX_ROWS rows of under
-    _CITE_ROW_MAX bytes, and, when a session file is created, one listing of the ledger directory (not
-    bounded in entries) and at most _CITE_PRUNE_MAX removals. A failed write SURFACES as a non-blocking
-    systemMessage naming the error (nocncl), never a swallowed one."""
+    tool input and response is only type-checked or compared with a fixed value, except a Read's startLine
+    and numLines, which are also used in arithmetic (the first line of the span, its count of lines), and
+    the payload's cwd, which is given to the toplevel probe and joined to each relative path a Grep, grep,
+    rg or sed call names or prints (each joined path is then held to the path bound). One deadline,
+    _CITE_BUDGET seconds from here, covers the toplevel probe and the work of _cite_rows: each git probe is
+    given only the time left and none starts once it is reached, and it is checked between a file read's
+    chunks, before each path is resolved, at each line of a response's split, of the comparison of shown
+    lines with the file and of the scan of grep output, at each word of a grep or rg command, at each line
+    number of the merge of grep hits into spans, before each Edit range and at each of its lines, and before
+    each row's digest; the rows digested by then are appended. A step under way when it is reached finishes
+    first: the scan of one output line for the places it could split, with the slicing of its at most
+    _CITE_MAX_SPLITS splits and the join of each split's path to cwd (at most _CITE_MAX_TEXT characters);
+    the find and slice of one line when a response text is split into lines (_cite_lines, _cite_split; at
+    most _CITE_MAX_TEXT characters) and the find of one line in an Edit range (_cite_within; a file of at
+    most _CITE_MAX_FILE bytes); the decoding of one file line and its comparison with a shown line
+    (_cite_span, and _cite_hits through _cite_text; a line of at most _CITE_MAX_FILE bytes); the parse of
+    one word of a grep or rg command (at most _CITE_MAX_COMMAND characters); the resolution of one path (at
+    most _CITE_MAX_PATH characters, and the targets of the symlinks it meets); the read of one chunk; and
+    the count of the lines before one Edit range or the digest of one row (at most _CITE_MAX_FILE bytes
+    each). Bounded by size or count instead of the deadline: the payload, read and parsed whole before this
+    handler starts; the lexing of a command, the argument checks of git show and the parse of its one
+    ls-tree line, and the join and stat of each path a grep or rg command names (a command of at most
+    _CITE_MAX_COMMAND characters); the copy of a Bash output without its final line feed (at most
+    _CITE_MAX_TEXT characters); the split of a file's or blob's bytes into lines and, for a Write or Edit,
+    the decoding of the file and of the new text and a Write's comparison of the two (at most _CITE_MAX_FILE
+    bytes and _CITE_MAX_TEXT characters); the search for at most _CITE_EDIT_MAX replacements and the
+    replacement check of an Edit (texts of at most _CITE_MAX_TEXT characters); the sort of the grep hits
+    found before the deadline (at most one per output line); and, after the deadline, the append: the digest
+    of the session id that names the ledger file (as long as the payload gives it), the orchestration
+    registry read that locates the state directory (read whole, as every hook here reads it; this hook sets
+    no size bound on it), the duplicate scan (a session file under _CITE_DEDUP_BELOW bytes), at most
+    _CITE_MAX_ROWS rows of under _CITE_ROW_MAX bytes, and, when a session file is created, one listing of
+    the ledger directory (not bounded in entries) and at most _CITE_PRUNE_MAX removals. A failed write
+    SURFACES as a non-blocking systemMessage naming the error (nocncl), never a swallowed one."""
     if data.get("hook_event_name") != "PostToolUse":
         return _allow()
     deadline = time.monotonic() + _CITE_BUDGET
@@ -13552,12 +13565,25 @@ def citation_read_recorder(data):
 # checked command earns one guard-events row (kind citint) recording every citation's class, the bake
 # evidence a later promotion is decided on. As in the recorder, one deadline set when the handler starts
 # covers the toplevel probes, every git probe (each given only the time left, none started once it is
-# reached), every cited-file read and every row digest; a range not judged by then is named as such. Not
-# checked against the deadline: the message or body files (at most _CITECHK_BODY_MAX bytes each) and the two
-# ledger generations (at most _CITECHK_LEDGER_MAX bytes each), read and parsed whole within those bounds; a
-# cited file's split into lines (at most _CITE_MAX_FILE bytes); the command and its inline message texts,
-# lexed and scanned whole at whatever size the payload gives them; and the orchestration registry read that
-# locates the state directory (read whole, as every hook here reads it) and the guard-events append.
+# reached), every path resolution, every cited-file read and every row digest; a range not judged by then is
+# named as such. Every path the check resolves goes through _cite_resolve (_citechk_real): a message or body
+# file, a cited path (joined to the repository top where relative), the repository top a diff is read
+# against, and the session cwd and a git -C directory it compares. A path longer than _CITE_MAX_PATH
+# characters, or one reached once the deadline has passed, is not resolved: a body file is named as not
+# read, and each range that needs the path as not judged, with the bound or the budget named. The deadline
+# is checked before each citation is judged, before each path is resolved, between a cited file's read
+# chunks and before each row's digest. A step under way when it is reached finishes first: one resolution
+# (of at most _CITE_MAX_PATH characters, and the targets of the symlinks it meets), one chunk's read, or one
+# digest (at most _CITE_MAX_FILE bytes). Not checked against the deadline, and bounded by size or count
+# instead: the message or body files (at most _CITECHK_BODY_MAX bytes each) and the two ledger generations
+# (at most _CITECHK_LEDGER_MAX bytes each), read and parsed whole within those bounds; a cited file's stat
+# and its split into lines (at most _CITE_MAX_FILE bytes); for each of at most _CITECHK_MAX_CITES citations,
+# the match of a relative cited path against the paths the ledger records and of the range against the
+# rows of its file (ledgers within their bound); the parse of a diff probe's output (what git printed in the
+# time it was given); the command and its inline message texts, lexed and scanned whole at whatever size
+# the payload gives them, with the join of a body file or git -C path to the directory it is relative to;
+# and the orchestration registry read that locates the state directory (read whole, as every hook here
+# reads it) and the guard-events append.
 _CITECHK_BODY_MAX = 1024 * 1024          # a message or body file larger than this is not read (noted)
 _CITECHK_LEDGER_MAX = 2 * _CITE_CAP      # a ledger generation larger than this is not read (noted)
 _CITECHK_MAX_CITES = 200                 # at most this many citations are judged per Bash call
@@ -13673,13 +13699,27 @@ def _citechk_heredocs(command):
         i = j
 
 
-def _citechk_read_body(path):
-    """(text, None) for a message or body file, else (None, reason): resolved through symlinks, never a path
-    under /dev or /proc, opened non-blocking (a FIFO is refused at the fstat, never waited on), a regular file
-    of at most _CITECHK_BODY_MAX bytes, strict UTF-8; one leading byte-order mark is dropped."""
-    real = _cite_real(path)
+def _citechk_real(path, what, deadline):
+    """(path resolved through _cite_resolve, None), or (None, why it was not resolved): what (the path, as the
+    note names it) is longer than _CITE_MAX_PATH characters, or the check's deadline has been reached
+    (_CITECHK_OUT_OF_TIME); (None, None) where it cannot be resolved (an embedded NUL, for example)."""
+    real = _cite_resolve(path, deadline)
+    if real is not None:
+        return real, None
+    if len(path) > _CITE_MAX_PATH:
+        return None, "{} is longer than {} characters, the most this check resolves".format(what, _CITE_MAX_PATH)
+    return None, _CITECHK_OUT_OF_TIME if _cite_over(deadline) else None
+
+
+def _citechk_read_body(path, deadline):
+    """(text, None) for a message or body file, else (None, reason): resolved through symlinks
+    (_citechk_real, so a path longer than _CITE_MAX_PATH characters, or one reached once the check's
+    deadline has passed, is not resolved and the reason names the bound or the budget), never a path under
+    /dev or /proc, opened non-blocking (a FIFO is refused at the fstat, never waited on), a regular file of
+    at most _CITECHK_BODY_MAX bytes, strict UTF-8; one leading byte-order mark is dropped."""
+    real, why = _citechk_real(path, "its path", deadline)
     if real is None:
-        return None, "it cannot be resolved"
+        return None, why or "it cannot be resolved"
     if real in ("/dev", "/proc") or real.startswith(("/dev/", "/proc/")):
         return None, "it is under /dev or /proc, which this check does not read"
     try:
@@ -13712,13 +13752,14 @@ def _citechk_read_body(path):
     return text.removeprefix("\ufeff"), None
 
 
-def _citechk_commands(command, cwd):
+def _citechk_commands(command, cwd, deadline):
     """The git commit and gh pr create or edit commands of a Bash command, each a dict: cmd (git-commit,
     gh-pr-create or gh-pr-edit), parse ("lexed", or "raw" where the command does not lex and its whole text
     is scanned as body text), texts [(label, text)], unread [(label, reason)], repo (the directory the command
     runs in, after a git -C; None without an absolute session cwd) and base (a gh --base value). A message or
-    body file resolves against repo; "-" is standard input, read from the command's here-documents where the
-    command carries one and otherwise named as unseen."""
+    body file resolves against repo and is read by _citechk_read_body within the check's deadline; "-" is
+    standard input, read from the command's here-documents where the command carries one and otherwise named
+    as unseen."""
     try:
         segments = _lex_command(command)
     except ValueError:
@@ -13774,7 +13815,7 @@ def _citechk_commands(command, cwd):
                     item["unread"].append(("{} {}".format(name, value), "it is relative and the session has "
                                            "no absolute cwd to resolve it against"))
                     continue
-                text, reason = _citechk_read_body(os.path.join(repo or "/", value))
+                text, reason = _citechk_read_body(os.path.join(repo or "/", value), deadline)
                 if text is None:
                     item["unread"].append(("{} {}".format(name, value), reason))
                 else:
@@ -13972,11 +14013,11 @@ def _citechk_base(repo, spec, merge, deadline):
     return probe.stdout.decode("ascii", "replace").strip() or None
 
 
-def _citechk_added(repo, base, real, deadline):
+def _citechk_added(repo, top, base, real, deadline):
     """The inclusive line spans of real, as the working tree holds it, that the diff from commit base to the
-    working tree adds (its -U0 hunk headers), or None where real is outside repo, the probe fails, or the
-    check's deadline leaves no time for it (the probe is given only the time left)."""
-    top = os.path.realpath(repo).rstrip("/") + "/"
+    working tree adds (its -U0 hunk headers), or None where real is outside top (repo, resolved), the probe
+    fails, or the check's deadline leaves no time for it (the probe is given only the time left)."""
+    top = top.rstrip("/") + "/"
     left = _cite_left(deadline)
     if not real.startswith(top) or left is None:
         return None
@@ -13994,20 +14035,25 @@ def _citechk_added(repo, base, real, deadline):
     return spans
 
 
-def _citechk_resolve(token, repo, index):
-    """The resolved regular file a cited path names: under repo (an absolute path kept), else the one ledger
-    path ending in /token where exactly one does; None otherwise."""
-    real = _cite_real(token if os.path.isabs(token) else os.path.join(repo, token))
+def _citechk_resolve(token, repo, index, deadline):
+    """(real, None): the resolved regular file a cited path names, under repo (an absolute path kept), else
+    the one ledger path ending in /token where exactly one does; (None, None) where it names none; and
+    (None, reason) where the path, joined to repo where relative, is not resolved (_citechk_real: longer than
+    _CITE_MAX_PATH characters, or the check's deadline reached), when no ledger path is matched either."""
+    real, why = _citechk_real(token if os.path.isabs(token) else os.path.join(repo, token),
+                              "the path it names (joined to the repository top where relative)", deadline)
+    if why is not None:
+        return None, why
     try:
         if real is not None and stat.S_ISREG(os.stat(real).st_mode):
-            return real
+            return real, None
     except (OSError, ValueError):
         pass
     if os.path.isabs(token):
-        return None
+        return None, None
     suffix = "/" + token.removeprefix("./")
     hits = {path for path in index if path.endswith(suffix)}
-    return hits.pop() if len(hits) == 1 else None
+    return (hits.pop() if len(hits) == 1 else None), None
 
 
 def _citechk_class(cite, item, index, state):
@@ -14019,9 +14065,14 @@ def _citechk_class(cite, item, index, state):
     the bytes the recorder digested, so a git show row of any revision counts where the working tree holds
     the blob's bytes at those lines. A read or a diff probe the check's deadline cuts short, and a range
     whose rows are not all digested before it (checked before each digest), is unjudged, and state["budget"]
-    says so."""
+    says so; so is a range whose cited path or repository top is not resolved, with the bound or the budget
+    as its detail (_citechk_real)."""
     token, first, last = cite[0], cite[1], cite[2]
-    real = _citechk_resolve(token, item["root"], index)
+    real, why = _citechk_resolve(token, item["root"], index, state["deadline"])
+    if why == _CITECHK_OUT_OF_TIME:
+        state["budget"] = True
+    if why is not None:
+        return "unjudged", why
     if real is None:
         shaped = "/" in token and _CITECHK_EXT.search(token.rsplit("/", 1)[-1])
         return ("nofile", None) if shaped else (None, None)
@@ -14058,10 +14109,12 @@ def _citechk_class(cite, item, index, state):
             current.append((start, end))
     if _citechk_covers(current, first, last):
         return "covered", None
-    added = _citechk_diff(item, real, state)
+    added, why = _citechk_diff(item, real, state)
     if added is None and _cite_over(state["deadline"]):
         state["budget"] = True
         return "unjudged", _CITECHK_OUT_OF_TIME
+    if why is not None:
+        return "unjudged", why
     if added and _citechk_covers(current + added, first, last):
         return "authored-in-diff", None
     if _citechk_covers([(start, end) for start, end, _digest in rows], first, last):
@@ -14072,24 +14125,28 @@ def _citechk_class(cite, item, index, state):
 
 
 def _citechk_diff(item, real, state):
-    """The lines of real the command's diff adds (see _citechk_added), cached; the command's diff status
-    becomes "used", or "unavailable" where the base or the probe fails."""
+    """(added, why): added the lines of real the command's diff adds (see _citechk_added), cached, or None;
+    why, where the repository top is not resolved (_citechk_real, before any probe: longer than
+    _CITE_MAX_PATH characters, or the check's deadline reached), the bound or the budget, else None. The
+    command's diff status becomes "used", or "unavailable" where the top, the base or the probe fails."""
     merge = item["cmd"] != "git-commit"
     spec = (item["base"] or "origin/HEAD") if merge else "HEAD"
+    if item["root"] not in state["tops"]:
+        state["tops"][item["root"]] = _citechk_real(item["root"], "the repository top", state["deadline"])
+    top, why = state["tops"][item["root"]]
     base_key = (item["root"], spec, merge)
-    if base_key not in state["bases"]:
+    if top is not None and base_key not in state["bases"]:
         state["bases"][base_key] = _citechk_base(item["root"], spec, merge, state["deadline"])
-    base = state["bases"][base_key]
+    base = state["bases"].get(base_key)
     key = base_key + (real,)
-    if key not in state["diffs"]:
-        state["diffs"][key] = None if base is None else _citechk_added(item["root"], base, real,
-                                                                       state["deadline"])
-    added = state["diffs"][key]
+    if base is not None and key not in state["diffs"]:
+        state["diffs"][key] = _citechk_added(item["root"], top, base, real, state["deadline"])
+    added = state["diffs"].get(key)
     if added is None:
         item["diff"] = "unavailable"
     elif item["diff"] != "unavailable":
         item["diff"] = "used"
-    return added
+    return added, why
 
 
 def _citechk_phrase(result, root):
@@ -14116,7 +14173,7 @@ def _citechk_run(data):
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str) or not _CITECHK_PREFILTER.search(command):
         return None
-    commands = _citechk_commands(command, cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None)
+    commands = _citechk_commands(command, cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None, deadline)
     if not commands or not (isinstance(cwd, str) and cwd):
         return None
     left = _cite_left(deadline)
@@ -14131,11 +14188,16 @@ def _citechk_run(data):
     key = _cite_sha256(session.encode("utf-8", "replace"))[:16] if isinstance(session, str) and session else None
     for item in commands:
         item["cites"], item["counts"], item["results"], item["dropped"], item["diff"] = [], {}, [], 0, "not-needed"
-        if item["repo"] is None or os.path.realpath(item["repo"]) == os.path.realpath(cwd):
-            item["root"] = root
-        else:
+        item["root"], item["unresolved"] = root, None
+        if item["repo"] is not None and item["repo"] != cwd:
+            # A git -C directory and the session cwd are compared resolved (_citechk_real); where either is
+            # refused, for the path bound or the deadline, each range of the command is named as not judged.
+            here, why_here = _citechk_real(cwd, "the session cwd", deadline)
+            there, why_there = _citechk_real(item["repo"], "the git -C directory", deadline)
+            item["unresolved"] = why_here or why_there
             left = _cite_left(deadline)
-            item["root"] = (None if left is None else _recovery_toplevel(item["repo"], timeout=left)) or root
+            if item["unresolved"] is None and here != there:
+                item["root"] = (None if left is None else _recovery_toplevel(item["repo"], timeout=left)) or root
         for _label, text in item["texts"]:
             found, counts = _citechk_extract(text)
             item["cites"].extend(found)
@@ -14151,8 +14213,8 @@ def _citechk_run(data):
     index = {}
     for path, start, end, digest in rows:
         index.setdefault(path, []).append((start, end, digest))
-    state = {"files": {}, "current": {}, "bases": {}, "diffs": {}, "bytes": 0, "deadline": deadline,
-             "budget": False}
+    state = {"files": {}, "current": {}, "tops": {}, "bases": {}, "diffs": {}, "bytes": 0, "deadline": deadline,
+             "budget": any(reason == _CITECHK_OUT_OF_TIME for item in commands for _label, reason in item["unread"])}
     judged, over_cap = 0, 0
     for item in commands:
         item["over_cap"] = 0
@@ -14166,6 +14228,9 @@ def _citechk_run(data):
             result = {"cite": shown, "form": cite[3]}
             if cite[4]:
                 result["class"] = "exempt-verifier"
+            elif item["unresolved"] is not None:
+                state["budget"] = state["budget"] or item["unresolved"] == _CITECHK_OUT_OF_TIME
+                result["class"], result["detail"] = "unjudged", item["unresolved"]
             elif _cite_over(deadline):
                 state["budget"] = True
                 result["class"], result["detail"] = "unjudged", _CITECHK_OUT_OF_TIME
@@ -14256,9 +14321,10 @@ def citation_read_check(data):
     allow, no row) on any other event, tool or command, a payload with no command string, and a session cwd
     that resolves to no git toplevel (a toplevel probe the deadline cuts short is named in a note instead).
     A ledger that cannot be read, a missing session id, a body file that cannot be read, a body on standard
-    input it cannot see, and an exhausted budget, citation cap, file cap or read bound are each named in the
-    note, never a silent clean. Any fault inside the check is caught and named in a note, so during the bake
-    no path of this handler blocks; the dispatcher's own PreToolUse error paths (an unreadable payload, a bad
+    input it cannot see, and an exhausted budget, citation cap, file cap, read bound or path bound (a path
+    the check would resolve that is longer than _CITE_MAX_PATH characters) are each named in the note, never
+    a silent clean. Any fault inside the check is caught and named in a note, so during the bake no path of
+    this handler blocks; the dispatcher's own PreToolUse error paths (an unreadable payload, a bad
     invocation, an interpreter below the floor) still exit 2 as for every PreToolUse mode."""
     try:
         message = _citechk_run(data)

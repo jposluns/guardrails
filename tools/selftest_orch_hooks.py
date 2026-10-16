@@ -2970,6 +2970,17 @@ class _CiteSplitProbe(str):
         return str.find(self, *args, **kwargs)
 
 
+class _CiteCutProbe(_CiteSplitProbe):
+    """A _CiteSplitProbe that moves the stand-in clock set as its clock (a _CiteClock) on once cut lines have
+    been split out of it by str.find, so the deadline is reached at a known line."""
+
+    def find(self, *args, **kwargs):
+        found = _CiteSplitProbe.find(self, *args, **kwargs)
+        if self.lines == self.cut:
+            self.clock.advance()
+        return found
+
+
 def _cite_stub_git(stub_dir):
     """Write a git stand-in into stub_dir, for PATH: when one of its arguments is in CITE_STUB_SLOW (one per
     line; "*" slows every call) it appends "start" to the file CITE_STUB_MARK, sleeps 8 seconds, appends
@@ -3047,15 +3058,16 @@ class _CiteStepClock:
         return getattr(time, name)
 
 
-def _cite_resolutions(run):
-    """run() with every os.path.realpath call made inside aiqt_hooks._cite_rows recorded: the paths it was
-    given, in order, so a vector can tell which paths the recorder resolved."""
-    saved_rows, saved_realpath, active, paths = aiqt_hooks._cite_rows, os.path.realpath, [], []
+def _cite_resolutions(run, within="_cite_rows"):
+    """run() with every os.path.realpath call made inside aiqt_hooks.<within> (the recorder's _cite_rows, or
+    the check's _citechk_run) recorded: the paths it was given, in order, so a vector can tell which paths
+    the recorder or the check resolved."""
+    saved_within, saved_realpath, active, paths = getattr(aiqt_hooks, within), os.path.realpath, [], []
 
-    def rows(*args, **kwargs):
+    def scoped(*args, **kwargs):
         active.append(True)
         try:
-            return saved_rows(*args, **kwargs)
+            return saved_within(*args, **kwargs)
         finally:
             active.pop()
 
@@ -3064,10 +3076,12 @@ def _cite_resolutions(run):
             paths.append(path)
         return saved_realpath(path, *args, **kwargs)
     try:
-        aiqt_hooks._cite_rows, os.path.realpath = rows, realpath
+        setattr(aiqt_hooks, within, scoped)
+        os.path.realpath = realpath
         run()
     finally:
-        aiqt_hooks._cite_rows, os.path.realpath = saved_rows, saved_realpath
+        setattr(aiqt_hooks, within, saved_within)
+        os.path.realpath = saved_realpath
     return paths
 
 
@@ -3143,32 +3157,41 @@ def _citeledger_deadline_cases(tmp):
           ([target, None, None], [limit - 1, limit, limit + 1], [target, target, None]))
     # Once a stand-in toplevel probe has moved the clock to just inside, at or just past the deadline, no
     # path is resolved, the session root included, whatever the tool: Read, Write and Grep stop at their
-    # first resolution, and grep, sed and git show before it. Just inside, every tool resolves its paths;
-    # git show still records nothing there, since its ls-tree probe is given the one millisecond left.
+    # first resolution, and grep, sed and git show before it. Just inside, every tool resolves its paths
+    # and records its row. git show's ls-tree and cat-file probes are each given the one millisecond left
+    # (recorded, to the microsecond) by a stand-in that then runs the real probe with git's own default
+    # timeout, so what is recorded never depends on how fast a real git process starts.
     (repo.root / "w.txt").write_bytes(b"w1\n")
     a_txt, w_txt = str(repo.root / "a.txt"), str(repo.root / "w.txt")
-    tools = (("Read", 1, lambda s: repo.call("Read", {"file_path": a_txt}, {"type": "text", "file": {
+    tools = (("Read", [], lambda s: repo.call("Read", {"file_path": a_txt}, {"type": "text", "file": {
                  "filePath": a_txt, "content": "a1", "startLine": 1, "numLines": 1}}, s)),
-             ("Write", 1, lambda s: repo.call("Write", {"file_path": w_txt, "content": "w1\n"}, {"filePath": w_txt},
-                                              s)),
-             ("Grep", 1, lambda s: repo.grep(repo.root, "a.txt:1:a1", s)),
-             ("grep", 1, lambda s: repo.bash("grep -n a1 a.txt", "1:a1\n", s)),
-             ("sed", 1, lambda s: repo.bash("sed -n 1p a.txt", "a1\n", s)),
-             ("git-show", 0, lambda s: repo.bash("git show HEAD:a.txt", shown, s)))
-    resolved = {}
+             ("Write", [], lambda s: repo.call("Write", {"file_path": w_txt, "content": "w1\n"},
+                                               {"filePath": w_txt}, s)),
+             ("Grep", [], lambda s: repo.grep(repo.root, "a.txt:1:a1", s)),
+             ("grep", [], lambda s: repo.bash("grep -n a1 a.txt", "1:a1\n", s)),
+             ("sed", [], lambda s: repo.bash("sed -n 1p a.txt", "a1\n", s)),
+             ("git-show", [("ls-tree", 0.001), ("cat-file", 0.001)],
+              lambda s: repo.bash("git show HEAD:a.txt", shown, s)))
+    resolved, probes = {}, []
+
+    def probe(repo_dir, *args, **kwargs):
+        probes.append((args[0], round(kwargs.get("timeout", -1.0), 6)))
+        return saved[2](repo_dir, *args)
     try:
+        aiqt_hooks._review_git = probe
         for name, offset in (("inside", -0.001), ("at", 0.0), ("outside", 0.001)):
-            for tool, _rows, call in tools:
+            for tool, _probes, call in tools:
                 clock = aiqt_hooks.time = _CiteClock(1000.0, 1000.0 + aiqt_hooks._CITE_BUDGET + offset, False)
                 aiqt_hooks._recovery_toplevel = lambda *args, clock=clock, **kwargs: clock.advance() or str(
                     repo.root)
                 session = "resolve-{}-{}".format(tool, name)
+                del probes[:]
                 paths = _cite_resolutions(lambda call=call, session=session: call(session))
-                resolved.setdefault(tool, []).append((bool(paths), len(repo.rows(session))))
+                resolved.setdefault(tool, []).append((bool(paths), len(repo.rows(session)), list(probes)))
     finally:
-        aiqt_hooks.time, aiqt_hooks._recovery_toplevel = saved[0], saved[1]
+        aiqt_hooks.time, aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git = saved[0], saved[1], saved[2]
     check("citeledger/no-resolution-past-deadline", resolved,
-          {tool: [(True, rows), (False, 0), (False, 0)] for tool, rows, _call in tools})
+          {tool: [(True, 1, given), (False, 0, []), (False, 0, [])] for tool, given, _call in tools})
 
     def stepped(step_name, after, session_of, call, seen=None):
         """call(session) once per clock position, with the clock moved to it by a stand-in around
@@ -3250,11 +3273,12 @@ def _citeledger_timing_cases(tmp):
     default (_cite_probe_timeouts); a large file read in slowed chunks and many files read slowly make at
     least one slowed read and fewer than reading them whole takes; and a huge grep output takes at most
     the budget plus one second of this process's CPU time (CPU time, not elapsed time, so a runner busy
-    with other work cannot stretch it). Each of the toplevel, ls-tree and cat-file probes, slowed alone, is
-    reached and cut off, and nothing is recorded. The probe and read vectors get a 2.5 second budget, so the
-    unslowed probes before the slowed step finish well inside it on a busy runner, and a slowed read takes
-    half a second, so a whole read of big.txt (9 reads) takes 4.5 seconds and of the many files (100 reads)
-    50: the budget cuts both short."""
+    with other work cannot stretch it), and with the deadline reached at a known line by a stand-in clock
+    is split up to that line, scanned into hits up to the line before it, and records nothing. Each of the
+    toplevel, ls-tree and cat-file probes, slowed alone, is reached and cut off, and nothing is recorded.
+    The probe and read vectors get a 2.5 second budget, so the unslowed probes before the slowed step finish
+    well inside it on a busy runner, and a slowed read takes half a second, so a whole read of big.txt (9
+    reads) takes 4.5 seconds and of the many files (100 reads) 50: the budget cuts both short."""
     budget, slack, cut_budget = 0.5, 1.0, 2.5
     big = b"x\n" * (4 * 1024 * 1024)
     files = {"tools/a.py": b"alpha = 1\n", "big.txt": big,
@@ -3306,6 +3330,21 @@ def _citeledger_timing_cases(tmp):
         repo.grep(repo.root / "huge.txt", huge_out, "huge-grep")
         cpu = time.process_time() - began
         aiqt_hooks._CITE_BUDGET = cut_budget
+        # The same output with the deadline reached at a known line: the 1,000th line split off moves a
+        # stand-in clock to it (_CiteCutProbe; the toplevel probe is a stand-in too), so the scan is shown
+        # reached and cut short whatever the runner: 1,000 lines split off, the 999 before the cut scanned
+        # into hits (the hits _cite_merge is given), and no row, since no span is merged past the deadline.
+        saved_scan = (aiqt_hooks.time, aiqt_hooks._recovery_toplevel, aiqt_hooks._cite_merge)
+        merged, cut_out = [], _CiteCutProbe(huge_out)
+        try:
+            cut_out.clock, cut_out.cut = _CiteClock(1000.0, 1000.0 + cut_budget + 0.001, False), 1000
+            aiqt_hooks.time, aiqt_hooks._recovery_toplevel = cut_out.clock, lambda *args, **kwargs: str(repo.root)
+            aiqt_hooks._cite_merge = lambda hits, *args: merged.append(
+                sum(len(numbers) for numbers in hits.values())) or saved_scan[2](hits, *args)
+            repo.grep(repo.root / "huge.txt", cut_out, "huge-grep-cut")
+        finally:
+            aiqt_hooks.time, aiqt_hooks._recovery_toplevel, aiqt_hooks._cite_merge = saved_scan
+        scanned = (getattr(cut_out, "lines", 0), merged, len(repo.rows("huge-grep-cut")))
         cut = []
         for name, word in (("toplevel", "--show-toplevel"), ("ls-tree", "ls-tree"), ("cat-file", "cat-file")):
             within = []
@@ -3318,9 +3357,9 @@ def _citeledger_timing_cases(tmp):
         aiqt_hooks._CITE_BUDGET = saved_budget
     check("citeledger/deadline-bounds-worst-shapes",
           [("slow-git-probe", marks, timed, repo.rows("slow-git")), ("slow-file-read", 0 < big_reads < 9),
-           ("many-files", 0 < many_reads < 2 * 50), ("huge-grep-output", cpu <= budget + slack)],
+           ("many-files", 0 < many_reads < 2 * 50), ("huge-grep-output", cpu <= budget + slack, scanned)],
           [("slow-git-probe", ["start"], [True], []), ("slow-file-read", True), ("many-files", True),
-           ("huge-grep-output", True)])
+           ("huge-grep-output", True, (1000, [999], 0))])
     check("citeledger/slow-probe-cut-off", cut,
           [("toplevel", ["start"], [True], []), ("ls-tree", ["start"], [True], []),
            ("cat-file", ["start"], [True], [])])
@@ -3957,6 +3996,123 @@ def _citecheck_deadline_cases(tmp):
            ("merge-base", ["start"], False, [True], "warn", False, True, [("tools/a.py:1", "unjudged")]),
            ("diff", ["start"], False, [True], "warn", False, True, [("tools/a.py:1", "unjudged")]),
            ("file-read", [], True, [True], "warn", False, True, [("big.txt:1", "unjudged")])])
+
+
+def _citecheck_path_cases(tmp):
+    """Every path the citation check resolves is resolved only when it is at most _CITE_MAX_PATH characters
+    long and the check's deadline has not been reached: a message or body file (-F), a cited path (joined
+    to the repository top where relative), the repository top a diff is read against, and a git -C
+    directory and the session cwd it is compared with. Each is tried one under, at and one over the bound
+    (padded with slashes or ./ segments, which resolution drops), and with a stand-in clock moved past the
+    deadline just before the step that resolves it. Whether a path was resolved is read from the
+    os.path.realpath calls made inside _citechk_run (_cite_resolutions), never from timing; the toplevel
+    probe is a stand-in naming a fixed top, so a path git itself would refuse still reaches its site. Over
+    the bound the body file is named as not read and the range as not judged, the bound named; past the
+    deadline, the budget named. One end-to-end call, with the real toplevel probe, cites a path of 800,000
+    characters: it returns the warn note naming the bound within the budget in this process's CPU time."""
+    repo = _CiteRepo(tmp / "citecheck-path", {"tools/a.py": b"a1\na2\n", "msg.txt": b"see tools/a.py:1\n"})
+    root, limit = repo.top, aiqt_hooks._CITE_MAX_PATH
+    saved = (aiqt_hooks.time, aiqt_hooks._recovery_toplevel)
+
+    def pad(head, tail, size):
+        return head + "/" * (size - len(head) - len(tail)) + tail
+
+    def cited(size):
+        """A relative cited path naming tools/a.py that is size characters long once joined to root."""
+        rest = size - len(root) - 1 - len("tools/a.py")
+        detour = "tools/../" if rest % 2 else ""
+        return "./" * ((rest - len(detour)) // 2) + detour + "tools/a.py"
+
+    def run(command, session, cwd=root, top=root, step=None):
+        """citation_read_check on command at cwd, its toplevel probe a stand-in naming top: the paths
+        resolved inside _citechk_run, the classes of the command's guard-events row, and whether the note
+        names the path bound and the budget. With step, a stand-in clock is moved past the deadline just
+        before aiqt_hooks.<step> runs (for _recovery_toplevel, as the stand-in probe returns)."""
+        clock = _CiteClock(1000.0, 1000.0 + aiqt_hooks._CITECHK_BUDGET + 0.001, False)
+        saved_step = None if step in (None, "_recovery_toplevel") else getattr(aiqt_hooks, step)
+
+        def toplevel(*args, **kwargs):
+            if step == "_recovery_toplevel":
+                clock.advance()
+            return top
+
+        def stand_in(*args, **kwargs):
+            clock.advance()
+            return saved_step(*args, **kwargs)
+        events = Path(aiqt_hooks._orch_state_dir_for_root(top)) / "guard-events.jsonl"
+        before = len(events.read_text(encoding="utf-8").splitlines()) if events.is_file() else 0
+        result = []
+        try:
+            aiqt_hooks.time, aiqt_hooks._recovery_toplevel = clock, toplevel
+            if saved_step is not None:
+                setattr(aiqt_hooks, step, stand_in)
+            paths = _cite_resolutions(lambda: result.append(aiqt_hooks.citation_read_check({
+                "hook_event_name": "PreToolUse", "cwd": cwd, "tool_name": "Bash", "session_id": session,
+                "tool_input": {"command": command}})), "_citechk_run")
+        finally:
+            aiqt_hooks.time, aiqt_hooks._recovery_toplevel = saved
+            if saved_step is not None:
+                setattr(aiqt_hooks, step, saved_step)
+        note = result[0][1].get("systemMessage", "") if isinstance(result[0][1], dict) else ""
+        rows = [json.loads(x) for x in (events.read_text(encoding="utf-8").splitlines()[before:]
+                                        if events.is_file() else []) if x.strip()]
+        classes = [c["class"] for r in rows if r.get("kind") == "citint" for c in r["detail"]["citations"]]
+        bound = "is longer than {} characters".format(limit) in note
+        return paths, classes, bound, "budget" in note
+
+    # Per site: the call at a size, the path whose resolution is looked for, and the step the stand-in clock
+    # is moved past the deadline before.
+    sites = (
+        ("body", lambda size: (pad(root, "msg.txt", size), "git commit -F " + pad(root, "msg.txt", size), {}),
+         "_citechk_read_body"),
+        ("cited", lambda size: (os.path.join(root, cited(size)), "git commit -m 'see {}:1'".format(cited(size)),
+                                {}), "_citechk_resolve"),
+        ("top", lambda size: (pad(root, "", size), "git commit -m 'see {}/tools/a.py:1'".format(root),
+                              {"top": pad(root, "", size)}), "_citechk_diff"),
+        ("git-C-directory", lambda size: (pad(root, "", size), "git -C {} commit -m 'see tools/a.py:1'".format(
+            pad(root, "", size)), {}), "_recovery_toplevel"),
+        ("git-C-cwd", lambda size: (pad(root, "", size), "git -C {} commit -m 'see tools/a.py:1'".format(root),
+                                    {"cwd": pad(root, "", size)}), "_recovery_toplevel"))
+    sized, timed = {}, {}
+    for site, call, step in sites:
+        for size in (limit - 1, limit, limit + 1):
+            path, command, where = call(size)
+            paths, classes, bound, budget = run(command, "path-{}-{}".format(site, size), **where)
+            sized.setdefault(site, []).append((path in paths, classes, bound, budget))
+        path, command, where = call(limit - 1)
+        paths, classes, bound, budget = run(command, "path-{}-late".format(site), step=step, **where)
+        timed[site] = (path in paths, classes, bound, budget)
+    inside, over = (True, ["unread"], False, False), (False, ["unjudged"], True, False)
+    check("citeledger/check-path-bound", sized,
+          {"body": [inside, inside, (False, [], True, False)], "cited": [inside, inside, over],
+           "top": [inside, inside, over], "git-C-directory": [inside, inside, over],
+           "git-C-cwd": [inside, inside, over]})
+    # Past the deadline: the body file's resolution comes before the toplevel probe, so that probe is not
+    # started either and the note says the repository was not resolved within the budget.
+    check("citeledger/check-no-resolution-past-deadline", timed,
+          {"body": (False, [], False, True), "cited": (False, ["unjudged"], False, True),
+           "top": (False, ["unjudged"], False, True), "git-C-directory": (False, ["unjudged"], False, True),
+           "git-C-cwd": (False, ["unjudged"], False, True)})
+    # End to end, with the real toplevel probe and clock: a cited path of 800,000 characters is never
+    # resolved (none longer than the bound is), and the warn note naming the bound comes back within the
+    # budget in this process's CPU time.
+    long_path = "x/" * 399998 + "a.py"
+    events = Path(aiqt_hooks._orch_state_dir_for_root(str(repo.root))) / "guard-events.jsonl"
+    before = len(events.read_text(encoding="utf-8").splitlines()) if events.is_file() else 0
+    result = []
+    began = time.process_time()
+    paths = _cite_resolutions(lambda: result.append(aiqt_hooks.citation_read_check({
+        "hook_event_name": "PreToolUse", "cwd": str(repo.root), "tool_name": "Bash", "session_id": "path-long",
+        "tool_input": {"command": "git commit -m 'see {}:1'".format(long_path)}})), "_citechk_run")
+    cpu = time.process_time() - began
+    note = result[0][1].get("systemMessage", "") if isinstance(result[0][1], dict) else ""
+    rows = [json.loads(x) for x in (events.read_text(encoding="utf-8").splitlines()[before:]
+                                    if events.is_file() else []) if x.strip()]
+    check("citeledger/check-long-cited-path",
+          (len(long_path), _verdict(result[0]), [c["class"] for r in rows for c in r["detail"]["citations"]],
+           "is longer than {} characters".format(limit) in note, cpu <= aiqt_hooks._CITECHK_BUDGET,
+           max([0] + [len(path) for path in paths]) <= limit),
+          (800000, "warn", ["unjudged"], True, True, True))
 
 
 def _cite_unpaired(roadmap):
@@ -8595,6 +8751,7 @@ def _main_isolated(report_path=None):
             _citecheck_cases(tmp)
             _citecheck_show_cases(tmp)
             _citecheck_deadline_cases(tmp)
+            _citecheck_path_cases(tmp)
             _cite_roadmap_cases(tmp)
         finally:
             _cite_unpin_state(tmp, pinned)

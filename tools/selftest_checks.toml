@@ -831,6 +831,9 @@ expected-check-ids = [
   "citeledger/check-deadline-probe-boundary",
   "citeledger/git-show-row-judged-at-working-tree",
   "citeledger/check-deadline-bounds-slow-probes",
+  "citeledger/check-path-bound",
+  "citeledger/check-no-resolution-past-deadline",
+  "citeledger/check-long-cited-path",
   # ---------- the citation hooks together ----------
   "citeledger/roadmap-pairs-recorder-with-check",
   "citeledger/state-dir-inside-tmp",
