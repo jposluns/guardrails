@@ -2406,3 +2406,37 @@ expected-check-ids = [
   "revert/r7-request-red",
   "revert/every-flip-ran",
 ]
+
+[[suite]]
+id = "hook-latency-selftest"
+runner = "tools/measure_hook_latency.py"
+expected-check-ids = [
+  # ---------- the command line ----------
+  "args/bounds",
+  "args/defaults",
+  "args/unknown-refused",
+  # ---------- the statistics and the synthetic inputs ----------
+  "summary/order-statistics",
+  "inputs/bash-command-at-cap",
+  "inputs/write-sizes-exact",
+  "inputs/write-line-scans-clean",
+  "inputs/startup-payload-rejected",
+  # ---------- hooks.json ----------
+  "hooks/real-hooks-json-resolves",
+  "hooks/malformed-refused",
+  "hooks/missing-id-named",
+  "hooks/unknown-selection-named",
+  # ---------- the fixture and the child environment ----------
+  "fixture/git-fixture-shape",
+  "env/child-pinned",
+  # ---------- a measurement over stub hooks ----------
+  "measure/each-case-n-samples",
+  "measure/timed-out-never-a-time",
+  "measure/timeout-kills-child",
+  "measure/inside-timeout-is-a-time",
+  "report/exit-zero-with-timeouts",
+  "report/json-conditions",
+  "report/table-plain",
+  "report/json-existing-refused",
+  "measure/fixture-root-removed",
+]

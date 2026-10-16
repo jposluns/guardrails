@@ -702,6 +702,10 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite brief-capability-selftest
 
+      - name: Hook-latency harness self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite hook-latency-selftest
+
       - name: Entry-guard self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite entry-guard-selftest
