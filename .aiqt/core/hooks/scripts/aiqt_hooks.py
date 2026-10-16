@@ -16868,8 +16868,8 @@ class _DeadlineWindow:
     once, to the caller's handler, as the mask is put back.
     Any other SIGALRM pending at the restore (one sent while the mask was held, say) is left pending and
     reaches the caller's handler the same way. The kernel keeps at most one pending instance of a standard
-    signal, which leaves two merges: a SIGALRM sent while the window's own expiry is pending merges with it
-    and is discarded with it, and a caller expiry that came due and another SIGALRM pending at the restore
+    signal, which leaves two merges: a SIGALRM from elsewhere pending with the window's own expiry (in either
+    order) is discarded with it, and a caller expiry that came due and another SIGALRM pending at the restore
     reach the caller's handler as one delivery. A re-armed periodic timer whose next expiry also falls due
     before the mask is put back adds no second delivery: the kernel can hold one SIGALRM pending for the
     process and one for the thread, both are delivered on return from the call that puts the mask back,
@@ -16880,7 +16880,8 @@ class _DeadlineWindow:
     nothing where it cannot know that the SIGALRM pending is the window's own expiry: after an arming
     setitimer that raised (`_unheard` is set only once it has returned), after a cancel whose first run
     raised (_twice says why), or after a read in _fire that raised; a window's own expiry then pending
-    reaches the caller's handler.
+    reaches the caller's handler. Under the SIG_DFL that main() runs the window with, that delivery kills
+    the hook process by SIGALRM, so it ends without the exit 2 that fails a PreToolUse call closed.
 
     An operation of the restore that raises (setitimer, signal.signal, sigpending or raise_signal failing)
     is tried once more inside the same blocked section; the restore then goes on, and the first exception
@@ -16911,8 +16912,15 @@ class _DeadlineWindow:
     expiry, if it comes pending later in the restore, to be discarded; an expiry already pending when _fire
     runs inside the call that sets the mask (for a SIGALRM that arrived just before it) is discarded the
     same way. A read that raises counts the expiry as delivered, and its exception is kept like a close
-    attempt's. One SIGALRM is still taken for that expiry wrongly, and discarded: one sent once the mask is
-    set, when the window's expiry arrived just before the call that sets it and _fire runs inside that call.
+    attempt's. Where this read leaves `_unheard` set, one SIGALRM is still taken for that expiry wrongly,
+    and discarded: one sent once the mask is set, when the window's expiry arrived just before the call that
+    sets it and _fire runs inside that call. _fire then reads the timer run out and a SIGALRM pending, as in
+    the ordering the other way round (a SIGALRM from elsewhere just before that call, the window's expiry
+    once the mask is set), so neither of its reads can tell the two apart. It is not the only one: a
+    SIGALRM from elsewhere pending together with the window's expiry merges with it and is discarded with
+    it (the restore above), and the limits below state two more ways a SIGALRM from elsewhere is discarded
+    as the window's expiry, after a handler that raises at the entry of _fire has taken that expiry with
+    it, and after another thread has taken it.
 
     CPython runs a Python handler only where it checks for signals: at the entry of a function, at the
     back edge of a loop, and inside or on return from a call. So a handler can still run before the take or
@@ -16941,7 +16949,8 @@ class _DeadlineWindow:
     a signal sent to the process can still be taken by another thread that leaves it unblocked (a worker
     thread review_dispatch_pin leaves running past its wait is one), and its Python handler then runs in
     the main thread inside the blocked section, as whichever handler is installed at that moment (so a
-    window's own expiry taken that way can reach the caller's handler).
+    window's own expiry taken that way can reach the caller's handler, and a SIGALRM from elsewhere then
+    pending at the restore can be discarded as that expiry).
 
     The borrow is refused, and the window runs with no deadline at all (armed stays False, nothing is
     changed), where it cannot be done faithfully: no finite positive `seconds` (the fail-open modes pass
