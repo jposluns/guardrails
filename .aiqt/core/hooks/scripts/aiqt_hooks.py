@@ -975,11 +975,13 @@ def _command_word(tokens):
 # '"if"' from an unquoted one, so a quoted reserved word at the head of a segment is skipped too, an
 # over-read in the safe direction (bash would look up a command of that name instead). Not read,
 # the existing residuals: an eval or sh -c/bash -c body (one quoted word), a function or alias that renames
-# the command, a substitution nested more than _SUBSTITUTION_DEPTH deep, and the rest of a substitution body
-# after a construct the lexer cannot parse (its complete prefix is read).
+# the command, a $(...) command substitution inside double quotes (the lexer keeps it in one quoted word and
+# only backquote substitutions are read, so echo "$(git diff)" is judged as the outer command while bash also
+# runs the inner one), a substitution nested more than _SUBSTITUTION_DEPTH deep, and the rest of a
+# substitution body after a construct the lexer cannot parse (its complete prefix is read).
 # Words after which bash reads a command in the same simple-command position: the conditional and loop
 # keywords whose next word starts a command list, brace grouping, the '!' pipeline negation and the 'time'
-# pipeline prefix (with its -p option).
+# pipeline prefix (with its -p option, and one '--' after 'time' or 'time -p').
 _COMMAND_LEAD_WORDS = frozenset(("!", "{", "if", "then", "elif", "else", "do", "while", "until", "time"))
 # The words that open a compound command: after 'coproc', a NAME is read only when one of these follows it.
 _COMPOUND_OPENERS = frozenset(("{", "if", "while", "until", "for", "select", "case", "[["))
@@ -988,8 +990,9 @@ _SUBSTITUTION_DEPTH = 16
 
 def _command_start(argv):
     """Index in a lexed segment's argv of the first word of the simple command it runs, past the leading
-    reserved and grouping words bash reads before a command (_COMMAND_LEAD_WORDS, 'time -p', 'coproc [NAME]',
-    'function NAME'). A 'for NAME' or 'select NAME' header followed by 'do' in the same segment continues
+    reserved and grouping words bash reads before a command (_COMMAND_LEAD_WORDS, 'time -p', one '--' after
+    'time' or 'time -p', 'coproc [NAME]', 'function NAME'; a second '--' is the command word, as bash reads
+    it). A 'for NAME' or 'select NAME' header followed by 'do' in the same segment continues
     after the 'do'; any other for/select header and a 'case WORD in PATTERN' header run no command, so they
     return len(argv). Leading assignments are NOT skipped here: _command_word_index skips them afterwards, as
     bash reads 'FOO=1 git' after '!' or 'then'. A word after an assignment is never read as reserved."""
@@ -1001,6 +1004,8 @@ def _command_start(argv):
             i += 1
             while word == "time" and i < n and argv[i] == "-p":
                 i += 1
+            if word == "time" and i < n and argv[i] == "--":
+                i += 1  # 'time --' and 'time -p --': bash reads the command after one '--'
             continue
         if word == "coproc":
             i += 1
@@ -1063,7 +1068,9 @@ def _backquote_bodies(text):
     the index of its opening backquote. Quote-aware as the lexer is: a single-quoted or ANSI-C $'...' span,
     a backslash-escaped backquote and a word-start '#' comment hold none; a double-quoted span does, as bash
     runs a backquote substitution inside double quotes. A substitution nested in a body is found when that
-    body is read in turn."""
+    body is read in turn. Like the lexer, the scan does not read a $(...) inside double quotes as its own
+    quoting context, so where a quote inside it ends or opens a span early, a later backquote substitution
+    bash runs is missed too."""
     out = []
     i = 0
     n = len(text)
@@ -1121,8 +1128,11 @@ def _substitution_records(records):
     """[(index, body records)] for each top-level backquote substitution in one lexed command line, in source
     order: index is the record whose raw text opens it, and the body is lexed as a command line of its own
     (best effort: the complete segments before a construct the lexer cannot parse). The line's text is
-    rebuilt from the records' raw slices and separators, so a quoted heredoc body, which the lexer drops as
-    literal data, is never read as a substitution."""
+    rebuilt from the records' raw slices and separators, so on a full lex a quoted heredoc body, which the
+    lexer drops as literal data, is never read as a substitution. On a partial lex the unfinished segment's
+    raw slice runs to the end of the command, so a backquote in a later quoted heredoc body is read as a
+    substitution: an over-read in the safe direction (cat <(true) <<'EOF' with a backquoted relative
+    redirect on a body line denies under bash_absolute_paths)."""
     starts = []
     parts = []
     pos = 0
@@ -3155,8 +3165,10 @@ def git_stash_ref(data):
     opener, `!`, `time`, and control keywords such as `if`, `then`, `elif`, `else`, `while`, `until` and
     `do`) and each backquote substitution as a command line of its own (_command_flow), so a bare
     pop/apply inside a compound command or a backquote substitution warns as the bare form does. Not
-    read: an eval or sh -c body, a function or alias, and the rest of a substitution after a construct
-    the lexer cannot parse.
+    read: an eval or sh -c body, a function or alias, a $(...) command substitution inside double quotes
+    (the lexer keeps it in one quoted word and only backquote substitutions are read, so
+    echo "$(git diff)" is judged as the outer command while bash also runs the inner one), and the rest
+    of a substitution after a construct the lexer cannot parse.
     Only the current no-value pop/apply option grammar (-q/--quiet/--index) is modelled: a future
     value-taking option can make its value look like an operand and falsely allow; re-validate on a
     git upgrade. No git calls or filesystem probes: every recognized bare pop/apply warns regardless

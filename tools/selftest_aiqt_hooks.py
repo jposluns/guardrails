@@ -83,12 +83,15 @@ bare-`$`-before-escaped-paren over-ASK. The raw fallback ASKS on a coarse appare
 detected cases, deliberate over-ASKs, and selected named residual ALLOWs; they make no soundness or
 universal-coverage claim.
 
-It also covers the shared command reading every lexer-reading guard uses (cs-* cases): each guard's bare
-deny shape (git_stash_ref: its bare note shape), wrapped in a compound command (if, else, elif, for, for
-NAME do, while, until, select, case, a brace group, '!', time -p) and in a backquote substitution, must
-decide at least as strictly as the bare shape; a reserved word as a plain argument, a git command inside a
-quoted string, a single-quoted backquote and a backquote in a quoted heredoc body must each keep the
-decision every guard gave it before the shared reading existed.
+It also covers the shared command reading the lexer-reading guards use (cs-* cases): each bare shape in
+the compound-subject table (one or two shapes per guard, each one the guard denies bare; for git_stash_ref,
+the one it notes), wrapped in a compound command (if, else, elif, for, for NAME do, while, until, select,
+case, a brace group, '!', time -p, time --) and in a backquote substitution, must decide at least as
+strictly as the bare shape; a reserved word as a plain argument, a git command inside a quoted string, a
+single-quoted backquote and a backquote in a quoted heredoc body must each keep the decision every guard
+gave it before the shared reading existed. The table does not cover gate_weakening's verification-sink deny
+tier, which still reads the command's own records, or the two orchestration guards (orch_truncation_guard,
+orch_untracked_wait_loop), whose shared reading tools/selftest_orch_hooks.py checks.
 
 It also covers the secrets-shift-left guard (secrets_shift_left, secsec): a Write content, an Edit
 new_string, or a Bash command that carries an obvious hardcoded secret (a provider-token prefix or a
@@ -2210,7 +2213,7 @@ def _test_git_stash_ref(failures):
              'cd /abs && git stash pop "unbalanced'),
             ("(sr-a35) parse failure with sibling hazard",
              'git add -A && git push "unbalanced'),
-            ("(sr-a36) single-quoted backquote text is no substitution", "echo '`git stash pop`'")):
+            ("(sr-a40) single-quoted backquote text is no substitution", "echo '`git stash pop`'")):
         expect_silent(label, command)
 
     # The shared lexer keeps an unquoted brace-bearing ref as one positional token.
@@ -2263,10 +2266,12 @@ def _test_git_stash_ref(failures):
         failures.append("(sr-wiring) git_stash_ref handler/event wiring is missing or wrong")
 
 
-# The compound-subject table: every lexer-reading PreToolUse guard, each with the bare shape it denies
+# The compound-subject table: the lexer-reading PreToolUse guards below, each with the bare shapes it denies
 # (git_stash_ref: the bare shape it notes) and that bare decision, wrapped in each compound command and in a
 # backquote substitution. A wrapped shape must decide at least as strictly as the bare one (deny > allow-note >
-# allow). The bare shapes need no repository: every payload carries no cwd.
+# allow). The bare shapes need no repository: every payload carries no cwd. Not in the table: gate_weakening's
+# verification-sink deny tier, which reads the command's own records, and the two orchestration guards, whose
+# shared reading tools/selftest_orch_hooks.py checks.
 _CS_SHAPES = (
     ("commit_identity", 'git commit -m x --author="Claude <c@x>"', "deny"),
     ("commit_msg_subst", 'git commit -m "a$(id)"', "deny"),
@@ -2295,6 +2300,7 @@ _CS_WRAPPERS = (
     ("elif", "if false; then :; elif {}; then :; fi"),
     ("time", "time -p {}"),
     ("for-do", "for x do {}; done"),
+    ("time-dashdash", "time -- {}"),
 )
 _CS_RANK = {"allow": 0, "allow-note": 1, "deny": 2}
 # Controls: a reserved word as a plain argument, a git command inside a quoted string, a single-quoted
@@ -2314,9 +2320,9 @@ _CS_CONTROLS = (
 
 
 def _test_compound_subject(failures):
-    """(cs-*) Every lexer-reading guard reads its subject past the shell's reserved and grouping words and
-    inside a backquote substitution: each bare shape decides as recorded, each wrapped form at least as
-    strictly, and each control exactly as recorded. No submitted Bash command is executed."""
+    """(cs-*) Each guard in the compound-subject table reads its subject past the shell's reserved and
+    grouping words and inside a backquote substitution: each bare shape decides as recorded, each wrapped
+    form at least as strictly, and each control exactly as recorded. No submitted Bash command is executed."""
     for name, shape, bare_want in _CS_SHAPES:
         handler = getattr(aiqt_hooks, name)
         bare = _decision(handler, shape)
@@ -2342,6 +2348,9 @@ def _test_compound_subject(failures):
             ("for x do git diff; done", [["git", "diff"], ["done"]]),
             ("case a in a) git diff;; esac", [[], ["git", "diff"], [], ["esac"]]),
             ("time -p ! FOO=1 git diff", [["FOO=1", "git", "diff"]]),
+            ("time -- git diff", [["git", "diff"]]),
+            ("time -p -- git diff", [["git", "diff"]]),
+            ("time -- -- git diff", [["--", "git", "diff"]]),
             ("coproc git diff", [["git", "diff"]]),
             ("coproc N { git diff; }", [["git", "diff"], ["}"]]),
             ("function f { git diff; }", [["git", "diff"], ["}"]]),
