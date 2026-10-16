@@ -7441,6 +7441,22 @@ def _main_isolated(monitor):
                 failures.append("(tok-cannot) {} must raise ValueError, did not".format(_why))
             except ValueError:
                 pass
+        # The partial-lex contract: _lex_command(partial=True) returns (segments, complete, in_progress), and
+        # in_progress is True only when the last recovered segment is the one the lexer was still inside when
+        # it stopped. A construct that begins a new segment leaves every recovered segment complete; a
+        # newline-closed segment ends with sep "" just like the open one, so only the flag tells them apart.
+        def _plex(command):
+            result = aiqt_hooks._lex_command(command, partial=True)
+            return ([(seg.argv, seg.sep_after) for seg in result[0]],) + tuple(result[1:])
+
+        texpect("(tok-partial-a) a command that parses whole is complete with no open segment",
+                _plex("pytest | head"), ([(["pytest"], "|"), (["head"], "")], True, False))
+        texpect("(tok-partial-b) a lone quote that begins a new segment leaves the closed head segment complete",
+                _plex("pytest | head; '"), ([(["pytest"], "|"), (["head"], ";")], False, False))
+        texpect("(tok-partial-c) a quote inside the head segment marks that segment as the open one",
+                _plex("pytest | head '"), ([(["pytest"], "|"), (["head"], "")], False, True))
+        texpect("(tok-partial-d) a newline-closed head segment before a lone quote is complete, not open",
+                _plex("pytest | head\n'"), ([(["pytest"], "|"), (["head"], "")], False, False))
         # ROUND-2 FINDING 17: a QUOTED heredoc (<<'EOF'/<<"EOF"/<<\\EOF) lexes cleanly with its body EXCLUDED,
         # so the lexical guards never fire on shell syntax quoted inside heredoc prose. The lexer sees only
         # the command word ('cat'), not the body's 'git diff | tail' / '|| true' / bare '&'.
@@ -8228,6 +8244,20 @@ def _main_isolated(monitor):
         gexpect("(gw-ae) unparseable checker + swallow allows-with-note (finding 14; fallback relaxed)",
                 'pytest || true "unbalanced', "allow-note")
         gexpect("(gw-af) unparseable non-gate command allows", 'ls -la "unbalanced', "allow")
+        # DENY outranks the parse error only over complete segments: the segment the lexer was still inside
+        # is dropped, and a segment the scan had already closed (by ';', '&&' or a newline) before the
+        # unparseable construct begins is judged, so the closed verification-into-sink pipeline denies as it
+        # does with a parseable tail ('pytest | head; echo x').
+        gexpect("(gw-af2) a closed verification run into head before a lone quote denies",
+                "pytest | head; '", "deny")
+        gexpect("(gw-af3) a newline-closed verification run into head before a lone quote denies",
+                "pytest | head\n'", "deny")
+        gexpect("(gw-af4) a closed verification run into head before a process substitution denies",
+                "pytest | head; <(x)", "deny")
+        gexpect("(gw-af5) a quote inside the head segment drops that open segment, so only the note stands",
+                "pytest | head '", "allow-note")
+        gexpect("(gw-af6) a process substitution inside the head segment drops it, so only the note stands",
+                "pytest | head <(x)", "allow-note")
 
         # gatdis (EN-5 PR-B): additional brief coverage - the full verb roster in long form, the
         # short/abbrev spellings, the out-of-roster verbs, and the disclosed value-spelling over-deny.
