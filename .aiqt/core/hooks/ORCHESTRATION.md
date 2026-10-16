@@ -196,7 +196,18 @@ Stop or TeammateIdle, which has no banner; a denied scheduling call carries it i
 banner), which asks for a manual record, and leaves no row) and the append-only `forced-exit.jsonl`
 (every non-closed-disposition forced exit appended as its
 own row, each normally raised once, at least once if recording that it was raised fails, tracked by a
-companion `forced-exit-surfaced.json`). The whole-file JSON records (`turn-state.json`,
+companion `forced-exit-surfaced.json`). The citation read recorder (the `citation-read-ledger` hook, which
+runs wherever the session cwd resolves to a git toplevel, with or without a registry) keeps a
+`citation-ledger/` subdirectory there, made mode 0700 whatever the umask, holding one append-only
+`<key>.jsonl` per session (`<key>` is the first 16 hex digits of the sha256 of the session id), mode 0600,
+opened without following a symlink and refused unless it is a regular file. Each row names a resolved path,
+its path relative to the repository root (or null outside it), a 1-based inclusive line span, the sha256 of
+the raw bytes of those lines (split on LF only, CR kept), the tool that read or wrote them and, for
+`git show`, the revision. An append that would take a non-empty session file past 4 MiB first renames it
+onto `<key>.jsonl.1`, replacing the older generation (a later reader reads both); a row already present is
+skipped only while the file is under 256 KiB; creating a session file removes up to 50 regular files of
+the ledger name shape in the directory last modified more than 14 days earlier. A failed append is named
+in a non-blocking note, never swallowed. No check reads this ledger yet. The whole-file JSON records (`turn-state.json`,
 `backlog-checkpoint.json`, its `checkpoint-init.marker`, `attestations-validated.json` and
 `forced-exit-surfaced.json`) are each saved by one writer: it opens the state directory once as a
 directory descriptor (with `O_PATH` where the platform has it, so the open needs no permission on that

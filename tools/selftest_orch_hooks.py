@@ -55,6 +55,7 @@ import subprocess
 import tempfile
 import shutil
 import threading
+import time
 import datetime
 import hashlib
 from pathlib import Path
@@ -2226,6 +2227,371 @@ def _perm_sweep(base):
                 if got != expected:
                     mismatches.append(("model" if model else "kernel",) + key + (oct(index << 6), got, expected))
     return counts[0], counts[1], mismatches
+
+
+def _cite_prune_in(directory, keep, now_ns):
+    """aiqt_hooks._cite_prune run on the directory at path directory: the number of files it removed."""
+    dirfd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        return aiqt_hooks._cite_prune(dirfd, keep, now_ns)
+    finally:
+        os.close(dirfd)
+
+
+def _citeledger_cases(tmp):
+    """The citation read recorder (aiqt_hooks.citation_read_recorder): the rows each recognized tool call
+    earns, the shapes that record nothing, the owner-only modes, the refused symlink, rotation,
+    deduplication, pruning and the size bounds (each bound tried just inside, at and just outside it), and
+    the surfaced write failure. Every tool_response here is built by hand in the shape the recorder
+    recognizes; none was captured from a live session."""
+    root = tmp / "citeledger"
+    tools_dir = root / "tools"
+    tools_dir.mkdir(parents=True)
+    a_py, b_py, c_py = tools_dir / "a.py", tools_dir / "b.py", tools_dir / "c.py"
+    a_bytes = b"alpha = 1\nbeta = 2\ngamma = 3\ndelta = 4\nepsilon = 5\n"
+    a_py.write_bytes(a_bytes)
+    b_py.write_bytes(b"other\n")
+    for args in (["init", "-q", "-b", "main"], ["add", "tools"],
+                 ["-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                  "commit", "-q", "-m", "seed"]):
+        subprocess.run(["git", "-C", str(root)] + args, check=True, capture_output=True, timeout=30)
+    state = Path(aiqt_hooks._orch_state_dir_for_root(str(root)))
+    ledger_dir = state / "citation-ledger"
+    verdicts = []
+
+    def ledger(session):
+        return ledger_dir / (hashlib.sha256(session.encode("utf-8")).hexdigest()[:16] + ".jsonl")
+
+    def rows(session):
+        path = ledger(session)
+        if not path.exists():
+            return []
+        return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+    def spans(session):
+        return [(r["via"], r["rel"], r["start"], r["end"]) for r in rows(session)]
+
+    def call(tool, tool_input, response, session, event="PostToolUse"):
+        data = {"hook_event_name": event, "cwd": str(root), "tool_name": tool, "tool_input": tool_input,
+                "tool_response": response}
+        if session is not None:
+            data["session_id"] = session
+        result = aiqt_hooks.citation_read_recorder(data)
+        verdicts.append(_verdict(result))
+        return result
+
+    def read(content, start, count, path=a_py, kind="text"):
+        return {"type": kind, "file": {"filePath": str(path), "content": content, "numLines": count,
+                                       "startLine": start, "totalLines": 6}}
+
+    def bash(command, stdout, session):
+        return call("Bash", {"command": command}, {"stdout": stdout, "stderr": "", "interrupted": False,
+                                                    "isImage": False}, session)
+
+    def digest(data):
+        return hashlib.sha256(data).hexdigest()
+
+    def mode(path):  # None for a missing path, so a recorder that writes nothing fails a check, not the run
+        return oct(os.stat(str(path)).st_mode & 0o777) if os.path.lexists(str(path)) else None
+
+    def size(path):
+        return os.stat(str(path)).st_size if os.path.lexists(str(path)) else -1
+
+    # The ledger directory and file are owner-only under a permissive umask, and wider modes found later
+    # are narrowed again on the next append (red when the explicit modes are dropped for umask defaults).
+    saved_umask = os.umask(0o022)
+    try:
+        call("Read", {"file_path": str(a_py)}, read("alpha = 1", 1, 1), "modes")
+        fresh = (mode(ledger_dir), mode(ledger("modes")))
+        for path, wide in ((ledger_dir, 0o755), (ledger("modes"), 0o644)):
+            if os.path.lexists(str(path)):
+                os.chmod(str(path), wide)
+        call("Read", {"file_path": str(a_py)}, read("beta = 2", 2, 1), "modes")
+        narrowed = (mode(ledger_dir), mode(ledger("modes")))
+    finally:
+        os.umask(saved_umask)
+    check("citeledger/ledger-owner-only", (fresh, narrowed), (("0o700", "0o600"), ("0o700", "0o600")))
+
+    # Read: the span comes from startLine and numLines, confirmed line by line against the file, and the
+    # digest is of the raw bytes of those lines as read from disk.
+    call("Read", {"file_path": str(a_py), "offset": 3, "limit": 2}, read("gamma = 3\ndelta = 4", 3, 2),
+         "read-span")
+    check("citeledger/read-span-recorded",
+          [(r["kind"], r["via"], r["path"], r["rel"], r["start"], r["end"], r["sha256"], r["rev"])
+           for r in rows("read-span")],
+          [("read", "Read", os.path.realpath(str(a_py)), "tools/a.py", 3, 4,
+            digest(b"gamma = 3\ndelta = 4\n"), None)])
+    # A whole-file read shows an empty line after the final line feed; it is no line of the file, whether
+    # numLines counts it or not.
+    call("Read", {"file_path": str(a_py)}, read(a_bytes.decode("utf-8"), 1, 6), "read-whole-6")
+    call("Read", {"file_path": str(a_py)}, read(a_bytes.decode("utf-8"), 1, 5), "read-whole-5")
+    check("citeledger/read-final-line-feed-not-a-line", (spans("read-whole-6"), spans("read-whole-5")),
+          ([("Read", "tools/a.py", 1, 5)], [("Read", "tools/a.py", 1, 5)]))
+    # Shapes the recorder does not recognize record nothing, never a guessed span: the span a 0-based
+    # offset would claim, cat -n prefixed text, a non-integer or boolean field, a count the content
+    # disagrees with, an image read, a response naming another file, no file object, a bare string, a
+    # zero startLine.
+    unknown_read = (
+        ("zero-based-offset", read("gamma = 3\ndelta = 4", 2, 2)),
+        ("cat-n-prefixed", read("     3\tgamma = 3\n     4\tdelta = 4", 3, 2)),
+        ("string-start", read("gamma = 3\ndelta = 4", "3", 2)),
+        ("bool-count", read("gamma = 3", 3, True)),
+        ("count-disagrees", read("gamma = 3\ndelta = 4", 3, 3)),
+        ("image", read("gamma = 3", 3, 1, kind="image")),
+        ("other-file", read("other", 1, 1, path=b_py)),
+        ("no-file-object", {"type": "text"}),
+        ("bare-string", "     3\tgamma = 3"),
+        ("zero-start", read("alpha = 1", 0, 1)))
+    for name, response in unknown_read:
+        call("Read", {"file_path": str(a_py), "offset": 3, "limit": 2}, response, "unknown-read-" + name)
+    check("citeledger/read-unknown-shape-records-nothing",
+          [name for name, _resp in unknown_read if ledger("unknown-read-" + name).exists()], [])
+
+    # No session id, an empty one, or an event other than PostToolUse: nothing is written.
+    call("Read", {"file_path": str(a_py)}, read("alpha = 1", 1, 1), None)
+    call("Read", {"file_path": str(a_py)}, read("alpha = 1", 1, 1), "")
+    call("Read", {"file_path": str(a_py)}, read("alpha = 1", 1, 1), "pre-event", event="PreToolUse")
+    check("citeledger/no-session-no-row",
+          (sorted(p.name for p in (ledger_dir.iterdir() if ledger_dir.is_dir() else ()) if p.name.startswith(
+              hashlib.sha256(b"").hexdigest()[:16])), ledger("pre-event").exists()), ([], False))
+    # A malformed payload (a tool_name that is not a string, a tool_input that is not an object, a path
+    # holding a NUL) allows silently and records nothing, never a handler crash.
+    malformed = []
+    for name, tool, tool_input, response in (
+            ("tool-list", ["Read"], {"file_path": str(a_py)}, read("alpha = 1", 1, 1)),
+            ("input-list", "Read", [str(a_py)], read("alpha = 1", 1, 1)),
+            ("nul-path", "Read", {"file_path": str(a_py) + "\x00"}, read("alpha = 1", 1, 1))):
+        try:
+            outcome = call(tool, tool_input, response, "malformed-" + name)
+        except Exception as exc:  # a handler crash fails this check rather than ending the run
+            outcome = "crash: {}".format(type(exc).__name__)
+        malformed.append((outcome, ledger("malformed-" + name).exists()))
+    check("citeledger/malformed-payload-records-nothing", malformed, [((0, None, None), False)] * 3)
+
+    # Grep, content mode: hit and context lines of a directory search (paths relative to cwd, consecutive
+    # lines merged into one span) and the N:TEXT lines of a one-file search.
+    call("Grep", {"pattern": "gamma|other", "path": str(root), "output_mode": "content", "-n": True, "-A": 1},
+         {"mode": "content", "numFiles": 2, "filenames": [], "numLines": 4,
+          "content": "tools/a.py:3:gamma = 3\ntools/a.py-4-delta = 4\n--\ntools/b.py:1:other"}, "grep-dir")
+    call("Grep", {"pattern": "beta", "path": str(a_py), "output_mode": "content"},
+         {"mode": "content", "numFiles": 1, "filenames": [], "numLines": 1, "content": "2:beta = 2"},
+         "grep-file")
+    check("citeledger/grep-hit-recorded", (spans("grep-dir"), spans("grep-file")),
+          ([("Grep", "tools/a.py", 3, 4), ("Grep", "tools/b.py", 1, 1)], [("Grep", "tools/a.py", 2, 2)]))
+    # A line that splits into a line of two different files is ambiguous, and one whose text is not the
+    # file's line, a files-only search and a search without line numbers name no line: nothing is recorded.
+    (tools_dir / "c").write_bytes(b"d:1:e\n")
+    (tools_dir / "c:1:d").write_bytes(b"e\n")
+    grep_unknown = (
+        ("ambiguous", {"pattern": "e", "path": str(root), "output_mode": "content"},
+         {"mode": "content", "content": "tools/c:1:d:1:e"}),
+        ("text-differs", {"pattern": "g", "path": str(root), "output_mode": "content"},
+         {"mode": "content", "content": "tools/a.py:3:gamma = 33"}),
+        ("files-only", {"pattern": "g", "path": str(root)},
+         {"mode": "files_with_matches", "filenames": ["tools/a.py"], "content": "tools/a.py:3:gamma = 3"}),
+        ("no-line-numbers", {"pattern": "g", "path": str(root), "output_mode": "content", "-n": False},
+         {"mode": "content", "content": "tools/a.py:3:gamma = 3"}))
+    for name, tool_input, response in grep_unknown:
+        call("Grep", tool_input, response, "unknown-grep-" + name)
+    check("citeledger/grep-unrecognized-records-nothing",
+          [name for name, _i, _r in grep_unknown if ledger("unknown-grep-" + name).exists()], [])
+
+    # git show REV:PATH: lines 1..k, digested from the blob, which here differs from the working tree.
+    a_py.write_bytes(a_bytes.replace(b"beta = 2", b"beta = 22"))
+    bash("git show HEAD:tools/a.py", a_bytes.decode("utf-8"), "git-show")
+    bash("git --no-pager -C {} show HEAD:tools/a.py".format(root), a_bytes.decode("utf-8")[:-1],
+         "git-show-c")
+    a_py.write_bytes(a_bytes)
+    check("citeledger/git-show-recorded",
+          ([(r["via"], r["rel"], r["start"], r["end"], r["sha256"], r["rev"]) for r in rows("git-show")],
+           spans("git-show-c")),
+          ([("git-show", "tools/a.py", 1, 5, digest(a_bytes), "HEAD")], [("git-show", "tools/a.py", 1, 5)]))
+    # grep -n, rg -n and sed -n 'A,Bp' as one plain command each.
+    bash("grep -n beta tools/a.py", "2:beta = 2\n", "bash-grep")
+    bash("rg -n -C1 gamma tools", "tools/a.py-2-beta = 2\ntools/a.py:3:gamma = 3\ntools/a.py-4-delta = 4\n",
+         "bash-rg")
+    bash("sed -n '2,3p' tools/a.py", "beta = 2\ngamma = 3\n", "bash-sed")
+    check("citeledger/bash-read-recorded", (spans("bash-grep"), spans("bash-rg"), spans("bash-sed")),
+          ([("grep", "tools/a.py", 2, 2)], [("grep", "tools/a.py", 2, 4)], [("sed", "tools/a.py", 2, 3)]))
+    # Bash shapes that record nothing: a pipeline, a trailing separator, a redirect, an unrecorded command,
+    # a commit operand, a relative -C, output that is not the blob, grep without -n, a reversed sed range,
+    # an interrupted call, and a response with no stdout string.
+    bash_unknown = (
+        ("pipeline", "git show HEAD:tools/a.py | cat", a_bytes.decode("utf-8")),
+        ("trailing-separator", "git show HEAD:tools/a.py;", a_bytes.decode("utf-8")),
+        ("redirect", "git show HEAD:tools/a.py 2>/dev/null", a_bytes.decode("utf-8")),
+        ("cat", "cat tools/a.py", a_bytes.decode("utf-8")),
+        ("commit-operand", "git show HEAD", a_bytes.decode("utf-8")),
+        ("relative-c", "git -C tools show HEAD:tools/a.py", a_bytes.decode("utf-8")),
+        ("not-the-blob", "git show HEAD:tools/a.py", a_bytes.decode("utf-8").replace("beta", "BETA")),
+        ("grep-no-n", "grep beta tools/a.py", "beta = 2\n"),
+        ("sed-reversed", "sed -n '3,2p' tools/a.py", "gamma = 3\n"))
+    for name, command, stdout in bash_unknown:
+        bash(command, stdout, "unknown-bash-" + name)
+    call("Bash", {"command": "sed -n '2p' tools/a.py"}, {"stdout": "beta = 2\n", "interrupted": True},
+         "unknown-bash-interrupted")
+    call("Bash", {"command": "sed -n '2p' tools/a.py"}, {"output": "beta = 2\n"}, "unknown-bash-no-stdout")
+    check("citeledger/bash-unrecognized-records-nothing",
+          [name for name in [n for n, _c, _s in bash_unknown] + ["interrupted", "no-stdout"]
+           if ledger("unknown-bash-" + name).exists()], [])
+
+    # Write is the whole written file and Edit the lines of its new text, both as "wrote" rows; a Write
+    # whose file does not hold the written content records nothing.
+    c_py.write_bytes(b"x = 1\ny = 2\n")
+    call("Write", {"file_path": str(c_py), "content": "x = 1\ny = 2\n"}, {"filePath": str(c_py), "success": True},
+         "write")
+    call("Write", {"file_path": str(c_py), "content": "x = 9\n"}, {"filePath": str(c_py), "success": True},
+         "write-differs")
+    c_py.write_bytes(b"x = 1\ny = 2\nz = 3\n")
+    call("Edit", {"file_path": str(c_py), "old_string": "y = 2\n", "new_string": "y = 2\nz = 3\n"},
+         {"filePath": str(c_py)}, "edit")
+    check("citeledger/write-edit-recorded",
+          ([(r["kind"], r["via"], r["rel"], r["start"], r["end"]) for r in rows("write")],
+           ledger("write-differs").exists(),
+           [(r["kind"], r["via"], r["rel"], r["start"], r["end"]) for r in rows("edit")]),
+          ([("wrote", "Write", "tools/c.py", 1, 2)], False, [("wrote", "Edit", "tools/c.py", 2, 3)]))
+
+    # A file of exactly _CITE_MAX_FILE bytes is read; one byte more is not.
+    saved_max = aiqt_hooks._CITE_MAX_FILE
+    try:
+        sizes = []
+        for limit in (len(a_bytes) + 1, len(a_bytes), len(a_bytes) - 1):
+            aiqt_hooks._CITE_MAX_FILE = limit
+            call("Read", {"file_path": str(a_py)}, read("alpha = 1", 1, 1), "max-file-{}".format(limit))
+            sizes.append(ledger("max-file-{}".format(limit)).exists())
+    finally:
+        aiqt_hooks._CITE_MAX_FILE = saved_max
+    check("citeledger/max-file-boundary", sizes, [True, True, False])
+
+    # The writer's bounds, driven through _cite_append with one fixed row of L bytes after F filler bytes.
+    def row(start):
+        return {"v": 1, "ts": "t", "kind": "read", "via": "Read", "path": "/x/p.py", "rel": None,
+                "start": start, "end": start, "sha256": "0" * 64, "rev": None}
+
+    width = len((json.dumps(row(1), sort_keys=True) + "\n").encode("utf-8"))
+    filler = b"#" * 99 + b"\n"
+    saved = (aiqt_hooks._CITE_CAP, aiqt_hooks._CITE_DEDUP_BELOW, aiqt_hooks._CITE_ROW_MAX)
+    try:
+        # rotation: a cap of F+L+1 and of F+L keeps one file (it ends at most at the cap); F+L-1 rotates.
+        rotated = []
+        for name, cap in (("inside", len(filler) + width + 1), ("at", len(filler) + width),
+                          ("outside", len(filler) + width - 1)):
+            ledger("rot-" + name).parent.mkdir(parents=True, exist_ok=True)
+            ledger("rot-" + name).write_bytes(filler)
+            aiqt_hooks._CITE_CAP = cap
+            failure = aiqt_hooks._cite_append(str(state), "rot-" + name, [row(1)])
+            older = Path(str(ledger("rot-" + name)) + ".1")
+            rotated.append((failure, ledger("rot-" + name).stat().st_size,
+                            older.stat().st_size if older.exists() else None))
+        check("citeledger/rotation-cap-boundary", rotated,
+              [(None, len(filler) + width, None), (None, len(filler) + width, None),
+               (None, width, len(filler))])
+        aiqt_hooks._CITE_CAP = saved[0]
+        # deduplication: the held row is skipped below the bound (F+L < F+L+1) and appended again at it
+        # (F+L == F+L) and above it (F+L > F+L-1).
+        deduped = []
+        for name, bound in (("inside", len(filler) + width + 1), ("at", len(filler) + width),
+                            ("outside", len(filler) + width - 1)):
+            ledger("dedup-" + name).write_bytes(filler)
+            aiqt_hooks._cite_append(str(state), "dedup-" + name, [row(1)])
+            aiqt_hooks._CITE_DEDUP_BELOW = bound
+            aiqt_hooks._cite_append(str(state), "dedup-" + name, [row(1)])
+            aiqt_hooks._CITE_DEDUP_BELOW = saved[1]
+            deduped.append(ledger("dedup-" + name).stat().st_size)
+        check("citeledger/dedup-boundary", deduped,
+              [len(filler) + width, len(filler) + 2 * width, len(filler) + 2 * width])
+        # row size: a JSON line of L bytes is kept under a bound of L+1 and dropped at L and at L-1.
+        kept = []
+        for name, bound in (("inside", width + 1), ("at", width), ("outside", width - 1)):
+            aiqt_hooks._CITE_ROW_MAX = bound
+            aiqt_hooks._cite_append(str(state), "row-" + name, [row(1)])
+            kept.append(ledger("row-" + name).exists())
+        check("citeledger/row-max-boundary", kept, [True, False, False])
+    finally:
+        aiqt_hooks._CITE_CAP, aiqt_hooks._CITE_DEDUP_BELOW, aiqt_hooks._CITE_ROW_MAX = saved
+
+    # Rotation through the hook, with a cap of three rows: the fourth read rotates the first three onto .1
+    # (one older generation), and the current file stays at or under the cap.
+    saved_cap = aiqt_hooks._CITE_CAP
+    try:
+        for start in range(1, 6):
+            line = a_bytes.split(b"\n")[start - 1].decode("utf-8")
+            call("Read", {"file_path": str(a_py)}, read(line, start, 1), "rot-hook")
+            if start == 1:
+                aiqt_hooks._CITE_CAP = 3 * max(size(ledger("rot-hook")), 1)
+        older = Path(str(ledger("rot-hook")) + ".1")
+        older_starts = [json.loads(x)["start"] for x in older.read_text(encoding="utf-8").splitlines()] \
+            if older.exists() else []
+        check("citeledger/rotation-bounded",
+              (0 <= size(ledger("rot-hook")) <= aiqt_hooks._CITE_CAP, older_starts,
+               [r["start"] for r in rows("rot-hook")]),
+              (True, [1, 2, 3], [4, 5]))
+    finally:
+        aiqt_hooks._CITE_CAP = saved_cap
+
+    # Pruning keeps a file modified exactly 14 days before now or later, removes one a nanosecond older,
+    # and passes over a symlink, another name shape and the session's own files; at most 50 per call.
+    prune_dir = tmp / "cite-prune"
+    prune_dir.mkdir()
+    now_ns = 1_800_000_000 * 10 ** 9
+    age = aiqt_hooks._CITE_PRUNE_AGE_NS
+    keep = "f" * 16 + ".jsonl"
+    stamps = {"a" * 16 + ".jsonl": now_ns - age + 1, "b" * 16 + ".jsonl": now_ns - age,
+              "c" * 16 + ".jsonl": now_ns - age - 1, "d" * 16 + ".jsonl.1": now_ns - age - 1,
+              keep: now_ns - age - 1, keep + ".1": now_ns - age - 1, "notes.txt": now_ns - age - 1}
+    for name, when in stamps.items():
+        (prune_dir / name).write_bytes(b"x\n")
+        os.utime(str(prune_dir / name), ns=(when, when))
+    os.symlink(str(prune_dir / "notes.txt"), str(prune_dir / ("e" * 16 + ".jsonl")))
+    removed = _cite_prune_in(prune_dir, keep, now_ns)
+    check("citeledger/prune-boundary", (removed, sorted(p.name for p in prune_dir.iterdir())),
+          (2, sorted(["a" * 16 + ".jsonl", "b" * 16 + ".jsonl", "e" * 16 + ".jsonl", keep, keep + ".1",
+                      "notes.txt"])))
+    many_dir = tmp / "cite-prune-many"
+    many_dir.mkdir()
+    for index in range(51):
+        old = many_dir / ("{:016x}.jsonl".format(index))
+        old.write_bytes(b"x\n")
+        os.utime(str(old), ns=(now_ns - age - 1, now_ns - age - 1))
+    check("citeledger/prune-at-most-fifty", (_cite_prune_in(many_dir, keep, now_ns), len(list(many_dir.iterdir()))),
+          (50, 1))
+    # Through the hook: a new session file prunes an old ledger file; an append to an existing one does not.
+    stale = ledger_dir / ("9" * 16 + ".jsonl")
+    stale.write_bytes(b"x\n")
+    old_ns = time.time_ns() - age - 10 ** 9
+    os.utime(str(stale), ns=(old_ns, old_ns))
+    call("Read", {"file_path": str(a_py)}, read("alpha = 1", 1, 1), "read-span")
+    kept_on_append = stale.exists()
+    call("Read", {"file_path": str(a_py)}, read("alpha = 1", 1, 1), "prune-new-session")
+    check("citeledger/new-session-prunes-old", (kept_on_append, stale.exists()), (True, False))
+
+    # A write that fails is surfaced, never swallowed: a regular file where the ledger directory belongs,
+    # and a symlink at the session file, whose target is left untouched.
+    saved_xdg = os.environ.get("XDG_STATE_HOME")
+    try:
+        os.environ["XDG_STATE_HOME"] = str(tmp / "cite-alt-xdg")
+        alt = Path(aiqt_hooks._orch_state_dir_for_root(str(root)))
+        alt.mkdir(parents=True)
+        (alt / "citation-ledger").write_bytes(b"not a directory\n")
+        failed = call("Read", {"file_path": str(a_py)}, read("alpha = 1", 1, 1), "fail")
+    finally:
+        if saved_xdg is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = saved_xdg
+    note = failed[1].get("systemMessage", "") if isinstance(failed[1], dict) else ""
+    check("citeledger/write-failure-noted",
+          (_verdict(failed), "citation-ledger write failed (FileExistsError" in note), ("warn", True))
+    target = tmp / "cite-symlink-target.txt"
+    target.write_bytes(b"keep\n")
+    os.symlink(str(target), str(ledger("symlinked")))
+    linked = call("Read", {"file_path": str(a_py)}, read("alpha = 1", 1, 1), "symlinked")
+    note = linked[1].get("systemMessage", "") if isinstance(linked[1], dict) else ""
+    check("citeledger/symlink-ledger-refused",
+          (_verdict(linked), "citation-ledger write failed" in note, target.read_bytes()), ("warn", True, b"keep\n"))
+
+    # The recorder never decides a permission: every call above allowed, silently or with a note.
+    check("citeledger/never-denies", sorted(set(verdicts)), ["allow", "warn"])
 
 
 def main(report_path=None):
@@ -6790,6 +7156,7 @@ def _main_isolated(report_path=None):
                   encoding="utf-8")).get("keys", [])), {"k1", "k2"})
         check("forced5/second-pass-clean", aiqt_hooks._orch_forced_exit_findings(str(hsd)), [])
         _rdp_cases(tmp)
+        _citeledger_cases(tmp)
     finally:
         aiqt_hooks._orch_dirfd_has_registry = saved_probe
         shutil.rmtree(tmp, ignore_errors=True)

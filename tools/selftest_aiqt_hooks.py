@@ -1319,7 +1319,7 @@ def _test_note_literal_sites(failures, tmp):
     review_dispatch_pin's;
     the UserPromptSubmit stamp's unwritten-stamp note and its timer-path _context_note (judged by its own
     shape: model context plus an operator systemMessage, no permissionDecision), the PostToolUse ledger
-    returns, the Stop loop-bound
+    returns and the citation recorder's failed-write note, the Stop loop-bound
     _stop_warn and the dispatcher's bad-argv fail-open note are pinned the same way (the other Stop and
     dispatcher sites: (ns-*)). The fixtures are selftest_orch_hooks.Fixture repos under tmp."""
     import selftest_orch_hooks as orch
@@ -1397,6 +1397,17 @@ def _test_note_literal_sites(failures, tmp):
              "recording that fail-open could not be written")
     finally:
         aiqt_hooks._orch_append_jsonl = saved_append
+    saved_cite = aiqt_hooks._cite_append
+    try:
+        aiqt_hooks._cite_append = lambda state_dir, session, rows: "QA write fault"
+        seed = str(r.root / "seed.txt")
+        note("(nl-citeledger-write) a failed citation-ledger write is surfaced with a note naming the failure",
+             aiqt_hooks.citation_read_recorder(r.payload("PostToolUse", "Read", dict(file_path=seed), extra=dict(
+                 tool_response=dict(type="text", file=dict(filePath=seed, content="seed", numLines=1,
+                                                           startLine=1))))),
+             "citation-ledger write failed (QA write fault)")
+    finally:
+        aiqt_hooks._cite_append = saved_cite
     saved_save = aiqt_hooks._orch_save_turn_state
     try:
         aiqt_hooks._orch_save_turn_state = lambda root, state: "PermissionError"

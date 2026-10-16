@@ -18,6 +18,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   commit_msg_subst    PreToolUse  sectvl  deny shell substitution in a git commit argument
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
   gensrc_guard        PreToolUse  gensrc  a Write/Edit/MultiEdit that hand-edits a registered generated artefact
+  citation_read_recorder PostToolUse citint record (never block) the line spans a Read, Grep, plain Bash read, Write or Edit returned
 
 Contract (doc-confirmed 2026-08-17 against code.claude.com/docs/en/hooks): the hook payload arrives
 as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
@@ -208,8 +209,8 @@ import sys
 # streams: with a sys.stderr whose write works but whose flush fails, `raise SystemExit` here ended
 # as the interpreter's own exit 120 instead of the refusal exit. Nothing runs before this guard, so
 # os._exit discards no other buffered output; the warning itself is flushed before the exit.
-FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_prompt_stamp", "orch_resume_audit",
-                         "orch_stop_guard", "orch_teammate_idle")
+FLOOR_FAIL_OPEN_MODES = ("citation_read_recorder", "diff_wall_stop", "orch_dispatch_ledger", "orch_prompt_stamp",
+                         "orch_resume_audit", "orch_stop_guard", "orch_teammate_idle")
 
 if tuple(sys.version_info[:2]) < (3, 14):
     import os
@@ -12698,6 +12699,521 @@ def orch_dispatch_ledger(data):
     return _allow()
 
 
+# --- citation read ledger (citint/refcap) ------------------------------------------------------------
+# PostToolUse recorder, never blocks. After a Read, Grep, plain Bash read (git show REV:PATH, grep or rg with
+# a line-number flag, sed -n 'A,Bp' PATH), Write or Edit it appends rows naming the 1-based inclusive line
+# span the call returned or wrote, with the sha256 of those lines' raw bytes, to an owner-only ledger file per
+# session under the state directory. A span is recorded only when the tool output is a shape recognized here
+# AND the text it shows equals the file's own text at that span; any other shape records nothing, so a span
+# is never guessed. Every digest is computed from bytes the hook reads itself (the file on disk, or the git
+# blob), never from tool output.
+_CITE_TOOLS = frozenset(("Read", "Grep", "Bash", "Write", "Edit"))
+_CITE_DIR = "citation-ledger"
+_CITE_NAME_RE = re.compile(r"[0-9a-f]{16}\.jsonl(?:\.1)?")
+_CITE_MAX_FILE = 16 * 1024 * 1024        # a larger file or blob is not read, so nothing of it is recorded
+_CITE_CAP = 4 * 1024 * 1024              # a session file an append would take past this is rotated first
+_CITE_DEDUP_BELOW = 256 * 1024           # duplicate rows are skipped only while the file is smaller than this
+_CITE_ROW_MAX = 4096                     # a row whose JSON line is this many bytes or more is dropped
+_CITE_PRUNE_AGE_NS = 14 * 86400 * 10 ** 9  # ledger files last modified longer ago than this are pruned
+_CITE_PRUNE_MAX = 50                     # at most this many files are pruned per new session file
+_CITE_EDIT_MAX = 50                      # at most this many occurrences of an Edit's new text are recorded
+_CITE_MAX_FILES = 50                     # at most this many distinct paths are read per tool call
+_CITE_MAX_ROWS = 500                     # at most this many rows are appended per tool call
+_CITE_MAX_SPLITS = 8                     # at most this many path splits are tried per output line
+_CITE_BUDGET = 5.0                       # seconds of reading per call, under the 10 second hook timeout
+_CITE_OPEN_FLAGS = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0)
+_CITE_APPEND_FLAGS = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+_CITE_SED_RE = re.compile(r"([1-9][0-9]{0,8})(?:,([1-9][0-9]{0,8}))?p")
+# A grep or rg output line names its file and line as PATH:N:TEXT (a match) or PATH-N-TEXT (context). The
+# lookahead finds every place the line could split that way, since a path may itself hold ':' or '-N-'.
+_CITE_SPLIT_RE = re.compile(r"(?=([:-])([1-9][0-9]{0,8})\1)")
+_CITE_BARE_RE = re.compile(r"([1-9][0-9]{0,8})[:-]")  # N:TEXT or N-TEXT, from a search of one named file
+
+
+def _cite_sha256(blob):
+    """The sha256 hex of bytes."""
+    return __import__("hashlib").sha256(blob).hexdigest()
+
+
+def _cite_real(path):
+    """path resolved through symlinks, or None where it cannot be resolved (an embedded NUL, for example)."""
+    try:
+        return os.path.realpath(path)
+    except (OSError, ValueError):
+        return None
+
+
+def _cite_entry(blob, path):
+    """One file's bytes as the recorder sees them: its path, its lines as raw byte pieces (split on LF only,
+    each keeping its LF and any CR, so the pieces join back to the bytes), and each line's text decoded as
+    UTF-8 (an undecodable byte becomes U+FFFD) without its LF and without one CR before it."""
+    lines = blob.split(b"\n")
+    pieces = [line + b"\n" for line in lines[:-1]]
+    if lines[-1]:
+        pieces.append(lines[-1])
+    texts = [p.removesuffix(b"\n").removesuffix(b"\r").decode("utf-8", "replace") for p in pieces]
+    return {"path": path, "blob": blob, "pieces": pieces, "texts": texts}
+
+
+def _cite_read(path, files, deadline):
+    """The _cite_entry of the regular file at path, resolved through symlinks, or None: a path under /dev or
+    /proc, a call that has already read _CITE_MAX_FILES paths or spent its budget, an open or read fault, a
+    file that is not regular, or one larger than _CITE_MAX_FILE bytes. The open is non-blocking, so a FIFO is
+    refused at the fstat rather than waited on; results are kept in files, keyed by resolved path."""
+    real = _cite_real(path)
+    if real in files:
+        return files[real]
+    if real is None or len(files) >= _CITE_MAX_FILES or time.monotonic() > deadline \
+            or real in ("/dev", "/proc") or real.startswith(("/dev/", "/proc/")):
+        return None
+    entry = None
+    try:
+        fd = os.open(real, _CITE_OPEN_FLAGS)
+    except OSError:
+        fd = None
+    if fd is not None:
+        try:
+            st = os.fstat(fd)
+            if stat.S_ISREG(st.st_mode) and st.st_size <= _CITE_MAX_FILE:
+                chunks, total = [], 0
+                while total <= _CITE_MAX_FILE:
+                    chunk = os.read(fd, min(1 << 20, _CITE_MAX_FILE + 1 - total))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    total += len(chunk)
+                if total <= _CITE_MAX_FILE:
+                    entry = _cite_entry(b"".join(chunks), real)
+        except OSError:
+            entry = None
+        finally:
+            try:
+                os.close(fd)  # once: after a failed close the descriptor number may already be reused
+            except OSError:
+                pass
+    files[real] = entry
+    return entry
+
+
+def _cite_span(entry, start, shown):
+    """The last line of the span that starts at line start and shows the lines in shown, when each shown
+    line, without one trailing CR, equals the file's line at its position; None when any line differs, the
+    span starts before line 1, nothing is shown, or the span runs past the file's last line."""
+    texts = entry["texts"]
+    if start < 1 or not shown or start - 1 + len(shown) > len(texts):
+        return None
+    for offset, line in enumerate(shown):
+        if line.removesuffix("\r") != texts[start - 1 + offset]:
+            return None
+    return start - 1 + len(shown)
+
+
+def _cite_from_read(tool_input, response, files, deadline):
+    """Read: one span, from a tool_response {"type": "text", "file": {"filePath", "content", "startLine",
+    "numLines"}} whose filePath resolves to the requested file_path, whose content splits on LF into
+    numLines lines (one trailing empty piece after a final LF is dropped), and whose lines equal the file's
+    lines startLine onward. An empty line shown just past the file's last line, where the file ends in a
+    line feed, is no line of the file and is dropped. Any other shape (an image, PDF or notebook read, a
+    missing or non-integer field, a mismatch) records nothing."""
+    data = response.get("file") if isinstance(response, dict) and response.get("type") == "text" else None
+    if not isinstance(data, dict):
+        return []
+    want, got = tool_input.get("file_path"), data.get("filePath")
+    content, start, count = data.get("content"), data.get("startLine"), data.get("numLines")
+    if not (isinstance(want, str) and isinstance(got, str) and os.path.isabs(want) and os.path.isabs(got)
+            and isinstance(content, str) and type(start) is int and type(count) is int and count >= 1):
+        return []
+    if _cite_real(want) is None or _cite_real(want) != _cite_real(got):
+        return []
+    entry = _cite_read(got, files, deadline)
+    if entry is None:
+        return []
+    shown = content.split("\n")
+    if len(shown) == count + 1 and shown[-1] == "":
+        shown.pop()
+    if len(shown) != count:
+        return []
+    blob = entry["blob"]
+    if start - 1 + count == len(entry["texts"]) + 1 and shown[-1] == "" and (not blob or blob.endswith(b"\n")):
+        shown.pop()
+    end = _cite_span(entry, start, shown)
+    return [] if end is None else [("read", "Read", entry, start, end, None)]
+
+
+def _cite_hits(lines, cwd, single, via, files, deadline):
+    """grep or rg output lines as read spans. Each line is split at every place it could name a file and a
+    line (PATH:N:TEXT, PATH-N-TEXT, and N:TEXT or N-TEXT where the search named the one file single), a
+    relative PATH resolving against cwd, and a split counts only when that file's line N equals TEXT; a line
+    with no such split, or with more than one, records nothing. Consecutive lines of one file merge into one
+    span."""
+    hits = {}
+    for line in lines:
+        if time.monotonic() > deadline:
+            break
+        splits = []
+        bare = _CITE_BARE_RE.match(line) if single is not None else None
+        if bare:
+            splits.append((single, int(bare.group(1)), line[bare.end():]))
+        for match in _CITE_SPLIT_RE.finditer(line):
+            if len(splits) >= _CITE_MAX_SPLITS:
+                break
+            if match.start() > 0:
+                splits.append((line[:match.start()], int(match.group(2)),
+                               line[match.start() + len(match.group(2)) + 2:]))
+        found = set()
+        for path, number, text in splits:
+            entry = _cite_read(os.path.join(cwd, path), files, deadline)
+            if entry is not None and number <= len(entry["texts"]) \
+                    and entry["texts"][number - 1] == text.removesuffix("\r"):
+                found.add((entry["path"], number))
+        if len(found) == 1:
+            path, number = found.pop()
+            hits.setdefault(path, set()).add(number)
+    spans = []
+    for path in sorted(hits):
+        numbers = sorted(hits[path])
+        start = prev = numbers[0]
+        for number in numbers[1:] + [None]:
+            if number is not None and number == prev + 1:
+                prev = number
+                continue
+            spans.append(("read", via, files[path], start, prev, None))
+            start = prev = number
+    return spans
+
+
+def _cite_from_grep(tool_input, response, cwd, files, deadline):
+    """Grep: the hit and context lines of a tool_response {"mode": "content", "content": TEXT}, through
+    _cite_hits. A search run with "-n" false prints no line numbers, so it records nothing."""
+    if not isinstance(response, dict) or response.get("mode") != "content":
+        return []
+    content, base = response.get("content"), tool_input.get("path")
+    base = cwd if base is None else base
+    if not isinstance(content, str) or tool_input.get("-n") is False or not isinstance(base, str) or not base:
+        return []
+    base = os.path.join(cwd, base)
+    return _cite_hits(content.split("\n"), cwd, base if os.path.isfile(base) else None, "Grep", files,
+                      deadline)
+
+
+def _cite_git_show(args, shown, cwd):
+    """git [--no-pager] [-C ABS] show REV:PATH, its stdout showing the blob from line 1: one span, digested
+    from the blob itself (read through the scrubbed git probe, at most _CITE_MAX_FILE bytes) and recorded
+    against PATH under the repository's toplevel. A relative -C, a second operand, an option after show, a
+    PATH that is absolute or starts ./ or ../, or a probe fault records nothing."""
+    repo, i = cwd, 0
+    while i < len(args) and args[i] in ("-C", "--no-pager"):
+        if args[i] == "-C":
+            if i + 1 >= len(args) or not os.path.isabs(args[i + 1]):
+                return []
+            repo = args[i + 1]
+            i += 2
+        else:
+            i += 1
+    if len(args) != i + 2 or args[i] != "show":
+        return []
+    selector = args[i + 1]
+    rev, colon, rel = selector.partition(":")
+    if not (colon and rev and rel) or rev.startswith("-") or rev.count("{") != rev.count("}") \
+            or rel.startswith(("/", "./", "../")) or rel in (".", ".."):
+        return []
+    top = _recovery_toplevel(repo)
+    if top is None:
+        return []
+    size = _review_git(repo, "cat-file", "-s", selector)
+    try:
+        nbytes = int(size.stdout) if size is not None and size.returncode == 0 else None
+    except ValueError:
+        nbytes = None
+    if nbytes is None or nbytes > _CITE_MAX_FILE:
+        return []
+    blob = _review_git(repo, "cat-file", "blob", selector)
+    if blob is None or blob.returncode != 0 or len(blob.stdout) != nbytes:
+        return []
+    path = _cite_real(os.path.join(top, rel))
+    entry = None if path is None else _cite_entry(blob.stdout, path)
+    end = None if entry is None else _cite_span(entry, 1, shown)
+    return [] if end is None else [("read", "git-show", entry, 1, end, rev)]
+
+
+def _cite_grep_command(argv, shown, cwd, files, deadline):
+    """grep or rg with -n (alone or in a short option cluster) or --line-number: the output's lines through
+    _cite_hits. Where exactly one operand names a regular file and none names a directory, N:TEXT lines are
+    read as that file's."""
+    numbered, operands, ended = False, [], False
+    for word in argv[1:]:
+        if not ended and word == "--":
+            ended = True
+        elif not ended and word.startswith("-"):
+            numbered = numbered or word == "--line-number" or (
+                not word.startswith("--") and word[1:].isalpha() and "n" in word[1:])
+        else:
+            operands.append(os.path.join(cwd, word))
+    if not numbered:
+        return []
+    named = {_cite_real(p) for p in operands if os.path.isfile(p)}
+    single = named.pop() if len(named) == 1 and not any(os.path.isdir(p) for p in operands) else None
+    return _cite_hits(shown, cwd, single, "grep", files, deadline)
+
+
+def _cite_sed(argv, shown, cwd, files, deadline):
+    """sed -n 'A,Bp' PATH (or 'Ap'): one span from line A, ending where the output ends, at line B at most."""
+    match = _CITE_SED_RE.fullmatch(argv[2]) if len(argv) == 4 and argv[1] == "-n" else None
+    if match is None or argv[3].startswith("-"):
+        return []
+    first, last = int(match.group(1)), int(match.group(2) or match.group(1))
+    entry = _cite_read(os.path.join(cwd, argv[3]), files, deadline)
+    end = None if entry is None else _cite_span(entry, first, shown)
+    return [] if end is None or end > last else [("read", "sed", entry, first, end, None)]
+
+
+def _cite_from_bash(tool_input, response, cwd, files, deadline):
+    """Bash: a command that lexes to one plain simple command (no separator, pipe, redirect, expansion or
+    glob) whose command word is literally git, grep, rg or sed, with a tool_response whose stdout is a
+    non-empty string and whose interrupted field is not true. One final LF is dropped from stdout before it
+    is split into lines. Anything else records nothing."""
+    if not isinstance(response, dict) or response.get("interrupted") is True:
+        return []
+    out, command = response.get("stdout"), tool_input.get("command")
+    if not (isinstance(out, str) and out and isinstance(command, str)):
+        return []
+    try:
+        segments = _lex_command(command)
+    except ValueError:
+        return []
+    words = [seg for seg in segments if seg.argv or seg.redirects]
+    if len(words) != 1 or any(seg.sep_after for seg in segments) or words[0].redirects \
+            or words[0].opaque_shell:
+        return []
+    argv = words[0].argv
+    shown = out.removesuffix("\n").split("\n")
+    if argv[0] == "git":
+        return _cite_git_show(argv[1:], shown, cwd)
+    if argv[0] in ("grep", "rg"):
+        return _cite_grep_command(argv, shown, cwd, files, deadline)
+    if argv[0] == "sed":
+        return _cite_sed(argv, shown, cwd, files, deadline)
+    return []
+
+
+def _cite_from_write(tool, tool_input, response, files, deadline):
+    """Write and Edit, from a tool_response object whose filePath resolves to the requested file_path. A
+    Write is the whole file, recorded only when the file's text equals the written content (CRLF read as
+    LF on both sides); an Edit is the lines of each occurrence of its new_string in the file, at most
+    _CITE_EDIT_MAX of them. An empty content or new_string records nothing."""
+    path = tool_input.get("file_path")
+    got = response.get("filePath") if isinstance(response, dict) else None
+    if not (isinstance(path, str) and isinstance(got, str) and os.path.isabs(path) and os.path.isabs(got)) \
+            or _cite_real(path) is None or _cite_real(path) != _cite_real(got):
+        return []
+    new = tool_input.get("content" if tool == "Write" else "new_string")
+    entry = _cite_read(path, files, deadline) if isinstance(new, str) and new else None
+    if entry is None:
+        return []
+    text = entry["blob"].decode("utf-8", "replace")
+    if tool == "Write":
+        if text.replace("\r\n", "\n") != new.replace("\r\n", "\n"):
+            return []
+        return [("wrote", "Write", entry, 1, len(entry["pieces"]), None)]
+    spans, line, last = [], 1, 0
+    pos = text.find(new)
+    while pos != -1 and len(spans) < _CITE_EDIT_MAX:
+        line += text.count("\n", last, pos)
+        spans.append(("wrote", "Edit", entry, line, line + new.count("\n", 0, len(new) - 1), None))
+        last = pos
+        pos = text.find(new, pos + len(new))
+    return spans
+
+
+def _cite_rows(tool, tool_input, response, cwd, root):
+    """The ledger rows one finished tool call earns: {"v": 1, "ts", "kind": "read"|"wrote", "via", "path"
+    (resolved), "rel" (relative to the resolved root, or null outside it), "start", "end", "sha256" (of the
+    raw bytes of lines start..end, LF-split, CR kept), "rev" (the git show revision, else null)}."""
+    files, deadline = {}, time.monotonic() + _CITE_BUDGET
+    if tool == "Read":
+        found = _cite_from_read(tool_input, response, files, deadline)
+    elif tool in ("Write", "Edit"):
+        found = _cite_from_write(tool, tool_input, response, files, deadline)
+    elif not (isinstance(cwd, str) and os.path.isabs(cwd)):
+        found = []
+    elif tool == "Grep":
+        found = _cite_from_grep(tool_input, response, cwd, files, deadline)
+    else:
+        found = _cite_from_bash(tool_input, response, cwd, files, deadline)
+    top = os.path.realpath(root).rstrip("/") + "/"
+    ts = _orch_now().isoformat()
+    rows = []
+    for kind, via, entry, start, end, rev in found[:_CITE_MAX_ROWS]:
+        path = entry["path"]
+        rows.append({"v": 1, "ts": ts, "kind": kind, "via": via, "path": path,
+                     "rel": path[len(top):] if path.startswith(top) else None, "start": start, "end": end,
+                     "sha256": _cite_sha256(b"".join(entry["pieces"][start - 1:end])), "rev": rev})
+    return rows
+
+
+def _cite_fail(exc):
+    """A short failure detail: the exception's class name, with the system's error text where it gave one."""
+    text = getattr(exc, "strerror", None)
+    return "{}: {}".format(type(exc).__name__, text) if text else type(exc).__name__
+
+
+def _cite_open(dirfd, name):
+    """Open the ledger file name in the directory dirfd for appending, never through a symlink and without
+    waiting on a FIFO, creating it 0600 when absent: (fd, created)."""
+    try:
+        return os.open(name, _CITE_APPEND_FLAGS | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dirfd), True
+    except FileExistsError:
+        return os.open(name, _CITE_APPEND_FLAGS | os.O_CREAT, 0o600, dir_fd=dirfd), False
+
+
+def _cite_regular(fd):
+    """The size of the open ledger file, its permission bits set to 0600 first when they differ; None when
+    it is not a regular file."""
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    if stat.S_IMODE(st.st_mode) != 0o600:
+        os.fchmod(fd, 0o600)
+    return st.st_size
+
+
+def _cite_unseen(fd, size, items):
+    """items without those whose (path, start, end, sha256) a row of the open ledger file (size bytes)
+    already holds; a line that is not a JSON object is passed over."""
+    have = set()
+    for line in os.pread(fd, size, 0).split(b"\n"):
+        try:
+            row = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(row, dict):
+            key = (row.get("path"), row.get("start"), row.get("end"), row.get("sha256"))
+            if all(isinstance(k, (str, int)) for k in key):
+                have.add(key)
+    return [(key, line) for key, line in items if key not in have]
+
+
+def _cite_prune(dirfd, keep, now_ns):
+    """Remove up to _CITE_PRUNE_MAX regular files in the ledger directory whose names have the ledger shape,
+    other than keep and its .1, last modified more than _CITE_PRUNE_AGE_NS before now_ns (stat without
+    following a symlink; a fault skips that file). Returns how many were removed."""
+    cutoff, removed = now_ns - _CITE_PRUNE_AGE_NS, 0
+    try:
+        names = sorted(os.listdir(dirfd))
+    except OSError:
+        return removed
+    for name in names:
+        if removed >= _CITE_PRUNE_MAX:
+            break
+        if name in (keep, keep + ".1") or not _CITE_NAME_RE.fullmatch(name):
+            continue
+        try:
+            st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+            if stat.S_ISREG(st.st_mode) and st.st_mtime_ns < cutoff:
+                os.unlink(name, dir_fd=dirfd)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def _cite_append_at(dirfd, name, items):
+    """The append of _cite_append in the open ledger directory dirfd (see there): None, or the failure
+    detail."""
+    if stat.S_IMODE(os.fstat(dirfd).st_mode) != 0o700:
+        os.fchmod(dirfd, 0o700)
+    fd, created = _cite_open(dirfd, name)
+    rotate = False
+    try:
+        size = _cite_regular(fd)
+        if size is None:
+            return "not a regular file"
+        if size < _CITE_DEDUP_BELOW:
+            items = _cite_unseen(fd, size, items)
+        data = b"".join(line for _key, line in items)
+        if data and size > 0 and size + len(data) > _CITE_CAP:
+            rotate = True
+        elif data and os.write(fd, data) != len(data):
+            return "short write"
+    finally:
+        os.close(fd)
+    if rotate:
+        os.replace(name, name + ".1", src_dir_fd=dirfd, dst_dir_fd=dirfd)
+        fd, created = _cite_open(dirfd, name)
+        try:
+            if _cite_regular(fd) is None:
+                return "not a regular file"
+            if os.write(fd, data) != len(data):
+                return "short write"
+        finally:
+            os.close(fd)
+    if created:
+        _cite_prune(dirfd, name, time.time_ns())
+    return None
+
+
+def _cite_append(state_dir, session, rows):
+    """Append rows to this session's ledger, <state_dir>/citation-ledger/<first 16 hex of sha256(session
+    id)>.jsonl, in one write: None on success, else the failure detail. The directory is made 0700 (its
+    leaf opened without following a symlink) and the file 0600, whatever the umask. A row whose JSON line is
+    _CITE_ROW_MAX bytes or more is dropped, and while the file is under _CITE_DEDUP_BELOW bytes a row it
+    already holds is skipped. Where the append would take a non-empty file past _CITE_CAP bytes the file is
+    first renamed onto <name>.1, replacing the older generation. A new file prunes old ledger files."""
+    items, seen = [], set()
+    for row in rows:
+        key = (row["path"], row["start"], row["end"], row["sha256"])
+        line = (json.dumps(row, sort_keys=True) + "\n").encode("utf-8")
+        if key not in seen and len(line) < _CITE_ROW_MAX:
+            seen.add(key)
+            items.append((key, line))
+    if not items:
+        return None
+    name = _cite_sha256(session.encode("utf-8", "replace"))[:16] + ".jsonl"
+    try:
+        directory = os.path.join(state_dir, _CITE_DIR)
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        dirfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except (OSError, ValueError) as exc:
+        return _cite_fail(exc)
+    try:
+        return _cite_append_at(dirfd, name, items)
+    except (OSError, ValueError) as exc:
+        return _cite_fail(exc)
+    finally:
+        try:
+            os.close(dirfd)  # once: after a failed close the descriptor number may already be reused
+        except OSError:
+            pass
+
+
+def citation_read_recorder(data):
+    """citint/refcap, PostToolUse (recorder, never blocks): record the line spans a Read, Grep, plain Bash
+    read, Write or Edit returned or wrote, for a later citation check. Inert (a silent allow) unless the
+    payload is a PostToolUse one with a non-empty session_id, a recorded tool and a tool_input object, and
+    the session cwd resolves to a git toplevel; not registry-gated and not holder-gated, since each session
+    writes only its own ledger file. A tool_response shape it does not recognize, or output that does not
+    equal the file's text, records nothing. A failed write SURFACES as a non-blocking systemMessage naming
+    the error (nocncl), never a swallowed one."""
+    if data.get("hook_event_name") != "PostToolUse":
+        return _allow()
+    session, tool, tool_input = data.get("session_id"), data.get("tool_name"), data.get("tool_input")
+    if not (isinstance(session, str) and session and isinstance(tool, str) and tool in _CITE_TOOLS
+            and isinstance(tool_input, dict)):
+        return _allow()
+    root = _orch_root(data)
+    if root is None:
+        return _allow()
+    rows = _cite_rows(tool, tool_input, data.get("tool_response"), data.get("cwd"), root)
+    if not rows:
+        return _allow()
+    failure = _cite_append(_orch_state_dir_for_root(root), session, rows)
+    if failure is not None:
+        return _allow_note("AIQT guardrail (rules citint/refcap): the citation-ledger write failed ({}); this "
+                           "read was not recorded, so a later citation of these lines cannot be matched to "
+                           "it.".format(failure))
+    return _allow()
+
+
 # --- review dispatch pin (vfxcmt) --------------------------------------------------------------------
 # PreToolUse Bash, registry scoped. Inert unless the orchestration registry declares a `review_dispatch`
 # binding (ORCHESTRATION.md, "The review dispatch binding"). A Bash call that names a declared dispatch
@@ -16698,6 +17214,7 @@ HANDLERS = {
     "orch_prompt_stamp": orch_prompt_stamp,
     "orch_resume_audit": orch_resume_audit,
     "orch_resume_barrier": orch_resume_barrier,
+    "citation_read_recorder": citation_read_recorder,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
@@ -16735,6 +17252,7 @@ HANDLER_EVENT = {
     "orch_prompt_stamp": "UserPromptSubmit",
     "orch_resume_audit": "SessionStart",
     "orch_resume_barrier": PRETOOL,
+    "citation_read_recorder": "PostToolUse",
 }
 
 
