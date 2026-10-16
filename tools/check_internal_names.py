@@ -382,10 +382,13 @@ def self_test_main():
     environment. A caller's home, XDG or system configuration (malformed or hostile) therefore cannot change
     a self-test verdict or run a configured program. The lifecycle saves the environment before its scrub
     and restores it on exit, so no scrub runs here first: an in-process call leaves the caller's environment
-    exactly as it found it (self-test case 22)."""
+    exactly as it found it (self-test case 22). The snapshot taken here, before the lifecycle, is the caller
+    environment case 21 builds its child runs from: inside the lifecycle os.environ carries the fixture scrub
+    and the wrapper's PATH, so it no longer names the caller's own home, PATH or git."""
     from _git_fixture_env import fixture_git_lifecycle
+    caller_env = dict(os.environ)
     with fixture_git_lifecycle():
-        return _self_test()
+        return _self_test(caller_env)
 
 
 # A self-test that launches a child self-test sets _CHILD_SENTINEL in the child's environment to its OWN pid,
@@ -428,7 +431,7 @@ def _stale_sentinel_values(own_pid, parent_pid):
 
 
 # --- self-test --------------------------------------------------------------------------------------
-def _self_test():
+def _self_test(caller_env=None):
     import hashlib
     import shutil
     import tempfile
@@ -844,9 +847,13 @@ def _self_test():
             #     child fails all three; applying the scrub without the lifecycle fails the system case. A
             #     control first proves each poisoned configuration breaks a git read that honours it; the home
             #     and XDG controls pin the host's system configuration away (the shim supplies the system
-            #     control's), so no control reads the host's system file.
+            #     control's), so no control reads the host's system file. The caller environment is the
+            #     snapshot self_test_main takes before the lifecycle (a direct _self_test() call runs outside
+            #     the lifecycle and uses os.environ), without its GIT_* variables; each lane and control here
+            #     replaces HOME and XDG_CONFIG_HOME, so none of them reads the caller's own configuration.
             import shlex
-            caller = _git_fixture_env.caller_env_without_git()
+            caller = {k: v for k, v in (os.environ if caller_env is None else caller_env).items()
+                      if not k.startswith("GIT_")}
             real_git = shutil.which("git", path=caller.get("PATH", os.defpath))
             poison = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-poison-"))
             try:
@@ -963,12 +970,21 @@ def _self_test():
             #     nothing, so it cannot recurse, and adds no not-run line). It must exit 3 with the SELF-TEST
             #     INCOMPLETE line naming case 11, so a run that returns 0 unless it is a recognized child or an
             #     inherited-probe run fails this lane.
+            #     The mutated copy's entry drops the lifecycle, so the tracked-file reads of the copy, of its
+            #     case 21 home and XDG children and of its case 22 probe run without the system-config pin
+            #     and would read the host's system file. Its two lanes therefore put a git shim first on PATH
+            #     that points GIT_CONFIG_SYSTEM at os.devnull only where neither GIT_CONFIG_NOSYSTEM=1 nor
+            #     GIT_CONFIG_SYSTEM is set: those reads stay isolated, while the copy's own case 21 system
+            #     shim, which sets GIT_CONFIG_SYSTEM to its malformed file in front of this one, still
+            #     reaches git and fails that lane as this case requires.
             lifecycle_entry = ("    from _git_fixture_env import fixture_git_lifecycle\n"
+                               "    caller_env = dict(os.environ)\n"
                                "    with fixture_git_lifecycle():\n"
-                               "        return _self_test()\n")
+                               "        return _self_test(caller_env)\n")
             scrub_entry = ("    from _git_fixture_env import scrub_git_environment\n"
+                           "    caller_env = dict(os.environ)\n"
                            "    scrub_git_environment()\n"
-                           "    return _self_test()\n")
+                           "    return _self_test(caller_env)\n")
             # Each (original, mutant) pair is source text that occurs exactly once in this file; the escaped
             # quotes and backslashes keep these literals from matching themselves.
             copy_mutations = (
@@ -1006,18 +1022,32 @@ def _self_test():
             elif unbuildable:
                 failures.append("the inherited-sentinel case could not build its mutated copies (each mutated source "
                                 "text must occur once): {}".format("; ".join(unbuildable)))
+            elif real_git is None:
+                failures.append("no git on the caller's PATH; the inherited-sentinel case cannot pin its mutated "
+                                "copies' system configuration")
             else:
                 inherited_dir = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-inherited-"))
                 try:
                     for name in ("_walk.py", "check_leaks.py", "_git_fixture_env.py"):
                         shutil.copy(str(Path(toolsdir) / name), str(inherited_dir / name))
                     (inherited_dir / "check_internal_names.py").write_text(mutant, encoding="utf-8")
+                    pin_dir = inherited_dir / "system-config-pin"
+                    pin_dir.mkdir()
+                    (pin_dir / "git").write_text(
+                        "#!/bin/sh\n"
+                        'if [ "${{GIT_CONFIG_NOSYSTEM:-}}" != 1 ] && [ "${{GIT_CONFIG_SYSTEM+x}}" != x ]; then\n'
+                        "  export GIT_CONFIG_SYSTEM={}\n"
+                        "fi\n"
+                        "exec {} \"$@\"\n".format(shlex.quote(os.devnull), shlex.quote(real_git)),
+                        encoding="utf-8")
+                    (pin_dir / "git").chmod(0o700)
+                    pinned = dict(caller, PATH=str(pin_dir) + os.pathsep + caller.get("PATH", os.defpath))
                     for inherited in _stale_sentinel_values(os.getpid(), os.getppid()):
                         try:
                             proc = subprocess.run(
                                 [sys.executable, "-I", "-B", str(inherited_dir / "check_internal_names.py"),
                                  "--self-test"], capture_output=True, text=True, timeout=1200,
-                                env=dict(caller, **{_CHILD_SENTINEL: inherited, _INHERITED_PROBE: str(os.getpid())}))
+                                env=dict(pinned, **{_CHILD_SENTINEL: inherited, _INHERITED_PROBE: str(os.getpid())}))
                         except subprocess.TimeoutExpired:
                             failures.append("a top-level self-test with the child sentinel inherited as {!r} timed "
                                             "out".format(inherited))
