@@ -761,6 +761,17 @@ expected-check-ids = [
   "citeledger/write-failure-noted",
   "citeledger/symlink-ledger-refused",
   "citeledger/never-denies",
+  "citeledger/git-show-names-blob-path",
+  "citeledger/edit-own-lines-only",
+  "citeledger/grep-scope",
+  "citeledger/grep-flag-parse",
+  "citeledger/dedup-key-separates-facts",
+  "citeledger/max-files-boundary",
+  "citeledger/max-rows-boundary",
+  "citeledger/max-splits-boundary",
+  "citeledger/edit-max-boundary",
+  "citeledger/deadline-boundary",
+  "citeledger/deadline-bounds-worst-shapes",
 ]
 
 [[suite]]

@@ -3950,15 +3950,16 @@ def _recovery_git(repo, args, env_extra=None, timeout=10):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
 
 
-def _recovery_toplevel(repo):
+def _recovery_toplevel(repo, timeout=5):
     """The absolute repo TOPLEVEL for repo, via `git rev-parse --show-toplevel` (run through _recovery_git,
-    so it inherits the discovery-env neutralization and targets the REAL repo). Returns the toplevel path, or
+    so it inherits the discovery-env neutralization and targets the REAL repo), given timeout seconds (a
+    caller with its own deadline passes what is left of it). Returns the toplevel path, or
     None when git cannot resolve it (a non-zero return or an empty result: a bare repo, a broken git dir, or
     not a work tree) - the caller treats None as a snapshot failure. This matters because `status --porcelain`
     paths are repo-ROOT-relative while the session cwd can be a SUBDIR, so the size-estimate joins and the
     inside-the-repo containment checks must anchor on the TOPLEVEL, not on the (possibly deeper) cwd."""
     try:
-        result = _recovery_git(repo, ["rev-parse", "--show-toplevel"], timeout=5)
+        result = _recovery_git(repo, ["rev-parse", "--show-toplevel"], timeout=timeout)
     except (subprocess.SubprocessError, OSError, ValueError):
         # ValueError covers a UnicodeDecodeError raised by text-mode decoding of a non-UTF-8 toplevel path.
         return None
@@ -12706,7 +12707,9 @@ def orch_dispatch_ledger(data):
 # session under the state directory. A span is recorded only when the tool output is a shape recognized here
 # AND the text it shows equals the file's own text at that span; any other shape records nothing, so a span
 # is never guessed. Every digest is computed from bytes the hook reads itself (the file on disk, or the git
-# blob), never from tool output.
+# blob), never from tool output. Every read, parse and git probe of one call runs inside one deadline set
+# when the handler starts: each loop checks it, each git probe is given only the time left, nothing new
+# starts once it is reached, and the rows finished by then are still appended.
 _CITE_TOOLS = frozenset(("Read", "Grep", "Bash", "Write", "Edit"))
 _CITE_DIR = "citation-ledger"
 _CITE_NAME_RE = re.compile(r"[0-9a-f]{16}\.jsonl(?:\.1)?")
@@ -12716,11 +12719,11 @@ _CITE_DEDUP_BELOW = 256 * 1024           # duplicate rows are skipped only while
 _CITE_ROW_MAX = 4096                     # a row whose JSON line is this many bytes or more is dropped
 _CITE_PRUNE_AGE_NS = 14 * 86400 * 10 ** 9  # ledger files last modified longer ago than this are pruned
 _CITE_PRUNE_MAX = 50                     # at most this many files are pruned per new session file
-_CITE_EDIT_MAX = 50                      # at most this many occurrences of an Edit's new text are recorded
+_CITE_EDIT_MAX = 50                      # at most this many replacements of a replace_all Edit are recorded
 _CITE_MAX_FILES = 50                     # at most this many distinct paths are read per tool call
 _CITE_MAX_ROWS = 500                     # at most this many rows are appended per tool call
 _CITE_MAX_SPLITS = 8                     # at most this many path splits are tried per output line
-_CITE_BUDGET = 5.0                       # seconds of reading per call, under the 10 second hook timeout
+_CITE_BUDGET = 5.0                       # seconds for every read, parse and git probe of a call (timeout 10)
 _CITE_OPEN_FLAGS = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0)
 _CITE_APPEND_FLAGS = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
 _CITE_SED_RE = re.compile(r"([1-9][0-9]{0,8})(?:,([1-9][0-9]{0,8}))?p")
@@ -12728,6 +12731,20 @@ _CITE_SED_RE = re.compile(r"([1-9][0-9]{0,8})(?:,([1-9][0-9]{0,8}))?p")
 # lookahead finds every place the line could split that way, since a path may itself hold ':' or '-N-'.
 _CITE_SPLIT_RE = re.compile(r"(?=([:-])([1-9][0-9]{0,8})\1)")
 _CITE_BARE_RE = re.compile(r"([1-9][0-9]{0,8})[:-]")  # N:TEXT or N-TEXT, from a search of one named file
+# The short options of grep and rg that take a value: in an option cluster the rest of the word is that
+# value (so the n of -en is a pattern, not the line-number flag), and where nothing follows in the word the
+# next word is.
+_CITE_GREP_VALUED = {"grep": "ABCDdefm", "rg": "ABCEMTefgjmrt"}
+# The long options of grep and rg that take their value as the next word when written without '='.
+_CITE_GREP_LONG_VALUED = frozenset((
+    "--after-context", "--before-context", "--binary-files", "--color", "--colors", "--context",
+    "--context-separator", "--devices", "--directories", "--encoding", "--engine", "--exclude",
+    "--exclude-dir", "--exclude-from", "--file", "--glob", "--group-separator", "--iglob", "--ignore-file",
+    "--include", "--label", "--max-columns", "--max-count", "--max-depth", "--max-filesize",
+    "--path-separator", "--pre", "--pre-glob", "--regexp", "--replace", "--sort", "--sortr", "--threads",
+    "--type", "--type-add", "--type-not"))
+# A row's identity for deduplication: two rows differing in any of these are different facts.
+_CITE_KEY = ("kind", "via", "path", "start", "end", "sha256", "rev")
 
 
 def _cite_sha256(blob):
@@ -12743,27 +12760,51 @@ def _cite_real(path):
         return None
 
 
+def _cite_over(deadline):
+    """Whether the call's deadline has been reached."""
+    return time.monotonic() >= deadline
+
+
+def _cite_left(deadline):
+    """The seconds a git probe of the call may take: what is left before deadline, or None when nothing is
+    left (the probe is not started)."""
+    left = deadline - time.monotonic()
+    return left if left > 0 else None
+
+
 def _cite_entry(blob, path):
-    """One file's bytes as the recorder sees them: its path, its lines as raw byte pieces (split on LF only,
-    each keeping its LF and any CR, so the pieces join back to the bytes), and each line's text decoded as
-    UTF-8 (an undecodable byte becomes U+FFFD) without its LF and without one CR before it."""
+    """One file's bytes as the recorder sees them: its path, the bytes, and its lines as raw byte pieces
+    split on LF only, each without its LF (an empty piece after a final LF is no line)."""
     lines = blob.split(b"\n")
-    pieces = [line + b"\n" for line in lines[:-1]]
-    if lines[-1]:
-        pieces.append(lines[-1])
-    texts = [p.removesuffix(b"\n").removesuffix(b"\r").decode("utf-8", "replace") for p in pieces]
-    return {"path": path, "blob": blob, "pieces": pieces, "texts": texts}
+    if lines[-1] == b"":
+        lines.pop()
+    return {"path": path, "blob": blob, "lines": lines}
+
+
+def _cite_text(raw):
+    """A raw line's text: decoded as UTF-8 (an undecodable byte becomes U+FFFD) without one CR at its end."""
+    return raw.removesuffix(b"\r").decode("utf-8", "replace")
+
+
+def _cite_bytes(entry, start, end):
+    """The raw bytes of lines start..end of entry, each with its LF where the file has one."""
+    lines = entry["lines"]
+    tail = b"\n" if end < len(lines) or entry["blob"].endswith(b"\n") else b""
+    return b"\n".join(lines[start - 1:end]) + tail
 
 
 def _cite_read(path, files, deadline):
-    """The _cite_entry of the regular file at path, resolved through symlinks, or None: a path under /dev or
-    /proc, a call that has already read _CITE_MAX_FILES paths or spent its budget, an open or read fault, a
-    file that is not regular, or one larger than _CITE_MAX_FILE bytes. The open is non-blocking, so a FIFO is
-    refused at the fstat rather than waited on; results are kept in files, keyed by resolved path."""
+    """The _cite_entry of the regular file at path, resolved through symlinks, or None: the call's deadline
+    reached (before the read or between its chunks), a path under /dev or /proc, a call that has already read
+    _CITE_MAX_FILES paths, an open or read fault, a file that is not regular, or one larger than
+    _CITE_MAX_FILE bytes. The open is non-blocking, so a FIFO is refused at the fstat rather than waited
+    on; results are kept in files, keyed by resolved path."""
+    if _cite_over(deadline):
+        return None
     real = _cite_real(path)
     if real in files:
         return files[real]
-    if real is None or len(files) >= _CITE_MAX_FILES or time.monotonic() > deadline \
+    if real is None or len(files) >= _CITE_MAX_FILES \
             or real in ("/dev", "/proc") or real.startswith(("/dev/", "/proc/")):
         return None
     entry = None
@@ -12775,14 +12816,13 @@ def _cite_read(path, files, deadline):
         try:
             st = os.fstat(fd)
             if stat.S_ISREG(st.st_mode) and st.st_size <= _CITE_MAX_FILE:
-                chunks, total = [], 0
-                while total <= _CITE_MAX_FILE:
+                chunks, total, ended = [], 0, False
+                while total <= _CITE_MAX_FILE and not ended and not _cite_over(deadline):
                     chunk = os.read(fd, min(1 << 20, _CITE_MAX_FILE + 1 - total))
-                    if not chunk:
-                        break
+                    ended = not chunk
                     chunks.append(chunk)
                     total += len(chunk)
-                if total <= _CITE_MAX_FILE:
+                if ended and total <= _CITE_MAX_FILE:
                     entry = _cite_entry(b"".join(chunks), real)
         except OSError:
             entry = None
@@ -12795,15 +12835,16 @@ def _cite_read(path, files, deadline):
     return entry
 
 
-def _cite_span(entry, start, shown):
+def _cite_span(entry, start, shown, deadline):
     """The last line of the span that starts at line start and shows the lines in shown, when each shown
     line, without one trailing CR, equals the file's line at its position; None when any line differs, the
-    span starts before line 1, nothing is shown, or the span runs past the file's last line."""
-    texts = entry["texts"]
-    if start < 1 or not shown or start - 1 + len(shown) > len(texts):
+    span starts before line 1, nothing is shown, the span runs past the file's last line, or the call's
+    deadline is reached before every line is compared."""
+    lines = entry["lines"]
+    if start < 1 or not shown or start - 1 + len(shown) > len(lines):
         return None
     for offset, line in enumerate(shown):
-        if line.removesuffix("\r") != texts[start - 1 + offset]:
+        if _cite_over(deadline) or line.removesuffix("\r") != _cite_text(lines[start - 1 + offset]):
             return None
     return start - 1 + len(shown)
 
@@ -12834,21 +12875,27 @@ def _cite_from_read(tool_input, response, files, deadline):
     if len(shown) != count:
         return []
     blob = entry["blob"]
-    if start - 1 + count == len(entry["texts"]) + 1 and shown[-1] == "" and (not blob or blob.endswith(b"\n")):
+    if start - 1 + count == len(entry["lines"]) + 1 and shown[-1] == "" and (not blob or blob.endswith(b"\n")):
         shown.pop()
-    end = _cite_span(entry, start, shown)
+    end = _cite_span(entry, start, shown, deadline)
     return [] if end is None else [("read", "Read", entry, start, end, None)]
 
 
-def _cite_hits(lines, cwd, single, via, files, deadline):
+def _cite_inside(path, scope):
+    """Whether the resolved path is one of the resolved paths in scope or lies under one of them."""
+    return any(path == root or path.startswith(root.rstrip("/") + "/") for root in scope)
+
+
+def _cite_hits(lines, cwd, single, scope, via, files, deadline):
     """grep or rg output lines as read spans. Each line is split at every place it could name a file and a
     line (PATH:N:TEXT, PATH-N-TEXT, and N:TEXT or N-TEXT where the search named the one file single), a
-    relative PATH resolving against cwd, and a split counts only when that file's line N equals TEXT; a line
-    with no such split, or with more than one, records nothing. Consecutive lines of one file merge into one
-    span."""
+    relative PATH resolving against cwd, and a split counts only when that file is the searched file or lies
+    under a searched directory (scope, resolved paths) and its line N equals TEXT; a line with no such
+    split, or with more than one, records nothing. Consecutive lines of one file merge into one span. Once
+    the call's deadline is reached no further line is read; the lines matched before it are kept."""
     hits = {}
     for line in lines:
-        if time.monotonic() > deadline:
+        if _cite_over(deadline):
             break
         splits = []
         bare = _CITE_BARE_RE.match(line) if single is not None else None
@@ -12862,9 +12909,11 @@ def _cite_hits(lines, cwd, single, via, files, deadline):
                                line[match.start() + len(match.group(2)) + 2:]))
         found = set()
         for path, number, text in splits:
-            entry = _cite_read(os.path.join(cwd, path), files, deadline)
-            if entry is not None and number <= len(entry["texts"]) \
-                    and entry["texts"][number - 1] == text.removesuffix("\r"):
+            real = _cite_real(os.path.join(cwd, path))
+            inside = real is not None and _cite_inside(real, scope)
+            entry = _cite_read(real, files, deadline) if inside else None
+            if entry is not None and number <= len(entry["lines"]) \
+                    and _cite_text(entry["lines"][number - 1]) == text.removesuffix("\r"):
                 found.add((entry["path"], number))
         if len(found) == 1:
             path, number = found.pop()
@@ -12884,23 +12933,31 @@ def _cite_hits(lines, cwd, single, via, files, deadline):
 
 def _cite_from_grep(tool_input, response, cwd, files, deadline):
     """Grep: the hit and context lines of a tool_response {"mode": "content", "content": TEXT}, through
-    _cite_hits. A search run with "-n" false prints no line numbers, so it records nothing."""
+    _cite_hits, each counted only inside the requested path (the file, or the directory and what lies under
+    it; cwd when no path is given). A search run with "-n" false prints no line numbers, so it records
+    nothing."""
     if not isinstance(response, dict) or response.get("mode") != "content":
         return []
     content, base = response.get("content"), tool_input.get("path")
     base = cwd if base is None else base
     if not isinstance(content, str) or tool_input.get("-n") is False or not isinstance(base, str) or not base:
         return []
-    base = os.path.join(cwd, base)
-    return _cite_hits(content.split("\n"), cwd, base if os.path.isfile(base) else None, "Grep", files,
+    base = _cite_real(os.path.join(cwd, base))
+    if base is None:
+        return []
+    return _cite_hits(content.split("\n"), cwd, base if os.path.isfile(base) else None, (base,), "Grep", files,
                       deadline)
 
 
-def _cite_git_show(args, shown, cwd):
+def _cite_git_show(args, shown, cwd, root, deadline):
     """git [--no-pager] [-C ABS] show REV:PATH, its stdout showing the blob from line 1: one span, digested
-    from the blob itself (read through the scrubbed git probe, at most _CITE_MAX_FILE bytes) and recorded
-    against PATH under the repository's toplevel. A relative -C, a second operand, an option after show, a
-    PATH that is absolute or starts ./ or ../, or a probe fault records nothing."""
+    from the blob itself and recorded against the repository path PATH names at REV, never a working-tree
+    file: the row's path is PATH under the repository's resolved toplevel, PATH itself is not resolved
+    through the working tree, and its rel is PATH when that repository is the session's (else null). One
+    probe lists the tree entry (it must be a regular file blob, so a committed symlink, a submodule or a
+    tree records nothing) and a second reads that blob by its object id, at most _CITE_MAX_FILE bytes; each
+    runs within the call's deadline. A relative -C, a second operand, an option after show, a PATH with an
+    empty, '.' or '..' component, or a probe fault records nothing."""
     repo, i = cwd, 0
     while i < len(args) and args[i] in ("-C", "--no-pager"):
         if args[i] == "-C":
@@ -12912,48 +12969,74 @@ def _cite_git_show(args, shown, cwd):
             i += 1
     if len(args) != i + 2 or args[i] != "show":
         return []
-    selector = args[i + 1]
-    rev, colon, rel = selector.partition(":")
+    rev, colon, rel = args[i + 1].partition(":")
     if not (colon and rev and rel) or rev.startswith("-") or rev.count("{") != rev.count("}") \
-            or rel.startswith(("/", "./", "../")) or rel in (".", ".."):
+            or any(part in ("", ".", "..") for part in rel.split("/")):
         return []
-    top = _recovery_toplevel(repo)
-    if top is None:
+    if repo == cwd:
+        top = root
+    else:
+        left = _cite_left(deadline)
+        top = None if left is None else _recovery_toplevel(repo, timeout=left)
+    top = None if top is None else _cite_real(top)
+    left = None if top is None else _cite_left(deadline)
+    listing = None if left is None else _review_git(repo, "ls-tree", "-z", "-l", "--full-tree", rev, "--", rel,
+                                                    timeout=left)
+    if listing is None or listing.returncode != 0 or listing.stdout.count(b"\0") != 1 \
+            or not listing.stdout.endswith(b"\0"):
         return []
-    size = _review_git(repo, "cat-file", "-s", selector)
-    try:
-        nbytes = int(size.stdout) if size is not None and size.returncode == 0 else None
-    except ValueError:
-        nbytes = None
-    if nbytes is None or nbytes > _CITE_MAX_FILE:
+    head, _tab, name = listing.stdout[:-1].partition(b"\t")
+    fields = head.split()
+    if name != os.fsencode(rel) or len(fields) != 4 or fields[0] not in (b"100644", b"100755") \
+            or fields[1] != b"blob" or not fields[3].isdigit() or int(fields[3]) > _CITE_MAX_FILE:
         return []
-    blob = _review_git(repo, "cat-file", "blob", selector)
-    if blob is None or blob.returncode != 0 or len(blob.stdout) != nbytes:
+    oid, left = fields[2].decode("ascii", "replace"), _cite_left(deadline)
+    blob = None if left is None else _review_git(repo, "cat-file", "blob", oid, timeout=left)
+    if blob is None or blob.returncode != 0 or len(blob.stdout) != int(fields[3]):
         return []
-    path = _cite_real(os.path.join(top, rel))
-    entry = None if path is None else _cite_entry(blob.stdout, path)
-    end = None if entry is None else _cite_span(entry, 1, shown)
+    entry = _cite_entry(blob.stdout, os.path.join(top, rel))
+    entry["rel"] = rel if top == _cite_real(root) else None
+    end = _cite_span(entry, 1, shown, deadline)
     return [] if end is None else [("read", "git-show", entry, 1, end, rev)]
 
 
 def _cite_grep_command(argv, shown, cwd, files, deadline):
-    """grep or rg with -n (alone or in a short option cluster) or --line-number: the output's lines through
-    _cite_hits. Where exactly one operand names a regular file and none names a directory, N:TEXT lines are
-    read as that file's."""
-    numbered, operands, ended = False, [], False
+    """grep or rg with -n (alone or in a short option cluster, not as the value of an option such as -e)
+    or --line-number, not turned off again by a later --no-line-number (or rg's -N): the output's lines
+    through _cite_hits, each counted only inside a named path (a named file, or a named directory and what
+    lies under it; cwd where no path is named). The first operand is the pattern unless -e, -f, --regexp or
+    --file gave one. Where exactly one path is named and it is a regular file, N:TEXT lines are read as that
+    file's."""
+    valued, numbered, patterned = _CITE_GREP_VALUED[argv[0]], False, False
+    operands, take, ended = [], False, False
     for word in argv[1:]:
-        if not ended and word == "--":
+        if take:
+            take = False
+        elif ended or word == "-" or not word.startswith("-"):
+            operands.append(word)
+        elif word == "--":
             ended = True
-        elif not ended and word.startswith("-"):
-            numbered = numbered or word == "--line-number" or (
-                not word.startswith("--") and word[1:].isalpha() and "n" in word[1:])
+        elif word.startswith("--"):
+            name = word.partition("=")[0]
+            if name in ("--line-number", "--no-line-number"):
+                numbered = name == "--line-number"
+            patterned = patterned or name in ("--regexp", "--file")
+            take = "=" not in word and name in _CITE_GREP_LONG_VALUED
         else:
-            operands.append(os.path.join(cwd, word))
+            for index, letter in enumerate(word[1:], 1):
+                if letter in valued:
+                    patterned = patterned or letter in "ef"
+                    take = index == len(word) - 1
+                    break
+                if letter == "n" or (letter == "N" and argv[0] == "rg"):
+                    numbered = letter == "n"
     if not numbered:
         return []
-    named = {_cite_real(p) for p in operands if os.path.isfile(p)}
-    single = named.pop() if len(named) == 1 and not any(os.path.isdir(p) for p in operands) else None
-    return _cite_hits(shown, cwd, single, "grep", files, deadline)
+    paths = [os.path.join(cwd, word) for word in (operands if patterned else operands[1:])]
+    named = [p for p in paths if os.path.isfile(p) or os.path.isdir(p)] if paths else [cwd]
+    scope = tuple(real for real in (_cite_real(p) for p in named) if real is not None)
+    single = scope[0] if len(paths) == 1 and len(scope) == 1 and os.path.isfile(paths[0]) else None
+    return _cite_hits(shown, cwd, single, scope, "grep", files, deadline)
 
 
 def _cite_sed(argv, shown, cwd, files, deadline):
@@ -12963,11 +13046,11 @@ def _cite_sed(argv, shown, cwd, files, deadline):
         return []
     first, last = int(match.group(1)), int(match.group(2) or match.group(1))
     entry = _cite_read(os.path.join(cwd, argv[3]), files, deadline)
-    end = None if entry is None else _cite_span(entry, first, shown)
+    end = None if entry is None else _cite_span(entry, first, shown, deadline)
     return [] if end is None or end > last else [("read", "sed", entry, first, end, None)]
 
 
-def _cite_from_bash(tool_input, response, cwd, files, deadline):
+def _cite_from_bash(tool_input, response, cwd, root, files, deadline):
     """Bash: a command that lexes to one plain simple command (no separator, pipe, redirect, expansion or
     glob) whose command word is literally git, grep, rg or sed, with a tool_response whose stdout is a
     non-empty string and whose interrupted field is not true. One final LF is dropped from stdout before it
@@ -12988,7 +13071,7 @@ def _cite_from_bash(tool_input, response, cwd, files, deadline):
     argv = words[0].argv
     shown = out.removesuffix("\n").split("\n")
     if argv[0] == "git":
-        return _cite_git_show(argv[1:], shown, cwd)
+        return _cite_git_show(argv[1:], shown, cwd, root, deadline)
     if argv[0] in ("grep", "rg"):
         return _cite_grep_command(argv, shown, cwd, files, deadline)
     if argv[0] == "sed":
@@ -12996,11 +13079,61 @@ def _cite_from_bash(tool_input, response, cwd, files, deadline):
     return []
 
 
+def _cite_within(text, start, stop, deadline):
+    """The first and last 1-based lines of text that lie wholly inside text[start:stop], or None when no
+    line does: a line only partly inside is left out, and an empty line counts only where its LF lies
+    inside too. Stops at the call's deadline with the lines found so far."""
+    begin = text.rfind("\n", 0, start) + 1
+    if begin < start:
+        begin = text.find("\n", start, stop) + 1
+        if begin == 0:
+            return None
+    first = line = text.count("\n", 0, begin) + 1
+    last = None
+    while begin < len(text) and not _cite_over(deadline):
+        close = text.find("\n", begin)
+        close = len(text) if close == -1 else close
+        if close > stop or (close == begin and close >= stop):
+            break
+        last, begin, line = line, close + 1, line + 1
+    return None if last is None else (first, last)
+
+
+def _cite_edit_ranges(tool_input, response, text, new):
+    """Where an Edit's new text lies in the edited file text (CRLF read as LF throughout): a list of
+    [start, stop) ranges. Where the tool_response carries originalFile (the file before the edit), each
+    range is the edit's own position: old_string must occur in it once (or, with replace_all, any number of
+    times, of which the first _CITE_EDIT_MAX are taken), and the text must equal originalFile with that
+    replacement made. Otherwise, without replace_all, the one occurrence of new_string in the text, when
+    it occurs exactly once (overlaps counted). Anything else is no range."""
+    old, every = tool_input.get("old_string"), tool_input.get("replace_all") is True
+    before = response.get("originalFile")
+    if isinstance(before, str) and isinstance(old, str) and old:
+        before, old = before.replace("\r\n", "\n"), old.replace("\r\n", "\n")
+        at = [before.find(old)]
+        if at[0] == -1 or (not every and before.find(old, at[0] + 1) != -1):
+            return []
+        while every and len(at) < _CITE_EDIT_MAX:
+            pos = before.find(old, at[-1] + len(old))
+            if pos == -1:
+                break
+            at.append(pos)
+        if (before.replace(old, new) if every else before.replace(old, new, 1)) != text:
+            return []
+        shift = len(new) - len(old)
+        return [(pos + k * shift, pos + k * shift + len(new)) for k, pos in enumerate(at)]
+    if every:
+        return []
+    pos = text.find(new)
+    return [] if pos == -1 or text.find(new, pos + 1) != -1 else [(pos, pos + len(new))]
+
+
 def _cite_from_write(tool, tool_input, response, files, deadline):
     """Write and Edit, from a tool_response object whose filePath resolves to the requested file_path. A
     Write is the whole file, recorded only when the file's text equals the written content (CRLF read as
-    LF on both sides); an Edit is the lines of each occurrence of its new_string in the file, at most
-    _CITE_EDIT_MAX of them. An empty content or new_string records nothing."""
+    LF on both sides). An Edit is, for each range _cite_edit_ranges gives, the lines that lie wholly inside
+    it (_cite_within): never another occurrence of the new text elsewhere in the file, and never a line the
+    new text only partly covers. An empty content or new_string records nothing."""
     path = tool_input.get("file_path")
     got = response.get("filePath") if isinstance(response, dict) else None
     if not (isinstance(path, str) and isinstance(got, str) and os.path.isabs(path) and os.path.isabs(got)) \
@@ -13010,26 +13143,24 @@ def _cite_from_write(tool, tool_input, response, files, deadline):
     entry = _cite_read(path, files, deadline) if isinstance(new, str) and new else None
     if entry is None:
         return []
-    text = entry["blob"].decode("utf-8", "replace")
+    text, new = entry["blob"].decode("utf-8", "replace").replace("\r\n", "\n"), new.replace("\r\n", "\n")
     if tool == "Write":
-        if text.replace("\r\n", "\n") != new.replace("\r\n", "\n"):
-            return []
-        return [("wrote", "Write", entry, 1, len(entry["pieces"]), None)]
-    spans, line, last = [], 1, 0
-    pos = text.find(new)
-    while pos != -1 and len(spans) < _CITE_EDIT_MAX:
-        line += text.count("\n", last, pos)
-        spans.append(("wrote", "Edit", entry, line, line + new.count("\n", 0, len(new) - 1), None))
-        last = pos
-        pos = text.find(new, pos + len(new))
+        return [("wrote", "Write", entry, 1, len(entry["lines"]), None)] if text == new else []
+    spans = []
+    for start, stop in _cite_edit_ranges(tool_input, response, text, new):
+        lines = None if _cite_over(deadline) else _cite_within(text, start, stop, deadline)
+        if lines is not None:
+            spans.append(("wrote", "Edit", entry, lines[0], lines[1], None))
     return spans
 
 
-def _cite_rows(tool, tool_input, response, cwd, root):
+def _cite_rows(tool, tool_input, response, cwd, root, deadline):
     """The ledger rows one finished tool call earns: {"v": 1, "ts", "kind": "read"|"wrote", "via", "path"
-    (resolved), "rel" (relative to the resolved root, or null outside it), "start", "end", "sha256" (of the
-    raw bytes of lines start..end, LF-split, CR kept), "rev" (the git show revision, else null)}."""
-    files, deadline = {}, time.monotonic() + _CITE_BUDGET
+    (resolved through symlinks; for git show, the repository path under the resolved toplevel), "rel"
+    (relative to the resolved root, or null outside it; for git show, the repository path, or null when the
+    repository is not the session's), "start", "end", "sha256" (of the raw bytes of lines start..end,
+    LF-split, CR kept), "rev" (the git show revision as the command named it, else null)}."""
+    files = {}
     if tool == "Read":
         found = _cite_from_read(tool_input, response, files, deadline)
     elif tool in ("Write", "Edit"):
@@ -13039,15 +13170,15 @@ def _cite_rows(tool, tool_input, response, cwd, root):
     elif tool == "Grep":
         found = _cite_from_grep(tool_input, response, cwd, files, deadline)
     else:
-        found = _cite_from_bash(tool_input, response, cwd, files, deadline)
+        found = _cite_from_bash(tool_input, response, cwd, root, files, deadline)
     top = os.path.realpath(root).rstrip("/") + "/"
     ts = _orch_now().isoformat()
     rows = []
     for kind, via, entry, start, end, rev in found[:_CITE_MAX_ROWS]:
         path = entry["path"]
-        rows.append({"v": 1, "ts": ts, "kind": kind, "via": via, "path": path,
-                     "rel": path[len(top):] if path.startswith(top) else None, "start": start, "end": end,
-                     "sha256": _cite_sha256(b"".join(entry["pieces"][start - 1:end])), "rev": rev})
+        rel = entry["rel"] if "rel" in entry else (path[len(top):] if path.startswith(top) else None)
+        rows.append({"v": 1, "ts": ts, "kind": kind, "via": via, "path": path, "rel": rel, "start": start,
+                     "end": end, "sha256": _cite_sha256(_cite_bytes(entry, start, end)), "rev": rev})
     return rows
 
 
@@ -13078,8 +13209,8 @@ def _cite_regular(fd):
 
 
 def _cite_unseen(fd, size, items):
-    """items without those whose (path, start, end, sha256) a row of the open ledger file (size bytes)
-    already holds; a line that is not a JSON object is passed over."""
+    """items without those whose _CITE_KEY fields a row of the open ledger file (size bytes) already holds;
+    a line that is not a JSON object with those fields is passed over."""
     have = set()
     for line in os.pread(fd, size, 0).split(b"\n"):
         try:
@@ -13087,8 +13218,9 @@ def _cite_unseen(fd, size, items):
         except (ValueError, RecursionError):
             continue
         if isinstance(row, dict):
-            key = (row.get("path"), row.get("start"), row.get("end"), row.get("sha256"))
-            if all(isinstance(k, (str, int)) for k in key):
+            key = tuple(row.get(field) for field in _CITE_KEY)
+            rev = key[-1]
+            if all(isinstance(k, (str, int)) for k in key[:-1]) and (rev is None or isinstance(rev, str)):
                 have.add(key)
     return [(key, line) for key, line in items if key not in have]
 
@@ -13156,12 +13288,14 @@ def _cite_append(state_dir, session, rows):
     """Append rows to this session's ledger, <state_dir>/citation-ledger/<first 16 hex of sha256(session
     id)>.jsonl, in one write: None on success, else the failure detail. The directory is made 0700 (its
     leaf opened without following a symlink) and the file 0600, whatever the umask. A row whose JSON line is
-    _CITE_ROW_MAX bytes or more is dropped, and while the file is under _CITE_DEDUP_BELOW bytes a row it
-    already holds is skipped. Where the append would take a non-empty file past _CITE_CAP bytes the file is
-    first renamed onto <name>.1, replacing the older generation. A new file prunes old ledger files."""
+    _CITE_ROW_MAX bytes or more is dropped, and a row whose _CITE_KEY fields equal an earlier row's of the
+    same call, or (while the file is under _CITE_DEDUP_BELOW bytes) a row the file already holds, is
+    skipped. Where the append would take a non-empty file past _CITE_CAP bytes the file is first renamed
+    onto <name>.1, replacing the older generation. Creating a file (a new session's, or the fresh one after
+    a rotation) prunes old ledger files."""
     items, seen = [], set()
     for row in rows:
-        key = (row["path"], row["start"], row["end"], row["sha256"])
+        key = tuple(row[field] for field in _CITE_KEY)
         line = (json.dumps(row, sort_keys=True) + "\n").encode("utf-8")
         if key not in seen and len(line) < _CITE_ROW_MAX:
             seen.add(key)
@@ -13192,18 +13326,21 @@ def citation_read_recorder(data):
     payload is a PostToolUse one with a non-empty session_id, a recorded tool and a tool_input object, and
     the session cwd resolves to a git toplevel; not registry-gated and not holder-gated, since each session
     writes only its own ledger file. A tool_response shape it does not recognize, or output that does not
-    equal the file's text, records nothing. A failed write SURFACES as a non-blocking systemMessage naming
-    the error (nocncl), never a swallowed one."""
+    equal the file's text, records nothing. The toplevel probe and every read, parse and git probe after it
+    share one deadline, _CITE_BUDGET seconds from here; the rows finished by then are appended. A failed
+    write SURFACES as a non-blocking systemMessage naming the error (nocncl), never a swallowed one."""
     if data.get("hook_event_name") != "PostToolUse":
         return _allow()
+    deadline = time.monotonic() + _CITE_BUDGET
     session, tool, tool_input = data.get("session_id"), data.get("tool_name"), data.get("tool_input")
     if not (isinstance(session, str) and session and isinstance(tool, str) and tool in _CITE_TOOLS
             and isinstance(tool_input, dict)):
         return _allow()
-    root = _orch_root(data)
+    cwd, left = data.get("cwd"), _cite_left(deadline)
+    root = _recovery_toplevel(cwd, timeout=left) if isinstance(cwd, str) and cwd and left is not None else None
     if root is None:
         return _allow()
-    rows = _cite_rows(tool, tool_input, data.get("tool_response"), data.get("cwd"), root)
+    rows = _cite_rows(tool, tool_input, data.get("tool_response"), cwd, root, deadline)
     if not rows:
         return _allow()
     failure = _cite_append(_orch_state_dir_for_root(root), session, rows)
@@ -13279,7 +13416,7 @@ def _rdp_time_left(cap):
     return min(cap, left) if left > 0.05 else None
 
 
-def _review_git(repo, *args, stdin=None):
+def _review_git(repo, *args, stdin=None, timeout=_RDP_GIT_TIMEOUT):
     """One isolated git probe for the review dispatch pin: the _isolate_git_env scrub plus no optional
     locks, replacement refs and grafts disabled (so a `git replace --graft` or an info/grafts file cannot
     change the parents the base is derived from), literal pathspecs (a declared path is matched as a literal
@@ -13287,9 +13424,11 @@ def _review_git(repo, *args, stdin=None):
     program or caches working-tree state switched off on the command line (core.fsmonitor and
     core.untrackedCache), and the submodule settings that would hide a submodule change or recurse into
     one (diff.ignoreSubmodules, submodule.recurse; a .gitmodules `ignore` value is overridden by each
-    diff read's own --ignore-submodules=none). Bytes in and out. Returns the CompletedProcess, or None when git could not be run,
+    diff read's own --ignore-submodules=none). Bytes in and out. The probe is given timeout seconds at most
+    (_RDP_GIT_TIMEOUT unless a caller with its own deadline passes what is left of it). Returns the
+    CompletedProcess, or None when git could not be run,
     timed out, or the decision's deadline has passed (the caller's cannot-evaluate)."""
-    timeout = _rdp_time_left(_RDP_GIT_TIMEOUT)
+    timeout = _rdp_time_left(timeout)
     if timeout is None:
         return None
     env = _isolate_git_env(dict(os.environ))

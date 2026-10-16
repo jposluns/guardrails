@@ -2547,14 +2547,17 @@ def _citeledger_cases(tmp):
     check("citeledger/prune-boundary", (removed, sorted(p.name for p in prune_dir.iterdir())),
           (2, sorted(["a" * 16 + ".jsonl", "b" * 16 + ".jsonl", "e" * 16 + ".jsonl", keep, keep + ".1",
                       "notes.txt"])))
-    many_dir = tmp / "cite-prune-many"
-    many_dir.mkdir()
-    for index in range(51):
-        old = many_dir / ("{:016x}.jsonl".format(index))
-        old.write_bytes(b"x\n")
-        os.utime(str(old), ns=(now_ns - age - 1, now_ns - age - 1))
-    check("citeledger/prune-at-most-fifty", (_cite_prune_in(many_dir, keep, now_ns), len(list(many_dir.iterdir()))),
-          (50, 1))
+    # The prune count: 49, 50 and 51 old files leave none, none and one.
+    pruned = []
+    for total in (49, 50, 51):
+        many_dir = tmp / "cite-prune-many-{}".format(total)
+        many_dir.mkdir()
+        for index in range(total):
+            old = many_dir / ("{:016x}.jsonl".format(index))
+            old.write_bytes(b"x\n")
+            os.utime(str(old), ns=(now_ns - age - 1, now_ns - age - 1))
+        pruned.append((_cite_prune_in(many_dir, keep, now_ns), len(list(many_dir.iterdir()))))
+    check("citeledger/prune-at-most-fifty", pruned, [(49, 0), (50, 0), (50, 1)])
     # Through the hook: a new session file prunes an old ledger file; an append to an existing one does not.
     stale = ledger_dir / ("9" * 16 + ".jsonl")
     stale.write_bytes(b"x\n")
@@ -2592,6 +2595,346 @@ def _citeledger_cases(tmp):
 
     # The recorder never decides a permission: every call above allowed, silently or with a note.
     check("citeledger/never-denies", sorted(set(verdicts)), ["allow", "warn"])
+
+
+class _CiteRepo:
+    """A committed git repository for the citation recorder's cases: files (bytes) and symlinks (target
+    text) written under root and committed, calls made as PostToolUse payloads with cwd at root, and the
+    rows each session's ledger holds."""
+
+    def __init__(self, root, files, links=()):
+        self.root = root
+        for rel, data in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_bytes(data)
+        for rel, target in links:
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(target, str(root / rel))
+        for args in (["init", "-q", "-b", "main"], ["add", "-A"],
+                     ["-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                      "commit", "-q", "-m", "seed"]):
+            subprocess.run(["git", "-C", str(root)] + args, check=True, capture_output=True, timeout=30)
+        self.top = os.path.realpath(str(root))
+        self.ledger_dir = Path(aiqt_hooks._orch_state_dir_for_root(str(root))) / "citation-ledger"
+        self.verdicts = []
+
+    def ledger(self, session):
+        return self.ledger_dir / (hashlib.sha256(session.encode("utf-8")).hexdigest()[:16] + ".jsonl")
+
+    def rows(self, session):
+        path = self.ledger(session)
+        if not path.exists():
+            return []
+        return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+    def spans(self, session):
+        return [(r["via"], r["rel"], r["start"], r["end"]) for r in self.rows(session)]
+
+    def call(self, tool, tool_input, response, session):
+        result = aiqt_hooks.citation_read_recorder({
+            "hook_event_name": "PostToolUse", "cwd": str(self.root), "session_id": session, "tool_name": tool,
+            "tool_input": tool_input, "tool_response": response})
+        self.verdicts.append(_verdict(result))
+        return result
+
+    def bash(self, command, stdout, session):
+        return self.call("Bash", {"command": command}, {"stdout": stdout, "stderr": "", "interrupted": False},
+                         session)
+
+    def grep(self, path, content, session):
+        tool_input = {"pattern": "p", "output_mode": "content", "-n": True}
+        if path is not None:
+            tool_input["path"] = str(path)
+        return self.call("Grep", tool_input, {"mode": "content", "content": content}, session)
+
+
+class _CiteClock:
+    """Stands in for the time module inside aiqt_hooks: monotonic() returns first until the clock is
+    advanced and later from then on, so a deadline set from the first reading is met by later exactly as
+    chosen. With step, the first reading advances it; otherwise advance() does (called here by a stand-in
+    toplevel probe). Every other attribute is the real time module's."""
+
+    def __init__(self, first, later, step):
+        self.first, self.later, self.step, self.advanced = first, later, step, False
+
+    def monotonic(self):
+        value = self.later if self.advanced else self.first
+        self.advanced = self.advanced or self.step
+        return value
+
+    def advance(self):
+        self.advanced = True
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def _citeledger_show_cases(tmp):
+    """git show REV:PATH is recorded against the repository path and revision it names, never a
+    working-tree file the path now resolves to: a committed symlink records nothing, and a path the working
+    tree has replaced by a symlink, lost under a symlinked parent, replaced by a directory, or removed is
+    recorded at that path. A repository other than the session's (here one nested inside it) leaves rel
+    null."""
+    blobs = {"tools/a.py": b"alpha = 1\n", "tools/b.py": b"bravo = 2\n", "tools/sub/s.py": b"sub = 3\n",
+             "tools/d.py": b"delta = 4\n", "tools/gone.py": b"gone = 5\n", "tools/elsewhere/keep.txt": b"keep\n"}
+    repo = _CiteRepo(tmp / "cite-show", blobs, links=[("tools/link", "b.py")])
+    tools_dir = repo.root / "tools"
+    os.unlink(str(tools_dir / "a.py"))
+    os.symlink("b.py", str(tools_dir / "a.py"))
+    shutil.rmtree(str(tools_dir / "sub"))
+    os.symlink("elsewhere", str(tools_dir / "sub"))
+    os.unlink(str(tools_dir / "d.py"))
+    (tools_dir / "d.py").mkdir()
+    os.unlink(str(tools_dir / "gone.py"))
+    nested = repo.root / "vendor" / "inner"
+    nested.mkdir(parents=True)
+    (nested / "tools").mkdir()
+    (nested / "tools" / "a.py").write_bytes(b"inner = 6\n")
+    for args in (["init", "-q", "-b", "main"], ["add", "-A"],
+                 ["-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                  "commit", "-q", "-m", "seed"]):
+        subprocess.run(["git", "-C", str(nested)] + args, check=True, capture_output=True, timeout=30)
+    cases = (("symlink-entry", "git show HEAD:tools/link", "b.py"),
+             ("replaced-by-symlink", "git show HEAD:tools/a.py", "alpha = 1\n"),
+             ("parent-replaced-by-symlink", "git show HEAD:tools/sub/s.py", "sub = 3\n"),
+             ("replaced-by-directory", "git show HEAD:tools/d.py", "delta = 4\n"),
+             ("removed", "git show HEAD:tools/gone.py", "gone = 5\n"),
+             ("nested-repository", "git -C {} show HEAD:tools/a.py".format(nested), "inner = 6\n"))
+    got = {}
+    for name, command, stdout in cases:
+        repo.bash(command, stdout, "show-" + name)
+        got[name] = [(r["path"], r["rel"], r["start"], r["end"], r["sha256"], r["rev"])
+                     for r in repo.rows("show-" + name)]
+
+    def want(rel, data, top=repo.top, named=True):
+        return [(os.path.join(top, rel), rel if named else None, 1, 1, hashlib.sha256(data).hexdigest(), "HEAD")]
+    check("citeledger/git-show-names-blob-path", got, {
+        "symlink-entry": [],
+        "replaced-by-symlink": want("tools/a.py", b"alpha = 1\n"),
+        "parent-replaced-by-symlink": want("tools/sub/s.py", b"sub = 3\n"),
+        "replaced-by-directory": want("tools/d.py", b"delta = 4\n"),
+        "removed": want("tools/gone.py", b"gone = 5\n"),
+        "nested-repository": want("tools/a.py", b"inner = 6\n", top=os.path.realpath(str(nested)), named=False)})
+
+
+def _citeledger_edit_cases(tmp):
+    """An Edit records only the lines its new text wholly occupies after the edit, at the edit's own
+    position: from originalFile in the response where it is given (the replacement must reproduce the file
+    on disk), else at the one occurrence of the new text; never another occurrence, never a line the new
+    text only partly covers, and nothing where the position is ambiguous or the file disagrees."""
+    repo = _CiteRepo(tmp / "cite-edit", {"seed.txt": b"seed\n"})
+    cases = (
+        ("partial-line", "x = 9\nsecret_token_two = 2\nw = 2\n", "9", "2", False, True),
+        ("partial-line-no-original", "x = 9\nsecret_token_two = 2\nw = 2\n", "9", "2", False, False),
+        ("other-occurrence", "keep\nOLD\nNEW\n", "OLD", "NEW", False, True),
+        ("ambiguous-no-original", "keep\nOLD\nNEW\n", "OLD", "NEW", False, False),
+        ("multi-line-partial-ends", "x = 1\ny = 2\n", "1\ny", "1\nz = 3\ny", False, True),
+        ("replace-all", "a OLD\nOLD\nb\n", "OLD", "NEW", True, True),
+        ("replace-all-no-original", "a OLD\nOLD\nb\n", "OLD", "NEW", True, False),
+        ("whole-lines", "a\nb\nc\n", "b\n", "B1\nB2\n", False, True),
+        ("unique-no-original", "m = 1\nold line\n", "old line\n", "new line\n", False, False),
+        ("crlf-file", "a\r\nb\r\nc\r\n", "b", "B", False, True))
+    got = {}
+    for name, before, old, new, every, original in cases:
+        path = repo.root / (name + ".txt")
+        path.write_bytes((before.replace(old, new) if every else before.replace(old, new, 1)).encode("utf-8"))
+        response = {"filePath": str(path)}
+        if original:
+            response["originalFile"] = before
+        tool_input = {"file_path": str(path), "old_string": old, "new_string": new}
+        if every:
+            tool_input["replace_all"] = True
+        repo.call("Edit", tool_input, response, "edit-" + name)
+        got[name] = [(r["kind"], r["start"], r["end"]) for r in repo.rows("edit-" + name)]
+    # The file on disk no longer equals originalFile with the edit made: nothing is recorded.
+    drifted = repo.root / "drifted.txt"
+    drifted.write_bytes(b"q = 3\nq = 2\n")
+    repo.call("Edit", {"file_path": str(drifted), "old_string": "q = 1", "new_string": "q = 2"},
+              {"filePath": str(drifted), "originalFile": "q = 1\n"}, "edit-drifted")
+    got["drifted"] = [(r["kind"], r["start"], r["end"]) for r in repo.rows("edit-drifted")]
+    check("citeledger/edit-own-lines-only", got, {
+        "partial-line": [], "partial-line-no-original": [], "other-occurrence": [("wrote", 2, 2)],
+        "ambiguous-no-original": [], "multi-line-partial-ends": [("wrote", 2, 2)],
+        "replace-all": [("wrote", 2, 2)], "replace-all-no-original": [], "whole-lines": [("wrote", 2, 3)],
+        "unique-no-original": [("wrote", 2, 2)], "crlf-file": [("wrote", 2, 2)], "drifted": []})
+
+
+def _citeledger_scope_cases(tmp):
+    """A Grep or grep/rg hit counts only where its resolved path is the searched file or lies under the
+    searched directory (cwd when none is named), and the line-number flag is read as grep and rg parse it:
+    the n of -en is -e's pattern, and a later -N or --no-line-number turns numbering off again."""
+    repo = _CiteRepo(tmp / "cite-scope", {
+        "tools/searched/s.txt": b"seen\n", "tools/unsearched/u.txt": b"secret\n", "tools/a.py": b"alpha = 1\n",
+        "tools/b.py": b"other\n", "tools/e.txt": b"3:n\nx\nn\n"},
+        links=[("tools/searched/ln.txt", "../unsearched/u.txt")])
+    tools_dir = repo.root / "tools"
+    repo.grep(tools_dir / "searched", "tools/unsearched/u.txt:1:secret", "scope-dir-outside")
+    repo.grep(tools_dir / "a.py", "tools/b.py:1:other", "scope-file-outside")
+    repo.grep(tools_dir / "searched", "tools/searched/ln.txt:1:secret", "scope-link-outside")
+    repo.grep(tools_dir / "searched", "tools/searched/s.txt:1:seen", "scope-dir-inside")
+    repo.grep(None, "tools/b.py:1:other", "scope-no-path")
+    repo.bash("grep -rn secret tools/searched", "tools/unsearched/u.txt:1:secret\n", "scope-bash-outside")
+    repo.bash("rg -n seen tools/searched", "tools/searched/s.txt:1:seen\n", "scope-bash-inside")
+    names = ("dir-outside", "file-outside", "link-outside", "dir-inside", "no-path", "bash-outside",
+             "bash-inside")
+    check("citeledger/grep-scope", {name: repo.spans("scope-" + name) for name in names}, {
+        "dir-outside": [], "file-outside": [], "link-outside": [],
+        "dir-inside": [("Grep", "tools/searched/s.txt", 1, 1)], "no-path": [("Grep", "tools/b.py", 1, 1)],
+        "bash-outside": [], "bash-inside": [("grep", "tools/searched/s.txt", 1, 1)]})
+    # tools/e.txt is "3:n", "x", "n": unnumbered output of its lines 1 and 3 reads "3:n" and "n", which
+    # a numbered reading would take as line 3.
+    flags = (("rg-n-then-N", "rg -n -N n tools/e.txt", "3:n\nn\n"),
+             ("rg-long-off", "rg --line-number --no-line-number n tools/e.txt", "3:n\nn\n"),
+             ("grep-e-cluster", "grep -en tools/e.txt", "3:n\nn\n"),
+             ("grep-n-cluster", "grep -in n tools/e.txt", "1:3:n\n3:n\n"),
+             ("grep-e-then-n", "grep -e n -n tools/e.txt", "1:3:n\n3:n\n"))
+    for name, command, stdout in flags:
+        repo.bash(command, stdout, "flag-" + name)
+    check("citeledger/grep-flag-parse", {name: repo.spans("flag-" + name) for name, _c, _s in flags}, {
+        "rg-n-then-N": [], "rg-long-off": [], "grep-e-cluster": [],
+        "grep-n-cluster": [("grep", "tools/e.txt", 1, 1), ("grep", "tools/e.txt", 3, 3)],
+        "grep-e-then-n": [("grep", "tools/e.txt", 1, 1), ("grep", "tools/e.txt", 3, 3)]})
+
+
+def _citeledger_dedup_cases(tmp):
+    """Deduplication keys on kind, via and rev as well as path, span and digest: rows that differ only in
+    those are different facts and are all kept, within one call and against the file, while an exact
+    repeat is still skipped."""
+    def row(**fields):
+        base = {"v": 1, "ts": "t", "kind": "read", "via": "Read", "path": "/x/p.py", "rel": None, "start": 1,
+                "end": 1, "sha256": "0" * 64, "rev": None}
+        base.update(fields)
+        return base
+    state = str(tmp / "cite-dedup-state")
+    aiqt_hooks._cite_append(state, "dedup-key", [row()])
+    aiqt_hooks._cite_append(state, "dedup-key", [row(via="git-show", rev="HEAD"), row(via="git-show", rev="main"),
+                                                 row(kind="wrote", via="Edit"), row(),
+                                                 row(via="git-show", rev="HEAD")])
+    path = Path(state) / "citation-ledger" / (hashlib.sha256(b"dedup-key").hexdigest()[:16] + ".jsonl")
+    held = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+    check("citeledger/dedup-key-separates-facts", [(r["kind"], r["via"], r["rev"]) for r in held],
+          [("read", "Read", None), ("read", "git-show", "HEAD"), ("read", "git-show", "main"),
+           ("wrote", "Edit", None)])
+
+
+def _citeledger_bound_cases(tmp):
+    """The per-call bounds, each tried just inside, at and just outside it: 50 distinct files read, 500
+    rows appended, 8 path splits tried per output line, 50 replacements of a replace_all Edit, and the
+    deadline (met by a stand-in clock: a git probe is started, and a read made, only while the deadline has
+    not been reached)."""
+    files = {"many/f{:02d}.txt".format(i): "hit {:02d}\n".format(i).encode("utf-8") for i in range(51)}
+    files["rows.txt"] = "".join("r{}\n".format(i) for i in range(1, 1002)).encode("utf-8")
+    for k in (7, 8, 9):
+        files["split{}/{}".format(k, "s" + ":1:s" * (k - 1))] = b"t\n"
+    repo = _CiteRepo(tmp / "cite-bounds", files)
+
+    def count(session):
+        return len(repo.rows(session))
+    for n in (49, 50, 51):
+        repo.grep(repo.root / "many", "\n".join("many/f{:02d}.txt:1:hit {:02d}".format(i, i) for i in range(n)),
+                  "files-{}".format(n))
+    check("citeledger/max-files-boundary", [count("files-{}".format(n)) for n in (49, 50, 51)], [49, 50, 50])
+    for n in (499, 500, 501):
+        repo.grep(repo.root / "rows.txt", "\n".join("{0}:r{0}".format(2 * k - 1) for k in range(1, n + 1)),
+                  "rows-{}".format(n))
+    check("citeledger/max-rows-boundary", [count("rows-{}".format(n)) for n in (499, 500, 501)], [499, 500, 500])
+    for k in (7, 8, 9):
+        repo.grep(repo.root / "split{}".format(k), "split{}/{}:1:t".format(k, "s" + ":1:s" * (k - 1)),
+                  "splits-{}".format(k))
+    check("citeledger/max-splits-boundary", [count("splits-{}".format(k)) for k in (7, 8, 9)], [1, 1, 0])
+    for n in (49, 50, 51):
+        path = repo.root / "edit-{}.txt".format(n)
+        path.write_bytes(b"NEW\nx\n" * n)
+        repo.call("Edit", {"file_path": str(path), "old_string": "OLD", "new_string": "NEW", "replace_all": True},
+                  {"filePath": str(path), "originalFile": "OLD\nx\n" * n}, "edits-{}".format(n))
+    check("citeledger/edit-max-boundary", [count("edits-{}".format(n)) for n in (49, 50, 51)], [49, 50, 50])
+    # The deadline, set from the handler's first clock reading: with the clock just inside, at or just past
+    # it before the toplevel probe, is the probe started and is the read made; and with the clock moved
+    # there only once the probe has returned, is the read made.
+    saved_time, saved_top = aiqt_hooks.time, aiqt_hooks._recovery_toplevel
+    probed, read = [], []
+    try:
+        for name, offset in (("inside", -0.001), ("at", 0.0), ("outside", 0.001)):
+            for step, session in ((True, "deadline-probe-" + name), (False, "deadline-read-" + name)):
+                clock = aiqt_hooks.time = _CiteClock(1000.0, 1000.0 + aiqt_hooks._CITE_BUDGET + offset, step)
+                calls = []
+                aiqt_hooks._recovery_toplevel = lambda *args, **kwargs: calls.append(clock.advance()) or str(
+                    repo.root)
+                repo.call("Read", {"file_path": str(repo.root / "rows.txt")},
+                          {"type": "text", "file": {"filePath": str(repo.root / "rows.txt"), "content": "r1",
+                                                    "startLine": 1, "numLines": 1}}, session)
+                if step:
+                    probed.append((bool(calls), repo.ledger(session).exists()))
+                else:
+                    read.append(repo.ledger(session).exists())
+    finally:
+        aiqt_hooks.time, aiqt_hooks._recovery_toplevel = saved_time, saved_top
+    check("citeledger/deadline-boundary", (probed, read),
+          ([(True, True), (False, False), (False, False)], [True, False, False]))
+
+
+def _citeledger_timing_cases(tmp):
+    """One deadline bounds every read, parse and git probe of a call: with the budget cut to half a second,
+    each of the worst shapes (every git probe slowed by a stub on PATH, a large file read in slowed chunks,
+    many files read slowly, and a huge grep output) returns within the budget plus one second, and the
+    huge grep output still records the lines matched before the deadline."""
+    budget, slack = 0.5, 1.0
+    big = b"x\n" * (4 * 1024 * 1024)
+    files = {"tools/a.py": b"alpha = 1\n", "big.txt": big,
+             "huge.txt": "".join("h{}\n".format(i) for i in range(1, 400001)).encode("utf-8")}
+    files.update({"many/f{:02d}.txt".format(i): "hit {:02d}\n".format(i).encode("utf-8") for i in range(51)})
+    repo = _CiteRepo(tmp / "cite-timing", files)
+    real_git = shutil.which("git")
+    stub_dir = tmp / "cite-stub-bin"
+    stub_dir.mkdir()
+    (stub_dir / "git").write_text("#!{} -I\nimport os, sys, time\ntime.sleep(0.6)\nos.execv({!r}, [{!r}] + "
+                                  "sys.argv[1:])\n".format(sys.executable, real_git, real_git), encoding="utf-8")
+    os.chmod(str(stub_dir / "git"), 0o755)
+    real_read = os.read
+
+    def regular(fd):
+        try:
+            return (os.fstat(fd).st_mode & 0o170000) == 0o100000
+        except OSError:
+            return False
+
+    def slow_read(fd, size):  # a regular file's read is slowed; a pipe's (a git probe's output) is not
+        if regular(fd):
+            time.sleep(0.25)
+        return real_read(fd, size)
+
+    def timed(run, slow=False, path=None):
+        saved_path = os.environ.get("PATH", "")
+        began = time.monotonic()
+        try:
+            if path is not None:
+                os.environ["PATH"] = str(path) + os.pathsep + saved_path
+            if slow:
+                os.read = slow_read
+            run()
+        finally:
+            os.read = real_read
+            os.environ["PATH"] = saved_path
+        return time.monotonic() - began <= budget + slack
+    saved_budget = aiqt_hooks._CITE_BUDGET
+    try:
+        aiqt_hooks._CITE_BUDGET = budget
+        got = [("slow-git-probe", timed(lambda: repo.bash("git show HEAD:tools/a.py", "alpha = 1\n", "slow-git"),
+                                        path=stub_dir)),
+               ("slow-file-read", timed(lambda: repo.call(
+                   "Read", {"file_path": str(repo.root / "big.txt")},
+                   {"type": "text", "file": {"filePath": str(repo.root / "big.txt"), "content": "x",
+                                             "startLine": 1, "numLines": 1}}, "slow-read"), slow=True)),
+               ("many-files", timed(lambda: repo.grep(repo.root / "many", "\n".join(
+                   "many/f{:02d}.txt:1:hit {:02d}".format(i, i) for i in range(51)), "many-files"), slow=True)),
+               ("huge-grep-output", timed(lambda: repo.grep(repo.root / "huge.txt", "\n".join(
+                   "{0}:h{0}".format(i) for i in range(1, 400001)), "huge-grep")))]
+    finally:
+        aiqt_hooks._CITE_BUDGET = saved_budget
+    got.append(("huge-grep-output-recorded", bool(repo.rows("huge-grep"))))
+    check("citeledger/deadline-bounds-worst-shapes", got,
+          [("slow-git-probe", True), ("slow-file-read", True), ("many-files", True), ("huge-grep-output", True),
+           ("huge-grep-output-recorded", True)])
 
 
 def main(report_path=None):
@@ -7157,6 +7500,12 @@ def _main_isolated(report_path=None):
         check("forced5/second-pass-clean", aiqt_hooks._orch_forced_exit_findings(str(hsd)), [])
         _rdp_cases(tmp)
         _citeledger_cases(tmp)
+        _citeledger_show_cases(tmp)
+        _citeledger_edit_cases(tmp)
+        _citeledger_scope_cases(tmp)
+        _citeledger_dedup_cases(tmp)
+        _citeledger_bound_cases(tmp)
+        _citeledger_timing_cases(tmp)
     finally:
         aiqt_hooks._orch_dirfd_has_registry = saved_probe
         shutil.rmtree(tmp, ignore_errors=True)
