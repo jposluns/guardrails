@@ -2920,7 +2920,7 @@ def _citeledger_bound_cases(tmp):
           ([(True, True), (False, False), (False, False)], [True, False, False]))
     # The path bound: each path is written as the path to a file padded with slashes (which resolution
     # drops) to one under, at and one over _CITE_MAX_PATH characters. Over it the path is never resolved
-    # (no longer path reaches os.path.realpath inside _cite_rows) and records nothing. Input paths: Read
+    # (no longer path reaches _cite_real inside _cite_rows) and records nothing. Input paths: Read
     # and Write file_path and filePath, a Grep path, the file of a sed command and a file a grep command
     # names; Linux refuses a path of more than 4095 bytes itself, so that grep file over the bound already
     # fails its stat before any resolution, and its column is coverage (this suite runs on Linux). Split
@@ -3059,10 +3059,10 @@ class _CiteStepClock:
 
 
 def _cite_resolutions(run, within="_cite_rows"):
-    """run() with every os.path.realpath call made inside aiqt_hooks.<within> (the recorder's _cite_rows, or
-    the check's _citechk_run) recorded: the paths it was given, in order, so a vector can tell which paths
-    the recorder or the check resolved."""
-    saved_within, saved_realpath, active, paths = getattr(aiqt_hooks, within), os.path.realpath, [], []
+    """run() with every call of aiqt_hooks._cite_real (the walk that resolves a path through its symlinks)
+    made inside aiqt_hooks.<within> (the recorder's _cite_rows, or the check's _citechk_run) recorded: the
+    paths it was given, in order, so a vector can tell which paths the recorder or the check resolved."""
+    saved_within, saved_real, active, paths = getattr(aiqt_hooks, within), aiqt_hooks._cite_real, [], []
 
     def scoped(*args, **kwargs):
         active.append(True)
@@ -3071,17 +3071,17 @@ def _cite_resolutions(run, within="_cite_rows"):
         finally:
             active.pop()
 
-    def realpath(path, *args, **kwargs):
+    def real(path, *args, **kwargs):
         if active:
             paths.append(path)
-        return saved_realpath(path, *args, **kwargs)
+        return saved_real(path, *args, **kwargs)
     try:
         setattr(aiqt_hooks, within, scoped)
-        os.path.realpath = realpath
+        aiqt_hooks._cite_real = real
         run()
     finally:
         setattr(aiqt_hooks, within, saved_within)
-        os.path.realpath = saved_realpath
+        aiqt_hooks._cite_real = saved_real
     return paths
 
 
@@ -4004,14 +4004,21 @@ def _citecheck_path_cases(tmp):
     to the repository top where relative), the repository top a diff is read against, and a git -C
     directory and the session cwd it is compared with. Each is tried one under, at and one over the bound
     (padded with slashes or ./ segments, which resolution drops), and with a stand-in clock moved past the
-    deadline just before the step that resolves it. Whether a path was resolved is read from the
-    os.path.realpath calls made inside _citechk_run (_cite_resolutions), never from timing; the toplevel
-    probe is a stand-in naming a fixed top, so a path git itself would refuse still reaches its site. Over
-    the bound the body file is named as not read and the range as not judged, the bound named; past the
-    deadline, the budget named. One end-to-end call, with the real toplevel probe, cites a path of 800,000
-    characters: it returns the warn note naming the bound within the budget in this process's CPU time."""
+    deadline just before the step that resolves it. Whether a path was resolved is read from the paths given
+    to _cite_real inside _citechk_run (_cite_resolutions), never from timing; the toplevel probe is a
+    stand-in naming a fixed top, so a path git itself would refuse still reaches its site. Over the bound
+    the body file is named as not read, in the note and in the sources_unread of the command's warn row,
+    and the range as not judged, the bound named; past the deadline, the budget named, and a body file not
+    read for it is named in the note that says the repository was not resolved. Where both the session cwd
+    and the git -C directory are refused, the reason for each is named. One end-to-end call, with the real
+    toplevel probe, cites a path of 800,000 characters: it returns the warn note naming the bound within the
+    budget in this process's CPU time, the note and the row showing the path shortened; a cited path and a
+    body file path one under, at and one over _CITECHK_PATH_SHOWN characters are shown whole, whole and
+    shortened to that many."""
     repo = _CiteRepo(tmp / "citecheck-path", {"tools/a.py": b"a1\na2\n", "msg.txt": b"see tools/a.py:1\n"})
     root, limit = repo.top, aiqt_hooks._CITE_MAX_PATH
+    shown_max = getattr(aiqt_hooks, "_CITECHK_PATH_SHOWN", 200)  # a hook without the bound shows paths whole
+    out_of_time = aiqt_hooks._CITECHK_OUT_OF_TIME
     saved = (aiqt_hooks.time, aiqt_hooks._recovery_toplevel)
 
     def pad(head, tail, size):
@@ -4023,11 +4030,11 @@ def _citecheck_path_cases(tmp):
         detour = "tools/../" if rest % 2 else ""
         return "./" * ((rest - len(detour)) // 2) + detour + "tools/a.py"
 
-    def run(command, session, cwd=root, top=root, step=None):
+    def run(command, session, cwd=root, top=root, step=None, after=False):
         """citation_read_check on command at cwd, its toplevel probe a stand-in naming top: the paths
-        resolved inside _citechk_run, the classes of the command's guard-events row, and whether the note
-        names the path bound and the budget. With step, a stand-in clock is moved past the deadline just
-        before aiqt_hooks.<step> runs (for _recovery_toplevel, as the stand-in probe returns)."""
+        resolved inside _citechk_run, the command's guard-events rows, and the note. With step, a stand-in
+        clock is moved past the deadline just before aiqt_hooks.<step> runs (for _recovery_toplevel, as the
+        stand-in probe returns), or with after, once its first call has returned."""
         clock = _CiteClock(1000.0, 1000.0 + aiqt_hooks._CITECHK_BUDGET + 0.001, False)
         saved_step = None if step in (None, "_recovery_toplevel") else getattr(aiqt_hooks, step)
 
@@ -4037,8 +4044,12 @@ def _citecheck_path_cases(tmp):
             return top
 
         def stand_in(*args, **kwargs):
-            clock.advance()
-            return saved_step(*args, **kwargs)
+            if not after:
+                clock.advance()
+            try:
+                return saved_step(*args, **kwargs)
+            finally:
+                clock.advance()
         events = Path(aiqt_hooks._orch_state_dir_for_root(top)) / "guard-events.jsonl"
         before = len(events.read_text(encoding="utf-8").splitlines()) if events.is_file() else 0
         result = []
@@ -4054,11 +4065,16 @@ def _citecheck_path_cases(tmp):
             if saved_step is not None:
                 setattr(aiqt_hooks, step, saved_step)
         note = result[0][1].get("systemMessage", "") if isinstance(result[0][1], dict) else ""
-        rows = [json.loads(x) for x in (events.read_text(encoding="utf-8").splitlines()[before:]
-                                        if events.is_file() else []) if x.strip()]
-        classes = [c["class"] for r in rows if r.get("kind") == "citint" for c in r["detail"]["citations"]]
-        bound = "is longer than {} characters".format(limit) in note
-        return paths, classes, bound, "budget" in note
+        rows = [r for r in (json.loads(x) for x in (events.read_text(encoding="utf-8").splitlines()[before:]
+                                                    if events.is_file() else []) if x.strip())
+                if r.get("kind") == "citint"]
+        return paths, rows, note
+
+    def summary(rows):
+        """The classes and the decisions of rows, and each sources_unread entry as whether its label is a -F
+        option and its reason."""
+        return ([c["class"] for r in rows for c in r["detail"]["citations"]], [r["decision"] for r in rows],
+                [(u.startswith("-F "), u.split(": ", 1)[-1]) for r in rows for u in r["detail"]["sources_unread"]])
 
     # Per site: the call at a size, the path whose resolution is looked for, and the step the stand-in clock
     # is moved past the deadline before.
@@ -4073,29 +4089,58 @@ def _citecheck_path_cases(tmp):
             pad(root, "", size)), {}), "_recovery_toplevel"),
         ("git-C-cwd", lambda size: (pad(root, "", size), "git -C {} commit -m 'see tools/a.py:1'".format(root),
                                     {"cwd": pad(root, "", size)}), "_recovery_toplevel"))
+    bound = "is longer than {} characters".format(limit)
     sized, timed = {}, {}
     for site, call, step in sites:
         for size in (limit - 1, limit, limit + 1):
             path, command, where = call(size)
-            paths, classes, bound, budget = run(command, "path-{}-{}".format(site, size), **where)
-            sized.setdefault(site, []).append((path in paths, classes, bound, budget))
+            paths, rows, note = run(command, "path-{}-{}".format(site, size), **where)
+            sized.setdefault(site, []).append((path in paths,) + summary(rows) + (bound in note, "budget" in note))
         path, command, where = call(limit - 1)
-        paths, classes, bound, budget = run(command, "path-{}-late".format(site), step=step, **where)
-        timed[site] = (path in paths, classes, bound, budget)
-    inside, over = (True, ["unread"], False, False), (False, ["unjudged"], True, False)
+        paths, rows, note = run(command, "path-{}-late".format(site), step=step, **where)
+        timed[site] = (path in paths,) + summary(rows)[:2] + ("budget" in note,
+                                                              "was not read: {}.".format(out_of_time) in note)
+    inside, over = (True, ["unread"], ["warn"], [], False, False), (False, ["unjudged"], ["warn"], [], True, False)
+    # Over the bound the body file's command still earns its warn row, which names the file as not read.
     check("citeledger/check-path-bound", sized,
-          {"body": [inside, inside, (False, [], True, False)], "cited": [inside, inside, over],
-           "top": [inside, inside, over], "git-C-directory": [inside, inside, over],
+          {"body": [inside, inside, (False, [], ["warn"], [(True, "its path {}, the most this check resolves".format(
+              bound))], True, False)],
+           "cited": [inside, inside, over], "top": [inside, inside, over], "git-C-directory": [inside, inside, over],
            "git-C-cwd": [inside, inside, over]})
     # Past the deadline: the body file's resolution comes before the toplevel probe, so that probe is not
-    # started either and the note says the repository was not resolved within the budget.
+    # started either: the note says the repository was not resolved within the budget and names the body
+    # file as not read for it, and no row is written.
     check("citeledger/check-no-resolution-past-deadline", timed,
-          {"body": (False, [], False, True), "cited": (False, ["unjudged"], False, True),
-           "top": (False, ["unjudged"], False, True), "git-C-directory": (False, ["unjudged"], False, True),
-           "git-C-cwd": (False, ["unjudged"], False, True)})
+          {"body": (False, [], [], True, True), "cited": (False, ["unjudged"], ["warn"], True, False),
+           "top": (False, ["unjudged"], ["warn"], True, False),
+           "git-C-directory": (False, ["unjudged"], ["warn"], True, False),
+           "git-C-cwd": (False, ["unjudged"], ["warn"], True, False)})
+    # Both the session cwd and the git -C directory refused: the range's detail names the reason for each,
+    # the cwd's first. Both over the length bound; the cwd over it and the directory refused for the budget
+    # (the clock moved past the deadline once the cwd's refusal has returned, so the budget is named too);
+    # and both refused for the budget (named once).
+    long_cwd, long_dir, short_dir = pad(root, "", limit + 1), pad(root, "/.", limit + 1), root + "/."
+    over_cwd = "the session cwd {}, the most this check resolves".format(bound)
+    over_dir = "the git -C directory {}, the most this check resolves".format(bound)
+    prefix = "  tools/a.py:1 (not judged: "
+    both = []
+    for session, command, cwd, step, after in (
+            ("both-bound", "git -C {} commit -m 'see tools/a.py:1'".format(long_dir), long_cwd, None, False),
+            ("bound-then-budget", "git -C {} commit -m 'see tools/a.py:1'".format(short_dir), long_cwd,
+             "_citechk_real", True),
+            ("both-budget", "git -C {} commit -m 'see tools/a.py:1'".format(short_dir), root + "/./.",
+             "_citechk_real", False)):
+        _paths, rows, note = run(command, session, cwd=cwd, step=step, after=after)
+        details = [line[len(prefix):-1] for line in note.split("\n") if line.startswith(prefix)]
+        both.append(summary(rows)[:2] + (details, "incomplete (budget)" in note))
+    check("citeledger/check-both-refusals-named", both,
+          [(["unjudged"], ["warn"], [over_cwd + "; " + over_dir], False),
+           (["unjudged"], ["warn"], [over_cwd + "; " + out_of_time], True),
+           (["unjudged"], ["warn"], [out_of_time], True)])
     # End to end, with the real toplevel probe and clock: a cited path of 800,000 characters is never
-    # resolved (none longer than the bound is), and the warn note naming the bound comes back within the
-    # budget in this process's CPU time.
+    # resolved (none longer than the bound is), the warn note naming the bound comes back within the budget
+    # in this process's CPU time, and the note and the row show the path shortened, so the note stays under
+    # 4,096 characters here.
     long_path = "x/" * 399998 + "a.py"
     events = Path(aiqt_hooks._orch_state_dir_for_root(str(repo.root))) / "guard-events.jsonl"
     before = len(events.read_text(encoding="utf-8").splitlines()) if events.is_file() else 0
@@ -4111,8 +4156,312 @@ def _citecheck_path_cases(tmp):
     check("citeledger/check-long-cited-path",
           (len(long_path), _verdict(result[0]), [c["class"] for r in rows for c in r["detail"]["citations"]],
            "is longer than {} characters".format(limit) in note, cpu <= aiqt_hooks._CITECHK_BUDGET,
-           max([0] + [len(path) for path in paths]) <= limit),
-          (800000, "warn", ["unjudged"], True, True, True))
+           max([0] + [len(path) for path in paths]) <= limit, len(note) < 4096,
+           [len(c["cite"]) for r in rows for c in r["detail"]["citations"]]),
+          (800000, "warn", ["unjudged"], True, True, True, True, [shown_max + len(":1")]))
+    # A cited path that names no file (its class nofile) and a relative body file that is not there (it
+    # cannot be opened), each one under, at and one over _CITECHK_PATH_SHOWN characters: the row's cite and
+    # its sources_unread label show the path whole, whole, and shortened to that many characters.
+    shown = {"cited": [], "body": []}
+    for size in (shown_max - 1, shown_max, shown_max + 1):
+        name = "d" * (size - len("/a.py")) + "/a.py"
+        _paths, rows, _note = run("git commit -m 'see {}:1'".format(name), "shown-cited-{}".format(size))
+        shown["cited"] += [(len(c["cite"]) - len(":1"), c["cite"] == name + ":1")
+                           for r in rows for c in r["detail"]["citations"]]
+        body = "m" * size
+        _paths, rows, _note = run("git commit -F " + body, "shown-body-{}".format(size))
+        shown["body"] += [(len(entry.split(": ", 1)[0]) - len("-F "), entry.startswith("-F {}: ".format(body)))
+                          for r in rows for entry in r["detail"]["sources_unread"]]
+    check("citeledger/check-shown-path-bound", shown,
+          {"cited": [(shown_max - 1, True), (shown_max, True), (shown_max, False)],
+           "body": [(shown_max - 1, True), (shown_max, True), (shown_max, False)]})
+
+
+class _CiteCutPattern:
+    """Stands in for a compiled pattern of aiqt_hooks: match() is the pattern's own, and its cut-th call moves
+    the stand-in clock set as clock on, so a scan that matches the pattern once per line reaches the
+    deadline at a known line."""
+
+    def __init__(self, pattern, clock, cut):
+        self.pattern, self.clock, self.cut, self.calls = pattern, clock, cut, 0
+
+    def match(self, *args, **kwargs):
+        self.calls += 1
+        if self.calls == self.cut:
+            self.clock.advance()
+        return self.pattern.match(*args, **kwargs)
+
+
+def _cite_touches(targets, clock, run):
+    """run() with each os.stat and os.open of a path in targets recorded as whether the stand-in clock had
+    been advanced when it was made: those flags, in order."""
+    saved_stat, saved_open, made = os.stat, os.open, []
+
+    def stat_(path, *args, **kwargs):
+        if isinstance(path, str) and path in targets:
+            made.append(clock.advanced)
+        return saved_stat(path, *args, **kwargs)
+
+    def open_(path, *args, **kwargs):
+        if isinstance(path, str) and path in targets:
+            made.append(clock.advanced)
+        return saved_open(path, *args, **kwargs)
+    try:
+        os.stat, os.open = stat_, open_
+        run()
+    finally:
+        os.stat, os.open = saved_stat, saved_open
+    return made
+
+
+def _citeledger_walk_cases(tmp):
+    """How far a resolution walks. It follows at most _CITE_MAX_LINKS symlinks: a chain of one under, at and
+    one over that many resolves, resolves, and is refused for the link bound, and wherever it completes its
+    result is os.path.realpath's. It stops at the deadline between two components: with a stand-in clock
+    moved just inside, at or just past the deadline as the first symlink of a chain of three is read, the
+    walk reads the rest, or stops with the deadline as its reason and makes no further lstat. The link
+    fan-out (24 symlinked directories of 700 symlinks each, every one to 819 times e/../, cited as one path
+    of 162 characters joined to the repository top) ends within each hook's budget in this process's CPU
+    time: the check names the link bound for the range, and for a body file reached the same way, which it
+    names as not read, and the recorder records nothing."""
+    resolution = getattr(aiqt_hooks, "_cite_resolution", None)
+    links = getattr(aiqt_hooks, "_CITE_MAX_LINKS", 40)  # a hook without the bound is held to Linux's own
+
+    def resolved(path, deadline):
+        """The hook's (resolution, reason) of path; a hook without _cite_resolution names no reason."""
+        if resolution is None:
+            return aiqt_hooks._cite_resolve(path, deadline), None
+        return resolution(path, deadline)
+    walk = tmp / "cite-walk"
+    (walk / "d" / "e").mkdir(parents=True)
+    (walk / "d" / "f").write_bytes(b"f\n")
+    target = os.path.realpath(str(walk / "d" / "f"))
+
+    def chain(count):
+        """A chain l1 -> l2 -> ... -> l<count> -> the target, in its own directory: the path of l1."""
+        where = walk / "chain-{}".format(count)
+        where.mkdir()
+        os.symlink(target, str(where / "l{}".format(count)))
+        for k in range(count - 1, 0, -1):
+            os.symlink("l{}".format(k + 1), str(where / "l{}".format(k)))
+        return str(where / "l1")
+    for name, value in (("rel", "d"), ("abs", str(walk / "d")), ("loop1", "loop2"), ("loop2", "loop1"),
+                        ("dangling", "missing/x"), ("d/e/up", "../e/..")):
+        os.symlink(value, str(walk / name))
+    shapes = ["/", "//", "/.", "/..", str(walk), str(walk) + "/", str(walk / "rel" / "f"), str(walk) + "/abs/e/../f",
+              str(walk) + "/rel/../rel/f", str(walk / "loop1"), str(walk) + "/loop1/x", str(walk / "dangling"),
+              str(walk) + "/dangling/y", str(walk) + "/d/f/g", str(walk) + "/d/e/up/f", str(walk) + "/no/../d/./f",
+              str(walk) + "/rel//e/", "relative/x", ".", ""]
+    unequal = [shape for shape in shapes if resolved(shape, time.monotonic() + 60) != (os.path.realpath(shape), None)]
+    bounded = [resolved(chain(count), time.monotonic() + 60) for count in (links - 1, links, links + 1)]
+    check("citeledger/resolve-link-bound", (unequal, bounded),
+          ([], [(target, None), (target, None), (None, "links")]))
+    # The deadline inside the walk: a stand-in readlink moves the stand-in clock on as the first symlink of
+    # l1 -> l2 -> l3 -> target is read; each lstat made once the clock reads at or past the deadline counts.
+    three, stopped = chain(3), []
+    saved_time, saved_readlink, saved_lstat = aiqt_hooks.time, os.readlink, os.lstat
+    try:
+        for offset in (-0.001, 0.0, 0.001):
+            clock = aiqt_hooks.time = _CiteClock(1000.0, 1005.0 + offset, False)
+            counts = {"readlink": 0, "late": 0}
+
+            def readlink(path, *args, clock=clock, counts=counts, **kwargs):
+                counts["readlink"] += 1
+                try:
+                    return saved_readlink(path, *args, **kwargs)
+                finally:
+                    clock.advance()
+
+            def lstat(path, *args, clock=clock, counts=counts, **kwargs):
+                counts["late"] += clock.monotonic() >= 1005.0
+                return saved_lstat(path, *args, **kwargs)
+            os.readlink, os.lstat = readlink, lstat
+            try:
+                got = resolved(three, 1005.0)
+            finally:
+                os.readlink, os.lstat = saved_readlink, saved_lstat
+            stopped.append((got, counts["readlink"], counts["late"]))
+    finally:
+        aiqt_hooks.time, os.readlink, os.lstat = saved_time, saved_readlink, saved_lstat
+    check("citeledger/resolve-stops-mid-walk", stopped,
+          [((target, None), 3, 0), ((None, "deadline"), 1, 0), ((None, "deadline"), 1, 0)])
+    # The link fan-out, built in this run's own directory: each s<i> leads through d<i>/t0 ... t699, and each
+    # t<j> back to d<i> by 819 times e/../ (a target of 4,095 characters).
+    fan = _CiteRepo(tmp / "cite-fan-out", {"a.py": b"a1\n", "msg.txt": b"see a.py:1\n"})
+    for i in range(24):
+        (fan.root / "d{}".format(i) / "e").mkdir(parents=True)
+        for j in range(700):
+            os.symlink("e/../" * 819, str(fan.root / "d{}".format(i) / "t{}".format(j)))
+        os.symlink("d{}/".format(i) + "/".join("t{}".format(j) for j in range(700)), str(fan.root / "s{}".format(i)))
+    token = "".join("s{}/../".format(i) for i in range(24)) + "a.py"
+    began = time.process_time()
+    verdict, note, rows = _citecheck_run(fan.root, "git commit -m 'see {}:1'".format(token), "fan-out")
+    check_cpu = time.process_time() - began
+    # The same fan-out leading to a body file (-F): the file is named as not read, the link bound its reason.
+    began = time.process_time()
+    _verdict_, _note, body_rows = _citecheck_run(fan.root, "git commit -F " + os.path.join(
+        str(fan.root), token[:-len("a.py")] + "msg.txt"), "fan-out-body")
+    body = ([r["decision"] for r in body_rows], [u.split(": ", 1)[-1] for r in body_rows
+                                                 for u in r["detail"]["sources_unread"]],
+            time.process_time() - began <= aiqt_hooks._CITECHK_BUDGET)
+    joined, walked = os.path.join(str(fan.root), token), []
+    saved_real = aiqt_hooks._cite_real
+
+    def real(path, *args, **kwargs):
+        result = saved_real(path, *args, **kwargs)
+        if path == joined:
+            walked.append(result[1] if isinstance(result, tuple) else "resolved")
+        return result
+    began = time.process_time()
+    try:
+        aiqt_hooks._cite_real = real
+        fan.call("Read", {"file_path": joined}, {"type": "text", "file": {
+            "filePath": joined, "content": "a1", "startLine": 1, "numLines": 1}}, "fan-out-read")
+    finally:
+        aiqt_hooks._cite_real = saved_real
+    record_cpu = time.process_time() - began
+    check("citeledger/link-fan-out-bounded",
+          (len(token), verdict, [c["class"] for r in rows for c in r["detail"]["citations"]],
+           [r["detail"]["budget_exhausted"] for r in rows],
+           "leads through more than {} symbolic links".format(links) in note, check_cpu <= aiqt_hooks._CITECHK_BUDGET,
+           walked, len(fan.rows("fan-out-read")), record_cpu <= aiqt_hooks._CITE_BUDGET, body),
+          (162, "warn", ["unjudged"], [False], True, True, ["links"], 0, True,
+           (["warn"], ["its path leads through more than {} symbolic links, the most this check follows".format(
+               links)], True)))
+
+
+def _citecheck_step_cases(tmp):
+    """No step of either hook is taken on a resolved path once the deadline is reached, and the check reads
+    each message text once and stops its scan at the deadline. With a stand-in clock moved just inside, at
+    or just past the deadline as a resolution returns, no os.stat or os.open is made on the resolved path
+    after it: in the check, the body file's open (_citechk_read_body), the cited file's stat
+    (_citechk_resolve) and size stat (_citechk_class), and its open (_cite_read); in the recorder, a sed
+    read's open (_cite_read), a Grep path's stat (_cite_from_grep) and a grep command's file stat
+    (_cite_grep_command). Inside, each is made and the range judged or the row recorded; at and past it, the
+    range is not judged (budget), the body file is named as not read (budget), or nothing is recorded. The
+    here-documents of a Bash command are scanned once each, whatever the number of -F - options or of
+    commands that read them: 1,000 options over a 101,000 character here-document take one scan and end
+    within the budget in this process's CPU time, and a command's row lists each citation and source once.
+    The scan of a message stops at the deadline: a stand-in pattern moves the clock on at line 2 of the
+    masking or of the search, line 3 is not scanned, and the note says no citation was checked, naming the
+    budget."""
+    steps = _CiteRepo(tmp / "citecheck-steps", {"tools/a.py": b"a1\na2\n", "msg.txt": b"see tools/a.py:1\n",
+                                                "a.txt": b"a1\n"})
+    root, budget = steps.top, aiqt_hooks._CITECHK_BUDGET
+
+    def spelled(rel):
+        """The spellings a hook may give a path under the repository: joined to it, and resolved."""
+        return {os.path.join(root, rel), os.path.join(str(steps.root), rel)}
+    saved = (aiqt_hooks.time, aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git)
+
+    def stepped(step, offset, budget_s, targets, call):
+        """call() with a stand-in clock moved to the deadline plus offset once aiqt_hooks.<step> first
+        returns, the toplevel probe a stand-in naming the repository and no diff probe: whether an os.stat or
+        os.open of targets was made after that, and call's result."""
+        clock = _CiteClock(1000.0, 1000.0 + budget_s + offset, False)
+        saved_step, out = getattr(aiqt_hooks, step), []
+
+        def stand_in(*args, **kwargs):
+            try:
+                return saved_step(*args, **kwargs)
+            finally:
+                clock.advance()
+        try:
+            aiqt_hooks.time, aiqt_hooks._recovery_toplevel = clock, lambda *args, **kwargs: str(steps.root)
+            aiqt_hooks._review_git = lambda *args, **kwargs: None
+            setattr(aiqt_hooks, step, stand_in)
+            made = _cite_touches(targets, clock, lambda: out.append(call()))
+        finally:
+            aiqt_hooks.time, aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git = saved
+            setattr(aiqt_hooks, step, saved_step)
+        return any(made), out[0]
+    a_py, msg = spelled("tools/a.py"), spelled("msg.txt")
+    sites = (("body-open", "_citechk_real", "git commit -F " + os.path.join(root, "msg.txt"), msg),
+             ("cited-stat", "_citechk_real", "git commit -m 'see tools/a.py:1'", a_py),
+             ("cited-size", "_citechk_resolve", "git commit -m 'see tools/a.py:1'", a_py),
+             ("cited-open", "_cite_resolve", "git commit -m 'see tools/a.py:1'", a_py))
+    checked = {}
+    for site, step, command, targets in sites:
+        for name, offset in (("inside", -0.001), ("at", 0.0), ("outside", 0.001)):
+            made, (_verdict_, note, rows) = stepped(step, offset, budget, targets, lambda command=command, site=site,
+                                                    name=name: _citecheck_run(steps.root, command,
+                                                                              "step-{}-{}".format(site, name)))
+            checked.setdefault(site, []).append((made, [c["class"] for r in rows for c in r["detail"]["citations"]],
+                                                 "budget" in note))
+    late = [(False, ["unjudged"], True)] * 2
+    check("citeledger/check-no-step-past-deadline", checked,
+          {"body-open": [(True, ["unread"], False)] + [(False, [], True)] * 2,
+           "cited-stat": [(True, ["unread"], False)] + late, "cited-size": [(True, ["unread"], False)] + late,
+           "cited-open": [(True, ["unread"], False)] + late})
+    a_txt, recorded = spelled("a.txt"), {}
+    tools = (("sed", lambda s: steps.bash("sed -n 1p a.txt", "a1\n", s)),
+             ("Grep", lambda s: steps.grep(steps.root / "a.txt", "1:a1", s)),
+             ("grep", lambda s: steps.bash("grep -n a1 a.txt", "1:a1\n", s)))
+    for tool, call in tools:
+        for name, offset in (("inside", -0.001), ("at", 0.0), ("outside", 0.001)):
+            session = "step-{}-{}".format(tool, name)
+            made, _result = stepped("_cite_real", offset, aiqt_hooks._CITE_BUDGET, a_txt,
+                                    lambda call=call, session=session: call(session))
+            recorded.setdefault(tool, []).append((made, len(steps.rows(session))))
+    check("citeledger/recorder-no-step-past-deadline", recorded,
+          {tool: [(True, 1), (False, 0), (False, 0)] for tool, _call in tools})
+    # Here-documents: each body scanned once (the scans of _citechk_extract counted), whatever the number of
+    # -F - options or of commands that read standard input from them.
+    saved_extract, scans = aiqt_hooks._citechk_extract, []
+
+    def extract(text, *args, **kwargs):
+        scans.append(len(text))
+        return saved_extract(text, *args, **kwargs)
+    body = ("word " * 20 + "\n") * 1000
+    shapes = (("options", "git commit" + " -F -" * 1000 + " <<'EOF'\n" + body + "EOF\n"),
+              ("three", "git commit -F - -F - -F - <<'EOF'\nsee tools/a.py:1\n```\nx\n```\nEOF\n"),
+              ("two-commands", "git commit -F - <<'A'\nsee tools/a.py:1\nA\ngit commit -F - <<'B'\nsee tools/a.py:2\n"
+                               "B\n"))
+    once = {}
+    try:
+        aiqt_hooks._citechk_extract = extract
+        for name, command in shapes:
+            del scans[:]
+            began = time.process_time()
+            verdict, _note, rows = _citecheck_run(steps.root, command, "heredoc-" + name)
+            cpu = time.process_time() - began
+            once[name] = (len(scans), cpu <= budget, verdict,
+                          [([(c["cite"], c["class"]) for c in r["detail"]["citations"]], r["detail"]["sources"],
+                            r["detail"]["masked"].get("fence", 0), r["detail"]["not_judged_past_cap"]) for r in rows])
+    finally:
+        aiqt_hooks._citechk_extract = saved_extract
+    both_cites = [("tools/a.py:1", "unread"), ("tools/a.py:2", "unread")]
+    check("citeledger/check-heredoc-once", once,
+          {"options": (1, True, "allow", [([], ["here-document"], 0, 0)]),
+           "three": (1, True, "warn", [([("tools/a.py:1", "unread")], ["here-document"], 3, 0)]),
+           "two-commands": (2, True, "warn", [(both_cites, ["2 here-documents"], 0, 0)] * 2)})
+    # The scan's deadline: line 2's match of the search's heading pattern, or of the masking's fence
+    # pattern, moves a stand-in clock to just inside, at or just past the deadline. Inside, line 3 (the
+    # second citation) is scanned too (three matches) and both ranges judged; at and past it the scan stops
+    # after line 2 (two matches), the scan comes before the toplevel probe, so that probe is not started,
+    # and the note says no citation was checked, naming the budget (no row, with no state directory known).
+    command = "git commit -m 'see tools/a.py:1\nx\nsee tools/a.py:2'"
+    scanned = {}
+    for loop, attr in (("search", "_CITECHK_HEADING"), ("masking", "_CITECHK_FENCE")):
+        for name, offset in (("inside", -0.001), ("at", 0.0), ("outside", 0.001)):
+            clock = _CiteClock(1000.0, 1000.0 + budget + offset, False)
+            saved_pattern, pattern = getattr(aiqt_hooks, attr), None
+            try:
+                aiqt_hooks.time, aiqt_hooks._recovery_toplevel = clock, lambda *args, **kwargs: str(steps.root)
+                aiqt_hooks._review_git = lambda *args, **kwargs: None
+                pattern = _CiteCutPattern(saved_pattern, clock, 2)
+                setattr(aiqt_hooks, attr, pattern)
+                _verdict_, note, rows = _citecheck_run(steps.root, command, "scan-{}-{}".format(loop, name))
+            finally:
+                aiqt_hooks.time, aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git = saved
+                setattr(aiqt_hooks, attr, saved_pattern)
+            scanned.setdefault(loop, []).append((
+                pattern.calls, [c["class"] for r in rows for c in r["detail"]["citations"]],
+                [r["decision"] for r in rows], "budget before it resolved the repository" in note))
+    late = [(2, [], [], True)] * 2
+    check("citeledger/check-scan-deadline", scanned,
+          {"search": [(3, ["unread", "unread"], ["warn"], False)] + late,
+           "masking": [(3, ["unread", "unread"], ["warn"], False)] + late})
 
 
 def _cite_unpaired(roadmap):
@@ -8752,6 +9101,8 @@ def _main_isolated(report_path=None):
             _citecheck_show_cases(tmp)
             _citecheck_deadline_cases(tmp)
             _citecheck_path_cases(tmp)
+            _citeledger_walk_cases(tmp)
+            _citecheck_step_cases(tmp)
             _cite_roadmap_cases(tmp)
         finally:
             _cite_unpin_state(tmp, pinned)
