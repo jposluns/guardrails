@@ -129,8 +129,8 @@ treats a live result exceeding the recorded one as a fresh, unaddressed finding.
 the cited instance while a sibling of the same class survives unaddressed is an incomplete fix,
 the completeness-claim-enumerates-its-set discipline applied to a defect class standing in for
 the registry that class otherwise lacks. For example, a wording fix is a defect class whose
-probe is derived from the superseded wording the correction names, matches it across line wraps
-and escapes, and is validated against that correction. Each instance the probe finds is fixed
+probe is derived from and validated against the correction that names the superseded wording, and
+matches that wording across line wraps and escapes. Each instance the probe finds is fixed
 or carries one of exactly two named exemptions: history (a quotation recording the superseded
 wording) or warning (a correction that warns against it). A copy that must change with the
 wording, such as a clause register's canonical text, is in scope, never exempt.
