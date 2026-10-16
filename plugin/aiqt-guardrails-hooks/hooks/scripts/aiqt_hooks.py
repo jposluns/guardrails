@@ -1501,19 +1501,39 @@ def _is_possible_producer(seg):
             or (seg.opaque_shell and _has_producer_surface(seg.argv)))
 
 
+def _diff_ends_options(argv, j):
+    """True when argv[j] ends the option region of a git diff producer for the output-diversion and
+    patch-flag scans. git's revision walk cuts its arguments at the FIRST '--' before it reads any option,
+    so a '--' ends the options whatever comes before it (git diff -p -- --output=real.txt prints the patch
+    on stdout and reads --output=real.txt as a pathspec, checked with git 2.55.0). An '--end-of-options'
+    right after an option word may be that option's value (_option_may_take_value: git diff -S
+    --end-of-options --output=/dev/stderr writes the patch to stderr), so it does not end them; one
+    anywhere else does."""
+    word = argv[j]
+    if word == "--":
+        return True
+    return word in _DIFF_END_OF_OPTIONS and not (j > 0 and _option_may_take_value(argv[j - 1]))
+
+
 # git diff/log write the diff to a --output/-o file instead of stdout, so a shell redirect or a pipe is a
 # DECOY when --output is present (proofs C and D must not apply). --output/-o takes a file value, inline
 # (--output=X / -oX) or separated (--output X / -o X).
 def _diff_output_diversion(argv):
-    """Return (present, target) for a git --output/-o diff-output diversion before any '--' boundary, or
-    (False, None). The target decides console vs file: the diff lands there, not on stdout. A boundary word
-    right after an option word may be that option's value (_option_may_take_value: git diff -S
-    --end-of-options --output=/dev/stderr writes the patch to stderr), so it does not end the scan; git's
-    revision walk ends the options at the first '--' whatever comes before it, so reading a '--' there as a
-    possible value only over-detects a diversion, which never earns an allow."""
+    """Return (present, target) for a git --output/-o diff-output diversion before the end of the options
+    (_diff_ends_options), or (False, None). The target decides console vs file: the diff lands there, not on
+    stdout. A diversion read where git reads none hides a console patch behind a file target, so it can earn
+    an allow; what holds: the scan stops at the first '--', exactly where the revision walk does, and goes on
+    past an '--end-of-options' only right after an option word. Where that option takes a value, git agrees.
+    Where it takes none, git ends the options there and must read the next word as a revision: a word
+    spelled as a diversion names one only through a ref created with that name by git update-ref (git
+    branch and git tag refuse a name starting with '-'), and otherwise git refuses the command (git diff -p
+    --end-of-options --output=real.txt, git 2.55.0). Disclosed residue: under --no-index, explicit or implied
+    outside a repository, git reads the options with its option parser, which gives a value-taking option
+    the next word even when it is '--', so a diversion after such a '--' (git diff --no-index -S --
+    --output=out.txt a b writes out.txt) is missed and the stdout redirect or pipe decides."""
     end = len(argv)
-    for j, word in enumerate(argv):
-        if word in _DIFF_END_OF_OPTIONS and not (j > 0 and _option_may_take_value(argv[j - 1])):
+    for j in range(len(argv)):
+        if _diff_ends_options(argv, j):
             end = j
             break
     i = 0
@@ -1562,15 +1582,21 @@ def _argv_has_patch_enabler(argv):
     narrows the short patch-letter set to _SUMMARY_PATCH_SHORT (p/u/U, excluding the merge-only -c letter;
     see that constant), and the long enablers to the --patch*/--unified* prefixes (excluding --cc, the
     merge-only combined-diff form). Any other (unknown) option is not a patch enabler; this predicate
-    answers only 'is a patch forced on', leaving every other classification to the caller (F-R2-5). A boundary
-    word right after an option word outside those value sets may be that option's value
-    (_option_may_take_value: git diff --stat --word-diff-regex --end-of-options -p prints the patch), so the
-    scan goes on past it, which can only find an enabler more often."""
+    answers only 'is a patch forced on', leaving every other classification to the caller (F-R2-5). The
+    region ends where _diff_ends_options says: at the first '--', where the revision walk ends it (git diff
+    --stat -- -p prints only the summary), or at an '--end-of-options' that does not follow an option word;
+    one right after an option word outside those value sets may be that option's value (git diff --stat
+    --word-diff-regex --end-of-options -p prints the patch), so the scan goes on past it, which can only find
+    an enabler more often. A listed value-taking option consumes its separated value before that test, a
+    '--' included. Disclosed residue: under --no-index git's option parser gives a value-taking option the
+    next word even when it is '--', so a patch flag after a '--' that follows a value-taking option outside
+    those value sets is missed (git diff --no-index --stat --word-diff-regex -- -p a b prints the patch,
+    git 2.55.0)."""
     i = 0
     n = len(argv)
     while i < n:
         tok = argv[i]
-        if tok in _DIFF_END_OF_OPTIONS and not (i > 0 and _option_may_take_value(argv[i - 1])):
+        if _diff_ends_options(argv, i):
             break  # every remaining token is an operand (a pathspec/ref), never an option
         if not tok.startswith("-") or tok == "-":
             i += 1
@@ -3205,6 +3231,23 @@ def _checkout_switch_parse_options(pre):
     return short_flags, operands
 
 
+def _pathspec_file_scopes(pre, is_spelling):
+    """True when the last --pathspec-from-file of the option region pre (is_spelling tells its spellings;
+    git reads the last one) makes a checkout or reset path-scoped by itself. Not when its value is a
+    separated '--' or '--end-of-options': git gives the option the next word whatever it is and reads the
+    words after it as options, so git checkout --pathspec-from-file -- -f and git reset
+    --pathspec-from-file -- --hard, with an empty file named '--', force a checkout of the whole tree and
+    reset it --hard (git 2.55.0); the role helper then judges the options after it."""
+    last = None
+    for i, word in enumerate(pre):
+        if is_spelling(word):
+            last = i
+    if last is None:
+        return False
+    value = pre[last + 1] if last + 1 < len(pre) else None
+    return "=" in pre[last] or value not in _EOO_TOKENS
+
+
 def _checkout_role(args):
     """git checkout. Force ('-f'/'--force', abbreviations included) is decided FIRST (GD-41 blocker 7). A
     '-B' force branch-create/RESET overwrites an existing branch ref and can orphan committed commits (the
@@ -3229,9 +3272,15 @@ def _checkout_role(args):
     path-restore. Any '-- <paths>' or other bare-operand form is scoped for the same reason. Only an
     operand-FREE forced checkout ('checkout -f' with no branch and no pathspec) clobbers the whole worktree
     with certainty -> clobber (which DENIES on a confirmed-dirty tree). A bare 'git checkout' with no options
-    and no operands has no worktree effect -> allow."""
-    pre, post, _had_sep = _split_pre_post(args)
-    if _has_long_prefix(pre, "pathspec-from-file"):  # prefix-matched: '--pathspec-from-f' too
+    and no operands has no worktree effect -> allow. A '--'/'--end-of-options' right after a value-taking
+    checkout option (_discard_takes_value) is that option's value, not the end of the options, and a
+    --pathspec-from-file whose separated value is one does not make the form scoped by itself
+    (_pathspec_file_scopes): git checkout --pathspec-from-file -- -f with an empty file named '--' forces a
+    checkout of the whole tree, so the -f after it decides. One naming an ordinary file stays scoped, as a
+    forced checkout with an operand is, although with an empty file it is that whole-tree checkout too."""
+    pre, post, _had_sep = _split_pre_post(args, lambda word: _discard_takes_value("checkout", word))
+    # prefix-matched: '--pathspec-from-f' too
+    if _pathspec_file_scopes(pre, lambda word: _has_long_prefix((word,), "pathspec-from-file")):
         return ("scoped", "git checkout --pathspec-from-file (reverts paths listed in a file)")
     short_flags, operands = _checkout_switch_parse_options(pre)  # '-b'/'-B' consume their branch name (F-85)
     force = "f" in short_flags or _has_long_prefix(pre, "force")
@@ -3322,9 +3371,14 @@ def _reset_role(args):
     scoped either way; option parsing stops at the first '--'/'--end-of-options' so a mode-looking operand
     past it is a pathspec, not a mode, unless that word is the value of a value-taking reset option
     (_discard_takes_value: git reset --pathspec-from -- --hard reads a pathspec file named '--' and resets
-    --hard), when the options go on past it."""
+    --hard), when the options go on past it. A --pathspec-from-file whose separated value is such a word
+    does not make the reset scoped by itself (_pathspec_file_scopes), so the mode after it decides: git reset
+    --pathspec-from-file -- --hard is a clobber. One naming an ordinary file (or joined with '=') stays
+    scoped even beside --hard, a disclosed under-read: git refuses a hard reset with paths, so it runs only
+    when the file lists none, as a whole-tree hard reset (git 2.55.0)."""
     pre, _post, _had_sep = _split_pre_post(args, lambda word: _discard_takes_value("reset", word))
-    if any(a == "--pathspec-from-file" or a.startswith("--pathspec-from-file=") for a in pre):
+    if _pathspec_file_scopes(pre, lambda word: word == "--pathspec-from-file"
+                             or word.startswith("--pathspec-from-file=")):
         return ("scoped", "git reset --pathspec-from-file (a path-scoped reset from a file)")
     mode = None  # "clobber" / "soft" / "scoped"
     for a in pre:
@@ -8714,7 +8768,12 @@ def _gate_weakening_fallback(command):
 # wrapped command (_gate_suffixes) is quadratic in a segment's words, so a longer command could outlast the
 # 10-second hook timeout, and a hook stopped at its timeout prints no decision at all. The bounds are set so
 # that the slowest shape measured within them is judged in under a tenth of the hook timeout on the measuring
-# host, leaving room for a slower or loaded one; the residue gives the measurements.
+# host, leaving room for a slower or loaded one; the residue gives the measurements. The words and segments
+# after the first unparseable construct are not counted, since the lexer stops there: echo with 4,095
+# arguments, then <(true) and 50 more words, allows, while the same words without the substitution are
+# refused. They are not judged either, only read by the raw fallback probes, which are linear in the length,
+# so the character bound caps their cost (0.09 seconds of CPU time for such words up to that bound, measured
+# 2026-10-16).
 _GATE_MAX_CHARS = 262144
 _GATE_MAX_SEGMENTS = 4096
 _GATE_MAX_WORDS = 4096
@@ -8948,7 +9007,8 @@ def gate_weakening(data):
         recovered, complete = _lex_command(command, partial=True)
         # The size bound counts every segment the lexer read, the one it was still inside included: dropping
         # that one first let 4,097 words before an unsupported construct (echo x x ... <(true)) pass unbounded.
-        # Only the judgement below drops it, since its unseen tokens could change it.
+        # Only the judgement below drops it, since its unseen tokens could change it. Words after the construct
+        # are never lexed, so they are not counted (see _GATE_MAX_CHARS).
         over = _gate_size_over(command, recovered)
         if not complete:
             recovered = recovered[:-1]

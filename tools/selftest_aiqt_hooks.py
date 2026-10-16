@@ -3490,6 +3490,14 @@ def _main_isolated(monitor):
                "git checkout --pathspec-from-file -b", "allow-note", cwd=rp)
         expect("(pfr-reset) reset --pathspec-from-file --soft allows with a note (--soft is the file, not the mode)",
                "git reset --pathspec-from-file --soft", "allow-note", cwd=rp)
+        # A separated '--' value is the file too, and the options go on after it (git 2.55.0, with an empty file
+        # named '--': reset --pathspec-from-file -- --hard reset the whole tree --hard and checkout
+        # --pathspec-from-file -- -f discarded the tracked change), so on this dirty tree both deny as the
+        # whole-tree clobbers they are; both were snapshotted then allowed before.
+        expect("(pfr-reset-eoo) reset --pathspec-from-file -- --hard denies (-- is the file, --hard the mode)",
+               "git reset --pathspec-from-file -- --hard", "deny", cwd=rp)
+        expect("(pfr-checkout-eoo) checkout --pathspec-from-file -- -f denies (-- is the file, -f is force)",
+               "git checkout --pathspec-from-file -- -f", "deny", cwd=rp)
         # An inline git alias that expands to a work-losing verb cannot be resolved -> ASK.
         # CLAUDE-F1 (round-7): an inline '-c alias.<name>=' invoking a NON-builtin subcommand ('x') enters the
         # view-override branch ('-c' makes the command not dir-simple); its raw scan flags 'reset' but the
@@ -3629,6 +3637,21 @@ def _main_isolated(monitor):
             (("branch", ["-d", "--", "topic"]), "allow"),
             (("clean", ["-n", "--", "-f"]), "allow"),
             (("reset", ["--soft", "--", "--hard"]), "allow"),
+            # A --pathspec-from-file whose separated value is '--' or --end-of-options does not scope a reset or
+            # checkout by itself: the --hard or -f after it decides (git 2.55.0, with an empty file of that name:
+            # reset --hard and a forced whole-tree checkout). Each of the four was scoped before. The controls:
+            # a second '--' really ends the options, so the --hard or -f after it is a pathspec (git refuses
+            # pathspec arguments beside --pathspec-from-file), and an ordinary file name keeps the scoped
+            # reading, the disclosed under-read (with an empty list file git reset --pathspec-from-file list
+            # --hard reset the whole tree).
+            (("reset", ["--pathspec-from-file", "--", "--hard"]), "clobber"),
+            (("reset", ["--pathspec-from-file", "--end-of-options", "--hard"]), "clobber"),
+            (("checkout", ["--pathspec-from-file", "--", "-f"]), "clobber"),
+            (("checkout", ["--pathspec-from-file", "--end-of-options", "-f"]), "clobber"),
+            (("reset", ["--pathspec-from-file", "--", "--", "--hard"]), "scoped"),
+            (("checkout", ["--pathspec-from-file", "--", "--", "-f"]), "scoped"),
+            (("reset", ["--pathspec-from-file", "list", "--hard"]), "scoped"),
+            (("checkout", ["--pathspec-from-file", "list", "-f"]), "scoped"),
         ]
         for (sub, args), want_role in role_cases:
             got_role = aiqt_hooks._discard_role(sub, args)[0]
@@ -6968,6 +6991,18 @@ def _main_isolated(monitor):
                 "git diff --stat --word-diff-regex --end-of-options -p", "deny")
         dexpect("(cnsdif-eoo-c1) a pathspec after -- with a real-file redirect allows",
                 "git diff --cached -- a.txt > real.txt", "allow")
+        # A '--' ends the options whatever precedes it, as git's revision walk cuts its arguments at the first
+        # '--' (git 2.55.0: git diff -p -- --output=real.txt and git diff --cached -- -p --output=real.txt printed
+        # the patch on stdout and wrote no real.txt), so an option-looking pathspec after it is not a diversion:
+        # both were read as a diversion to a file and allowed before. The control's -p after a real '--' is a
+        # pathspec too (git diff --stat -- -p printed only the summary), so the summary stays a summary: it
+        # was denied before.
+        dexpect("(cnsdif-eoo3) a --output pathspec after a -- that follows -p is no diversion, denies",
+                "git diff -p -- --output=real.txt", "deny")
+        dexpect("(cnsdif-eoo4) a -p and a --output pathspec after a real -- are no diversion, denies",
+                "git diff --cached -- -p --output=real.txt", "deny")
+        dexpect("(cnsdif-eoo-c2) a -p pathspec after a real -- is no patch flag, a summary allows with a note",
+                "git diff -M --stat -- -p", "allow-note")
         # F-117 round-7: remaining reachable silent-allows now fixed (prtbrn --end-of-options + --repo;
         # cnsdif clustered patch + command-word-wrapper fallback), plus disclosed-residual lock cases.
         pexpect("(f117r7-a) --end-of-options boundary does not mask a force-push",
@@ -8599,7 +8634,9 @@ def _main_isolated(monitor):
         # does not inflate as it does wall time; a judgement over _gw_cpu_limit seconds (half the 10-second hook
         # timeout) fails. Each is also run once as a whole hook process, as the platform runs it, as a smoke check
         # of the printed decision with a generous wall-time bound (_gw_smoke_limit seconds), and one still running
-        # at _gw_time_kill seconds is stopped and fails.
+        # at _gw_time_kill seconds is stopped and fails. The smoke bound is three times the hook timeout, so it no
+        # longer guards that timeout: a whole hook process that took 10 to 30 seconds would pass it, and so would
+        # the CPU-time check, which leaves out the interpreter start and the module import.
         _gw_cpu_limit = 5.0
         _gw_smoke_limit = 30.0
         _gw_time_kill = 60
