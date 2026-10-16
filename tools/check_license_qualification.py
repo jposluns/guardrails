@@ -88,8 +88,11 @@ number follows; (3) it lies in a CSS REGION, either the body of an HTML <style> 
 </style>, inside a { } block (the nearest brace before it in that body is "{"), or the QUOTED value
 of a style attribute of an HTML start tag (tag and attribute names case-insensitive); and (4) it is
 a declaration VALUE: the text of its declaration, from just after the nearest { } or ; before it in
-that region (or from the region start), opens with a CSS property name and a colon ("color:",
-"--accent:"; any CSS identifier, not a list of known properties). Everything else is a finding:
+that region (or from the region start), opens with a property name and a colon ("color:",
+"--accent:"), where a property name is a shape, not a list of known properties: up to two hyphens,
+an ASCII letter, then any run of ASCII letters, digits, and hyphens. Any other name, one with an
+underscore ("--my_accent:") or a non-ASCII character, is not admitted, so its "#cc0" is a finding
+that needs an exception row. Everything else is a finding:
 prose ("Our project licence is #cc0", "Licence: #cc0"), a markdown heading "#cc0", a CSS-looking
 line in markdown text ("background: #cc0;"), a selector ("a:hover #cc0 {"), an unclosed <style>, a
 style attribute written as text, unquoted, or inside another attribute's value, and "#CC0-1.0",
@@ -169,10 +172,10 @@ reserved", where entity text, not a space, sits between the tokens) all slip the
 U+00A0 character IS whitespace and is caught); a "#cc0" that is the whole value token of a CSS
 declaration in a CSS region (above) is never matched, and both are read SYNTACTICALLY: a <style>
 element or a style attribute written as text (in a markdown code span or fence, or in an HTML
-comment) still counts as CSS, any CSS identifier is a property name ('<p style="licence: #cc0">'
-is a declaration), and a nested selector that opens like a declaration inside a { } block ("a {
-b:hover #cc0 { } }") reads as one, so a waiver spelled "#cc0" there is not seen, though every
-OTHER waiver phrase after "#" IS a finding;
+comment) still counts as CSS, any name of the admitted property-name shape counts as a property
+name ('<p style="licence: #cc0">' is a declaration), and a nested selector that opens like a
+declaration inside a { } block ("a { b:hover #cc0 { } }") reads as one, so a waiver spelled "#cc0"
+there is not seen, though every OTHER waiver phrase after "#" IS a finding;
 a waiver token fused to an underscore ("CC0_1.0" written with an underscore is one \\w+ token) has
 no word boundary and is not seen; the other-identity refusal reads markdown markers as spaces but NOT
 HTML tags or entities, so an opening split by them ("<b>Apache</b> License", "Apache&nbsp;License") is
@@ -615,7 +618,8 @@ def _is_css_colour_cc0(text, start, end):
     end of the CSS region follows) and no "1.0" version number follows; (3) the "#" and the match lie
     in one _css_regions region, and in a <style> body the nearest brace before the "#" is "{"; and (4)
     the declaration holding it, from just after the nearest { } or ; before the "#" in that region (or
-    from the region start), opens with a CSS property name and a colon. So
+    from the region start), opens with a property name of the _CSS_DECLARATION_HEAD shape (up to two
+    hyphens, an ASCII letter, then ASCII letters, digits, and hyphens) and a colon. So
     "<style>a{color:#cc0}</style>" and '<p style="color: #cc0">' are the colour, while prose ("Our
     project licence is #cc0"), a markdown heading "#cc0", "background: #cc0;" outside a style element
     or attribute, a selector, "##cc0", "x#cc0", "#cc0.5em", and "#CC0 1.0" are not. A six-digit colour
@@ -1409,8 +1413,9 @@ CLASS3_SCAN_CASES = [
     # ... and the near-CSS shapes the rule does not admit: element text after a style attribute, an
     # unclosed <style>, a style attribute written as text, unquoted, or inside another attribute's
     # value, a selector (outside any { } block, or after a closed one), a declaration with no
-    # property name, and inside a declaration value a cc0 with no "#", a fused, doubled, or "=" led
-    # "#", a dimension or a quote run on after it, or a following version number.
+    # property name or with a name outside the admitted shape (an underscore), and inside a
+    # declaration value a cc0 with no "#", a fused, doubled, or "=" led "#", a dimension or a quote
+    # run on after it, or a following version number.
     ("<p style=\"color: red\">Licence: #cc0</p>", "site/hash-after-attr.html", (), 1),
     ("<style>a{color:#cc0}", "site/hash-unclosed.html", (), 1),
     ("style=\"color:#cc0\"", "docs/hash-attr-text.md", (), 1),
@@ -1419,6 +1424,7 @@ CLASS3_SCAN_CASES = [
     ("<style>a:hover #cc0 {color:red}</style>", "site/hash-selector.html", (), 1),
     ("<style>a{color:red} p:focus #cc0 {color:red}</style>", "site/hash-selector-after.html", (), 1),
     ("<style>p{ #cc0 }</style>", "site/hash-no-property.html", (), 1),
+    ("<style>:root{--my_accent: #cc0}</style>", "site/a.html", (), 1),
     ("<style>p{font-family: cc0}</style>", "site/hash-no-hash.html", (), 1),
     ("<style>a{color:x#cc0}</style>", "site/hash-css-fused.html", (), 1),
     ("<style>a{color:##cc0}</style>", "site/hash-css-double.html", (), 1),
@@ -1535,12 +1541,23 @@ _CFG_MALFORMED = (
     ("duplicate row", "[[exception]]\n" + _ROW_OK + "reason = \"r\"\n[[exception]]\n" + _ROW_OK
      + "reason = \"other\"\n", "duplicates an earlier row"),
 )
-# Configuration texts that are not TOML at all, with the exception class each parse handler must name:
-# a syntax error (tomllib.TOMLDecodeError, a ValueError) and an array nested ten times past the
-# default recursion limit (RecursionError). Both legs' handlers are driven with each.
+
+
+def _raise_memory_error(text):
+    """A stand-in for tomllib.loads that fails as an exhausted allocation does. No fixture text can
+    raise MemoryError without exhausting memory, so the parse handlers' MemoryError arm is driven
+    through this loader instead."""
+    raise MemoryError("injected allocation failure")
+
+
+# Configuration texts that do not load, with the exception class each parse handler must name and the
+# loader that reads them (None is tomllib.loads): a syntax error (tomllib.TOMLDecodeError, a
+# ValueError), an array nested ten times past the default recursion limit (RecursionError), and a
+# valid text whose loader raises MemoryError. Both legs' handlers are driven with each.
 _CFG_UNPARSEABLE = (
-    ("not TOML", "licence = \n", "TOMLDecodeError"),
-    ("nested too deep", "licence = " + "[" * 10000 + "]" * 10000 + "\n", "RecursionError"),
+    ("not TOML", "licence = \n", "TOMLDecodeError", None),
+    ("nested too deep", "licence = " + "[" * 10000 + "]" * 10000 + "\n", "RecursionError", None),
+    ("out of memory", "licence = \"Apache-2.0\"\n", "MemoryError", _raise_memory_error),
 )
 
 # Result-rendering fixtures: (findings, claims, identity, reserves, class3_error, expected exit code,
@@ -1556,13 +1573,13 @@ RENDER_CASES = [
 ]
 
 
-def _valid_config_failures(text, want):
+def _valid_config_failures(text, want, loads=None):
     """The valid-configuration leg over one fixture text: [] when it parses as TOML and _parse_config
     returns want, else the NAMED failure line (a text that does not parse is reported by its exception
-    class, never escapes)."""
+    class, never escapes). loads reads the text (None is tomllib.loads)."""
     import tomllib
     try:
-        parsed = _parse_config(tomllib.loads(text), "fixture")
+        parsed = _parse_config(tomllib.loads(text) if loads is None else loads(text), "fixture")
     except (ValueError, RecursionError, MemoryError) as exc:
         return ["CONFIG PARSE: valid fixture did not parse as TOML: {}".format(type(exc).__name__)]
     except _FailClosed as exc:
@@ -1572,13 +1589,14 @@ def _valid_config_failures(text, want):
     return []
 
 
-def _malformed_config_failures(label, text, want):
+def _malformed_config_failures(label, text, want, loads=None):
     """The malformed-configuration leg over one fixture text: [] when it parses as TOML and
     _parse_config refuses it with want in the diagnostic, else the NAMED failure line (a text that
-    does not parse is reported by its exception class, never escapes)."""
+    does not parse is reported by its exception class, never escapes). loads reads the text (None is
+    tomllib.loads)."""
     import tomllib
     try:
-        _parse_config(tomllib.loads(text), "fixture")
+        _parse_config(tomllib.loads(text) if loads is None else loads(text), "fixture")
     except (ValueError, RecursionError, MemoryError) as exc:
         return ["CONFIG PARSE: malformed fixture {} did not parse as TOML: {}".format(
             label, type(exc).__name__)]
@@ -1658,19 +1676,21 @@ def _self_test_class3():
     failures.extend(_valid_config_failures(_CFG_VALID, _CFG_VALID_PARSED))
     for label, bad, want in _CFG_MALFORMED:
         failures.extend(_malformed_config_failures(label, bad, want))
-    # Each leg's parse handler is driven too: a text that is not TOML, and one nested past the
-    # recursion limit, must come back as that handler's NAMED failure line. An exception that escapes
-    # (a deleted or narrowed handler) is caught here and fails by name, never passes.
-    for label, text, exc_name in _CFG_UNPARSEABLE:
+    # Each leg's parse handler is driven with each of the three classes it catches: TOMLDecodeError (a
+    # text that is not TOML), RecursionError (a text nested past the recursion limit), and MemoryError
+    # (raised by the stand-in loader). Each must come back as that handler's NAMED failure line. An
+    # exception that escapes (a deleted handler, or one narrowed to drop any of the three classes) is
+    # caught here and fails by name, never passes.
+    for label, text, exc_name, loads in _CFG_UNPARSEABLE:
         for leg, want_line in (
                 ("valid", "CONFIG PARSE: valid fixture did not parse as TOML: " + exc_name),
                 ("malformed", "CONFIG PARSE: malformed fixture {} did not parse as TOML: {}".format(
                     label, exc_name))):
             try:
                 if leg == "valid":
-                    got = _valid_config_failures(text, _CFG_VALID_PARSED)
+                    got = _valid_config_failures(text, _CFG_VALID_PARSED, loads)
                 else:
-                    got = _malformed_config_failures(label, text, "")
+                    got = _malformed_config_failures(label, text, "", loads)
             except (ValueError, RecursionError, MemoryError) as exc:
                 got = ["{} escaped the handler".format(type(exc).__name__)]
             if got != [want_line]:
@@ -1751,8 +1771,9 @@ def _self_test_files():
     the lstat-presence, stat, and EACCES fail-closed paths, and the never-hidden guarantee are
     exercised where they live, not only on in-memory lists. EACCES is injected through the _lstat /
     _stat / _read_file_text / _load_toml_file seams (a chmod 000 denies nothing under root). Every
-    child runs as -I -B and first reports os.getcwd(), which must lie inside the temporary root, and
-    the root is checked to be gone afterwards. Returns (failures, case count)."""
+    child runs as -I -B and first reports os.getcwd(), which must be exactly the working directory
+    it was given inside the temporary root, and the root is checked to be gone afterwards. Returns
+    (failures, case count)."""
     import subprocess
     import tempfile
     global _lstat, _stat, _read_file_text, _load_toml_file
@@ -1776,19 +1797,22 @@ def _self_test_files():
     cwd_mark = "CHILD CWD "
 
     def run_child(label, payload, cwd):
-        """Run payload in a -I -B child with working directory cwd. The child first prints
-        os.getcwd(), which must lie inside the temporary root td (a NAMED failure otherwise, so a
-        child run anywhere else, beside the sources included, fails); that line is dropped from the
-        returned capture."""
+        """Run payload in a -I -B child with working directory cwd, which must lie inside the
+        temporary root td. The child first prints os.getcwd(), which must resolve to exactly
+        cwd.resolve() (a NAMED failure otherwise, so a child run anywhere else, the temporary root
+        itself, the parent's own directory, or beside the sources, fails); that line is dropped from
+        the returned capture."""
         proc = subprocess.run(
             [sys.executable, "-I", "-B", "-c",
              "import os; print({!r} + os.getcwd(), flush=True); {}".format(cwd_mark, payload)],
             cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120, text=True)
         head, _, rest = proc.stdout.partition("\n")
         reported = Path(head[len(cwd_mark):]) if head.startswith(cwd_mark) else None
-        if reported is None or not reported.resolve().is_relative_to(Path(td).resolve()):
-            failures.append("FILES {}: the child must run inside the temporary root {}, it reported"
-                            " {!r}".format(label, td, head))
+        want = Path(cwd).resolve()
+        if (reported is None or reported.resolve() != want
+                or not want.is_relative_to(Path(td).resolve())):
+            failures.append("FILES {}: the child must run in {}, inside the temporary root {}, it"
+                            " reported {!r}".format(label, want, td, head))
         return subprocess.CompletedProcess(proc.args, proc.returncode, rest)
 
     def merged_order_failure(label, proc, want_code, first, then):
