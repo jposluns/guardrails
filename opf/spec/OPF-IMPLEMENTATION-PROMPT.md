@@ -755,8 +755,9 @@ conformance claim (checklist item 19) until the maintainer rules.
     under section 8.6". It does not list the other cases.
     Each statement below that a store at 1.3.0 is valid or reaches VALID is about your own
     validator, whose C-IMPORTED-PROVENANCE follows section 8.3; section 17 says the reference
-    validator in `opf/tools/` does not yet grade imported-record provenance on homes 1, so under it
-    no 1.3.0 store reaches doctor VALID. This prompt's readings follow, from
+    validator in `opf/tools/` refuses a 1.3.0 declaration at its shipped 1.2.0 ceiling and, as
+    written for its 1.3.0 activation, does not grade imported-record provenance on homes 1, so under
+    it no 1.3.0 store reaches doctor VALID. This prompt's readings follow, from
     sections 8.5 and 8.6, except for the decision-chain bullet, which sets out two readings for the
     maintainer to choose between:
     - A ratified `done` backlog item whose only receipt is legacy importer-authored fails the clean
@@ -1578,16 +1579,18 @@ containment.
   throwaway stores, the step 8 fixtures included. A throwaway store at 1.3.0 whose imported series
   must grade valid uses `import_status = "none"` and a preserved original for each imported record
   whose `source_sha256` matches, under the reading step 10 labels for its check (a) of re-sends that
-  supersede immutable history. Section 17 says that the reference validator in `opf/tools/` does
-  not yet grade imported-record provenance on homes 1, where every 1.3.0 store is: its
-  C-IMPORTED-PROVENANCE reports cannot-evaluate there, an empty imported series included, so under
-  it neither your fresh store nor that throwaway store reaches doctor VALID. Your validator is not
-  the reference validator: your C-IMPORTED-PROVENANCE follows section 8.3, which says it "re-reads
-  each preserved original and verifies `source_sha256`", on homes 1 as well. Whether the reference
-  tooling will grade homes 1 is an open question. Treat a missing imported leaf of an enabled type
-  other than `legacy_fragment` as a finding, and an imported leaf for `legacy_fragment` as one too:
-  section 4.2 requires init and the upgrade to create the imported leaves "for every enabled type
-  except `legacy_fragment`" (this is a reading of that rule, not a check the specification names).
+  supersede immutable history. Section 17 says that the reference validator in `opf/tools/`
+  refuses a 1.3.0 declaration at its shipped 1.2.0 ceiling, and that as written for its 1.3.0
+  activation it does not grade imported-record provenance on homes 1, where every 1.3.0 store is:
+  there its C-IMPORTED-PROVENANCE reports cannot-evaluate, an empty imported series included, so
+  under it neither your fresh store nor that throwaway store reaches doctor VALID. Your validator
+  is not the reference validator: your C-IMPORTED-PROVENANCE follows section 8.3, which says it
+  "re-reads each preserved original and verifies `source_sha256`", on homes 1 as well. Whether the
+  reference tooling will grade homes 1 is an open question. Treat a missing imported leaf of an
+  enabled type other than `legacy_fragment` as a finding, and an imported leaf for
+  `legacy_fragment` as one too: section 4.2 requires init and the upgrade to create the imported
+  leaves "for every enabled type except `legacy_fragment`" (this is a reading of that rule, not a
+  check the specification names).
 - The section 8.6 authority firewall covers "every record whose `actor.kind` is `importer`, in the
   imported series or written into the clean series by the pre-1.3.0 legacy importer", and
   C-IMPORTED-SEGREGATION enforces it over importer-authored records in both series (section 8.6);
@@ -3287,19 +3290,21 @@ maintainer's ruling on an open point, report the ruling with it.
     accepted the 1.3.0 format (section 4.2); every detail of open point 25 is resolved, and no step
     8 check was left not run. The step 8 valid results are your validator's, whose
     C-IMPORTED-PROVENANCE follows section 8.3; under the reference validator no 1.3.0 store reaches
-    doctor VALID (section 17). While that holds, report those results as your validator's alone,
-    never as confirmed by the reference tooling; if your validator reports C-IMPORTED-PROVENANCE
-    cannot-evaluate on homes 1, as the reference validator does, report this item as not passed,
-    naming that check and section 17.
+    doctor VALID (section 17). While that holds, report the step 8 results you observed as your
+    validator's alone, never as confirmed by the reference tooling; if your validator reports
+    C-IMPORTED-PROVENANCE cannot-evaluate on homes 1, as the reference validator as written for its
+    1.3.0 activation does, report that observed result, and this item as not passed, naming that
+    check and section 17.
 11. Initialization implements `opf.init.coupled/v1` (this prompt's scope choice; see "Choices to
     make before you start"): exit 0 only on fresh observations, with the exact success sentence;
     init-created sources staged as exact entries; views unstaged; no commit created; final
     validation after the lease removal; a finalization or lock-release failure prevents exit 0.
     That exit 0 and success sentence rest on your validator's final validation, whose
     C-IMPORTED-PROVENANCE follows section 8.3; under the reference validator no 1.3.0 store reaches
-    doctor VALID (section 17). While that holds, report init's exit and sentence as your validator's
-    result alone; if your validator reports C-IMPORTED-PROVENANCE cannot-evaluate on homes 1, report
-    that init did not exit 0 and that this item is not passed, naming that check and section 17.
+    doctor VALID (section 17). While that holds, report init's observed exit status and sentence as
+    your validator's result alone; if your validator reports C-IMPORTED-PROVENANCE cannot-evaluate
+    on homes 1, report init's observed exit status, and this item as not passed, naming that check
+    and section 17.
 12. The record writer enforces the `/proposed` rule, the per-type transition table and rules of
     section 8.5 (with the handoff supersession as the maintainer-performed replacement of open point
     23, as ratified, completing the supersession in the same act and refusing an assistant or

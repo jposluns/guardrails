@@ -5749,17 +5749,25 @@ def self_test():
             # red if that branch ever lets an empty series pass, which the one-row vectors above would miss.
             _h1_empty = run(_h1_machine())
             check("provenance-homes1-empty-series-cannot-evaluate", _h1_only_provenance(_h1_empty))
-            # The regression it guards, as a mutant: the driver grades the declared homes-1 series as if it were
-            # active (imported_series_active patched to the declaration, restored in finally), so the empty
-            # series has nothing to fail and C-IMPORTED-PROVENANCE passes. The vector's predicate rejects that run.
-            _h1_prev_isa = imported_series_active
+            # The regression it guards, as a mutant: the homes-1 branch records nothing for the declared series
+            # with no imported rows (a report class that drops exactly that CANNOT-EVALUATE is patched in for this
+            # one run, restored in finally), and nothing else changes, so C-IMPORTED-PROVENANCE passes records it
+            # never read. The run must be VALID, which proves the mutant took effect, and the vector's predicate
+            # must reject it (red when that predicate is weakened to accept a run with no findings).
+            class _H1PassReport(_Report):
+                def cant(self, msg):
+                    if msg != _h1_msg:
+                        super().cant(msg)
+
+            _h1_prev_report = _Report
             try:
-                _p_g["imported_series_active"] = _opf_store.imported_series_declared
+                _p_g["_Report"] = _H1PassReport
                 _h1_mut = run(_h1_machine())
             finally:
-                _p_g["imported_series_active"] = _h1_prev_isa
+                _p_g["_Report"] = _h1_prev_report
             check("provenance-homes1-empty-series-pass-mutant-caught",
-                  _h1_mut is not None and _h1_mut.checks.get("C-IMPORTED-PROVENANCE") == "PASS"
+                  _h1_mut is not None and _h1_mut.status == VALID and not _h1_mut.findings
+                  and not _h1_mut.cannot_evaluate and _h1_mut.checks.get("C-IMPORTED-PROVENANCE") == "PASS"
                   and not _h1_only_provenance(_h1_mut))
         finally:
             _p_g["required_checks"] = _h1_prev_rc
