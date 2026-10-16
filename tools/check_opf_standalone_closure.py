@@ -22,9 +22,12 @@ Exit convention (matches the repo's gates):
   0  the isolated opf/ subtree verifies (closure holds)
   1  a real finding: a subset gate failed in isolation (closure is broken), or REGISTRATION DRIFT, one of
      the closure-roster registration checks failing on its own assertion (each named; the checks run
-     first, before opf/ is copied, any bound is derived or any leg runs, so a row removed, its
-     arguments changed, or its name or script renamed is named as drift, never as a bound that cannot
-     be derived)
+     first, before opf/ is copied, any bound is derived or any leg runs). The whole-roster check holds
+     every row: the leg names must be exactly those of the ceiling table, each once, and every script
+     a file in opf/tools/, so a row removed, added or repeated, a leg renamed, or a script renamed to
+     a file opf/tools/ does not hold is named as drift, never as a bound that cannot be derived and
+     never passed over. Three rows are also pinned as exact tuples, so for those alone a changed
+     argument list, or a script changed to another file that exists, is drift too
   2  malformed input or a harness error (fail-closed): opf/ absent/unreadable, a temporary directory that
      cannot be created, copy failed, no interpreter, a per-leg bound that cannot be derived, any other
      exception before, around or after the legs (a harness fault, named, whatever it carries, an
@@ -44,12 +47,15 @@ fit the CI job (see _LEG_CEILING_S); its trip is reported as the bound tripping 
 failure the leg reported. A run under load heavier than the recorded ceilings' can trip a healthy leg's
 bound and exit 2 (see _LOAD_HEADROOM).
 --self-test follows the same convention: 1 only for a definite failure (the real opf/ does not verify,
-registration drift, the flipped copy is NOT caught, or a self-test check fails on its own assertion,
-whose message begins "closure/"), and 2 when a leg or the flip could not be evaluated (a bound kill, a
-signal, a harness failure or fault, a temporary directory that cannot be created, a bound that cannot be
-derived, any other exception in the fast phase, an AssertionError no check raised included, any
-exception building or running the flipped copy, a source that cannot be decoded included, or any flip
-outcome other than the exact bytes the flipped import writes; see _negative_verdict), each named.
+registration drift, the flipped copy is NOT caught, or a self-test check fails, which it reports by
+raising _CheckFailure, a crash in the code under test that a check calls included), and 2 when a leg or
+the flip could not be evaluated (a bound kill, a signal, a harness failure or fault, a temporary
+directory that cannot be created, a bound that cannot be derived, a check that cannot evaluate what it
+checks (_CannotEvaluate: the CI job limit cannot be read), any other exception in the fast phase, an
+AssertionError of any other type included whatever its message, any exception building or running the
+flipped copy, a source that cannot be decoded included, or any flip outcome other than the exact bytes
+the flipped import writes; see _negative_verdict), each named. The exception's type routes it, never its
+message (_self_test_phase).
 """
 import sys
 
@@ -257,14 +263,49 @@ _CI_SETUP_ALLOWANCE_S = 600    # checkout with full history and setup-python, be
 #     and fast-phase errors, the flipped leg's raw output) launch no process and hold no deadline; with
 #     them, one run of the whole vector phase on 2026-10-16 took 44.6 s (plain; load not recorded).
 #     Nor do the ones added after (every drift shape and harness fault through run(), the report and
-#     flip faults, and the self-test's wiring to its fast phase); with them, one later run of the whole
-#     vector phase on 2026-10-16 also took 44.6 s (plain, load5 about 13).
+#     flip faults, the self-test's wiring to its fast phase, the whole-roster check, and the routing of
+#     a crash in the code under test, a check that cannot evaluate and a fault in a check's own
+#     fixture); with them, one measured run of the whole vector phase on 2026-10-16 took 44.4 s
+#     (plain, load5 22.2 at its start and 21.5 at its end).
 # 269 + 38.4 = 307.4 s, rounded up to 310 s.
 _VECTOR_ALLOWANCE_S = 310
 
 
 class _BoundError(Exception):
     """A per-leg bound cannot be derived (no ceiling, or a source that cannot be read or parsed)."""
+
+
+class _CheckFailure(AssertionError):
+    """A check failing on its own assertion: a definite failure (exit 1), its message naming the check
+    ("closure/..."). Every self-test check raises it, as do the closure-roster registration checks, and
+    a check that calls the code under test converts an exception that code lets escape into one
+    (_under_test). The TYPE is what routes it: an AssertionError of any other type is never read as a
+    check failing, whatever its message (_self_test_phase, _registration_drift)."""
+
+
+class _CannotEvaluate(Exception):
+    """A self-test check that cannot evaluate what it checks: cannot evaluate (exit 2), named by its
+    message, never a failure and never a pass. Raised when the CI job limit cannot be read."""
+
+
+def _under_test(check, func, *args, refuses=(), **kwargs):
+    """func(*args, **kwargs), a call the self-test check named check makes into the code under test.
+    An exception func lets escape is that check's failure, a _CheckFailure naming the check, func and
+    the exception's type (exit 1): a crash in the code under test is a definite failure, never a harness
+    fault. Two kinds pass through as themselves: a _CheckFailure (a registration check's own finding,
+    which the calling check judges) and an instance of a type in refuses, the documented refusal the
+    calling check expects or leaves as cannot evaluate (a _BoundError: a bound that cannot be derived).
+    Work the check does outside such calls (its own fixtures, temporary directories and processes) is
+    not wrapped, so a fault there stays a harness fault (2)."""
+    try:
+        return func(*args, **kwargs)
+    except _CheckFailure:
+        raise
+    except refuses:
+        raise
+    except Exception as exc:
+        raise _CheckFailure("closure/{}: the code under test, {}, raised {}: {}".format(
+            check, getattr(func, "__name__", repr(func)), type(exc).__name__, exc)) from exc
 
 
 def _numbers(node):
@@ -501,118 +542,192 @@ def _ci_job_limit_s(workflow_text, job=_CI_JOB):
     return 60 * min(minutes), None
 
 
-def _check_pack_manifest_registration(subset):
+def _check_pack_manifest_registration(subset, tools_dir=None):
     """Independent requirement, not inferred from the release manifest.
 
     Covers this exact closure-roster tuple, not arbitrary dispatcher changes
-    or the registrations of other gates.
+    or the registrations of other gates. tools_dir is unused: the tuple
+    names its own script (_check_roster_registration checks scripts exist).
     """
     expected = ("opf-pack-manifest-selftest", "_opf_pack_manifest.py", ["--self-test"])
     matches = [row for row in subset
                if row[0] == expected[0] or row[1] == expected[1]]
     if matches != [expected]:
-        raise AssertionError("closure/pack-manifest-registration")
+        raise _CheckFailure("closure/pack-manifest-registration")
 
 
 def _pack_manifest_registration_self_test():
-    _check_pack_manifest_registration(_SUBSET)
+    _under_test("pack-manifest-registration", _check_pack_manifest_registration, _SUBSET)
     print("PASS closure/pack-manifest-registration")
     # Mutate the real roster, independently of the shell-runner deletion.
     # No digest or generated-manifest check participates in the verdict.
     changed = list(_SUBSET)
     changed.remove(("opf-pack-manifest-selftest", "_opf_pack_manifest.py", ["--self-test"]))
     try:
-        _check_pack_manifest_registration(changed)
-    except AssertionError as exc:
+        _under_test("pack-manifest-registration", _check_pack_manifest_registration, changed)
+    except _CheckFailure as exc:
         if str(exc) != "closure/pack-manifest-registration":
             raise
     else:
-        raise AssertionError("closure/pack-manifest-registration-not-red")
+        raise _CheckFailure("closure/pack-manifest-registration-not-red")
     print("RED closure-registration -> closure/pack-manifest-registration")
 
 
-def _check_adopt_observe_registration(subset):
+def _check_adopt_observe_registration(subset, tools_dir=None):
     """Independent requirement, not inferred from the release manifest.
 
     Covers this exact closure-roster tuple, not arbitrary dispatcher changes
-    or the registrations of other gates.
+    or the registrations of other gates. tools_dir is unused: the tuple
+    names its own script (_check_roster_registration checks scripts exist).
     """
     expected = ("opf-adopt-observe-selftest", "_opf_adopt_observe.py", ["--self-test"])
     matches = [row for row in subset
                if row[0] == expected[0] or row[1] == expected[1]]
     if matches != [expected]:
-        raise AssertionError("closure/adopt-observe-registration")
+        raise _CheckFailure("closure/adopt-observe-registration")
 
 
 def _adopt_observe_registration_self_test():
-    _check_adopt_observe_registration(_SUBSET)
+    _under_test("adopt-observe-registration", _check_adopt_observe_registration, _SUBSET)
     print("PASS closure/adopt-observe-registration")
     # Mutate the real roster, independently of the shell-runner deletion.
     # No digest or generated-manifest check participates in the verdict.
     changed = list(_SUBSET)
     changed.remove(("opf-adopt-observe-selftest", "_opf_adopt_observe.py", ["--self-test"]))
     try:
-        _check_adopt_observe_registration(changed)
-    except AssertionError as exc:
+        _under_test("adopt-observe-registration", _check_adopt_observe_registration, changed)
+    except _CheckFailure as exc:
         if str(exc) != "closure/adopt-observe-registration":
             raise
     else:
-        raise AssertionError("closure/adopt-observe-registration-not-red")
+        raise _CheckFailure("closure/adopt-observe-registration-not-red")
     print("RED closure-registration -> closure/adopt-observe-registration")
 
 
-def _check_import_batch_registration(subset):
+def _check_import_batch_registration(subset, tools_dir=None):
     """Independent requirement, not inferred from the release manifest.
 
     Covers this exact closure-roster tuple, not arbitrary dispatcher changes
-    or the registrations of other gates.
+    or the registrations of other gates. tools_dir is unused: the tuple
+    names its own script (_check_roster_registration checks scripts exist).
     """
     expected = ("opf-import-batch-selftest", "_opf_import_batch.py", ["--self-test"])
     matches = [row for row in subset
                if row[0] == expected[0] or row[1] == expected[1]]
     if matches != [expected]:
-        raise AssertionError("closure/import-batch-registration")
+        raise _CheckFailure("closure/import-batch-registration")
 
 
 def _import_batch_registration_self_test():
-    _check_import_batch_registration(_SUBSET)
+    _under_test("import-batch-registration", _check_import_batch_registration, _SUBSET)
     print("PASS closure/import-batch-registration")
     # Mutate the real roster, independently of the shell-runner deletion.
     # No digest or generated-manifest check participates in the verdict.
     changed = list(_SUBSET)
     changed.remove(("opf-import-batch-selftest", "_opf_import_batch.py", ["--self-test"]))
     try:
-        _check_import_batch_registration(changed)
-    except AssertionError as exc:
+        _under_test("import-batch-registration", _check_import_batch_registration, changed)
+    except _CheckFailure as exc:
         if str(exc) != "closure/import-batch-registration":
             raise
     else:
-        raise AssertionError("closure/import-batch-registration-not-red")
+        raise _CheckFailure("closure/import-batch-registration-not-red")
     print("RED closure-registration -> closure/import-batch-registration")
 
 
-# Each closure-roster registration check, by the one assertion message that is its own finding.
+def _check_roster_registration(subset, tools_dir=None):
+    """The WHOLE closure roster, every row, against an independent pinned roster: the legs of
+    _LEG_CEILING_S, each row of which records a measured run of that leg, so a leg enters or leaves the
+    roster only with its ceiling row in the same change. Every leg there must be a row of subset
+    exactly once, subset must name no other leg, and, when tools_dir is given (the opf/tools/ the legs
+    run from; None when there is no opf/ to check, which the gate refuses as cannot evaluate), every
+    row's script must be a file there. Raises _CheckFailure "closure/roster-registration: ..." naming
+    each missing, extra or repeated row and each missing script. LIMIT: it holds names and script
+    presence only; a row's arguments, or its script changed to another file that exists, are held only
+    for the three rows the tuple checks below pin."""
+    names = [row[0] for row in subset]
+    faults = ["row {} missing".format(name) for name in _LEG_CEILING_S if name not in names]
+    faults.extend("row {} not in the pinned roster".format(name) for name in dict.fromkeys(names)
+                  if name not in _LEG_CEILING_S)
+    faults.extend("row {} listed {} times".format(name, names.count(name))
+                  for name in dict.fromkeys(names) if names.count(name) > 1)
+    if tools_dir is not None:
+        faults.extend("script {} of row {} is not a file in opf/tools/".format(script, name)
+                      for name, script, _args in subset if not (Path(tools_dir) / script).is_file())
+    if faults:
+        raise _CheckFailure("closure/roster-registration: " + "; ".join(faults))
+
+
+def _roster_registration_self_test(root):
+    """The whole-roster check holds on the real roster and opf/tools/, and names each drift shape: a
+    row removed (one the tuple checks do not pin), a row added, a row repeated, a leg renamed, a script
+    renamed to a file opf/tools/ does not hold, and a ceiling row removed (the pinned roster then lacks
+    a leg the subset runs); with no opf/tools/ to check, the script check is skipped, never failed."""
+    tools_dir = Path(root) / "opf" / "tools"
+    _under_test("roster-registration", _check_roster_registration, _SUBSET, tools_dir)
+    print("PASS closure/roster-registration")
+    renamed = [("opf-homes-renamed", script, args) if name == "opf-homes-selftest"
+               else (name, script, args) for name, script, args in _SUBSET]
+    moved = [(name, "check_opf_homes_renamed.py", args) if name == "opf-homes-contract"
+             else (name, script, args) for name, script, args in _SUBSET]
+    ceilings = dict(_LEG_CEILING_S)
+    del ceilings["opf-homes-contract"]
+    for label, subset, table, scripts, want in (
+            ("row-removed", [row for row in _SUBSET if row[0] != "opf-homes-contract"],
+             _LEG_CEILING_S, tools_dir, "row opf-homes-contract missing"),
+            ("row-added", _SUBSET + [("opf-extra-selftest", "check_opf_homes.py", ["--self-test"])],
+             _LEG_CEILING_S, tools_dir, "row opf-extra-selftest not in the pinned roster"),
+            ("row-repeated", _SUBSET + [_SUBSET[1]], _LEG_CEILING_S, tools_dir,
+             "row opf-homes-contract listed 2 times"),
+            ("leg-renamed", renamed, _LEG_CEILING_S, tools_dir,
+             "row opf-homes-selftest missing; row opf-homes-renamed not in the pinned roster"),
+            ("script-renamed", moved, _LEG_CEILING_S, tools_dir,
+             "script check_opf_homes_renamed.py of row opf-homes-contract is not a file in opf/tools/"),
+            ("script-renamed-no-tools-dir", moved, _LEG_CEILING_S, None, None),
+            ("ceiling-row-removed", _SUBSET, ceilings, tools_dir,
+             "row opf-homes-contract not in the pinned roster")):
+        try:
+            with _swapped(_LEG_CEILING_S=table):
+                _under_test("roster-registration", _check_roster_registration, subset, scripts)
+        except _CheckFailure as exc:
+            if want is None or str(exc) != "closure/roster-registration: " + want:
+                raise _CheckFailure("closure/roster-registration-drift-misnamed: {}: {}".format(
+                    label, exc))
+        else:
+            if want is not None:
+                raise _CheckFailure("closure/roster-registration-not-red: " + label)
+    print("RED closure-registration -> closure/roster-registration names a row removed, added or "
+          "repeated, a leg renamed, a script opf/tools/ does not hold and a ceiling row removed; with "
+          "no opf/tools/ to check, the script check is skipped")
+
+
+# Each closure-roster registration check, by the assertion message that is its own finding (the
+# whole-roster check's message carries its faults after the name and a colon). Each takes the roster
+# and the opf/tools/ its legs run from (None when there is none).
 _REGISTRATION_CHECKS = (
+    ("closure/roster-registration", _check_roster_registration),
     ("closure/pack-manifest-registration", _check_pack_manifest_registration),
     ("closure/adopt-observe-registration", _check_adopt_observe_registration),
     ("closure/import-batch-registration", _check_import_batch_registration),
 )
 
 
-def _registration_drift(subset):
-    """The name of every registration check that subset fails on that check's OWN assertion (its
-    closure/*-registration message), [] when all hold. Every check runs, so each drift is named. Any
-    other exception a check raises, an AssertionError with another message included (another check's
-    message too), propagates: it is a harness fault (exit 2), never registration drift and never read
-    as no drift (_harness_routing_self_test holds both)."""
+def _registration_drift(subset, tools_dir=None):
+    """The drift text of every registration check that subset fails on that check's OWN assertion, [] when
+    all hold: a _CheckFailure whose message is the check's name, or its name, a colon and the faults it
+    names. Every check runs, so each drift is named. tools_dir is the opf/tools/ the legs run from (None
+    when there is none). Any other exception a check raises propagates: it is a harness fault (exit 2),
+    never registration drift and never read as no drift, an AssertionError of another type carrying the
+    check's own message included, as is a _CheckFailure carrying another check's message
+    (_harness_routing_self_test holds each)."""
     drift = []
     for name, check in _REGISTRATION_CHECKS:
         try:
-            check(subset)
-        except AssertionError as exc:
-            if str(exc) != name:
+            check(subset, tools_dir)
+        except _CheckFailure as exc:
+            if str(exc) != name and not str(exc).startswith(name + ": "):
                 raise
-            drift.append(name)
+            drift.append(str(exc))
     return drift
 
 
@@ -845,9 +960,11 @@ def run(root, ceilings=None):
     """Materialize opf/ alone and run the subset in isolation. Returns 0 (closure holds), 1 (a subset gate
     failed: closure broken; or registration drift, named, found before opf/ is copied, any bound is
     derived or any leg runs), or 2 (harness error, opf/ unreadable, a temporary directory that cannot be
-    created, a leg with no ceiling row, refused before any leg launches, any other exception before,
-    around or after the legs, or a leg killed at its bound or ended by a signal), fail-closed. ceilings
-    defaults to _LEG_CEILING_S (the self-test passes a table missing a row)."""
+    created, a leg with no row in the ceilings passed in, refused before any leg launches, any other
+    exception before, around or after the legs, or a leg killed at its bound or ended by a signal),
+    fail-closed. ceilings defaults to _LEG_CEILING_S (the self-test passes a table missing a row); a leg
+    missing from _LEG_CEILING_S itself is registration drift (1), since that table is the pinned roster
+    (_check_roster_registration)."""
     return _run_closure(root, ceilings)[0]
 
 
@@ -855,25 +972,28 @@ def _run_closure(root, ceilings=None):
     """run(), returning (exit code, results, stopped): results is the per-leg rows _report read, or None
     when the run stopped before any leg result, and stopped is then the text naming why (None when the
     legs ran); the self-test's positive leg names each leg it could not evaluate, or the stop, from
-    them. The registration checks run FIRST, over the real roster, before opf/ is read or copied, any
-    bound is derived or any leg launches, so a drift that renames a row's name or script is named as
-    registration drift (1), never as a bound that cannot be derived. Only those checks' own assertions
-    are a definite finding here. Any other exception, from a registration check, the copy, the bound
-    scan, the legs or the report of their results (a leg result it cannot read included), an
-    AssertionError included, is a harness fault: named, cannot evaluate (2), never a finding and never a
-    traceback. The routing vectors rebind the module names this looks up (_harness_routing_self_test),
-    so the path they hold through run() is this one."""
+    them. The registration checks run FIRST, over the real roster, before opf/ is copied, any bound is
+    derived or any leg launches, so a row removed, added or repeated, a leg renamed or a script renamed
+    to a file opf/tools/ does not hold is named as registration drift (1), never as a bound that cannot
+    be derived and never passed over. They read opf/ only to check each script is a file in opf/tools/,
+    and only when opf/ is present; drift in the roster itself is named even when it is not. Only those
+    checks' own assertions (_registration_drift) are a definite finding here. Any other exception, from
+    a registration check, the copy, the bound scan, the legs or the report of their results (a leg
+    result it cannot read included), an AssertionError included, is a harness fault: named, cannot
+    evaluate (2), never a finding and never a traceback. The routing vectors rebind the module names this
+    looks up (_harness_routing_self_test), so the path they hold through run() is this one."""
     tmp = None
     try:
-        drift = _registration_drift(_SUBSET)
+        opf_src = Path(root) / "opf"
+        present = opf_src.is_dir() and (opf_src / "tools" / "opf.py").is_file()
+        drift = _registration_drift(_SUBSET, opf_src / "tools" if present else None)
         if drift:
             print("STANDALONE CLOSURE: REGISTRATION DRIFT (a definite finding: the closure roster fails "
                   "each registration check below on its own assertion; no leg ran):", file=sys.stderr)
             for name in drift:
                 print("  registration drift: {}".format(name), file=sys.stderr)
             return 1, None, "registration drift: {}".format("; ".join(drift))
-        opf_src = Path(root) / "opf"
-        if not (opf_src.is_dir() and (opf_src / "tools" / "opf.py").is_file()):
+        if not present:
             stopped = "opf/ subtree not found under {} (cannot evaluate closure)".format(root)
             print("error: " + stopped, file=sys.stderr)
             return 2, None, stopped
@@ -912,12 +1032,22 @@ def _run_closure(root, ceilings=None):
 def _bounds_self_test(root):
     """The per-leg bounds hold the rule on the real tree, fit the CI job, and every rule here is
     discriminating (each has a RED case beside its PASS). Returns the derived bounds; raises
-    AssertionError naming the first broken property."""
+    _CheckFailure naming the first broken property. Each call into the code under test goes through
+    _under_test (a crash there is the named check's failure); derive() lets the bound derivation's own
+    refusal, a _BoundError (a source that cannot be read or parsed), through as cannot evaluate (2)
+    unless the check expects it."""
+
+    def derive(check, func, *args, **kwargs):
+        return _under_test(check, func, *args, refuses=(_BoundError,), **kwargs)
+
+    def ci_limit(check, workflow_text):
+        return _under_test(check, _ci_job_limit_s, workflow_text)
+
     names = [name for name, _script, _args in _SUBSET]
     if sorted(_LEG_CEILING_S) != sorted(names):
-        raise AssertionError("closure/leg-ceilings-match-the-subset")
+        raise _CheckFailure("closure/leg-ceilings-match-the-subset")
     tools_dir = Path(root) / "opf" / "tools"
-    required = _leg_bounds(tools_dir)
+    required = derive("leg-bounds-cover-their-work", _leg_bounds, tools_dir)
     live = dict((name, row[0]) for name, row in required.items())
     # The expectation is recombined here from the ceiling table and the wait scan, independently of
     # _leg_bounds, so a _leg_bounds that drops a term (the headroom, the wait sum) is a named fault,
@@ -927,13 +1057,15 @@ def _bounds_self_test(root):
     for name, script, _args in _SUBSET:
         sources = [tools_dir / script]
         if script == "opf.py":
-            sources.extend(tools_dir / module for module in _self_test_modules(tools_dir / script))
-        waits[name] = math.ceil(sum(_declared_wait_sites(sources)))
+            sources.extend(tools_dir / module for module in derive(
+                "leg-bounds-cover-their-work", _self_test_modules, tools_dir / script))
+        waits[name] = math.ceil(sum(derive("leg-bounds-cover-their-work", _declared_wait_sites,
+                                           sources)))
         needs[name] = max(_MIN_LEG_BOUND_S, _LOAD_HEADROOM * _LEG_CEILING_S[name],
                           waits[name] + _LAUNCH_MARGIN_S)
-    faults = _bound_faults(live, needs)
+    faults = _under_test("leg-bounds-cover-their-work", _bound_faults, live, needs)
     if faults:
-        raise AssertionError("closure/leg-bounds-cover-their-work: " + "; ".join(faults))
+        raise _CheckFailure("closure/leg-bounds-cover-their-work: " + "; ".join(faults))
     for name in names:
         bound, ceiling, declared = required[name]
         print("  bound {:38s} {}s (ceiling {}s x {}; literal wait sites sum {}s + {}s)".format(
@@ -951,9 +1083,9 @@ def _bounds_self_test(root):
             (1, [])):
         mutated = dict(live)
         mutated[leg] = needs[leg] + delta
-        got = _bound_faults(mutated, needs)
+        got = _under_test("leg-bounds-mutant", _bound_faults, mutated, needs)
         if got != expected:
-            raise AssertionError("closure/leg-bounds-mutant (need{:+d}): {!r}".format(delta, got))
+            raise _CheckFailure("closure/leg-bounds-mutant (need{:+d}): {!r}".format(delta, got))
     print("RED mutant bound (one second below the independent need of {}) -> named fault; at and one "
           "above the need -> clean".format(leg))
     # The floor term, discriminated. The launch margin passed to _leg_bounds is LOWERED to one second
@@ -965,26 +1097,28 @@ def _bounds_self_test(root):
     floored = []
     for margin in (_MIN_LEG_BOUND_S - 1, _MIN_LEG_BOUND_S, _MIN_LEG_BOUND_S + 1):
         lowered = dict((name, row[0]) for name, row in
-                       _leg_bounds(tools_dir, launch_margin_s=margin).items())
+                       derive("floor-raises-a-bound", _leg_bounds, tools_dir,
+                              launch_margin_s=margin).items())
         others = dict((name, max(_LOAD_HEADROOM * _LEG_CEILING_S[name], waits[name] + margin))
                       for name in names)
         want = dict((name, max(_MIN_LEG_BOUND_S, others[name])) for name in names)
         raised = sorted(name for name in names if others[name] < _MIN_LEG_BOUND_S)
-        floor_faults = _bound_faults(lowered, want) + [
+        floor_faults = _under_test("floor-raises-a-bound", _bound_faults, lowered, want) + [
             "{}: bound {}s, not raised to exactly the {}s floor".format(name, lowered[name],
                                                                          _MIN_LEG_BOUND_S)
             for name in raised if lowered[name] != _MIN_LEG_BOUND_S]
         if floor_faults:
-            raise AssertionError("closure/floor-raises-a-bound (launch margin {}s): {}".format(
+            raise _CheckFailure("closure/floor-raises-a-bound (launch margin {}s): {}".format(
                 margin, "; ".join(floor_faults)))
         if margin < _MIN_LEG_BOUND_S:
             if not raised:
-                raise AssertionError("closure/floor-not-discriminated: at a launch margin of {}s no "
-                                     "leg's other terms sit below the {}s floor".format(
-                                         margin, _MIN_LEG_BOUND_S))
-            floorless = sorted(fault.split(":", 1)[0] for fault in _bound_faults(others, want))
+                raise _CheckFailure("closure/floor-not-discriminated: at a launch margin of {}s no "
+                                    "leg's other terms sit below the {}s floor".format(
+                                        margin, _MIN_LEG_BOUND_S))
+            floorless = sorted(fault.split(":", 1)[0] for fault in _under_test(
+                "floorless-bounds-not-named", _bound_faults, others, want))
             if floorless != raised:
-                raise AssertionError("closure/floorless-bounds-not-named: named {!r}, want {!r}".format(
+                raise _CheckFailure("closure/floorless-bounds-not-named: named {!r}, want {!r}".format(
                     floorless, raised))
             floored = raised
     print("RED a launch margin one second below the {}s floor -> the floor raises {} leg(s) to exactly "
@@ -996,11 +1130,12 @@ def _bounds_self_test(root):
     # exercises only the have-below-need comparison over the live needs (the mutant above already tests
     # that comparison at its boundary); when no need exceeds 600 the PASS arm below adds nothing.
     under = sorted(name for name in names if needs[name] > 600)
-    flat_faults = _bound_faults(dict((name, 600) for name in names), needs)
+    flat_faults = _under_test("flat-600-refusals-do-not-match-the-table", _bound_faults,
+                              dict((name, 600) for name in names), needs)
     flat_named = sorted(fault.split(":", 1)[0] for fault in flat_faults)
     if flat_named != under:
-        raise AssertionError("closure/flat-600-refusals-do-not-match-the-table: named {!r}, "
-                             "table-derived {!r}".format(flat_named, under))
+        raise _CheckFailure("closure/flat-600-refusals-do-not-match-the-table: named {!r}, "
+                            "table-derived {!r}".format(flat_named, under))
     if under:
         print("RED flat-600 -> " + "; ".join(flat_faults))
     else:
@@ -1008,11 +1143,11 @@ def _bounds_self_test(root):
     ceilings = dict(_LEG_CEILING_S)
     del ceilings[leg]
     try:
-        _leg_bounds(tools_dir, ceilings)
+        derive("missing-ceiling-not-refused", _leg_bounds, tools_dir, ceilings)
     except _BoundError:
         print("RED missing-ceiling -> cannot derive the bound (fail-closed)")
     else:
-        raise AssertionError("closure/missing-ceiling-not-refused")
+        raise _CheckFailure("closure/missing-ceiling-not-refused")
     # End to end through run(): a subset leg with no ceiling row is refused BY NAME before ANY leg
     # launches. The row dropped is the LAST leg's, so a runner that checked each ceiling only as it
     # reached that leg would launch every earlier leg first. Every launch is recorded and refused here
@@ -1031,13 +1166,13 @@ def _bounds_self_test(root):
     subprocess.Popen = refuse_launch
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-            code = run(root, ceilings)
+            code = _under_test("missing-row-refused-by-name-before-any-launch", run, root, ceilings)
     finally:
         subprocess.Popen = real_popen
     said = out.getvalue()
     if code != 2 or "leg {} has no ceiling in _LEG_CEILING_S".format(last) not in said or launches:
-        raise AssertionError("closure/missing-row-refused-by-name-before-any-launch (exit {}, {} "
-                             "launch(es)): {!r}".format(code, len(launches), said))
+        raise _CheckFailure("closure/missing-row-refused-by-name-before-any-launch (exit {}, {} "
+                            "launch(es)): {!r}".format(code, len(launches), said))
     print("RED a subset leg with no ceiling row ({}) -> refused by name through run(), exit 2, before "
           "any leg launches".format(last))
     # The declared-wait scan reads what it says it reads: sequential sites SUM; a conditional site
@@ -1067,17 +1202,17 @@ def _bounds_self_test(root):
                 ("subprocess.run(a, timeout=limit)\nx = 9999\n", 0),
                 ("subprocess.run(a, timeout=True)\n", 0)):
             probe.write_text(source, encoding="utf-8")
-            got = _declared_wait_s([probe])
+            got = _under_test("declared-wait-scan", _declared_wait_s, [probe])
             if got != want:
-                raise AssertionError("closure/declared-wait-scan: {!r} -> {!r}, want {!r}".format(
+                raise _CheckFailure("closure/declared-wait-scan: {!r} -> {!r}, want {!r}".format(
                     source, got, want))
         probe.write_text("def f(:\n", encoding="utf-8")
         try:
-            _declared_wait_s([probe])
+            derive("declared-wait-scan-unparseable-not-refused", _declared_wait_s, [probe])
         except _BoundError:
             pass
         else:
-            raise AssertionError("closure/declared-wait-scan-unparseable-not-refused")
+            raise _CheckFailure("closure/declared-wait-scan-unparseable-not-refused")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("PASS closure/declared-wait-scan (literal SITES sum: a repeated site counts once and "
@@ -1087,12 +1222,12 @@ def _bounds_self_test(root):
     # --self-test step (one full subset sweep in its positive leg, a negative leg bounded by the
     # opf-tooling bound, and the fast vectors) and then the live gate step (one more subset sweep).
     text = (Path(root) / _CI_WORKFLOW).read_text(encoding="utf-8")
-    limit, reason = _ci_job_limit_s(text)
+    limit, reason = ci_limit("ci-job-limit-cannot-evaluate", text)
     if limit is None:
-        raise AssertionError("closure/ci-job-limit-cannot-evaluate: " + reason)
-    oversize = _oversize_legs(live, limit)
+        raise _CannotEvaluate("closure/ci-job-limit-cannot-evaluate: " + reason)
+    oversize = _under_test("leg-bound-exceeds-the-ci-job", _oversize_legs, live, limit)
     if oversize:
-        raise AssertionError("closure/leg-bound-exceeds-the-ci-job: " + "; ".join(oversize))
+        raise _CheckFailure("closure/leg-bound-exceeds-the-ci-job: " + "; ".join(oversize))
     # The expectation is recombined here, independently of _job_worst_case_s: every leg of both sweeps
     # and the negative leg can be killed, and each kill pays ONE cleanup deadline (_DRAIN_MARGIN_S,
     # shared by the drain and the leader reap in _kill_and_reap), so a model that drops or halves the
@@ -1102,13 +1237,14 @@ def _bounds_self_test(root):
     kills = 2 * len(_SUBSET) + 1
     cleanup_free = 2 * subset_sum + negative + _VECTOR_ALLOWANCE_S + _CI_SETUP_ALLOWANCE_S
     want_total = cleanup_free + kills * _DRAIN_MARGIN_S
-    total = _job_worst_case_s(live, negative)
+    total = _under_test("fit-model-counts-one-cleanup-deadline-per-kill", _job_worst_case_s, live,
+                        negative)
     if total != want_total:
-        raise AssertionError("closure/fit-model-counts-one-cleanup-deadline-per-kill: {}s, recombined "
-                             "{}s".format(total, want_total))
-    fault = _fit_fault(live, negative, limit)
+        raise _CheckFailure("closure/fit-model-counts-one-cleanup-deadline-per-kill: {}s, recombined "
+                            "{}s".format(total, want_total))
+    fault = _under_test("bounds-fit-the-ci-job", _fit_fault, live, negative, limit)
     if fault is not None:
-        raise AssertionError("closure/bounds-fit-the-ci-job: " + fault)
+        raise _CheckFailure("closure/bounds-fit-the-ci-job: " + fault)
     print("PASS closure/bounds-fit-the-ci-job: 2 x subset sweep {}s + negative leg {}s + {} cleanup "
           "deadlines x {}s + vectors {}s + setup {}s = {}s <= {}s ({} job)".format(
               subset_sum, negative, kills, _DRAIN_MARGIN_S, _VECTOR_ALLOWANCE_S,
@@ -1116,8 +1252,9 @@ def _bounds_self_test(root):
     # The fit check's cleanup term is discriminating: a job limit that covers every bound but not the
     # cleanup deadlines is refused, as is one second below the worst case; at the worst case it fits.
     for probe_limit, fits in ((want_total, True), (want_total - 1, False), (cleanup_free, False)):
-        if (_fit_fault(live, negative, probe_limit) is None) != fits:
-            raise AssertionError("closure/fit-check-cleanup-term (limit {}s, worst case {}s)".format(
+        if (_under_test("fit-check-cleanup-term", _fit_fault, live, negative, probe_limit)
+                is None) != fits:
+            raise _CheckFailure("closure/fit-check-cleanup-term (limit {}s, worst case {}s)".format(
                 probe_limit, want_total))
     print("RED a job limit covering every bound but not the {} cleanup deadlines ({}s) -> refused; one "
           "second below the {}s worst case -> refused; at it -> fits".format(
@@ -1127,23 +1264,27 @@ def _bounds_self_test(root):
     for delta, want_named in ((-1, False), (0, False), (1, True)):
         probe_bounds = dict(live)
         probe_bounds[leg] = limit + delta
-        named = [entry for entry in _oversize_legs(probe_bounds, limit)
+        named = [entry for entry in _under_test("oversize-leg-refusal", _oversize_legs, probe_bounds,
+                                                limit)
                  if entry.startswith(leg + ":")]
         if bool(named) != want_named:
-            raise AssertionError("closure/oversize-leg-refusal (limit{:+d}): {!r}".format(delta, named))
+            raise _CheckFailure("closure/oversize-leg-refusal (limit{:+d}): {!r}".format(delta, named))
     print("RED a leg bound one second over the job limit -> refused by name, never shrunk; at and one "
           "under the limit -> not oversize")
     header = "  {}:\n".format(_CI_JOB)
     tight = text.replace(header, header + "    timeout-minutes: 30\n", 1)
-    if tight == text or _ci_job_limit_s(tight) != (1800, None) or total <= 1800:
-        raise AssertionError("closure/ci-job-30-minutes-not-refused")
-    absent_limit, absent_reason = _ci_job_limit_s(text.replace(header, "  renamed-job:\n", 1))
+    if (tight == text or ci_limit("ci-job-30-minutes-not-refused", tight) != (1800, None)
+            or total <= 1800):
+        raise _CheckFailure("closure/ci-job-30-minutes-not-refused")
+    absent_limit, absent_reason = ci_limit("ci-job-absent-not-refused-by-name",
+                                           text.replace(header, "  renamed-job:\n", 1))
     if absent_limit is not None or _CI_JOB not in (absent_reason or ""):
-        raise AssertionError("closure/ci-job-absent-not-refused-by-name")
-    bad_limit, bad_reason = _ci_job_limit_s(
+        raise _CheckFailure("closure/ci-job-absent-not-refused-by-name")
+    bad_limit, bad_reason = ci_limit(
+        "ci-job-non-integer-not-refused-by-name",
         text.replace(header, header + "    timeout-minutes: thirty\n", 1))
     if bad_limit is not None or "thirty" not in (bad_reason or ""):
-        raise AssertionError("closure/ci-job-non-integer-not-refused-by-name")
+        raise _CheckFailure("closure/ci-job-non-integer-not-refused-by-name")
     # Job and step limits are DISTINCT: a step's own timeout-minutes (first key of its `- ` line or
     # not) is parsed and validated, kills only that step in CI, and never caps the budget the job
     # gives the gate steps, so a short setup-step timeout cannot make this fit check reject the job.
@@ -1151,30 +1292,33 @@ def _bounds_self_test(root):
     step = "      - name: OPF standalone-closure gate\n"
     reordered = text.replace(
         step, "      - timeout-minutes: 1\n        name: OPF standalone-closure gate\n", 1)
-    if reordered == text or _ci_job_limit_s(reordered) != (default_s, None):
-        raise AssertionError("closure/ci-step-timeout-capped-the-job-budget (first key)")
+    if reordered == text or ci_limit("ci-step-timeout-capped-the-job-budget",
+                                     reordered) != (default_s, None):
+        raise _CheckFailure("closure/ci-step-timeout-capped-the-job-budget (first key)")
     stepwise = text.replace(step, step + "        timeout-minutes: 1\n", 1)
-    if stepwise == text or _ci_job_limit_s(stepwise) != (default_s, None):
-        raise AssertionError("closure/ci-step-timeout-capped-the-job-budget")
+    if stepwise == text or ci_limit("ci-step-timeout-capped-the-job-budget",
+                                    stepwise) != (default_s, None):
+        raise _CheckFailure("closure/ci-step-timeout-capped-the-job-budget")
     # The fail-closed line scan: a key or step this parser does not evaluate but the YAML loader
     # GitHub runs would (a quoted key, an escape-carrying key, an alias step) is refused by name,
     # never scanned around to the default; block-scalar CONTENT is data, not keys, and is skipped.
     quoted = text.replace(header, header + '    "timeout-minutes": 1\n', 1)
-    quoted_limit, quoted_reason = _ci_job_limit_s(quoted)
+    quoted_limit, quoted_reason = ci_limit("ci-quoted-timeout-key-not-refused-by-name", quoted)
     if quoted_limit is not None or "timeout-minutes" not in (quoted_reason or ""):
-        raise AssertionError("closure/ci-quoted-timeout-key-not-refused-by-name")
+        raise _CheckFailure("closure/ci-quoted-timeout-key-not-refused-by-name")
     escaped = text.replace(header, header + '    "timeout\\u002dminutes": 1\n', 1)
-    escaped_limit, escaped_reason = _ci_job_limit_s(escaped)
+    escaped_limit, escaped_reason = ci_limit("ci-escaped-timeout-key-not-refused-by-name", escaped)
     if escaped_limit is not None or "u002dminutes" not in (escaped_reason or ""):
-        raise AssertionError("closure/ci-escaped-timeout-key-not-refused-by-name")
+        raise _CheckFailure("closure/ci-escaped-timeout-key-not-refused-by-name")
     aliased = text.replace(step, "      - *closure_gate\n" + step, 1)
-    alias_limit, alias_reason = _ci_job_limit_s(aliased)
+    alias_limit, alias_reason = ci_limit("ci-alias-step-not-refused-by-name", aliased)
     if aliased == text or alias_limit is not None or "*closure_gate" not in (alias_reason or ""):
-        raise AssertionError("closure/ci-alias-step-not-refused-by-name")
+        raise _CheckFailure("closure/ci-alias-step-not-refused-by-name")
     blocky = text.replace(
         step, "      - run: |\n          echo widen\n          \"timeout-minutes\": 1\n" + step, 1)
-    if blocky == text or _ci_job_limit_s(blocky) != (default_s, None):
-        raise AssertionError("closure/ci-block-scalar-content-misread-as-a-key")
+    if blocky == text or ci_limit("ci-block-scalar-content-misread-as-a-key",
+                                  blocky) != (default_s, None):
+        raise _CheckFailure("closure/ci-block-scalar-content-misread-as-a-key")
     # Value forms, on a minimal job: each entry is (check, job body, the limit it must read, or None
     # with the text its refusal must name). A timeout-minutes value is validated before any
     # block-scalar skip; a value that opens structure this parser does not read (an alias, a flow
@@ -1195,13 +1339,13 @@ def _bounds_self_test(root):
             ("ci-plain-list-item-refused", "    needs:\n      - lint\n", default_s, None),
             ("ci-indentless-step-timeout-capped-the-job-budget",
              "    steps:\n    - timeout-minutes: 1\n      run: echo ok\n", default_s, None)):
-        got_limit, got_reason = _ci_job_limit_s(
-            "jobs:\n  {}:\n    runs-on: ubuntu-latest\n{}".format(_CI_JOB, body))
+        got_limit, got_reason = ci_limit(
+            check, "jobs:\n  {}:\n    runs-on: ubuntu-latest\n{}".format(_CI_JOB, body))
         if want_limit is not None:
             if (got_limit, got_reason) != (want_limit, None):
-                raise AssertionError("closure/{}: {!r}".format(check, (got_limit, got_reason)))
+                raise _CheckFailure("closure/{}: {!r}".format(check, (got_limit, got_reason)))
         elif got_limit is not None or want_named not in (got_reason or ""):
-            raise AssertionError("closure/{}: {!r}".format(check, (got_limit, got_reason)))
+            raise _CheckFailure("closure/{}: {!r}".format(check, (got_limit, got_reason)))
     print("RED ci-job-30-minutes -> does not fit; ci-job-absent, a non-integer value, a quoted key, an "
           "escaped key, an alias step, a block-scalar timeout-minutes, an alias or flow steps value, "
           "timeout-minutes 30#x and 030, and a quoted list item -> each refused by name; a step's own "
@@ -1245,13 +1389,13 @@ def _await_file(path, deadline_s):
 
 def _readiness_pids(path, count, check):
     """The `count` pids a fixture wrote to its readiness file. A file holding anything else (a partly
-    written file included) raises AssertionError naming `check`: a named self-test failure, never a
+    written file included) raises _CheckFailure naming `check`: a named self-test failure, never a
     traceback and never cleanup credit. The fixtures write the file aside and rename it into place, so
     a reader sees it whole or not at all; this check is the backstop."""
     text = path.read_text(encoding="utf-8")
     parts = text.split()
     if len(parts) != count or not all(re.fullmatch(r"[1-9][0-9]*", part) for part in parts):
-        raise AssertionError("closure/{}-readiness-malformed: {!r} (want {} pid(s))".format(
+        raise _CheckFailure("closure/{}-readiness-malformed: {!r} (want {} pid(s))".format(
             check, text, count))
     return [int(part) for part in parts]
 
@@ -1348,8 +1492,8 @@ def _cleanup_doubles_self_test():
         try:
             out, faults = _kill_and_reap(double, drain_s, killpg=killpg)
         except Exception as exc:
-            raise AssertionError("closure/{}: _kill_and_reap raised {!r} instead of naming the outcome "
-                                 "(pipe closed: {})".format(check, exc, double.stdout.closed))
+            raise _CheckFailure("closure/{}: _kill_and_reap raised {!r} instead of naming the outcome "
+                                "(pipe closed: {})".format(check, exc, double.stdout.closed))
         named = [fault.split(":", 1)[0] for fault in faults]
         reaps = [timeout for call, timeout in double.calls if call == "reap"]
         leader_kills = [call for call, _timeout in double.calls if call == "kill"]
@@ -1358,17 +1502,17 @@ def _cleanup_doubles_self_test():
                 or group_kills != [(double.pid, signal.SIGKILL)]
                 or leader_kills != (["kill"] if double.group_kill_fails else [])
                 or any(timeout > drain_s - used_s + 1e-6 for timeout in reaps)):
-            raise AssertionError("closure/{}: faults {!r}, output {!r}, pipe closed {}, returncode {!r}, "
-                                 "group kills {!r}, calls {!r}".format(
-                                     check, faults, out, double.stdout.closed, double.returncode,
-                                     group_kills, double.calls))
+            raise _CheckFailure("closure/{}: faults {!r}, output {!r}, pipe closed {}, returncode {!r}, "
+                                "group kills {!r}, calls {!r}".format(
+                                    check, faults, out, double.stdout.closed, double.returncode,
+                                    group_kills, double.calls))
         if "leader-unreaped" in named and "leader pid {}".format(double.pid) not in faults[-1]:
-            raise AssertionError("closure/{}: the unreaped leader is not named by pid: {!r}".format(
+            raise _CheckFailure("closure/{}: the unreaped leader is not named by pid: {!r}".format(
                 check, faults))
         for name, cause in (("group-kill-error", "scripted group-kill failure"),
                             ("reap-error", "scripted reap failure")):
             if name in named and cause not in faults[named.index(name)]:
-                raise AssertionError("closure/{}: {} does not carry its error: {!r}".format(
+                raise _CheckFailure("closure/{}: {} does not carry its error: {!r}".format(
                     check, name, faults))
     print("RED cleanup doubles -> a drain timeout, a reap timeout, a drain or reap OSError, a failed "
           "group kill (the leader kill delivered) and an undelivered kill each close the pipe and name "
@@ -1410,24 +1554,26 @@ def _timeout_vectors_self_test(required):
         os.makedirs(stub_root / "tools")
         (stub_root / "tools" / "stub_sleep.py").write_text(
             "import sys, time\ntime.sleep(float(sys.argv[1]))\n", encoding="utf-8")
-        env = _isolated_env()
-        rc, _tail_text, _elapsed, _launched, _cleanup = _run_one(stub_root, "stub_sleep.py", [slow],
-                                                                 tmp, env, undersized)
+        env = _under_test("half-ceiling-bound-did-not-kill-the-ceiling-run", _isolated_env)
+        rc, _tail_text, _elapsed, _launched, _cleanup = _under_test(
+            "half-ceiling-bound-did-not-kill-the-ceiling-run", _run_one, stub_root, "stub_sleep.py",
+            [slow], tmp, env, undersized)
         if rc is not None:
-            raise AssertionError(
+            raise _CheckFailure(
                 "closure/half-ceiling-bound-did-not-kill-the-ceiling-run (rc={!r})".format(rc))
         print("RED half-ceiling flat bound -> a correct run at the recorded {}s {} ceiling is killed "
               "(time-scaled 1:{:g})".format(ceiling, leg, scale))
-        rc, _tail_text, _elapsed, _launched, _cleanup = _run_one(stub_root, "stub_sleep.py", [slow],
-                                                                 tmp, env, scaled_bound)
+        rc, _tail_text, _elapsed, _launched, _cleanup = _under_test(
+            "derived-bound-killed-the-ceiling-run", _run_one, stub_root, "stub_sleep.py", [slow], tmp,
+            env, scaled_bound)
         if rc != 0:
-            raise AssertionError("closure/derived-bound-killed-the-ceiling-run (rc={!r})".format(rc))
+            raise _CheckFailure("closure/derived-bound-killed-the-ceiling-run (rc={!r})".format(rc))
         print("PASS closure/derived-bound-lets-the-ceiling-run-finish ({}s bound over the {}s "
               "ceiling)".format(bound, ceiling))
-        rc, tail, elapsed, _launched, cleanup = _run_one(stub_root, "stub_sleep.py", [hang], tmp, env,
-                                                         scaled_bound)
+        rc, tail, elapsed, _launched, cleanup = _under_test(
+            "hang-not-cut-off", _run_one, stub_root, "stub_sleep.py", [hang], tmp, env, scaled_bound)
         if rc is not None or not scaled_bound <= elapsed < scaled_bound + 30 or cleanup:
-            raise AssertionError("closure/hang-not-cut-off (rc={!r}, {:.1f}s, cleanup {!r})".format(
+            raise _CheckFailure("closure/hang-not-cut-off (rc={!r}, {:.1f}s, cleanup {!r})".format(
                 rc, elapsed, cleanup))
         unreaped = "leader-unreaped: leader pid 4242 was still unreaped at the 10s cleanup deadline"
         for rows, want_code, want, refused in (
@@ -1462,13 +1608,13 @@ def _timeout_vectors_self_test(required):
                  ("CLOSURE: OK", "opf-tooling-selftest (rc=-9)"))):
             out = io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-                code = _report(rows)
+                code = _under_test("timeout-report", _report, rows)
             said = out.getvalue()
             if code != want_code or not all(w in said for w in want) or any(r in said for r in refused):
-                raise AssertionError("closure/timeout-report (exit {}): {!r}".format(code, said))
-        if _signal_name(-200) != "signal 200":
-            raise AssertionError("closure/unnamed-signal-not-named-by-number: {!r}".format(
-                _signal_name(-200)))
+                raise _CheckFailure("closure/timeout-report (exit {}): {!r}".format(code, said))
+        unnamed = _under_test("unnamed-signal-not-named-by-number", _signal_name, -200)
+        if unnamed != "signal 200":
+            raise _CheckFailure("closure/unnamed-signal-not-named-by-number: {!r}".format(unnamed))
         print("RED hang -> cut off at its bound and reported as LEG BOUND EXCEEDED (exit 2; exit 1 "
               "beside a real failure; a leg that never launched -> NOT EVALUATED, exit 2, never "
               "BROKEN; a killed leg whose leader is unreaped -> CLEANUP INCOMPLETE naming it, exit 2; "
@@ -1482,11 +1628,11 @@ def _timeout_vectors_self_test(required):
             partly.write_text(text, encoding="utf-8")
             try:
                 _readiness_pids(partly, count, "partly-written")
-            except AssertionError as exc:
+            except _CheckFailure as exc:
                 if "closure/partly-written-readiness-malformed" not in str(exc):
                     raise
             else:
-                raise AssertionError("closure/partly-written-readiness-not-refused: {!r}".format(text))
+                raise _CheckFailure("closure/partly-written-readiness-not-refused: {!r}".format(text))
         print("RED a partly written or malformed readiness file -> a named self-test failure")
         tools = stub_root / "tools"
         # TERMINATION: the hung leader forks a holder that STAYS in the leg's process group. The holder
@@ -1521,29 +1667,29 @@ def _timeout_vectors_self_test(required):
         try:
             ready_at = _await_file(ready, 30.0)
             if ready_at is None:
-                raise AssertionError("closure/descendant-readiness-missing: the fixture leg never "
-                                     "spawned its descendant inside its own 30s readiness deadline (a "
-                                     "self-test failure, never cleanup credit)")
+                raise _CheckFailure("closure/descendant-readiness-missing: the fixture leg never "
+                                    "spawned its descendant inside its own 30s readiness deadline (a "
+                                    "self-test failure, never cleanup credit)")
             descendant, = _readiness_pids(ready, 1, "descendant")
             try:
                 proc.communicate(timeout=2.0)
             except subprocess.TimeoutExpired:
                 pass  # the hang the deadline cuts off
             else:
-                raise AssertionError("closure/descendant-fixture-shape: the leader exited (rc={!r}) "
-                                     "inside its 2.0s hang deadline".format(proc.returncode))
+                raise _CheckFailure("closure/descendant-fixture-shape: the leader exited (rc={!r}) "
+                                    "inside its 2.0s hang deadline".format(proc.returncode))
         finally:
-            _out, cleanup = _kill_and_reap(proc)
+            _out, cleanup = _under_test("descendant-kill-cleanup-incomplete", _kill_and_reap, proc)
         if cleanup:
-            raise AssertionError("closure/descendant-kill-cleanup-incomplete: " + "; ".join(cleanup))
+            raise _CheckFailure("closure/descendant-kill-cleanup-incomplete: " + "; ".join(cleanup))
         if not _pid_gone(descendant, 10.0):
-            raise AssertionError("closure/descendant-survived-the-kill: descendant pid {} still "
-                                 "exists after the group kill".format(descendant))
+            raise _CheckFailure("closure/descendant-survived-the-kill: descendant pid {} still "
+                                "exists after the group kill".format(descendant))
         while time.monotonic() < ready_at + holder_delay_s + marker_margin_s and not marker.exists():
             time.sleep(0.1)
         if marker.exists():
-            raise AssertionError("closure/descendant-survived-the-kill: the descendant wrote its "
-                                 "marker after the leg was killed")
+            raise _CheckFailure("closure/descendant-survived-the-kill: the descendant wrote its "
+                                "marker after the leg was killed")
         print("RED descendant-bearing hang -> readiness confirmed under its own deadline (holder pid {}), "
               "then the 2.0s hang deadline and the group kill: cleanup complete, the holder gone, and "
               "no marker {:g}s past the moment it would have been written".format(
@@ -1583,45 +1729,46 @@ def _timeout_vectors_self_test(required):
             try:
                 try:
                     if _await_file(pids, 30.0) is None:
-                        raise AssertionError("closure/{}-fixture-shape: no readiness inside 30s (a "
-                                             "self-test failure, never credit)".format(check))
+                        raise _CheckFailure("closure/{}-fixture-shape: no readiness inside 30s (a "
+                                            "self-test failure, never credit)".format(check))
                     escapee, = _readiness_pids(pids, 1, check)
                 finally:
-                    out, faults = _kill_and_reap(proc, drain_s=2.0)
+                    out, faults = _under_test(check, _kill_and_reap, proc, drain_s=2.0)
                 if [fault.split(":", 1)[0] for fault in faults] != ["drain-timeout"]:
-                    raise AssertionError("closure/{}-drain-did-not-time-out: {!r} (the branch under "
-                                         "test never ran)".format(check, faults))
+                    raise _CheckFailure("closure/{}-drain-did-not-time-out: {!r} (the branch under "
+                                        "test never ran)".format(check, faults))
                 if check == "leader-reaped-after-a-drain-timeout":
                     if proc.returncode is None or not proc.stdout.closed:
-                        raise AssertionError("closure/leader-not-reaped-or-pipe-left-open after the "
-                                             "drain (returncode={!r})".format(proc.returncode))
+                        raise _CheckFailure("closure/leader-not-reaped-or-pipe-left-open after the "
+                                            "drain (returncode={!r})".format(proc.returncode))
                 elif "partial output before the hang" not in out.decode("utf-8", "replace"):
-                    raise AssertionError(
+                    raise _CheckFailure(
                         "closure/partial-output-lost-on-a-drain-timeout: {!r}".format(out))
             finally:
                 release.write_text("released", encoding="utf-8")
             if not _pid_gone(escapee, 20.0):
-                raise AssertionError("closure/escape-fixture-descendant-still-running: pid {} (it "
-                                     "exits once released)".format(escapee))
+                raise _CheckFailure("closure/escape-fixture-descendant-still-running: pid {} (it "
+                                    "exits once released)".format(escapee))
             print("PASS closure/{} (the drain timed out on escapee pid {}, released after the "
                   "assertions)".format(check, escapee))
         pids = tmp / "runner-cleanup-report.pid"
         release = tmp / "runner-cleanup-report.release"
         try:
-            rc, tail, elapsed, _launched, cleanup = _run_one(
-                stub_root, "stub_escape.py", [str(pids), str(release)], tmp, env, 5.0, drain_s=2.0)
+            rc, tail, elapsed, _launched, cleanup = _under_test(
+                "runner-cleanup-not-reported", _run_one, stub_root, "stub_escape.py",
+                [str(pids), str(release)], tmp, env, 5.0, drain_s=2.0)
         finally:
             release.write_text("released", encoding="utf-8")
         if (rc is not None or [fault.split(":", 1)[0] for fault in cleanup] != ["drain-timeout"]
                 or "partial output before the hang" not in tail):
-            raise AssertionError("closure/runner-cleanup-not-reported (rc={!r}, cleanup {!r}, tail "
-                                 "{!r})".format(rc, cleanup, tail))
+            raise _CheckFailure("closure/runner-cleanup-not-reported (rc={!r}, cleanup {!r}, tail "
+                                "{!r})".format(rc, cleanup, tail))
         if _await_file(pids, 30.0) is None:
-            raise AssertionError("closure/runner-cleanup-report-fixture-shape: no readiness inside 30s")
+            raise _CheckFailure("closure/runner-cleanup-report-fixture-shape: no readiness inside 30s")
         escapee, = _readiness_pids(pids, 1, "runner-cleanup-report")
         if not _pid_gone(escapee, 20.0):
-            raise AssertionError("closure/escape-fixture-descendant-still-running: pid {} (it exits "
-                                 "once released)".format(escapee))
+            raise _CheckFailure("closure/escape-fixture-descendant-still-running: pid {} (it exits "
+                                "once released)".format(escapee))
         print("PASS closure/runner-reports-an-incomplete-cleanup (_run_one returned the drain-timeout "
               "fault by name, with the partial output, after {:.1f}s)".format(elapsed))
     finally:
@@ -1686,9 +1833,10 @@ def _negative_verdict_self_test():
     newline) or with trailing whitespace each leave the flip unevaluated (2). The harness-failure
     rejection is STRUCTURAL: a real launch failure whose pathname contains the token, so that its text
     names the token, is still rejected."""
-    caught = _negative_verdict(_FLIP_EXIT, _FLIP_BYTES, 600, True)
+    caught = _under_test("negative-verdict-rejects-a-genuine-catch", _negative_verdict, _FLIP_EXIT,
+                         _FLIP_BYTES, 600, True)
     if caught is not None:
-        raise AssertionError("closure/negative-verdict-rejects-a-genuine-catch: {!r}".format(caught))
+        raise _CheckFailure("closure/negative-verdict-rejects-a-genuine-catch: {!r}".format(caught))
     print("PASS closure/negative-verdict-accepts-the-exact-flipped-import-failure")
     line = _FLIP_OUTPUT.encode("utf-8")
     for rc, output, launched, label, want_code in (
@@ -1724,16 +1872,17 @@ def _negative_verdict_self_test():
             (2, line + b" \n", True, "trailing-space-before-the-newline", 2),
             (2, _FLIP_BYTES + b" ", True, "trailing-space-after-the-newline", 2),
             (2, _FLIP_BYTES + b"\n", True, "trailing-blank-line", 2)):
-        verdict = _negative_verdict(rc, output, 600, launched)
+        verdict = _under_test("negative-verdict-not-red", _negative_verdict, rc, output, 600, launched)
         if verdict is None or verdict[0] != want_code:
-            raise AssertionError("closure/negative-verdict-not-red: {} (rc={!r}): {!r}, want exit "
-                                 "{}".format(label, rc, verdict, want_code))
-    signalled = _negative_verdict(-9, _FLIP_BYTES, 600, True)
+            raise _CheckFailure("closure/negative-verdict-not-red: {} (rc={!r}): {!r}, want exit "
+                                "{}".format(label, rc, verdict, want_code))
+    signalled = _under_test("negative-signal-not-named", _negative_verdict, -9, _FLIP_BYTES, 600, True)
     if "SIGKILL (signal 9)" not in signalled[1] or "own process group" not in signalled[1]:
-        raise AssertionError("closure/negative-signal-not-named: {!r}".format(signalled))
-    returned = _negative_verdict(2, line + b"\r", 600, True)
+        raise _CheckFailure("closure/negative-signal-not-named: {!r}".format(signalled))
+    returned = _under_test("negative-output-not-shown-byte-for-byte", _negative_verdict, 2,
+                           line + b"\r", 600, True)
     if repr(line + b"\r") not in returned[1]:
-        raise AssertionError("closure/negative-output-not-shown-byte-for-byte: {!r}".format(returned))
+        raise _CheckFailure("closure/negative-output-not-shown-byte-for-byte: {!r}".format(returned))
     # REAL harness failures through _run_one, under a path that contains the token, one per
     # launched-False producer: the missing-script branch names the script's full path, and the
     # interpreter-launch branch (an EXISTING script, an interpreter path that does not exist, so Popen
@@ -1746,24 +1895,27 @@ def _negative_verdict_self_test():
         fake_root = token_dir / "opf"
         os.makedirs(fake_root / "tools")
         (fake_root / "tools" / "present.py").write_text("", encoding="utf-8")
+        env = _under_test("negative-launch-fixture-shape", _isolated_env)
         for label, script, interpreter, want_text in (
                 ("missing-script", "missing.py", real_interpreter, "missing subset script"),
                 ("interpreter-launch", "present.py", str(token_dir / "bin" / "python3"),
                  "could not launch the interpreter")):
             sys.executable = interpreter
             try:
-                rc, output, _elapsed, launched, _cleanup = _run_one(fake_root, script, [], tmp,
-                                                                    _isolated_env(), 10, raw=True)
+                rc, output, _elapsed, launched, _cleanup = _under_test(
+                    "negative-launch-fixture-shape", _run_one, fake_root, script, [], tmp, env, 10,
+                    raw=True)
             finally:
                 sys.executable = real_interpreter
             if (launched is not False or rc != 2 or want_text.encode("utf-8") not in output
                     or _INJECTED_EDGE.encode("utf-8") not in output):
-                raise AssertionError("closure/negative-launch-fixture-shape: {} (rc={!r}, launched={!r}, "
-                                     "output={!r})".format(label, rc, launched, output))
-            verdict = _negative_verdict(rc, output, 600, launched)
+                raise _CheckFailure("closure/negative-launch-fixture-shape: {} (rc={!r}, launched={!r}, "
+                                    "output={!r})".format(label, rc, launched, output))
+            verdict = _under_test("negative-verdict-not-red", _negative_verdict, rc, output, 600,
+                                  launched)
             if verdict is None or verdict[0] != 2:
-                raise AssertionError("closure/negative-verdict-not-red: a real {} failure whose path "
-                                     "contains {!r}: {!r}".format(label, _INJECTED_EDGE, verdict))
+                raise _CheckFailure("closure/negative-verdict-not-red: a real {} failure whose path "
+                                    "contains {!r}: {!r}".format(label, _INJECTED_EDGE, verdict))
     finally:
         sys.executable = real_interpreter
         shutil.rmtree(tmp, ignore_errors=True)
@@ -1885,9 +2037,9 @@ def _verdict_routing_self_test():
     the real opf/ failing to verify (1), or, with no leg result, the registration drift it names (1),
     never read as the real opf/ failing to verify; 0 is clean; a flip outcome that is not the exact
     failure leaves the self-test at 2, as do fixture drift in the flip, a failed copy, a store whose
-    bytes are not UTF-8, a runner that raises, a temporary directory that cannot be created and an
-    incomplete cleanup after the flipped leg's kill, each named; and a definite failure outranks a leg
-    that could not be evaluated. The wiring is held
+    bytes are not UTF-8, a runner that raises, a temporary directory that cannot be created (an OSError
+    or any other exception from mkdtemp) and an incomplete cleanup after the flipped leg's kill, each
+    named; and a definite failure outranks a leg that could not be evaluated. The wiring is held
     through _closure_legs, the legs self_test_main runs, with both runners stubbed over a throwaway tree
     that holds only the import the flip rewrites: the copy and the flip are real, and nothing is
     launched."""
@@ -1908,13 +2060,14 @@ def _verdict_routing_self_test():
             (2, None, fault, 2, "stopped before any leg result: " + fault),
             (1, None, drift, 1, drift),
             (1, [failed], None, 1, "did not verify")):
-        verdict = _positive_verdict(code, rows, stopped)
+        verdict = _under_test("positive-verdict", _positive_verdict, code, rows, stopped)
         if (verdict is None or verdict[0] != want_code or want not in verdict[1]
                 or ((want_code == 2 or rows is None) and "did not verify" in verdict[1])):
-            raise AssertionError("closure/positive-verdict (run() exit {}): {!r}, want exit {} naming "
-                                 "{!r}".format(code, verdict, want_code, want))
-    if _positive_verdict(0, [clean], None) is not None:
-        raise AssertionError("closure/positive-verdict-rejects-a-clean-run")
+            raise _CheckFailure("closure/positive-verdict (run() exit {}): {!r}, want exit {} naming "
+                                "{!r}".format(code, verdict, want_code, want))
+    if _under_test("positive-verdict-rejects-a-clean-run", _positive_verdict, 0, [clean],
+                   None) is not None:
+        raise _CheckFailure("closure/positive-verdict-rejects-a-clean-run")
     caught = (_FLIP_EXIT, _FLIP_BYTES, 0.1, True, [])
     flips = []
 
@@ -1929,6 +2082,9 @@ def _verdict_routing_self_test():
 
     def full_disk(*_args, **_kwargs):
         raise OSError(errno.ENOSPC, "No space left on device (injected)")
+
+    def mkdtemp_fault(*_args, **_kwargs):
+        raise RuntimeError("mkdtemp fault (injected)")
 
     tmp = Path(tempfile.mkdtemp(prefix="opf-closure-routing-"))
     try:
@@ -1945,70 +2101,78 @@ def _verdict_routing_self_test():
         os.makedirs(absent)
         unreaped = "leader-unreaped: leader pid 4242 was still unreaped at the 10s cleanup deadline"
         flipped = [("from check_versions import _parse\n", "opf.py", ["--self-test"], 1458, True)]
-        for label, base, no_tmp, positive, negative, want_code, want, refused, want_flips in (
-                ("bound-kill", root, False, (2, [killed, clean], None), caught, 2,
+        for label, base, mkdtemp, positive, negative, want_code, want, refused, want_flips in (
+                ("bound-kill", root, None, (2, [killed, clean], None), caught, 2,
                  ("SELF-TEST CANNOT EVALUATE: positive", "opf-doctor-selftest killed at its 1140s bound"),
                  ("SELF-TEST FAIL", "did not verify"), flipped),
-                ("refused-before-any-leg", root, False, (2, None, None), caught, 2,
+                ("refused-before-any-leg", root, None, (2, None, None), caught, 2,
                  ("stopped before any leg result",), ("SELF-TEST FAIL",), flipped),
-                ("harness-fault-before-the-legs", root, False, (2, None, fault), caught, 2,
+                ("harness-fault-before-the-legs", root, None, (2, None, fault), caught, 2,
                  ("SELF-TEST CANNOT EVALUATE: positive", fault), ("SELF-TEST FAIL",), flipped),
-                ("registration-drift", root, False, (1, None, drift), caught, 1,
+                ("registration-drift", root, None, (1, None, drift), caught, 1,
                  ("SELF-TEST FAIL: positive: " + drift,), ("did not verify",), flipped),
-                ("unrelated-flip-failure-naming-the-token", root, False, (0, [clean], None),
+                ("unrelated-flip-failure-naming-the-token", root, None, (0, [clean], None),
                  (1, b"unrelated assertion failed; debug path /tmp/check_versions/cache\n", 0.1, True,
                   []), 2, ("SELF-TEST CANNOT EVALUATE: negative",), ("SELF-TEST FAIL",), flipped),
-                ("flip-not-caught-beside-a-bound-kill", root, False, (2, [killed], None),
+                ("flip-not-caught-beside-a-bound-kill", root, None, (2, [killed], None),
                  (0, b"SELF-TEST PASS\n", 0.1, True, []), 1,
                  ("SELF-TEST FAIL: negative", "SELF-TEST CANNOT EVALUATE: positive"), (), flipped),
-                ("positive-failure", root, False, (1, [failed], None), caught, 1,
+                ("positive-failure", root, None, (1, [failed], None), caught, 1,
                  ("SELF-TEST FAIL: positive", "did not verify"), (), flipped),
                 # The flipped leg killed at its bound with its cleanup incomplete: the cleanup verdict
                 # is kept beside the bound kill, naming what did not complete.
-                ("negative-cleanup-incomplete", root, False, (0, [clean], None),
+                ("negative-cleanup-incomplete", root, None, (0, [clean], None),
                  (None, b"partial", 1458.2, True, [unreaped]), 2,
                  ("killed at its 1458s bound",
                   "the cleanup after the flipped leg's kill did not complete: " + unreaped),
                  ("SELF-TEST FAIL",), flipped),
-                ("fixture-drift", drifted, False, (0, [clean], None), caught, 2,
+                ("fixture-drift", drifted, None, (0, [clean], None), caught, 2,
                  ("SELF-TEST CANNOT EVALUATE: negative: could not locate the _semver import to flip "
                   "(fixture drift",), ("SELF-TEST FAIL",), []),
-                ("copy-oserror", absent, False, (0, [clean], None), caught, 2,
+                ("copy-oserror", absent, None, (0, [clean], None), caught, 2,
                  ("SELF-TEST CANNOT EVALUATE: negative: harness error building the broken copy",),
                  ("SELF-TEST FAIL",), []),
-                ("invalid-source-bytes", undecodable, False, (0, [clean], None), caught, 2,
+                ("invalid-source-bytes", undecodable, None, (0, [clean], None), caught, 2,
                  ("SELF-TEST CANNOT EVALUATE: negative: harness error building the broken copy (the "
                   "flip was not evaluated): UnicodeDecodeError:",), ("SELF-TEST FAIL",), []),
-                ("runner-fault", root, False, (0, [clean], None),
+                ("runner-fault", root, None, (0, [clean], None),
                  RuntimeError("runner fault in the flipped leg"), 2,
                  ("SELF-TEST CANNOT EVALUATE: negative: harness fault running or judging the flipped "
                   "leg (the flip was not evaluated): RuntimeError: runner fault in the flipped leg",),
                  ("SELF-TEST FAIL",), flipped),
-                ("temporary-directory-oserror", root, True, (0, [clean], None), caught, 2,
+                ("temporary-directory-oserror", root, full_disk, (0, [clean], None), caught, 2,
                  ("SELF-TEST CANNOT EVALUATE: negative: could not create the temporary directory for "
                   "the flipped copy", "[Errno {}] No space left on device (injected)".format(
                       errno.ENOSPC)), ("SELF-TEST FAIL",), []),
-                ("clean", root, False, (0, [clean], None), caught, 0, (), ("SELF-TEST",), flipped)):
+                # REGRESSION COVERAGE for the handler that takes every exception creating the flipped
+                # copy's temporary directory: an exception other than an OSError is named, exit 2, and
+                # a handler narrowed back to OSError lets it escape _closure_legs (a named check
+                # failure here).
+                ("temporary-directory-other-exception", root, mkdtemp_fault, (0, [clean], None),
+                 caught, 2,
+                 ("SELF-TEST CANNOT EVALUATE: negative: could not create the temporary directory for "
+                  "the flipped copy (the flip was not evaluated): RuntimeError: mkdtemp fault "
+                  "(injected)",), ("SELF-TEST FAIL",), []),
+                # REGRESSION COVERAGE: a clean run passes whether or not any routing above is in place.
+                ("clean", root, None, (0, [clean], None), caught, 0, (), ("SELF-TEST",), flipped)):
             del flips[:]
             out = io.StringIO()
             real_mkdtemp = tempfile.mkdtemp
-            if no_tmp:
-                tempfile.mkdtemp = full_disk
+            if mkdtemp is not None:
+                tempfile.mkdtemp = mkdtemp
             try:
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-                    code = _closure_legs(base, {"opf-tooling-selftest": (1458, 486, 0)},
-                                         run_closure=lambda _root, positive=positive: positive,
-                                         run_one=flip_runner(negative))
-            except Exception as exc:
-                raise AssertionError("closure/self-test-routing: {} escaped _closure_legs: {!r}".format(
-                    label, exc))
+                    code = _under_test("self-test-routing: " + label, _closure_legs, base,
+                                       {"opf-tooling-selftest": (1458, 486, 0)},
+                                       run_closure=lambda _root, positive=positive: positive,
+                                       run_one=flip_runner(negative))
             finally:
                 tempfile.mkdtemp = real_mkdtemp
             said = out.getvalue()
             if (code != want_code or not all(w in said for w in want) or any(r in said for r in refused)
                     or flips != want_flips):
-                raise AssertionError("closure/self-test-routing: {} (exit {}, want {}; flips {!r}): "
-                                     "{!r}".format(label, code, want_code, flips, said))
+                raise _CheckFailure("closure/self-test-routing: {} (exit {}, want {}; flips {!r}): "
+                                    "{!r}".format(label, code, want_code, flips, said))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("RED run() exit 2 (a leg killed at its bound, a signal, a leg never launched, an incomplete "
@@ -2019,30 +2183,35 @@ def _verdict_routing_self_test():
           "the token -> exit 2; the flip not caught beside a bound kill -> exit 1; the flipped leg's "
           "incomplete cleanup -> named beside its bound kill, exit 2; fixture drift in the flip, a "
           "failed copy, a store whose bytes are not UTF-8 and a temporary directory that cannot be "
-          "created -> each named, exit 2, nothing launched; a runner that raises -> named, exit 2")
+          "created (an OSError or another exception) -> each named, exit 2, nothing launched; a runner "
+          "that raises -> named, exit 2")
 
 
 def _self_test_phase(phase):
     """Run the self-test's fast phase, phase(), returning (None, its result), or (exit code, None) with
-    the reason printed. Only a check's own failure is a self-test failure (1): an AssertionError whose
-    message begins "closure/", the name every check here raises (a check that catches an exception the
-    code under test let escape names itself the same way). Every other exception is a harness fault,
-    cannot evaluate (2), named by its type, never a self-test failure and never a traceback: a
-    _BoundError (a bound that cannot be derived), an OSError, a RuntimeError, a ValueError (a
-    UnicodeDecodeError included) and an AssertionError no check raised. _harness_routing_self_test
-    holds this routing, and self_test_main's wiring to it."""
+    the reason printed. The exception's TYPE routes it, never its message. A _CheckFailure, a check
+    failing on its own assertion, is a self-test failure (1); that includes a crash in the code under
+    test a check calls, which the check converts into one (_under_test). A _CannotEvaluate, a check
+    that cannot evaluate what it checks (the CI job limit cannot be read), is cannot evaluate (2),
+    named by its message. Every other exception is a harness fault, cannot evaluate (2), named by its
+    type, never a self-test failure and never a traceback: a _BoundError (a bound that cannot be
+    derived), an OSError, a RuntimeError, a ValueError (a UnicodeDecodeError included) and an
+    AssertionError of any other type, whatever its message ("closure/..." included).
+    _harness_routing_self_test and _check_routing_self_test hold this routing, and self_test_main's
+    wiring to it."""
     try:
         return None, phase()
-    except AssertionError as exc:
-        if str(exc).startswith("closure/"):
-            print("SELF-TEST FAIL:", str(exc), file=sys.stderr)
-            return 1, None
-        fault = exc
+    except _CheckFailure as exc:
+        print("SELF-TEST FAIL:", str(exc), file=sys.stderr)
+        return 1, None
+    except _CannotEvaluate as exc:
+        print("SELF-TEST CANNOT EVALUATE: {} (a check that cannot evaluate what it checks, never a "
+              "self-test failure)".format(exc), file=sys.stderr)
+        return 2, None
     except Exception as exc:
-        fault = exc
-    print("SELF-TEST CANNOT EVALUATE: {}: {} (a harness fault in the fast phase, never a self-test "
-          "failure)".format(type(fault).__name__, fault), file=sys.stderr)
-    return 2, None
+        print("SELF-TEST CANNOT EVALUATE: {}: {} (a harness fault in the fast phase, never a self-test "
+              "failure)".format(type(exc).__name__, exc), file=sys.stderr)
+        return 2, None
 
 
 @contextlib.contextmanager
@@ -2060,28 +2229,48 @@ def _swapped(**values):
         namespace.update(saved)
 
 
+def _throwaway_opf(base):
+    """Write a throwaway opf/ under base for the routing vectors: every subset script as an empty
+    source, and an opf.py whose _self_tests() registry names one helper self-test, so the copy, the
+    roster's script check and the bound scan over it are real. Returns the opf/tools/ directory."""
+    tools = Path(base) / "opf" / "tools"
+    os.makedirs(tools)
+    for _name, script, _args in _SUBSET:
+        (tools / script).write_text("", encoding="utf-8")
+    (tools / "opf.py").write_text("def _self_tests():\n    return [_helper.self_test]\n",
+                                  encoding="utf-8")
+    (tools / "_helper.py").write_text("", encoding="utf-8")
+    return tools
+
+
 def _harness_routing_self_test():
     """What the gate meets is routed by what it is, through run() and _run_closure alike, each case
     reaching them only by rebinding the module names they look up (_swapped). REGISTRATION DRIFT (a
-    registration check failing on its OWN assertion) is a definite finding for every drift shape (two
-    rows removed, a row's arguments changed, a row's name renamed, a row's script renamed to a file the
-    copy does not hold): exit 1, each failing check named and no other, no leg launched and nothing
-    read as a bound that cannot be derived, and the self-test's positive leg names it, never as the
-    real opf/ failing to verify. The two renamed shapes discriminate the order: a gate that derived the
-    bounds first would stop there (exit 2) and never name the drift. Any other exception is a HARNESS
-    FAULT, cannot evaluate (exit 2), named: an AssertionError a registration check raises with an
-    unrelated message or with another check's message (never read as drift, and never as no drift),
-    an unrelated AssertionError raised before the first leg, an AssertionError carrying a registration
-    check's message that a launch raised rather than the check, an exception raised as the first leg
-    starts, an OSError creating the temporary directory (as on a full disk), and a leg result the
-    report cannot read (an empty row). A run whose every leg passes is 0. Each run is over a throwaway
-    opf/ of empty sources whose opf.py names one helper self-test, so the copy and the bound scan are
-    real; every launch is recorded and refused (the clean run's runner records each leg and reports it
-    passed, launching nothing).
-    The self-test's fast phase routes the same way (_self_test_phase): only a check's own
-    AssertionError (its message begins "closure/") is a self-test failure (1); a _BoundError, an
-    OSError, a RuntimeError, a UnicodeDecodeError and an AssertionError no check raised are cannot
-    evaluate (2), named by type, and none escapes. self_test_main is held on that wiring: a fast phase
+    registration check failing on its OWN assertion) is a definite finding: exit 1, each failing check
+    named with what it found and no other, no leg launched and nothing read as a bound that cannot be
+    derived, and the self-test's positive leg names it, never as the real opf/ failing to verify. The
+    drift shapes: a row the tuple checks do not pin removed, a row added, a row repeated, such a leg
+    renamed, its script renamed to a file opf/tools/ does not hold, its ceiling row removed, and the
+    same drift beside a missing opf/ (named before the missing opf/ is); then, for the rows the tuple
+    checks pin, two rows removed, a row's arguments changed, its name renamed and its script renamed
+    to a missing file. A runner that passes every leg stands in for the legs in each drift case, so a
+    drift the checks missed would run clean (exit 0) or stop at the bound scan (exit 2), never exit 1.
+    The renamed shapes also discriminate the order: a gate that derived the bounds first would stop
+    there (exit 2) and never name the drift. Any other exception is a HARNESS FAULT, cannot evaluate
+    (exit 2), named: a registration check raising an unrelated AssertionError, a _CheckFailure carrying
+    another check's message, or an AssertionError of another type carrying its OWN message (the type
+    routes it: never read as drift, and never as no drift), an unrelated AssertionError raised before
+    the first leg, a _CheckFailure carrying a registration check's message that a launch raised rather
+    than the check, an exception raised as the first leg starts, an OSError creating the temporary
+    directory (as on a full disk), and a leg result the report cannot read (an empty row). A missing
+    opf/ with a clean roster is cannot evaluate (2), never drift: the script check is skipped when
+    there is no opf/ to check. A run whose every leg passes is 0. Each run is over a throwaway opf/
+    (_throwaway_opf); every launch is recorded and refused (the clean runner records each leg and
+    reports it passed, launching nothing).
+    The self-test's fast phase routes by type the same way (_self_test_phase): a _CheckFailure is a
+    self-test failure (1); a _CannotEvaluate, a _BoundError, an OSError, a RuntimeError, a
+    UnicodeDecodeError and an AssertionError of another type, a "closure/" message included, are
+    cannot evaluate (2), named, and none escapes. self_test_main is held on that wiring: a fast phase
     that raises returns the phase's code before any closure leg runs, and one that returns hands the
     repository root and its bounds to the closure legs, whose code self_test_main returns, printing
     PASS only on 0."""
@@ -2110,9 +2299,9 @@ def _harness_routing_self_test():
     def replaced(name, row):
         return [row if entry[0] == name else entry for entry in _SUBSET]
 
-    def checks_with(name, message):
-        def check(_subset):
-            raise AssertionError(message)
+    def checks_with(name, exc):
+        def check(_subset, _tools_dir):
+            raise exc
         return tuple((entry, check if entry == name else real)
                      for entry, real in _REGISTRATION_CHECKS)
 
@@ -2122,95 +2311,139 @@ def _harness_routing_self_test():
     legs = len(_SUBSET)
     fault = "harness fault before, around or after the legs ("
     full = "[Errno {}] No space left on device (injected)".format(errno.ENOSPC)
-    cases = [(label, {"_SUBSET": rows}, refuse, False, 1,
-              ("STANDALONE CLOSURE: REGISTRATION DRIFT",)
-              + tuple("  registration drift: " + name for name in drifted),
-              ("NOT EVALUATED", "cannot derive")
-              + tuple("registration drift: " + name for name in names if name not in drifted),
-              "registration drift: " + "; ".join(drifted), [])
-             for label, rows, drifted in (
-                 ("two-rows-removed",
-                  [row for row in _SUBSET
-                   if row[0] not in ("opf-adopt-observe-selftest", "opf-import-batch-selftest")],
-                  ["closure/adopt-observe-registration", "closure/import-batch-registration"]),
-                 ("arguments-changed",
-                  replaced("opf-import-batch-selftest",
-                           ("opf-import-batch-selftest", "_opf_import_batch.py",
-                            ["--self-test", "--changed"])),
-                  ["closure/import-batch-registration"]),
-                 ("name-renamed",
-                  replaced("opf-pack-manifest-selftest",
-                           ("opf-pack-manifest-renamed", "_opf_pack_manifest.py", ["--self-test"])),
-                  ["closure/pack-manifest-registration"]),
-                 ("script-renamed-to-a-missing-file",
-                  replaced("opf-adopt-observe-selftest",
-                           ("opf-adopt-observe-selftest", "_opf_adopt_observe_renamed.py",
-                            ["--self-test"])),
-                  ["closure/adopt-observe-registration"]))]
-    for label, message in (("unrelated-assertion-in-a-registration-check",
-                            "unrelated assertion in a registration check"),
-                           ("another-checks-message-from-a-registration-check",
-                            "closure/pack-manifest-registration")):
-        cases.append((label, {"_REGISTRATION_CHECKS": checks_with("closure/import-batch-registration",
-                                                                   message)},
-                      refuse, False, 2,
-                      ("STANDALONE CLOSURE: NOT EVALUATED", "AssertionError: " + message),
-                      ("REGISTRATION DRIFT",), fault + "AssertionError: " + message + ")", []))
-    cases.extend((
-        ("unrelated-assertion-before-the-first-leg", {"_run_subset": before_the_first_leg}, refuse,
-         False, 2, ("STANDALONE CLOSURE: NOT EVALUATED", "AssertionError: " + before),
-         ("REGISTRATION DRIFT",), fault + "AssertionError: " + before + ")", []),
-        ("registration-message-from-a-launch", {},
-         launch_raising(AssertionError("closure/import-batch-registration")), False, 2,
-         ("STANDALONE CLOSURE: NOT EVALUATED", "AssertionError: closure/import-batch-registration"),
-         ("REGISTRATION DRIFT",), fault + "AssertionError: closure/import-batch-registration)", [first]),
-        ("exception-as-the-first-leg-starts", {}, launch_raising(RuntimeError(starts)), False, 2,
-         ("STANDALONE CLOSURE: NOT EVALUATED", "RuntimeError: " + starts),
-         ("REGISTRATION DRIFT",), fault + "RuntimeError: " + starts + ")", [first]),
-        ("temporary-directory-oserror", {}, refuse, True, 2,
-         ("could not create the temporary directory for the isolated opf/ copy", full),
-         ("REGISTRATION DRIFT",),
-         "could not create the temporary directory for the isolated opf/ copy: " + full, []),
-        ("malformed-leg-result", {"_run_subset": lambda _opf_root, _run_dir, _bounds: [()]}, refuse,
-         False, 2, ("STANDALONE CLOSURE: NOT EVALUATED", "IndexError"),
-         ("REGISTRATION DRIFT", "CLOSURE: OK", "BROKEN"), fault + "IndexError: ", []),
-        ("clean", {"_run_one": clean_leg}, refuse, False, 0, ("STANDALONE CLOSURE: OK",),
-         ("NOT EVALUATED", "REGISTRATION DRIFT", "BROKEN"), None, every)))
+    roster = "closure/roster-registration: "
+    no_contract = [row for row in _SUBSET if row[0] != "opf-homes-contract"]
+    ceilings = dict(_LEG_CEILING_S)
+    del ceilings["opf-homes-contract"]
     tmp = Path(tempfile.mkdtemp(prefix="opf-closure-harness-"))
     try:
-        tools = tmp / "opf" / "tools"
-        os.makedirs(tools)
-        for script in every:
-            (tools / script).write_text("", encoding="utf-8")
-        (tools / "opf.py").write_text("def _self_tests():\n    return [_helper.self_test]\n",
-                                      encoding="utf-8")
-        (tools / "_helper.py").write_text("", encoding="utf-8")
-        for label, rebound, popen, no_tmp, want_code, want, refused, want_stop, want_launches in cases:
-            for entry in ("run", "_run_closure"):
+        _throwaway_opf(tmp)
+        absent = tmp / "no-opf"
+        os.makedirs(absent)
+        cases = [(label, base, dict(rebound, _run_one=clean_leg), refuse, None, 1,
+                  ("STANDALONE CLOSURE: REGISTRATION DRIFT",)
+                  + tuple("  registration drift: " + text for text in drifted),
+                  ("NOT EVALUATED", "cannot derive", "CLOSURE: OK")
+                  + tuple("registration drift: " + name for name in names
+                          if name not in [text.split(": ", 1)[0] for text in drifted]),
+                  "registration drift: " + "; ".join(drifted), [])
+                 for label, base, rebound, drifted in (
+                     # Rows the tuple checks do not pin: only the whole-roster check names these.
+                     ("other-row-removed", tmp, {"_SUBSET": no_contract},
+                      [roster + "row opf-homes-contract missing"]),
+                     ("row-added", tmp,
+                      {"_SUBSET": _SUBSET + [("opf-extra-selftest", "check_opf_homes.py",
+                                              ["--self-test"])]},
+                      [roster + "row opf-extra-selftest not in the pinned roster"]),
+                     ("row-repeated", tmp, {"_SUBSET": _SUBSET + [_SUBSET[1]]},
+                      [roster + "row opf-homes-contract listed 2 times"]),
+                     ("other-leg-renamed", tmp,
+                      {"_SUBSET": replaced("opf-homes-selftest",
+                                           ("opf-homes-renamed", "check_opf_homes.py",
+                                            ["--self-test"]))},
+                      [roster + "row opf-homes-selftest missing; row opf-homes-renamed not in the "
+                       "pinned roster"]),
+                     ("other-script-renamed-to-a-missing-file", tmp,
+                      {"_SUBSET": replaced("opf-homes-contract",
+                                           ("opf-homes-contract", "check_opf_homes_renamed.py", []))},
+                      [roster + "script check_opf_homes_renamed.py of row opf-homes-contract is not "
+                       "a file in opf/tools/"]),
+                     ("ceiling-row-removed", tmp, {"_LEG_CEILING_S": ceilings},
+                      [roster + "row opf-homes-contract not in the pinned roster"]),
+                     ("roster-drift-beside-a-missing-opf", absent, {"_SUBSET": no_contract},
+                      [roster + "row opf-homes-contract missing"]),
+                     # Rows the tuple checks pin: the whole-roster check names a removal or a rename
+                     # beside them.
+                     ("two-rows-removed", tmp,
+                      {"_SUBSET": [row for row in _SUBSET if row[0] not in (
+                          "opf-adopt-observe-selftest", "opf-import-batch-selftest")]},
+                      [roster + "row opf-import-batch-selftest missing; row opf-adopt-observe-selftest "
+                       "missing", "closure/adopt-observe-registration",
+                       "closure/import-batch-registration"]),
+                     ("name-renamed", tmp,
+                      {"_SUBSET": replaced("opf-pack-manifest-selftest",
+                                           ("opf-pack-manifest-renamed", "_opf_pack_manifest.py",
+                                            ["--self-test"]))},
+                      [roster + "row opf-pack-manifest-selftest missing; row opf-pack-manifest-renamed "
+                       "not in the pinned roster", "closure/pack-manifest-registration"]),
+                     ("script-renamed-to-a-missing-file", tmp,
+                      {"_SUBSET": replaced("opf-adopt-observe-selftest",
+                                           ("opf-adopt-observe-selftest",
+                                            "_opf_adopt_observe_renamed.py", ["--self-test"]))},
+                      [roster + "script _opf_adopt_observe_renamed.py of row opf-adopt-observe-selftest "
+                       "is not a file in opf/tools/", "closure/adopt-observe-registration"]),
+                     # REGRESSION COVERAGE: the tuple check named this before the whole-roster check
+                     # existed, and the whole-roster check does not hold arguments.
+                     ("arguments-changed", tmp,
+                      {"_SUBSET": replaced("opf-import-batch-selftest",
+                                           ("opf-import-batch-selftest", "_opf_import_batch.py",
+                                            ["--self-test", "--changed"]))},
+                      ["closure/import-batch-registration"]))]
+        for label, exc in (("unrelated-assertion-in-a-registration-check",
+                            AssertionError("unrelated assertion in a registration check")),
+                           ("another-checks-message-from-a-registration-check",
+                            _CheckFailure("closure/pack-manifest-registration")),
+                           ("own-message-as-another-assertion-type",
+                            AssertionError("closure/import-batch-registration"))):
+            raised = "{}: {}".format(type(exc).__name__, exc)
+            cases.append((label, tmp, {"_REGISTRATION_CHECKS": checks_with(
+                              "closure/import-batch-registration", exc)}, refuse, None, 2,
+                          ("STANDALONE CLOSURE: NOT EVALUATED", raised), ("REGISTRATION DRIFT",),
+                          fault + raised + ")", []))
+        cases.extend((
+            ("unrelated-assertion-before-the-first-leg", tmp, {"_run_subset": before_the_first_leg},
+             refuse, None, 2, ("STANDALONE CLOSURE: NOT EVALUATED", "AssertionError: " + before),
+             ("REGISTRATION DRIFT",), fault + "AssertionError: " + before + ")", []),
+            ("registration-message-from-a-launch", tmp, {},
+             launch_raising(_CheckFailure("closure/import-batch-registration")), None, 2,
+             ("STANDALONE CLOSURE: NOT EVALUATED", "_CheckFailure: closure/import-batch-registration"),
+             ("REGISTRATION DRIFT",), fault + "_CheckFailure: closure/import-batch-registration)",
+             [first]),
+            ("exception-as-the-first-leg-starts", tmp, {}, launch_raising(RuntimeError(starts)), None,
+             2, ("STANDALONE CLOSURE: NOT EVALUATED", "RuntimeError: " + starts),
+             ("REGISTRATION DRIFT",), fault + "RuntimeError: " + starts + ")", [first]),
+            ("temporary-directory-oserror", tmp, {}, refuse, full_disk, 2,
+             ("could not create the temporary directory for the isolated opf/ copy", full),
+             ("REGISTRATION DRIFT",),
+             "could not create the temporary directory for the isolated opf/ copy: " + full, []),
+            ("malformed-leg-result", tmp, {"_run_subset": lambda _opf_root, _run_dir, _bounds: [()]},
+             refuse, None, 2, ("STANDALONE CLOSURE: NOT EVALUATED", "IndexError"),
+             ("REGISTRATION DRIFT", "CLOSURE: OK", "BROKEN"), fault + "IndexError: ", []),
+            # REGRESSION COVERAGE: a missing opf/ read as cannot evaluate before the whole-roster check
+            # existed; this holds that check's skip with no opf/ to check (a script check run anyway
+            # would read every script as missing, drift, exit 1).
+            ("missing-opf-with-a-clean-roster", absent, {"_run_one": clean_leg}, refuse, None, 2,
+             ("opf/ subtree not found under",), ("REGISTRATION DRIFT", "CLOSURE: OK"),
+             "opf/ subtree not found under", []),
+            # REGRESSION COVERAGE: a clean run passes whether or not any routing above is in place.
+            ("clean", tmp, {"_run_one": clean_leg}, refuse, None, 0, ("STANDALONE CLOSURE: OK",),
+             ("NOT EVALUATED", "REGISTRATION DRIFT", "BROKEN"), None, every)))
+        for (label, base, rebound, popen, mkdtemp, want_code, want, refused, want_stop,
+             want_launches) in cases:
+            for entry, call in (("run", run), ("_run_closure", _run_closure)):
                 del launches[:]
                 out = io.StringIO()
                 real_popen, real_mkdtemp = subprocess.Popen, tempfile.mkdtemp
                 subprocess.Popen = popen
-                if no_tmp:
-                    tempfile.mkdtemp = full_disk
+                if mkdtemp is not None:
+                    tempfile.mkdtemp = mkdtemp
                 try:
                     with _swapped(**rebound):
                         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-                            if entry == "run":
-                                code, result = run(tmp), None
-                            else:
-                                result = _run_closure(tmp)
-                                code = result[0]
-                except Exception as exc:
-                    raise AssertionError("closure/harness-routing: {} escaped {}: {!r}".format(
-                        label, entry, exc))
+                            try:
+                                got = call(base)
+                            except Exception as exc:
+                                raise _CheckFailure("closure/harness-routing: {} escaped {}: {}: "
+                                                    "{}".format(label, entry, type(exc).__name__,
+                                                                exc)) from exc
                 finally:
                     subprocess.Popen, tempfile.mkdtemp = real_popen, real_mkdtemp
+                code, result = (got, None) if entry == "run" else (got[0], got)
                 said = out.getvalue()
                 wrong = (code != want_code or not all(w in said for w in want)
                          or any(r in said for r in refused) or launches != want_launches)
                 if result is not None:
-                    verdict = _positive_verdict(*result)
+                    verdict = _under_test("harness-routing: " + label, _positive_verdict, *result)
                     if want_stop is None:
                         wrong = (wrong or verdict is not None or result[2] is not None
                                  or result[1] is None or len(result[1]) != legs)
@@ -2220,22 +2453,26 @@ def _harness_routing_self_test():
                                  or verdict is None or verdict[0] != want_code
                                  or result[2] not in verdict[1] or "did not verify" in verdict[1])
                 if wrong:
-                    raise AssertionError("closure/harness-routing: {} through {} (exit {}, want {}; "
-                                         "launches {!r}; result {!r}): {!r}".format(
-                                             label, entry, code, want_code, launches,
-                                             result and (result[0], result[2]), said))
-        print("RED registration drift through run(), whatever its shape (two rows removed, arguments "
-              "changed, a name renamed, a script renamed to a missing file) -> each failing check named "
-              "and no other, exit 1, never a bound that cannot be derived, no leg launched, and the "
-              "positive leg names the drift, never the real opf/ failing to verify; a registration "
-              "check raising an unrelated message or another check's message, an unrelated "
-              "AssertionError before the first leg, a registration message raised by a launch, an "
-              "exception as the first leg starts, an OSError creating the temporary directory and a leg "
-              "result the report cannot read -> each a named harness fault, exit 2; every leg passing "
-              "-> exit 0")
+                    raise _CheckFailure("closure/harness-routing: {} through {} (exit {}, want {}; "
+                                        "launches {!r}; result {!r}): {!r}".format(
+                                            label, entry, code, want_code, launches,
+                                            result and (result[0], result[2]), said))
+        print("RED registration drift through run(): a row the tuple checks do not pin removed, a row "
+              "added or repeated, such a leg renamed, its script renamed to a missing file, its ceiling "
+              "row removed, the same drift beside a missing opf/, and for the pinned rows two rows "
+              "removed, arguments changed, a name renamed and a script renamed to a missing file -> each "
+              "failing check named with what it found and no other, exit 1, never a bound that cannot be "
+              "derived, no leg launched, and the positive leg names the drift, never the real opf/ "
+              "failing to verify; a registration check raising an unrelated AssertionError, another "
+              "check's message or its own message as another type, an unrelated AssertionError before "
+              "the first leg, a registration message raised by a launch, an exception as the first leg "
+              "starts, an OSError creating the temporary directory and a leg result the report cannot "
+              "read -> each a named harness fault, exit 2; a missing opf/ with a clean roster -> exit 2, "
+              "never drift; every leg passing -> exit 0")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for label, phase, want, said_want in (
+            # REGRESSION COVERAGE: these two read as cannot evaluate before the phase routed by type.
             ("bound-error", _raiser(_BoundError("leg x has no ceiling in _LEG_CEILING_S")), (2, None),
              "SELF-TEST CANNOT EVALUATE: _BoundError: leg x has no ceiling"),
             ("oserror", _raiser(OSError(errno.ENOSPC, "No space left on device (injected)")), (2, None),
@@ -2247,26 +2484,40 @@ def _harness_routing_self_test():
              "SELF-TEST CANNOT EVALUATE: UnicodeDecodeError: "),
             ("assertion-no-check-raised", _raiser(AssertionError("unrelated assertion")), (2, None),
              "SELF-TEST CANNOT EVALUATE: AssertionError: unrelated assertion"),
-            ("check-failure", _raiser(AssertionError("closure/a-vector")), (1, None),
+            # A check's own "closure/" name on an AssertionError of another type: the type routes it,
+            # never the message.
+            ("closure-named-assertion-no-check-raised",
+             _raiser(AssertionError("closure/foreign-harness")), (2, None),
+             "SELF-TEST CANNOT EVALUATE: AssertionError: closure/foreign-harness"),
+            ("cannot-evaluate",
+             _raiser(_CannotEvaluate("closure/ci-job-limit-cannot-evaluate: job opf-closure appears 0 "
+                                     "times in the workflow (need exactly one)")), (2, None),
+             "SELF-TEST CANNOT EVALUATE: closure/ci-job-limit-cannot-evaluate: job opf-closure appears 0 "
+             "times"),
+            # REGRESSION COVERAGE: a check's failure and a clean phase read this way before the phase
+            # routed by type.
+            ("check-failure", _raiser(_CheckFailure("closure/a-vector")), (1, None),
              "SELF-TEST FAIL: closure/a-vector"),
             ("clean", lambda: "bounds", (None, "bounds"), None)):
         out = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            try:
                 got = _self_test_phase(phase)
-        except Exception as exc:
-            raise AssertionError("closure/self-test-phase-routing: {} escaped the phase: {!r}".format(
-                label, exc))
+            except Exception as exc:
+                raise _CheckFailure("closure/self-test-phase-routing: {} escaped the phase: {}: "
+                                    "{}".format(label, type(exc).__name__, exc)) from exc
         said = out.getvalue()
         if got != want or (said_want not in said if said_want else said):
-            raise AssertionError("closure/self-test-phase-routing: {} -> {!r}, want {!r}: {!r}".format(
+            raise _CheckFailure("closure/self-test-phase-routing: {} -> {!r}, want {!r}: {!r}".format(
                 label, got, want, said))
     stand_in = Path("repository-root-stand-in")
     for label, phase, legs_code, want_code, want_said, refused in (
             ("fast-phase-runtime-error", _raiser(RuntimeError("harness fault in the fast phase")), None,
              2, "SELF-TEST CANNOT EVALUATE: RuntimeError: harness fault in the fast phase",
              "SELF-TEST PASS"),
-            ("fast-phase-check-failure", _raiser(AssertionError("closure/a-vector")), None, 1,
+            # REGRESSION COVERAGE: self_test_main stopped at a failing fast phase, and returned the
+            # closure legs' code, printing PASS only on 0, before the fast phase routed by type.
+            ("fast-phase-check-failure", _raiser(_CheckFailure("closure/a-vector")), None, 1,
              "SELF-TEST FAIL: closure/a-vector", "SELF-TEST PASS"),
             ("legs-cannot-evaluate", lambda: "bounds", 2, 2, None, "SELF-TEST PASS"),
             ("legs-failure", lambda: "bounds", 1, 1, None, "SELF-TEST PASS"),
@@ -2282,27 +2533,27 @@ def _harness_routing_self_test():
             return legs_code
 
         out = io.StringIO()
-        try:
-            with _swapped(repo_root=lambda: stand_in, _fast_vectors=fast_vectors,
-                          _closure_legs=closure_legs):
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+        with _swapped(repo_root=lambda: stand_in, _fast_vectors=fast_vectors,
+                      _closure_legs=closure_legs):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                try:
                     code = self_test_main()
-        except Exception as exc:
-            raise AssertionError("closure/self-test-main-wiring: {} escaped self_test_main: {!r}".format(
-                label, exc))
+                except Exception as exc:
+                    raise _CheckFailure("closure/self-test-main-wiring: {} escaped self_test_main: {}: "
+                                        "{}".format(label, type(exc).__name__, exc)) from exc
         said = out.getvalue()
         want_calls = [("fast", stand_in)]
         if legs_code is not None:
             want_calls.append(("legs", stand_in, "bounds"))
         if (code != want_code or calls != want_calls or (want_said and want_said not in said)
                 or (refused and refused in said)):
-            raise AssertionError("closure/self-test-main-wiring: {} (exit {}, want {}; calls {!r}): "
-                                 "{!r}".format(label, code, want_code, calls, said))
-    print("RED the self-test's fast phase: a bound that cannot be derived, an OSError, a RuntimeError, "
-          "a UnicodeDecodeError and an AssertionError no check raised -> CANNOT EVALUATE named by type, "
-          "exit 2; a check's own AssertionError -> FAIL, exit 1; none escapes; self_test_main stops at "
-          "the phase's code before any closure leg, and otherwise returns the closure legs' code, "
-          "printing PASS only on 0")
+            raise _CheckFailure("closure/self-test-main-wiring: {} (exit {}, want {}; calls {!r}): "
+                                "{!r}".format(label, code, want_code, calls, said))
+    print("RED the self-test's fast phase, routed by type: a bound that cannot be derived, an OSError, "
+          "a RuntimeError, a UnicodeDecodeError, an AssertionError of another type (a closure/ message "
+          "included) and a check that cannot evaluate -> CANNOT EVALUATE, named, exit 2; a check's "
+          "failure -> FAIL, exit 1; none escapes; self_test_main stops at the phase's code before any "
+          "closure leg, and otherwise returns the closure legs' code, printing PASS only on 0")
 
 
 def _raiser(exc):
@@ -2312,14 +2563,118 @@ def _raiser(exc):
     return phase
 
 
+def _check_routing_self_test():
+    """The real checks, run through the fast phase as CI runs them (_self_test_phase), are routed by
+    what they meet. A CRASH IN THE CODE UNDER TEST is the calling check's failure (1), named with the
+    check, the code and the exception, never a harness fault: the code is rebound (_swapped) to a
+    stand-in that raises, for _negative_verdict, _leg_bounds, _positive_verdict, a registration check,
+    the whole-roster check, _run_one and _kill_and_reap, each under the check that calls it. A check
+    that CANNOT EVALUATE what it checks is 2, named: the real bounds check over a throwaway tree whose
+    workflow has no opf-closure job cannot read the CI job limit. A FAULT IN A CHECK'S OWN FIXTURE (its
+    temporary directory, as on a full disk) stays a harness fault (2), so the conversion covers the
+    calls into the code under test and nothing more. Each case launches no process."""
+    def crashing(name, exc):
+        def crashed(*_args, **_kwargs):
+            raise exc
+        crashed.__name__ = name
+        return crashed
+
+    def full_disk(*_args, **_kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device (injected)")
+
+    defect = "injected defect"
+    code_under_test = "the code under test, {}, raised {}: "
+    tmp = Path(tempfile.mkdtemp(prefix="opf-closure-checks-"))
+    try:
+        _throwaway_opf(tmp)
+        workflow = tmp / _CI_WORKFLOW
+        os.makedirs(workflow.parent)
+        workflow.write_text("jobs:\n  other-job:\n    runs-on: ubuntu-latest\n", encoding="utf-8")
+        for label, phase, rebound, mkdtemp, want, said_want in (
+                ("negative-verdict-crash", _negative_verdict_self_test,
+                 {"_negative_verdict": crashing("_negative_verdict", TypeError(defect))}, None, (1, None),
+                 "SELF-TEST FAIL: closure/negative-verdict-rejects-a-genuine-catch: "
+                 + code_under_test.format("_negative_verdict", "TypeError") + defect),
+                ("leg-bounds-crash", lambda: _bounds_self_test(tmp),
+                 {"_leg_bounds": crashing("_leg_bounds", KeyError(defect))}, None, (1, None),
+                 "SELF-TEST FAIL: closure/leg-bounds-cover-their-work: "
+                 + code_under_test.format("_leg_bounds", "KeyError") + repr(defect)),
+                ("positive-verdict-crash", _verdict_routing_self_test,
+                 {"_positive_verdict": crashing("_positive_verdict", TypeError(defect))}, None, (1, None),
+                 "SELF-TEST FAIL: closure/positive-verdict: "
+                 + code_under_test.format("_positive_verdict", "TypeError") + defect),
+                ("registration-check-crash", _import_batch_registration_self_test,
+                 {"_check_import_batch_registration": crashing("_check_import_batch_registration",
+                                                               TypeError(defect))}, None, (1, None),
+                 "SELF-TEST FAIL: closure/import-batch-registration: "
+                 + code_under_test.format("_check_import_batch_registration", "TypeError") + defect),
+                ("roster-check-crash", lambda: _roster_registration_self_test(tmp),
+                 {"_check_roster_registration": crashing("_check_roster_registration",
+                                                         TypeError(defect))}, None, (1, None),
+                 "SELF-TEST FAIL: closure/roster-registration: "
+                 + code_under_test.format("_check_roster_registration", "TypeError") + defect),
+                ("runner-crash",
+                 lambda: _timeout_vectors_self_test({"opf-tooling-selftest": (1458, 486, 0)}),
+                 {"_run_one": crashing("_run_one", RuntimeError(defect))}, None, (1, None),
+                 "SELF-TEST FAIL: closure/half-ceiling-bound-did-not-kill-the-ceiling-run: "
+                 + code_under_test.format("_run_one", "RuntimeError") + defect),
+                # REGRESSION COVERAGE: this check named an exception _kill_and_reap let escape as its
+                # own failure before the other checks did.
+                ("cleanup-crash", _cleanup_doubles_self_test,
+                 {"_kill_and_reap": crashing("_kill_and_reap", RuntimeError(defect))}, None, (1, None),
+                 "SELF-TEST FAIL: closure/cleanup-normal-drain: _kill_and_reap raised"),
+                # REGRESSION COVERAGE: a wrong answer from the code under test (no crash) is the
+                # check's own failure, as before the phase routed by type; it also shows the check
+                # raises the failure type, since an AssertionError of another type would read as 2.
+                ("negative-verdict-wrong-answer", _negative_verdict_self_test,
+                 {"_negative_verdict": lambda *_args: None}, None, (1, None),
+                 "SELF-TEST FAIL: closure/negative-verdict-not-red: bound-kill"),
+                ("ci-job-limit-cannot-evaluate", lambda: _bounds_self_test(tmp), {}, None, (2, None),
+                 "SELF-TEST CANNOT EVALUATE: closure/ci-job-limit-cannot-evaluate: job opf-closure "
+                 "appears 0 times in the workflow (need exactly one)"),
+                # REGRESSION COVERAGE: a fault in the check's own fixture read as a harness fault
+                # before; it fails if the conversion were widened past the calls into the code under
+                # test.
+                ("check-fixture-fault", _negative_verdict_self_test, {}, full_disk, (2, None),
+                 "SELF-TEST CANNOT EVALUATE: OSError: [Errno {}] No space left on device "
+                 "(injected)".format(errno.ENOSPC))):
+            out = io.StringIO()
+            real_mkdtemp = tempfile.mkdtemp
+            if mkdtemp is not None:
+                tempfile.mkdtemp = mkdtemp
+            try:
+                with _swapped(**rebound):
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                        try:
+                            got = _self_test_phase(phase)
+                        except Exception as exc:
+                            raise _CheckFailure("closure/check-routing: {} escaped the phase: {}: "
+                                                "{}".format(label, type(exc).__name__, exc)) from exc
+            finally:
+                tempfile.mkdtemp = real_mkdtemp
+            said = out.getvalue()
+            if got != want or said_want not in said:
+                raise _CheckFailure("closure/check-routing: {} -> {!r}, want {!r} naming {!r}: "
+                                    "{!r}".format(label, got, want, said_want, said[-2000:]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("RED a crash in the code under test (_negative_verdict, _leg_bounds, _positive_verdict, a "
+          "registration check, the whole-roster check, _run_one, _kill_and_reap) -> the calling "
+          "check's FAIL naming it, exit 1; a wrong answer -> FAIL, exit 1; the CI job limit that "
+          "cannot be read -> CANNOT EVALUATE, exit 2; a fault in a check's own fixture -> CANNOT "
+          "EVALUATE, exit 2")
+
+
 def _fast_vectors(root):
     """The self-test's fast phase, run before the closure legs; returns the derived per-leg bounds."""
+    _roster_registration_self_test(root)
     _pack_manifest_registration_self_test()
     _adopt_observe_registration_self_test()
     _import_batch_registration_self_test()
     _negative_verdict_self_test()
     _verdict_routing_self_test()
     _harness_routing_self_test()
+    _check_routing_self_test()
     _cleanup_doubles_self_test()
     required = _bounds_self_test(root)
     _timeout_vectors_self_test(required)
@@ -2337,9 +2692,11 @@ def self_test_main():
     timeout or OSError; a reap timeout or OSError), and the negative-leg verdict, the gate's routing
     through run() of what stops a run before, around or after the legs (registration drift, harness
     faults) and the self-test's own exit routing are shown discriminating. That fast phase runs through
-    _self_test_phase: only a check's own AssertionError is a failure (1), and any other exception, a
-    bound that cannot be derived included, is CANNOT EVALUATE (2), named by type
-    (_harness_routing_self_test holds this wiring with the phase and the legs stubbed). The positive
+    _self_test_phase, which routes by the exception's type: a check's failure (_CheckFailure, a crash in
+    the code under test a check calls included) is a failure (1), and any other exception, a check that
+    cannot evaluate what it checks and a bound that cannot be derived included, is CANNOT EVALUATE (2),
+    named (_harness_routing_self_test holds this wiring with the phase and the legs stubbed, and
+    _check_routing_self_test holds it over the real checks). The positive
     leg runs the gate over the real opf/ and requires 0: exit 1 is
     a failure (registration drift named as itself), and exit 2 (a leg killed at its bound or ended by a
     signal, a leg never launched, or a run stopped before any leg result by a refusal or a harness
