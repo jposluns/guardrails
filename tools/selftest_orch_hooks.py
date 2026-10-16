@@ -4248,19 +4248,25 @@ def _main_isolated(report_path=None):
         check("wl/dollar-subst-beside-indeterminate", clf(DOLLAR_BESIDE), "indeterminate")
         check("wl/dollar-subst-backquote-match", clf(DOLLAR_BACKQUOTE), "match")
         # The decision the text states for each, at the handlers: this guard denies the backquote 'match', and
-        # it allows each 'indeterminate' form while the truncation guard denies it on the same event.
+        # it allows each 'indeterminate' form while the truncation guard denies it on the same event. Each
+        # truncation deny must be its bare-& detach deny, so a deny from another path (a malformed payload or a
+        # registry scope fault) fails these checks.
+        def tg_detach(cmd):
+            res = tg(cmd)
+            why = (res[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+            return _verdict(res), "detaches a child with a bare '&'" in why
         check("wl/handler-deny-dollar-subst-backquote", _verdict(wl(DOLLAR_BACKQUOTE)), "deny")
         check("wl/degrade-time-header-guard-allows", tuple(_verdict(wl(cmd)) for cmd in TIME_HEADERS),
               ("allow",) * 4)
-        check("wl/degrade-time-header-trunc-denies", tuple(_verdict(tg(cmd)) for cmd in TIME_HEADERS),
-              ("deny",) * 4)
+        check("wl/degrade-time-header-trunc-denies", tuple(tg_detach(cmd) for cmd in TIME_HEADERS),
+              (("deny", True),) * 4)
         for guard_cid, trunc_cid, cmd in [
                 ("wl/degrade-dollar-subst-loop-guard-allows", "wl/degrade-dollar-subst-loop-trunc-denies",
                  DOLLAR_LOOP),
                 ("wl/degrade-dollar-subst-beside-guard-allows", "wl/degrade-dollar-subst-beside-trunc-denies",
                  DOLLAR_BESIDE)]:
             check(guard_cid, _verdict(wl(cmd)), "allow")
-            check(trunc_cid, _verdict(tg(cmd)), "deny")
+            check(trunc_cid, tg_detach(cmd), ("deny", True))
         check("wl/for-header-variable-probe-match",
               (clf("for gh in 1 2; do sleep 5; done &"), clf("for curl in a; do sleep 5; done &")),
               ("match", "match"))
