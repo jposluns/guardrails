@@ -3688,10 +3688,11 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # those outside their leaf series included, so a pass covers every row of every readable leaf.
     # A store that declares the imported series under supporting tooling at homes 1 has its leaves and bundles
     # registered by containment, but no imported row is gathered there, so the check cannot evaluate it, an
-    # empty imported series included. Every activated 1.3.0 store is such a store: homes 2 needs spec_version
-    # 2.0.0 and spec 4.2 migrates no homes-1 store. Whether homes 1 is graded is open; until homes-1 grading
-    # is decided and added, the check fails closed rather than pass unread records, so no activated 1.3.0
-    # store reaches doctor VALID and no import completes, the consequence spec 17 states.
+    # empty imported series included. Every 1.3.0 store is such a store: homes 2 needs spec_version 2.0.0 and
+    # spec 4.2 migrates no homes-1 store. Whether this tooling will grade homes 1 is open; until it does, the
+    # check fails closed rather than pass unread records, so under this tooling no 1.3.0 store reaches doctor
+    # VALID and no new spec 14.1 import completes, the reference-tooling residual spec 17 states. Spec 4.2 and
+    # 8.3 still require the check to re-read each preserved original on homes 1; the gap is this tooling's.
     if "C-IMPORTED-PROVENANCE" in rep.required:
         rep.ran("C-IMPORTED-PROVENANCE")
         if imported:
@@ -5743,10 +5744,23 @@ def self_test():
             _h1_none = run(_h1_machine(_p_row(1)))
             check("provenance-homes1-no-evidence-cannot-evaluate", _h1_only_provenance(_h1_none))
             # An empty imported series reads the same: no row is gathered on homes 1, so the check records
-            # CANNOT-EVALUATE with nothing to grade, and the store does not reach VALID (red when an empty
-            # series passes, which would grade VALID a store whose imported rows were never read).
+            # CANNOT-EVALUATE with nothing to grade, and the store does not reach VALID. This is regression
+            # coverage of the unchanged homes-1 branch, not evidence that a code change turned it green: it goes
+            # red if that branch ever lets an empty series pass, which the one-row vectors above would miss.
             _h1_empty = run(_h1_machine())
             check("provenance-homes1-empty-series-cannot-evaluate", _h1_only_provenance(_h1_empty))
+            # The regression it guards, as a mutant: the driver grades the declared homes-1 series as if it were
+            # active (imported_series_active patched to the declaration, restored in finally), so the empty
+            # series has nothing to fail and C-IMPORTED-PROVENANCE passes. The vector's predicate rejects that run.
+            _h1_prev_isa = imported_series_active
+            try:
+                _p_g["imported_series_active"] = _opf_store.imported_series_declared
+                _h1_mut = run(_h1_machine())
+            finally:
+                _p_g["imported_series_active"] = _h1_prev_isa
+            check("provenance-homes1-empty-series-pass-mutant-caught",
+                  _h1_mut is not None and _h1_mut.checks.get("C-IMPORTED-PROVENANCE") == "PASS"
+                  and not _h1_only_provenance(_h1_mut))
         finally:
             _p_g["required_checks"] = _h1_prev_rc
             _p_g["IMPORTED_CONTENT_CHECKS"] = _h1_prev_icc

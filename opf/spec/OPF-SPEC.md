@@ -963,9 +963,10 @@ machine-proven. Preserved originals remain the restoration authority.
 
 Imported records and their worklog entries MUST be immutable after publication; corrections MUST be
 a fresh import run retaining the old evidence. A conforming imported series can reach doctor VALID:
-it MUST NOT enter the legacy importer or module-schema deferral seam. That VALID is subject to the
-open question of section 17: every activated 1.3.0 store is at homes 1, where C-IMPORTED-PROVENANCE
-reports cannot-evaluate until homes-1 grading is decided and added. C-IMPORTED-SCHEMA checks
+it MUST NOT enter the legacy importer or module-schema deferral seam. The reference tooling in
+`opf/tools/` does not yet grade imported-record provenance on homes 1, where every 1.3.0 store is,
+so under it C-IMPORTED-PROVENANCE reports cannot-evaluate and no 1.3.0 store reaches that VALID
+(section 17). C-IMPORTED-SCHEMA checks
 this envelope and missingness; C-IMPORTED-IDS checks the series grammar, counters and no-deletion;
 C-IMPORTED-PROVENANCE re-reads each preserved original and verifies `source_sha256`.
 C-CONTAINMENT recognizes the imported managed leaves, C-LINKS resolves the union of both series,
@@ -1282,12 +1283,16 @@ guarantees:
    verb's render and final doctor MUST accept that cannot-evaluate only for exactly the record
    and the from and to statuses it has just written, never a finding and never any other
    cannot-evaluate, and the verb MUST report it as pending until commit. `opf doctor` itself is
-   unchanged and still reports it until then.
+   unchanged and still reports it until then. The reference tooling in `opf/tools/` does not yet
+   grade imported-record provenance on homes 1 (section 17), so under it the final doctor does not
+   report VALID on a 1.3.0 store, and the change is left for review there.
 8. The lease MUST be released, and only then are the claimed IDs and touched files reported. The
    change MUST be left uncommitted in the working tree: the verb MUST NOT stage or commit it.
 
 The verb MUST exit 0 when the change is recorded and the store is doctor-VALID (or carries only
 the pending cannot-evaluate of item 7), and 2 on every refusal or cannot-evaluate.
+Under the reference tooling no 1.3.0 store is doctor-VALID (section 17), so under it the verb does
+not exit 0 on a 1.3.0 store.
 
 Import MUST preserve that operation sequence, including the one allocation seam, independent model
 delta check, cleanliness gate, lease and reconcile-first recovery. Its atomic operands are the
@@ -1529,9 +1534,11 @@ the adopter's own branch-and-merge. It MUST NOT stage or commit the change. The 
 MUST NOT write the adoption archive and MUST NOT overwrite, relocate or remove a plan-enumerated
 frozen source (section 14.2); a frozen source sits outside the planned schema and render
 destinations, so the clean-tree precondition does not read it, and the required doctor VALID grades
-it under the section 11 bounded treatment. An upgrade delta or manifest change that would declare a
-new view or managed store path at a registered `[unmanaged]` path or at a plan-enumerated frozen
-source MUST refuse, naming the collision; the remedy is the adopter's own fresh plan
+it under the section 11 bounded treatment. The reference tooling in `opf/tools/` does not yet grade
+imported-record provenance on homes 1 (section 17), so under it no upgrade into 1.3.0 reaches that
+required doctor VALID, and none offers its change. An upgrade delta or manifest change that would
+declare a new view or managed store path at a registered `[unmanaged]` path or at a plan-enumerated
+frozen source MUST refuse, naming the collision; the remedy is the adopter's own fresh plan
 re-dispositioning that file (section 14.2).
 
 The manifest and counters rewrite MUST be a model regeneration through the canonical new-document
@@ -1598,12 +1605,14 @@ legacy LF records and evidence remain readable and MUST NOT be silently converte
 A completed legacy import upgrades in place: its `import_status` MUST stay `"complete"`,
 substantiated by its preserved legacy run evidence under section 11, and adoption approval,
 receipt or provenance MUST NOT be fabricated for it.
+That upgrade needs the same full doctor VALID before offering its change, so under the reference
+tooling it does not yet offer that change for a completed legacy import either (section 17).
 The bump also activates the homes-1 recognition of the adoption and import control paths and
 the four imported-series checks of section 4.2; the upgrade itself MUST NOT create such a folder.
 Earlier stores compose their applicable deltas with this delta; repeated upgrade is a verified
 no-op only after full doctor VALID.
-That VALID is subject to the open question of section 17: until homes-1 grading is decided and
-added, no activated 1.3.0 store reaches it, so no repeated upgrade into 1.3.0 is a verified no-op.
+Under the reference tooling no 1.3.0 store reaches that VALID (section 17), so under it no
+repeated upgrade into 1.3.0 is a verified no-op.
 The 1.3.0 delta remains a target contract until a tested upgrade and its required readers
 activate; import writing is a separate later activation.
 Declaring a spec_version above the tooling's supported version MUST be refused at validation
@@ -1710,9 +1719,9 @@ without a process running.
 section 14.1 with a live full doctor VALID, or that a pre-1.3.0 legacy import finished and its
 preserved legacy run evidence substantiates it; the
 section 9.2 upgrade preserves that legacy status without fabricating an approval or receipt.
-That live full doctor VALID is subject to the open question of section 17: until homes-1
-grading is decided and added, no activated 1.3.0 store reaches it, so no source completes
-under section 14.1.
+The reference tooling in `opf/tools/` does not yet grade imported-record provenance on homes 1
+(section 17), so under it no 1.3.0 store reaches that live full doctor VALID, and no source
+completes under section 14.1.
 A partial or complete status that neither an adoption receipt with completion results nor
 preserved legacy import evidence substantiates MUST fail closed, as does a missing, unreadable
 or contradictory input. Elapsed time and a staging directory MUST NOT be taken as proof of status.
@@ -1742,8 +1751,8 @@ Defaults: scaffolding and clean-start adoption MUST write `posture = "required"`
 `import_status = "none"`. An adoption with migrate-disposed sources keeps `required` and MUST
 hold `import_status = "partial"` until each source's completion result is recorded green
 (section 14.1), then `"complete"`.
-That green result is subject to the open question of section 17: until homes-1 grading is decided
-and added, no activated 1.3.0 store reaches doctor VALID, so no import completes (section 14.1).
+Under the reference tooling no 1.3.0 store reaches doctor VALID (section 17), so under it no
+completion result is recorded green, and no new section 14.1 import completes.
 Import status MUST NOT weaken posture. Reports MUST carry `migration_incomplete` while an approved
 source or detected file remains unresolved. Weakening the posture (`required` toward `warn`
 or `off`) is a guardrail-configuration change: it MUST take effect only through the
@@ -1862,7 +1871,9 @@ The clean-start completion check MUST deterministically verify the following ros
    presence and identity so absence cannot pass as NOT-APPLICABLE. Doctor validity and
    declared-view byte drift are evaluated on the live tree, where apply has already rendered
    every declared view, a formerly occupied destination included, and any drift the plan does
-   not account for fails the check. Consumer repointings match the plan.
+   not account for fails the check. Consumer repointings match the plan. The reference tooling
+   in `opf/tools/` does not yet grade imported-record provenance on homes 1 (section 17), so under
+   it doctor validity is not reached on a 1.3.0 store, and this check does not pass there.
 5. Wiring: the enforcement pack is installed and probed, with a direct store write denied, a
    write under `.working/archive/adoption/<run-id>/` denied, and sanctioned writer and render
    paths succeeding on the live tree. Server-side branch protection is adopter-attested,
@@ -1927,8 +1938,8 @@ plan digest, and hence its apply-archived retirement preimage under completion c
 transaction runs, and an archived source is already out of the live tree, so its recorded
 retirement changes no live path. `import_status` MUST become `"complete"` only when every migrate
 source completes on those terms; import is never complete on a state that is not doctor-VALID.
-That doctor VALID is subject to the open question of section 17: until homes-1 grading is decided
-and added, no activated 1.3.0 store reaches it, so no import completes.
+Under the reference tooling no 1.3.0 store reaches that doctor VALID (section 17), so under it no
+new section 14.1 import completes.
 This proves source accounting and preservation, not byte-level mapping coverage or semantic
 fidelity. No writer-side leftover accounting is required.
 
@@ -2537,8 +2548,8 @@ otherwise to the state that the lease reconciliation and recovery above left, ap
 and release. A fresh-only implementation that provides an upgrade command MUST refuse an older store
 with the same finding and MUST NOT report a successful upgrade; it MAY report a no-op on a supported
 store only after full doctor VALID.
-That VALID is subject to the open question of section 17: until homes-1 grading is decided and
-added, no activated 1.3.0 store reaches it, so no such no-op is reported on a 1.3.0 store.
+Under the reference tooling's doctor no 1.3.0 store reaches that VALID (section 17), so a no-op
+on a 1.3.0 store cannot rest on that doctor.
 Admission MUST NOT substitute for any other applicable check.
 
 For a store its admission check refuses, a report MUST give the base result as `indeterminate`,
@@ -2633,14 +2644,18 @@ The gates in this standard are strong where they are strong and say so where the
   after completion, a tampered retire preimage no record references included, is outside doctor's
   coverage until homes 2 activates. This bullet discloses that target contract's residual and
   claims no shipped tooling behaviour. Version-control history over the tracked store is the
-  control. Imported-record provenance is not graded on homes 1. The homes-2 contract is for
-  `spec_version = "2.0.0"` and no homes-1 store is migrated to homes 2 (section 4.2), so under
-  activated 1.3.0 tooling every 1.3.0 store is a homes-1 store that declares the imported series.
-  For such a store, C-IMPORTED-PROVENANCE reports cannot-evaluate, an empty imported series
-  included, so it gives no assurance about the preserved originals that imported records reference.
-  Until homes-1 grading is decided and added, no activated 1.3.0 store therefore reaches doctor
-  VALID, and no import completes, because section 14.1 never completes an import on a state that
-  is not doctor-VALID. Whether homes 1 is graded remains an open question.
+  control. The reference tooling in `opf/tools/` does not yet grade imported-record provenance on
+  homes 1. The homes-2 contract is for `spec_version = "2.0.0"` and no homes-1 store is migrated to
+  homes 2 (section 4.2), so every 1.3.0 store is a homes-1 store that declares the imported series.
+  For such a store, the reference tooling's C-IMPORTED-PROVENANCE, as written for its 1.3.0
+  activation, reports cannot-evaluate, an empty imported series included, so under the reference
+  tooling that check gives no assurance about the preserved originals that imported records
+  reference. Under the reference tooling no 1.3.0 store therefore reaches doctor VALID, and no new
+  section 14.1 import completes, because section 14.1 never completes an import on a state that is
+  not doctor-VALID. This is a residual of the reference tooling, not a property of every conforming
+  implementation: sections 4.2 and 8.3 still have activated 1.3.0 tooling run C-IMPORTED-PROVENANCE
+  on homes 1, re-reading each preserved original and verifying `source_sha256`. Whether the
+  reference tooling will grade homes 1 remains an open question.
 - Store resolution fails closed on a pointer that does not resolve and on zero or multiple
   manifests at the target; it cannot detect a second store that no pointer names, placed somewhere
   the tooling was never aimed.
