@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "638594aa6629d90b98a3634f2b9cd869879d892766e6e5f55d583365fb1b28db"
+tree-sha256 = "e8437d21871b0ca0075cd6d3e7dcdee3825447f5b7fa1325723e534484626a4a"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -92,7 +92,7 @@ sha256 = "65d77dc6cb74fab790b2745866137b223eeacc5b6a41e5d2ff2c327d3d0dce45"
 [[sources]]
 path = ".aiqt/core/instruction-budget.toml"
 bytes = 5646
-sha256 = "d69574476d02ab1f0b95061918907a14f2fb26e6ae2e69337534adc7de4269e9"
+sha256 = "aa5f3713b0add0df52d448db975d6cb56a27b8b86133072ee1837c1b017c4073"
 
 [[sources]]
 path = ".aiqt/core/migration/crosswalk-schema.toml"
