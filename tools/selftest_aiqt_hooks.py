@@ -10454,9 +10454,9 @@ def _main_isolated(monitor):
         # to ci-wr81), and a parse error met after such a line keeps that judgment (ci-wr82); each allowed when
         # the raw-string contexts alone judged the command past a bound. A nest past the bound whose text merely
         # names an AI product denies (ci-wr83, the disclosed over-deny). Controls: the quoted spelling with a
-        # human name past the bound allows (ci-wr-c35, red when a bound overflow denies outright), and an
-        # ordinary parse error whose message merely names an AI product keeps the raw-string contexts and allows
-        # (ci-wr-c36, red when a parse error takes the scan for an AI identity anywhere).
+        # human name past the bound allows (ci-wr-c35, red when a bound overflow denies outright), and a parse
+        # error in the command itself whose message merely names an AI product keeps the raw-string contexts and
+        # allows (ci-wr-c36, red when such a parse error takes the scan for an AI identity anywhere).
         ciexpect("(ci-wr78) an AI --author value behind a quoted option name past the bound denies",
                  _ci_deep + 'git commit --"auth"="Claude <c@x>" -m x', "deny")
         ciexpect("(ci-wr79) an AI --author value that a quote splits past the bound denies",
@@ -10481,6 +10481,109 @@ def _main_isolated(monitor):
         if "past the check's bounds" not in _ci_reason or "'Claude'" not in _ci_reason:
             failures.append("(ci-wr-bounds-reason) the deny past a run-line bound gave the reason {!r} (want one "
                             "that names the bounds and the AI identity 'Claude')".format(_ci_reason))
+        # A run line that cannot be parsed (an unbalanced quote in a foreach operand or a rebase exec value, at any
+        # depth and behind any of the three run-line forms) is left unread like one past the bounds: every other
+        # segment and every other run line is still read, so a git commit beside it is judged on its words, a
+        # quote-split value or option name included (ci-wr84 to ci-wr92, each allowed when the parse error ended
+        # the read and the raw-string contexts judged the command), and when nothing read sets an AI identity the
+        # scan for an AI identity anywhere judges the command, so an AI --author that a quote splits inside the
+        # unparseable line denies (ci-wr93). An unparseable run line in a command that merely names an AI product
+        # denies (ci-wr94, the disclosed over-deny); ci-wr93 and ci-wr94 were allowed then too. Control: an
+        # unparseable run line in a command that names no AI identity allows (ci-wr-c37).
+        ciexpect("(ci-wr84) an AI --author value that a quote splits, in the segment after a foreach operand that "
+                 "cannot be parsed, denies",
+                 'git submodule foreach "echo \'x"; git commit --author=C"laude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr85) an AI --author value that a quote splits, after && and a foreach operand that cannot be "
+                 "parsed, denies",
+                 'git submodule foreach "echo \'x" && git commit --author=C"laude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr86) an AI co-author trailer that a quote splits, in the segment after a foreach operand "
+                 "that cannot be parsed, denies",
+                 'git submodule foreach "echo \'x"; git commit -m x --trailer "Co-authored-by: C"laude" <c@x>"',
+                 "deny")
+        ciexpect("(ci-wr87) an AI --author value that a quote splits, in the segment after a rebase exec value "
+                 "that cannot be parsed, denies",
+                 'git rebase -x "echo \'" main; git commit --author=C"laude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr88) an AI --author value behind a quoted option name, after a foreach operand that cannot "
+                 "be parsed, denies",
+                 'git submodule foreach "echo \'x"; git commit --"auth"="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr89) an AI --author value behind a quoted option name, after a rebase exec value that "
+                 "cannot be parsed, denies",
+                 'git rebase -x "echo \'" main; git commit --"auth"="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr90) an AI --author value after a foreach operand that cannot be parsed at depth 2 denies",
+                 'git submodule foreach "git submodule foreach \\"echo \'x\\""; git commit --author=C"laude <c@x>" '
+                 "-m x", "deny")
+        ciexpect("(ci-wr91) an AI --author value after a bisect run line whose foreach operand cannot be parsed "
+                 "denies",
+                 'git bisect run git submodule foreach "echo \'x"; git commit --author=C"laude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr92) an AI --author value in a run line, after an exec value in it that cannot be parsed at "
+                 "depth 2, denies",
+                 "git submodule foreach "
+                 + shlex.quote('git rebase -x "echo \'" main; git commit --author=C"laude <c@x>" -m x'), "deny")
+        ciexpect("(ci-wr93) an AI --author value that a quote splits inside a foreach operand that cannot be parsed "
+                 "denies",
+                 'git submodule foreach "git commit --author=C\\"laude <c@x>\\" -m \'x"', "deny")
+        ciexpect("(ci-wr94) a run line that cannot be parsed in a command whose message merely names an AI product "
+                 "denies (the disclosed over-deny)",
+                 'git submodule foreach "echo \'x"; git commit -m "fix claude adapter"', "deny")
+        ciexpect("(ci-wr-c37) a foreach operand that cannot be parsed in a command that names no AI identity allows",
+                 'git submodule foreach "echo \'x"; git commit -m x', "allow")
+        _ci_out = cig({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                       "tool_input": {"command": 'git submodule foreach "git commit --author=C\\"laude <c@x>\\" '
+                                                 '-m \'x"'}})[1]
+        _ci_reason = ((_ci_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+        if "could not be parsed" not in _ci_reason or "'Claude'" not in _ci_reason:
+            failures.append("(ci-wr-parse-reason) the deny for a run line that cannot be parsed gave the reason "
+                            "{!r} (want one that names the unparsed line and the AI identity 'Claude')"
+                            .format(_ci_reason))
+        # Each rebase reads its options only up to the next rebase subcommand of its segment, and an earlier
+        # rebase's exec lines are still read: an AI --author commit in the exec value of the first of two or three
+        # wrapped rebases denies, the commit bare or behind env or sudo, the exec value spelled -x, -ix or
+        # --exec=, after an exec value spelled rebase, before a next rebase word that is itself an exec value, and
+        # with -- just before or just after the next rebase word (ci-wr95 to ci-wr105, each allowed when only the
+        # last rebase's lines were read). Since no word is read for two rebases, repeated rebase words do not
+        # spend the length bound on one exec line many times, so 20 wrapped rebases before one long exec value
+        # whose git commit merely names an AI product in its message read that line and allow (ci-wr-c38, denied
+        # by the scan for an AI identity anywhere when each rebase read to the end of its segment, since 20
+        # copies of the line passed the length bound).
+        _ci_ai = shlex.quote('git commit --amend --no-edit --author="Claude <c@x>"')
+        ciexpect("(ci-wr95) an AI --author commit in the exec value of the first of two wrapped rebases denies",
+                 "sudo -E git rebase -x " + _ci_ai + " git rebase main", "deny")
+        ciexpect("(ci-wr96) an AI --author commit in the exec value of the first of three wrapped rebases denies",
+                 "sudo -E git rebase -x " + _ci_ai + " -q git rebase -q git rebase main", "deny")
+        ciexpect("(ci-wr97) an AI --author commit in the exec value of the first of three rebases, each behind "
+                 "sudo, denies",
+                 "sudo -E git rebase -x " + _ci_ai + " sudo -E git rebase sudo -E git rebase main", "deny")
+        ciexpect("(ci-wr98) an AI --author commit behind env in the exec value of the first of two rebases, each "
+                 "behind env, denies",
+                 "env -i git rebase -x " + shlex.quote('env git commit --amend --no-edit --author="Claude <c@x>"')
+                 + " env -i git rebase main", "deny")
+        ciexpect("(ci-wr99) an AI --author commit behind sudo in the --exec= value of the first of three rebases, "
+                 "each behind env, denies",
+                 "env -i git rebase --exec="
+                 + shlex.quote('sudo git commit --amend --no-edit --author="Claude <c@x>"')
+                 + " env -i git rebase env -i git rebase main", "deny")
+        ciexpect("(ci-wr100) an AI --author commit after an exec value spelled rebase, on the first of two wrapped "
+                 "rebases, denies",
+                 "sudo -E git rebase -x rebase -x " + _ci_ai + " git rebase main", "deny")
+        ciexpect("(ci-wr101) an AI --author commit on the first of two wrapped rebases, whose next rebase word is "
+                 "an exec value too, denies",
+                 "sudo -E git rebase -x " + _ci_ai + " git -x rebase main", "deny")
+        ciexpect("(ci-wr102) an AI --author commit on the first of two wrapped rebases, with -- just before the "
+                 "next rebase command, denies",
+                 "sudo -E git rebase -x " + _ci_ai + " -- git rebase main", "deny")
+        ciexpect("(ci-wr103) an AI --author commit on the first of two wrapped rebases, with -- just before the "
+                 "next rebase word, denies",
+                 "sudo -E git rebase -x " + _ci_ai + " git -- rebase main", "deny")
+        ciexpect("(ci-wr104) an AI --author commit on the first of two wrapped rebases, with -- just after the "
+                 "next rebase word, denies",
+                 "sudo -E git rebase -x " + _ci_ai + " git rebase -- main", "deny")
+        ciexpect("(ci-wr105) an AI --author commit in the value of an -ix cluster on the first of two wrapped "
+                 "rebases denies",
+                 "sudo -E git rebase -ix " + _ci_ai + " git rebase main", "deny")
+        ciexpect("(ci-wr-c38) 20 wrapped rebases before one long exec value whose commit message merely names an AI "
+                 "product read that line once and allow",
+                 "sudo" + " -E git rebase" * 20 + " -x "
+                 + shlex.quote('git commit -m "fix claude adapter"' + "; true" * 160), "allow")
 
         # The wrapper scan is ONE pass: each word of a wrapped segment is read a bounded number of times. Every
         # -c value below is spelled git, so each one also starts a candidate still reading its options; a
@@ -10596,25 +10699,102 @@ def _main_isolated(monitor):
             if not isinstance(_ci_got, str):
                 failures.append("(ci-wr-run-after) {!r} gave {!r} (want the --author hit read past the bound)"
                                 .format(_ci_cmd[-60:], _ci_got))
+        # Reading each rebase's options only up to the next rebase subcommand finds the same exec lines as reading
+        # them to the end of the segment: over these segments of several wrapped rebase commands (exec values
+        # before and after each rebase word, an exec value and a directory value spelled rebase, a next rebase
+        # word that is an exec value, -- before and after the next rebase word, -ix clusters, and a value word
+        # spelled git that starts the next rebase), the exec lines the handler's read yields for the segment
+        # equal the reference below, which reads the options of every rebase that the segment's git commands
+        # read to the end of the segment. Each segment names no AI identity, so every line is read.
+        def _ci_exec_to_end(tokens, k):
+            """The exec values that the rebase whose subcommand is the word at k reads to the end of its segment."""
+            j = k + 1
+            while j < len(tokens) and tokens[j] != "--":
+                kind, value = aiqt_hooks._cmtidn_option(tokens[j], aiqt_hooks._CMTIDN_REBASE_SHORT,
+                                                        aiqt_hooks._CMTIDN_REBASE_LONG)
+                if kind is not None and value is None and j + 1 < len(tokens):
+                    j += 1
+                    value = tokens[j]
+                if kind == "exec" and value is not None:
+                    yield value
+                j += 1
+
+        _ci_saved = aiqt_hooks._cmtidn_run_lines
+        _ci_read = {}
+
+        def _ci_recorded_run_lines(tokens, k, *args):
+            for line in _ci_saved(tokens, k, *args):
+                _ci_read.setdefault(tuple(tokens), set()).add(line)
+                yield line
+
+        try:
+            aiqt_hooks._cmtidn_run_lines = _ci_recorded_run_lines
+            for _ci_cmd in ("sudo -E git rebase -x 'echo a' git rebase -x 'echo b' main",
+                            "env -i git rebase -x 'echo a' env -i git rebase env -i git rebase --exec='echo c' main",
+                            "sudo -E git rebase -x 'echo a' sudo -E git rebase -x 'echo b' sudo -E git rebase main",
+                            "sudo -E git rebase -x rebase -x 'echo a' git rebase -x 'echo b' main",
+                            "sudo -E git rebase -x 'echo a' git -x rebase -x 'echo b' main",
+                            "sudo -E git rebase -x 'echo a' git -C rebase rebase -x 'echo b' main",
+                            "sudo -E git rebase -x 'echo a' -- git rebase -x 'echo b' main",
+                            "sudo -E git rebase -x 'echo a' git -- rebase -x 'echo b' main",
+                            "sudo -E git rebase -x 'echo a' git rebase -- -x 'echo b' main",
+                            "sudo -E git rebase -ix 'echo a' -q git rebase -ix 'echo b' -q git rebase -x 'echo c'",
+                            "sudo -E git rebase --onto git rebase -x 'echo a' main"):
+                _ci_read.clear()
+                _ci_tokens = aiqt_hooks._segments(_ci_cmd)[0][0]
+                _ci_rebases = [k for k in aiqt_hooks._cmtidn_git_commands(_ci_tokens) if _ci_tokens[k] == "rebase"]
+                _ci_want = {line for k in _ci_rebases for line in _ci_exec_to_end(_ci_tokens, k)}
+                _ci_got = _ci_find(_ci_cmd)
+                _ci_lines = _ci_read.get(tuple(_ci_tokens), set())
+                if _ci_got is not None or len(_ci_rebases) < 2 or not _ci_want or _ci_lines != _ci_want:
+                    failures.append("(ci-wr-rebase-stop) {!r} gave {!r} and read the exec lines {!r} (want None, "
+                                    "and the exec lines {!r} that {} rebases read to the end of the segment)"
+                                    .format(_ci_cmd, _ci_got, sorted(_ci_lines), sorted(_ci_want),
+                                            len(_ci_rebases)))
+        finally:
+            aiqt_hooks._cmtidn_run_lines = _ci_saved
         # Each rebase reads its options only up to the next rebase subcommand that the segment's git commands
         # read, so a segment of many wrapped rebase commands costs time linear in its length, where reading the
-        # rest of the segment for each of them cost time quadratic in it (about 3 s of CPU time at 64 KiB).
-        # The bound is the handler's CPU time in this process over 'sudo -E git rebase x ...' padded to 64 KiB
-        # and to 1 MiB: 0.5 s at 64 KiB and 8 s at 1 MiB, the same bound per character, against about 0.03 s
-        # and 0.4 s measured, a margin of about 15 times. The 1 MiB command runs only when the 64 KiB one is
-        # within its bound, so a quadratic reader fails in seconds rather than running for many minutes.
-        for _ci_size, _ci_cap in ((64 << 10, 0.5), (1 << 20, 8.0)):
-            _ci_cmd = "sudo" + " -E git rebase x" * ((_ci_size - 4) // 16)
-            _ci_cmd += " " * (_ci_size - len(_ci_cmd))
-            _ci_start = time.process_time()
-            _ci_got = _decision(cig, _ci_cmd)
-            _ci_spent = time.process_time() - _ci_start
-            if _ci_got != "allow" or _ci_spent > _ci_cap:
-                failures.append("(ci-wr-rebase-cpu) {} characters of wrapped git rebase commands gave {} after "
-                                "{:.2f} s of CPU time (want allow within {} s){}".format(
-                                    len(_ci_cmd), _ci_got, _ci_spent, _ci_cap,
-                                    "; the 1 MiB command was not run" if _ci_size < 1 << 20 else ""))
-                break
+        # rest of the segment for each of them cost time quadratic in it (about 1.5 s to 4 s of CPU time at 64
+        # KiB for the two forms below). The bound is the handler's CPU time in this process over 'sudo -E git rebase
+        # x ...' and over 'sudo -E git rebase -x x ...', each padded to 64 KiB and to 1 MiB: 0.5 s at 64 KiB and
+        # 8 s at 1 MiB, the same bound per character, against at most about 0.045 s and 0.65 s measured, a
+        # margin of about 11 times. The run-line read is counted through a shim, so a handler that allows a long
+        # command without reading it fails too: every rebase of the command is read, and in the -x form each
+        # one's exec line is built. For each form the 1 MiB command runs only when the 64 KiB one is within its
+        # bound, so a quadratic reader fails in seconds rather than running for many minutes.
+        _ci_saved = aiqt_hooks._cmtidn_run_lines
+        _ci_counts = [0, 0]  # the rebase reads, and the run lines built
+
+        def _ci_counted_rebase_lines(tokens, k, *args):
+            if tokens[k] == "rebase":
+                _ci_counts[0] += 1
+            for line in _ci_saved(tokens, k, *args):
+                _ci_counts[1] += 1
+                yield line
+
+        try:
+            aiqt_hooks._cmtidn_run_lines = _ci_counted_rebase_lines
+            for _ci_unit in (" -E git rebase x", " -E git rebase -x x"):
+                for _ci_size, _ci_cap in ((64 << 10, 0.5), (1 << 20, 8.0)):
+                    _ci_reps = (_ci_size - 4) // len(_ci_unit)
+                    _ci_cmd = "sudo" + _ci_unit * _ci_reps
+                    _ci_cmd += " " * (_ci_size - len(_ci_cmd))
+                    _ci_want = [_ci_reps, _ci_reps if " -x " in _ci_unit else 0]
+                    _ci_counts[:] = [0, 0]
+                    _ci_start = time.process_time()
+                    _ci_got = _decision(cig, _ci_cmd)
+                    _ci_spent = time.process_time() - _ci_start
+                    if _ci_got != "allow" or _ci_spent > _ci_cap or _ci_counts != _ci_want:
+                        failures.append("(ci-wr-rebase-cpu) {} characters of 'sudo{} ...' gave {} after {:.2f} s of "
+                                        "CPU time, {} rebase reads and {} run lines built (want allow within {} s, "
+                                        "{} rebase reads and {} run lines){}".format(
+                                            len(_ci_cmd), _ci_unit, _ci_got, _ci_spent, _ci_counts[0],
+                                            _ci_counts[1], _ci_cap, _ci_want[0], _ci_want[1],
+                                            "; the 1 MiB command was not run" if _ci_size < 1 << 20 else ""))
+                        break
+        finally:
+            aiqt_hooks._cmtidn_run_lines = _ci_saved
 
         # secsec (EN-5 PR-C): decision-signal battery for the secrets-shift-left guard.
         # === secrets_shift_left (secsec): an obvious hardcoded secret in a Write/Edit/Bash write-form ==

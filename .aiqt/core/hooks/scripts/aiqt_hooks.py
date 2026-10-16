@@ -1905,10 +1905,11 @@ CO_AUTHOR_RE = re.compile(r"(?i)co[- ]?authored[- ]?by\s*:?\s*([^\n]{1,160})")
 GIT_ENV_RE = re.compile(r"(?is)^GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)=(.*)$")
 USER_CONF_EQ_RE = re.compile(r"(?is)^user\.(?:name|email)=(.*)$")
 # Fallback-only raw-string contexts, used when the shared tokenizer cannot parse the command or a command line
-# that git runs from its operands is left unread past the run-line bounds (see _commit_identity_fallback). A
-# value runs to whitespace or a shell separator/quote. The --author context matches every prefix that git
-# reads as --author (--au, --aut, --auth, --autho, --author; no other git commit option starts with 'au'),
-# with '=' or whitespace before the value, so the fallback is no weaker on that option than the token reader.
+# that git runs from its operands is left unread, because the tokenizer cannot parse it or it is past the
+# run-line bounds (see _commit_identity_fallback). A value runs to whitespace or a shell separator/quote. The
+# --author context matches every prefix that git reads as --author (--au, --aut, --auth, --autho, --author; no
+# other git commit option starts with 'au'), with '=' or whitespace before the value, so the fallback is no
+# weaker on that option than the token reader.
 _VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s\"';|&]+)"
 _RAW_IDENTITY_CONTEXTS = (
     (re.compile(r"(?i)co[- ]?authored[- ]?by\s*:?\s*([^\n\"']{1,160})"), "co-author trailer"),
@@ -2172,15 +2173,17 @@ _CMTIDN_REBASE_LONG = {
 # How deep the command lines that git runs from its operands may nest (a foreach that runs a foreach) and how
 # many characters of such lines one command may make the check read, as a multiple of its own length plus a
 # floor, so a command built to nest or repeat them costs time linear in its length. A line past either bound
-# is left unread, and every other segment of the command and every run line within the bounds is still
-# judged, so a nest past a bound cannot hide an AI identity that the reader can read. Only when none of them
+# is left unread, and so is a line, at any depth, that the shared tokenizer cannot parse (an unbalanced quote
+# in a foreach operand or an exec value): every other segment of the command and every other run line is
+# still judged, so such a line cannot hide an AI identity that the reader can read. Only when none of them
 # sets one does find_ai_authorship raise ValueError with _CMTIDN_RUN_BOUNDS, so the handler judges the
 # command with its conservative fallback, which then denies an AI identity anywhere in the command once its
 # quotes and backslashes are removed (_commit_identity_fallback).
 _CMTIDN_RUN_DEPTH = 8
 _CMTIDN_RUN_SCALE = 8
 _CMTIDN_RUN_FLOOR = 4096
-_CMTIDN_RUN_BOUNDS = "git runs command lines nested or repeated past the commit-identity bounds"
+_CMTIDN_RUN_BOUNDS = ("git runs a command line that could not be parsed, or command lines nested or repeated past "
+                      "the commit-identity bounds")
 
 
 def _cmtidn_run_lines(tokens, k, stop):
@@ -2232,17 +2235,12 @@ def find_ai_authorship(command):
     trailer, --author value) on a segment that runs a git commit-family command, found by
     _cmtidn_git_commands behind leading reserved words, a function or coprocess name, VAR=value words and
     wrapper words (env, sudo, ...), and the same on each command line that a git command runs from its
-    operands (_cmtidn_run_lines). Raises ValueError on a shell parse error (via _segments), in a run line too,
-    and ValueError(_CMTIDN_RUN_BOUNDS) when a run line past the bounds (_CMTIDN_RUN_DEPTH) was left unread and
-    nothing read sets an AI identity, a parse error met after such a line included; the handler turns either
-    into the conservative fallback."""
+    operands (_cmtidn_run_lines). Raises ValueError on a shell parse error in the command itself (via
+    _segments), and ValueError(_CMTIDN_RUN_BOUNDS) when a run line was left unread, because it could not be
+    parsed or was past the bounds (_CMTIDN_RUN_DEPTH), and nothing read sets an AI identity; the handler turns
+    either into the conservative fallback."""
     unread = [False]
-    try:
-        hit = _cmtidn_line_ai(command, 0, [_CMTIDN_RUN_SCALE * len(command) + _CMTIDN_RUN_FLOOR], unread)
-    except ValueError:
-        if not unread[0]:
-            raise
-        hit = None  # a line was left unread past a bound before the parse error, so the bounds error stands
+    hit = _cmtidn_line_ai(command, 0, [_CMTIDN_RUN_SCALE * len(command) + _CMTIDN_RUN_FLOOR], unread)
     if hit is None and unread[0]:
         raise ValueError(_CMTIDN_RUN_BOUNDS)
     return hit
@@ -2251,11 +2249,19 @@ def find_ai_authorship(command):
 def _cmtidn_line_ai(command, depth, budget, unread):
     """find_ai_authorship over one command line at a run-line nesting depth, with budget a one-item list of the
     characters of run lines still to be read, shared by every nested line of the command, and unread a one-item
-    list set to True when a run line past the bounds is left unread. Such a line is not read, but the other
-    segments of the command and of every line being read still are, and so are the other run lines within the
-    bounds; once the length bound is spent no further run line is built, and each rebase reads its options
-    only up to the next rebase subcommand (_cmtidn_run_lines), so the cost stays linear."""
-    for tokens, _sep in _segments(command):
+    list set to True when a run line is left unread: one past the bounds, or one (depth above 0) that the
+    shared tokenizer cannot parse. Such a line is not read, but the other segments of the command and of every
+    line being read still are, and so are the other run lines; once the length bound is spent no further run
+    line is built, and each rebase reads its options only up to the next rebase subcommand
+    (_cmtidn_run_lines), so the cost stays linear. A parse error in the command itself (depth 0) raises."""
+    try:
+        segments = _segments(command)
+    except ValueError:
+        if depth == 0:
+            raise
+        unread[0] = True  # a run line that cannot be parsed is left unread, like one past the bounds
+        return None
+    for tokens, _sep in segments:
         hit = _identity_assignment_ai(tokens)
         if hit is not None:
             return hit
@@ -2280,37 +2286,38 @@ def _cmtidn_line_ai(command, depth, budget, unread):
     return None
 
 
-def _commit_identity_fallback(command, past_bounds):
+def _commit_identity_fallback(command, unread_line):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an
-    unsupported construct), or when a command line that git runs from its operands was left unread past the
-    run-line bounds and nothing read set an AI identity (past_bounds): scan the RAW string of the whole command
-    for an AI identity in a Co-Authored-By trailer, an --author value (any prefix git reads as --author), a
-    git-identity env var, or a user.name/user.email value; deny on a hit. Past the bounds it first denies when
-    an AI identity appears ANYWHERE in the command once every backslash-newline, backslash and quote is
-    removed, since quoting or escaping in the unread line can split or build an option name or value that no
-    raw-string context sees (--"auth"=..., --author=C"laude ...", a backslash-newline before the value); the
-    cost is a disclosed over-deny of such a nest whose text merely names an AI product. Never silent-allow a
-    plausibly-violating command the check could not read in full."""
-    if past_bounds:
+    unsupported construct), or when a command line that git runs from its operands was left unread, because the
+    tokenizer cannot parse it or it is past the run-line bounds, and nothing read set an AI identity
+    (unread_line): scan the RAW string of the whole command for an AI identity in a Co-Authored-By trailer, an
+    --author value (any prefix git reads as --author), a git-identity env var, or a user.name/user.email value;
+    deny on a hit. With a run line left unread it first denies when an AI identity appears ANYWHERE in the
+    command once every backslash-newline, backslash and quote is removed, since quoting or escaping in the
+    unread line can split or build an option name or value that no raw-string context sees (--"auth"=...,
+    --author=C"laude ...", a backslash-newline before the value); the cost is a disclosed over-deny of such a
+    command whose text merely names an AI product. Never silent-allow a plausibly-violating command the check
+    could not read in full."""
+    if unread_line:
         match = AI_IDENTITY_RE.search(
             command.replace("\\\n", "").replace("\\", "").replace('"', "").replace("'", ""))
         if match:
-            reason = ("AIQT rule cmtidn (commit-identity): git runs command lines nested or repeated past the "
-                      "check's bounds, so a line was left unread, and the command names an AI identity ({!r}) "
-                      "once its quotes and backslashes are removed; failing closed, since quoting or escaping "
-                      "in the unread line can build an AI --author or trailer. Remove it and commit as the "
-                      "maintainer.".format(match.group(0)))
+            reason = ("AIQT rule cmtidn (commit-identity): git runs a command line that could not be parsed, or "
+                      "command lines nested or repeated past the check's bounds, so a line was left unread, and "
+                      "the command names an AI identity ({!r}) once its quotes and backslashes are removed; "
+                      "failing closed, since quoting or escaping in the unread line can build an AI --author or "
+                      "trailer. Remove it and commit as the maintainer.".format(match.group(0)))
             return _deny(reason,
-                         "AIQT guardrail: denied a git command nested or repeated past the commit-identity "
-                         "bounds that names an AI identity (rule cmtidn, fail-safe).")
+                         "AIQT guardrail: denied a git command with a run line left unread (unparseable or past "
+                         "the commit-identity bounds) that names an AI identity (rule cmtidn, fail-safe).")
     for regex, label in _RAW_IDENTITY_CONTEXTS:
         for match in regex.finditer(command):
             if AI_IDENTITY_RE.search(match.group(1)):
                 hit = "{} {!r}".format(label, match.group(1).strip()[:80])
                 reason = ("AIQT rule cmtidn (commit-identity): the command could not be read in full (a shell "
-                          "parse error such as unbalanced quotes, or command lines that git runs nested or "
-                          "repeated past the check's bounds) and it appears to set an AI identity "
-                          "({}); failing closed. Remove it and commit as the maintainer.".format(hit))
+                          "parse error such as unbalanced quotes, or a command line that git runs that could not "
+                          "be parsed or was nested or repeated past the check's bounds) and it appears to set an "
+                          "AI identity ({}); failing closed. Remove it and commit as the maintainer.".format(hit))
                 return _deny(reason,
                              "AIQT guardrail: denied a git command the check could not read in full that "
                              "appears to record an AI commit identity (rule cmtidn, fail-safe).")
