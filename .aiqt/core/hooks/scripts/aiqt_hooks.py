@@ -188,12 +188,14 @@ hooks.json timeout tools/gen_hooks.py renders, less 2), armed before the payload
 not decided by then is interrupted by _HookDeadline, a BaseException that no handler's except Exception
 branch catches, and the call fails CLOSED with exit 2 and a stderr line naming the handler, the budget and
 the input size and asking for smaller calls or long content moved into a file; the timer is cancelled
-before any decision is written. The raw 'git ... <verb>' fallback scans are _RawSequence probes of linear
-cost: the single regexes they replaced grew with the square or the cube of the command length, and five
-guards ran past the hook timeout on some shape at or below 64 KB. Measured in-process on a 24-core host
-with Python 3.14.4 (2026-10-15), the slowest PreToolUse handler call on the worst shapes
-tools/selftest_aiqt_hooks.py times took 0.09 s at 64 KB, 0.43 s at 256 KB and 1.73 s at 1 MB, and
-interpreter start-up adds about 0.1 to 0.2 s to each call. Outside the deadline: interpreter start-up and
+before the decision is written to stdout. Any other exception out of the window (an error entering or
+leaving it, or an in-process caller's own alarm handler raising when its expiry is delivered) fails
+closed with exit 2 as well, and a fail-open mode warns on exit 0 instead. The raw 'git ... <verb>'
+fallback scans are _RawSequence probes of linear cost: the single regexes they replaced grew with the
+square or the cube of the command length, and five guards ran past the hook timeout on some shape at or
+below 64 KB. Measured in-process on a 24-core host with Python 3.14.4 (2026-10-15), the slowest
+PreToolUse handler call on the worst shapes tools/selftest_aiqt_hooks.py times took 0.09 s at 64 KB,
+0.43 s at 256 KB and 1.73 s at 1 MB, and interpreter start-up adds about 0.1 to 0.2 s to each call. Outside the deadline: interpreter start-up and
 module import, which run before main(); a wait the interpreter cannot interrupt (a system call in
 uninterruptible sleep, such as a read from a hung network mount, or a long call into C code that does not
 check for signals), which holds the deadline back until it returns, as does review_dispatch_pin's wait for
@@ -16830,24 +16832,60 @@ class _DeadlineWindow:
     window's own timer through the window's handler, which ignores it once the window is closing, so that
     expiry never reaches the caller. A nested window is just such a caller, so nesting restores each level.
 
+    The restore never waits on __exit__'s own code. The window's expiry is delivered in whatever frame is
+    running while the window is live, the entry of __exit__ before its first statement included, so _fire
+    closes the window and gives the caller back its timer and disposition before it raises, and a later
+    call from __exit__ or from __enter__'s cleanup finds nothing left to do. A caller expiry that has come
+    due by then runs the caller's handler inside _fire. An enclosing window's _HookDeadline from that
+    handler goes on as it is, to its owner; any other exception it raises is held while the body unwinds
+    on this window's _HookDeadline, so no except branch in the body can catch it and decide on it, and
+    __exit__ (or __enter__'s cleanup) raises it in place of the deadline. Where this window's expiry lands
+    at the entry of __exit__, the held exception reaches the caller only as the __cause__ of the deadline.
+
+    The take is guarded too. A caller expiry that trips during setitimer(ITIMER_REAL, 0) runs the caller's
+    handler as soon as that call returns, before its result could be bound to a name, so the take appends
+    its result to a list inside the call (list.extend over a map); a caller handler that raises there, or
+    inside signal.signal() before the swap, gets its timer back before the exception goes on. A periodic
+    timer taken between an expiry and the delivery of its signal reads (0, interval), and the kernel no
+    longer re-arms it once taken; that expiry is still delivered as the take returns, so the window counts
+    the timer as due one interval after the take.
+
     The borrow is refused, and the window runs with no deadline at all (armed stays False, nothing is
     changed), where it cannot be done faithfully: no finite positive `seconds` (the fail-open modes pass
     None), a platform without setitimer, pthread_sigmask or raise_signal (Windows), a thread other than
     the main thread (Python runs signal handlers only there), a caller that blocks SIGALRM (a deadline
     could not fire, and its pending notification could not be kept apart from ours), or a SIGALRM
     disposition not installed from Python (getsignal returns None, which cannot be reinstalled)."""
-    __slots__ = ("seconds", "armed", "_live", "_handler", "_timer", "_began")
+    __slots__ = ("seconds", "armed", "_live", "_handler", "_timer", "_began", "_held")
 
     def __init__(self, seconds):
         self.seconds = seconds
         self.armed = False
         self._live = False
-        self._handler = self._timer = self._began = None
+        self._handler = self._timer = self._began = self._held = None
 
     def _fire(self, signum, frame):
-        if self._live:
-            self._live = False
-            raise _HookDeadline(self)
+        if not self._live:
+            return
+        self._live = False
+        try:
+            self._give_back()
+        except _HookDeadline:
+            raise  # an enclosing window's deadline, delivered as the caller expiry that came due
+        except BaseException as exc:
+            self._held = exc
+            raise _HookDeadline(self) from exc
+        raise _HookDeadline(self)
+
+    def _raise_held(self):
+        held, self._held = self._held, None
+        if held is not None:
+            raise held
+
+    @staticmethod
+    def _as_taken(timer):
+        value, interval = timer
+        return (interval, interval) if value <= 0 < interval else timer
 
     def _can_borrow(self):
         seconds = self.seconds
@@ -16867,27 +16905,32 @@ class _DeadlineWindow:
         if self.armed or not self._can_borrow():
             return self
         # The clock is read just before the take, so the window's use is never undercounted (a caller
-        # timer comes back at most microseconds early, never late) and nothing runs between the take and
-        # the guarded swap below.
+        # timer comes back at most microseconds early, never late). The take appends its result to `took`
+        # inside the call, so a caller handler that runs as the call returns cannot lose it.
         began = time.monotonic()
-        taken = signal.setitimer(signal.ITIMER_REAL, 0)
+        took = []
         try:
+            took.extend(map(signal.setitimer, (signal.ITIMER_REAL,), (0,)))
             handler = signal.signal(signal.SIGALRM, self._fire)
         except BaseException:
-            # A caller expiry pending at the take ran the caller's own handler inside signal.signal()
-            # and that handler raised: the swap did not happen, so give the caller its timer back.
-            self._handler, self._timer, self._began = signal.getsignal(signal.SIGALRM), taken, began
-            self.armed = True
-            self._give_back()
+            # A caller expiry ran the caller's own handler, as the take returned or inside signal.signal()
+            # before its swap, and that handler raised: the swap did not happen, so give the caller its
+            # timer back (nothing was taken when the exception came before the take).
+            if took:
+                self._handler, self._began = signal.getsignal(signal.SIGALRM), began
+                self._timer = self._as_taken(took[0])
+                self.armed = True
+                self._give_back()
             raise
-        self._handler, self._timer, self._began = handler, taken, began
+        self._handler, self._timer, self._began = handler, self._as_taken(took[0]), began
         self.armed = True
         try:
             self._live = True
-            left = taken[0]
+            left = self._timer[0]
             signal.setitimer(signal.ITIMER_REAL, self.seconds if left <= 0 else min(self.seconds, left))
         except BaseException:
             self._give_back()
+            self._raise_held()
             raise
         return self
 
@@ -16896,6 +16939,7 @@ class _DeadlineWindow:
             self._live = False
         finally:
             self._give_back()
+        self._raise_held()
         return False
 
     def _give_back(self):
@@ -16990,8 +17034,10 @@ def main(argv):
     # inside one _DeadlineWindow of PRETOOL_BUDGET_SECONDS, armed before the read; when the check has not
     # decided by then the window raises _HookDeadline and the call fails CLOSED with exit 2 and a stderr
     # line naming the handler, the budget and the input size. The window closes (the timer is cancelled
-    # and any caller timer restored) before the decision below is written. A fail-open mode gets a
-    # window with no deadline, so its error posture is unchanged.
+    # and any caller timer restored) before the stdout decision below is written; the stderr notes of
+    # the unreadable-payload and handler-crash paths are written inside it, and both paths exit 2 even
+    # when the deadline interrupts the note. A fail-open mode gets a window with no deadline, so its
+    # error posture is unchanged. Any other exception out of the window keeps the mode's posture too.
     window = _DeadlineWindow(None if is_fail_open else PRETOOL_BUDGET_SECONDS)
     payload = None
     try:
@@ -17040,6 +17086,20 @@ def main(argv):
         if exc.args[:1] != (window,):
             raise  # an enclosing window's deadline (an in-process caller's), not this call's
         _stderr_note(_deadline_message(handler_name, window.seconds, payload))
+        return 2
+    except BaseException as exc:
+        # Anything else out of the window: an error entering or leaving it (an ItimerError, or a caller's
+        # own alarm handler raising when its expiry is delivered during the take or on the way out), or a
+        # BaseException from the read or the handler that no branch above catches. Left to escape, it
+        # would end the run with a traceback and status 1, which the platform treats as non-blocking.
+        detail = "{}: {}".format(type(exc).__name__, exc)
+        if is_fail_open:
+            try:
+                return _dispatcher_fail_open_warn(handler_name, "dispatcher error: {}".format(detail))
+            except BaseException:
+                return 0
+        _stderr_note("aiqt_hooks: {}: the check did not complete ({}); failing closed".format(
+            handler_name, detail))
         return 2
     if stdout_obj is not None:
         try:

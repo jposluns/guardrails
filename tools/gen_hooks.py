@@ -36,6 +36,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import ast
 import json
 import os
 import re
@@ -90,8 +91,9 @@ HANDLER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 TIMEOUT = 10  # seconds the platform gives each hook command; the one source of the hook's deadline
 # The dispatcher mirrors TIMEOUT as HOOK_TIMEOUT_SECONDS and derives its PreToolUse deadline from that
 # mirror as PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - <margin>, so main() fails closed (exit 2) with
-# a named reason before the platform's timeout. check_deadline refuses a mirror that differs from TIMEOUT
-# and a margin under DEADLINE_MIN_MARGIN or one that leaves no positive budget.
+# a named reason before the platform's timeout. check_deadline refuses a mirror that differs from TIMEOUT,
+# a margin under DEADLINE_MIN_MARGIN or one that leaves no positive budget, and any other binding of
+# either name in the script.
 DEADLINE_MIN_MARGIN = 1
 _HOOK_TIMEOUT_LINE_RE = re.compile(r"^HOOK_TIMEOUT_SECONDS = (\d+)$", re.M)
 _PRETOOL_BUDGET_LINE_RE = re.compile(
@@ -231,23 +233,63 @@ def cross_check(hooks, corpus_ids, script_text, name):
                              .format(where, hook["handler"], SCRIPT_NAME))
 
 
+def _name_bindings(tree, name):
+    """The line of every binding of `name` the parse shows, wherever it sits: an assignment target of any
+    form (plain, augmented, annotated, walrus, for, with, a tuple or starred element), a del, an import, an
+    except or match capture, a def or class, and a global or nonlocal declaration, which lets a function
+    rebind the module's name. A write the parse cannot see (a star import, globals() or setattr) is outside
+    it."""
+    lines = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            bound = node.id == name and not isinstance(node.ctx, ast.Load)
+        elif isinstance(node, ast.alias):
+            bound = (node.asname or node.name.partition(".")[0]) == name
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            bound = name in node.names
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar, ast.FunctionDef,
+                               ast.AsyncFunctionDef, ast.ClassDef)):
+            bound = node.name == name
+        elif isinstance(node, ast.MatchMapping):
+            bound = node.rest == name
+        else:
+            continue
+        if bound:
+            lines.append(node.lineno)
+    return sorted(lines)
+
+
 def check_deadline(script_text):
     """Fail closed (ValueError) unless the dispatcher derives its PreToolUse deadline from TIMEOUT: exactly
     one `HOOK_TIMEOUT_SECONDS = <int>` line equal to TIMEOUT, and exactly one `PRETOOL_BUDGET_SECONDS =
     HOOK_TIMEOUT_SECONDS - <margin>` line whose margin is at least DEADLINE_MIN_MARGIN and below TIMEOUT,
-    so the budget is positive and the refusal is written before the platform's timeout."""
-    timeouts = _HOOK_TIMEOUT_LINE_RE.findall(script_text)
-    margins = _PRETOOL_BUDGET_LINE_RE.findall(script_text)
-    if len(timeouts) != 1 or int(timeouts[0]) != TIMEOUT:
+    so the budget is positive and the refusal is written before the platform's timeout. Each of those lines
+    must also be its name's only binding in the parsed script (_name_bindings), so no later assignment of
+    another form, and no copy of the line inside a string, stands in for it."""
+    timeouts = list(_HOOK_TIMEOUT_LINE_RE.finditer(script_text))
+    margins = list(_PRETOOL_BUDGET_LINE_RE.finditer(script_text))
+    if len(timeouts) != 1 or int(timeouts[0].group(1)) != TIMEOUT:
         raise ValueError("scripts/{}: expected one line 'HOOK_TIMEOUT_SECONDS = {}' mirroring the hooks.json "
-                         "timeout, found {}".format(SCRIPT_NAME, TIMEOUT, timeouts or "none"))
+                         "timeout, found {}".format(SCRIPT_NAME, TIMEOUT,
+                                                    [m.group(1) for m in timeouts] or "none"))
     if len(margins) != 1:
         raise ValueError("scripts/{}: expected one line 'PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - "
                          "<margin>', found {}".format(SCRIPT_NAME, len(margins)))
-    margin = float(margins[0])
+    margin = float(margins[0].group(1))
     if not DEADLINE_MIN_MARGIN <= margin < TIMEOUT:
         raise ValueError("scripts/{}: the PreToolUse budget margin {:g} must be at least {} and below the "
                          "{}-second timeout".format(SCRIPT_NAME, margin, DEADLINE_MIN_MARGIN, TIMEOUT))
+    try:
+        tree = ast.parse(script_text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+        raise ValueError("scripts/{}: cannot parse the dispatcher to check its deadline bindings ({}: {})"
+                         .format(SCRIPT_NAME, type(exc).__name__, exc))
+    for name, match in (("HOOK_TIMEOUT_SECONDS", timeouts[0]), ("PRETOOL_BUDGET_SECONDS", margins[0])):
+        line = script_text.count("\n", 0, match.start()) + 1
+        bindings = _name_bindings(tree, name)
+        if bindings != [line]:
+            raise ValueError("scripts/{}: {} must be bound only by its line {}, found bindings on lines {}"
+                             .format(SCRIPT_NAME, name, line, bindings or "none"))
 
 
 def render_hooks_json(hooks):
@@ -395,8 +437,10 @@ def main():
 #      its default is "block" or "warn" (default is authoring metadata, never rendered into output),
 #  13. a malformed/unknown default keyword fails closed (exit 2): the default whitelist.
 #  16. the PreToolUse deadline derives from TIMEOUT: a script whose HOOK_TIMEOUT_SECONDS differs from
-#      TIMEOUT, or that lacks either deadline line, fails closed (exit 2), and the margin is accepted from
-#      DEADLINE_MIN_MARGIN up to just below TIMEOUT and refused just outside either end.
+#      TIMEOUT, that lacks either deadline line, or that binds either name a second time (in any form, or
+#      with the budget line only inside a string) fails closed (exit 2), while reading the budget is
+#      accepted, and the margin is accepted from DEADLINE_MIN_MARGIN up to just below TIMEOUT and refused
+#      just outside either end.
 
 _APEX = """---
 corpus-id: apex01
@@ -713,6 +757,18 @@ def self_test_main():
         deadline_case("no-budget", "HOOK_TIMEOUT_SECONDS = {}\n".format(TIMEOUT), 2)
         deadline_case("literal-budget", "HOOK_TIMEOUT_SECONDS = {}\nPRETOOL_BUDGET_SECONDS = 8.0\n"
                       .format(TIMEOUT), 2)
+        # A second binding of either name, in any form, fails closed even beside the one accepted line.
+        accepted = _SCRIPT_DEADLINE.format(timeout=TIMEOUT, margin="2.0")
+        for label, extra in (("budget-rebound", "PRETOOL_BUDGET_SECONDS = 30\n"),
+                             ("budget-augmented", "PRETOOL_BUDGET_SECONDS += 30\n"),
+                             ("budget-tuple", "PRETOOL_BUDGET_SECONDS, _other = 30, 0\n"),
+                             ("budget-global", "def _rebind():\n    global PRETOOL_BUDGET_SECONDS\n"
+                                               "    PRETOOL_BUDGET_SECONDS = 30\n"),
+                             ("timeout-augmented", "HOOK_TIMEOUT_SECONDS += 50\n")):
+            deadline_case(label, accepted + extra, 2)
+        deadline_case("budget-line-in-string", "HOOK_TIMEOUT_SECONDS = {}\n_TEXT = '''\nPRETOOL_BUDGET_SECONDS = "
+                      "HOOK_TIMEOUT_SECONDS - 2.0\n'''\nPRETOOL_BUDGET_SECONDS = 30\n".format(TIMEOUT), 2)
+        deadline_case("budget-read-only", accepted + "_BUDGET_COPY = PRETOOL_BUDGET_SECONDS\n", 0)
         for margin, want in ((DEADLINE_MIN_MARGIN - 0.1, 2), (DEADLINE_MIN_MARGIN, 0),
                              (DEADLINE_MIN_MARGIN + 0.1, 0), (TIMEOUT - 0.1, 0), (TIMEOUT, 2),
                              (TIMEOUT + 0.1, 2)):
@@ -739,7 +795,7 @@ def self_test_main():
           "PreToolUse and the SessionStart-cannot-block overclaim); a Stop hook renders "
           "byte-identical hooks.json whether its default is 'block' or 'warn'; and the dispatcher's "
           "PreToolUse deadline must mirror TIMEOUT and leave a margin from DEADLINE_MIN_MARGIN up to just "
-          "below TIMEOUT (each end refused just outside it)" + note)
+          "below TIMEOUT (each end refused just outside it), with no second binding of either name" + note)
     return 0
 
 

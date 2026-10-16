@@ -116,9 +116,13 @@ It also covers the PreToolUse deadline posture (the dl-* checks): the hook's dea
 tools/gen_hooks.py TIMEOUT; each linear raw-scan probe decides what the single regex it replaced decided
 over a generated corpus; every PreToolUse mode exits 2 with the named refusal when a stub handler sleeps
 past a short test budget, a fail-open mode keeps its result, and the timer is cancelled before the decision
-is written; the shared timer window restores a caller's timer elapsed-aware, nests, and refuses a borrow
-it cannot make faithfully; and each PreToolUse handler decides its worst measured input shapes at 64 KB,
-256 KB and 1 MB within bounds set from a measured run. The timer and timing checks run in a child process.
+is written to stdout; the shared timer window restores a caller's timer elapsed-aware, nests, and refuses a
+borrow it cannot make faithfully; it gives the caller's state back wherever its own expiry lands (tiny
+windows in a loop, and the expiry delivered at the entry of __exit__) and when a caller expiry interrupts
+its take of the timer; any other exception out of the window fails a PreToolUse call closed and leaves a
+fail-open mode a warning; and each PreToolUse handler decides its worst measured input shapes at 64 KB,
+256 KB and 1 MB within CPU-time bounds set from a measured run, under a wall-clock hang guard that is not
+itself a bound. The timer and timing checks run in a child process.
 
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
@@ -1989,8 +1993,9 @@ def _test_stop_dispatch_note_sites(failures, tmp):
     permissionDecision "allow" mutant at the site fails here, in the hooks suite, not only in the
     orchestration suite: diff_wall_stop's wrong-event, unreadable-payload and diff-wall warnings;
     _orch_stop_family's unreadable-registry, unsaved-counter and failed-escape-spoof-record warnings
-    (Stop and TeammateIdle); orch_resume_audit's divergence warning; and main's unreadable-payload and
-    handler-crash fail-open notes. The fixtures are selftest_orch_hooks.Fixture repos under tmp."""
+    (Stop and TeammateIdle); orch_resume_audit's divergence warning; and main's unreadable-payload,
+    handler-crash and window-error fail-open notes. The fixtures are selftest_orch_hooks.Fixture repos
+    under tmp."""
     import selftest_orch_hooks as orch
 
     def note(label, result, needle):
@@ -2066,10 +2071,24 @@ def _test_stop_dispatch_note_sites(failures, tmp):
     def crash(_data):
         raise RuntimeError("ns-handler-crash")
 
+    class Escape(BaseException):
+        pass
+
+    def escape(_data):
+        raise Escape("ns-window-error")
+
     try:
         aiqt_hooks.HANDLERS["orch_stop_guard"] = crash
         note("(ns-dispatch-crash) a crashing Stop handler prints the fail-open note, never exit 2",
              dispatch("{}"), "ns-handler-crash")
+        aiqt_hooks.HANDLERS["orch_stop_guard"] = escape
+        try:
+            result = dispatch("{}")
+        except BaseException as exc:
+            result = (None, "main raised {}".format(type(exc).__name__), None)
+        note("(ns-dispatch-window-error) a BaseException out of a Stop dispatch's window, which no except "
+             "Exception branch catches, prints the fail-open note, never exit 2", result,
+             "Escape: ns-window-error")
     finally:
         aiqt_hooks.HANDLERS["orch_stop_guard"] = saved_handler
 
@@ -2411,12 +2430,20 @@ _DEADLINE_DENY_CASES = frozenset((
     ("gate_weakening", "noverify_after"), ("git_explicit_binding", "breadth_push_after_unbal"),
     ("protected_line", "push_force_after")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
-# Seconds one in-process handler call may take on a shape of that size. Measured on a 24-core host with
-# Python 3.14.4 (2026-10-15) after the linear scans, the slowest case took 0.09 s at 64 KB, 0.43 s at
-# 256 KB and 1.73 s at 1 MB (git_discard on nest_parens); before them, five handlers took 15 to 39 s or
-# more at 64 KB. Each bound is about 16, 7 and 4 times the measured worst and stays under
-# PRETOOL_BUDGET_SECONDS, so a slower runner passes while a return of super-linear growth does not.
+# CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
+# CPU time, plus that of the child processes it reaped). The gate is CPU time, not wall-clock time: a
+# loaded host deschedules the run without adding to its CPU time, so host load does not fail a correct
+# linear implementation. Over two runs on a 24-core host with Python 3.14.4 (2026-10-15) after the linear
+# scans, the slowest case used at most 0.09 s of CPU at 64 KB, 0.40 s at 256 KB and 1.83 s at 1 MB (on
+# nest_parens, under git_discard or git_stash_ref), its wall-clock time within 0.01 s of that; before them,
+# five handlers took 15 to 39 s or more at 64 KB. Each bound keeps a margin of about 17, 7 and 4 times
+# that worst and stays under PRETOOL_BUDGET_SECONDS, so a slower processor passes while a return of
+# super-linear growth does not.
 _DEADLINE_BOUNDS = {65536: 1.5, 262144: 3.0, 1048576: 7.0}
+# Each case runs under a _DeadlineWindow of this many wall-clock seconds, a hang guard only: far above
+# every bound, so a loaded host does not reach it, while a return of super-linear growth ends there
+# instead of running on for minutes. Wall-clock time is printed with a CPU failure, never gated on.
+_DEADLINE_HANG_SECONDS = 60.0
 _DEADLINE_CHILD_TIMEOUT = 900
 
 
@@ -2430,22 +2457,28 @@ def _deadline_fixtures(tmp):
     return plain, orch
 
 
-def _deadline_shape_runs(tmp, bounds):
-    """Every (handler, shape, size) case once, each in-process under a _DeadlineWindow of its size's
-    bound: [(handler, shape, size, seconds, outcome)], the outcome being the reduced decision, "deadline"
-    when the window fired, "hard-block" for an exit 2, or "crash: <type>"."""
+def _cpu_seconds():
+    """CPU seconds this process has used (every thread), plus those of the child processes it reaped."""
+    children = os.times()
+    return time.process_time() + children.children_user + children.children_system
+
+
+def _deadline_shape_runs(tmp, sizes):
+    """Every (handler, shape, size) case once, each in-process under a _DeadlineWindow of
+    _DEADLINE_HANG_SECONDS: [(handler, shape, size, cpu_seconds, wall_seconds, outcome)], the outcome being
+    the reduced decision, "deadline" when the window fired, "hard-block" for an exit 2, or "crash: <type>"."""
     plain, orch = _deadline_fixtures(tmp)
     runs = []
     for name, shapes in sorted(_DEADLINE_CASES.items()):
         handler = aiqt_hooks.HANDLERS[name]
         cwd = str(orch if name.startswith(("orch_", "review_")) else plain)
         for shape in shapes:
-            for size in sorted(bounds):
+            for size in sorted(sizes):
                 tool, tool_input = _DEADLINE_SHAPES[shape](size, cwd)
                 data = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input,
                         "cwd": cwd, "session_id": "deadline-session", "tool_use_id": "deadline-call"}
-                window = aiqt_hooks._DeadlineWindow(bounds[size])
-                began = time.monotonic()
+                window = aiqt_hooks._DeadlineWindow(_DEADLINE_HANG_SECONDS)
+                began, cpu_began = time.monotonic(), _cpu_seconds()
                 try:
                     with window:
                         code, stdout_obj, _stderr = handler(data)
@@ -2456,22 +2489,27 @@ def _deadline_shape_runs(tmp, bounds):
                     outcome = "deadline"
                 except Exception as exc:
                     outcome = "crash: {}".format(type(exc).__name__)
-                runs.append((name, shape, size, time.monotonic() - began, outcome))
+                runs.append((name, shape, size, _cpu_seconds() - cpu_began, time.monotonic() - began, outcome))
     return runs
 
 
 def _deadline_shape_failures(tmp):
     """(dl-shape) Every PreToolUse handler has shapes here, and on each shape at 64 KB, 256 KB and 1 MB it
-    reaches a decision within that size's bound, denying where the case carries a hazard."""
+    reaches a decision within the hang guard and that size's CPU-time bound, denying where the case
+    carries a hazard."""
     out = []
     missing = sorted(name for name, event in aiqt_hooks.HANDLER_EVENT.items()
                      if event == aiqt_hooks.PRETOOL and name not in _DEADLINE_CASES)
     if missing:
         out.append("(dl-shape-coverage) PreToolUse handlers with no timed shape: {}".format(", ".join(missing)))
-    for name, shape, size, seconds, outcome in _deadline_shape_runs(tmp, _DEADLINE_BOUNDS):
+    for name, shape, size, cpu, wall, outcome in _deadline_shape_runs(tmp, _DEADLINE_SIZES):
         label = "(dl-shape-{}-{}-{})".format(name, shape, size)
-        if outcome == "deadline" or seconds > _DEADLINE_BOUNDS[size]:
-            out.append("{} took {:.2f}s, over its {}s bound".format(label, seconds, _DEADLINE_BOUNDS[size]))
+        if outcome == "deadline":
+            out.append("{} reached no decision within the {:g}-second hang guard".format(
+                label, _DEADLINE_HANG_SECONDS))
+        elif cpu > _DEADLINE_BOUNDS[size]:
+            out.append("{} used {:.2f}s of CPU time ({:.2f}s wall-clock), over its {}s bound".format(
+                label, cpu, wall, _DEADLINE_BOUNDS[size]))
         elif (name, shape) in _DEADLINE_DENY_CASES and outcome != "deny":
             out.append("{} expected deny, got {}".format(label, outcome))
         elif outcome not in ("allow", "allow-note", "deny"):
@@ -2665,10 +2703,258 @@ def _deadline_restore_failures():
     return out
 
 
+class _CallerAlarm(Exception):
+    """An in-process caller's own alarm exception: an Exception, which a handler's except branch could
+    catch if the window let it reach the body."""
+
+
+def _deadline_race_failures(count=200000):
+    """(dl-race-*) The window's own expiry gives the caller back its SIGALRM disposition and its timer in
+    whichever frame the expiry is delivered. `count` tiny windows (1 to 40 microseconds) run under a caller
+    disposition, and `count` more nested in a 600-second window, each followed by a check of the
+    disposition and the outer timer (the outer window's handler, and its countdown active and no later than
+    before). The expiry landing at the entry of __exit__ is rare in such a loop, so it is also delivered
+    there deterministically, unnested and nested: signal.raise_signal from the sys.settrace call event of
+    __exit__, before any of its own code runs."""
+    out = []
+
+    def caller_alarm(signum, frame):
+        pass
+
+    def reset():
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, caller_alarm)
+
+    def tiny(index):
+        return aiqt_hooks._DeadlineWindow(1e-6 * (1 + index % 40))
+
+    def expires_at_exit_entry(window):
+        exit_code = aiqt_hooks._DeadlineWindow.__exit__.__code__
+
+        def tracer(frame, event, arg):
+            if event == "call" and frame.f_code is exit_code and frame.f_locals.get("self") is window:
+                sys.settrace(None)
+                signal.raise_signal(signal.SIGALRM)
+            return None
+        try:
+            with window:
+                sys.settrace(tracer)
+        except aiqt_hooks._HookDeadline as exc:
+            return exc.args[:1] == (window,)
+        finally:
+            sys.settrace(None)
+        return False
+
+    reset()
+    try:
+        lost = 0
+        for index in range(count):
+            try:
+                with tiny(index):
+                    pass
+            except aiqt_hooks._HookDeadline:
+                pass
+            if (signal.getsignal(signal.SIGALRM) is not caller_alarm
+                    or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0)):
+                lost += 1
+                reset()
+        if lost:
+            out.append("(dl-race-unnested) {} of {} tiny windows left SIGALRM or ITIMER_REAL other than the "
+                       "caller had them".format(lost, count))
+        outer = aiqt_hooks._DeadlineWindow(600.0)
+        lost = None
+        with outer:
+            for index in range(count):
+                before = signal.getitimer(signal.ITIMER_REAL)
+                try:
+                    with tiny(index):
+                        pass
+                except aiqt_hooks._HookDeadline as exc:
+                    if exc.args[:1] == (outer,):
+                        raise
+                after = signal.getitimer(signal.ITIMER_REAL)
+                if (getattr(signal.getsignal(signal.SIGALRM), "__self__", None) is not outer
+                        or after[1] != 0.0 or not 0 < after[0] <= before[0]):
+                    lost = (index, before, after)
+                    break
+        if lost is not None:
+            out.append("(dl-race-nested) tiny window {} nested in a 600-second window left SIGALRM other than "
+                       "the outer window's handler, or its countdown {!r} as {!r}".format(*lost))
+        reset()
+        raised = expires_at_exit_entry(aiqt_hooks._DeadlineWindow(60.0))
+        handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+        if not (raised and handler is caller_alarm and timer == (0.0, 0.0)):
+            out.append("(dl-race-exit-entry) the window's expiry delivered at the entry of __exit__ must raise "
+                       "its deadline and give back the caller's disposition with the timer inactive, got "
+                       "raised {}, handler {!r}, timer {!r}".format(raised, handler, timer))
+        reset()
+        outer = aiqt_hooks._DeadlineWindow(600.0)
+        with outer:
+            raised = expires_at_exit_entry(aiqt_hooks._DeadlineWindow(60.0))
+            handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+        if not (raised and getattr(handler, "__self__", None) is outer and timer[1] == 0.0
+                and 599.0 < timer[0] <= 600.0):
+            out.append("(dl-race-exit-entry-nested) an inner window's expiry delivered at the entry of its "
+                       "__exit__ must give the outer window its handler and its countdown back, got raised {}, "
+                       "handler {!r}, timer {!r}".format(raised, handler, timer))
+    finally:
+        sys.settrace(None)
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+    return out
+
+
+def _deadline_take_failures(count=50000):
+    """(dl-take-*) The take of the caller's timer cannot lose it. A caller expiry that trips during the take
+    runs the caller's handler as the take's call returns, so it is delivered there deterministically: from
+    an opcode trace event of __enter__, at the first instruction that finds the caller's timer taken and
+    its handler not yet swapped, with a handler that raises. That exception must leave the with statement
+    and the caller's periodic timer must be back, less the time used, with its interval. A periodic timer
+    taken between an expiry and the delivery of its signal reads (0, interval), so `count` windows are
+    also entered as a periodic caller timer of one millisecond comes due 1 to 40 microseconds after it is
+    set, and each must leave that timer's interval in place."""
+    out = []
+    enter_code = aiqt_hooks._DeadlineWindow.__enter__.__code__
+    injected = []
+
+    def raising(signum, frame):
+        raise _CallerAlarm("caller alarm")
+
+    def tracer(frame, event, arg):
+        if event == "call" and frame.f_code is not enter_code:
+            return None
+        frame.f_trace_opcodes = True  # set again on each event: Python 3.14 starts opcode events from a line event
+        if (event == "opcode" and not injected and signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+                and signal.getsignal(signal.SIGALRM) is raising):
+            injected.append(frame.f_lineno)
+            signal.raise_signal(signal.SIGALRM)
+        return tracer
+
+    escaped = None
+    signal.signal(signal.SIGALRM, raising)
+    signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
+    try:
+        sys.settrace(tracer)
+        try:
+            with aiqt_hooks._DeadlineWindow(5.0):
+                pass
+        except _CallerAlarm:
+            escaped = "the caller's exception"
+        except BaseException as exc:
+            escaped = type(exc).__name__
+        finally:
+            sys.settrace(None)
+        handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+    if not (injected and escaped == "the caller's exception" and handler is raising and timer[1] == 30.0
+            and 29.0 < timer[0] <= 30.0):
+        out.append("(dl-take-raises) a caller handler raising on an expiry delivered just after the take must "
+                   "get its periodic timer back, got delivery at {!r}, escaped {}, handler {!r}, timer {!r}"
+                   .format(injected, escaped, handler, timer))
+
+    def counting(signum, frame):
+        pass
+
+    lost = 0
+    signal.signal(signal.SIGALRM, counting)
+    try:
+        for index in range(count):
+            signal.setitimer(signal.ITIMER_REAL, 1e-6 * (1 + index % 40), 1e-3)
+            try:
+                with aiqt_hooks._DeadlineWindow(5.0):
+                    pass
+            except aiqt_hooks._HookDeadline:
+                pass
+            if abs(signal.getitimer(signal.ITIMER_REAL)[1] - 1e-3) > 1e-6:
+                lost += 1
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+    if lost:
+        out.append("(dl-take-pending) {} of {} windows entered as a periodic caller timer came due left that "
+                   "timer with no interval".format(lost, count))
+    return out
+
+
+def _deadline_window_error_failures():
+    """(dl-caller-raises, dl-enter-raises, dl-enter-raises-fail-open) Any exception out of the window fails
+    a PreToolUse call closed with exit 2 and a stderr note, and a fail-open mode warns on exit 0. A caller
+    timer of 20 ms whose handler raises RuntimeError comes due during an in-process PreToolUse call whose
+    stub handler sleeps inside an except Exception branch that allows, as several handlers do on a
+    cannot-evaluate: the call must exit 2 naming the RuntimeError, run the caller's handler once and give
+    back its disposition with the timer inactive. A window whose __enter__ raises signal.ItimerError must
+    exit 2 on a PreToolUse mode and warn on exit 0 on a fail-open one."""
+    out = []
+    calls = []
+
+    def raising(signum, frame):
+        calls.append(signum)
+        raise RuntimeError("caller alarm")
+
+    def allows_on_error(_data):
+        try:
+            time.sleep(1.0)
+        except Exception:
+            return (0, None, None)
+        return (0, None, None)
+
+    signal.signal(signal.SIGALRM, raising)
+    signal.setitimer(signal.ITIMER_REAL, 0.02)
+    try:
+        with _stub_handler("diff_source_pretool", allows_on_error):
+            try:
+                code, err, _seconds = _main_run("diff_source_pretool")
+            except BaseException as exc:
+                code, err = "raised {}: {}".format(type(exc).__name__, exc), ""
+        handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+    if not (code == 2 and "RuntimeError: caller alarm" in err and "failing closed" in err
+            and calls == [signal.SIGALRM] and handler is raising and timer == (0.0, 0.0)):
+        out.append("(dl-caller-raises) a caller handler raising during an in-process PreToolUse call must "
+                   "fail it closed with exit 2, got exit {!r}, stderr {!r}, deliveries {}, handler {!r}, "
+                   "timer {!r}".format(code, err, len(calls), handler, timer))
+
+    class EnterRaises(aiqt_hooks._DeadlineWindow):
+        __slots__ = ()
+
+        def __enter__(self):
+            raise signal.ItimerError("setitimer refused")
+
+    fail_open = sorted(mode for mode, event in aiqt_hooks.HANDLER_EVENT.items()
+                       if event in aiqt_hooks.FAIL_OPEN_EVENTS)[0]
+    results = {}
+    saved = aiqt_hooks._DeadlineWindow
+    aiqt_hooks._DeadlineWindow = EnterRaises
+    try:
+        for mode in ("diff_source_pretool", fail_open):
+            stdout = io.StringIO()
+            try:
+                code, err, _seconds = _main_run(mode, stdout=stdout)
+            except BaseException as exc:
+                code, err = "raised {}: {}".format(type(exc).__name__, exc), ""
+            results[mode] = (code, err, stdout.getvalue())
+    finally:
+        aiqt_hooks._DeadlineWindow = saved
+    code, err, _text = results["diff_source_pretool"]
+    if not (code == 2 and "ItimerError: setitimer refused" in err and "failing closed" in err):
+        out.append("(dl-enter-raises) a window whose __enter__ raises must fail a PreToolUse call closed with "
+                   "exit 2, got exit {!r} and stderr {!r}".format(code, err))
+    code, _err, text = results[fail_open]
+    if not (code == 0 and "ItimerError: setitimer refused" in text and "systemMessage" in text):
+        out.append("(dl-enter-raises-fail-open) a window whose __enter__ raises must leave the fail-open mode {} "
+                   "a warning on exit 0, got exit {!r} and stdout {!r}".format(fail_open, code, text))
+    return out
+
+
 def _deadline_child(tmp):
     """The deadline checks that set timers and dispositions, plus the shape timings, in this (child)
     process; returns their failures."""
-    return (_deadline_path_failures() + _deadline_restore_failures()
+    return (_deadline_path_failures() + _deadline_restore_failures() + _deadline_race_failures()
+            + _deadline_take_failures() + _deadline_window_error_failures()
             + _deadline_shape_failures(Path(tmp)))
 
 
