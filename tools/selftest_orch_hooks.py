@@ -4456,10 +4456,11 @@ def _citecheck_step_cases(tmp):
     command reads only the here-document its own standard input receives (bash gives it the last of its
     standard-input redirections, and a later one of fd 0 onto itself leaves it), its sources keep their
     option order in the note, the row and under the citation cap, and where its standard input is not its
-    own here-document it is named as not read. A command that does not lex, or whose lexing reaches a
-    here-document delimiter that a backslash-newline splits, quoted or not, is scanned as written and names
-    the expansion of each here-document with an unquoted delimiter as not read (a shift inside a one-line
-    $((...)) is none), and a command is read after the reserved words that begin its segment (a brace
+    own here-document it is named as not read. A command that does not lex, or in which a backslash-newline
+    splits a here-document delimiter where bash reads one (at an operator the lexer reads, quoted or not, or
+    unquoted inside a command substitution in double quotes), is scanned as written and names the expansion
+    of each here-document with an unquoted delimiter as not read (a shift inside a one-line $((...)) is
+    none), and a command is read after the reserved words that begin its segment (a brace
     group's '{', '!', 'if', 'then', 'do', 'time -p', 'time --', 'coproc'). The scan of a message stops at
     the deadline: a stand-in pattern moves the clock on at line 2 of the masking or of the search, line 3
     is not scanned, and the note says no citation was checked, naming the budget."""
@@ -4688,16 +4689,21 @@ def _citecheck_step_cases(tmp):
     # A here-document delimiter that a backslash-newline splits is the word bash reads once it is removed:
     # <<E\, a newline and OF, <<\, a newline and EOF, and <<-\, a newline and EOF are the unquoted EOF, so
     # bash expands the body, and the command is scanned as one that does not lex, with that expansion named,
-    # with or without a $ in the body. The lexer reads each split delimiter it reaches as one that holds a
-    # newline, which no line matches, so it would take the rest of the command as that body: a later
-    # command is scanned too, and so is one after a split delimiter that bash reads as quoted (<<E\, a
+    # with or without a $ in the body. The lexer reads each split delimiter at an operator it reads as one
+    # that holds a newline, which no line matches, so it would take the rest of the command as that body: a
+    # later command is scanned too, and so is one after a split delimiter that bash reads as quoted (<<E\, a
     # newline and 'OF'; <<$\, a newline and 'EOF'; <<"E"\, a newline and OF; <<"E\, a newline and OF"), for
     # which no expansion is named, or after a split '<<' inside $((...)), which the lexer reads as an
     # operator and bash as a shift. Inside single quotes bash keeps the backslash-newline and also runs the
-    # body to the end, so the later command scanned there is a note the command did not earn. A look-alike
-    # the lexer does not reach, inside quotes, a comment or a quoted here-document's body, or after an
-    # escaped '<', leaves the command lexed, so its -F file is read. The lexer is given at most
-    # _CITECHK_SPLIT_PROBES such operators to try: with one more, the command is scanned as written.
+    # body to the end, so the later command scanned there is a note the command did not earn. A here-document
+    # inside a command substitution in double quotes, $(...) or backticks, is real: bash expands its body,
+    # which the lexer reads as text, so with a split delimiter that bash reads as unquoted the command is
+    # scanned as written and that expansion named; one that bash reads as quoted, and a '<<' inside single
+    # quotes or $((...)) in such a substitution, leaves the command lexed. A look-alike the lexer does not
+    # read as an operator, inside quotes (after a substitution closes, too), a comment or a quoted
+    # here-document's body (also one that, with '<(' for its '<<', would be the line that closes that body),
+    # or after an escaped '<', leaves the command lexed, so its -F file (after the escaped '<', its -m value)
+    # is read, and so do nine of them.
     split, later = {}, "git commit -m 'see tools/a.py:1'\n"
     for name, command in (("mid", "git commit -F - <<E\\\nOF\nsee tools/a.py:1\nEOF\n"),
                           ("mid-dollar", "git commit -F - <<E\\\nOF\nsee $(printf tools/a.py):1\nEOF\n"),
@@ -4715,16 +4721,19 @@ def _citecheck_step_cases(tmp):
                           ("look-alike-double", "git commit -F msg.txt; echo \"x <<E\\\nOF y\""),
                           ("look-alike-comment", "git commit -F msg.txt # x <<E\\\nOF\n"),
                           ("look-alike-body", "git commit -F msg.txt; cat <<'Q'\nx <<E\\\nOF y\nQ\n"),
-                          ("look-alike-escaped", "echo a\\<<E\\\nOF\n" + later)):
+                          ("look-alike-escaped", "echo a\\<<E\\\nOF\n" + later),
+                          ("look-alike-collision", "git commit -F msg.txt; cat <<'x <(E\\'\nx <<E\\\nOF\nx <(E\\\n"),
+                          ("look-alike-after-subst", "git commit -F msg.txt; echo \"$(date) x <<E\\\nOF y\""),
+                          ("look-alike-many", "git commit -F msg.txt; echo" + " \"x <<E\\\nOF y\"" * 9),
+                          ("subst-double", "git commit -m \"$(cat <<E\\\nOF\nsee tools/${F}.py:1\nEOF\n)\""),
+                          ("backticks-double", "git commit -m \"`cat <<E\\\nOF\nsee tools/${F}.py:1\nEOF\n`\""),
+                          ("subst-quoted", "git commit -F msg.txt; echo \"$(cat <<E\\\n'OF'\nx\nEOF\n)\""),
+                          ("subst-single", "git commit -F msg.txt; echo \"$(echo 'x <<E\\\nOF y')\""),
+                          ("subst-arith", "git commit -F msg.txt; echo \"$((x<<\\\n2))\"")):
         verdict, note, rows = _citecheck_run(steps.root, command, "split-delim-" + name)
         split[name] = (verdict, [(r["detail"]["parse"], [c["cite"] for c in r["detail"]["citations"]],
                                   r["detail"]["sources"], r["detail"]["sources_unread"]) for r in rows],
                        "The git commit message expanded <<" in note)
-    probes = aiqt_hooks._CITECHK_SPLIT_PROBES
-    for name, count in (("probes-inside", probes - 1), ("probes-at", probes), ("probes-past", probes + 1)):
-        command = "git commit -F msg.txt; echo" + " \"x <<E\\\nOF y\"" * count
-        _verdict_, _note, rows = _citecheck_run(steps.root, command, "split-delim-" + name)
-        split[name] = [(r["detail"]["parse"], r["detail"]["sources"]) for r in rows]
     by_raw = [("raw", ["tools/a.py:1"], ["command text"], named("EOF"))]
     by_quoted = [("raw", ["tools/a.py:1"], ["command text"], [])]
     by_file = ("warn", [("lexed", ["tools/a.py:1"], ["-F msg.txt"], [])], False)
@@ -4737,8 +4746,10 @@ def _citecheck_step_cases(tmp):
            "later-in-single-quotes": ("warn", by_quoted, False), "look-alike-single": by_file,
            "look-alike-double": by_file, "look-alike-comment": by_file, "look-alike-body": by_file,
            "look-alike-escaped": ("warn", [("lexed", ["tools/a.py:1"], ["-m value"], [])], False),
-           "probes-inside": [("lexed", ["-F msg.txt"])], "probes-at": [("lexed", ["-F msg.txt"])],
-           "probes-past": [("raw", ["command text"])]})
+           "look-alike-collision": by_file, "look-alike-after-subst": by_file, "look-alike-many": by_file,
+           "subst-double": ("warn", [("raw", [], ["command text"], named("EOF"))], True),
+           "backticks-double": ("warn", [("raw", [], ["command text"], named("EOF"))], True),
+           "subst-quoted": by_file, "subst-single": by_file, "subst-arith": by_file})
     # A command after the reserved words that begin its segment is read: in a brace group, after '!', 'if'
     # or 'then', after 'do', after 'time -p', after a '--' that follows time or its -p, and after coproc,
     # with the NAME bash reads before a compound command. Where bash runs another command, none is read: a

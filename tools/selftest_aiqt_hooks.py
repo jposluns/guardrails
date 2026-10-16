@@ -7395,6 +7395,18 @@ def _main_isolated(monitor):
                 _redir("git diff > ./proc/self/fd/1"), [(">", 1, "./proc/self/fd/1", "opaque", "opaque")])
         texpect("(tok-18e) a nested 'dev' component ('foo/dev/x') is a plain file, still file-real",
                 _redir("git diff > foo/dev/x"), [(">", 1, "foo/dev/x", "file-real", "file-real")])
+        # Given a spans list, the lexer reports, in order, the '<<' of each quoted heredoc and each
+        # double-quoted string it reads in a word or a redirect target, and returns the same segments. A
+        # comment, a heredoc's body, single quotes, escaped quotes and a heredoc's quoted delimiter give none.
+        _spans_cmd = ("cat <<'A' \"x <<B\" >\"o\" # \"c\" <<'C'\n<<'D' \"y\"\nA\n"
+                      "echo '\"s\"' \\\"e\\\" <<-\"Q\" a\"b\"\nw\nQ\n")
+        _spans = []
+        _spans_segs = aiqt_hooks._lex_command(_spans_cmd, spans=_spans)
+        texpect("(tok-19) spans: each quoted heredoc's '<<' and each double-quoted string the lexer reads",
+                ([(s, _spans_cmd[s:e]) for s, e in _spans], _spans_segs == aiqt_hooks._lex_command(_spans_cmd)),
+                ([(_spans_cmd.index(at), text) for at, text in (("<<'A'", "<<"), ("\"x", "\"x <<B\""),
+                                                                 ("\"o\"", "\"o\""), ("<<-", "<<"),
+                                                                 ("\"b\"", "\"b\""))], True))
         # Unsupported constructs are cannot-evaluate (ValueError), never partial argv. ROUND-2 FINDING 17: an
         # UNQUOTED heredoc still raises (its body interpolates and stays in scope); a QUOTED heredoc does NOT
         # (its body is literal data, excluded from analysis - asserted separately below).
