@@ -810,9 +810,10 @@ def _lex_command(command, partial=False, heredocs=None):
     of their '<<' operators: the index in the returned list of the segment the heredoc redirects, how many
     of that segment's redirects precede it, and its body as _skip_heredoc_bodies gives it (empty where no
     line follows its operator's line). A heredoc carries no source fd here (an fd before '<<' is
-    unsupported), so it is that segment's standard input unless a later redirect of fd 0 replaces it: bash
-    gives a command the last of its standard-input redirections. Only the citation check (_citechk_commands)
-    passes it, and passing it changes nothing else the lexer returns.
+    unsupported), so it is that segment's standard input unless a later redirect of fd 0 replaces it (one
+    that duplicates fd 0 onto itself, <&0, does not): bash gives a command the last of its standard-input
+    redirections. Only the citation check (_citechk_commands) passes it, and passing it changes nothing else
+    the lexer returns.
 
     When partial is True the raise-on-error contract is replaced by a best-effort one: instead of raising,
     the lexer returns (segments, complete), where segments are the COMPLETE segments recovered before the
@@ -12840,17 +12841,21 @@ def _cite_sha256(blob):
 
 def _cite_real(path, deadline):
     """(path resolved through symlinks, None), or (None, why) where the walk stops without a result: why
-    "links" where it would follow more than _CITE_MAX_LINKS symlinks, "deadline" where the call's deadline
-    is reached before it ends (checked before each component it takes and before each symlink it reads),
-    and None where the path cannot be resolved (an embedded NUL, for example). The walk is
-    os.path.realpath's own as Python 3.14 makes it (non-strict, and a symlink met again at the same path is
-    taken from its cache, not read again), so where it ends its result is os.path.realpath's. Every symlink
-    it meets counts toward the bound, a cached one as many times as its first resolution followed symlinks
-    (itself and those its target led through), since Linux reads it again each time it meets it and counts
-    each of those symlinks again. Linux follows at most 40 symlinks in one path lookup, counting every one
-    it meets, so for a path whose every component exists the count is the kernel's own, and a path the
-    kernel can open is never refused for the bound. The walk takes at most the path's components and those
-    of the at most _CITE_MAX_LINKS targets it reads (one lstat and one join, or one cut for '..', each).
+    "links" where it would follow more than _CITE_MAX_LINKS symlinks or meets a symlink again while that
+    symlink's own resolution is still under way (a loop), "deadline" where the call's deadline is reached
+    before it ends (checked before each component it takes and before each symlink it reads), and None where
+    the path cannot be resolved (an embedded NUL, for example). The walk is os.path.realpath's own as Python
+    3.14 makes it (non-strict, and a symlink met again at the same path is taken from its cache, not read
+    again), so where it ends its result is os.path.realpath's; a loop, which os.path.realpath leaves as the
+    link's own path, ends it without a result instead. Every symlink it meets counts toward the bound, a
+    cached one as many times as its first resolution followed symlinks (itself and those its target led
+    through), since Linux reads it again each time it meets it and counts each of those symlinks again.
+    Linux follows at most 40 symlinks in one path lookup, counting every one it meets, so for a path whose
+    every component exists the count is the kernel's own (a loop, which the kernel follows until it passes
+    that bound and then refuses with ELOOP, is refused here when it is met), and a path the kernel can open
+    is never refused for the bound. A loop met after a missing component is refused for the bound too,
+    where the kernel refuses the path as missing. The walk takes at most the path's components and those of
+    the at most _CITE_MAX_LINKS targets it reads (one lstat and one join, or one cut for '..', each).
     The bound does not make that quick: where the targets are thousands of components long, each lstat is
     of a path up to PATH_MAX characters, and a walk within the bound can take seconds of CPU time. The
     deadline is what bounds such a walk."""
@@ -12880,11 +12885,13 @@ def _cite_real(path, deadline):
                     current = step
                     continue
                 cached = seen.get(step, False)
-                followed += 1 if not cached else cached[1]  # a loop (still unresolved, None) counts once
+                if cached is None:  # met again inside its own resolution: a loop, which Linux follows until
+                    return None, "links"  # it passes the bound, so it refuses the path (ELOOP)
+                followed += 1 if cached is False else cached[1]
                 if followed > _CITE_MAX_LINKS:
                     return None, "links"
-                if cached is not False:  # resolved before, or a loop, where the link's path is kept
-                    current = step if cached is None else cached[0]
+                if cached is not False:  # resolved before: where it led, from the cache
+                    current = cached[0]
                     continue
                 if _cite_over(deadline):  # the lstat may have used the last of the time: no readlink after it
                     return None, "deadline"
@@ -12914,8 +12921,8 @@ def _cite_resolution(path, deadline):
     walked, else what _cite_real gives ("links", "deadline", or None where the path cannot be resolved).
     Every path the recorder or the citation check resolves goes through here, so a resolution starts only
     before the deadline, is given at most _CITE_MAX_PATH characters, follows at most _CITE_MAX_LINKS
-    symlinks (each one met counted, as Linux counts them), and stops at the deadline between any two of its
-    components and before each symlink it reads."""
+    symlinks (each one met counted, as Linux counts them, and a loop refused as over that bound), and stops
+    at the deadline between any two of its components and before each symlink it reads."""
     if len(path) > _CITE_MAX_PATH:
         return None, "path"
     if _cite_over(deadline):
@@ -13686,13 +13693,14 @@ def citation_read_recorder(data):
 # resolves goes through _cite_resolution (_citechk_real): a message or body file, a cited path (joined to
 # the repository top where relative), the repository top a diff is read against, and the session cwd and a
 # git -C directory it compares. A path longer than _CITE_MAX_PATH characters, one whose resolution would
-# follow more than _CITE_MAX_LINKS symlinks, and one reached, or still being walked, once the deadline has
-# passed are not resolved: a body file is named as not read, and each range that needs the path as not
-# judged, with the bound or the budget named (where the deadline passes before the toplevel probe, that
-# note names each body file not read). The deadline is checked at each line of a text's scan, before each
-# citation is judged, before each path is resolved, between two components of its resolution and before
-# each symlink it reads, before each stat, open or fstat of a resolved path, before each chunk of a message,
-# body or cited-file read and before each row's digest. A step under way when it is reached finishes
+# follow more than _CITE_MAX_LINKS symlinks or meets a symlink loop (which Linux follows until it passes
+# that bound), and one reached, or still being walked, once the deadline has passed are not resolved: a body
+# file is named as not read, and each range that needs the path as not judged, with the bound or the budget
+# named (where the deadline passes before the toplevel probe, that note names each body file not read). The
+# deadline is checked at each line of a text's scan, before each citation is judged, before each path is
+# resolved, between two components of its resolution and before each symlink it reads, before each stat,
+# open or fstat of a resolved path, before each chunk of a message, body or cited-file read and before each
+# row's digest. A step under way when it is reached finishes
 # first: one line of a scan, one lstat or readlink of a resolution, one stat, open or fstat, one chunk's
 # read, or one digest (at most _CITE_MAX_FILE bytes). Not checked against the deadline, and bounded by size
 # or count instead: the two ledger generations (at most _CITECHK_LEDGER_MAX bytes each), read and parsed
@@ -13702,14 +13710,18 @@ def citation_read_recorder(data):
 # records and of the range against the rows of its file (ledgers within their bound); the parse of a diff
 # probe's output (what git printed in the time it was given); the lexing of the command and the parse of
 # its here-documents, once each, at whatever size the payload gives them, with the join of a body file or
-# git -C path to the directory it is relative to; the split of each text into lines before its scan (at the
+# git -C path to the directory it is relative to; for a command that does not lex, the search of its text
+# for here-documents with an unquoted delimiter; the split of each text into lines before its scan (at the
 # text's size); and the orchestration registry read that locates the state directory (read whole, as every
 # hook here reads it) and the guard-events append. A command's standard input (-F -) is the here-document
-# bash gives it, its last standard-input redirection, read once however many -F - options name it; where
-# that redirection is no here-document of the command, standard input is named as not read. Each text is
-# scanned once, in the order the command's options name it, and a cited or body-file path longer than
-# _CITECHK_PATH_SHOWN characters is shown in the note and the row shortened to that many characters
-# (_citechk_short).
+# bash gives it, its last standard-input redirection (a later one that duplicates fd 0 onto itself, such as
+# <&0, leaves it), read once however many -F - options name it; where that redirection is no here-document
+# of the command, standard input is named as not read. A command that does not lex is scanned as written,
+# and the expansion of each here-document with an unquoted delimiter in it is named as not read. A command
+# is found after the reserved words that begin its segment, so one in a brace group or after '!', 'if' or
+# 'then' is read. Each text is scanned once, in the order the command's options name it, and a cited or
+# body-file path longer than _CITECHK_PATH_SHOWN characters is shown in the note and the row shortened to
+# that many characters (_citechk_short).
 _CITECHK_BODY_MAX = 1024 * 1024          # a message or body file larger than this is not read (noted)
 _CITECHK_LEDGER_MAX = 2 * _CITE_CAP      # a ledger generation larger than this is not read (noted)
 _CITECHK_MAX_CITES = 200                 # at most this many citations are judged per Bash call
@@ -13726,6 +13738,14 @@ _CITECHK_PREFILTER = re.compile(r"\bcommit\b|\bpr\b")
 _CITECHK_RAW_KINDS = ((re.compile(r"\bgit\b[^\n;&|]*\bcommit\b"), "git-commit"),
                       (re.compile(r"\bgh\b[^\n;&|]*\bpr\s+create\b"), "gh-pr-create"),
                       (re.compile(r"\bgh\b[^\n;&|]*\bpr\s+edit\b"), "gh-pr-edit"))
+# Why the expansions of an unquoted here-document in such a command are named as not read.
+_CITECHK_EXPANDED = ("its delimiter is unquoted, so bash expands parameters, command substitutions and "
+                     "arithmetic in its body, and the command does not lex, so only its text as written was "
+                     "scanned")
+# The reserved words after which bash reads a command in the same segment ({ git commit ...; }, ! git commit,
+# if git commit, then, elif, else, while, until, do and time, with time's -p): passed over to the command.
+# The words are lexed, so a quoted spelling ('{'), which bash runs as a command name, is passed over too.
+_CITECHK_LEADING = frozenset(("{", "!", "if", "then", "elif", "else", "while", "until", "do", "time"))
 # Option tables: the short options that take a value (attached, or the next word), the short options whose
 # value is optional and only ever attached, and the long options that take the next word as their value.
 _CITECHK_GIT_SHORT = "mFCct"
@@ -13809,7 +13829,8 @@ def _citechk_short(path):
 def _citechk_real(path, what, deadline):
     """(path resolved through _cite_resolution, None), or (None, why it was not resolved): what (the path, as
     the note names it) is longer than _CITE_MAX_PATH characters, its resolution would follow more than
-    _CITE_MAX_LINKS symlinks, or the check's deadline has been reached, before the resolution or during it
+    _CITE_MAX_LINKS symlinks or meets a symlink loop (both named as the link bound), or the check's
+    deadline has been reached, before the resolution or during it
     (_CITECHK_OUT_OF_TIME); (None, None) where it cannot be resolved (an embedded NUL, for example)."""
     real, why = _cite_resolution(path, deadline)
     if why == "path":
@@ -13869,17 +13890,47 @@ def _citechk_read_body(path, deadline):
     return text.removeprefix("\ufeff"), None
 
 
+def _citechk_expanded_heredocs(command):
+    """The delimiters, in order, of the here-documents whose delimiter is unquoted in command, a command that
+    does not lex: each '<<' or '<<-' whose delimiter word _parse_heredoc_delim reads as unquoted (a
+    here-string's '<<<' has none, its third '<' being no word), found in the text with each backslash-newline
+    removed (bash removes it before it reads the operator, so '<\\', a newline and '<EOF' is one too). Found
+    in the text as written, not lexed, so an operator inside quotes or inside another here-document's body is
+    found too."""
+    text, out = command.replace("\\\n", ""), []
+    at = text.find("<<")
+    while at != -1:
+        parsed = _parse_heredoc_delim(text, at + 2, len(text))
+        if parsed is not None and not parsed[0]:
+            out.append(parsed[1])
+        at = text.find("<<", at + 2)
+    return out
+
+
+def _citechk_keeps_stdin(red):
+    """Whether a redirect of fd 0 leaves standard input as it was: one that duplicates or moves fd 0 onto
+    itself (<&0, 0<&00, 0>&0, 0<&0-), which bash makes without replacing what fd 0 reads."""
+    target = red.target[:-1] if red.target.endswith("-") else red.target
+    return red.op in ("<&", ">&") and target.isascii() and target.isdigit() and int(target) == 0
+
+
 def _citechk_commands(command, cwd, deadline):
     """The git commit and gh pr create or edit commands of a Bash command, each a dict: cmd (git-commit,
     gh-pr-create or gh-pr-edit), parse ("lexed", or "raw" where the command does not lex and its whole text
     is scanned as body text), texts [(label, text)] in the order the command's options name them, unread
     [(label, reason)], repo (the directory the command runs in, after a git -C; None without an absolute
-    session cwd) and base (a gh --base value). A message or body file resolves against repo and is read by
+    session cwd) and base (a gh --base value). A raw command names, as not read, the expansion of each
+    here-document with an unquoted delimiter that its text shows (_citechk_expanded_heredocs): bash expands
+    parameters, command substitutions and arithmetic in such a body, and the scan saw only the text as
+    written. A command is found after any reserved words that begin its segment (_CITECHK_LEADING), so one
+    inside a brace group or after '!', 'if' or 'then' is read; a redirection of the group as a whole
+    (after its '}') is not the command's own. A message or body file resolves against repo and is read by
     _citechk_read_body within the check's deadline. "-" is standard input, one stream however many -F -
     options name it, so it is taken once, at the first: the body of the here-document bash gives the
-    command, which is its last standard-input redirection (_lex_command), and otherwise, where that last
-    redirection is a file, a descriptor or none of the command's own (a pipe, for example), named as
-    unseen. A here-document is read only by the command it redirects."""
+    command, which is its last standard-input redirection (_lex_command; a later <&0 that duplicates fd 0
+    onto itself leaves it), and otherwise, where that last redirection is a file, a descriptor or none of
+    the command's own (a pipe, or a redirection of its group, for example), named as unseen. A
+    here-document is read only by the command it redirects."""
     heredocs = []
     try:
         segments = _lex_command(command, heredocs=heredocs)
@@ -13888,14 +13939,19 @@ def _citechk_commands(command, cwd, deadline):
                       for found in [regex.search(command)] if found)
         if not hits:
             return []
-        return [{"cmd": hits[0][1], "parse": "raw", "texts": [("command text", command)], "unread": [],
+        unread = [("expanded <<{} here-document".format(_citechk_short(delim)), _CITECHK_EXPANDED)
+                  for delim in _citechk_expanded_heredocs(command)]
+        return [{"cmd": hits[0][1], "parse": "raw", "texts": [("command text", command)], "unread": unread,
                  "repo": cwd, "base": None}]
     stdin = {}  # segment index: (redirects before it, body) of its last here-document
     for index, before, body in heredocs:
         stdin[index] = before, body
     out = []
     for index, seg in enumerate(segments):
-        argv, at = seg.argv, _command_word_index(seg.argv)
+        argv = seg.argv
+        while argv and argv[0] in _CITECHK_LEADING:
+            argv = argv[2:] if argv[0] == "time" and argv[1:2] == ["-p"] else argv[1:]
+        at = _command_word_index(argv)
         word, repo = _command_word(argv), cwd
         if word == "git":
             sub, args = _git_sub_and_args(argv)
@@ -13921,8 +13977,9 @@ def _citechk_commands(command, cwd, deadline):
         inline_names, file_names = _CITECHK_SOURCES[kind]
         item = {"cmd": kind, "parse": "lexed", "texts": [], "unread": [], "repo": repo, "base": None}
         here = stdin.get(index)
-        if here is not None and any(red.src_fd == 0 for red in seg.redirects[here[0]:]):
-            here = None  # a later redirect of fd 0 replaces the here-document
+        if here is not None and any(red.src_fd == 0 and not _citechk_keeps_stdin(red)
+                                    for red in seg.redirects[here[0]:]):
+            here = None  # a later redirect of fd 0 replaces the here-document, unless it is fd 0 onto itself
         taken = False  # whether standard input has been taken
         for name, value in options:
             if value is None:
@@ -14489,11 +14546,12 @@ def citation_read_check(data):
     decision warn or allow. Inert (a silent allow, no row) on any other event, tool or command, a payload
     with no command string, and a session cwd that resolves to no git toplevel (a toplevel probe the
     deadline cuts short is named in a note instead). A ledger that cannot be read, a missing session id, a
-    body file that cannot be read, a body on standard input it cannot see, and an exhausted budget (one that
-    stops the scan of the message texts included), citation cap, file cap, read bound, path bound or link
-    bound (a path the check would resolve that is longer than _CITE_MAX_PATH characters, or whose
-    resolution would follow more than _CITE_MAX_LINKS symlinks) are each named in the note, never a silent
-    clean. Any fault inside the check is caught and named in a note, so during the bake no path of this
+    body file that cannot be read, a body on standard input it cannot see, the expansion of a here-document
+    with an unquoted delimiter in a command that does not lex, and an exhausted budget (one that stops the
+    scan of the message texts included), citation cap, file cap, read bound, path bound or link bound (a
+    path the check would resolve that is longer than _CITE_MAX_PATH characters, or whose resolution would
+    follow more than _CITE_MAX_LINKS symlinks or meets a symlink loop) are each named in the note, never a
+    silent clean. Any fault inside the check is caught and named in a note, so during the bake no path of this
     handler blocks; the dispatcher's own PreToolUse error paths (an unreadable payload, a bad invocation, an
     interpreter below the floor) still exit 2 as for every PreToolUse mode."""
     try:

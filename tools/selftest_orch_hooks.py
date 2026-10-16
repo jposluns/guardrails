@@ -4254,7 +4254,9 @@ def _citeledger_walk_cases(tmp):
     follows for it each time, though the walk takes it from its cache: passes through one symlink, or
     through a symlink to a symlink, that follow one or two under, exactly, and one or two over that many
     resolve, resolve, and are refused for the link bound, as the kernel opens, opens, and refuses each
-    (ELOOP). It stops at the deadline between two components: with a stand-in clock moved just inside, at
+    (ELOOP). A symlink loop (one to itself, two to each other), met within a path or at its end, is refused
+    for the link bound, as the kernel refuses it (ELOOP), where os.path.realpath keeps the link's own path.
+    It stops at the deadline between two components: with a stand-in clock moved just inside, at
     or just past the deadline as the first symlink of a chain of three is read, the walk reads the rest, or
     stops with the deadline as its reason and makes no further lstat. It stops at the deadline before it
     reads a symlink: with the clock moved as the lstat of that first symlink returns, the walk reads all
@@ -4288,9 +4290,8 @@ def _citeledger_walk_cases(tmp):
                         ("dangling", "missing/x"), ("d/e/up", "../e/..")):
         os.symlink(value, str(walk / name))
     shapes = ["/", "//", "/.", "/..", str(walk), str(walk) + "/", str(walk / "rel" / "f"), str(walk) + "/abs/e/../f",
-              str(walk) + "/rel/../rel/f", str(walk / "loop1"), str(walk) + "/loop1/x", str(walk / "dangling"),
-              str(walk) + "/dangling/y", str(walk) + "/d/f/g", str(walk) + "/d/e/up/f", str(walk) + "/no/../d/./f",
-              str(walk) + "/rel//e/", "relative/x", ".", ""]
+              str(walk) + "/rel/../rel/f", str(walk / "dangling"), str(walk) + "/dangling/y", str(walk) + "/d/f/g",
+              str(walk) + "/d/e/up/f", str(walk) + "/no/../d/./f", str(walk) + "/rel//e/", "relative/x", ".", ""]
     unequal = [shape for shape in shapes if resolved(shape, time.monotonic() + 60) != (os.path.realpath(shape), None)]
     bounded = [resolved(chain(count), time.monotonic() + 60) for count in (links - 1, links, links + 1)]
     check("citeledger/resolve-link-bound", (unequal, bounded),
@@ -4378,9 +4379,17 @@ def _citeledger_walk_cases(tmp):
             got = resolved(path, time.monotonic() + 60)
             passes.setdefault(name, []).append((count * per, got, got[0] in (None, os.path.realpath(path)),
                                                 kernel(path)))
-    check("citeledger/resolve-link-passes", passes,
-          {name: [(links - per, (target, None), True, "opens"), (links, (target, None), True, "opens"),
-                  (links + per, (None, "links"), True, "ELOOP")] for name, per in (("pass1", 1), ("pass2", 2))})
+    # A loop, a symlink met again inside its own resolution (self to itself, and loop1 to loop2 and back),
+    # which the kernel follows until it passes its bound and then refuses (ELOOP): refused for the link
+    # bound, whether the path goes on through it (self/../d/f) or ends at it.
+    os.symlink("self", os.path.join(base, "self"))
+    loops = ("self", "self/../d/f", "loop1", "loop1/../d/f", "loop1/x")
+    passes["loops"] = [(rel, resolved(base + "/" + rel, time.monotonic() + 60), kernel(base + "/" + rel))
+                       for rel in loops]
+    want = {name: [(links - per, (target, None), True, "opens"), (links, (target, None), True, "opens"),
+                   (links + per, (None, "links"), True, "ELOOP")] for name, per in (("pass1", 1), ("pass2", 2))}
+    want["loops"] = [(rel, (None, "links"), "ELOOP") for rel in loops]
+    check("citeledger/resolve-link-passes", passes, want)
     # The link fan-out, built in this run's own directory: each s<i> leads through d<i>/t0 ... t699, and each
     # t<j> back to d<i> by 819 times e/../ (a target of 4,095 characters).
     fan = _CiteRepo(tmp / "cite-fan-out", {"a.py": b"a1\n", "msg.txt": b"see a.py:1\n"})
@@ -4445,8 +4454,11 @@ def _citecheck_step_cases(tmp):
     of its -F - options: 1,000 options over a 101,000 character here-document take one scan and end within
     the budget in this process's CPU time, and a command's row lists each citation and source once. Each
     command reads only the here-document its own standard input receives (bash gives it the last of its
-    standard-input redirections), its sources keep their option order in the note, the row and under the
-    citation cap, and where its standard input is not its own here-document it is named as not read. The
+    standard-input redirections, and a later one of fd 0 onto itself leaves it), its sources keep their
+    option order in the note, the row and under the citation cap, and where its standard input is not its
+    own here-document it is named as not read. A command that does not lex names the expansion of each
+    here-document with an unquoted delimiter as not read, and a command is read after the reserved words
+    that begin its segment (a brace group's '{', '!', 'if', 'then', 'do', 'time -p'). The
     scan of a message stops at the deadline: a stand-in pattern moves the clock on at line 2 of the masking
     or of the search, line 3 is not scanned, and the note says no citation was checked, naming the
     budget."""
@@ -4598,23 +4610,81 @@ def _citecheck_step_cases(tmp):
            "m-first-capped": (second[:1], second[:1], [["-m value", "here-document"]], [1])})
     # Standard input is what bash gives the command, its last standard-input redirection: of two
     # here-documents the second; a file redirected after the here-document replaces it (standard input named
-    # as not read), one before it does not; <<- strips the body's leading tabs, as bash does, so a tab does
-    # not hide a line as an indented block; and a here-document another command of a pipeline reads is not
-    # this command's (standard input named as not read).
+    # as not read), one before it does not; a later redirection that duplicates or moves fd 0 onto itself
+    # (<&0, 0<&0, 0>&0, <&00, 0<&0-) leaves the here-document, as bash does, while one from fd 1 or a close
+    # (<&-) replaces it; <<- strips the body's leading tabs, as bash does, so a tab does not hide a line as an
+    # indented block; and a here-document another command of a pipeline reads is not this command's
+    # (standard input named as not read).
     unseen = ["-F -: it is read from standard input, which this check cannot see"]
-    stdin = {}
+    stdin, own = {}, [(["tools/a.py:1"], ["here-document"], [])]
+    dups = (("self", "<&0"), ("self-fd", "0<&0"), ("self-out", "0>&0"), ("self-00", "<&00"),
+            ("self-move", "0<&0-"), ("from-1", "0<&1"), ("closed", "<&-"))
     for name, command in (("two", "git commit -F - <<'A' <<'B'\nsee tools/a.py:1\nA\nsee tools/a.py:2\nB\n"),
                           ("file-after", "git commit -F - <<'A' < a.txt\nsee tools/a.py:1\nA\n"),
                           ("file-before", "git commit -F - < a.txt <<'A'\nsee tools/a.py:1\nA\n"),
                           ("tabs", "git commit -F - <<-'A'\n\tsee tools/a.py:1\n\tA\n"),
-                          ("piped", "cat <<'A' | git commit -F -\nsee tools/a.py:1\nA\n")):
+                          ("piped", "cat <<'A' | git commit -F -\nsee tools/a.py:1\nA\n")) + tuple(
+            (name, "git commit -F - <<'A' {}\nsee tools/a.py:1\nA\n".format(dup)) for name, dup in dups):
         _verdict_, _note, rows = _citecheck_run(steps.root, command, "stdin-" + name)
         stdin[name] = [([c["cite"] for c in r["detail"]["citations"]], r["detail"]["sources"],
                         r["detail"]["sources_unread"]) for r in rows]
-    check("citeledger/check-heredoc-stdin", stdin,
-          {"two": [(["tools/a.py:2"], ["here-document"], [])], "file-after": [([], [], unseen)],
-           "file-before": [(["tools/a.py:1"], ["here-document"], [])],
-           "tabs": [(["tools/a.py:1"], ["here-document"], [])], "piped": [([], [], unseen)]})
+    want = {"two": [(["tools/a.py:2"], ["here-document"], [])], "file-after": [([], [], unseen)],
+            "file-before": own, "tabs": own, "piped": [([], [], unseen)]}
+    want.update((name, own if name.startswith("self") else [([], [], unseen)]) for name, _dup in dups)
+    check("citeledger/check-heredoc-stdin", stdin, want)
+    # A command that does not lex is scanned as written, and the expansion of each here-document with an
+    # unquoted delimiter in it is named as not read, with or without a $ in its body: plain text, whose
+    # citation the scan still judges; a citation only the expansion makes, which the scan cannot see; the
+    # <<- form; an operator split by a backslash-newline, which bash joins; and two such here-documents, each
+    # named. A here-string, and a quoted here-document in a command that does not lex for a process
+    # substitution, name none.
+    reason = ("its delimiter is unquoted, so bash expands parameters, command substitutions and arithmetic in its "
+              "body, and the command does not lex, so only its text as written was scanned")
+    unquoted = {}
+    for name, command in (("plain", "git commit -F - <<EOF\nsee tools/a.py:1\nEOF\n"),
+                          ("dollar", "git commit -F - <<EOF\nsee $(printf tools/a.py):1\nEOF\n"),
+                          ("dash", "git commit -F - <<-EOF\n\tsee tools/a.py:1\n\tEOF\n"),
+                          ("split", "git commit -F - <\\\n<EOF\nsee tools/a.py:1\nEOF\n"),
+                          ("two", "git commit -F - <<A <<B\nsee tools/a.py:1\nA\nsee tools/a.py:2\nB\n"),
+                          ("here-string", "git commit -F - <<< 'see tools/a.py:1'"),
+                          ("quoted", "cat <(true); git commit -F - <<'EOF'\nsee tools/a.py:1\nEOF\n")):
+        verdict, note, rows = _citecheck_run(steps.root, command, "unquoted-" + name)
+        unquoted[name] = (verdict, [(r["detail"]["parse"], [c["cite"] for c in r["detail"]["citations"]],
+                                     r["detail"]["sources"], r["detail"]["sources_unread"]) for r in rows],
+                          "The git commit message expanded <<" in note)
+
+    def named(*delims):
+        return ["expanded <<{} here-document: {}".format(delim, reason) for delim in delims]
+    check("citeledger/check-unquoted-heredoc", unquoted,
+          {"plain": ("warn", [("raw", ["tools/a.py:1"], ["command text"], named("EOF"))], True),
+           "dollar": ("warn", [("raw", [], ["command text"], named("EOF"))], True),
+           "dash": ("warn", [("raw", ["tools/a.py:1"], ["command text"], named("EOF"))], True),
+           "split": ("warn", [("raw", ["tools/a.py:1"], ["command text"], named("EOF"))], True),
+           "two": ("warn", [("raw", ["tools/a.py:1", "tools/a.py:2"], ["command text"], named("A", "B"))], True),
+           "here-string": ("warn", [("raw", ["tools/a.py:1"], ["command text"], [])], False),
+           "quoted": ("warn", [("raw", ["tools/a.py:1"], ["command text"], [])], False)})
+    # A command after the reserved words that begin its segment is read: in a brace group, after '!', 'if'
+    # or 'then', after 'do', and after 'time -p'. Standard input that a brace group, a subshell or a loop is
+    # given as a whole is not the command's own here-document, so it is named as not read; a here-document
+    # on the command itself inside a group is read.
+    grouped = {}
+    for name, command in (("brace-stdin", "{ git commit -F -; } <<'A'\nsee tools/a.py:1\nA\n"),
+                          ("brace-own", "{ git commit -F - <<'A'\nsee tools/a.py:1\nA\n}\n"),
+                          ("brace-m", "{ git commit -m 'see tools/a.py:1'; }"),
+                          ("subshell", "( git commit -F - ) <<'A'\nsee tools/a.py:1\nA\n"),
+                          ("loop", "while read -r x; do git commit -F -; done <<'A'\nsee tools/a.py:1\nA\n"),
+                          ("bang", "! git commit -m 'see tools/a.py:1'"),
+                          ("if-then", "if git commit -m 'see tools/a.py:1'; then git commit -m 'see tools/a.py:2';"
+                                      " fi"),
+                          ("time", "time -p git commit -m 'see tools/a.py:1'")):
+        verdict, _note, rows = _citecheck_run(steps.root, command, "grouped-" + name)
+        grouped[name] = (verdict, [([c["cite"] for c in r["detail"]["citations"]], r["detail"]["sources"],
+                                    r["detail"]["sources_unread"]) for r in rows])
+    by_m = [(["tools/a.py:1"], ["-m value"], [])]
+    check("citeledger/check-command-in-group", grouped,
+          {"brace-stdin": ("warn", [([], [], unseen)]), "brace-own": ("warn", own), "brace-m": ("warn", by_m),
+           "subshell": ("warn", [([], [], unseen)]), "loop": ("warn", [([], [], unseen)]), "bang": ("warn", by_m),
+           "if-then": ("warn", by_m + [(["tools/a.py:2"], ["-m value"], [])]), "time": ("warn", by_m)})
     # The scan's deadline: line 2's match of the search's heading pattern, or of the masking's fence
     # pattern, moves a stand-in clock to just inside, at or just past the deadline. Inside, line 3 (the
     # second citation) is scanned too (three matches) and both ranges judged; at and past it the scan stops

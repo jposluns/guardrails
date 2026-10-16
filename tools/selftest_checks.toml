@@ -847,6 +847,8 @@ expected-check-ids = [
   "citeledger/check-heredoc-once",
   "citeledger/check-heredoc-order",
   "citeledger/check-heredoc-stdin",
+  "citeledger/check-unquoted-heredoc",
+  "citeledger/check-command-in-group",
   "citeledger/check-scan-deadline",
   # ---------- the citation hooks together ----------
   "citeledger/roadmap-pairs-recorder-with-check",
