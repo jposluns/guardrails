@@ -60,8 +60,11 @@ Exit 0 clean, 1 on any finding or a malformed hashes file, 2 on a read error or 
 rule cannot evaluate (fail-closed). `--self-test` proves the gate FAILS on a seeded internal name (a
 provenance id, a host path, a hashed codename, and the role name in a tracked file outside SCOPE_RELPATHS)
 and passes clean generic content, so removing a layer makes a case fail. The self-test exits 0 only when
-every case ran and passed, 1 when a case failed, and 3 when it skipped any case (a child launched by a
-parent self-test, or a case this platform cannot run), never 0.
+every case ran and passed, and 1 when a case failed, also when it skipped a case (it then lists the cases
+it did not run). It exits 3 when no case failed and it skipped a case: a run whose child sentinel matches
+its parent pid (as a child a parent self-test launches does), a top-level run whose inherited-probe
+sentinel matches its parent pid, or a run on a platform that cannot run a case. A run that skipped a case
+never exits 0.
 """
 import sys
 
@@ -386,12 +389,13 @@ def self_test_main():
 # would recurse). Case 23 likewise sets _INHERITED_PROBE to its own pid in the run it launches, which skips
 # case 23 alone. A value is honoured only when it equals this process's parent pid. That match does not
 # prove a self-test launched this process: a caller that exports its own pid, a "1" reaching a run whose
-# parent is PID 1, or a pid reused by an unrelated parent is honoured as well. So a run that skipped any
-# case, a recognized child included, exits 3 and never 0, and a parent accepts a child only by exit 3
-# together with the child line.
+# parent is PID 1, or a pid reused by an unrelated parent is honoured as well. So a run that skipped a case
+# and failed none, a recognized child included, exits 3; a run that failed a case exits 1 whether or not it
+# also skipped one; neither exits 0. A parent accepts a child only by exit 3 together with the child line.
 _CHILD_SENTINEL = "AIQT_INTERNAL_NAMES_SELFTEST_CHILD"
 _INHERITED_PROBE = "AIQT_INTERNAL_NAMES_SELFTEST_INHERITED_PROBE"
-# The exit status of a self-test that skipped any case: never 0, and distinct from 1 (a case failed).
+# The exit status of a self-test that skipped a case and failed none: never 0, and distinct from 1, which a
+# run that failed a case returns whether or not it also skipped one.
 _INCOMPLETE_EXIT = 3
 
 
@@ -402,10 +406,14 @@ def _set_by_launcher(var):
 
 
 def _stale_sentinel_values(own_pid, parent_pid):
-    """The two inherited child-sentinel values case 23 runs: "1" and this run's parent pid. A run this one
-    launches sees own_pid as its parent pid, so any other value stands for an inherited one; a candidate
-    equal to own_pid (a run that is PID 1) or to a value already chosen (a parent that is PID 1) is replaced
-    by the next stale value, so the case always runs two lanes and never skips one."""
+    """The two inherited child-sentinel values case 23 runs: the first two of "1", parent_pid, own_pid + 1
+    and own_pid + 2 that are neither own_pid nor a value already chosen. A run this one launches sees own_pid
+    as its parent pid and honours only that value, so any other value stands for an inherited one. That is
+    "1" and parent_pid unless this run or its parent is PID 1: a run that is PID 1 gets parent_pid and
+    own_pid + 1 (["0", "2"] for a parent pid 0), or own_pid + 2 when parent_pid is own_pid + 1, and a run
+    whose parent is PID 1 gets "1" and own_pid + 1. A replacement need not be a stale pid (own_pid + 1 can
+    name a live process); it is an inherited value only because it is not own_pid. Self-test case 24 calls
+    this directly with an own pid and a parent pid of 1. The case always runs two lanes and never skips one."""
     values = []
     for candidate in ("1", str(parent_pid), str(own_pid + 1), str(own_pid + 2)):
         if len(values) < 2 and candidate != str(own_pid) and candidate not in values:
@@ -733,9 +741,9 @@ def _self_test():
 
         # The subprocess-spawning cases below give each child the sentinel naming this process, so a child
         # (which re-enters --self-test) skips them rather than recursing without bound. A run recognized as a
-        # child (see _CHILD_SENTINEL) skips them and therefore exits 3, never 0.
+        # child (see _CHILD_SENTINEL) skips them and therefore exits 3, or 1 when a case also failed, never 0.
         if launched_child:
-            not_run.append("cases 19 to 23 (a child launched by a parent self-test, which runs them)")
+            not_run.append("cases 19 to 23 (the child sentinel matched the parent pid)")
         else:
             child_tag = {_CHILD_SENTINEL: str(os.getpid())}
             childenv = dict(os.environ, **child_tag)
@@ -924,20 +932,26 @@ def _self_test():
             finally:
                 shutil.rmtree(poison, ignore_errors=True)
 
-            # 23. DISCRIMINATING (an inherited child sentinel does not skip cases 19 to 22): a run whose
-            #     environment already holds the child sentinel as "1" or as a stale pid (this run's own parent;
-            #     see _stale_sentinel_values for the value used where either would name this run or repeat a
-            #     lane) was not launched by this run, so it runs cases 19 to 22. Each lane runs a scratch copy
-            #     of this script as a top-level --self-test with that inherited value. The copy carries one
-            #     mutation per case, so each of those cases records its own failure only if it runs: its case
-            #     19 probe reports the fail-closed OSError as exit 4, its case 20 sibling copy omits _walk.py
-            #     so that copy cannot run, and its self_test_main applies the fixture scrub without the
-            #     lifecycle, which fails case 21's system lane and case 22. This case requires all five
-            #     failure messages, so honouring the inherited value (as a child) fails it. It shows this for
-            #     these two values only: a value equal to the launching run's pid is honoured by design, and
-            #     the exit-3 rule covers a run misrecognized that way. Case 19 needs os.mkfifo, so where a
-            #     FIFO cannot be made this case fails rather than passing. The copy is launched with
-            #     _INHERITED_PROBE naming this process, so it skips this case and does not recurse.
+            # 23. DISCRIMINATING (an inherited child sentinel does not skip cases 19 to 22, and a run that skips
+            #     a case never exits 0): a run whose environment already holds the child sentinel as "1" or as
+            #     a stale pid (this run's own parent; see _stale_sentinel_values for the values used where this
+            #     run or its parent is PID 1) was not launched by this run, so it runs cases 19 to 22. Each lane
+            #     runs a scratch copy of this script as a top-level --self-test with that inherited value. The
+            #     copy carries three mutations for cases 19 to 22, so each of those cases records its own
+            #     failure only if it runs: its case 19 probe reports the fail-closed OSError as exit 4 (a
+            #     failure at both FIFO paths), its case 20 sibling copy omits _walk.py so that copy cannot run,
+            #     and its self_test_main applies the fixture scrub without the lifecycle, the one mutation
+            #     cases 21 and 22 share (it fails case 21's system lane and case 22). This case requires all
+            #     five failure messages, so honouring the inherited value (as a child) fails it. It shows this
+            #     for these two values only: a value equal to the launching run's pid is honoured by design, and
+            #     a run misrecognized that way skips cases 19 to 23, so it exits 3, or 1 when a case also
+            #     failed, never 0. Case 19 needs os.mkfifo, so where a FIFO cannot be made this case fails
+            #     rather than passing. The copy is launched with _INHERITED_PROBE naming this process, so it
+            #     skips this case and does not recurse. Each copy therefore fails cases and skips one, and must
+            #     exit 1 with its not-run line naming this case: a failure outranks a skip. A last lane runs
+            #     this script unmutated as a top-level --self-test with only _INHERITED_PROBE naming this
+            #     process, so it fails no case and skips this one, and must exit 3 with the SELF-TEST
+            #     INCOMPLETE line naming this case; a top-level run that skipped a case and exited 0 fails it.
             lifecycle_entry = ("    from _git_fixture_env import fixture_git_lifecycle\n"
                                "    with fixture_git_lifecycle():\n"
                                "        return _self_test()\n")
@@ -963,8 +977,9 @@ def _self_test():
                 if mutant.count(original) != 1:
                     unbuildable.append("{!r} occurs {} times".format(original, mutant.count(original)))
                 mutant = mutant.replace(original, replacement)
+            inherited_skip = "case 23 (the inherited-probe sentinel matched the parent pid)"
             if _set_by_launcher(_INHERITED_PROBE):
-                not_run.append("case 23 (this run was launched by case 23, which runs it)")
+                not_run.append(inherited_skip)
             elif unbuildable:
                 failures.append("the inherited-sentinel case could not build its mutated copy (each mutated source "
                                 "text must occur once): {}".format("; ".join(unbuildable)))
@@ -985,16 +1000,49 @@ def _self_test():
                                             "out".format(inherited))
                             continue
                         missing = [m for m in ran_markers if m not in proc.stdout]
-                        if proc.returncode != 1 or "SELF-TEST PASS" in proc.stdout or missing:
+                        listed = any(line.startswith("  not run: ") and inherited_skip in line
+                                     for line in proc.stdout.splitlines())
+                        if proc.returncode != 1 or "SELF-TEST PASS" in proc.stdout or missing or not listed:
                             failures.append("a top-level self-test with the child sentinel inherited as {!r} must "
-                                            "run cases 19 to 22 (its mutated copy fails each when it runs), got "
-                                            "rc={} missing={!r} out={!r} err={!r}".format(
-                                                inherited, proc.returncode, missing, proc.stdout, proc.stderr))
+                                            "run cases 19 to 22 (its mutated copy fails each when it runs) and, "
+                                            "having failed them and skipped case 23, exit 1 with a not-run line "
+                                            "naming case 23, got rc={} missing={!r} not-run line found={} "
+                                            "out={!r} err={!r}".format(inherited, proc.returncode, missing, listed,
+                                                                       proc.stdout, proc.stderr))
                 finally:
                     shutil.rmtree(inherited_dir, ignore_errors=True)
+                clean_env = dict(caller, **{_INHERITED_PROBE: str(os.getpid())})
+                clean_env.pop(_CHILD_SENTINEL, None)
+                try:
+                    proc = subprocess.run([sys.executable, "-I", "-B", selfpath, "--self-test"], capture_output=True,
+                                          text=True, timeout=1200, env=clean_env)
+                    incomplete = any(line.startswith("SELF-TEST INCOMPLETE:") and inherited_skip in line
+                                     for line in proc.stdout.splitlines())
+                    if proc.returncode != _INCOMPLETE_EXIT or not incomplete:
+                        failures.append("a top-level self-test that fails no case and skips case 23 must exit 3 "
+                                        "with a SELF-TEST INCOMPLETE line naming case 23, got rc={} out={!r} "
+                                        "err={!r}".format(proc.returncode, proc.stdout, proc.stderr))
+                except subprocess.TimeoutExpired:
+                    failures.append("a top-level self-test that skips case 23 timed out")
+
+        # 24. DISCRIMINATING (the inherited child-sentinel values case 23 runs, by direct calls, so no real
+        #     PID 1 run is needed): "1" and the parent pid normally, and the replacements
+        #     _stale_sentinel_values documents for a run that is PID 1 (parent pid 0, and parent pid 2, which
+        #     equals own pid + 1) and for a run whose parent is PID 1. Each result is two distinct values and
+        #     neither is the run's own pid, the one value a launched copy honours. Dropping the own-pid test
+        #     returns "1" for a run that is PID 1, and dropping the repeat test returns "1" twice for a run
+        #     whose parent is PID 1; either fails this case.
+        for own, parent, expected in ((7, 5, ["1", "5"]), (1, 0, ["0", "2"]), (1, 2, ["2", "3"]),
+                                      (7, 1, ["1", "8"])):
+            got = _stale_sentinel_values(own, parent)
+            if got != expected:
+                failures.append("the inherited child-sentinel values for own pid {} and parent pid {} expected "
+                                "{!r}, got {!r}".format(own, parent, expected, got))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # A failure outranks a skip: a run that failed a case exits 1 even when it also skipped one, and lists
+    # the cases it did not run.
     if failures:
         print("SELF-TEST FAIL:")
         for x in failures:
@@ -1003,8 +1051,9 @@ def _self_test():
             print("  not run: " + "; ".join(not_run))
         return 1
     if not_run:
-        # The full PASS text below claims every case, so a run that skipped any prints this line instead and
-        # exits 3: a skipped case never reports success by exit code, even in a run misrecognized as a child.
+        # The full PASS text below claims every case, so a run that failed none but skipped any prints this
+        # line instead and exits 3: a skipped case never reports success by exit code, even in a run
+        # misrecognized as a child.
         print("{} every case this run ran passed; not run: {}".format(
             "SELF-TEST CHILD PASS:" if launched_child else "SELF-TEST INCOMPLETE:", "; ".join(not_run)))
         return _INCOMPLETE_EXIT
@@ -1025,9 +1074,14 @@ def _self_test():
           "shim, since the gate drops GIT_CONFIG_SYSTEM), so the gate's tracked-file read does not read the "
           "caller's home, XDG or system configuration during the self-test; an in-process self_test_main() "
           "restores the caller's environment exactly; a top-level self-test whose environment already holds "
-          "the child sentinel as \"1\" or as a stale pid still runs cases 19 to 22; a run that skips any case "
-          "(a recognized child, or a case this platform cannot run) exits 3, never 0; a malformed hashes file "
-          "is reported, never a silent empty denylist; a "
+          "the child sentinel as an inherited value (\"1\" and its parent pid, a stale pid, or the replacement "
+          "values used where the run or its parent is PID 1) still runs cases 19 to 22, and direct calls show "
+          "those replacements are two distinct values other than the run's own pid; a run that fails no case "
+          "but skips one exits 3, never 0, shown for a launched "
+          "child (child line) and for a top-level run whose inherited-probe sentinel matches its parent pid "
+          "(SELF-TEST INCOMPLETE line), the same return a run on a platform that cannot run a case takes; "
+          "a run that fails a case and skips one exits 1 and lists the case it did not run; a malformed "
+          "hashes file is reported, never a silent empty denylist; a "
           "non-UTF-8 in-scope surface fails closed as unscannable, never a silent skip; a broken symlink "
           "(a present dentry with a missing target) at a scoped path and at the hash-file path each fails "
           "closed (re-raised), never read as absent; a scoped file "
