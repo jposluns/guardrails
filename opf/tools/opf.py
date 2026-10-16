@@ -4425,8 +4425,8 @@ def _watchdog_completion_case(mode):
                 # capture alongside subject output; tolerate exactly that
                 # block -- a warning line naming this process and its
                 # indented source-text continuation -- and nothing else
-                # (FIX-559-R3 claude MINOR-2: with warnings made visible
-                # the leg wrote its own line into the capture and Leg 2
+                # (without this tolerance, a run with warnings made visible
+                # wrote the leg's own line into the capture and Leg 2
                 # failed falsely).
                 own = "(pid=%d)" % os.getpid()
                 kept = []
@@ -4448,10 +4448,9 @@ def _watchdog_completion_case(mode):
                 # the status that close() cannot return. A target that is
                 # not (or is no longer) a child here has no authoritative
                 # status left: that is a cannot-evaluate failure, never
-                # acceptance (FIX-559-R3 codex MAJOR: the removed /proc
-                # helper read an already-reaped child as None and the legs
-                # accepted None, so a silent hold-gate exit 96 could
-                # satisfy Leg 2).
+                # acceptance (the /proc reader this replaces read an
+                # already-reaped child as None and the legs accepted None,
+                # so a silent hold-gate exit 96 could satisfy Leg 2).
                 bound = _watchdog_deadline(30)
                 while True:
                     try:
@@ -4481,9 +4480,9 @@ def _watchdog_completion_case(mode):
             def launch_held(arm=True, ack_bound=30, capture_open=os.open,
                             restore=os.dup2):
                 # capture_open and restore are fault seams for the two
-                # committed launch-cleanup vectors below (FIX-559-R3 codex
-                # MEDIUM); every production leg runs the real primitives,
-                # bound here at definition time.
+                # committed launch-cleanup vectors below; every production
+                # leg runs the real primitives, bound here at definition
+                # time.
                 import select
                 waiting.unlink(missing_ok=True)
                 release.unlink(missing_ok=True)
@@ -4518,14 +4517,14 @@ def _watchdog_completion_case(mode):
                     scratch.write_text(outcome.name, encoding="ascii")
                     scratch.rename(outcome)  # atomic: never a partial publication
 
-                # ONE ownership-cleanup scope from construction (FIX-559-R3
-                # codex MEDIUM): the fixture above already owns a parked
-                # launcher, two sockets and a report file, so the capture
-                # setup, the start, the stderr restoration and the
-                # acknowledgment wait below all run inside this try, whose
-                # failure path collects the fixture. Before this round a
-                # fault in the capture setup or in the post-start
-                # restoration routed around that cleanup.
+                # ONE ownership-cleanup scope from construction: the
+                # fixture above already owns a parked launcher, two sockets
+                # and a report file, so the capture setup, the start, the
+                # stderr restoration and the acknowledgment wait below all
+                # run inside this try, whose failure path collects the
+                # fixture. A scope opened later would let a fault in the
+                # capture setup or in the post-start restoration route
+                # around that cleanup.
                 try:
                     # The refusal evidence of the subject lands on its
                     # inherited fd 2 (the traceback, then exit 125): route
@@ -4572,20 +4571,21 @@ def _watchdog_completion_case(mode):
                     # A buffered receipt does not order a kill against the
                     # ownership acknowledgment: the guardian writes the ack
                     # byte strictly AFTER the receipt send, so a SIGKILL
-                    # landing in between (seen under host load as
-                    # F-OPF-WATCHDOG-ORPHAN-TIMING) hands the gated subject an
-                    # acknowledgment EOF once released, and a released subject
-                    # that reaches the ack read -- Leg 1 refuses EARLIER, at
-                    # _fixture_check_parent -- then refuses at
-                    # _fixture_await_ack (which no leg here patches out)
-                    # instead of exercising the stimulus under test: Flip A
-                    # fails as "the flip orphan never ran", and before this
-                    # wait existed the same window let Leg 1 pass FALSELY, its
-                    # subject refusing at the ack read with the parent check
-                    # removed. Wait for the marker the guardian publishes only
-                    # on an observed successful ack write, so every kill below
-                    # lands only after the ack byte is buffered and a released
-                    # subject that reaches the ack read always reads it. The
+                    # landing in between (seen under host load as an
+                    # intermittent subject-orphan failure) hands the gated
+                    # subject an acknowledgment EOF once released, and a
+                    # released subject that reaches the ack read -- Leg 1
+                    # refuses EARLIER, at _fixture_check_parent -- then
+                    # refuses at _fixture_await_ack (which no leg here
+                    # patches out) instead of exercising the stimulus under
+                    # test: Flip A fails as "the flip orphan never ran", and
+                    # before this wait existed the same window let Leg 1
+                    # pass FALSELY, its subject refusing at the ack read
+                    # with the parent check removed. Wait for the marker the
+                    # guardian publishes only on an observed successful ack
+                    # write, so every kill below lands only after the ack
+                    # byte is buffered and a released subject that reaches
+                    # the ack read always reads it. The
                     # ORDERING no longer depends on host speed; the finite
                     # bounds still do: this backstop and the 120 s hold gate
                     # of the subject bound the leg either way (at most 90 s
@@ -4620,7 +4620,7 @@ def _watchdog_completion_case(mode):
                     # only what the fault and publication vectors below
                     # assert, and a leg assertion that fails AFTER a launch
                     # returned still cleans up nothing, the pre-existing
-                    # pattern (FIX-559-R3 claude MINOR-3).
+                    # pattern of these legs, left unchanged here.
                     cancel(child, [])
                     raise
                 return child, subject
@@ -4635,7 +4635,7 @@ def _watchdog_completion_case(mode):
             # Leg 1: the guardian dies while the subject is still gated pre-arm;
             # the released subject arms, sees a changed parent, and refuses.
             # Before the acknowledgment-marker wait above existed this leg
-            # shared the F-OPF-WATCHDOG-ORPHAN-TIMING race as a FALSE-PASS
+            # shared the kill-before-acknowledgment race as a FALSE-PASS
             # window: with the parent check removed, an early kill let the
             # subject refuse at the ack read instead, and the leg passed
             # without the protection it guards. The refusal REASON and the
@@ -4670,7 +4670,7 @@ def _watchdog_completion_case(mode):
             # no subject lines) and the authoritative reaped status proves it
             # died by the SIGKILL close() sends -- never by the exit 96 of
             # the 120 s gate, by the exit 125 of a setup error, or with an
-            # unavailable status read as acceptance (FIX-559-R3 codex MAJOR).
+            # unavailable status read as acceptance.
             child, subject = launch_held()
             os.kill(child.pid, signal.SIGKILL)
             failures = []
@@ -4683,12 +4683,11 @@ def _watchdog_completion_case(mode):
             assert foreign == [], ("the gated subject left its hold gate", foreign)
             require_sigkill(subject)
 
-            # Cause vectors (FIX-559-R3 codex MAJOR): the SAME verdict helper
-            # Leg 2 relies on, fed each committed counter-cause, must reject
-            # it, never accept it. A probe child stands in for the dead
-            # subject: it exits the given code silently, like the hold gate
-            # or a setup refusal does, and is awaited to its zombie before
-            # the verdict reads it.
+            # Cause vectors: the SAME verdict helper Leg 2 relies on, fed
+            # each committed counter-cause, must reject it, never accept it.
+            # A probe child stands in for the dead subject: it exits the
+            # given code silently, like the hold gate or a setup refusal
+            # does, and is awaited to its zombie before the verdict reads it.
             def dead_probe(code):
                 probe = os.fork()
                 if probe == 0:
@@ -4750,13 +4749,13 @@ def _watchdog_completion_case(mode):
             # Barrier: the guardian HOLDS its acknowledgment until this launch
             # observably reaches the marker wait (the stalled gate that wait
             # itself publishes), a controlled, file-gated stand-in for the
-            # F-OPF-WATCHDOG-ORPHAN-TIMING scheduling delay -- no sleep and no
-            # host timing. Under Flip A's configuration the released orphan
-            # must RUN its callable, which is only possible when the kill
-            # below landed after the ack byte was buffered; with the ordering
-            # wait removed the gate is never published, the held guardian
-            # never acknowledges, and the launch returns without the marker:
-            # this vector is red.
+            # scheduling delay of the kill-before-acknowledgment race -- no
+            # sleep and no host timing. Under Flip A's configuration the
+            # released orphan must RUN its callable, which is only possible
+            # when the kill below landed after the ack byte was buffered;
+            # with the ordering wait removed the gate is never published,
+            # the held guardian never acknowledges, and the launch returns
+            # without the marker: this vector is red.
             real_ack_subject = emit._fixture_ack_subject
 
             def held_ack(fd):
@@ -4792,7 +4791,7 @@ def _watchdog_completion_case(mode):
             # (EIO in the recorded failure class; /dev/full injects the same
             # handler deterministically) must surface as the NAMED launch
             # failure and never as a marker. Red at commit 0734fe9560e8 (the
-            # round that added the marker wait), where the helper swallowed
+            # commit that added the marker wait), where the helper swallowed
             # the failure and the marker was published anyway.
             def eio_ack(fd):
                 # Guardian-side: the REAL helper, its write routed at a
@@ -4822,10 +4821,10 @@ def _watchdog_completion_case(mode):
             await_state(leaked, (None, "Z"), "the refused launch leaked its subject")
             # The leak check above is not discriminating on its own: a LIVE
             # guardian drains the gated subject itself once the control
-            # socket of the dropped fixture closes, cancel or no cancel
-            # (FIX-559-R3 claude MINOR-4). Only close() reaps the guardian,
-            # so with the failure-path cancel removed the guardian stays a
-            # lingering zombie child here and this check goes red.
+            # socket of the dropped fixture closes, cancel or no cancel.
+            # Only close() reaps the guardian, so with the failure-path
+            # cancel removed the guardian stays a lingering zombie child
+            # here and this check goes red.
             collected_guardian = int(guard.read_text(encoding="ascii"))
             await_state(collected_guardian, (None,),
                         "the refused launch did not collect its guardian")
@@ -4856,13 +4855,13 @@ def _watchdog_completion_case(mode):
             await_state(leaked, (None, "Z"), "the unpublished launch leaked its subject")
             require_sigkill(leaked)  # dead by the cleanup kill, proven
 
-            # Launch-cleanup fault vectors (FIX-559-R3 codex MEDIUM): the
-            # ownership scope opens at construction, so a fault during the
-            # capture setup (before any start) and one during the post-start
-            # stderr restoration must each surface as the injected error AND
-            # still collect the fixture; before this round both faults
-            # routed around the failure-path cancel. Collection is observed
-            # through the close call itself, recorded by the patch below.
+            # Launch-cleanup fault vectors: the ownership scope opens at
+            # construction, so a fault during the capture setup (before any
+            # start) and one during the post-start stderr restoration must
+            # each surface as the injected error AND still collect the
+            # fixture; with the scope opened later, both faults would route
+            # around the failure-path cancel. Collection is observed through
+            # the close call itself, recorded by the patch below.
             collected = []
             real_close = emit._FixtureProcess.close
 
@@ -13554,8 +13553,9 @@ def _watchdog_regression_self_test():
         # subject-orphan: term by term at each code site. The four
         # production legs: Leg 1 482 (launch 300 + 30 + 30 + 30 with the
         # acknowledgment-published wait each launch makes before any leg
-        # kills the guardian, F-OPF-WATCHDOG-ORPHAN-TIMING; guardian zombie
-        # 30, subject exit 30, authoritative reap 30, close 2), Leg 2 452
+        # kills the guardian, against the kill-before-acknowledgment race;
+        # guardian zombie 30, subject exit 30, authoritative reap 30,
+        # close 2), Leg 2 452
         # (launch 390, close 2, subject exit 30, reap 30), Flip A 512
         # (launch 390, guardian zombie 30, orphan marker 30, close 2,
         # cleanup 30, reap 30) and Flip B 452 (launch 390, close 2, hygiene
