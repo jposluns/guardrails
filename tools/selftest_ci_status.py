@@ -1695,9 +1695,10 @@ def _run_checks():
                 ([[page([pending_b])]], [probe_read(pull(9, head_sha)), probe_read(conflicted)], "60")):
             rc, output, calls = fixture.invoke(polls, wait=True, timeout=timeout, probes=probes)
             conflicts.append((rc, calls, fixture.probe_reads,
-                              "pull request #9 CONFLICTING with main now, and none with this head was "
-                              "merged into main, so no new pull_request run will start for it while "
-                              "that holds; a run that started earlier may still finish" in output))
+                              "pull request #9 CONFLICTING with main now, and the pull requests "
+                              "associated with {} show none with this head merged into main, so no new "
+                              "pull_request run will start for it while that holds; a run that started "
+                              "earlier may still finish".format(head_sha) in output))
         rc, output, calls = fixture.invoke(green_polls, wait=True,
                                            probes=[probe_read(conflicted, pull(10, head_sha))])
         conflicts.append((rc, calls, fixture.probe_reads, "CONFLICTING" in output))
@@ -1925,8 +1926,9 @@ def _run_checks():
         # holding such a pull request rather than an array of them, and a pull request numbered 1e300,
         # which jq prints as 1E+300 and the script refuses before it builds a URL from it. Each is
         # cannot-evaluate (exit 2) at once, although the pull request it carries reads MERGEABLE.
-        # Coverage of rules the script already had before it read the associated pull requests: every
-        # vector here passes there too, so this check guards those rules and does not show that change.
+        # Controls guarding rules the script already had before it read the associated pull requests:
+        # every vector here passes there too, so this check guards those rules and does not show that
+        # change.
         listed_at_head = {key: value for key, value in pull(24, head_sha).items() if key != "mergeable"}
         listing_malformed = "malformed pull-request response: the open pull-request listing"
         shapes = []
@@ -2010,9 +2012,10 @@ def _run_checks():
         # or unmerged. A failed associated read other than a permanent form is re-read: once, then a
         # MERGEABLE read waits; at every read, with no open pull request listed, or only one into
         # another base (#7 into dev), cannot-evaluate (exit 2) at the 12th read with no runs read, never
-        # the exit 1 refusal of no open pull request or of another base. That second case guards a rule
-        # the script already had before the associated read also followed a CONFLICTING, UNKNOWN or
-        # changed read (a listing into another base was already followed by it): it passes there too.
+        # the exit 1 refusal of no open pull request or of another base. That second case is a control
+        # guarding a rule the script already had before the associated read also followed a
+        # CONFLICTING, UNKNOWN or changed read (a listing into another base was already followed by
+        # it): it passes there too, so it does not show that change.
         merged_record = closed_pull(25, head_sha)
         associated_malformed = ("malformed pull-request response: the pull requests associated with "
                                 "{}".format(head_sha))
@@ -2053,7 +2056,8 @@ def _run_checks():
         # read beside the CONFLICTING #28 is a failed read, cannot-evaluate (exit 2) at the 12th read,
         # never the refusal, which that script gave at once. A MERGEABLE #30 beside the merged #21 keeps
         # its path: the probe never reads the associated pull requests, and runs before every poll, as
-        # it did there.
+        # it did there. That last vector is a control guarding an older rule: it passes against the
+        # script before this rule too, so it does not show that change.
         stale = pull(27, head_sha, state="closed", mergeable=None)
         conflicted_sibling = pull(28, head_sha, mergeable=False)
         unknown_sibling = pull(29, head_sha, mergeable=None)
@@ -2072,8 +2076,8 @@ def _run_checks():
                  "cannot evaluate: the open pull request into main for this head changed between the "
                  "listing and its own read, still after 12 reads"),
                 (probe_read(conflicted_sibling, associated=[closed_pull(21, head_sha, base="dev")]),
-                 "pull request #28 CONFLICTING with main now, and none with this head was merged into "
-                 "main"),
+                 "pull request #28 CONFLICTING with main now, and the pull requests associated with "
+                 "{} show none with this head merged into main".format(head_sha)),
                 (probe_read(unknown_sibling, associated=[closed_pull(21, "e" * 40)]),
                  "pull request #29 as UNKNOWN (not yet computed), still after 12 reads"),
                 (dict(probe_read(conflicted_sibling), associated_error="gh: HTTP 502"),
@@ -2087,6 +2091,34 @@ def _run_checks():
               [(0, 5, 1, 1, True)] * 3
               + [(2, 0, 12, 12, True), (1, 0, 1, 1, True), (2, 0, 12, 12, True), (2, 0, 12, 12, True),
                  (0, 5, 5, 0, False)])
+
+        # A merge time is a timestamp as GitHub writes one, YYYY-MM-DDTHH:MM:SSZ: a record closed into
+        # main at this head whose .merged_at is any other string is a malformed associated record,
+        # cannot-evaluate (exit 2) at once, never a merge that lets the runs decide (exit 0 on green
+        # runs). Text ("not-a-timestamp", "x"), a date without a time, an offset other than Z (+00:00
+        # and +02:00; GitHub's REST documentation states it writes every timestamp in UTC with Z, not
+        # verified live), fractional seconds, a trailing newline, and a calendar time that does not exist
+        # (February 29 of 2026, an hour of 24); and "not-a-timestamp" beside a CONFLICTING #28, where
+        # it would also have let the runs decide. Controls, with a valid timestamp: 2026-10-15T12:00:00Z
+        # and the leap day 2024-02-29T23:59:59Z each let the runs decide, and the note names only the
+        # merged pull request, with no claim about others open at this head (here the CONFLICTING #28).
+        merged_at_cases = []
+        merged_only = ("pull request #21 with {} as its head was merged into main; the pull-request "
+                       "probe stops for the rest of this wait".format(head_sha))
+        for merged_at, listed in (("not-a-timestamp", ()), ("x", ()), ("2026-10-15", ()),
+                                  ("2026-10-15T12:00:00+00:00", ()), ("2026-10-15T14:00:00+02:00", ()),
+                                  ("2026-10-15T12:00:00.000Z", ()), ("2026-10-15T12:00:00Z\n", ()),
+                                  ("2026-02-29T12:00:00Z", ()), ("2026-10-15T24:00:00Z", ()),
+                                  ("not-a-timestamp", (pull(28, head_sha, mergeable=False),)),
+                                  ("2026-10-15T12:00:00Z", ()), ("2024-02-29T23:59:59Z", ()),
+                                  ("2026-10-15T12:00:00Z", (pull(28, head_sha, mergeable=False),))):
+            record = dict(closed_pull(21, head_sha), merged_at=merged_at)
+            rc, output, calls = fixture.invoke(
+                green_polls, wait=True, probes=[probe_read(*listed, associated=[record])])
+            merged_at_cases.append((rc, calls, fixture.probe_reads, associated_malformed in output,
+                                    merged_only in output))
+        check("ci/wait-pr-probe-merged-at-timestamp", merged_at_cases,
+              [(2, 0, 1, True, False)] * 10 + [(0, 5, 1, False, True)] * 3)
 
     # Round 7: main() must print every collected failure and map the exit code by the module docstring's
     # rule on every path. Each case runs a nested main() on seeded state and restores the real state.

@@ -841,6 +841,7 @@ expected-check-ids = [
   "ci/wait-pr-probe-closed-unmerged",
   "ci/wait-pr-probe-associated-read",
   "ci/wait-pr-probe-merged-beside-candidate",
+  "ci/wait-pr-probe-merged-at-timestamp",
   "ci/finalise-harness-error-keeps-failures",
 ]
 [[suite]]

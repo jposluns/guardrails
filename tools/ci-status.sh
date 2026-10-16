@@ -665,7 +665,8 @@ report() {
 # each CONFLICTING, UNKNOWN, or no longer open at this head into PR_BASE, as a listing read just
 # after a merge can still show the merged pull request open), the probe also reads the pull requests
 # GitHub associates with this commit (repos/OWNER/REPO/commits/SHA/pulls, paginated). One that is
-# closed with a merge time (.merged_at), whose head SHA is this commit and whose base is PR_BASE, was
+# closed with a merge time (.merged_at, a timestamp of the form given under PERMANENT below), whose
+# head SHA is this commit and whose base is PR_BASE, was
 # merged into PR_BASE with this head (auto-merge can do that as soon as the checks pass, within the
 # settle window), and the head is neither refused nor re-read: the probe says so, stops for the rest
 # of the wait (a merge is final), and the runs decide as for any other wait, a green verdict (exit 0)
@@ -704,7 +705,11 @@ report() {
 # .mergeable, so each open pull request into PR_BASE at this head is read on its own on every probe
 # read. Every listed, associated and read record must carry a positive integer number, a string
 # state, a head SHA string and a nonempty base branch string; each single read a .mergeable of true,
-# false or null; and each associated record a .merged_at of null or a nonempty string. Each single
+# false or null; and each associated record a .merged_at of null or a merge time as GitHub writes
+# one, an ISO 8601 UTC timestamp YYYY-MM-DDTHH:MM:SSZ that is a real calendar time. GitHub's REST
+# documentation states that it returns every timestamp in UTC in that form (not verified live), so
+# another string (no time, fractional seconds, an offset other than Z, even +00:00, or any other
+# text) is a malformed associated record, never a merge. Each single
 # read's response must be exactly one such object whose number is the number requested, checked on
 # its own before the reads are combined: a record of another pull request, two records in one
 # response, or an array is a malformed response, as is anything else that does not have this shape.
@@ -763,9 +768,15 @@ def malformed_pull:
 def malformed_mergeable:
   (has("mergeable") | not)
   or ((.mergeable != null) and ((.mergeable | type) != "boolean"));
+# A merge time as GitHub writes one: YYYY-MM-DDTHH:MM:SSZ, a real UTC calendar time (a date such as
+# February 30 or an hour of 24, which jq would normalise to another time, does not read back the same).
+def merge_time:
+  (type == "string")
+  and test("\\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\\z")
+  and ((try (fromdate | todate) catch null) == .);
 def malformed_merged_at:
   (has("merged_at") | not)
-  or ((.merged_at != null) and (((.merged_at | type) != "string") or ((.merged_at | length) == 0)));
+  or ((.merged_at != null) and (.merged_at | merge_time | not));
 def malformed_listing:
   (length != 1) or ((.[0] | type) != "array") or ((.[0] | length) == 0)
   or any(.[0][]; type != "array");
@@ -937,7 +948,7 @@ pr_probe() {
         mergeable) return 0 ;;
         merged)
           PR_PROBE_MERGED=1
-          echo "NOTE: pull request ${detail} with ${SHA} as its head was merged into ${PR_BASE}, so no pull request is open for it now; the pull-request probe stops for the rest of this wait, and the verdict rests on the runs alone, as they stand (the merge is not a pass)."
+          echo "NOTE: pull request ${detail} with ${SHA} as its head was merged into ${PR_BASE}; the pull-request probe stops for the rest of this wait, and the verdict rests on the runs alone, as they stand (the merge is not a pass)."
           return 0
           ;;
         none)
@@ -949,7 +960,7 @@ pr_probe() {
           exit 1
           ;;
         conflicting)
-          echo "RESULT: refusing to wait: GitHub reports pull request ${detail} CONFLICTING with ${PR_BASE} now, and none with this head was merged into ${PR_BASE}, so no new pull_request run will start for it while that holds; a run that started earlier may still finish, but the pull request cannot merge as it stands. Resolve the conflict (a refresh push moves the head SHA)."
+          echo "RESULT: refusing to wait: GitHub reports pull request ${detail} CONFLICTING with ${PR_BASE} now, and the pull requests associated with ${SHA} show none with this head merged into ${PR_BASE}, so no new pull_request run will start for it while that holds; a run that started earlier may still finish, but the pull request cannot merge as it stands. Resolve the conflict (a refresh push moves the head SHA)."
           exit 1
           ;;
         unknown) cause="GitHub reports the mergeability of pull request ${detail} as UNKNOWN (not yet computed)" ;;
