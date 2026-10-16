@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T81)
+  check_opf_record.py --self-test                    the fixture suite (T1-T82)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
                                                      through an assertion (_discriminate)
 
@@ -389,15 +389,16 @@ Each case runs on its own copy of that template; the root is removed in a finall
       declares, does (flip: a discriminator that refuses only a signature TypeError at the backstop and
       lets a harness exception escape)
   T81 a declared backstop is bound to the recorded injection that must cause it, and the binding is
-      decided out of process: the flipped run executes in a forked child of this gate (the same
-      python -I interpreter the gate was launched with), the child's stderr is an OS pipe, and the
-      parent decides from bytes it read from that pipe itself which recorded injection, if any, a
-      backstop line belongs to. The parent mints every declared injection's tokens and serials and
-      computes its repr before the child is launched (_oop_declared, _DECLARED_INJECTIONS); the child
-      receives the token pools alone, as what it needs to raise the declared injections. A line binds
-      only when its bytes carry exactly one recorded, unconsumed token whose label the flip declares
-      and are the record backstop's envelope around a repr EQUAL to one the parent computed for that
-      token's injection; anything the child prints that the parent did not record binds nothing, and
+      decided out of process: the flipped run executes in a forked child of this gate (the gate's own
+      interpreter and flags, so isolated by -I when the gate itself runs with -I), the child's stderr
+      is an OS pipe, and the parent decides from bytes it read from that pipe itself which recorded
+      injection, if any, a backstop line belongs to. The parent mints every declared injection's
+      tokens and serials and computes its repr before the child is launched (_oop_declared,
+      _DECLARED_INJECTIONS); the child receives the token pools alone, as what it needs to raise the
+      declared injections. A line binds only when its bytes carry exactly one recorded, unconsumed
+      token whose label the flip declares and are the backstop envelope the record CLI shares with
+      opf upgrade and opf adopt around a repr EQUAL to one the parent computed for that token's
+      injection; anything the child prints that the parent did not record binds nothing, and
       a token the parent never minted binds nothing however it is shaped (tokens are unguessable and
       parent-held). So an unrelated crash under a declared flip, another exception type carrying the
       declared text, a twin of the injected exception raised in its place, a crash the CLI turns into
@@ -434,6 +435,19 @@ Each case runs on its own copy of that template; the root is removed in a finall
       the backstop's own emission of it. The parent-held tokens and parent-computed reprs guard against
       accidental and unrecorded faults, never against a test author deliberately forging its own
       injection's output.
+  T82 a flip's assertion red counts only when every injection the flip expects fired in the flipped run
+      and each one that fired was seen at its backstop, on every path the test took: the child's
+      verdict lists each injection it raised, and the parent requires each fired injection of an
+      expected label to have its token consumed by a bound line and each expected label to have fired.
+      Rejected: the declared injection raised and caught at its own site (no backstop line) before an
+      unrelated held-lease refusal turns the assertion red; the declared injection caught once and then
+      raised to its backstop; a declared flip whose run refuses before its injection is reached; and
+      T75 under a broken flip (a wrong-arity stand-in for the examination lock), whose recovery A
+      crashes into the record backstop so that T75's first assertion fails before its verdict reads,
+      the crash's line reaching the parent because T75 reads and forwards each child's stderr exactly
+      once on every path. Accepted: the declared injection reaching its own backstop (flips: a
+      discriminator that refuses only stray backstop lines; T75's earlier collection, which drops
+      each child's stderr when an assertion fails before its verdict reads)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -588,14 +602,16 @@ def assert_no_auto_maintenance(env, base):
 # (record, render, doctor, upgrade, adopt) or the cli self-test, matches _BACKSTOP, as does the refusal a
 # store-resolution wrapper makes of a crash ("refused: unexpected error resolving the store ... (repr)").
 # _discriminate observes the flipped run out of process: the run executes in a forked child whose
-# stderr is an OS pipe, cli tees each capture write onto that pipe (_EmissionStderr), child and the T75
-# reads copy the stderr of the processes they ran onto it (_oop_forward), and the parent scans the bytes
-# it read itself for every backstop occurrence, so the flipped run's red is judged with every backstop
-# it met in view. While one of the looser in-process discriminators that serve as T80 and T81 flips
-# runs a flip, it pushes a list here instead, and cli, child and the T75 children add each backstop
-# occurrence in the stderr they read to the innermost list (_note_backstops). A crash that production
-# code swallows, or wraps in a refusal of any other wording, prints no such line and is not seen either
-# way.
+# stderr is an OS pipe, cli tees each capture write onto that pipe (_EmissionStderr), child, die_holding
+# and the T75 collection (_t75_collect, on every path T75 takes, an assertion that fails before its
+# verdict reads included) copy the stderr of the processes they ran onto it (_oop_forward), and the
+# parent scans the bytes it read itself for every backstop occurrence, so the flipped run's red is
+# judged with every backstop it met in view. While one of the looser in-process discriminators that
+# serve as T80 and T81 flips runs a flip, it pushes a list here instead, and the same readers add each
+# backstop occurrence in the stderr they read to the innermost list (_note_backstops). A crash that
+# production code swallows, or wraps in a refusal of any other wording, prints no such line and is not
+# seen either way; when that crash is an injection the flip expects, _discriminate still refuses the
+# red, as it requires each expected injection that fired to have its line bound (_unseen_injections).
 _BACKSTOP = re.compile(r"(?:cannot evaluate|harness error|refused): unexpected error[^\n]*")
 _flip_watch = []
 
@@ -607,11 +623,15 @@ _flip_watch = []
 # the pipe. The parent binds a line only by a token it minted itself plus the repr it computed itself
 # (_oop_declared, _bound_injection_oop); a token shows only that the text came from the injection's
 # message (an exception raised from its args, an error formatted with its message, or a child printing
-# it carries the token too), so the line must also be the record backstop's own envelope around exactly
-# the repr the parent computed (equality, never a substring, so an exception wrapping the injection or
-# its repr binds nothing), and that repr names the private fault class the child raised the injection
-# as (_PRIVATE_INJECTIONS) and the serial the parent minted for that token, which only the injection
-# object itself carries (_OpfInjection).
+# it carries the token too), so the line must also be the shared backstop envelope (_BACKSTOP_ENVELOPE)
+# around exactly the repr the parent computed (equality, never a substring, so an exception wrapping the
+# injection or its repr binds nothing), and that repr names the private fault class the child raised the
+# injection as (_PRIVATE_INJECTIONS) and the serial the parent minted for that token, which only the
+# injection object itself carries (_OpfInjection). Each injection the child raises is also recorded,
+# with the token it drew or None, in _oop_fired, which the child's verdict carries back, so the parent
+# can require every injection its flip expects to have fired and each one that fired to have its own
+# line bound (_unseen_injections): a declared injection that is caught, swallowed, or printed out of
+# view, followed by an unrelated assertion, never counts as the flip's red.
 # The in-process T81 flips _discriminate_token_only, _discriminate_any_write and
 # _discriminate_in_process push a dict here instead, {token: (label, exception object)}, minting a
 # fresh token per injection in-process; _discriminate_substring, _discriminate_runwide and
@@ -620,13 +640,14 @@ _flip_injections = []
 _INJECTION_TOKEN = re.compile(r"\binjection-[0-9a-f]{16}\b")
 
 # One discriminated child run's state: _oop_tokens[0] holds the child's per-label pools of (token,
-# serial) pairs (None outside a child), _oop_child[0] marks the child so cli tees capture writes onto
-# the pipe, and _case_namespace[0] prefixes the child's fixture case directories (its Fixtures.count
-# restarts at the fork's value, so without the prefix a child's copytree would collide with the
-# parent's next case).
+# serial) pairs (None outside a child), _oop_fired lists the (label, token or None) of each injection the
+# child raised, in order, _oop_child[0] marks the child so cli tees capture writes onto the pipe, and
+# _case_namespace[0] prefixes the child's fixture case directories (its Fixtures.count restarts at the
+# fork's value, so without the prefix a child's copytree would collide with the parent's next case).
 # _oop_serial counts forks parent-side; a child appends its serial to the namespace it inherited, so
 # nested discriminated runs stay distinct too.
 _oop_tokens = [None]
+_oop_fired = []
 _oop_child = [False]
 _case_namespace = [""]
 _oop_serial = [0]
@@ -800,10 +821,12 @@ def _injected(label, exc):
     message (_tokenize) and the serial held by the private rebuild (_serialed), so any backstop line
     printing it carries a token and a serial the parent recorded before the fork; a label the flip
     never declared, or an event past the pool, gets neither and its line binds nothing (fail closed).
-    Under an in-process T81 flip that pushes a dict a fresh token is minted and recorded in-process,
-    and under one that pushes a list exc is recorded untouched; outside any discriminated run exc is
-    returned unchanged. In a discriminated child the exception returned is exc rebuilt as its private
-    fault class (_private_injection), not exc itself, so the caller raises what this returns."""
+    Either way the child records the event, label and token or None, in _oop_fired, which its verdict
+    carries to the parent. Under an in-process T81 flip that pushes a dict a fresh token is minted and
+    recorded in-process, and under one that pushes a list exc is recorded untouched; outside any
+    discriminated run exc is returned unchanged. In a discriminated child the exception returned is exc
+    rebuilt as its private fault class (_private_injection), not exc itself, so the caller raises what
+    this returns."""
     if _flip_injections and isinstance(_flip_injections[-1], list):
         _flip_injections[-1].append((label, exc))
     elif _flip_injections:
@@ -813,9 +836,11 @@ def _injected(label, exc):
     elif _oop_tokens[0] is not None:
         exc = _private_injection(exc)
         pool = _oop_tokens[0].get(label)
+        token = None
         if pool:
             token, serial = pool.pop(0)
             _serialed(_tokenize(exc, token), serial)
+        _oop_fired.append((label, token))
     return exc
 
 
@@ -3698,8 +3723,11 @@ os._exit(137)
 
 def die_holding(env, root, operation):
     script = DIE_HOLDING.format(tools=str(TOOLS), operation=operation)
-    return subprocess.run([sys.executable, "-I", "-B", "-c", script, str(root)], capture_output=True,
-                          text=True, timeout=180, env=dict(env.vars)).returncode
+    proc = subprocess.run([sys.executable, "-I", "-B", "-c", script, str(root)], capture_output=True,
+                          text=True, timeout=180, env=dict(env.vars))
+    _note_backstops(proc.stderr)
+    _oop_forward(proc.stderr)
+    return proc.returncode
 
 
 def capability_records(root):
@@ -5646,6 +5674,18 @@ def flip_t69():
     return patch.object(record, "_publish", head_publish)
 
 
+def flip_t69_release():
+    """flip_t69 for T69-release-failure-closes-fd, a flip of its own so that it expects the one
+    injection that test raises, the release failure (_INTENDED_BACKSTOPS)."""
+    return flip_t69()
+
+
+def flip_t69_token():
+    """flip_t69 for T69-token-failure-closes-fd, a flip of its own so that it expects the one injection
+    that test raises, the token allocation failure (_INTENDED_BACKSTOPS)."""
+    return flip_t69()
+
+
 # --- T70-T71: the PR D fix-16 vectors -------------------------------------------------------------------
 
 import inspect
@@ -5819,12 +5859,12 @@ def _t74_refused_leg(fx, name, lease_bytes, needle=T74_HELD):
     return root
 
 
-def t74_live_holder_rule(fx):
+def t74_never_seize_dead_run_release(fx):
     """Recovery applies the spec 5.7 never-seize and dead-run release clauses, each never-seize guard
     carrying its own discriminating leg: a leftover lease whose holder is confirmed dead on this host is
     released through the reconciliation itself, in the same run, with the outcome naming the released
     lease and its holder; a LIVE local holder refuses before any recovery write with every byte intact
-    (the rule's core: never seized, however stale the journal behind it); a confirmed-dead holder on
+    (the never-seize core: never seized, however stale the journal behind it); a confirmed-dead holder on
     ANOTHER host
     refuses (liveness is observable only here, and this leg's dead pid turns red if the host binding is
     dropped); a dead holder under a non-closed payload schema refuses (full validation precedes any
@@ -6051,6 +6091,24 @@ def _t75_wait_for(sync, names, proc):
     raise Harness("T75 timed out waiting for " + "/".join(names))
 
 
+def _t75_collect(proc, collected, unwinding=False):
+    """proc's (stdout, stderr), read once and kept in `collected`: a child already collected is not read
+    again, and unwinding (T75's finally) kills a child still running before reading it. The stderr is
+    noted and forwarded (_note_backstops, _oop_forward) as it is read, so each child's backstop lines
+    reach the discriminating parent exactly once on every path T75 takes, an assertion or harness fault
+    before its verdict reads included."""
+    for seen, output in collected:
+        if seen is proc:
+            return output
+    if unwinding and proc.poll() is None:
+        proc.kill()
+    output = proc.communicate(timeout=60 if unwinding else 180)
+    collected.append((proc, output))
+    _note_backstops(output[1])
+    _oop_forward(output[1])
+    return output
+
+
 def t75_concurrent_recovery(fx):
     """At most ONE of two concurrent REAL recoveries ever examines, releases, and re-claims a dead run's
     leftover lease (spec 5.7 never-seize over the recovery path itself). Recovery A is paused between its
@@ -6065,7 +6123,7 @@ def t75_concurrent_recovery(fx):
     root = _t74_interrupted(fx, "t75-concurrent")
     sync = Path(str(root) + "-sync")
     sync.mkdir()
-    procs = []
+    procs, collected = [], []
     try:
         a = _t75_start(env, root, sync, "a")
         procs.append(a)
@@ -6085,12 +6143,8 @@ def t75_concurrent_recovery(fx):
         # Release every gate so both children always exit before any verdict is read.
         for name in T75_GO_MARKERS:
             (sync / name).write_bytes(b"")
-        out_a, err_a = a.communicate(timeout=180)
-        out_b, err_b = b.communicate(timeout=180)
-        _note_backstops(err_a)
-        _note_backstops(err_b)
-        _oop_forward(err_a)
-        _oop_forward(err_b)
+        out_a, err_a = _t75_collect(a, collected)
+        out_b, err_b = _t75_collect(b, collected)
         assert not both_in_recovery, (
             "T75 two concurrent recoveries both entered journal recovery (the slower examination seized "
             "the faster recoverer's live lease)", err_a[-800:], err_b[-800:])
@@ -6104,9 +6158,7 @@ def t75_concurrent_recovery(fx):
         assert not any(st == "open" for st in journal_states(root).values()), "T75 the journal is reconciled"
     finally:
         for proc in procs:
-            if proc.poll() is None:
-                proc.kill()
-                proc.communicate(timeout=60)
+            _t75_collect(proc, collected, unwinding=True)
 
 
 # --- T76: an examination lock failure is diagnosed as what it is (spec section 17) -----------------------
@@ -6400,16 +6452,20 @@ def _oop_declared(allowed):
 
 
 # The diagnostic envelope of the record CLI backstops (record.cli, opf._cmd_record) in a line _BACKSTOP
-# found: the printed repr of the exception is everything between the fixed head and the fixed tail.
-_RECORD_ENVELOPE = re.compile(r"cannot evaluate: unexpected error \((?P<shown>.*)\); "
-                              r"failing closed to exit 2")
+# found: the printed repr of the exception is everything between the fixed head and the fixed tail. The
+# envelope is shared: the backstops of opf upgrade and of opf adopt plan and status print the same one,
+# and the verb prefix that tells them apart lies before the _BACKSTOP match, so the envelope alone never
+# shows which verb printed a line; only the recorded token and parent-computed repr, which the record
+# tests' injections alone carry, make a line bind.
+_BACKSTOP_ENVELOPE = re.compile(r"cannot evaluate: unexpected error \((?P<shown>.*)\); "
+                                r"failing closed to exit 2")
 
 
 def _bound_injection_oop(line, records, consumed, allowed):
     """Consume and return the token of the recorded injection a backstop line binds to, decided from
     bytes the parent read from the pipe itself: the line carries exactly one recorded token (every
     recorded token is parent-minted and unguessable), that token unconsumed and its label one the flip
-    declares, and the line is the record backstop's envelope (_RECORD_ENVELOPE) around an exception
+    declares, and the line is the shared backstop envelope (_BACKSTOP_ENVELOPE) around an exception
     repr EQUAL to one the parent computed for the injection of that token before the child was
     launched, private class and minted serial included. A line with no recorded token (the line of
     another verb, a twin of the injection, a copied diagnostic of an unrecorded exception, a token the
@@ -6430,7 +6486,7 @@ def _bound_injection_oop(line, records, consumed, allowed):
     if label not in allowed or token in consumed:
         return None
     if _oop_exact[0]:
-        envelope = _RECORD_ENVELOPE.fullmatch(line)
+        envelope = _BACKSTOP_ENVELOPE.fullmatch(line)
         if envelope is None or envelope.group("shown") not in reprs:
             return None
     elif not any(shown in line for shown in reprs):
@@ -6480,29 +6536,33 @@ def _oop_reap(pid, err_fd, verdict_fd):
 
 def _discriminate(name, test, flip):
     """The flip must turn the test red through an assertion, and the unflipped test must stay green
-    around it. The flipped run executes OUT OF PROCESS, in a forked child of this gate (the same
-    python -I interpreter the gate was launched with, so the in-process patches of the flip apply
-    there and nowhere else): the stderr of the child is an OS pipe the parent reads, a second pipe
-    carries the one structured verdict of the child, and the parent decides from bytes it read
-    itself. Before the fork the parent mints the tokens of each declared injection and computes the
-    reprs it will accept (_oop_declared); the child receives the token pools alone (_oop_tokens,
-    drawn by _injected). A backstop line (_BACKSTOP) in the bytes of the pipe fails the
-    discrimination unless it carries exactly one recorded, unconsumed token whose label the flip
-    declares and a parent-computed repr of that injection (_INTENDED_BACKSTOPS,
-    _bound_injection_oop); any child exception other than an assertion (the own construction of the
-    flip included, a SystemExit too; an interrupt propagates) fails it by name; and, fail closed, so
-    does a child that crashes, reports no complete verdict, exits non-zero or outlives _OOP_TIMEOUT
-    (every read and wait is bounded, _oop_reap). Anything the child prints that the parent did not
-    record binds nothing, and a line binds only as the record backstop's envelope around a repr
-    EQUAL to one the parent computed, which names the private fault class of the injection
-    (_private_injection) and the serial the parent minted for its token, held only by the injection
-    object itself (_OpfInjection): an args copy, a copy, deep copy, pickle round trip or class rebuild
-    of the injection, and any exception wrapping it or its repr, bind nothing. What the child can
-    still forge is the line of one of its own declared injections by deliberately reproducing that
-    object's repr: writing the envelope around repr(injected) itself (the child holds the object by
-    necessity), or moving the injection's own _opf_serial onto another object of its private class;
-    nothing else. A crash production code swallows prints no backstop line and is outside this
-    check."""
+    around it. The flipped run executes OUT OF PROCESS, in a forked child of this gate (the gate's own
+    interpreter with the flags it was launched with, so isolated by -I only when the gate itself runs
+    with -I; the in-process patches of the flip apply there and nowhere else): the stderr of the child
+    is an OS pipe the parent reads, a second pipe carries the one structured verdict of the child, and
+    the parent decides from bytes it read itself. Before the fork the parent mints the tokens of each
+    declared injection and computes the reprs it will accept (_oop_declared); the child receives the
+    token pools alone (_oop_tokens, drawn by _injected). A backstop line (_BACKSTOP) in the bytes of the
+    pipe fails the discrimination unless it carries exactly one recorded, unconsumed token whose label
+    the flip declares and a parent-computed repr of that injection (_INTENDED_BACKSTOPS,
+    _bound_injection_oop); then every injection the flip expects must have fired in the child (its
+    verdict lists each injection it raised, _oop_fired) and each one that fired must have had its token
+    consumed by such a line, so a declared injection caught, swallowed or printed out of view, or never
+    reached, before an unrelated assertion fails it too (_unseen_injections); any child exception other
+    than an assertion (the own construction of the flip included, a SystemExit too; an interrupt
+    propagates) fails it by name; and, fail closed, so does a child that crashes, reports no complete
+    verdict, exits non-zero or outlives _OOP_TIMEOUT (every read and wait is bounded, _oop_reap).
+    Anything the child prints that the parent did not record binds nothing, and a line binds only as
+    the shared backstop envelope (_BACKSTOP_ENVELOPE) around a repr EQUAL to one the parent computed,
+    which names the private fault class of the injection (_private_injection) and the serial the
+    parent minted for its token, held only by the injection object itself (_OpfInjection): an args
+    copy, a copy, deep copy, pickle round trip or class rebuild of the injection, and any exception
+    wrapping it or its repr, bind nothing. What the child can still forge is the line of one of its
+    own declared injections by deliberately reproducing that object's repr: writing the envelope
+    around repr(injected) itself (the child holds the object by necessity), or moving the injection's
+    own _opf_serial onto another object of its private class; nothing else. A crash production code
+    swallows prints no backstop line and is outside this check unless it is an injection the flip
+    expects, which must be seen."""
     test()
     allowed = _INTENDED_BACKSTOPS.get(flip, ())
     records, pools = _oop_declared(allowed)
@@ -6522,6 +6582,7 @@ def _discriminate(name, test, flip):
             os.dup2(err_write, 2)
             os.close(err_write)
             _oop_tokens[0] = pools
+            del _oop_fired[:]   # a nested child starts with its own record, not its parent's
             _oop_child[0] = True
             _case_namespace[0] = "{}oop{:04d}-".format(_case_namespace[0], serial)
             try:
@@ -6535,6 +6596,7 @@ def _discriminate(name, test, flip):
                 verdict = dict(outcome="exception", shown=repr(exc))
             else:
                 verdict = dict(outcome="survived")
+            verdict["fired"] = [list(event) for event in _oop_fired]
             sys.stderr.flush()
             sys.stdout.flush()
             payload = memoryview(json.dumps(verdict).encode("utf-8"))
@@ -6557,8 +6619,13 @@ def _discriminate(name, test, flip):
     outcome = verdict.get("outcome") if isinstance(verdict, dict) else None
     if outcome == "interrupt":
         raise KeyboardInterrupt
+    fired = verdict.get("fired") if isinstance(verdict, dict) else None
+    if not isinstance(fired, list) or not all(
+            isinstance(event, list) and len(event) == 2 and isinstance(event[0], str)
+            and (event[1] is None or isinstance(event[1], str)) for event in fired):
+        fired = None
     if timed_out or not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0 or outcome not in (
-            "assertion", "survived", "exception"):
+            "assertion", "survived", "exception") or fired is None:
         raise AssertionError("{} failed closed: the flipped child run ended without a complete "
                              "structured verdict (timed out {}, wait status {}, verdict {!r})".format(
                                  name, timed_out, status, verdict))
@@ -6573,7 +6640,29 @@ def _discriminate(name, test, flip):
     if stray:
         raise AssertionError("{} went red through the unexpected-error backstop (exit 2, cannot "
                              "evaluate), not an assertion: {}".format(name, stray[0]))
+    unseen = _unseen_injections([tuple(event) for event in fired], consumed, allowed)
+    if unseen:
+        raise AssertionError("{} went red through an assertion, but {}".format(name, unseen[0]))
     test()
+
+
+def _unseen_injections(fired, consumed, expected):
+    """What a flipped run that went red through an assertion left unproven of the injections its flip
+    expects (_INTENDED_BACKSTOPS), from the (label, token or None) of each injection the child reports
+    it raised (`fired`, _oop_fired) and the tokens the parent bound to backstop lines it read itself
+    (`consumed`): each injection of an expected label that fired with no token, or whose token no line
+    consumed (caught, swallowed, printed out of view, or drawn past the pool), then each expected label
+    that never fired. Empty only when every expected injection fired and each one that fired was seen
+    at its backstop; an injection of a label the flip does not expect is the test's own and is not
+    read here."""
+    unseen = []
+    for label, token in fired:
+        if label in expected and token not in consumed:
+            unseen.append("its expected injection {!r} fired without its backstop line in view "
+                          "({})".format(label, token or "no token drawn"))
+    unseen.extend("its expected injection {!r} never fired".format(label) for label in expected
+                  if all(label != fired_label for fired_label, _token in fired))
+    return unseen
 
 
 def _discriminate_plain_type(name, test, flip, current=_discriminate):
@@ -6729,7 +6818,8 @@ _SUBSTRING_BACKSTOPS = {
     flip_t64_conclude: ("OSError(5, 'synthetic stderr failure')",),
     flip_t64_recovery: ("BrokenPipeError(32, 'synthetic emission failure')",),
     flip_t68: ("MemoryError('synthetic allocation failure after the acquisition')",),
-    flip_t69: ("RuntimeError('fd release witness')", "MemoryError('synthetic token allocation failure')"),
+    flip_t69_release: ("RuntimeError('fd release witness')",),
+    flip_t69_token: ("MemoryError('synthetic token allocation failure')",),
     flip_t77: ("OSError({}, ".format(errno.EMFILE),),
     flip_t79: ("RecursionError('maximum recursion depth exceeded')",),
     _t80_declared_flip: ("NameError('t80 broken flip fixture')",),
@@ -7115,7 +7205,7 @@ def _t81_wrapped_print(*args, **kwargs):
     exception repr in it wrapped as a RuntimeError's: in-process frame attribution, and every binding
     by substring, accept the line; it is not the backstop's own diagnostic of the injection."""
     text = kwargs.get("sep", " ").join(map(str, args))
-    found = _RECORD_ENVELOPE.search(text)
+    found = _BACKSTOP_ENVELOPE.search(text)
     if found is not None:
         text = text.replace(found.group("shown"), repr(RuntimeError(found.group("shown"))), 1)
     print(text, **kwargs)
@@ -7209,7 +7299,7 @@ def _t81_legs(fx):
 def t81_backstop_bound_to_injection(fx):
     """A declared backstop is accepted only when, in the bytes the discriminating parent read from the
     pipe of the flipped child run, its line carries exactly one parent-minted, unconsumed token of a
-    label the flip declares and is the record backstop's envelope around a repr EQUAL to one the parent
+    label the flip declares and is the shared backstop envelope around a repr EQUAL to one the parent
     computed for that injection before the child ran (private class and minted serial included).
     Rejected as a backstop: an unrelated EIO under the declarations of flip_t77, a RuntimeError
     carrying the text of the declared NameError, a twin of the recorded NameError raised in its place,
@@ -7544,6 +7634,123 @@ def flip_t81_runwide():
     return patch.object(sys.modules[__name__], "_discriminate", _discriminate_runwide)
 
 
+# --- T82: each injection a flip expects fired and was seen at its backstop, on every path --------------
+
+
+def _t82_caught_crash(*_args):
+    """The declared injection raised and caught at its own site, so no backstop prints it; the run then
+    refuses as an ordinary held lease, and the test's own assertion turns red."""
+    try:
+        raise _injected("t80-declared", NameError("t80 broken flip fixture"))
+    except NameError:
+        pass
+    raise guard.LeaseHeldError("t82 a held lease refuses after the caught injection")
+
+
+def _t82_caught_then_raised(*_args):
+    """The declared injection raised and caught once, then raised again: the second reaches the
+    backstop and its line binds, the first is never seen."""
+    try:
+        raise _injected("t80-declared", NameError("t80 broken flip fixture"))
+    except NameError:
+        pass
+    raise _injected("t80-declared", NameError("t80 broken flip fixture"))
+
+
+# A broken T75 flip, applied inside both children: the examination lock replaced by a stand-in of the
+# wrong arity, so recovery A crashes into the record backstop (exit 2) before it reaches the leftover
+# unlink, and T75's first assertion turns red before its verdict reads either child's stderr.
+FLIP_T82_WRONG_ARITY = """
+import _opf_write_guard as _t75_guard
+_t75_guard._exclusive_examination = lambda pfd: None
+"""
+
+
+@contextlib.contextmanager
+def _t82_wrong_arity_flip():
+    """The broken T75 flip as a context: while active, the T75 recovery children run with
+    FLIP_T82_WRONG_ARITY."""
+    _t75_flip[0] = FLIP_T82_WRONG_ARITY
+    try:
+        yield
+    finally:
+        _t75_flip[0] = ""
+
+
+def _t82_legs(fx):
+    """T82's legs, each (label, test, flip, setup, needle): needle names how a required-reject leg must
+    fail, and None marks the required-accept control."""
+    me = sys.modules[__name__]
+
+    def create():
+        recorded(record_cli(fx.env, fx.case("t82-create"), CREATE))
+
+    def crash(stand_in):
+        return lambda: patch.object(me, "_t80_declared_crash", stand_in)
+    unseen, unfired = "fired without its backstop line in view", "never fired"
+    return (("caught-injection", create, _t80_declared_flip, crash(_t82_caught_crash), unseen),
+            ("caught-then-raised", create, _t80_declared_flip, crash(_t82_caught_then_raised), unseen),
+            ("never-fired", create, _t80_declared_flip, crash(_t80_held), unfired),
+            ("declared-seen", create, _t80_declared_flip, contextlib.nullcontext, None),
+            ("t75-early-assertion", lambda: t75_concurrent_recovery(fx), _t82_wrong_arity_flip,
+             contextlib.nullcontext, "unexpected-error backstop"))
+
+
+def t82_expected_injection_seen(fx):
+    """A flipped run that goes red through an assertion discriminates only when every injection its flip
+    expects fired and each one that fired was seen at its backstop, whatever path the test took to its
+    red. Rejected: the declared injection raised and caught at its own site, so no backstop prints it,
+    before the run refuses as a held lease and an unrelated assertion turns red; the declared injection
+    caught once and then raised to its backstop (the first one never seen); a declared flip whose run
+    refuses before its injection is reached; and T75 under a broken flip whose stand-in examination lock
+    has the wrong arity, so recovery A crashes into the record backstop and T75's first assertion turns
+    red before its verdict reads, where A's backstop line must still reach the parent. Accepted: the
+    declared injection reaching its own backstop."""
+    me = sys.modules[__name__]
+    for label, test, flip, setup, needle in _t82_legs(fx):
+        outcome = None
+        try:
+            with setup():
+                me._discriminate("t82-" + label, test, flip)
+        except KeyboardInterrupt:
+            raise
+        except BaseException as exc:  # noqa: BLE001  the verdict below reads which outcome was reached
+            outcome = exc
+        if needle is None:
+            assert outcome is None, (
+                "T82 an expected injection seen at its backstop discriminates", label, repr(outcome))
+            continue
+        assert isinstance(outcome, AssertionError) and needle in str(outcome), (
+            "T82 an expected injection unseen, or never fired, never discriminates", label, repr(outcome))
+
+
+def flip_t82_unchecked():
+    """A discriminator that refuses only stray backstop lines: an expected injection that fired unseen, or
+    never fired, before an unrelated assertion still counts as the flip's red."""
+    return patch.object(sys.modules[__name__], "_unseen_injections", lambda fired, consumed, expected: [])
+
+
+def _t75_collect_head(proc, collected, unwinding=False):
+    """The earlier T75 collection: only the path that reaches T75's verdict reads, notes and forwards a
+    child's stderr; unwinding kills a child still running and discards its output, and leaves a child
+    that already exited unread."""
+    if unwinding:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate(timeout=60)
+        return None
+    output = proc.communicate(timeout=180)
+    _note_backstops(output[1])
+    _oop_forward(output[1])
+    return output
+
+
+def flip_t82_t75_unwinding():
+    """T75's earlier collection, which drops each child's stderr when an assertion fails before the
+    verdict reads it."""
+    return patch.object(sys.modules[__name__], "_t75_collect", _t75_collect_head)
+
+
 # The exact construction of each declared injection, one factory per declared variant of the label: the
 # parent builds these itself, before the flipped child is launched, to compute every repr it will accept
 # (_oop_declared); the child is never asked, and never believed, about what its injections looked like.
@@ -7563,19 +7770,25 @@ _DECLARED_INJECTIONS = {
     "t80-declared": (lambda: NameError("t80 broken flip fixture"),),
 }
 
-# The flips whose intended red is reached through a CLI backstop, each with the labels of the injections that
-# may cause it. A backstop line is accepted only when a recorded injection of a declared label is its cause:
-# the line, in the bytes the discriminating parent read from the pipe itself, carries exactly one recorded,
-# unconsumed token of a declared label and is the record backstop's envelope around exactly a repr the parent
-# computed for that injection before the child ran (_oop_declared, _bound_injection_oop; under the T81 flip
+# The flips whose intended red is reached through a CLI backstop, each with the labels of the injections it
+# expects there: under _discriminate every expected label must fire in the flipped run, and each injection of
+# an expected label that fires must be the cause of a backstop line the parent read (_unseen_injections). A
+# backstop line is accepted only when a recorded injection of an expected label is its cause: the line, in the
+# bytes the discriminating parent read from the pipe itself, carries exactly one recorded, unconsumed token of
+# an expected label and is the shared backstop envelope around exactly a repr the parent computed for that
+# injection before the child ran (_oop_declared, _bound_injection_oop; under the T81 flip
 # _discriminate_in_process: the in-process _injected, _EmissionStderr, _note_backstops and _bound_injection);
-# any other backstop or exception in the flipped run fails the discrimination. Each label is recorded by one
-# test's injection site alone, so a declaration binds the test, the flip and the injection together. Most
-# label the synthetic failure their test injects, which the reverted handling lets reach the backstop; the T18
-# flips drop an option guard and record the crash the planner then meets reading the missing option; T64's
-# emission leg reaches the backstop in every run, so its recovery flip meets it too; the T79 flip restores a
-# lease parse that lets the RecursionError of a deeply nested payload reach the backstop, recorded where it
-# leaves _closed_lease_model.
+# any other backstop or exception in the flipped run fails the discrimination. The labels of T18 to T79 are
+# each recorded by one test's injection site alone, so each of those declarations binds the test, the flip
+# and the injection together (T69's two tests share one reverted _publish, so each has a flip of its own that
+# expects its own test's injection). t80-declared is recorded at several sites: the T80 declared crash, the
+# T81 and T82 stand-ins patched over that crash, and the record parse that T81's child and capture flips
+# replace (_t81_child_parse, _t81_capture_flip); each leg declares it through _t80_declared_flip's entry (used
+# as it is, or copied to the leg's own flip by _t81_declared_as). Most label the synthetic failure their test
+# injects, which the reverted handling lets reach the backstop; the T18 flips drop an option guard and record
+# the crash the planner then meets reading the missing option; T64's emission leg reaches the backstop in every
+# run, so its recovery flip meets it too; the T79 flip restores a lease parse that lets the RecursionError of a
+# deeply nested payload reach the backstop, recorded where it leaves _closed_lease_model.
 _INTENDED_BACKSTOPS = {
     flip_t18_requires: ("t18-requires",),
     flip_t18_together: ("t18-together",),
@@ -7583,7 +7796,8 @@ _INTENDED_BACKSTOPS = {
     flip_t64_conclude: ("t64-stderr",),
     flip_t64_recovery: ("t64-emit",),
     flip_t68: ("t68-mark-copy",),
-    flip_t69: ("t69-release", "t69-token"),
+    flip_t69_release: ("t69-release",),
+    flip_t69_token: ("t69-token",),
     flip_t77: ("t77-emfile",),
     flip_t79: ("t79-recursion",),
     _t80_declared_flip: ("t80-declared",),
@@ -7672,8 +7886,8 @@ TESTS = (
     ("T66-release-interrupt-never-displaces", t66_release_interrupt_never_displaces, flip_t66),
     ("T67-ambient-exception-not-pending", t67_ambient_exception_not_pending, flip_t67),
     ("T68-release-mark-before-acquisition", t68_release_mark_before_acquisition, flip_t68),
-    ("T69-release-failure-closes-fd", t69_release_failure_closes_fd, flip_t69),
-    ("T69-token-failure-closes-fd", t69_token_failure_closes_fd, flip_t69),
+    ("T69-release-failure-closes-fd", t69_release_failure_closes_fd, flip_t69_release),
+    ("T69-token-failure-closes-fd", t69_token_failure_closes_fd, flip_t69_token),
     ("T70-tag-after-unwind", t70_tag_after_unwind, flip_t70),
     ("T71-allocation-residual-disclosed", t71_allocation_residual_disclosed, flip_t71),
     ("T72-decision-supersession", t72_supersession, flip_t72_link),
@@ -7700,10 +7914,9 @@ TESTS = (
     ("T72-register-assistant-ruling", t72_assistant_ruling, flip_t72_trust),
     ("T73-contribution-delivery-bundle", t73_contribution_delivery, (flip_t73_delivery, flip_t73_rejection,
                                                                     flip_t73_receipt)),
-    ("T74-recovery-live-holder-rule", t74_live_holder_rule, (flip_t74_claim, flip_t74_unscoped,
-                                                             flip_t74_live, flip_t74_host,
-                                                             flip_t74_schema, flip_t74_prefix,
-                                                             flip_t74_eperm, flip_t74_verb)),
+    ("T74-recovery-never-seize-dead-run-release", t74_never_seize_dead_run_release,
+     (flip_t74_claim, flip_t74_unscoped, flip_t74_live, flip_t74_host, flip_t74_schema, flip_t74_prefix,
+      flip_t74_eperm, flip_t74_verb)),
     ("T75-concurrent-recovery-single-writer", t75_concurrent_recovery, None),  # its flip runs inside the children
     ("T76-examination-lock-failure-diagnosed", t76_lock_failure_diagnosed, flip_t76),
     ("T77-release-report-every-failure", t77_report_every_failure, flip_t77),
@@ -7717,6 +7930,8 @@ TESTS = (
                                                                           flip_t81_in_process,
                                                                           flip_t81_plain_type,
                                                                           flip_t81_repr_substring)),
+    ("T82-expected-injection-seen", t82_expected_injection_seen, (flip_t82_unchecked,
+                                                                  flip_t82_t75_unwinding)),
 )
 
 
