@@ -737,6 +737,8 @@ expected-check-ids = [
   "rdp/plain-registry-read-allows",
   "rdp/registry-disarm-dispatch-still-denies",
   "rdp/bindingless-local-registry-cannot-hide-committed-binding",
+  # ---------- the self-test entry point hands the caller's environment back ----------
+  "harness/entry-restores-caller-env",
 ]
 
 [[suite]]

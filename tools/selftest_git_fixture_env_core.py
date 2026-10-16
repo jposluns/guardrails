@@ -2269,6 +2269,13 @@ def _core_lanes(base):
             ("scope/check-record-sections", "tools/check_record_sections.py", "self_test"),
             ("scope/qa-adapter", "tools/_qa_adapter.py", "_self_test"),
             ("scope/gen-manifest", "tools/gen_manifest.py", "self_test_main"),
+            # These entries lead with the lifecycle alone: it scrubs after saving the caller's
+            # environment, so a scrub before it would make it restore the scrubbed values.
+            ("scope/check-portability", "tools/check_portability.py", "self_test_main"),
+            ("scope/selftest-orch-hooks", "tools/selftest_orch_hooks.py", "main"),
+            ("scope/selftest-aiqt-hooks", "tools/selftest_aiqt_hooks.py", "main"),
+            ("scope/check-release-build", "tools/check_release_build.py", "self_test_main"),
+            ("scope/check-release-delta", "tools/check_release_delta.py", "self_test_main"),
     ):
         check(check_id, _scrub_scoped_first(ROOT / member, owner,
                                            "fixture_git_lifecycle"), True)
@@ -2286,17 +2293,12 @@ def _core_lanes(base):
     # protections removed. Each named self-test entry must itself lead with the in-place
     # scrub, a top-level call with no process-launching call before it.
     for check_id, member_rel, func_name in (
-            ("scope/check-portability", "tools/check_portability.py", "self_test_main"),
             ("scope/selftest-aiqt-corpus-setup", "tools/selftest_aiqt_corpus.py", "GitTests.setUp"),
-            ("scope/selftest-orch-hooks", "tools/selftest_orch_hooks.py", "main"),
-            ("scope/selftest-aiqt-hooks", "tools/selftest_aiqt_hooks.py", "main"),
             ("scope/check-record-drift", "tools/check_record_drift.py", "self_test"),
             ("scope/check-mistakes-register", "tools/check_mistakes_register.py",
              "self_test"),
             ("scope/check-version-monotonicity", "tools/check_version_monotonicity.py",
              "self_test_main"),
-            ("scope/check-release-build", "tools/check_release_build.py", "self_test_main"),
-            ("scope/check-release-delta", "tools/check_release_delta.py", "self_test_main"),
     ):
         check(check_id, _scrub_scoped_first(ROOT / member_rel, func_name,
                                             "scrub_git_environment"), True)

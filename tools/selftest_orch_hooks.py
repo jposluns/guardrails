@@ -2233,8 +2233,9 @@ def main(report_path=None):
         # The execution report is finalized at interpreter exit, after this run's cleanup
         # (tools/_selftest_exit_report.py); nothing writes it in band.
         _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
-    from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
-    scrub_git_environment()
+    # The lifecycle applies the git fixture scrub itself after saving the caller's environment; a
+    # scrub before it would make it save, and so restore, the already scrubbed values.
+    from _git_fixture_env import fixture_git_lifecycle
     with fixture_git_lifecycle():
         return _main_isolated(report_path)
 
@@ -6793,6 +6794,13 @@ def _main_isolated(report_path=None):
     finally:
         aiqt_hooks._orch_dirfd_has_registry = saved_probe
         shutil.rmtree(tmp, ignore_errors=True)
+
+    # An in-process call of main() hands the caller's environment back exactly (HOME,
+    # XDG_CONFIG_HOME, the GIT_CONFIG_* pins and the caller's own GIT_* variables), with the git
+    # fixture scrub in effect inside: the entry point is run in a child around a stand-in main.
+    from _entry_restore_selftest import entry_restore_failures
+    check("harness/entry-restores-caller-env",
+          entry_restore_failures(__file__, "main", "_main_isolated"), [])
 
     # In-run execution-set self-guard (defence in depth beside tools/check_selftest_execution.py): the
     # executed set reconciles against the hand-authored expectation manifest even on a direct developer
