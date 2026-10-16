@@ -11024,14 +11024,50 @@ def _main_isolated(monitor):
                         break
         finally:
             aiqt_hooks._cmtidn_run_lines = _ci_saved
-        # A command longer than _CMTIDN_READ_LIMIT characters is not read, so the decision ends well inside the hook
+        # The co-author regex that the reader runs on each word (CO_AUTHOR_RE) and the user.name context of the
+        # raw-string scan that judges a command the tokenizer cannot parse (_RAW_IDENTITY_CONTEXTS) take each
+        # whitespace run whole, so a long run costs time linear in its length, where giving it back one character at
+        # a time cost time quadratic in it (about 53 s and 130 s of CPU time at _CMTIDN_READ_LIMIT characters for
+        # the two forms below). The bound is the handler's CPU time in this process over a commit message of a
+        # co-author name and a run of newlines, before a second message with an AI co-author trailer, which the
+        # reader denies (ci-wr172), and over user.name, a run of spaces and a quote that does not close, before an
+        # AI user.name value, which the raw-string scan denies (ci-wr173), each padded to 16,384 characters and to
+        # _CMTIDN_READ_LIMIT: 0.125 s and 1 s, the same bound per character as above, against at most about 0.01 s
+        # measured. The reason must name the AI identity and come from the reader or from the raw-string scan, so a
+        # handler that decides the command some other way fails too. For each form the command at the limit runs
+        # only when the shorter one is within its bound, so a quadratic regex fails in seconds.
+        for _ci_label, _ci_head, _ci_run, _ci_tail, _ci_wants in (
+                ("(ci-wr172) an AI co-author trailer after a commit message of a co-author name and a run of "
+                 "newlines, which the reader reads, denies", 'git commit -m "co-authored-by', "\n",
+                 '" -m "Co-authored-by: Claude <c@x>"',
+                 ("this git command sets an AI identity (co-author trailer 'Claude <c@x>')",)),
+                ("(ci-wr173) an AI user.name value after user.name, a run of spaces and a quote that does not "
+                 "close, in a command the tokenizer cannot parse, denies", "git config user.name", " ",
+                 "' user.name Claude", ("could not be read in full", "(user.name/user.email value 'Claude')"))):
+            for _ci_size, _ci_cap in ((16 << 10, 0.125), (aiqt_hooks._CMTIDN_READ_LIMIT, 1.0)):
+                _ci_cmd = _ci_head + _ci_run * (_ci_size - len(_ci_head) - len(_ci_tail)) + _ci_tail
+                _ci_start = time.process_time()
+                _ci_code, _ci_out = cig({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                         "tool_input": {"command": _ci_cmd}})[:2]
+                _ci_spent = time.process_time() - _ci_start
+                _ci_got = _reduce_result(_ci_code, _ci_out)
+                _ci_reason = ((_ci_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+                if _ci_got != "deny" or _ci_spent > _ci_cap or not all(_ci_w in _ci_reason for _ci_w in _ci_wants):
+                    failures.append("{}: over {} characters expected deny within {} s of CPU time with a reason "
+                                    "holding {!r}, got {} after {:.2f} s with the reason {!r}{}".format(
+                                        _ci_label, len(_ci_cmd), _ci_cap, _ci_wants, _ci_got, _ci_spent,
+                                        _ci_reason[-200:],
+                                        "; the longer command was not run" if _ci_size == 16 << 10 else ""))
+                    break
+        # A command longer than _CMTIDN_READ_LIMIT characters is not read, so no reading of it can outlast the hook
         # timeout: find_ai_authorship raises ValueError with _CMTIDN_TOO_LONG before the tokenizer is called, and
-        # the handler's fallback denies the command when an AI name appears anywhere in it once its quotes,
-        # backslashes, '$' signs and newlines are removed, with no word boundary needed around the name, and it
-        # holds a word that can record an identity: git as a whole word, or a GIT_AUTHOR_ or GIT_COMMITTER_ variable
-        # name or user.name or user.email; a command that names an AI and holds none of them is judged by the
-        # raw-string scan, as a command the tokenizer cannot parse is. ci-wr-long-limit pins the limit just under,
-        # at and just past it. Over the costliest command shape measured, repeated wrapped git bisect run words
+        # the handler's fallback, whose own cost grows with the command's length (_commit_identity_fallback), denies
+        # the command when an AI name appears anywhere in it once its quotes, backslashes, '$' signs and newlines
+        # are removed, with no word boundary needed around the name, and it holds a word that can record an
+        # identity: git as a whole word, or a GIT_AUTHOR_ or GIT_COMMITTER_ variable name or user.name or
+        # user.email; a command that names an AI and holds none of them is judged by the raw-string scan, as a
+        # command the tokenizer cannot parse is. ci-wr-long-limit pins the limit just under, at and just past it.
+        # Over the costliest command shape measured, repeated wrapped git bisect run words
         # nested three deep and ending in a locale quote, padded to 1 MiB, which took about 7 s of CPU time to read
         # in full, each decision below is made within 1 s of CPU time: an AI --author value that an ANSI-C quote
         # splits, an AI --author value after a quote character that the reader keeps, and an AI co-author trailer

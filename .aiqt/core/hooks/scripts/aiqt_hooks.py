@@ -1914,8 +1914,13 @@ AI_IDENTITY_RE = re.compile(
     r"|@anthropic\.com|@openai\.com")
 COMMIT_VERBS = ("commit", "merge", "cherry-pick", "am", "rebase", "revert", "commit-tree")
 # A Co-Authored-By trailer inside a single token; its value runs to the token end (the token IS the
-# quoted message, so no shell quote can appear within it).
-CO_AUTHOR_RE = re.compile(r"(?i)co[- ]?authored[- ]?by\s*:?\s*([^\n]{1,160})")
+# quoted message, so no shell quote can appear within it). Each whitespace run is taken whole (\s*+), as in the
+# fallback's co-author context (_RAW_IDENTITY_CONTEXTS): giving a run back one character at a time cost time
+# quadratic in its length when the token ends after it (a message of a trailer name and a long run of newlines).
+# Taking a run whole changes a match only where nothing but whitespace and at most one ':' follows the trailer
+# name to the end of the token: the value found there names no AI identity and no later match can start, so the
+# reader finds the same AI identities in the same order.
+CO_AUTHOR_RE = re.compile(r"(?i)co[- ]?authored[- ]?by\s*+:?\s*+([^\n]{1,160})")
 # Identity-assignment tokens (any segment): a git-identity env var, or a user.name/user.email config
 # value in the '-c user.name=VALUE' inline shape.
 GIT_ENV_RE = re.compile(r"(?is)^GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)=(.*)$")
@@ -1931,15 +1936,23 @@ USER_CONF_EQ_RE = re.compile(r"(?is)^user\.(?:name|email)=(.*)$")
 # length when a quote or the end of the command follows it (a run of newlines, which no value can start with).
 # Taking a run whole changes a match only there, and the value that giving part of the run back would find
 # holds only whitespace or a ':', which names no AI identity, and covers no place the context can start, so the
-# context finds the same AI identities in the same order. The identity variable and user.name contexts judge a
-# command too long to read only when it holds none of their names (_cmtidn_identity_word), so there they find
+# context finds the same AI identities in the same order. The user.name context takes each whitespace run whole
+# too, since it judges a command the tokenizer cannot parse at any length up to the read limit: splitting a run
+# between two whitespace quantifiers at each space in it cost time quadratic in the run's length when no value
+# can start after it (a run of spaces before a quote that does not close). Its name is followed by a whitespace
+# run, '=' and a whitespace run, or else by a whitespace run that holds a space (the lookahead). No value starts
+# with whitespace, so either way a value starts after the whole run, where it started when the run was split,
+# and when no value starts after the '=', the '=' itself is the value, as it was when a space before it was
+# taken for the separator: the context finds the same values. The identity variable and user.name contexts judge
+# a command too long to read only when it holds none of their names (_cmtidn_identity_word), so there they find
 # no place to start.
 _VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s\"';|&]+)"
 _RAW_IDENTITY_CONTEXTS = (
     (re.compile(r"(?i)co[- ]?authored[- ]?by\s*+:?\s*+([^\n\"']{1,160})"), "co-author trailer"),
     (re.compile(r"(?i)--au(?:t(?:h(?:o(?:r)?)?)?)?[=\s]\s*" + _VALUE), "--author value"),
     (re.compile(r"(?i)\bGIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)\s*=\s*" + _VALUE), "git identity variable"),
-    (re.compile(r"(?i)\buser\.(?:name|email)\s*[= ]\s*" + _VALUE), "user.name/user.email value"),
+    (re.compile(r"(?i)\buser\.(?:name|email)(?:\s*+=\s*+|(?=[^\S ]*+ )\s*+)" + _VALUE),
+     "user.name/user.email value"),
 )
 
 
@@ -2231,10 +2244,16 @@ _CMTIDN_RUN_BOUNDS = ("git runs a command line that could not be parsed, or comm
 # words nested up to three deep and ending in a locale quote, which spend all three run-line bounds, took up to
 # about 7.3 microseconds of CPU time per character to read (1.9 s at 256 KiB, 7.1 s at 1 MiB), so a command of
 # this length costs up to about 1 s, a tenth of the timeout; that margin is for a host several times slower than
-# the one measured and for the other PreToolUse hooks the platform runs on the same command at the same time. A
-# longer command raises ValueError with _CMTIDN_TOO_LONG before any reading starts, and the handler's fallback
-# denies it when it names an AI anywhere and holds a word that can record an identity, or when a raw-string
-# context finds an AI identity in it (_commit_identity_fallback), in time that grows with its length.
+# the one measured and for the other PreToolUse hooks the platform runs on the same command at the same time.
+# That bound holds only while each regex the reader runs on a word, and each one the fallback runs on a command of
+# this length that the tokenizer cannot parse, costs time linear in the length it scans: CO_AUTHOR_RE and the
+# user.name context of _RAW_IDENTITY_CONTEXTS take each whitespace run whole, since giving a run back one character
+# at a time cost time quadratic in its length (about 53 s and 130 s of CPU time at this length, for a commit message
+# of a trailer name and a run of newlines and for user.name and a run of spaces before a quote that does not close,
+# against about 0.01 s with each run taken whole). A longer command raises ValueError with _CMTIDN_TOO_LONG before
+# any reading starts, and the handler's fallback denies it when it names an AI anywhere and holds a word that can
+# record an identity, or when a raw-string context finds an AI identity in it (_commit_identity_fallback), in time
+# that grows with its length.
 _CMTIDN_READ_LIMIT = 128 << 10
 _CMTIDN_TOO_LONG = "the command is longer than the commit-identity check reads within the hook timeout"
 # An AI name as AI_IDENTITY_RE spells it but with no word boundary, so that a name the reader would find in a
