@@ -25,30 +25,37 @@ Exit convention (matches the repo's gates):
      first, before opf/ is copied, any bound is derived or any leg runs). The whole-roster check holds
      every row: the leg names must be exactly those of the ceiling table, each once, and the ceiling
      table's legs must be the count and digest recorded in _ROSTER_PIN; every script must be a plain
-     file name (no path separator, never '', '.' or '..', never absolute), so no row names a file
-     outside opf/tools/; and whenever opf/tools/ exists, every script must be a file there, opf.py
-     included. So a row removed, added or repeated, a leg renamed, a row removed or added together
-     with its ceiling row, a script that is not a plain file name, and a script opf/tools/ does not
-     hold are each named as drift, never as a bound that cannot be derived. LIMIT: a change that also records the
+     file name (no path separator, never '', '.' or '..', never absolute) and never one the isolated
+     copy leaves out (*.pyc, __pycache__); and whenever opf/tools/ exists, every script must be a
+     regular file that is itself there, opf.py included: never a symlink (read with os.lstat,
+     whatever it points at, inside opf/tools/ or out) and never reached through a symlinked opf/ or
+     opf/tools/ (its resolved path must be that file under the resolved repository root), so no row
+     names a file outside opf/tools/ and the code a leg runs is the file opf/tools/ holds. So a row
+     removed, added or repeated, a leg renamed, a row removed or added together with its ceiling row,
+     a script that is not a plain file name or that the copy leaves out, and a script opf/tools/ does
+     not hold as a regular file of its own (missing, a symlink, or resolving outside it) are each
+     named as drift, never as a bound that cannot be derived. LIMIT: a change that also records the
      new count and digest in _ROSTER_PIN passes; the pin makes a roster change a deliberate third
      edit, and does not judge whether the change is right. Three rows are also pinned as exact
      tuples, so for those alone a changed argument list, or a script changed to another file that
      exists, is drift too
   2  malformed input or a harness error (fail-closed): no opf/tools/ directory (opf/ absent included),
      an opf/tools/ entry that cannot be checked (an OSError other than a missing entry: a directory
-     that cannot be searched, a symlink loop), a temporary directory that cannot be created, copy
-     failed, no interpreter, a per-leg bound that cannot be derived, any other exception before, around
-     or after the legs (a harness fault, named, whatever it carries, an AssertionError or a SystemExit
-     included, as is a leg result the report cannot read), a leg killed at its wall-clock bound (named
-     as the bound tripping, never as a failure the leg reported; see _LEG_CEILING_S for how each bound
-     is derived), or a leg ended by a signal this gate did not send (named by its signal; a
-     negative status cannot tell an outside signal, from another process, the OOM killer or an
-     interpreter crash, from one the leg or its own process group sent itself, so it is never read as a
-     failure the leg reported), with any cleanup after a kill that did not complete named beside it
-     (CLEANUP INCOMPLETE); a real finding beside any of these still exits 1, except beside a harness
-     fault: that stops the run where it is raised and keeps no leg's row, so the run exits 2 even when
-     a leg already failed (a fault raised while the report prints can leave part of it above the NOT
-     EVALUATED line)
+     that cannot be searched), a temporary directory that cannot be created, copy failed, a symlink
+     anywhere in opf/ that resolves outside the isolated copy (the copy keeps every symlink as the link
+     itself, never its target, and is refused when one leaves it, so no symlink the copy holds
+     reaches outside it), no interpreter, a per-leg bound that cannot be derived, any other exception
+     before, around or after the legs (a harness fault, named, whatever it carries, an AssertionError
+     or a SystemExit included, as is a leg result the report cannot read), a leg killed at its
+     wall-clock bound (named as the bound tripping, never as a failure the leg reported; see
+     _LEG_CEILING_S for how each bound is derived), or a leg ended by a signal this gate did not send
+     (named by its signal; a negative status cannot tell an outside signal, from another process, the
+     OOM killer or an interpreter crash, from one the leg or its own process group sent itself, so it
+     is never read as a failure the leg reported), with any cleanup after a kill that did not complete
+     named beside it (CLEANUP INCOMPLETE); a real finding beside any of these still exits 1, except
+     beside a harness fault: that stops the run where it is raised and keeps no leg's row, so the run
+     exits 2 even when a leg already failed (a fault raised while the report prints can leave part of
+     it above the NOT EVALUATED line)
 One bound is DELIBERATELY SHORTER than the work its leg is sanctioned to do: opf-tooling-selftest's,
 below the budget opf.py grants its own blocked-isolation leg, because a bound above that budget would not
 fit the CI job (see _LEG_CEILING_S); its trip is reported as the bound tripping (exit 2), never as a
@@ -60,8 +67,9 @@ raising _CheckFailure), and 2 when a leg or the flip could not be evaluated (a b
 harness failure or fault, a temporary directory that cannot be created, a bound that cannot be derived,
 a check that cannot evaluate what it checks (_CannotEvaluate: the CI job limit cannot be read), any
 other exception or a SystemExit in the fast phase, an AssertionError of any other type included
-whatever its message, any exception or SystemExit building or running the flipped copy, a source that
-cannot be decoded included, or any flip outcome other than the exact bytes the flipped import writes;
+whatever its message, any exception or SystemExit running or judging the positive leg (the flip still
+runs), building or running the flipped copy (a source that cannot be decoded included) or escaping the
+closure legs, or any flip outcome other than the exact bytes the flipped import writes;
 see _negative_verdict), each named. The exception's type routes it, never its message
 (_self_test_phase), and where it is raised decides which type it reaches the phase as. A check's own
 assertions raise _CheckFailure (1), those about its fixtures included (a readiness file that never
@@ -266,6 +274,11 @@ _DRAIN_MARGIN_S = 10
 # needs a multiplier above 1348.7 / 486 = 2.77510..., so 2.776 to three places, since 2.775 x 486 =
 # 1348.65 falls short) and fits the job (that allows at most 2.705).
 _MIN_LEG_BOUND_S = 60
+# The names the isolated copy of opf/ leaves out (bytecode artefacts). _materialize copies through
+# _COPY_IGNORE, and the whole-roster check refuses a script it would leave out through the same
+# function, so the two cannot disagree on a name.
+_COPY_PATTERNS = ("__pycache__", "*.pyc")
+_COPY_IGNORE = shutil.ignore_patterns(*_COPY_PATTERNS)
 
 _CI_WORKFLOW = Path(".github") / "workflows" / "quality.yml"
 _CI_JOB = "opf-closure"
@@ -289,9 +302,14 @@ _CI_SETUP_ALLOWANCE_S = 600    # checkout with full history and setup-python, be
 #     fault through run(), the report and flip faults, the self-test's wiring to its fast phase, the
 #     whole-roster check with its roster pin and script-name drift, and the routing of a crash or a
 #     SystemExit in the code under test, a check that cannot evaluate and a fault creating a check's
-#     own temporary directory). With every vector this file holds, ONE measured run of the whole
-#     vector phase on 2026-10-16 took 44.0 s (a single run, plain, on a shared 24-CPU host, load5
-#     27.0 at its start and 27.4 at its end): one run at one load, never a bound.
+#     own temporary directory); one run of the whole vector phase with them was REPORTED at 44.0 s on
+#     2026-10-16 (plain, load5 27.0 at its start and 27.4 at its end), a figure NOT reproduced. Nor
+#     do the ones added last (a roster script that is a symlink, resolves outside opf/tools/ or is a
+#     name the copy leaves out, a copy holding a symlink that leaves it, and an exception or a
+#     SystemExit from the positive leg or escaping the closure legs). With every vector this file
+#     holds, ONE measured run of the whole vector phase on 2026-10-16 took 44.5 s (a single run,
+#     plain, on a shared 24-CPU host, load5 18.1 at its start and 18.2 at its end): one run at one
+#     load, never a bound.
 # 269 + 38.4 = 307.4 s, rounded up to 310 s.
 _VECTOR_ALLOWANCE_S = 310
 
@@ -311,6 +329,11 @@ class _CheckFailure(AssertionError):
 class _CannotEvaluate(Exception):
     """A self-test check that cannot evaluate what it checks: cannot evaluate (exit 2), named by its
     message, never a failure and never a pass. Raised when the CI job limit cannot be read."""
+
+
+class _CopyRefused(Exception):
+    """The isolated copy of opf/ holds a symlink that resolves outside it (_materialize): a harness
+    fault, cannot evaluate (exit 2), named with each such link, never a leg run against it."""
 
 
 def _under_test(check, func, *args, refuses=(), **kwargs):
@@ -679,15 +702,37 @@ def _plain_file_name(script):
             and Path(script).name == script)
 
 
-def _script_is_file(path):
-    """True when path is a regular file (through a symlink included), False when there is no such entry
-    or a component of path is not a directory. Any other OSError (a directory that cannot be searched,
-    a symlink loop) propagates: whether the script is there cannot be told, so the gate names it a
-    harness fault (exit 2, _run_closure), never a missing script."""
+def _tools_home(tools_dir):
+    """Where the entries of tools_dir (a repository's opf/tools/) must resolve: the repository root
+    resolved (os.path.realpath), then tools_dir's own last two components as named. A roster script
+    whose resolved path is not under it reaches the legs through a symlinked opf/ or opf/tools/."""
+    tools_dir = Path(os.path.abspath(tools_dir))
+    return os.path.join(os.path.realpath(tools_dir.parent.parent), tools_dir.parent.name, tools_dir.name)
+
+
+def _script_fault(tools_dir, script):
+    """None when the plain file name script is a regular file that is itself in tools_dir, else what it
+    is instead. The entry is read with os.lstat, so a symlink is named as one whatever it points at,
+    inside opf/tools/ or outside it (the copy keeps it a link, and a roster script must be the file
+    itself); its resolved path must then be that file under _tools_home, so a script reached through a
+    symlinked opf/ or opf/tools/ is named with where it resolves. No such entry, a component that is not
+    a directory, or an entry that is not a regular file is not a file in opf/tools/. Any other OSError
+    (a directory that cannot be searched, a name too long for the file system) propagates: whether the
+    script is there cannot be told, so the gate names it a harness fault (exit 2, _run_closure), never a
+    missing script. A hard link is a regular file in opf/tools/, whatever other names its file has."""
+    path = Path(tools_dir) / script
     try:
-        return stat.S_ISREG(os.stat(path).st_mode)
+        mode = os.lstat(path).st_mode
     except (FileNotFoundError, NotADirectoryError):
-        return False
+        return "is not a file in opf/tools/"
+    if stat.S_ISLNK(mode):
+        return "is a symlink in opf/tools/ (to {!r}), not the file itself".format(os.readlink(path))
+    if not stat.S_ISREG(mode):
+        return "is not a file in opf/tools/"
+    resolved = os.path.realpath(path)
+    if resolved != os.path.join(_tools_home(tools_dir), script):
+        return "resolves to {}, outside opf/tools/".format(resolved)
+    return None
 
 
 def _check_roster_registration(subset, tools_dir=None):
@@ -696,16 +741,22 @@ def _check_roster_registration(subset, tools_dir=None):
     the ceiling table's legs must be the count and digest _ROSTER_PIN records (_roster_pin), so a row
     removed, added or renamed together with its ceiling row, which leaves the two tables agreeing, is
     still named. Every row's script must be a plain file name (_plain_file_name), so no row names a
-    file outside the opf/tools/ the legs run from, whether or not there is one; and, when tools_dir is
-    given (that opf/tools/; None when there is none, which the gate refuses as cannot evaluate), each
-    plain script must be a file there (_script_is_file: an entry that cannot be checked propagates its
-    OSError, a harness fault, never drift). Raises _CheckFailure "closure/roster-registration: ..."
-    naming each missing, extra or repeated row, a ceiling table that is not the pin (with its count and
-    digest, the figures a deliberate roster change records in _ROSTER_PIN), each script that is not a
-    plain file name and each missing script. LIMIT: a roster change that also records its new pin
-    passes; and the check holds names, the pin and each script's name and presence only, so a row's
-    arguments, or its script changed to another file that exists, are held only for the three rows
-    the tuple checks above pin."""
+    file outside the opf/tools/ the legs run from, whether or not there is one, and never a name the
+    isolated copy leaves out (_COPY_IGNORE: a *.pyc file or __pycache__, which the copy would lack);
+    and, when tools_dir is given (that opf/tools/; None when there is none, which the gate refuses as
+    cannot evaluate), each such script must be a regular file that is itself in opf/tools/
+    (_script_fault: never a symlink, whatever it points at, and never reached through a symlinked
+    opf/ or opf/tools/; an entry that cannot be checked propagates its OSError, a harness fault, never
+    drift). Raises _CheckFailure "closure/roster-registration: ..." naming each missing, extra or
+    repeated row, a ceiling table that is not the pin (with its count and digest, the figures a
+    deliberate roster change records in _ROSTER_PIN), each script that is not a plain file name, each
+    one the copy leaves out, and each script that is missing, a symlink or resolves outside
+    opf/tools/. LIMIT: it reads opf/tools/ before the copy is made, so a change between the two is not
+    named as drift, though the copy still refuses any symlink in it that resolves outside it
+    (_materialize). LIMIT: a roster change that also records its new pin passes; and the check holds
+    names, the pin and each script's name and presence only, so a row's arguments, or its script
+    changed to another file that exists, are held only for the three rows the tuple checks above
+    pin."""
     names = [row[0] for row in subset]
     faults = ["row {} missing".format(name) for name in _LEG_CEILING_S if name not in names]
     faults.extend("row {} not in the ceiling table".format(name) for name in dict.fromkeys(names)
@@ -718,10 +769,16 @@ def _check_roster_registration(subset, tools_dir=None):
                       "(sha256 {})".format(count, digest, _ROSTER_PIN[0], _ROSTER_PIN[1]))
     faults.extend("script {!r} of row {} is not a plain file name".format(script, name)
                   for name, script, _args in subset if not _plain_file_name(script))
+    faults.extend("script {!r} of row {} is a name the isolated copy leaves out ({})".format(
+                      script, name, ", ".join(_COPY_PATTERNS))
+                  for name, script, _args in subset
+                  if _plain_file_name(script) and _COPY_IGNORE("opf/tools", [script]))
     if tools_dir is not None:
-        faults.extend("script {} of row {} is not a file in opf/tools/".format(script, name)
-                      for name, script, _args in subset
-                      if _plain_file_name(script) and not _script_is_file(Path(tools_dir) / script))
+        for name, script, _args in subset:
+            if _plain_file_name(script) and not _COPY_IGNORE("opf/tools", [script]):
+                fault = _script_fault(tools_dir, script)
+                if fault is not None:
+                    faults.append("script {} of row {} {}".format(script, name, fault))
     if faults:
         raise _CheckFailure("closure/roster-registration: " + "; ".join(faults))
 
@@ -740,10 +797,13 @@ def _roster_registration_self_test(root):
     row removed (one the tuple checks do not pin), a row added, a row repeated, a leg renamed, a script
     renamed to a file opf/tools/ does not hold, a ceiling row removed (the ceiling table then lacks a
     leg the subset runs, and is not the pin), a row removed, added or renamed together with its ceiling
-    row (only the pin then differs), and a script that is not a plain file name (an absolute path,
-    inside opf/tools/ or outside it, a '..' path to a file that exists, '..', '.', '', a nested path, a
-    value that is not a str), the last also with no opf/tools/ to check; with no opf/tools/ to check, a
-    plain script's presence is not checked, never failed."""
+    row (only the pin then differs), a script that is not a plain file name (ten cases over nine
+    values: an absolute path, inside opf/tools/ or outside it, a '..' path to a file that exists, '..',
+    '.', '', a nested path, a value that is not a str, a name carrying a NUL, and the absolute path
+    outside opf/tools/ again with no opf/tools/ to check), and a script the isolated copy leaves out (a
+    *.pyc name, with and without an opf/tools/ to check, and __pycache__); with no opf/tools/ to
+    check, a plain script's presence is not checked, never failed. The symlink shapes need a tree of
+    their own, so _harness_routing_self_test holds them through run()."""
     tools_dir = Path(root) / "opf" / "tools"
     _under_test("roster-registration", _check_roster_registration, _SUBSET, tools_dir)
     print("PASS closure/roster-registration")
@@ -797,10 +857,20 @@ def _roster_registration_self_test(root):
             ("script-empty", "", tools_dir),
             ("script-nested-path", "nested/check_opf_homes.py", tools_dir),
             ("script-not-a-str", Path("check_opf_homes.py"), tools_dir),
+            ("script-nul", "check_opf_homes.py\x00", tools_dir),
             ("script-absolute-no-tools-dir", str(Path(root).resolve() / "tools" /
                                                  "check_python_floor.py"), None)):
         cases.append((label, with_script(script), _LEG_CEILING_S, scripts,
                       "script {!r} of row opf-homes-contract is not a plain file name".format(script)))
+    # A plain file name the isolated copy leaves out (_COPY_IGNORE) would be missing from the copy the
+    # leg runs from: drift whatever opf/tools/ holds, opf/ present or not.
+    for label, script, scripts in (
+            ("script-bytecode", "check_opf_homes.pyc", tools_dir),
+            ("script-bytecode-no-tools-dir", "check_opf_homes.pyc", None),
+            ("script-pycache", "__pycache__", tools_dir)):
+        cases.append((label, with_script(script), _LEG_CEILING_S, scripts,
+                      "script {!r} of row opf-homes-contract is a name the isolated copy leaves out "
+                      "(__pycache__, *.pyc)".format(script)))
     for label, subset, table, scripts, want in cases:
         try:
             with _swapped(_LEG_CEILING_S=table):
@@ -814,9 +884,10 @@ def _roster_registration_self_test(root):
                 raise _CheckFailure("closure/roster-registration-not-red: " + label)
     print("RED closure-registration -> closure/roster-registration names a row removed, added or "
           "repeated, a leg renamed, a script opf/tools/ does not hold, a ceiling row removed, a row "
-          "removed, added or renamed together with its ceiling row (the pin), and a script that is "
-          "not a plain file name (absolute, '..', '.', '', nested or not a str), opf/tools/ present "
-          "or not; with no opf/tools/ to check, a plain script's presence is not checked")
+          "removed, added or renamed together with its ceiling row (the pin), a script that is not a "
+          "plain file name (absolute, '..', '.', '', nested, carrying a NUL or not a str) and a "
+          "script the isolated copy leaves out (*.pyc, __pycache__), opf/tools/ present or not; with "
+          "no opf/tools/ to check, a plain script's presence is not checked")
 
 
 # Each closure-roster registration check, by the assertion message that is its own finding (the
@@ -860,12 +931,41 @@ def _isolated_env():
     return env
 
 
+def _links_leaving(top):
+    """Each symlink under the directory top (top itself excluded) whose target, resolved
+    (os.path.realpath; a link that does not resolve, a loop included, reads as the path it names), is
+    neither top nor under it, as its path from top's parent and its link text, sorted. The walk never
+    follows a link; an OSError listing a directory propagates."""
+    home = os.path.realpath(top)
+    leaving = []
+
+    def fail(exc):
+        raise exc
+
+    for parent, dirs, files in os.walk(top, onerror=fail):
+        for name in dirs + files:
+            path = os.path.join(parent, name)
+            if os.path.islink(path) and os.path.commonpath([home, os.path.realpath(path)]) != home:
+                leaving.append("{} -> {!r}".format(os.path.relpath(path, os.path.dirname(top)),
+                                                   os.readlink(path)))
+    return sorted(leaving)
+
+
 def _materialize(opf_src, dest):
-    """Copy the opf/ subtree ALONE into dest/opf (no tools/, no .aiqt), skipping bytecode artefacts. Raises
-    on any copy failure so a truncated materialization fails closed rather than passing on a partial tree."""
-    shutil.copytree(opf_src, dest / "opf",
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    return dest / "opf"
+    """Copy the opf/ subtree ALONE into dest/opf (no tools/, no .aiqt), skipping bytecode artefacts
+    (_COPY_IGNORE). A symlink is copied as the link itself, never its target, and the copy is then
+    refused (_CopyRefused, a harness fault: exit 2) when any symlink in it resolves outside it
+    (_links_leaving): copying the target would put code from outside opf/ into the copy, and a link
+    kept as itself that leaves the copy (an absolute link, or a relative one that climbs out) would let
+    a leg reach it. A link that resolves inside the copy stays a link there. Raises on any copy failure
+    so a truncated materialization fails closed rather than passing on a partial tree."""
+    copy = dest / "opf"
+    shutil.copytree(opf_src, copy, symlinks=True, ignore=_COPY_IGNORE)
+    leaving = _links_leaving(copy)
+    if leaving:
+        raise _CopyRefused("the copy holds {} symlink(s) resolving outside its opf/: {}".format(
+            len(leaving), "; ".join(leaving)))
+    return copy
 
 
 def _tail(output, keep=3):
@@ -1078,9 +1178,10 @@ def run(root, ceilings=None):
     """Materialize opf/ alone and run the subset in isolation. Returns 0 (closure holds), 1 (a subset gate
     failed: closure broken; or registration drift, named, found before opf/ is copied, any bound is
     derived or any leg runs), or 2 (harness error, no opf/tools/ directory, an opf/tools/ entry that
-    cannot be checked, a temporary directory that cannot be created, a leg with no row in the ceilings
-    passed in, refused before any leg launches, any other exception or a SystemExit before, around or
-    after the legs, or a leg killed at its bound or ended by a signal), fail-closed. ceilings defaults to
+    cannot be checked, a temporary directory that cannot be created, a copy holding a symlink that
+    resolves outside it, a leg with no row in the ceilings passed in, refused before any leg launches,
+    any other exception or a SystemExit before, around or after the legs, or a leg killed at its bound
+    or ended by a signal), fail-closed. ceilings defaults to
     _LEG_CEILING_S (the self-test passes a table missing a row); a leg missing from _LEG_CEILING_S
     itself is registration drift (1), since the roster is held to that table and that table to
     _ROSTER_PIN (_check_roster_registration)."""
@@ -1094,16 +1195,19 @@ def _run_closure(root, ceilings=None):
     them. The registration checks run FIRST, over the real roster, before opf/ is copied, any bound is
     derived or any leg launches, so every drift shape _check_roster_registration names (a row removed,
     added or repeated, a leg renamed, a row removed or added together with its ceiling row, a script
-    that is not a plain file name, a script opf/tools/ does not hold) is registration drift (1), never a
-    bound that cannot be derived. They read opf/ only to check each plain script is a file in
-    opf/tools/, and they do so whenever opf/tools/ is a directory, so a roster script removed from it,
-    opf.py included, is drift; drift in the roster itself is named even when there is no opf/tools/,
-    and with a clean roster no opf/tools/ is cannot evaluate (2). Only those checks' own assertions
-    (_registration_drift) are a definite finding here. Any other exception or a SystemExit, from a
-    registration check (an opf/tools/ entry that cannot be checked included), the copy, the bound scan,
-    the legs or the report of their results (a leg result it cannot read included), an AssertionError
-    included, is a harness fault: named, cannot evaluate (2), never a finding, never a traceback and
-    never an exit the raiser chose. The routing vectors rebind the module names this looks up
+    that is not a plain file name or that the copy leaves out, a script opf/tools/ does not hold as a
+    regular file of its own: missing, a symlink, or resolving outside it) is registration drift (1),
+    never a bound that cannot be derived. They read opf/ only to check each such script is a regular
+    file in opf/tools/, and they do so whenever opf/tools/ is a directory, so a roster script removed
+    from it, opf.py included, is drift; drift in the roster itself is named even when there is no
+    opf/tools/, and with a clean roster no opf/tools/ is cannot evaluate (2). Only those checks' own
+    assertions (_registration_drift) are a definite finding here. A copy refused for a symlink that
+    resolves outside it (_materialize) is cannot evaluate (2), named with each such link. Any other
+    exception or a SystemExit, from a registration check (an opf/tools/ entry that cannot be checked
+    included), the copy, the bound scan, the legs or the report of their results (a leg result it
+    cannot read included), an AssertionError included, is a harness fault: named, cannot evaluate (2),
+    never a finding, never a traceback and never an exit the raiser chose. The routing vectors rebind
+    the module names this looks up
     (_harness_routing_self_test), so the path they hold through run() is this one."""
     tmp = None
     try:
@@ -1130,7 +1234,7 @@ def _run_closure(root, ceilings=None):
             return 2, None, stopped
         try:
             opf_root = _materialize(opf_src, tmp)
-        except OSError as exc:
+        except (OSError, _CopyRefused) as exc:
             stopped = "could not materialize the isolated opf/ copy: {}".format(exc)
             print("error: " + stopped, file=sys.stderr)
             return 2, None, stopped
@@ -2098,7 +2202,10 @@ def _self_test_outcome(verdicts):
 
 def _closure_legs(root, required, run_closure=None, run_one=None):
     """The self-test's positive and negative legs over root's opf/, returning the self-test's exit code
-    (_self_test_outcome). The negative leg's output is compared as raw bytes (run_one with raw True).
+    (_self_test_outcome). Any exception or SystemExit running the positive leg or judging it (from
+    run_closure or _positive_verdict) leaves it unevaluated (2), named by its type, and the negative leg
+    still runs, so a flip not caught beside it is still a failure (1). The negative leg's output is
+    compared as raw bytes (run_one with raw True).
     A temporary directory that cannot be created, fixture drift in the flip, any exception or SystemExit
     building the flipped copy (a failed copy, or a store that cannot be read or decoded), any exception
     or SystemExit running or judging the flipped leg, and an incomplete cleanup after the flipped leg's
@@ -2109,7 +2216,11 @@ def _closure_legs(root, required, run_closure=None, run_one=None):
     run_one = _run_one if run_one is None else run_one
 
     # Positive: the real opf/ subtree verifies itself in isolation.
-    verdicts = [_positive_verdict(*run_closure(root))]
+    try:
+        verdicts = [_positive_verdict(*run_closure(root))]
+    except (Exception, SystemExit) as exc:
+        verdicts = [(2, "positive: harness fault running or judging the positive leg (closure was not "
+                        "evaluated for the real opf/): {}: {}".format(type(exc).__name__, exc))]
 
     # Negative (deliberate flip): a surviving upward edge must be caught.
     opf_src = Path(root) / "opf"
@@ -2164,7 +2275,10 @@ def _verdict_routing_self_test():
     building the flipped copy, a store whose bytes are not UTF-8, a runner that raises (a SystemExit
     included), a temporary directory that cannot be created (an OSError, any other exception or a
     SystemExit from mkdtemp) and an incomplete cleanup after the flipped leg's kill, each named, never
-    the exit a SystemExit carries; and a definite failure outranks a leg that could not be evaluated.
+    the exit a SystemExit carries; a SystemExit or another exception running the positive leg, and a
+    SystemExit judging it (_positive_verdict), leave the positive leg unevaluated (2), named, with the
+    flip still run; and a definite failure outranks a leg that could not be evaluated, a flip not
+    caught beside such a positive fault included.
     The wiring is held through _closure_legs, the legs self_test_main runs, with both runners stubbed
     over a throwaway tree that holds only the import the flip rewrites: the copy and the flip are real
     (but in the one case that replaces the copy with a SystemExit), and nothing is launched."""
@@ -2195,6 +2309,13 @@ def _verdict_routing_self_test():
         raise _CheckFailure("closure/positive-verdict-rejects-a-clean-run")
     caught = (_FLIP_EXIT, _FLIP_BYTES, 0.1, True, [])
     flips = []
+
+    def positive_runner(result):
+        def run_closure(_root):
+            if isinstance(result, BaseException):
+                raise result
+            return result
+        return run_closure
 
     def flip_runner(result):
         def run_one(opf_root, script, args, _run_dir, _env, bound, raw=False):
@@ -2229,6 +2350,8 @@ def _verdict_routing_self_test():
         os.makedirs(absent)
         unreaped = "leader-unreaped: leader pid 4242 was still unreaped at the 10s cleanup deadline"
         flipped = [("from check_versions import _parse\n", "opf.py", ["--self-test"], 1458, True)]
+        positive_fault = ("SELF-TEST CANNOT EVALUATE: positive: harness fault running or judging the "
+                          "positive leg (closure was not evaluated for the real opf/): ")
         for label, base, mkdtemp, positive, negative, want_code, want, refused, want_flips in (
                 ("bound-kill", root, None, (2, [killed, clean], None), caught, 2,
                  ("SELF-TEST CANNOT EVALUATE: positive", "opf-doctor-selftest killed at its 1140s bound"),
@@ -2290,6 +2413,17 @@ def _verdict_routing_self_test():
                 ("runner-system-exit", root, None, (0, [clean], None), SystemExit(0), 2,
                  ("SELF-TEST CANNOT EVALUATE: negative: harness fault running or judging the flipped "
                   "leg (the flip was not evaluated): SystemExit: 0",), ("SELF-TEST FAIL",), flipped),
+                # A SystemExit or another exception from the positive leg's run is named, exit 2, never
+                # the exit 0 it carries and never a traceback; the negative leg still runs, so a flip
+                # not caught beside it is still a failure (1).
+                ("positive-system-exit", root, None, SystemExit(0), caught, 2,
+                 (positive_fault + "SystemExit: 0",), ("SELF-TEST FAIL",), flipped),
+                ("positive-runner-fault", root, None, RuntimeError("positive runner fault"), caught, 2,
+                 (positive_fault + "RuntimeError: positive runner fault",), ("SELF-TEST FAIL",),
+                 flipped),
+                ("positive-system-exit-beside-a-flip-not-caught", root, None, SystemExit(0),
+                 (0, b"SELF-TEST PASS\n", 0.1, True, []), 1,
+                 ("SELF-TEST FAIL: negative", positive_fault + "SystemExit: 0"), (), flipped),
                 # REGRESSION COVERAGE: a clean run passes whether or not any routing above is in place.
                 ("clean", root, None, (0, [clean], None), caught, 0, (), ("SELF-TEST",), flipped)):
             del flips[:]
@@ -2301,7 +2435,7 @@ def _verdict_routing_self_test():
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
                     code = _under_test("self-test-routing: " + label, _closure_legs, base,
                                        {"opf-tooling-selftest": (1458, 486, 0)},
-                                       run_closure=lambda _root, positive=positive: positive,
+                                       run_closure=positive_runner(positive),
                                        run_one=flip_runner(negative))
             finally:
                 tempfile.mkdtemp = real_mkdtemp
@@ -2327,6 +2461,22 @@ def _verdict_routing_self_test():
                    "flip was not evaluated): SystemExit: 0" not in said):
             raise _CheckFailure("closure/self-test-routing: copy-system-exit (exit {}, want 2; flips "
                                 "{!r}): {!r}".format(code, flips, said))
+        # A SystemExit judging the positive leg (here from _positive_verdict, the module name
+        # _closure_legs looks up rebound) is named, exit 2, never the exit 0 it carries; the flip
+        # still runs.
+        del flips[:]
+        out = io.StringIO()
+        with _swapped(_positive_verdict=exits):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                code = _under_test("self-test-routing: positive-verdict-system-exit", _closure_legs, root,
+                                   {"opf-tooling-selftest": (1458, 486, 0)},
+                                   run_closure=lambda _root: (0, [clean], None),
+                                   run_one=flip_runner(caught))
+        said = out.getvalue()
+        if (code != 2 or "SELF-TEST FAIL" in said or flips != flipped
+                or positive_fault + "SystemExit: 0" not in said):
+            raise _CheckFailure("closure/self-test-routing: positive-verdict-system-exit (exit {}, want "
+                                "2; flips {!r}): {!r}".format(code, flips, said))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("RED run() exit 2 (a leg killed at its bound, a signal, a leg never launched, an incomplete "
@@ -2339,7 +2489,9 @@ def _verdict_routing_self_test():
           "failed copy, a store whose bytes are not UTF-8 and a temporary directory that cannot be "
           "created (an OSError, another exception or a SystemExit) -> each named, exit 2, nothing "
           "launched; a runner that raises (an exception or a SystemExit) and a SystemExit building the "
-          "flipped copy -> named, exit 2")
+          "flipped copy -> named, exit 2; a SystemExit or another exception running the positive leg, "
+          "and a SystemExit judging it -> the positive leg CANNOT EVALUATE, named, exit 2, the flip "
+          "still run, and exit 1 beside a flip not caught")
 
 
 def _self_test_phase(phase):
@@ -2409,8 +2561,11 @@ def _harness_routing_self_test():
     renamed, its script renamed to a file opf/tools/ does not hold, its ceiling row removed, the row
     removed together with its ceiling row (only the pin names it), its script an absolute path or a
     '..' path to a file that exists outside opf/tools/, opf.py removed from an opf/tools/ that is
-    otherwise whole, and roster drift and an absolute script path each beside a missing opf/ (named
-    before the missing opf/ is); then, for the rows the tuple checks pin, two rows removed, a row's
+    otherwise whole, a roster script that is a symlink (to a file outside opf/tools/, to a file beside
+    it in opf/tools/, or to itself, a loop), every roster script reached through an opf/tools/ or an
+    opf/ that is itself a symlink, a script the copy leaves out (a *.pyc file opf/tools/ holds), and
+    roster drift and an absolute script path each beside a missing opf/ (named before the missing
+    opf/ is); then, for the rows the tuple checks pin, two rows removed, a row's
     arguments changed, its name renamed and its script renamed to a missing file. A runner that passes
     every leg stands in for the legs in each drift case, so a drift the checks missed would run clean
     (exit 0) or stop at the bound scan or at the missing opf/ (exit 2), never exit 1. The renamed
@@ -2418,13 +2573,16 @@ def _harness_routing_self_test():
     and never name the drift. Any other exception is a HARNESS FAULT, cannot evaluate (exit 2), named:
     a registration check raising an unrelated AssertionError, a _CheckFailure carrying another check's
     message, or an AssertionError of another type carrying its OWN message (the type routes it: never
-    read as drift, and never as no drift), an opf/tools/ entry whose presence cannot be checked (a
-    symlink loop where opf.py stands: never read as a missing script), an unrelated AssertionError or a
-    SystemExit raised before the first leg, a _CheckFailure carrying a registration check's message
+    read as drift, and never as no drift), an opf/tools/ entry whose presence cannot be checked (os.lstat
+    raising ELOOP for opf.py, injected: never read as a missing script), an unrelated AssertionError or
+    a SystemExit raised before the first leg, a _CheckFailure carrying a registration check's message
     that a launch raised rather than the check, an exception raised as the first leg starts, an OSError
-    creating the temporary directory (as on a full disk), and a leg result the report cannot read (an
-    empty row). A missing opf/ with a clean roster is cannot evaluate (2), never drift: a plain
-    script's presence is not checked when there is no opf/tools/. A run whose every leg passes is 0.
+    creating the temporary directory (as on a full disk), two symlinks in opf/ that are not roster
+    scripts and resolve outside the copy (one climbing out through '..', one absolute: the copy keeps
+    each as a link and is refused), and a leg result the report cannot read (an empty row). A missing
+    opf/ with a clean roster is cannot evaluate (2), never drift: a plain script's presence is not
+    checked when there is no opf/tools/. A run whose every leg passes is 0, beside a symlink in
+    opf/tools/ that resolves inside the copy too.
     Each run is over a throwaway opf/ (_throwaway_opf); every launch is recorded and refused (the clean
     runner records each leg and reports it passed, launching nothing).
     The self-test's fast phase routes by type the same way (_self_test_phase): a _CheckFailure is a
@@ -2433,7 +2591,8 @@ def _harness_routing_self_test():
     SystemExit are cannot evaluate (2), named, and none escapes. self_test_main is held on that wiring:
     a fast phase that raises (a SystemExit included) returns the phase's code before any closure leg
     runs, and one that returns hands the repository root and its bounds to the closure legs, whose code
-    self_test_main returns, printing PASS only on 0."""
+    self_test_main returns, printing PASS only on 0; a SystemExit or another exception escaping the
+    closure legs is a harness fault, cannot evaluate (2), named."""
     launches = []
     before = "unrelated assertion before the first leg"
     starts = "runner fault as the first leg starts"
@@ -2458,6 +2617,13 @@ def _harness_routing_self_test():
 
     def exits(*_args, **_kwargs):
         raise SystemExit(0)
+
+    real_lstat = os.lstat
+
+    def lstat_fault(path, *args, **kwargs):
+        if Path(path).name == "opf.py":
+            raise OSError(errno.ELOOP, "Too many levels of symbolic links (injected)", str(path))
+        return real_lstat(path, *args, **kwargs)
 
     def replaced(name, row):
         return [row if entry[0] == name else entry for entry in _SUBSET]
@@ -2490,8 +2656,13 @@ def _harness_routing_self_test():
         # '..' alone, with more '..' than the throwaway's opf/tools/ is deep (the copy's lies as deep,
         # under the same temporary directory), so it reaches the same file from either and a gate
         # that accepted it would launch it; no-opf-py holds every roster script but opf.py;
-        # script-loop holds them all, opf.py a symlink to itself (a loop, so whether it is a file
-        # cannot be told).
+        # script-loop holds them all, opf.py a symlink to itself (a loop); link-out and link-in each
+        # add check_opf_homes_link.py, a symlink to outside.py and to check_opf_homes.py beside it;
+        # tools-link's opf/tools/ is itself a symlink to elsewhere's, which holds every roster
+        # script, and opf-link's opf/ one to elsewhere's opf/; bytecode adds check_opf_homes.pyc, a
+        # file the copy leaves out; leaving-links adds two symlinks that leave opf/, one climbing out
+        # through '..' and one absolute, and inner-link one to _helper.py beside it, none of them a
+        # roster script.
         outside = tmp / "outside.py"
         outside.write_text("", encoding="utf-8")
         climb = "../" * (len(tmp.resolve().parts) + 4) + str(outside.relative_to(outside.anchor))
@@ -2501,7 +2672,34 @@ def _harness_routing_self_test():
         loop = _throwaway_opf(looped) / "opf.py"
         os.remove(loop)
         os.symlink(loop.name, loop)
+        link_out, link_in = tmp / "link-out", tmp / "link-in"
+        out_tools = _throwaway_opf(link_out)
+        out_text = os.path.relpath(outside, out_tools)
+        os.symlink(out_text, out_tools / "check_opf_homes_link.py")
+        os.symlink("check_opf_homes.py", _throwaway_opf(link_in) / "check_opf_homes_link.py")
+        elsewhere = _throwaway_opf(tmp / "elsewhere")
+        tools_link, opf_link = tmp / "tools-link", tmp / "opf-link"
+        os.makedirs(tools_link / "opf")
+        os.symlink(elsewhere, tools_link / "opf" / "tools")
+        os.makedirs(opf_link)
+        os.symlink(elsewhere.parent, opf_link / "opf")
+        relocated = "; ".join(
+            "script {} of row {} resolves to {}, outside opf/tools/".format(
+                script, name, os.path.join(os.path.realpath(elsewhere), script))
+            for name, script, _args in _SUBSET)
+        bytecode = tmp / "bytecode"
+        (_throwaway_opf(bytecode) / "check_opf_homes.pyc").write_bytes(b"")
+        leaving, inner = tmp / "leaving-links", tmp / "inner-link"
+        leaving_tools = _throwaway_opf(leaving)
+        os.symlink(os.path.relpath(outside, leaving_tools), leaving_tools / "_helper_climbs.py")
+        os.symlink(str(outside), leaving_tools / "_helper_absolute.py")
+        os.symlink("_helper.py", _throwaway_opf(inner) / "_helper_alias.py")
+        copy_refused = ("could not materialize the isolated opf/ copy: the copy holds 2 symlink(s) "
+                        "resolving outside its opf/: opf/tools/_helper_absolute.py -> {!r}; "
+                        "opf/tools/_helper_climbs.py -> {!r}".format(
+                            str(outside), os.path.relpath(outside, leaving_tools)))
         not_plain = "script {!r} of row opf-homes-contract is not a plain file name"
+        linked = "script {} of row {} is a symlink in opf/tools/ (to {!r}), not the file itself"
         cases = [(label, base, dict(rebound, _run_one=clean_leg), refuse, None, 1,
                   ("STANDALONE CLOSURE: REGISTRATION DRIFT",)
                   + tuple("  registration drift: " + text for text in drifted),
@@ -2548,6 +2746,28 @@ def _harness_routing_self_test():
                      ("opf-py-removed", no_opf_py, {},
                       [roster + "script opf.py of row opf-tooling-selftest is not a file in "
                        "opf/tools/"]),
+                     # A roster script that is a symlink, whatever it points at (a file outside
+                     # opf/tools/, a file beside it, itself), and every roster script reached through
+                     # a symlinked opf/tools/ or opf/: drift, never launched and never read as a
+                     # harness fault.
+                     ("script-symlink-to-an-outside-file", link_out,
+                      {"_SUBSET": contract_script("check_opf_homes_link.py")},
+                      [roster + linked.format("check_opf_homes_link.py", "opf-homes-contract",
+                                              out_text)]),
+                     ("script-symlink-inside-opf-tools", link_in,
+                      {"_SUBSET": contract_script("check_opf_homes_link.py")},
+                      [roster + linked.format("check_opf_homes_link.py", "opf-homes-contract",
+                                              "check_opf_homes.py")]),
+                     ("script-symlink-loop", looped, {},
+                      [roster + linked.format("opf.py", "opf-tooling-selftest", "opf.py")]),
+                     ("opf-tools-a-symlink", tools_link, {}, [roster + relocated]),
+                     ("opf-a-symlink", opf_link, {}, [roster + relocated]),
+                     # A script the copy leaves out, though opf/tools/ holds it: drift, never a bound
+                     # the copy cannot derive.
+                     ("script-the-copy-leaves-out", bytecode,
+                      {"_SUBSET": contract_script("check_opf_homes.pyc")},
+                      [roster + "script 'check_opf_homes.pyc' of row opf-homes-contract is a name the "
+                       "isolated copy leaves out (__pycache__, *.pyc)"]),
                      ("roster-drift-beside-a-missing-opf", absent, {"_SUBSET": no_contract},
                       [roster + "row opf-homes-contract missing"]),
                      ("script-path-beside-a-missing-opf", absent,
@@ -2599,12 +2819,20 @@ def _harness_routing_self_test():
             ("system-exit-before-the-first-leg", tmp, {"_run_subset": exits}, refuse, None, 2,
              ("STANDALONE CLOSURE: NOT EVALUATED", "SystemExit: 0"), ("REGISTRATION DRIFT",),
              fault + "SystemExit: 0)", []),
-            # An opf/tools/ entry whose presence cannot be checked is a harness fault, never drift: a
-            # presence check that read it as a missing script would name drift (exit 1).
-            ("script-entry-cannot-be-checked", looped, {"_run_one": clean_leg}, refuse, None, 2,
+            # An opf/tools/ entry whose presence cannot be checked (here os.lstat raising ELOOP for
+            # opf.py, injected) is a harness fault, never drift: a presence check that read it as a
+            # missing script would name drift (exit 1).
+            ("script-entry-cannot-be-checked", tmp, {"_run_one": clean_leg}, refuse,
+             ((os, "lstat", lstat_fault),), 2,
              ("STANDALONE CLOSURE: NOT EVALUATED", "OSError: [Errno {}]".format(errno.ELOOP)),
              ("REGISTRATION DRIFT", "CLOSURE: OK"),
              fault + "OSError: [Errno {}]".format(errno.ELOOP), []),
+            # A symlink in opf/ that is not a roster script and resolves outside it (one climbing out
+            # through '..', one absolute) is copied as the link itself, then refused as a harness
+            # fault before any bound is derived or any leg launches: a copy that dereferenced it would
+            # run clean (exit 0) with the outside file's code in it.
+            ("symlinks-leaving-the-copy", leaving, {"_run_one": clean_leg}, refuse, None, 2,
+             ("error: " + copy_refused,), ("REGISTRATION DRIFT", "CLOSURE: OK"), copy_refused, []),
             ("registration-message-from-a-launch", tmp, {},
              launch_raising(_CheckFailure("closure/import-batch-registration")), None, 2,
              ("STANDALONE CLOSURE: NOT EVALUATED", "_CheckFailure: closure/import-batch-registration"),
@@ -2613,7 +2841,7 @@ def _harness_routing_self_test():
             ("exception-as-the-first-leg-starts", tmp, {}, launch_raising(RuntimeError(starts)), None,
              2, ("STANDALONE CLOSURE: NOT EVALUATED", "RuntimeError: " + starts),
              ("REGISTRATION DRIFT",), fault + "RuntimeError: " + starts + ")", [first]),
-            ("temporary-directory-oserror", tmp, {}, refuse, full_disk, 2,
+            ("temporary-directory-oserror", tmp, {}, refuse, ((tempfile, "mkdtemp", full_disk),), 2,
              ("could not create the temporary directory for the isolated opf/ copy", full),
              ("REGISTRATION DRIFT",),
              "could not create the temporary directory for the isolated opf/ copy: " + full, []),
@@ -2627,18 +2855,27 @@ def _harness_routing_self_test():
             ("missing-opf-with-a-clean-roster", absent, {"_run_one": clean_leg}, refuse, None, 2,
              ("opf/tools/ not found under",), ("REGISTRATION DRIFT", "CLOSURE: OK"),
              "opf/tools/ not found under", []),
-            # REGRESSION COVERAGE: a clean run passes whether or not any routing above is in place.
+            # REGRESSION COVERAGE: a clean run passes whether or not any routing above is in place,
+            # and so does one beside a symlink in opf/tools/ that resolves inside the copy (a copy
+            # that refused every symlink would exit 2).
             ("clean", tmp, {"_run_one": clean_leg}, refuse, None, 0, ("STANDALONE CLOSURE: OK",),
-             ("NOT EVALUATED", "REGISTRATION DRIFT", "BROKEN"), None, every)))
-        for (label, base, rebound, popen, mkdtemp, want_code, want, refused, want_stop,
+             ("NOT EVALUATED", "REGISTRATION DRIFT", "BROKEN"), None, every),
+            ("clean-beside-a-symlink-inside-the-copy", inner, {"_run_one": clean_leg}, refuse, None, 0,
+             ("STANDALONE CLOSURE: OK",), ("NOT EVALUATED", "REGISTRATION DRIFT", "BROKEN"), None,
+             every)))
+        # patched is None, or the (module, attribute, value) triples set for the case's run and
+        # restored after it on every path, as subprocess.Popen is.
+        for (label, base, rebound, popen, patched, want_code, want, refused, want_stop,
              want_launches) in cases:
             for entry, call in (("run", run), ("_run_closure", _run_closure)):
                 del launches[:]
                 out = io.StringIO()
-                real_popen, real_mkdtemp = subprocess.Popen, tempfile.mkdtemp
+                saved = [(subprocess, "Popen", subprocess.Popen)] + [
+                    (module, attribute, getattr(module, attribute))
+                    for module, attribute, _value in patched or ()]
                 subprocess.Popen = popen
-                if mkdtemp is not None:
-                    tempfile.mkdtemp = mkdtemp
+                for module, attribute, value in patched or ():
+                    setattr(module, attribute, value)
                 try:
                     with _swapped(**rebound):
                         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
@@ -2649,7 +2886,8 @@ def _harness_routing_self_test():
                                                     "{}".format(label, entry, type(exc).__name__,
                                                                 exc)) from exc
                 finally:
-                    subprocess.Popen, tempfile.mkdtemp = real_popen, real_mkdtemp
+                    for module, attribute, value in saved:
+                        setattr(module, attribute, value)
                 code, result = (got, None) if entry == "run" else (got[0], got)
                 said = out.getvalue()
                 wrong = (code != want_code or not all(w in said for w in want)
@@ -2672,18 +2910,22 @@ def _harness_routing_self_test():
         print("RED registration drift through run(): a row the tuple checks do not pin removed, a row "
               "added or repeated, such a leg renamed, its script renamed to a missing file, its ceiling "
               "row removed, the row removed together with its ceiling row, its script an absolute or a "
-              "'..' path to a file outside opf/tools/, opf.py removed from opf/tools/, the drift and an "
-              "absolute script path beside a missing opf/, and for the pinned rows two rows removed, "
-              "arguments changed, a name renamed and a script renamed to a missing file -> each failing "
+              "'..' path to a file outside opf/tools/, opf.py removed from opf/tools/, a roster script "
+              "that is a symlink (to a file outside opf/tools/, to one beside it, or to itself), every "
+              "script reached through a symlinked opf/tools/ or opf/, a script the copy leaves out "
+              "(*.pyc), the drift and an absolute script path beside a missing opf/, and for the pinned "
+              "rows two rows removed, arguments changed, a name renamed and a script renamed to a "
+              "missing file -> each failing "
               "check named with what it found and no other, exit 1, never a bound that cannot be "
               "derived, no leg launched, and the positive leg names the drift, never the real opf/ "
               "failing to verify; a registration check raising an unrelated AssertionError, another "
               "check's message or its own message as another type, an opf/tools/ entry that cannot be "
               "checked, an unrelated AssertionError or a SystemExit before the first leg, a "
               "registration message raised by a launch, an exception as the first leg starts, an "
-              "OSError creating the temporary directory and a leg result the report cannot read -> each "
+              "OSError creating the temporary directory, symlinks in opf/ that resolve outside the copy "
+              "(climbing out through '..', or absolute) and a leg result the report cannot read -> each "
               "a named harness fault, exit 2; a missing opf/ with a clean roster -> exit 2, never drift; "
-              "every leg passing -> exit 0")
+              "every leg passing -> exit 0, a symlink resolving inside the copy beside them included")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for label, phase, want, said_want in (
@@ -2742,6 +2984,14 @@ def _harness_routing_self_test():
              "SELF-TEST FAIL: closure/a-vector", "SELF-TEST PASS"),
             ("legs-cannot-evaluate", lambda: "bounds", 2, 2, None, "SELF-TEST PASS"),
             ("legs-failure", lambda: "bounds", 1, 1, None, "SELF-TEST PASS"),
+            # Anything that escapes the closure legs is a harness fault, exit 2, never the exit 0 a
+            # SystemExit carries and never a traceback (exit 1).
+            ("legs-system-exit", lambda: "bounds", SystemExit(0), 2,
+             "SELF-TEST CANNOT EVALUATE: SystemExit: 0 (a harness fault in the closure legs",
+             "SELF-TEST PASS"),
+            ("legs-runtime-error", lambda: "bounds", RuntimeError("closure legs fault"), 2,
+             "SELF-TEST CANNOT EVALUATE: RuntimeError: closure legs fault (a harness fault in the "
+             "closure legs", "SELF-TEST PASS"),
             ("clean", lambda: "bounds", 0, 0, "SELF-TEST PASS", None)):
         calls = []
 
@@ -2751,6 +3001,8 @@ def _harness_routing_self_test():
 
         def closure_legs(root, required, legs_code=legs_code):
             calls.append(("legs", root, required))
+            if isinstance(legs_code, BaseException):
+                raise legs_code
             return legs_code
 
         out = io.StringIO()
@@ -2774,8 +3026,9 @@ def _harness_routing_self_test():
           "a RuntimeError, a UnicodeDecodeError, an AssertionError of another type (a closure/ message "
           "included), a SystemExit and a check that cannot evaluate -> CANNOT EVALUATE, named, exit 2; "
           "a check's failure -> FAIL, exit 1; none escapes; self_test_main stops at the phase's code "
-          "before any closure leg (exit 2 for a SystemExit, never the 0 it carries), and otherwise "
-          "returns the closure legs' code, printing PASS only on 0")
+          "before any closure leg (exit 2 for a SystemExit, never the 0 it carries), otherwise "
+          "returns the closure legs' code, printing PASS only on 0, and names a SystemExit or another "
+          "exception escaping the closure legs as a harness fault, exit 2")
 
 
 def _raiser(exc):
@@ -2943,12 +3196,19 @@ def self_test_main():
     failure or output, one naming the injected import or differing only in a line ending or trailing
     whitespace included, leave the flip unevaluated; see _negative_verdict). A gate that passed the
     deliberately-broken copy would provide no coverage. Exit 1 when anything definite failed, else 2
-    when anything could not be evaluated (_self_test_outcome)."""
+    when anything could not be evaluated (_self_test_outcome); an exception or a SystemExit that
+    escapes the closure legs is a harness fault, cannot evaluate (2), named by its type, never a
+    traceback and never the exit a SystemExit carries."""
     root = repo_root()
     code, required = _self_test_phase(lambda: _fast_vectors(root))
     if code is not None:
         return code
-    code = _closure_legs(root, required)
+    try:
+        code = _closure_legs(root, required)
+    except (Exception, SystemExit) as exc:
+        print("SELF-TEST CANNOT EVALUATE: {}: {} (a harness fault in the closure legs, never a self-test "
+              "failure)".format(type(exc).__name__, exc), file=sys.stderr)
+        return 2
     if code == 0:
         print("SELF-TEST PASS: standalone closure holds for opf/, and a re-introduced upward edge is "
               "caught.")
