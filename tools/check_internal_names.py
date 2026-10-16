@@ -59,7 +59,9 @@ change that differs from the working-tree copy (it reads the working tree), and 
 Exit 0 clean, 1 on any finding or a malformed hashes file, 2 on a read error or a tracked file the role
 rule cannot evaluate (fail-closed). `--self-test` proves the gate FAILS on a seeded internal name (a
 provenance id, a host path, a hashed codename, and the role name in a tracked file outside SCOPE_RELPATHS)
-and passes clean generic content, so removing a layer makes a case fail.
+and passes clean generic content, so removing a layer makes a case fail. The self-test exits 0 only when
+every case ran and passed, 1 when a case failed, and 3 when it skipped any case (a child launched by a
+parent self-test, or a case this platform cannot run), never 0.
 """
 import sys
 
@@ -382,16 +384,33 @@ def self_test_main():
 # A self-test that launches a child self-test sets _CHILD_SENTINEL in the child's environment to its OWN pid,
 # and the child skips the subprocess-launching cases 19 to 23 (its parent runs them; a child running them
 # would recurse). Case 23 likewise sets _INHERITED_PROBE to its own pid in the run it launches, which skips
-# case 23 alone. A value is honoured only when it names the process that launched this one, so a value
-# exported by a caller or inherited from an earlier run ("1", a stale pid) is ignored and every case runs.
+# case 23 alone. A value is honoured only when it equals this process's parent pid. That match does not
+# prove a self-test launched this process: a caller that exports its own pid, a "1" reaching a run whose
+# parent is PID 1, or a pid reused by an unrelated parent is honoured as well. So a run that skipped any
+# case, a recognized child included, exits 3 and never 0, and a parent accepts a child only by exit 3
+# together with the child line.
 _CHILD_SENTINEL = "AIQT_INTERNAL_NAMES_SELFTEST_CHILD"
 _INHERITED_PROBE = "AIQT_INTERNAL_NAMES_SELFTEST_INHERITED_PROBE"
+# The exit status of a self-test that skipped any case: never 0, and distinct from 1 (a case failed).
+_INCOMPLETE_EXIT = 3
 
 
 def _set_by_launcher(var):
     """True only when the environment variable `var` holds this process's parent pid (see _CHILD_SENTINEL)."""
     value = os.environ.get(var, "")
     return value.isascii() and value.isdigit() and int(value) == os.getppid()
+
+
+def _stale_sentinel_values(own_pid, parent_pid):
+    """The two inherited child-sentinel values case 23 runs: "1" and this run's parent pid. A run this one
+    launches sees own_pid as its parent pid, so any other value stands for an inherited one; a candidate
+    equal to own_pid (a run that is PID 1) or to a value already chosen (a parent that is PID 1) is replaced
+    by the next stale value, so the case always runs two lanes and never skips one."""
+    values = []
+    for candidate in ("1", str(parent_pid), str(own_pid + 1), str(own_pid + 2)):
+        if len(values) < 2 and candidate != str(own_pid) and candidate not in values:
+            values.append(candidate)
+    return values
 
 
 # --- self-test --------------------------------------------------------------------------------------
@@ -713,8 +732,8 @@ def _self_test():
                     badarg, proc.returncode))
 
         # The subprocess-spawning cases below give each child the sentinel naming this process, so a child
-        # (which re-enters --self-test) skips them rather than recursing without bound. Only a child this run
-        # launched skips them: an inherited or stray sentinel names another process and every case runs.
+        # (which re-enters --self-test) skips them rather than recursing without bound. A run recognized as a
+        # child (see _CHILD_SENTINEL) skips them and therefore exits 3, never 0.
         if launched_child:
             not_run.append("cases 19 to 23 (a child launched by a parent self-test, which runs them)")
         else:
@@ -776,9 +795,11 @@ def _self_test():
             # 20. DISCRIMINATING (finding-6: a hostile sibling json.py/hashlib.py must NOT shadow a stdlib
             #     import and neuter this gate). Copy this script and its sibling modules (_walk, check_leaks)
             #     beside a hostile json.py and hashlib.py (each `raise SystemExit(0)`) and run `--self-test`
-            #     isolated: the self-test must actually RUN (it emits its SELF-TEST marker). Reverting the
-            #     sys.path.append import fix to an index-0 insertion puts the script dir first, so under -I the
-            #     sibling shadows check_leaks' `import hashlib` and silently exits 0 before the self-test runs.
+            #     isolated: the copy must actually RUN its self-test as a child and pass, so it prints the
+            #     child line and exits 3 (any other exit, or a FAIL or other SELF-TEST text, fails this).
+            #     Reverting the sys.path.append import fix to an index-0 insertion puts the script dir first,
+            #     so under -I the sibling shadows check_leaks' `import hashlib` and silently exits 0 before
+            #     the self-test runs.
             sib = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-sibling-"))
             try:
                 for name in ("check_internal_names.py", "_walk.py", "check_leaks.py", "_git_fixture_env.py"):
@@ -787,10 +808,11 @@ def _self_test():
                     (sib / hostile).write_text("raise SystemExit(0)\n", encoding="utf-8")
                 proc = subprocess.run([sys.executable, "-I", "-B", str(sib / "check_internal_names.py"),
                                        "--self-test"], capture_output=True, text=True, env=childenv)
-                if "SELF-TEST" not in (proc.stdout + proc.stderr):
-                    failures.append("a hostile sibling json.py/hashlib.py shadowed a stdlib import and "
-                                    "prevented the self-test from running (finding-6): rc={} out={!r} "
-                                    "err={!r}".format(proc.returncode, proc.stdout, proc.stderr))
+                if proc.returncode != _INCOMPLETE_EXIT or "SELF-TEST CHILD PASS:" not in proc.stdout:
+                    failures.append("a copy beside a hostile sibling json.py/hashlib.py did not run and pass "
+                                    "its self-test as a child (a shadowed stdlib import exits before it "
+                                    "runs): rc={} out={!r} err={!r}".format(
+                                        proc.returncode, proc.stdout, proc.stderr))
             finally:
                 shutil.rmtree(sib, ignore_errors=True)
 
@@ -802,8 +824,8 @@ def _self_test():
             #     carry the system case: a PATH shim in front of git instead points git at the malformed file
             #     whenever neither GIT_CONFIG_NOSYSTEM=1 nor GIT_CONFIG_SYSTEM is set (where git reads the
             #     host's system file), and only the fixture git lifecycle's PATH wrapper reasserts that pin
-            #     after the drop. Each child must pass and print the child line (it skips cases 19 to 23,
-            #     which this run runs). Reverting self_test_main to a bare _self_test() lets
+            #     after the drop. Each child must pass, print the child line and exit 3 (it skips cases 19
+            #     to 23, which this run runs). Reverting self_test_main to a bare _self_test() lets
             #     the child's tracked-file read load the malformed file, so its cases 14 to 17 exit 2 and the
             #     child fails all three; applying the scrub without the lifecycle fails the system case. A
             #     control first proves each poisoned configuration breaks a git read that honours it; the home
@@ -859,7 +881,7 @@ def _self_test():
                         failures.append("a child self-test under a malformed caller {} git configuration "
                                         "timed out".format(label))
                         continue
-                    if child.returncode != 0 or "SELF-TEST CHILD PASS:" not in child.stdout:
+                    if child.returncode != _INCOMPLETE_EXIT or "SELF-TEST CHILD PASS:" not in child.stdout:
                         failures.append("a malformed caller {} git configuration changed the self-test verdict "
                                         "(the gate's tracked-file read must not read it): rc={} out={!r} "
                                         "err={!r}".format(label, child.returncode, child.stdout, child.stderr))
@@ -868,8 +890,9 @@ def _self_test():
                 #     exactly): a child imports this module, sets a caller environment (HOME at a scratch
                 #     directory, XDG_CONFIG_HOME and the GIT_CONFIG_* pins unset, a caller GIT_* variable
                 #     set), calls self_test_main() and compares os.environ with its snapshot from before the
-                #     call. A scrub applied before the fixture git lifecycle saves the environment makes the
-                #     lifecycle restore the scrubbed values (HOME at the fixture scratch, XDG_CONFIG_HOME and
+                #     call. The probe is a child of this run, so self_test_main() must print the child line
+                #     and return 3. A scrub applied before the fixture git lifecycle saves the environment
+                #     makes the lifecycle restore the scrubbed values (HOME at the fixture scratch, XDG_CONFIG_HOME and
                 #     GIT_CONFIG_GLOBAL set, the caller's GIT_* variable gone) and fails this.
                 probe = (
                     "import os\n"
@@ -885,12 +908,14 @@ def _self_test():
                     "rc = cin.self_test_main()\n"
                     "changed = sorted(k for k in set(before) | set(os.environ) if before.get(k) != os.environ.get(k))\n"
                     "print('ENVIRONMENT CHANGED: {{}}'.format(changed))\n"
-                    "sys.exit(0 if rc == 0 and not changed else 3)\n"
-                ).format(tools=toolsdir, home=str(clean_home))
+                    "print('SELF_TEST_MAIN RETURNED: {{}}'.format(rc))\n"
+                    "sys.exit(0 if rc == {incomplete} and not changed else 1)\n"
+                ).format(tools=toolsdir, home=str(clean_home), incomplete=_INCOMPLETE_EXIT)
                 try:
                     proc = subprocess.run([sys.executable, "-I", "-B", "-c", probe], capture_output=True, text=True,
                                           timeout=600, env=dict(caller, **child_tag))
-                    if proc.returncode != 0 or "ENVIRONMENT CHANGED: []" not in proc.stdout:
+                    if (proc.returncode != 0 or "ENVIRONMENT CHANGED: []" not in proc.stdout
+                            or "SELF-TEST CHILD PASS:" not in proc.stdout):
                         failures.append("an in-process self_test_main() expected to pass and restore the caller's "
                                         "environment exactly, got rc={} out={!r} err={!r}".format(
                                             proc.returncode, proc.stdout, proc.stderr))
@@ -899,39 +924,57 @@ def _self_test():
             finally:
                 shutil.rmtree(poison, ignore_errors=True)
 
-            # 23. DISCRIMINATING (an inherited child sentinel never skips a case): a run whose environment
-            #     already holds the child sentinel, as "1" or as a stale pid naming another process (here this
-            #     run's own parent), was not launched by a self-test, so it runs cases 19 to 22. Each lane
-            #     runs a scratch copy of this script as a top-level --self-test with that inherited value; the
-            #     copy's self_test_main applies the fixture scrub without the lifecycle, so it fails case 21's
-            #     system lane and case 22 only if it runs them. Honouring the inherited value (as a child)
-            #     skips both and passes, failing this. The copy is launched with _INHERITED_PROBE naming this
-            #     process, so it skips this case and does not recurse.
+            # 23. DISCRIMINATING (an inherited child sentinel does not skip cases 19 to 22): a run whose
+            #     environment already holds the child sentinel as "1" or as a stale pid (this run's own parent;
+            #     see _stale_sentinel_values for the value used where either would name this run or repeat a
+            #     lane) was not launched by this run, so it runs cases 19 to 22. Each lane runs a scratch copy
+            #     of this script as a top-level --self-test with that inherited value. The copy carries one
+            #     mutation per case, so each of those cases records its own failure only if it runs: its case
+            #     19 probe reports the fail-closed OSError as exit 4, its case 20 sibling copy omits _walk.py
+            #     so that copy cannot run, and its self_test_main applies the fixture scrub without the
+            #     lifecycle, which fails case 21's system lane and case 22. This case requires all five
+            #     failure messages, so honouring the inherited value (as a child) fails it. It shows this for
+            #     these two values only: a value equal to the launching run's pid is honoured by design, and
+            #     the exit-3 rule covers a run misrecognized that way. Case 19 needs os.mkfifo, so where a
+            #     FIFO cannot be made this case fails rather than passing. The copy is launched with
+            #     _INHERITED_PROBE naming this process, so it skips this case and does not recurse.
             lifecycle_entry = ("    from _git_fixture_env import fixture_git_lifecycle\n"
                                "    with fixture_git_lifecycle():\n"
                                "        return _self_test()\n")
             scrub_entry = ("    from _git_fixture_env import scrub_git_environment\n"
                            "    scrub_git_environment()\n"
                            "    return _self_test()\n")
+            # Each (original, mutant) pair is source text that occurs exactly once in this file; the escaped
+            # quotes and backslashes keep these literals from matching themselves.
+            copy_mutations = (
+                (lifecycle_entry, scrub_entry),
+                ("\"    sys.exit(0)\\n\"", "\"    sys.exit(4)\\n\""),
+                ("for name in (\"check_internal_names.py\", \"_walk.py\", ",
+                 "for name in (\"check_internal_names.py\", "))
+            ran_markers = ("a FIFO at the hash-file path expected a prompt fail-closed OSError",
+                           "a FIFO at the scoped-file path expected a prompt fail-closed OSError",
+                           "a copy beside a hostile sibling json.py/hashlib.py did not run and pass",
+                           "malformed caller system git configuration changed",
+                           "an in-process self_test_main() expected to pass")
             source = Path(selfpath).read_text(encoding="utf-8")
+            mutant = source
+            unbuildable = []
+            for original, replacement in copy_mutations:
+                if mutant.count(original) != 1:
+                    unbuildable.append("{!r} occurs {} times".format(original, mutant.count(original)))
+                mutant = mutant.replace(original, replacement)
             if _set_by_launcher(_INHERITED_PROBE):
                 not_run.append("case 23 (this run was launched by case 23, which runs it)")
-            elif source.count(lifecycle_entry) != 1:
-                failures.append("the inherited-sentinel case could not build its scrub-without-lifecycle copy (the "
-                                "self_test_main body occurs {} times, expected once)".format(
-                                    source.count(lifecycle_entry)))
+            elif unbuildable:
+                failures.append("the inherited-sentinel case could not build its mutated copy (each mutated source "
+                                "text must occur once): {}".format("; ".join(unbuildable)))
             else:
                 inherited_dir = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-inherited-"))
                 try:
                     for name in ("_walk.py", "check_leaks.py", "_git_fixture_env.py"):
                         shutil.copy(str(Path(toolsdir) / name), str(inherited_dir / name))
-                    (inherited_dir / "check_internal_names.py").write_text(
-                        source.replace(lifecycle_entry, scrub_entry), encoding="utf-8")
-                    for inherited in ("1", str(os.getppid())):
-                        if inherited == str(os.getpid()):
-                            not_run.append("case 23 with the inherited value {!r} (it names this process, so it "
-                                           "cannot stand for an inherited value)".format(inherited))
-                            continue
+                    (inherited_dir / "check_internal_names.py").write_text(mutant, encoding="utf-8")
+                    for inherited in _stale_sentinel_values(os.getpid(), os.getppid()):
                         try:
                             proc = subprocess.run(
                                 [sys.executable, "-I", "-B", str(inherited_dir / "check_internal_names.py"),
@@ -941,13 +984,12 @@ def _self_test():
                             failures.append("a top-level self-test with the child sentinel inherited as {!r} timed "
                                             "out".format(inherited))
                             continue
-                        if (proc.returncode != 1 or "SELF-TEST PASS" in proc.stdout
-                                or "malformed caller system git configuration changed" not in proc.stdout
-                                or "an in-process self_test_main() expected to pass" not in proc.stdout):
+                        missing = [m for m in ran_markers if m not in proc.stdout]
+                        if proc.returncode != 1 or "SELF-TEST PASS" in proc.stdout or missing:
                             failures.append("a top-level self-test with the child sentinel inherited as {!r} must "
-                                            "run cases 21 and 22 (its scrub-without-lifecycle copy fails both "
-                                            "when they run), got rc={} out={!r} err={!r}".format(
-                                                inherited, proc.returncode, proc.stdout, proc.stderr))
+                                            "run cases 19 to 22 (its mutated copy fails each when it runs), got "
+                                            "rc={} missing={!r} out={!r} err={!r}".format(
+                                                inherited, proc.returncode, missing, proc.stdout, proc.stderr))
                 finally:
                     shutil.rmtree(inherited_dir, ignore_errors=True)
     finally:
@@ -961,10 +1003,11 @@ def _self_test():
             print("  not run: " + "; ".join(not_run))
         return 1
     if not_run:
-        # The full PASS text below claims every case, so a run that skipped any prints this line instead.
+        # The full PASS text below claims every case, so a run that skipped any prints this line instead and
+        # exits 3: a skipped case never reports success by exit code, even in a run misrecognized as a child.
         print("{} every case this run ran passed; not run: {}".format(
             "SELF-TEST CHILD PASS:" if launched_child else "SELF-TEST INCOMPLETE:", "; ".join(not_run)))
-        return 0
+        return _INCOMPLETE_EXIT
     print("SELF-TEST PASS: clean generic content passes; a seeded provenance id, a fixed host path, and a "
           "hashed codename each fail (removing a layer fails a case); an internal-allow line is exempt from "
           "the structural layer; the whole capitalized internal role name is caught, while Architecture, "
@@ -976,13 +1019,15 @@ def _self_test():
           "(cannot evaluate) on a tracked non-UTF-8 text file, a tracked file absent from the working tree and "
           "a root that is not a git repository; a GIT_CONFIG_GLOBAL pointed at a malformed file does not "
           "change the gate result (the gate's tracked-file read drops the GIT_* environment); a child "
-          "self-test still passes with a malformed .gitconfig under the caller's HOME, a malformed git/config "
+          "self-test still passes (child line, exit 3) with a malformed .gitconfig under the caller's HOME, a "
+          "malformed git/config "
           "under the caller's XDG_CONFIG_HOME, or a malformed system configuration (supplied through a PATH "
           "shim, since the gate drops GIT_CONFIG_SYSTEM), so the gate's tracked-file read does not read the "
           "caller's home, XDG or system configuration during the self-test; an in-process self_test_main() "
           "restores the caller's environment exactly; a top-level self-test whose environment already holds "
-          "the child sentinel (\"1\" or a stale pid) still runs cases 21 and 22, since only a child the "
-          "self-test launched itself skips them; a malformed hashes file is reported, never a silent empty denylist; a "
+          "the child sentinel as \"1\" or as a stale pid still runs cases 19 to 22; a run that skips any case "
+          "(a recognized child, or a case this platform cannot run) exits 3, never 0; a malformed hashes file "
+          "is reported, never a silent empty denylist; a "
           "non-UTF-8 in-scope surface fails closed as unscannable, never a silent skip; a broken symlink "
           "(a present dentry with a missing target) at a scoped path and at the hash-file path each fails "
           "closed (re-raised), never read as absent; a scoped file "
@@ -994,8 +1039,8 @@ def _self_test():
           "--self-test; a NON-REGULAR input (a FIFO) at the hash-file path and at a scoped path fails closed "
           "PROMPTLY (classified non-regular before any open) rather than blocking on the open; and a hostile "
           "sibling json.py/hashlib.py beside the script does NOT shadow a stdlib import (the sibling modules "
-          "are imported via sys.path.append, keeping stdlib precedence), so the self-test still runs under -I "
-          "rather than being silently neutered.")
+          "are imported via sys.path.append, keeping stdlib precedence), so the copy still runs and passes its "
+          "self-test as a child under -I rather than being silently neutered.")
     return 0
 
 
