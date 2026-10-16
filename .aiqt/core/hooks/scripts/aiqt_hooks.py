@@ -150,7 +150,7 @@ persistent shell/config state; the deferred recovery/snapshot layer is the backs
 read-only and offline; it never mutates the repo.
 
 Stop layer is a DELIBERATE exception, non-blocking by design (GD-24 tri-family QA, 2026-08-17,
-flagged for Architect review): it SURFACES a diff wall with a strong systemMessage and exits 0 (WARN),
+flagged for maintainer review): it SURFACES a diff wall with a strong systemMessage and exits 0 (WARN),
 it does NOT hard-block. The wall has already rendered by Stop time, so blocking cannot unsend it; and
 because this layer keeps no loop bound of its own and does not read the stop_hook_active field of the
 Stop input, a hard exit-2 Stop block could re-fire on the forced continuation and wedge the session. The
@@ -1718,7 +1718,7 @@ def _diff_proof_summary(command):
 
 
 def _diff_proof_log_listing(command):
-    """Proof E (Architect-directed refinement): a benign 'git log' COMMIT LISTING that provably emits no diff
+    """Proof E (maintainer-directed refinement): a benign 'git log' COMMIT LISTING that provably emits no diff
     to the console. Requires a metacharacter-free single simple command (the conservative charset, no shell
     reserved word, so no redirect and no pipe), the first resolved words literally 'git' and 'log', and every
     option-like word before a '--'/'--end-of-options' boundary drawn from the exact _BENIGN_LOG_OPTS
@@ -12802,7 +12802,9 @@ def orch_dispatch_ledger(data):
 # reads the brief file passed as that command's one brief argument and reconciles the brief's column-0 labels against the repository BEFORE the
 # command runs: an explicit review target; for a revision review, a full-length pin that resolves to exactly
 # that commit and equals the authoritative task revision the adopter's authority command prints; the
-# declared review paths equal to the pin's changed set (base derived from the commit's raw parent headers);
+# declared review paths equal to the pin's changed set (base derived from the commit's raw parent headers),
+# where a brief that names the worker draft the commit applies has every path the draft's diff headers name
+# declared too, less the paths it records as skipped (_rdp_draft_census);
 # and no uncommitted state over any declared path, except edits inside a checked-out submodule whose HEAD is
 # at the pinned gitlink, which are not read. A refusal is a deny naming its reason; a cannot-evaluate
 # is a deny prefixed UNVERIFIABLE: so it stays distinct. Every git probe runs through _review_git, which
@@ -12810,6 +12812,9 @@ def orch_dispatch_ledger(data):
 _RDP_KEYS = frozenset(("commands", "brief_option", "labels", "authority", "max_brief_bytes"))
 _RDP_REQUIRED_KEYS = frozenset(("commands", "brief_option", "labels", "authority"))
 _RDP_LABEL_KEYS = frozenset(("target", "revision", "path", "repo", "branch"))
+# The optional labels a binding declares together or not at all: the brief line naming the worker draft a
+# revision applies, and the lines recording the drafted paths deliberately left out of it.
+_RDP_DRAFT_LABEL_KEYS = frozenset(("draft", "skip"))
 _RDP_AUTHORITY_KEYS = frozenset(("argv", "timeout"))
 _RDP_TARGETS = frozenset(("revision", "working-tree", "not-a-review"))
 # Line boundaries to Unicode that are not physical newlines (VT, FF, FS, GS, RS, NEL, LINE and PARAGRAPH
@@ -12910,8 +12915,10 @@ def _rdp_binding(reg):
             or any(ch.isspace() or ch == "=" for ch in option):
         return ("bad", "review_dispatch.brief_option is not a single option word")
     labels = raw["labels"]
-    if not isinstance(labels, dict) or set(labels) != _RDP_LABEL_KEYS:
-        return ("bad", "review_dispatch.labels must declare exactly {}".format(sorted(_RDP_LABEL_KEYS)))
+    if not isinstance(labels, dict) or set(labels) not in (
+            _RDP_LABEL_KEYS, _RDP_LABEL_KEYS | _RDP_DRAFT_LABEL_KEYS):
+        return ("bad", "review_dispatch.labels must declare exactly {}, or those and both of {}".format(
+            sorted(_RDP_LABEL_KEYS), sorted(_RDP_DRAFT_LABEL_KEYS)))
     values = list(labels.values())
     if not all(isinstance(v, str) and v and v.strip() == v and "\n" not in v and "\r" not in v
                for v in values):
@@ -12972,38 +12979,45 @@ def _rdp_read_fd(fd, limit):
     return b"".join(chunks)
 
 
-def _rdp_read_brief(path, max_bytes):
-    """(text, None) for a readable brief, or (None, reason) for a cannot-evaluate: missing, a symlink, not a
-    regular file, an I/O or permission error, over max_bytes, invalid UTF-8, a NUL, or a non-physical line
-    boundary. One leading byte-order mark is dropped, so a brief saved with one still shows its first
-    label at column 0. The brief is opened ONCE, non-blocking and without following a final symlink, and the type
-    is checked on that open descriptor, so no swap can land between a check and the open, and a FIFO or
-    device never blocks the hook."""
+def _rdp_read_text(path, max_bytes, what):
+    """(text, None) for a readable file, or (None, reason) for a cannot-evaluate: missing, a symlink, not a
+    regular file, an I/O or permission error, over max_bytes, invalid UTF-8, or a NUL; what names the file
+    in the reason (the brief, the draft). One leading byte-order mark is dropped. The file is opened ONCE,
+    non-blocking and without following a final symlink, and the type is checked on that open descriptor, so
+    no swap can land between a check and the open, and a FIFO or device never blocks the hook."""
     try:
         fd = os.open(path, _RDP_OPEN_FLAGS | os.O_NOFOLLOW)
     except (OSError, ValueError) as exc:
-        return (None, "the brief {} cannot be opened ({})".format(path, exc))
+        return (None, "the {} {} cannot be opened ({})".format(what, path, exc))
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return (None, "the brief {} is not a regular file".format(path))
+            return (None, "the {} {} is not a regular file".format(what, path))
         blob = _rdp_read_fd(fd, max_bytes + 1)
     except OSError as exc:
-        return (None, "the brief {} cannot be read ({})".format(path, exc))
+        return (None, "the {} {} cannot be read ({})".format(what, path, exc))
     finally:
         os.close(fd)
     if len(blob) > max_bytes:
-        return (None, "the brief {} is larger than max_brief_bytes ({})".format(path, max_bytes))
+        return (None, "the {} {} is larger than max_brief_bytes ({})".format(what, path, max_bytes))
     try:
         text = blob.decode("utf-8")
     except UnicodeDecodeError as exc:
-        return (None, "the brief {} is not valid UTF-8 ({})".format(path, exc))
+        return (None, "the {} {} is not valid UTF-8 ({})".format(what, path, exc))
     if text.startswith("\ufeff"):
         text = text[1:]
     if "\x00" in text:
-        return (None, "the brief {} contains a NUL".format(path))
-    if any(ch in text for ch in _RDP_NONPHYSICAL):
-        return (None, "the brief {} contains a line boundary that is not a physical newline".format(path))
+        return (None, "the {} {} contains a NUL".format(what, path))
     return (text, None)
+
+
+def _rdp_read_brief(path, max_bytes):
+    """(text, None) for a readable brief, or (None, reason) for a cannot-evaluate: a file _rdp_read_text
+    cannot read, or one holding a non-physical line boundary. The dropped byte-order mark lets a brief
+    saved with one still show its first label at column 0."""
+    text, why = _rdp_read_text(path, max_bytes, "brief")
+    if text is not None and any(ch in text for ch in _RDP_NONPHYSICAL):
+        return (None, "the brief {} contains a line boundary that is not a physical newline".format(path))
+    return (text, why)
 
 
 def _rdp_labels(text, labels):
@@ -13125,6 +13139,468 @@ def _rdp_gitlink_entry(repo, relpath, want):
     return ("160000", lines[1]) if lines[1] == want[1] else ("other", "")
 
 
+# The draft path census. A worker draft is a git diff; the census reads the paths its headers name, never
+# its prose, and reads the draft conservatively, as the diff output git writes by default, so some forms
+# git apply accepts but git does not write are refused, not read: a localized marker, a context marker
+# that only added lines follow, an added-line marker that more added lines follow, and a backslash line
+# other than the exact marker right after a hunk's counted lines or their marker. Others are read (an
+# added-line marker that a removed line follows, an empty line as context). After a hunk's counted lines,
+# git's exact no-newline marker is read as the marker; any other line beginning with a backslash there is
+# refused; a hunk header, a `diff --git` line or a `--- ` line naming a path goes on to the next hunk or
+# section; a `diff --cc` or `diff --combined` line is refused as a combined diff; a line that begins as
+# another diff header is refused as outside a file section; a `Content-Transfer-Encoding:` line naming an
+# encoding other than 7bit or 8bit is refused as a transfer-encoded mailbox part; a `Submodule` line that
+# shows a submodule's own changes inline (--submodule=log or --submodule=diff) is refused as a submodule
+# shown inline; and any other line is read as prose. Whatever line follows it, each hunk is consumed by
+# its header's counts, so no path is hidden. A file section opens at a `diff --git` line, or at a `--- `
+# line naming a path, which a `+++ ` line and a hunk header must follow; its extended headers are the git
+# header lines below; each hunk is consumed by the line counts of its own header, so an added line that reads `++ b/x`
+# (shown as `+++ b/x`) is content, never a header, and by git's exact `\ No newline at end of file` marker
+# where git writes one: after the last line of each side of the file it marks (a marker after a removed
+# line marks the old side, after an added line the new side, after a context line both), so only where
+# its hunk header's count for each of those sides is met, and with no hunk after it in its section. Any
+# other line beginning with a backslash, in a hunk or right after its counted lines, is refused. A
+# section completes with a hunk, a binary marker, or a creation, deletion, mode change, rename or copy
+# header; one that does not (a draft cut short inside it) cannot be read. A section names at most one old
+# path (its `---`, `rename from` and `copy from` headers) and one new path (its `+++`, `rename to` and
+# `copy to` headers), and its `diff --git` line names exactly those, as git writes them from one pair, so
+# a section whose headers disagree (a mangled or hand-edited one) cannot be read. A rename names both
+# paths, a copy only its destination (the source is unchanged), a deletion and a creation the one path
+# that is not /dev/null, and a section with no path header (a mode change, an empty file, a binary change)
+# the one name its `diff --git` line repeats. A line outside a section is prose (the mailbox headers and
+# message, the `---` separator, the diffstat, the `-- ` signature and the version after it, a binary
+# patch's encoded lines, blank and indented lines) unless it begins as a diff header or a no-newline
+# marker does, which is never prose: a truncated or mangled section would otherwise drop out of the census
+# unseen. A header or hunk line that ends in a carriage return before its LF (a CRLF draft, or a hunk of a
+# CRLF file) cannot be read either, since a header's names would carry the return, and neither can a
+# transfer-encoded mailbox part or a submodule shown inline. A `diff --git` line naming its paths under
+# b/ and then a/, as git diff -R writes it, in a section with no `--- ` line (a mode change, a binary
+# change, an empty file, a pure rename, a pure copy) is refused with a reason naming that swap; a section
+# with one is refused first by its `--- ` or `+++ ` line's prefix.
+_RDP_DIFF_EXTENDED = ("old mode ", "new mode ", "deleted file mode ", "new file mode ", "similarity index ",
+                      "dissimilarity index ", "index ", "rename from ", "rename to ", "copy from ", "copy to ")
+# The extended headers that complete a section with no hunk, and the pairs git writes together.
+_RDP_DIFF_METADATA = frozenset(("new file mode ", "deleted file mode ", "old mode ", "rename from ", "copy from "))
+_RDP_DIFF_PAIRS = (("old mode ", "new mode "), ("rename from ", "rename to "), ("copy from ", "copy to "))
+# The extended headers that name a path, and the side of the file each names (`---` names the old side
+# and `+++` the new).
+_RDP_DIFF_SIDES = {"rename from ": "old", "rename to ": "new", "copy from ": "old", "copy to ": "new"}
+# The lines that begin as a diff header does and so never stand outside a section in a draft git wrote:
+# every header git apply reads in a section ("rename old " and "rename new " are older spellings it still
+# reads as a rename), a hunk header, git's binary markers, and any other diff command line ("diff -",
+# which covers diff -ruN output; diff --git opens a section, and diff --cc and diff --combined, which git
+# writes for a merge, are refused on their own as a combined diff).
+_RDP_DIFF_STRAY = _RDP_DIFF_EXTENDED + ("rename old ", "rename new ", "diff -", "+++ ", "@@ ", "Binary files ",
+                                        "GIT binary patch")
+_RDP_DIFF_HUNK = re.compile(r"@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@")
+# The one marker git writes after a hunk line whose file ends without a newline. Among a hunk's counted
+# lines, git apply reads a line beginning with a backslash and a space as one when it is at least eleven
+# bytes long (counted in bytes before the line feed, so a short line of non-ASCII text can reach it) and
+# rejects a shorter one as a corrupt patch; right after a hunk's counted lines it accepts any such line,
+# reading one of eleven bytes or more as a marker and passing over a shorter one. The census refuses every
+# such line other than this exact marker in both places, and a line beginning so is never prose.
+_RDP_DIFF_NO_NEWLINE = "\\ No newline at end of file"
+# The sides of the file a marker after each kind of hunk line marks.
+_RDP_DIFF_MARKS = {" ": ("old", "new"), "": ("old", "new"), "-": ("old",), "+": ("new",)}
+# A mailbox part whose body is transfer-encoded (base64, quoted-printable) hides its headers from a line
+# reader, while git am decodes it and applies what it holds; git format-patch writes 7bit or 8bit.
+_RDP_MAIL_ENCODING = "content-transfer-encoding:"
+_RDP_MAIL_PLAIN = frozenset(("7bit", "8bit"))
+# The header git diff --submodule=log or --submodule=diff writes for a submodule whose own changes follow
+# inline (a log, or sections named under the submodule's path) instead of one gitlink section.
+_RDP_DIFF_SUBMODULE = re.compile(r"Submodule .+ (?:[0-9a-f]+\.\.\.?[0-9a-f]+[ :]|contains (?:untracked|modified) "
+                                 r"content$)")
+_RDP_C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+
+
+def _rdp_diff_quoted(text, i):
+    """The name git C-quoted at text[i] (a double quote): (name, the index after the closing quote), the
+    escapes and octal bytes decoded and the bytes read as UTF-8; None when it is not a complete quoted
+    name."""
+    out = bytearray()
+    j = i + 1
+    while j < len(text):
+        ch = text[j]
+        if ch == '"':
+            try:
+                return (bytes(out).decode("utf-8"), j + 1)
+            except UnicodeDecodeError:
+                return None
+        if ch != "\\":
+            out.extend(ch.encode("utf-8"))
+            j += 1
+            continue
+        if text[j + 1:j + 2] in _RDP_C_ESCAPES:
+            out.append(_RDP_C_ESCAPES[text[j + 1]])
+            j += 2
+            continue
+        digits = text[j + 1:j + 4]
+        if len(digits) != 3 or digits[0] not in "0123" or any(c not in "01234567" for c in digits):
+            return None
+        out.append(int(digits, 8))
+        j += 4
+    return None
+
+
+def _rdp_diff_name(value, prefix):
+    """The path a header value names (prefix "a/", "b/" or "" for a rename or copy line): the name with
+    that prefix removed, read up to a tab (where git and diff -u put a timestamp or the tab git adds to a
+    name holding a space), or C-quoted; "" for /dev/null under a prefix; None when it carries no such
+    prefix or cannot be read."""
+    if value.startswith('"'):
+        got = _rdp_diff_quoted(value, 0)
+        if got is None or value[got[1]:got[1] + 1] not in ("", "\t"):
+            return None
+        name = got[0]
+    else:
+        name = value.split("\t", 1)[0]
+        if prefix and name == "/dev/null":
+            return ""
+    if not name.startswith(prefix) or not name[len(prefix):]:
+        return None
+    return name[len(prefix):]
+
+
+def _rdp_diff_git_line(rest, prefixes=("a/", "b/")):
+    """The one path a `diff --git` line names twice, rest being the text after `diff --git `: the name
+    under the first of prefixes (git's a/) and the name under the second (b/), both C-quoted or both bare
+    (as git writes one path twice), must be the same path; None otherwise (two names, which git writes only
+    with rename or copy headers, or a line that cannot be read)."""
+    first_prefix, second_prefix = prefixes
+    if rest.startswith('"'):
+        got = _rdp_diff_quoted(rest, 0)
+        if got is None or rest[got[1]:got[1] + 2] != ' "':
+            return None
+        first = got[0]
+        got = _rdp_diff_quoted(rest, got[1] + 1)
+        if got is None or got[1] != len(rest):
+            return None
+        second = got[0]
+    elif len(rest) % 2 == 1:
+        half = (len(rest) - 1) // 2
+        first, gap, second = rest[:half], rest[half], rest[half + 1:]
+        if gap != " ":
+            return None
+    else:
+        return None
+    if not first.startswith(first_prefix) or not second.startswith(second_prefix) \
+            or first[len(first_prefix):] != second[len(second_prefix):] or not first[len(first_prefix):]:
+        return None
+    return first[len(first_prefix):]
+
+
+def _rdp_diff_git_names(rest, old, new, prefixes=("a/", "b/")):
+    """Whether a `diff --git` line, rest being the text after `diff --git `, names old and then new under
+    prefixes (git's a/ and b/), each C-quoted or bare, as git writes the line for that pair; with both names
+    known, a name holding a space or ` b/` reads one way only."""
+    for name, gap in ((prefixes[0] + old, " "), (prefixes[1] + new, "")):
+        if rest.startswith('"'):
+            got = _rdp_diff_quoted(rest, 0)
+            if got is None or got[0] != name:
+                return False
+            rest = rest[got[1]:]
+        elif rest.startswith(name):
+            rest = rest[len(name):]
+        else:
+            return False
+        if not rest.startswith(gap):
+            return False
+        rest = rest[len(gap):]
+    return rest == ""
+
+
+def _rdp_diff_swapped(line, old, new):
+    """The reason a `diff --git` line cannot be read where it names its paths under b/ and then a/, git's
+    default prefixes swapped, as git diff -R writes them: the one path it names twice when old and new (the
+    paths the section's other headers name) are both None, otherwise old and then new; None when the line
+    does not read so."""
+    rest = line[len("diff --git "):]
+    if old is None and new is None:
+        swapped = _rdp_diff_git_line(rest, ("b/", "a/")) is not None
+    else:
+        swapped = _rdp_diff_git_names(rest, old or new, new or old, ("b/", "a/"))
+    if not swapped:
+        return None
+    return ("the header {!r} names its paths under b/ and then a/, git's default prefixes swapped, as git "
+            "diff -R writes them".format(line[:80]))
+
+
+def _rdp_diff_crlf(line):
+    """The reason a draft header or hunk line that ends in a carriage return before its LF (a CRLF line end)
+    cannot be read, or None for any other line."""
+    if not line.endswith("\r"):
+        return None
+    return ("the line {!r} ends in a carriage return before its LF (CRLF), which the census does not read: a "
+            "draft saved with CRLF line ends, or a hunk of a file whose lines end in CRLF".format(line[:80]))
+
+
+def _rdp_diff_marker(line, after, left, inside):
+    """None when line, which begins with a backslash and stands among a hunk's counted lines (inside) or
+    right after them, is git's no-newline marker in its place: after a context, removed or added line
+    (after, the first character of the line before it, None after a hunk header), and after the last line
+    the hunk header counts for each side of the file it marks (left, the lines still to come for each
+    side), as git writes one only after a side's last line; otherwise the reason it cannot be read."""
+    why = _rdp_diff_crlf(line)
+    if why is not None:
+        return why
+    if line != _RDP_DIFF_NO_NEWLINE and inside:
+        return ("the hunk line {!r} is no context, removed or added line, and not git's no-newline marker "
+                "{!r}".format(line[:80], _RDP_DIFF_NO_NEWLINE))
+    if line != _RDP_DIFF_NO_NEWLINE:
+        return ("the line {!r} right after a hunk's counted lines begins with a backslash and is not git's "
+                "no-newline marker {!r}, the only such line git writes there".format(
+                    line[:80], _RDP_DIFF_NO_NEWLINE))
+    if after not in _RDP_DIFF_MARKS:
+        return "a no-newline marker follows no context, removed or added line"
+    early = [side for side in _RDP_DIFF_MARKS[after] if left[side] > 0]
+    if early:
+        return ("a no-newline marker stands before the last line its hunk header counts for the {} {} of the "
+                "file, and git writes one only after the last line of each side it marks".format(
+                    " and ".join(early), "sides" if len(early) > 1 else "side"))
+    return None
+
+
+def _rdp_diff_hunks(lines, i):
+    """The index after the hunks that start at lines[i], each consumed by its header's old and new line
+    counts (a context line counts in both, an empty line as context, as git apply reads one, and a
+    no-newline marker in neither) and by the marker that may follow its last counted line; (None, reason)
+    for a malformed or truncated hunk, a line that begins with a backslash and is not git's exact marker
+    after a context, removed or added line, a marker before the last line its hunk header counts for a
+    side of the file it marks, a hunk after a marker in its section (git writes one only in a section's
+    last hunk), or a line that ends in a carriage return."""
+    marked = False
+    while i < len(lines) and lines[i].startswith("@@ "):
+        why = _rdp_diff_crlf(lines[i])
+        if why is not None:
+            return (None, why)
+        if marked:
+            return (None, "the hunk header {!r} follows a no-newline marker in its section, and git writes one "
+                    "only after the last line of each side it marks, in a section's last hunk".format(
+                        lines[i][:80]))
+        match = _RDP_DIFF_HUNK.match(lines[i])
+        if match is None:
+            return (None, "the hunk header {!r} cannot be read".format(lines[i][:80]))
+        old = 1 if match.group(1) is None else int(match.group(1))
+        new = 1 if match.group(2) is None else int(match.group(2))
+        after = None
+        i += 1
+        while old > 0 or new > 0:
+            if i >= len(lines):
+                return (None, "a hunk ends before its header's line counts")
+            why = _rdp_diff_crlf(lines[i])
+            if why is not None:
+                return (None, why)
+            mark = lines[i][:1]
+            if mark in (" ", ""):
+                old, new = old - 1, new - 1
+            elif mark == "-":
+                old -= 1
+            elif mark == "+":
+                new -= 1
+            elif mark == "\\":
+                why = _rdp_diff_marker(lines[i], after, dict(old=old, new=new), True)
+                if why is not None:
+                    return (None, why)
+                marked = True
+            else:
+                return (None, "the hunk line {!r} is no context, removed or added line".format(lines[i][:80]))
+            if old < 0 or new < 0:
+                return (None, "a hunk holds more lines than its header counts")
+            after = mark
+            i += 1
+        while i < len(lines) and lines[i].startswith("\\"):
+            why = _rdp_diff_marker(lines[i], after, dict(old=old, new=new), False)
+            if why is not None:
+                return (None, why)
+            marked = True
+            after = "\\"
+            i += 1
+    return (i, None)
+
+
+def _rdp_diff_section(lines, i):
+    """The file section that opens at lines[i], a `diff --git` line or a `--- ` line naming a path: (the
+    index after it, the set of paths it names, None), or (None, None, reason) when it cannot be read: a
+    header without git's a/ or b/ prefix, a `--- ` line with no `+++ ` line, a `+++ ` line with no hunk,
+    a section that ends with no hunk, binary marker, or creation, deletion, mode, rename or copy header, a
+    rename, copy or mode header without its pair, a `diff --git` line naming two paths with no rename or
+    copy header, path headers naming two old or two new paths, a `diff --git` line that does not name the
+    old and new paths the other headers name (one naming them under b/ and then a/, as git diff -R writes
+    it, with a reason that says so), a malformed or truncated hunk, or a header or hunk line ending in a
+    carriage return."""
+    line = lines[i]
+    git = line.startswith("diff --git ")
+    heads, sides, complete = set(), dict(old=set(), new=set()), False
+    if git:
+        why = _rdp_diff_crlf(line)
+        if why is not None:
+            return (None, None, why)
+        i += 1
+        while i < len(lines) and lines[i].startswith(_RDP_DIFF_EXTENDED):
+            why = _rdp_diff_crlf(lines[i])
+            if why is not None:
+                return (None, None, why)
+            head = next(h for h in _RDP_DIFF_EXTENDED if lines[i].startswith(h))
+            heads.add(head)
+            if head in _RDP_DIFF_SIDES:
+                name = _rdp_diff_name(lines[i][len(head):], "")
+                if name is None:
+                    return (None, None, "the header {!r} cannot be read".format(lines[i][:80]))
+                sides[_RDP_DIFF_SIDES[head]].add(name)
+            i += 1
+    if i < len(lines) and lines[i].startswith("--- "):
+        if i + 1 >= len(lines) or not lines[i + 1].startswith("+++ "):
+            return (None, None, _rdp_diff_crlf(lines[i]) or "the header {!r} has no +++ line after it".format(
+                lines[i][:80]))
+        for k, prefix, side in ((i, "a/", "old"), (i + 1, "b/", "new")):
+            why = _rdp_diff_crlf(lines[k])
+            if why is not None:
+                return (None, None, why)
+            name = _rdp_diff_name(lines[k][4:], prefix)
+            if name is None:
+                return (None, None, "the header {!r} does not name a path under git's {} prefix or "
+                        "/dev/null".format(lines[k][:80], prefix))
+            if name:
+                sides[side].add(name)
+        if i + 2 >= len(lines) or not lines[i + 2].startswith("@@ "):
+            return (None, None, "the header {!r} has no hunk after it".format(lines[i + 1][:80]))
+        i, why = _rdp_diff_hunks(lines, i + 2)
+        if why is not None:
+            return (None, None, why)
+        complete = True
+    elif git and i < len(lines) and lines[i].startswith(("GIT binary patch", "Binary files ")):
+        why = _rdp_diff_crlf(lines[i])
+        if why is not None:
+            return (None, None, why)
+        if lines[i] != "GIT binary patch" and not lines[i].endswith(" differ"):
+            return (None, None, "the binary marker {!r} cannot be read".format(lines[i][:80]))
+        i += 1
+        complete = True
+    for pair in _RDP_DIFF_PAIRS:
+        if (pair[0] in heads) != (pair[1] in heads):
+            return (None, None, "the section {!r} has one of the headers {!r} and {!r} without the other".format(
+                line[:80], pair[0].strip(), pair[1].strip()))
+    if not complete and not heads & _RDP_DIFF_METADATA:
+        return (None, None, "the section {!r} ends with no hunk, binary marker, or creation, deletion, mode, "
+                "rename or copy header, as a draft cut short inside it does".format(line[:80]))
+    if len(sides["old"]) > 1 or len(sides["new"]) > 1:
+        return (None, None, "the section {!r} names {} in its ---, +++, rename and copy headers, which disagree "
+                "with each other, as git never writes them".format(
+                    line[:80], _rdp_listing(sorted(sides["old"] | sides["new"]))))
+    old, new = min(sides["old"], default=None), min(sides["new"], default=None)
+    if old is None and new is None:
+        name = _rdp_diff_git_line(line[len("diff --git "):]) if git else None
+        if name is None:
+            why = _rdp_diff_swapped(line, None, None) if git else None
+            return (None, None, why or "the header {!r} cannot be read as one path".format(line[:80]))
+        return (i, {name}, None)
+    if git and not _rdp_diff_git_names(line[len("diff --git "):], old or new, new or old):
+        return (None, None, _rdp_diff_swapped(line, old, new) or "the section {!r} names {} in its ---, +++, "
+                "rename or copy headers, which disagree with its diff --git line, as git never writes them".format(
+                    line[:80], _rdp_listing(sorted({old, new} - {None}))))
+    if "copy to " in heads and "rename to " not in heads:
+        return (i, {new}, None)
+    return (i, {old, new} - {None}, None)
+
+
+def _rdp_diff_prose(line):
+    """None when line, outside every file section, is prose as git's readers take it; otherwise the reason
+    the draft cannot be read: a combined diff, a line that begins as a diff header or a no-newline marker
+    does (a truncated or mangled section), a mailbox part transfer-encoded other than 7bit or 8bit, or a
+    submodule's own changes shown inline."""
+    if line.startswith(("diff --cc ", "diff --combined ")):
+        return "it holds a combined diff ({!r}), whose paths the census does not read".format(line[:80])
+    if line.startswith(_RDP_DIFF_STRAY):
+        return _rdp_diff_crlf(line) or ("the header {!r} stands outside a file section, as in a draft cut "
+                                        "short or mangled, and is not read as prose".format(line[:80]))
+    if line.startswith("\\ "):
+        return _rdp_diff_crlf(line) or ("the line {!r} begins as a no-newline marker does but follows no hunk "
+                                        "line, as in a draft cut short or mangled, and is not read as "
+                                        "prose".format(line[:80]))
+    if line[:len(_RDP_MAIL_ENCODING)].lower() == _RDP_MAIL_ENCODING \
+            and line[len(_RDP_MAIL_ENCODING):].strip().lower() not in _RDP_MAIL_PLAIN:
+        return ("a mailbox part is transfer-encoded ({!r}), so the file headers it holds cannot be read; "
+                "git am decodes it and applies them".format(line[:80]))
+    if _RDP_DIFF_SUBMODULE.match(line):
+        return ("the line {!r} shows a submodule's own changes inline (git diff --submodule=log or "
+                "--submodule=diff), which the census does not read; write the draft with --submodule=short, "
+                "which shows the submodule as its one gitlink section".format(line[:80]))
+    return None
+
+
+def _rdp_draft_paths(text):
+    """(paths, None), the set of repository paths the git diff text's file headers name, or (None,
+    reason) when the draft cannot be read: a section _rdp_diff_section cannot read (one cut short among
+    them), or a line outside every section that _rdp_diff_prose refuses. Lines are split on LF only, as
+    git apply reads them."""
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    paths = set()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("diff --git ") or (line.startswith("--- ") and line[4:].strip()):
+            i, named, why = _rdp_diff_section(lines, i)
+            if why is not None:
+                return (None, why)
+            paths.update(named)
+            continue
+        why = _rdp_diff_prose(line)
+        if why is not None:
+            return (None, why)
+        i += 1
+    return (paths, None)
+
+
+def _rdp_draft_census(cfg, found, changed, pin):
+    """The census of the worker draft a revision brief names: (paths, None), paths being the drafted paths
+    less those the brief records as skipped (a set, empty when the binding declares no draft label or the
+    brief names no draft), or (None, (kind, message)) for the first failure. The draft is named once, by an
+    absolute path, and read once as the brief is (under the same max_brief_bytes cap), by this hook alone,
+    so no other process's view of the path takes part. Each skip names a drafted path the commit does not
+    change, and skip lines without a draft are refused, since no census is made against them."""
+    labels = cfg["labels"]
+    if "draft" not in labels:
+        return (set(), None)
+    drafts, skips = found["draft"], found["skip"]
+    if not drafts:
+        if skips:
+            return (None, ("deny", "the brief has {!r} lines but no {!r} line; a skip is recorded against the "
+                           "draft it leaves out, so name that draft or drop the skips".format(
+                               labels["skip"], labels["draft"])))
+        return (set(), None)
+    if len(drafts) > 1:
+        return (None, ("unverifiable", "the brief has {} {!r} lines; at most one is allowed".format(
+            len(drafts), labels["draft"])))
+    draft = drafts[0].strip()
+    if not os.path.isabs(draft):
+        return (None, ("unverifiable", "the {!r} value {!r} is not an absolute path".format(
+            labels["draft"], draft)))
+    text, why = _rdp_read_text(draft, cfg["max_brief_bytes"], "draft")
+    if text is None:
+        return (None, ("unverifiable", why))
+    drafted, why = _rdp_draft_paths(text)
+    if drafted is None:
+        return (None, ("unverifiable", "the draft {} cannot be read as a git diff: {}".format(draft, why)))
+    if not drafted:
+        return (None, ("unverifiable", "the draft {} names no file in a diff header, so the paths it drafts "
+                       "cannot be counted; a draft that names its files only in prose is not "
+                       "censused".format(draft)))
+    if not all(skips):
+        return (None, ("unverifiable", "the brief has an empty {!r} value".format(labels["skip"])))
+    skipped = set(skips)
+    stray = sorted(skipped - drafted)
+    if stray:
+        return (None, ("deny", "the brief records {} as skipped, but the draft {} names no such path; a skip "
+                       "names a path the draft drafts".format(_rdp_listing(stray), draft)))
+    applied = sorted(skipped & set(c.decode("utf-8", "surrogateescape") for c in changed))
+    if applied:
+        return (None, ("deny", "the brief records {} as skipped, but {} changes it; a path the commit applies "
+                       "is not skipped".format(_rdp_listing(applied), pin)))
+    return (drafted - skipped, None)
+
+
 def _rdp_reconcile(cfg, found, root, brief, repo_default, auth_dir=None):
     """Reconcile a revision-target brief against the repository: ("allow"|"note"|"deny"|"unverifiable",
     message). repo_default is the top level of the repository the dispatch runs in, used when the brief
@@ -13209,22 +13685,33 @@ def _rdp_reconcile(cfg, found, root, brief, repo_default, auth_dir=None):
                                "--ignore-submodules=none", "--no-ext-diff", "--no-textconv", base, pin)
     if changed is None:
         return ("unverifiable", "the changed set of {} cannot be read".format(pin))
+    # A brief naming the worker draft the commit applies declares every path the draft's headers name, less
+    # its recorded skips, so a drafted file the apply left out is in neither the commit nor a hand list.
+    drafted, failed = _rdp_draft_census(cfg, found, set(changed), pin)
+    if failed is not None:
+        return failed
     declared = found["path"]
-    if not declared:
+    if not declared and not drafted:
         return ("deny", "the brief declares no {!r} line; list every path the review covers".format(
             labels["path"]))
     if not all(declared):
         return ("unverifiable", "the brief has an empty {!r} value".format(labels["path"]))
+    declared = declared + sorted(drafted - set(declared))
     declared_b = set(d.encode("utf-8") for d in declared)
     changed_b = set(changed)
     if declared_b != changed_b:
         parts = []
         missing = sorted(c.decode("utf-8", "replace") for c in changed_b - declared_b)
         extra = sorted(d.decode("utf-8", "replace") for d in declared_b - changed_b)
+        unapplied = [d for d in extra if d in drafted]
+        extra = [d for d in extra if d not in drafted]
         if missing:
             parts.append("changed by {} but not declared: {}".format(pin, _rdp_listing(missing)))
         if extra:
             parts.append("declared but not changed by {}: {}".format(pin, _rdp_listing(extra)))
+        if unapplied:
+            parts.append("drafted in {} but neither changed by {} nor recorded as skipped on a {!r} line: "
+                         "{}".format(found["draft"][0].strip(), pin, labels["skip"], _rdp_listing(unapplied)))
         return ("deny", "the declared review paths do not match the commit's changed set ({})".format(
             "; ".join(parts)))
     paths = sorted(declared)
@@ -15039,10 +15526,13 @@ def review_dispatch_pin(data):
     """vfxcmt, PreToolUse Bash: a review dispatch made through a registry-declared command pins an
     immutable, authoritative revision whose changed set is the declared review set and whose declared
     paths carry no uncommitted state (a checked-out submodule is compared by its HEAD only), BEFORE the
-    dispatch runs. Inert without a review_dispatch binding; in a session a binding scopes, a Bash call that
-    is not one provably plain command (its command word on the allowlist, or a declared dispatch command)
-    is withheld, a plain one naming the registry is refused unless it only reads, a plain git command that
-    sets configuration (every git config write, every -c or --config-env global) or may move the
+    dispatch runs; where the binding declares the draft labels, a brief naming the worker draft the commit
+    applies declares every path the draft's diff headers name less the paths it records as skipped, so a
+    drafted path neither committed nor skipped is refused. Inert without a review_dispatch binding; in a
+    session a binding scopes, a Bash call that is not one provably plain command (its command word on the
+    allowlist, or a declared dispatch command) is withheld, a plain one naming the registry is refused
+    unless it only reads, a plain git command that sets configuration (every git config write, every -c or
+    --config-env global) or may move the
     repository is refused, as is a plain command that may write into a git directory or a git
     configuration file (a read-only git subcommand's words taken as data, unless it carries an option that
     runs a program), and a malformed registry or binding, or a linked worktree whose main worktree cannot be located,

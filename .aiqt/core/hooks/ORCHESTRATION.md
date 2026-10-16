@@ -177,7 +177,8 @@ directory below, and a declaration there arms slice confinement.
   "review_dispatch": {"commands": ["orch-dispatch"], "brief_option": "--brief",
                       "labels": {"target": "Review-target:", "revision": "Reviewed-revision:",
                                  "path": "Review-path:", "repo": "Review-repo:",
-                                 "branch": "Review-branch:"},
+                                 "branch": "Review-branch:", "draft": "Review-draft:",
+                                 "skip": "Review-skip:"},
                       "authority": {"argv": ["python3", "tools/task_revision.py"], "timeout": 5},
                       "max_brief_bytes": 1048576},
   "mistakes_register": "path",
@@ -707,7 +708,8 @@ malformed.
 
 - `commands` lists the basenames of the commands that dispatch a review.
 - `brief_option` is the option that names the brief file, as `--brief PATH` or `--brief=PATH`.
-- `labels` names the five brief labels. They must be distinct.
+- `labels` names the five brief labels, and optionally two more, `draft` and `skip`, declared
+  together or not at all, which turn on the worker draft census below. They must be distinct.
 - `authority.argv` is a fixed argv, never a shell string. The hook runs it from the repository root
   with the brief's absolute path appended and every `GIT_*` variable removed from its environment, as
   for the hook's own git reads, and it must print exactly one full commit id: the
@@ -761,15 +763,22 @@ boundary other than a physical newline.
   defaults to the session repository root.
 - `Review-branch:` (optional) is informational. If it does not resolve to the pin, the dispatch is
   allowed with a note.
+- `Review-draft:` (optional, only where the binding declares the `draft` label) is the absolute path
+  of the worker draft the commit applies, once.
+- `Review-skip:` lines (only with the `skip` label) each name one drafted path deliberately left out
+  of the commit, kept exactly as written.
 
 For a `revision` target, the hook checks the following in order. The first failure decides.
 
 1. The pin resolves to exactly that commit. A tag object id is not accepted.
 2. The authority prints the same commit id.
 3. Every parent named in the raw commit is present.
-4. The commit's changed set equals the declared paths. The base is the sole parent, the first parent
+4. Where the binding declares the draft labels, the worker draft census below passes: `Review-skip:`
+   lines in a brief with no `Review-draft:` line are refused, and where the brief names a draft, the
+   paths the draft's headers name, less the skipped ones, join the declared paths.
+5. The commit's changed set equals the declared paths. The base is the sole parent, the first parent
    of a merge, or the empty tree for a root commit.
-5. No declared path is staged against the pin, and the working tree matches the pin at every
+6. No declared path is staged against the pin, and the working tree matches the pin at every
    declared path. The working tree is compared by content: the hook hashes each declared file, or
    reads each symlink target, and compares the result and the file mode with the pin's tree entry.
    An assume-unchanged or skip-worktree flag, `core.ignoreStat`, the stat cache, an fsmonitor answer
@@ -782,6 +791,127 @@ fsmonitor, the untracked cache and submodule recursion, and takes no optional lo
 and the staged state are read with `--ignore-submodules=none`, so a `.gitmodules` `ignore` value
 cannot hide a submodule change. A file the pin replaces with a directory holding the pin's own
 entries counts as clean.
+
+### The worker draft census
+
+A hand-written `Review-path:` list is checked against the commit, so a drafted file that the apply
+left out, and that the list leaves out too, shows no divergence. Where the binding declares the
+`draft` and `skip` labels, a revision brief can name the worker draft the commit applies, and the
+declared review set is then built from the draft's own diff headers, less the paths the brief
+records as skipped, together with any `Review-path:` lines (for paths the commit changes beyond the
+draft). A drafted path that is neither committed nor recorded as skipped is refused, and the refusal
+names it as drafted. The hook reads the draft once, by its absolute path, under `max_brief_bytes`,
+split on LF only, as `git apply` reads a patch. Unlike a brief, a draft under `/proc` or `/dev` (such
+as `/dev/shm`) is not withheld, since the census is made from what the hook itself reads there.
+
+The draft is a git diff (`git diff`, `git diff --cached` or `git format-patch` output). The census
+reads it conservatively, as the diff output git writes by default, so some forms that `git apply`
+accepts but git does not write are refused rather than read: a localized no-newline marker, a context
+marker that only added lines follow, an added-line marker that more added lines follow, and a line
+beginning with a backslash, other than git's exact marker, right after a hunk's counted lines or
+their marker. Not every such form is refused: an added-line marker that a removed line follows and an
+empty line read as context are read. After a hunk's counted lines, git's exact no-newline marker is
+read as the marker; any other line beginning with a backslash there is refused; a hunk header, a
+`diff --git` line or a `---` line naming a path goes on to the next hunk or section; a `diff --cc`
+or `diff --combined` line is refused as a combined diff; a line that begins as another diff header is
+refused as outside a file section; a `Content-Transfer-Encoding:` line naming an encoding other than
+7bit or 8bit is refused as a transfer-encoded mailbox part; a `Submodule` line that shows a
+submodule's own changes inline (as `--submodule=log` or `--submodule=diff` writes it) is refused as a
+submodule shown inline; and any other line is read as prose. Whatever line follows it, each hunk is
+consumed by the line counts in its own header, so no path is hidden.
+A file section opens at a `diff --git` line, or at a `---` line naming a path, which a `+++` line
+and a hunk header must follow. Each hunk is consumed by the line counts in its own header, so an
+added line that reads `++ b/x` (shown as `+++ b/x`) is content, not a header. Git's exact
+`\ No newline at end of file` marker is read only where git writes one, after the last line of each
+side of the file it marks. A marker after a removed line marks the old side, after an added line the
+new side, and after a context line both. So a marker is read only where the hunk header's count for
+each side it marks is met, and only in the section's last hunk. A line after a hunk's counted lines
+and its marker is not part of the hunk: as `git apply` reads it, it is prose unless it opens a section
+or begins as a diff header or a marker does, so a hunk with extra lines after its counted ones is not
+refused for them. The exception is a line right after the counted lines, or right after their
+marker, that begins with a backslash, with or without a space after it: git writes nothing there but
+its exact marker, so any other such line is refused. A section completes with a hunk, a binary
+marker (`Binary files ... differ` or `GIT binary patch`), or a creation, deletion, mode change,
+rename or copy header. A section names at most one old path (its `---`, `rename from` and
+`copy from` headers) and one new path (its `+++`, `rename to` and `copy to` headers), and its
+`diff --git` line names exactly those, `a/` then `b/`, as git writes them from one pair. A rename
+names both of its paths (`rename from` and `rename to`), a copy only its destination (`copy to`), a
+deletion or a creation the one path that is not `/dev/null`, and a section with no path header (a
+mode change, an empty file, a binary change) the one path its `diff --git` line names twice. C-quoted
+names are decoded, and a name is read up to a tab.
+
+Outside a section, a line is prose and is skipped unless it begins as a diff header or a no-newline
+marker does. Prose covers what git writes around its sections (the mailbox headers and the commit
+message, the `---` separator, alone or with trailing blanks, the diffstat and its summary, the `-- `
+signature and the version line after it, and a binary patch's encoded lines) and blank or indented
+lines. A line that begins as a diff header or a marker does is not prose, wherever it stands (after a
+section, at the end, or before prose), since a section cut short or mangled would otherwise drop out
+of the census unseen: a `+++` line, a hunk header, an extended header such as `index` or
+`rename from` (including the older `rename old` and `rename new`), a binary marker, a line beginning
+with a backslash and a space, and a `diff -` line other than `diff --git` (besides it, git writes
+only `diff --cc` and `diff --combined`, for a merge, which are refused as combined diffs, so
+`diff -ruN` output is refused too). A `---` line naming a path always opens a section.
+
+Among a hunk's counted lines, `git apply` reads a line beginning with a backslash and a space as a
+no-newline marker when it is at least eleven bytes long (counted in bytes before the line feed, so a
+short line of non-ASCII text can reach it) and rejects a shorter one as a corrupt patch; right after
+a hunk's counted lines it accepts any such line, reading one of eleven bytes or more as a marker and
+passing over a shorter one. The census refuses every such line other than git's exact marker in both
+places.
+
+- More than one `Review-draft:` line, a relative draft path, a draft that cannot be read (missing, a
+  symlink, not a regular file, over the cap, not UTF-8, a NUL), an empty `Review-skip:` value, and a
+  draft that names no file in a diff header are withheld as `UNVERIFIABLE:`, with a reason naming the
+  draft and the cause.
+- A draft the census cannot read is withheld as `UNVERIFIABLE:`, with a reason naming the cause: a
+  combined diff (`diff --cc` or `diff --combined`), a header path without git's default `a/` or `b/`
+  prefix in its place (written with `--no-prefix`, `diff.noprefix`, `diff.mnemonicPrefix` or custom
+  prefixes, or by `git diff -R`, which swaps them), a `---` line naming a path with no `+++` line after
+  it (the `---` line of a context-format `diff -c` section among them), a `+++` line with no hunk after
+  it, a section that ends with no hunk, binary marker, or creation, deletion, mode, rename or copy
+  header (a draft cut short inside a section), a rename, copy or mode header without its pair, a
+  `diff --git` line naming two paths with no rename or copy header, a section whose `---`, `+++`,
+  rename or copy headers name two old or two new paths, or other paths than its `diff --git` line
+  names (a mangled or hand-edited section, which is refused rather than counted by one of its
+  headers), an unreadable quoted name, a hunk header that cannot be read, a hunk that ends before its
+  header's counts are met or holds more lines for one side than its header counts while the other
+  side's count is not yet met, a hunk line beginning with a backslash that is not git's exact
+  `\ No newline at end of file` marker after a context, removed or added line, a marker before the
+  last line its hunk header counts for a side it marks (such as a marker after a removed line that
+  another removed line follows, or one after a context line in the middle of a hunk, as `git diff -w`,
+  `-b` or `--ignore-space-at-eol` can write), a hunk after a marker in its section, any other line
+  beginning with a backslash right after a hunk's counted lines or their marker, and a diff header or
+  marker line outside a section. Where a `diff --git` line names its paths under `b/` and then `a/`, as
+  `git diff -R` writes it, in a section with no `---` line (a mode change, a binary change, an empty
+  file, a pure rename or a pure copy), the reason names that swap; a section with a `---` line, as most
+  `git diff -R` output has, is refused first with the reason that its `---` or `+++` line names no
+  path under git's prefix for its side.
+- A header or hunk line that ends in a carriage return before its LF is withheld as `UNVERIFIABLE:`,
+  with a reason naming CRLF, since a header's names would end in the return. This covers a draft
+  saved with CRLF line ends, which must be written again with LF line ends, and a draft holding a
+  hunk of a file whose own lines end in CRLF, which is withheld however it is saved.
+- A mailbox part whose `Content-Transfer-Encoding` is other than `7bit` or `8bit` (base64,
+  quoted-printable) is withheld as `UNVERIFIABLE:`, since `git am` decodes and applies the file
+  headers it holds, which a line reader cannot see.
+- A submodule shown inline by `git diff --submodule=log` or `--submodule=diff` (a
+  `Submodule <path> <old>..<new>` line, whose own changes follow under the submodule's path) is
+  withheld as `UNVERIFIABLE:`, with a reason naming `--submodule=short`, the default, which shows the
+  submodule as its one gitlink section.
+- A `Review-skip:` line that names a path the draft does not name, or a path the commit changes, is
+  refused, and so are `Review-skip:` lines in a brief with no `Review-draft:` line.
+
+The census applies to a `revision` target only. It reads paths, not content: a draft that names a file
+only in prose, a partial apply inside one file (a hunk dropped from a file the commit still changes),
+and a section indented from column 0 (which GNU `patch` reads and `git apply` does not), which is read
+as prose, are not caught, and neither is an apply whose brief does not name its draft. The census
+reads the draft the brief names, and nothing proves that draft is the one the commit applied: a
+trimmed copy, or a draft cut short between two complete sections, reads as a complete draft of fewer
+files. A commit message line in a mailbox draft that begins as a diff header or a no-newline marker
+does (such as one starting `index ` or `\ `), that reads as an inline submodule header (such as
+`Submodule sub 1234567..89abcde: bumped`), or that reads as a `Content-Transfer-Encoding:` header with
+a value other than `7bit` or `8bit` is refused with the rest, which can withhold a correct draft:
+telling a message line from a part header or a section's line needs the mailbox structure, which a
+draft can mangle, so the census refuses such a line wherever it stands.
 
 The hook refuses with a deny that names the reason. When it cannot evaluate, it denies with the
 reason prefixed `UNVERIFIABLE:`, so that outcome stays distinct. Cannot-evaluate cases include a
@@ -876,6 +1006,12 @@ Limits:
   redirect output another way.
 - Uncommitted edits inside a checked-out submodule whose HEAD is at the pinned commit are not read. A declared file whose checkout was converted (line
   endings or a filter) differs by content from the pin and is refused.
+- A path the change needs that is missing from both the commit and the declaration is caught only
+  where the brief names the worker draft that drafts it; the census reads the draft's diff headers,
+  so a file the draft names only in prose and a partial apply inside one file are not caught. The
+  census reads the draft the brief names, which is not proven to be the draft the commit applied.
+  A draft with CRLF line ends, or one holding a hunk of a CRLF file, is withheld as `UNVERIFIABLE:`
+  rather than censused.
 
 ## Platforms without hooks
 
