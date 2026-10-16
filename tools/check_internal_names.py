@@ -379,6 +379,21 @@ def self_test_main():
         return _self_test()
 
 
+# A self-test that launches a child self-test sets _CHILD_SENTINEL in the child's environment to its OWN pid,
+# and the child skips the subprocess-launching cases 19 to 23 (its parent runs them; a child running them
+# would recurse). Case 23 likewise sets _INHERITED_PROBE to its own pid in the run it launches, which skips
+# case 23 alone. A value is honoured only when it names the process that launched this one, so a value
+# exported by a caller or inherited from an earlier run ("1", a stale pid) is ignored and every case runs.
+_CHILD_SENTINEL = "AIQT_INTERNAL_NAMES_SELFTEST_CHILD"
+_INHERITED_PROBE = "AIQT_INTERNAL_NAMES_SELFTEST_INHERITED_PROBE"
+
+
+def _set_by_launcher(var):
+    """True only when the environment variable `var` holds this process's parent pid (see _CHILD_SENTINEL)."""
+    value = os.environ.get(var, "")
+    return value.isascii() and value.isdigit() and int(value) == os.getppid()
+
+
 # --- self-test --------------------------------------------------------------------------------------
 def _self_test():
     import hashlib
@@ -386,6 +401,9 @@ def _self_test():
     import tempfile
 
     failures = []
+    # Each case this run does not run, with the reason; the full PASS text is printed only when it is empty.
+    not_run = []
+    launched_child = _set_by_launcher(_CHILD_SENTINEL)
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-selftest-"))
     try:
         toolsdir = tmp / "tools"
@@ -513,6 +531,8 @@ def _self_test():
             if not raised:
                 failures.append("a broken symlink at a scoped path expected fail-closed (raise), got a silent skip")
             broken.unlink()
+        else:
+            not_run.append("case 11 (a dangling symlink could not be created)")
 
         # 12. DISCRIMINATING (finding-4: a BROKEN SYMLINK at the HASH-FILE path FAILS CLOSED): a broken
         #     symlink at tools/internal-name-hashes.txt must raise from load_hashes (a present dentry with a
@@ -537,6 +557,8 @@ def _self_test():
                 failures.append("a broken symlink at the hash-file path expected fail-closed (raise), got an "
                                 "absent (empty-denylist) read")
             hf.unlink()
+        else:
+            not_run.append("case 12 (a dangling symlink could not be created)")
 
         # 13. DISCRIMINATING (internal role name): the whole capitalized word is caught, bare and in a
         #     hyphenated compound. Removing the role-name pattern leaves the hits unflagged; dropping its
@@ -628,7 +650,8 @@ def _self_test():
                                 "the role rule, got {!r}".format(report))
             # DISCRIMINATING (the tracked-file read drops the GIT_* environment): GIT_CONFIG_GLOBAL pointed at
             # a malformed file must not change the gate's result. A control first proves the file breaks a git
-            # read that honours it; then the gate runs with it set in the process environment and must give
+            # read that honours it (a nonzero exit reporting "bad config", so a failure for another reason is
+            # not taken as proof); then the gate runs with it set in the process environment and must give
             # the same exit code and report as the run above. A tracked-file read that inherits the caller's
             # GIT_* environment instead of dropping it fails on the malformed file (exit 2) and fails this.
             # This guards the drop in tracked_files only; case 21 guards the home, XDG and system isolation
@@ -636,11 +659,12 @@ def _self_test():
             malformed = tmp / "malformed-global-gitconfig"
             malformed.write_text("[core\n\tbroken\n", encoding="utf-8")
             control = subprocess.run(["git", "-C", str(repo), "ls-files", "-z", "--cached"], capture_output=True,
-                                     env=_git_fixture_env.git_fixture_env(GIT_CONFIG_GLOBAL=str(malformed)),
+                                     text=True, env=_git_fixture_env.git_fixture_env(GIT_CONFIG_GLOBAL=str(malformed)),
                                      timeout=60)
-            if control.returncode == 0:
+            if control.returncode == 0 or "bad config" not in control.stderr:
                 failures.append("a malformed GIT_CONFIG_GLOBAL file expected to break a git read that honours it "
-                                "(the global-config vector would be vacuous), got rc=0")
+                                "(the global-config vector would be vacuous), got rc={} {!r}".format(
+                                    control.returncode, control.stderr))
             saved_global = os.environ.get("GIT_CONFIG_GLOBAL")
             os.environ["GIT_CONFIG_GLOBAL"] = str(malformed)
             try:
@@ -688,10 +712,14 @@ def _self_test():
                 failures.append("unknown option {!r} expected a loud exit 2, got {}".format(
                     badarg, proc.returncode))
 
-        # The subprocess-spawning cases below carry a sentinel so a child (which re-enters --self-test)
-        # skips them rather than recursing without bound.
-        if os.environ.get("AIQT_INTERNAL_NAMES_SELFTEST_CHILD") != "1":
-            childenv = dict(os.environ, AIQT_INTERNAL_NAMES_SELFTEST_CHILD="1")
+        # The subprocess-spawning cases below give each child the sentinel naming this process, so a child
+        # (which re-enters --self-test) skips them rather than recursing without bound. Only a child this run
+        # launched skips them: an inherited or stray sentinel names another process and every case runs.
+        if launched_child:
+            not_run.append("cases 19 to 23 (a child launched by a parent self-test, which runs them)")
+        else:
+            child_tag = {_CHILD_SENTINEL: str(os.getpid())}
+            childenv = dict(os.environ, **child_tag)
             toolsdir = str(Path(__file__).resolve().parent)
 
             # 19. DISCRIMINATING (finding-1: a NON-REGULAR input FAILS CLOSED, never blocks on open): a FIFO
@@ -716,6 +744,7 @@ def _self_test():
                         made = False
                     if not made:
                         shutil.rmtree(fifo_root, ignore_errors=True)
+                        not_run.append("case 19 at the {} path (a FIFO could not be created)".format(label))
                         continue
                     probe = (
                         "import sys\n"
@@ -741,6 +770,8 @@ def _self_test():
                                         "(S_ISREG must be checked before any open)".format(label))
                     finally:
                         shutil.rmtree(fifo_root, ignore_errors=True)
+            else:
+                not_run.append("case 19 (os.mkfifo is unavailable)")
 
             # 20. DISCRIMINATING (finding-6: a hostile sibling json.py/hashlib.py must NOT shadow a stdlib
             #     import and neuter this gate). Copy this script and its sibling modules (_walk, check_leaks)
@@ -771,7 +802,8 @@ def _self_test():
             #     carry the system case: a PATH shim in front of git instead points git at the malformed file
             #     whenever neither GIT_CONFIG_NOSYSTEM=1 nor GIT_CONFIG_SYSTEM is set (where git reads the
             #     host's system file), and only the fixture git lifecycle's PATH wrapper reasserts that pin
-            #     after the drop. Each child must pass. Reverting self_test_main to a bare _self_test() lets
+            #     after the drop. Each child must pass and print the child line (it skips cases 19 to 23,
+            #     which this run runs). Reverting self_test_main to a bare _self_test() lets
             #     the child's tracked-file read load the malformed file, so its cases 14 to 17 exit 2 and the
             #     child fails all three; applying the scrub without the lifecycle fails the system case. A
             #     control first proves each poisoned configuration breaks a git read that honours it; the home
@@ -822,12 +854,12 @@ def _self_test():
                     try:
                         child = subprocess.run([sys.executable, "-I", "-B", selfpath, "--self-test"],
                                                capture_output=True, text=True, timeout=600,
-                                               env=dict(lane_env, AIQT_INTERNAL_NAMES_SELFTEST_CHILD="1"))
+                                               env=dict(lane_env, **child_tag))
                     except subprocess.TimeoutExpired:
                         failures.append("a child self-test under a malformed caller {} git configuration "
                                         "timed out".format(label))
                         continue
-                    if child.returncode != 0 or "SELF-TEST PASS" not in child.stdout:
+                    if child.returncode != 0 or "SELF-TEST CHILD PASS:" not in child.stdout:
                         failures.append("a malformed caller {} git configuration changed the self-test verdict "
                                         "(the gate's tracked-file read must not read it): rc={} out={!r} "
                                         "err={!r}".format(label, child.returncode, child.stdout, child.stderr))
@@ -857,7 +889,7 @@ def _self_test():
                 ).format(tools=toolsdir, home=str(clean_home))
                 try:
                     proc = subprocess.run([sys.executable, "-I", "-B", "-c", probe], capture_output=True, text=True,
-                                          timeout=600, env=dict(caller, AIQT_INTERNAL_NAMES_SELFTEST_CHILD="1"))
+                                          timeout=600, env=dict(caller, **child_tag))
                     if proc.returncode != 0 or "ENVIRONMENT CHANGED: []" not in proc.stdout:
                         failures.append("an in-process self_test_main() expected to pass and restore the caller's "
                                         "environment exactly, got rc={} out={!r} err={!r}".format(
@@ -866,6 +898,58 @@ def _self_test():
                     failures.append("the in-process self_test_main() environment probe timed out")
             finally:
                 shutil.rmtree(poison, ignore_errors=True)
+
+            # 23. DISCRIMINATING (an inherited child sentinel never skips a case): a run whose environment
+            #     already holds the child sentinel, as "1" or as a stale pid naming another process (here this
+            #     run's own parent), was not launched by a self-test, so it runs cases 19 to 22. Each lane
+            #     runs a scratch copy of this script as a top-level --self-test with that inherited value; the
+            #     copy's self_test_main applies the fixture scrub without the lifecycle, so it fails case 21's
+            #     system lane and case 22 only if it runs them. Honouring the inherited value (as a child)
+            #     skips both and passes, failing this. The copy is launched with _INHERITED_PROBE naming this
+            #     process, so it skips this case and does not recurse.
+            lifecycle_entry = ("    from _git_fixture_env import fixture_git_lifecycle\n"
+                               "    with fixture_git_lifecycle():\n"
+                               "        return _self_test()\n")
+            scrub_entry = ("    from _git_fixture_env import scrub_git_environment\n"
+                           "    scrub_git_environment()\n"
+                           "    return _self_test()\n")
+            source = Path(selfpath).read_text(encoding="utf-8")
+            if _set_by_launcher(_INHERITED_PROBE):
+                not_run.append("case 23 (this run was launched by case 23, which runs it)")
+            elif source.count(lifecycle_entry) != 1:
+                failures.append("the inherited-sentinel case could not build its scrub-without-lifecycle copy (the "
+                                "self_test_main body occurs {} times, expected once)".format(
+                                    source.count(lifecycle_entry)))
+            else:
+                inherited_dir = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-inherited-"))
+                try:
+                    for name in ("_walk.py", "check_leaks.py", "_git_fixture_env.py"):
+                        shutil.copy(str(Path(toolsdir) / name), str(inherited_dir / name))
+                    (inherited_dir / "check_internal_names.py").write_text(
+                        source.replace(lifecycle_entry, scrub_entry), encoding="utf-8")
+                    for inherited in ("1", str(os.getppid())):
+                        if inherited == str(os.getpid()):
+                            not_run.append("case 23 with the inherited value {!r} (it names this process, so it "
+                                           "cannot stand for an inherited value)".format(inherited))
+                            continue
+                        try:
+                            proc = subprocess.run(
+                                [sys.executable, "-I", "-B", str(inherited_dir / "check_internal_names.py"),
+                                 "--self-test"], capture_output=True, text=True, timeout=1200,
+                                env=dict(caller, **{_CHILD_SENTINEL: inherited, _INHERITED_PROBE: str(os.getpid())}))
+                        except subprocess.TimeoutExpired:
+                            failures.append("a top-level self-test with the child sentinel inherited as {!r} timed "
+                                            "out".format(inherited))
+                            continue
+                        if (proc.returncode != 1 or "SELF-TEST PASS" in proc.stdout
+                                or "malformed caller system git configuration changed" not in proc.stdout
+                                or "an in-process self_test_main() expected to pass" not in proc.stdout):
+                            failures.append("a top-level self-test with the child sentinel inherited as {!r} must "
+                                            "run cases 21 and 22 (its scrub-without-lifecycle copy fails both "
+                                            "when they run), got rc={} out={!r} err={!r}".format(
+                                                inherited, proc.returncode, proc.stdout, proc.stderr))
+                finally:
+                    shutil.rmtree(inherited_dir, ignore_errors=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -873,7 +957,14 @@ def _self_test():
         print("SELF-TEST FAIL:")
         for x in failures:
             print("  - " + x)
+        if not_run:
+            print("  not run: " + "; ".join(not_run))
         return 1
+    if not_run:
+        # The full PASS text below claims every case, so a run that skipped any prints this line instead.
+        print("{} every case this run ran passed; not run: {}".format(
+            "SELF-TEST CHILD PASS:" if launched_child else "SELF-TEST INCOMPLETE:", "; ".join(not_run)))
+        return 0
     print("SELF-TEST PASS: clean generic content passes; a seeded provenance id, a fixed host path, and a "
           "hashed codename each fail (removing a layer fails a case); an internal-allow line is exempt from "
           "the structural layer; the whole capitalized internal role name is caught, while Architecture, "
@@ -889,7 +980,9 @@ def _self_test():
           "under the caller's XDG_CONFIG_HOME, or a malformed system configuration (supplied through a PATH "
           "shim, since the gate drops GIT_CONFIG_SYSTEM), so the gate's tracked-file read does not read the "
           "caller's home, XDG or system configuration during the self-test; an in-process self_test_main() "
-          "restores the caller's environment exactly; a malformed hashes file is reported, never a silent empty denylist; a "
+          "restores the caller's environment exactly; a top-level self-test whose environment already holds "
+          "the child sentinel (\"1\" or a stale pid) still runs cases 21 and 22, since only a child the "
+          "self-test launched itself skips them; a malformed hashes file is reported, never a silent empty denylist; a "
           "non-UTF-8 in-scope surface fails closed as unscannable, never a silent skip; a broken symlink "
           "(a present dentry with a missing target) at a scoped path and at the hash-file path each fails "
           "closed (re-raised), never read as absent; a scoped file "
