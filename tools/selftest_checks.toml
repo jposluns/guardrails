@@ -834,6 +834,12 @@ expected-check-ids = [
   "ci/wait-pr-probe-empty-page-list",
   "ci/wait-pr-probe-retry-spacing",
   "ci/wait-pr-probe-malformed-clauses",
+  "ci/wait-pr-probe-permanent-forms",
+  "ci/wait-pr-probe-listing-shape",
+  "ci/wait-pr-probe-none-reread",
+  "ci/wait-pr-probe-merged-into-base",
+  "ci/wait-pr-probe-closed-unmerged",
+  "ci/wait-pr-probe-associated-read",
   "ci/finalise-harness-error-keeps-failures",
 ]
 [[suite]]
