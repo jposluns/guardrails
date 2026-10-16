@@ -12708,14 +12708,16 @@ def orch_dispatch_ledger(data):
 # session under the state directory. A span is recorded only when the tool output is a shape recognized here
 # AND the text it shows equals the file's own text at that span; any other shape records nothing, so a span
 # is never guessed. Every digest is computed from bytes the hook reads itself (the file on disk, or the git
-# blob), never from tool output. A tool input or response text longer than _CITE_MAX_TEXT characters, and a
-# Bash command longer than _CITE_MAX_COMMAND, record nothing. One deadline, set when the handler starts,
-# covers the toplevel probe and the work up to the append: each git probe is given only the time left and
-# none starts once it is reached, a file read checks it between chunks, and the split of a response into
-# lines, the comparison of shown lines with the file, the scan of grep output and of a grep or rg command's
-# options, the building of spans and the digest of each row check it at each line, word, number or row; the
-# rows digested by then are still appended. What it does not cover is bounded by size or count instead (see
-# citation_read_recorder).
+# blob), never from tool output. A text it reads (a Read, Grep or Bash output, a Write content, an Edit's
+# new_string, old_string or originalFile) longer than _CITE_MAX_TEXT characters and a Bash command longer
+# than _CITE_MAX_COMMAND record nothing, and a path longer than _CITE_MAX_PATH is never resolved, so names
+# no file; any other field is only type-checked or compared with a fixed value. One deadline, set when the
+# handler starts, covers the toplevel probe and the work up to the append: each git probe is given only the
+# time left and none starts once it is reached, a file read checks it between chunks, no path is resolved
+# once it is reached, and the split of a response into lines, the comparison of shown lines with the file,
+# the scan of grep output and of a grep or rg command's words, the merge of grep hits into spans and the
+# digest of each row check it at each line, word, line number or row; the rows digested by then are still
+# appended. What it does not cover is bounded by size or count instead (see citation_read_recorder).
 _CITE_TOOLS = frozenset(("Read", "Grep", "Bash", "Write", "Edit"))
 _CITE_DIR = "citation-ledger"
 _CITE_NAME_RE = re.compile(r"[0-9a-f]{16}\.jsonl(?:\.1)?")
@@ -12729,8 +12731,9 @@ _CITE_EDIT_MAX = 50                      # at most this many replacements of a r
 _CITE_MAX_FILES = 50                     # at most this many distinct paths are read per tool call
 _CITE_MAX_ROWS = 500                     # at most this many rows are appended per tool call
 _CITE_MAX_SPLITS = 8                     # at most this many path splits are tried per output line
-_CITE_MAX_TEXT = 16 * 1024 * 1024        # a longer tool input or response text (characters) records nothing
+_CITE_MAX_TEXT = 16 * 1024 * 1024        # a longer output, Write content or Edit text (characters) records nothing
 _CITE_MAX_COMMAND = 1024 * 1024          # a longer Bash command (characters) is not lexed, so records nothing
+_CITE_MAX_PATH = 4095                    # a longer path (characters) is not resolved (Linux PATH_MAX less its NUL)
 _CITE_BUDGET = 5.0                       # seconds for the probes, reads, scans and digests of a call (timeout 10)
 _CITE_OPEN_FLAGS = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0)
 _CITE_APPEND_FLAGS = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
@@ -12818,6 +12821,16 @@ def _cite_over(deadline):
     return time.monotonic() >= deadline
 
 
+def _cite_resolve(path, deadline):
+    """The recorder's resolution of path (_cite_real), or None without resolving it: a path longer than
+    _CITE_MAX_PATH characters, or the call's deadline reached. Every path the recorder resolves goes through
+    here, so a resolution, whose work grows with the path's components, starts only before the deadline and
+    walks at most _CITE_MAX_PATH characters."""
+    if len(path) > _CITE_MAX_PATH or _cite_over(deadline):
+        return None
+    return _cite_real(path)
+
+
 def _cite_left(deadline):
     """The seconds a git probe of the call may take: what is left before deadline, or None when nothing is
     left (the probe is not started)."""
@@ -12877,13 +12890,13 @@ def _cite_bytes(entry, start, end):
 
 def _cite_read(path, files, deadline):
     """The _cite_entry of the regular file at path, resolved through symlinks, or None: the call's deadline
-    reached (before the read or between its chunks), a path under /dev or /proc, a call that has already read
-    _CITE_MAX_FILES paths, an open or read fault, a file that is not regular, or one larger than
-    _CITE_MAX_FILE bytes. The open is non-blocking, so a FIFO is refused at the fstat rather than waited
-    on; results are kept in files, keyed by resolved path."""
+    reached (before the read or between its chunks), a path longer than _CITE_MAX_PATH characters, a path
+    under /dev or /proc, a call that has already read _CITE_MAX_FILES paths, an open or read fault, a file
+    that is not regular, or one larger than _CITE_MAX_FILE bytes. The open is non-blocking, so a FIFO is
+    refused at the fstat rather than waited on; results are kept in files, keyed by resolved path."""
     if _cite_over(deadline):
         return None
-    real = _cite_real(path)
+    real = _cite_resolve(path, deadline)
     if real in files:
         return files[real]
     if real is None or len(files) >= _CITE_MAX_FILES \
@@ -12937,8 +12950,9 @@ def _cite_from_read(tool_input, response, files, deadline):
     numLines lines (one trailing empty piece after a final LF is dropped), and whose lines equal the file's
     lines startLine onward. An empty line shown just past the file's last line, where the file ends in a
     line feed, is no line of the file and is dropped. Any other shape (an image, PDF or notebook read, a
-    missing or non-integer field, a mismatch), a content longer than _CITE_MAX_TEXT characters, and a split
-    of the content the call's deadline cuts short record nothing."""
+    missing or non-integer field, a mismatch), a file_path or filePath longer than _CITE_MAX_PATH
+    characters, a content longer than _CITE_MAX_TEXT characters, and a resolution or a split of the content
+    the call's deadline cuts short record nothing."""
     data = response.get("file") if isinstance(response, dict) and response.get("type") == "text" else None
     if not isinstance(data, dict):
         return []
@@ -12947,7 +12961,8 @@ def _cite_from_read(tool_input, response, files, deadline):
     if not (isinstance(want, str) and isinstance(got, str) and os.path.isabs(want) and os.path.isabs(got)
             and isinstance(content, str) and type(start) is int and type(count) is int and count >= 1):
         return []
-    if _cite_real(want) is None or _cite_real(want) != _cite_real(got):
+    real = _cite_resolve(want, deadline)
+    if real is None or real != _cite_resolve(got, deadline):
         return []
     entry = _cite_read(got, files, deadline)
     shown = None if entry is None else _cite_split(content, deadline)
@@ -12973,10 +12988,12 @@ def _cite_hits(lines, cwd, single, scope, via, files, deadline):
     """grep or rg output lines as read spans. Each line is split at every place it could name a file and a
     line (PATH:N:TEXT, PATH-N-TEXT, and N:TEXT or N-TEXT where the search named the one file single), a
     relative PATH resolving against cwd, and a split counts only when that file is the searched file or lies
-    under a searched directory (scope, resolved paths) and its line N equals TEXT; a line with no such
+    under a searched directory (scope, resolved paths) and its line N equals TEXT; a split whose PATH, so
+    joined, is longer than _CITE_MAX_PATH characters names no file (_cite_resolve), and a line with no such
     split, or with more than one, records nothing. Consecutive lines of one file merge into one span
-    (_cite_merge). Once the call's deadline is reached no further line is read, and since _cite_merge
-    builds no span past it either, a scan that reaches the deadline yields no span."""
+    (_cite_merge). Once the call's deadline is reached no further line is read and no further PATH is
+    resolved, and since _cite_merge builds no span past it either, a scan that reaches the deadline yields
+    no span."""
     hits = {}
     for line in lines:
         if _cite_over(deadline):
@@ -12993,7 +13010,7 @@ def _cite_hits(lines, cwd, single, scope, via, files, deadline):
                                line[match.start() + len(match.group(2)) + 2:]))
         found = set()
         for path, number, text in splits:
-            real = _cite_real(os.path.join(cwd, path))
+            real = _cite_resolve(os.path.join(cwd, path), deadline)
             inside = real is not None and _cite_inside(real, scope)
             entry = _cite_read(real, files, deadline) if inside else None
             if entry is not None and number <= len(entry["lines"]) \
@@ -13008,7 +13025,9 @@ def _cite_hits(lines, cwd, single, scope, via, files, deadline):
 def _cite_merge(hits, via, files, deadline):
     """The read spans of hits (resolved path: the set of its line numbers), in path order, each run of
     consecutive numbers one span, at most _CITE_MAX_ROWS of them. The call's deadline is checked at each
-    number; once it is reached no further span is added, so each span returned is a whole run."""
+    number; once it is reached no further span is added, so each span returned is a whole run. The paths,
+    and each path's numbers before they are walked, are sorted whole: no sort is cut short by the deadline,
+    and each is bounded by the count of hits (at most one per output line)."""
     spans = []
     for path in sorted(hits):
         numbers = sorted(hits[path])
@@ -13030,8 +13049,9 @@ def _cite_from_grep(tool_input, response, cwd, files, deadline):
     """Grep: the hit and context lines of a tool_response {"mode": "content", "content": TEXT}, through
     _cite_hits, each counted only inside the requested path (the file, or the directory and what lies under
     it; cwd when no path is given), its lines split off one at a time (_cite_lines). A search run with "-n"
-    false prints no line numbers, and a content longer than _CITE_MAX_TEXT characters is not read: both
-    record nothing."""
+    false prints no line numbers, a content longer than _CITE_MAX_TEXT characters is not read, and a path
+    longer than _CITE_MAX_PATH characters (joined to cwd where relative) is not resolved: each records
+    nothing."""
     if not isinstance(response, dict) or response.get("mode") != "content":
         return []
     content, base = response.get("content"), tool_input.get("path")
@@ -13039,7 +13059,7 @@ def _cite_from_grep(tool_input, response, cwd, files, deadline):
     if not isinstance(content, str) or len(content) > _CITE_MAX_TEXT or tool_input.get("-n") is False \
             or not isinstance(base, str) or not base:
         return []
-    base = _cite_real(os.path.join(cwd, base))
+    base = _cite_resolve(os.path.join(cwd, base), deadline)
     if base is None:
         return []
     return _cite_hits(_cite_lines(content, deadline), cwd, base if os.path.isfile(base) else None, (base,),
@@ -13075,7 +13095,7 @@ def _cite_git_show(args, shown, cwd, root, deadline):
     else:
         left = _cite_left(deadline)
         top = None if left is None else _recovery_toplevel(repo, timeout=left)
-    top = None if top is None else _cite_real(top)
+    top = None if top is None else _cite_resolve(top, deadline)
     left = None if top is None else _cite_left(deadline)
     listing = None if left is None else _review_git(repo, "ls-tree", "-z", "-l", "--full-tree", rev, "--", rel,
                                                     timeout=left)
@@ -13092,7 +13112,7 @@ def _cite_git_show(args, shown, cwd, root, deadline):
     if blob is None or blob.returncode != 0 or len(blob.stdout) != int(fields[3]):
         return []
     entry = _cite_entry(blob.stdout, os.path.join(top, rel))
-    entry["rel"] = rel if top == _cite_real(root) else None
+    entry["rel"] = rel if top == _cite_resolve(root, deadline) else None
     end = _cite_span(entry, 1, shown, deadline)
     return [] if end is None else [("read", "git-show", entry, 1, end, rev)]
 
@@ -13121,8 +13141,10 @@ def _cite_grep_command(argv, shown, cwd, files, deadline):
     file, or a named directory and what lies under it; cwd where no path is named). Options are read as
     _CITE_GREP_SHORT and _CITE_GREP_LONG give them, the deadline checked at each word; a command the tool
     would refuse (an unknown option, an ambiguous prefix, a value missing at the end) records nothing. The
-    first operand is the pattern unless -e, -f, --regexp or --file gave one. Where exactly one path is named
-    and it is a regular file, N:TEXT lines are read as that file's."""
+    first operand is the pattern unless -e, -f, --regexp or --file gave one. Each named path is joined to
+    cwd and given to stat (bounded by the command's length, not the deadline), then resolved through
+    _cite_resolve, so a path longer than _CITE_MAX_PATH characters adds nothing to the scope. Where exactly
+    one path is named and it is a regular file, N:TEXT lines are read as that file's."""
     valued, flags = _CITE_GREP_SHORT[argv[0]]
     numbered, patterned, operands, take, ended = False, False, [], False, False
     for word in argv[1:]:
@@ -13157,7 +13179,7 @@ def _cite_grep_command(argv, shown, cwd, files, deadline):
         return []
     paths = [os.path.join(cwd, word) for word in (operands if patterned else operands[1:])]
     named = [p for p in paths if os.path.isfile(p) or os.path.isdir(p)] if paths else [cwd]
-    scope = tuple(real for real in (_cite_real(p) for p in named) if real is not None)
+    scope = tuple(real for real in (_cite_resolve(p, deadline) for p in named) if real is not None)
     single = scope[0] if len(paths) == 1 and len(scope) == 1 and os.path.isfile(paths[0]) else None
     return _cite_hits(shown, cwd, single, scope, "grep", files, deadline)
 
@@ -13262,12 +13284,15 @@ def _cite_from_write(tool, tool_input, response, files, deadline):
     Write is the whole file, recorded only when the file's text equals the written content (CRLF read as
     LF on both sides). An Edit is, for each range _cite_edit_ranges gives, the lines that lie wholly inside
     it (_cite_within): never another occurrence of the new text elsewhere in the file, and never a line the
-    new text only partly covers. An empty content or new_string, and a content, new_string, old_string or
-    originalFile longer than _CITE_MAX_TEXT characters, record nothing."""
+    new text only partly covers. An empty content or new_string, a content, new_string, old_string or
+    originalFile longer than _CITE_MAX_TEXT characters, and a file_path or filePath longer than
+    _CITE_MAX_PATH characters record nothing."""
     path = tool_input.get("file_path")
     got = response.get("filePath") if isinstance(response, dict) else None
-    if not (isinstance(path, str) and isinstance(got, str) and os.path.isabs(path) and os.path.isabs(got)) \
-            or _cite_real(path) is None or _cite_real(path) != _cite_real(got):
+    if not (isinstance(path, str) and isinstance(got, str) and os.path.isabs(path) and os.path.isabs(got)):
+        return []
+    real = _cite_resolve(path, deadline)
+    if real is None or real != _cite_resolve(got, deadline):
         return []
     new = tool_input.get("content" if tool == "Write" else "new_string")
     texts = (new,) if tool == "Write" else (new, tool_input.get("old_string"), response.get("originalFile"))
@@ -13294,7 +13319,7 @@ def _cite_rows(tool, tool_input, response, cwd, root, deadline):
     repository is not the session's), "start", "end", "sha256" (of the raw bytes of lines start..end,
     LF-split, CR kept), "rev" (the git show revision exactly as the command typed it, not resolved, else
     null)}. At most _CITE_MAX_ROWS rows; the call's deadline is checked before each row is digested, and
-    the rows digested by then are returned."""
+    the rows digested by then are returned (none where it is reached before root is resolved)."""
     files = {}
     if tool == "Read":
         found = _cite_from_read(tool_input, response, files, deadline)
@@ -13306,7 +13331,10 @@ def _cite_rows(tool, tool_input, response, cwd, root, deadline):
         found = _cite_from_grep(tool_input, response, cwd, files, deadline)
     else:
         found = _cite_from_bash(tool_input, response, cwd, root, files, deadline)
-    top = os.path.realpath(root).rstrip("/") + "/"
+    home = _cite_resolve(root, deadline)
+    if home is None:
+        return []
+    top = home.rstrip("/") + "/"
     ts = _orch_now().isoformat()
     rows = []
     for kind, via, entry, start, end, rev in found[:_CITE_MAX_ROWS]:
@@ -13463,14 +13491,30 @@ def citation_read_recorder(data):
     payload is a PostToolUse one with a non-empty session_id, a recorded tool and a tool_input object, and
     the session cwd resolves to a git toplevel; not registry-gated and not holder-gated, since each session
     writes only its own ledger file. A tool_response shape it does not recognize, or output that does not
-    equal the file's text, records nothing. One deadline, _CITE_BUDGET seconds from here, covers the
-    toplevel probe and the work of _cite_rows (each git probe given only the time left; file reads, splits,
-    comparisons, the scan of grep output and options, span building and digests checked against it); the
-    rows digested by then are appended. Bounded by size or count instead of the deadline: the payload, read
-    and parsed whole before this handler starts; the lexing of a command (at most _CITE_MAX_COMMAND
-    characters); the split of a file's bytes into lines (at most _CITE_MAX_FILE bytes); the search for at
-    most _CITE_EDIT_MAX replacements and the replacement check of an Edit (texts of at most _CITE_MAX_TEXT
-    characters); and, after the deadline, the append: the orchestration registry read that locates the
+    equal the file's text, records nothing. Size bounds: a Bash command longer than _CITE_MAX_COMMAND
+    characters, and a Read, Grep or Bash output, a Write content or an Edit's new_string, old_string or
+    originalFile longer than _CITE_MAX_TEXT characters, record nothing, and a path longer than
+    _CITE_MAX_PATH characters is not resolved (_cite_resolve), so names no file; every other field of the
+    tool input and response is only type-checked or compared with a fixed value. One deadline, _CITE_BUDGET
+    seconds from here, covers the toplevel probe and the work of _cite_rows: each git probe is given only
+    the time left and none starts once it is reached, and it is checked between a file read's chunks,
+    before each path is resolved, at each line of a response's split, of the comparison of shown lines with
+    the file and of the scan of grep output, at each word of a grep or rg command, at each line number of
+    the merge of grep hits into spans, before each Edit range and at each of its lines, and before each
+    row's digest; the rows digested by then are appended. A step under way when it is reached finishes
+    first: the scan of one output line for the places it could split (at most _CITE_MAX_TEXT characters),
+    the resolution of one path (at most _CITE_MAX_PATH characters), the read of one chunk, and the count of
+    the lines before one Edit range or the digest of one row (at most _CITE_MAX_FILE bytes each). Bounded by
+    size or count instead of the deadline: the payload, read and parsed whole before this handler starts;
+    the lexing of a command, the argument checks of git show and the parse of its one ls-tree line, and the
+    join and stat of each path a grep or rg command names (a command of at most _CITE_MAX_COMMAND
+    characters); the copy of a Bash output without its final line feed (at most _CITE_MAX_TEXT characters);
+    the split of a file's or blob's bytes into lines and, for a Write or Edit, the decoding of the file and
+    of the new text and a Write's comparison of the two (at most _CITE_MAX_FILE bytes and _CITE_MAX_TEXT
+    characters); the search for at most _CITE_EDIT_MAX replacements and the replacement check of an Edit
+    (texts of at most _CITE_MAX_TEXT characters); the sort of the grep hits found before the deadline (at
+    most one per output line); and, after the deadline, the append: the digest of the session id that names
+    the ledger file (as long as the payload gives it), the orchestration registry read that locates the
     state directory (read whole, as every hook here reads it; this hook sets no size bound on it), the
     duplicate scan (a session file under _CITE_DEDUP_BELOW bytes), at most _CITE_MAX_ROWS rows of under
     _CITE_ROW_MAX bytes, and, when a session file is created, one listing of the ledger directory (not

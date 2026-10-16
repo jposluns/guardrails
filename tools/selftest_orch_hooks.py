@@ -2862,10 +2862,12 @@ def _citeledger_dedup_cases(tmp):
 
 def _citeledger_bound_cases(tmp):
     """The per-call bounds, each tried just inside, at and just outside it: 50 distinct files read, 500
-    rows appended, 8 path splits tried per output line, 50 replacements of a replace_all Edit, and the
-    deadline (met by a stand-in clock: a git probe is started, and a read made, only while the deadline has
-    not been reached). The four count bounds are coverage: the recorder enforced each of them before the
-    per-call deadline was added, so their checks pin the bounds and do not show a change to them."""
+    rows appended, 8 path splits tried per output line, 50 replacements of a replace_all Edit, the deadline
+    (met by a stand-in clock: a git probe is started, and a read made, only while the deadline has not been
+    reached), and the length of a path the recorder resolves, both a path a tool input or command names and
+    a path split from an output line. The four count bounds are coverage: the recorder enforced each of
+    them before the per-call deadline was added, so their checks pin the bounds and do not show a change to
+    them."""
     files = {"many/f{:02d}.txt".format(i): "hit {:02d}\n".format(i).encode("utf-8") for i in range(51)}
     files["rows.txt"] = "".join("r{}\n".format(i) for i in range(1, 1002)).encode("utf-8")
     for k in (7, 8, 9):
@@ -2916,6 +2918,42 @@ def _citeledger_bound_cases(tmp):
         aiqt_hooks.time, aiqt_hooks._recovery_toplevel = saved_time, saved_top
     check("citeledger/deadline-boundary", (probed, read),
           ([(True, True), (False, False), (False, False)], [True, False, False]))
+    # The path bound: each path is written as the path to a file padded with slashes (which resolution
+    # drops) to one under, at and one over _CITE_MAX_PATH characters. Over it the path is never resolved
+    # (no longer path reaches os.path.realpath inside _cite_rows) and records nothing. Input paths: Read
+    # and Write file_path and filePath, a Grep path, the file of a sed command and a file a grep command
+    # names; Linux refuses a path of more than 4095 bytes itself, so that grep file over the bound already
+    # fails its stat before any resolution, and its column is coverage (this suite runs on Linux). Split
+    # paths: a path split from a Grep content line and from a grep command's output line.
+    bound_repo = _CiteRepo(tmp / "cite-path-bound", {"a.txt": b"a1\n", "w.txt": b"w1\n"})
+    root, limit = str(bound_repo.root), aiqt_hooks._CITE_MAX_PATH
+    shapes = {
+        "input": (
+            ("Read", lambda p, s: bound_repo.call("Read", {"file_path": p("a.txt")}, {"type": "text", "file": {
+                "filePath": p("a.txt"), "content": "a1", "startLine": 1, "numLines": 1}}, s)),
+            ("Write", lambda p, s: bound_repo.call("Write", {"file_path": p("w.txt"), "content": "w1\n"},
+                                                   {"filePath": p("w.txt")}, s)),
+            ("Grep", lambda p, s: bound_repo.grep(p(""), "a.txt:1:a1", s)),
+            ("sed", lambda p, s: bound_repo.bash("sed -n 1p " + p("a.txt"), "a1\n", s)),
+            ("grep", lambda p, s: bound_repo.bash("grep -n a1 " + p("a.txt"), "1:a1\n", s))),
+        "split": (
+            ("Grep", lambda p, s: bound_repo.grep(bound_repo.root, p("a.txt") + ":1:a1", s)),
+            ("grep", lambda p, s: bound_repo.bash("grep -rn a1 .", p("a.txt") + ":1:a1\n", s)))}
+    counts, longest = {}, {}
+    for shape, calls in shapes.items():
+        for tool, call in calls:
+            for size in (limit - 1, limit, limit + 1):
+                session = "path-{}-{}-{}".format(shape, tool, size)
+
+                def pad(name, size=size):
+                    return root + "/" * (size - len(root) - len(name)) + name
+                resolved = _cite_resolutions(lambda call=call, pad=pad, session=session: call(pad, session))
+                longest[shape] = max([longest.get(shape, 0)] + [len(path) for path in resolved])
+                counts.setdefault(shape, {}).setdefault(tool, []).append(len(bound_repo.rows(session)))
+    check("citeledger/input-path-bound", (counts["input"], longest["input"]),
+          ({tool: [1, 1, 0] for tool, _call in shapes["input"]}, limit))
+    check("citeledger/split-path-bound", (counts["split"], longest["split"]),
+          ({tool: [1, 1, 0] for tool, _call in shapes["split"]}, limit))
 
 
 class _CiteSplitProbe(str):
@@ -2934,10 +2972,12 @@ class _CiteSplitProbe(str):
 
 def _cite_stub_git(stub_dir):
     """Write a git stand-in into stub_dir, for PATH: when one of its arguments is in CITE_STUB_SLOW (one per
-    line; "*" slows every call) it appends "start" to the file CITE_STUB_MARK, sleeps 4.5 seconds, appends
-    "done", and only then runs the real git. A probe its caller cuts off before then leaves "start" alone.
-    4.5 seconds is under the 5 seconds a probe gets by default, so a probe run without the time left leaves
-    "done": the mark tells the two apart however loaded the runner is, where a wall clock could not."""
+    line; "*" slows every call) it appends "start" to the file CITE_STUB_MARK, sleeps 8 seconds, appends
+    "done", and only then runs the real git. A "start" mark shows the slowed probe was reached, and "start"
+    alone that its caller cut it off. 8 seconds is well past the 5 seconds a probe gets by default, so on a
+    runner however loaded a probe given any timeout up to that default leaves "start" alone and only a probe
+    given none leaves "done"; which timeout each probe was given, the time left or the default, is told
+    apart by _cite_probe_timeouts, not by the marks. 8 seconds stays under the hook timeout of 10."""
     real_git = shutil.which("git")
     stub_dir.mkdir()
     (stub_dir / "git").write_text(
@@ -2945,7 +2985,7 @@ def _cite_stub_git(stub_dir):
         "if '*' in slow or slow & set(sys.argv[1:]):\n"
         "    with open(os.environ['CITE_STUB_MARK'], 'a') as handle:\n"
         "        handle.write('start\\n')\n"
-        "    time.sleep(4.5)\n"
+        "    time.sleep(8)\n"
         "    with open(os.environ['CITE_STUB_MARK'], 'a') as handle:\n"
         "        handle.write('done\\n')\n"
         "os.execv({!r}, [{!r}] + sys.argv[1:])\n".format(sys.executable, real_git, real_git), encoding="utf-8")
@@ -2967,35 +3007,106 @@ def _cite_stubbed(stub_dir, slow, mark, run):
     return mark.read_text(encoding="utf-8").split() if mark.exists() else []
 
 
+def _cite_probe_timeouts(run, budget):
+    """run() with every git probe of the citation hooks (aiqt_hooks._recovery_toplevel and _review_git)
+    recorded: whether at least one probe ran and each was given a timeout greater than 0 and at most budget,
+    so a probe given the time left is told apart from one given its 5 second default or none."""
+    saved = (aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git)
+    given = []
+
+    def top(repo_dir, *args, **kwargs):
+        given.append(kwargs.get("timeout", args[0] if args else None))
+        return saved[0](repo_dir, *args, **kwargs)
+
+    def git(repo_dir, *args, **kwargs):
+        given.append(kwargs.get("timeout"))
+        return saved[1](repo_dir, *args, **kwargs)
+    try:
+        aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git = top, git
+        run()
+    finally:
+        aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git = saved
+    return bool(given) and all(isinstance(t, (int, float)) and 0 < t <= budget for t in given)
+
+
+class _CiteStepClock:
+    """Stands in for the time module inside aiqt_hooks: monotonic() returns now, which moves only when
+    move() is called (here by a stand-in git probe, as if the probe took that long), so the time left at
+    each probe is known exactly. Every other attribute is the real time module's."""
+
+    def __init__(self, now):
+        self.now = now
+
+    def monotonic(self):
+        return self.now
+
+    def move(self, seconds):
+        self.now += seconds
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def _cite_resolutions(run):
+    """run() with every os.path.realpath call made inside aiqt_hooks._cite_rows recorded: the paths it was
+    given, in order, so a vector can tell which paths the recorder resolved."""
+    saved_rows, saved_realpath, active, paths = aiqt_hooks._cite_rows, os.path.realpath, [], []
+
+    def rows(*args, **kwargs):
+        active.append(True)
+        try:
+            return saved_rows(*args, **kwargs)
+        finally:
+            active.pop()
+
+    def realpath(path, *args, **kwargs):
+        if active:
+            paths.append(path)
+        return saved_realpath(path, *args, **kwargs)
+    try:
+        aiqt_hooks._cite_rows, os.path.realpath = rows, realpath
+        run()
+    finally:
+        aiqt_hooks._cite_rows, os.path.realpath = saved_rows, saved_realpath
+    return paths
+
+
 def _citeledger_deadline_cases(tmp):
-    """Where the recorder's deadline is checked. Every git probe is given the time left (a stand-in probe
-    records the timeout it was given, on a stand-in clock that does not move). Each tried with a stand-in
-    clock just inside, at and just past the deadline: _cite_span and _cite_within stop at it, and a
-    response's split into lines, the merge of grep hits into spans and the digest of each row are not
-    carried on once it is reached (the clock is moved there just before each step, by a stand-in around the
-    step before it)."""
+    """Where the recorder's deadline is checked. Every git probe is given the time left: a stand-in probe
+    records the timeout it was given and then moves a stand-in clock on by half a second, as if it took
+    that long, so each later probe must be given half a second less. Each tried with a stand-in clock just
+    inside, at and just past the deadline: _cite_span, _cite_within and _cite_resolve stop at it, and a
+    response's split into lines, the words of a grep or rg command, the merge of grep hits into spans and
+    the digest of each row are not carried on once it is reached (the clock is moved there just before each
+    step, by a stand-in around the step before it); and once the toplevel probe has moved it there, no path
+    is resolved, whatever the tool."""
     repo = _CiteRepo(tmp / "cite-deadline", {"a.txt": b"a1\na2\na3\na4\na5\na6\n"})
     other = _CiteRepo(tmp / "cite-deadline-other", {"o.txt": b"o1\n"})
     shown = "a1\na2\na3\na4\na5\na6\n"
-    # Each git probe is given what is left of the deadline (here exactly the cut budget, on a clock that
-    # does not move), never its own default: the handler's toplevel probe, the toplevel probe of a git -C
-    # repository, and the ls-tree and cat-file probes of git show.
+    # Each git probe is given what is left of the deadline when it starts, never the whole budget or its
+    # own default: the handler's toplevel probe, the toplevel probe of a git -C repository, and the ls-tree
+    # and cat-file probes of git show. Halves add and subtract exactly in binary, so the timeouts are exact.
     saved = (aiqt_hooks.time, aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git, aiqt_hooks._CITE_BUDGET)
     tops, gits = [], []
 
     def top(repo_dir, *args, **kwargs):
         tops.append(kwargs.get("timeout", args[0] if args else "none given"))
-        return saved[1](repo_dir, *args, **kwargs)
+        result = saved[1](repo_dir, *args, **kwargs)
+        aiqt_hooks.time.move(0.5)
+        return result
 
     def git(repo_dir, *args, **kwargs):
         gits.append((args[0], kwargs.get("timeout", "none given")))
-        return saved[2](repo_dir, *args, **kwargs)
+        result = saved[2](repo_dir, *args, **kwargs)
+        aiqt_hooks.time.move(0.5)
+        return result
     given = []
     try:
-        aiqt_hooks.time, aiqt_hooks._CITE_BUDGET = _CiteClock(1000.0, 1000.0, False), 2.5
+        aiqt_hooks._CITE_BUDGET = 2.5
         aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git = top, git
         for session, command, stdout in (("left-own", "git show HEAD:a.txt", shown),
                                          ("left-other", "git -C {} show HEAD:o.txt".format(other.root), "o1\n")):
+            aiqt_hooks.time = _CiteStepClock(1000.0)
             del tops[:], gits[:]
             repo.bash(command, stdout, session)
             given.append((list(tops), list(gits), repo.spans(session)))
@@ -3003,8 +3114,8 @@ def _citeledger_deadline_cases(tmp):
         (aiqt_hooks.time, aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git,
          aiqt_hooks._CITE_BUDGET) = saved
     check("citeledger/probe-given-time-left", given,
-          [([2.5], [("ls-tree", 2.5), ("cat-file", 2.5)], [("git-show", "a.txt", 1, 6)]),
-           ([2.5, 2.5], [("ls-tree", 2.5), ("cat-file", 2.5)], [("git-show", None, 1, 1)])])
+          [([2.5], [("ls-tree", 2.0), ("cat-file", 1.5)], [("git-show", "a.txt", 1, 6)]),
+           ([2.5, 2.0], [("ls-tree", 1.5), ("cat-file", 1.0)], [("git-show", None, 1, 1)])])
     # _cite_span and _cite_within compare and walk lines only while the deadline has not been reached.
     entry, inner = aiqt_hooks._cite_entry(shown.encode("utf-8"), "/x"), []
     try:
@@ -3015,24 +3126,72 @@ def _citeledger_deadline_cases(tmp):
     finally:
         aiqt_hooks.time = saved[0]
     check("citeledger/span-and-within-deadline", inner, [(3, (2, 3)), (None, None), (None, None)])
+    # _cite_resolve resolves a path only while the deadline has not been reached, and only a path of at
+    # most _CITE_MAX_PATH characters: tried with the deadline just ahead of, at and just behind the clock,
+    # and with a path to a.txt padded with slashes (which resolution drops) to one under, at and one over
+    # the bound.
+    target, limit = os.path.realpath(str(repo.root / "a.txt")), aiqt_hooks._CITE_MAX_PATH
+    padded = [str(repo.root) + "/" * (size - len(str(repo.root)) - len("a.txt")) + "a.txt"
+              for size in (limit - 1, limit, limit + 1)]
+    try:
+        aiqt_hooks.time = _CiteClock(1000.0, 1000.0, False)
+        timed = [aiqt_hooks._cite_resolve(target, 1000.0 + offset) for offset in (0.001, 0.0, -0.001)]
+        sized = [aiqt_hooks._cite_resolve(path, 1000.001) for path in padded]
+    finally:
+        aiqt_hooks.time = saved[0]
+    check("citeledger/resolve-bound-and-deadline", (timed, [len(path) for path in padded], sized),
+          ([target, None, None], [limit - 1, limit, limit + 1], [target, target, None]))
+    # Once a stand-in toplevel probe has moved the clock to just inside, at or just past the deadline, no
+    # path is resolved, the session root included, whatever the tool: Read, Write and Grep stop at their
+    # first resolution, and grep, sed and git show before it. Just inside, every tool resolves its paths;
+    # git show still records nothing there, since its ls-tree probe is given the one millisecond left.
+    (repo.root / "w.txt").write_bytes(b"w1\n")
+    a_txt, w_txt = str(repo.root / "a.txt"), str(repo.root / "w.txt")
+    tools = (("Read", 1, lambda s: repo.call("Read", {"file_path": a_txt}, {"type": "text", "file": {
+                 "filePath": a_txt, "content": "a1", "startLine": 1, "numLines": 1}}, s)),
+             ("Write", 1, lambda s: repo.call("Write", {"file_path": w_txt, "content": "w1\n"}, {"filePath": w_txt},
+                                              s)),
+             ("Grep", 1, lambda s: repo.grep(repo.root, "a.txt:1:a1", s)),
+             ("grep", 1, lambda s: repo.bash("grep -n a1 a.txt", "1:a1\n", s)),
+             ("sed", 1, lambda s: repo.bash("sed -n 1p a.txt", "a1\n", s)),
+             ("git-show", 0, lambda s: repo.bash("git show HEAD:a.txt", shown, s)))
+    resolved = {}
+    try:
+        for name, offset in (("inside", -0.001), ("at", 0.0), ("outside", 0.001)):
+            for tool, _rows, call in tools:
+                clock = aiqt_hooks.time = _CiteClock(1000.0, 1000.0 + aiqt_hooks._CITE_BUDGET + offset, False)
+                aiqt_hooks._recovery_toplevel = lambda *args, clock=clock, **kwargs: clock.advance() or str(
+                    repo.root)
+                session = "resolve-{}-{}".format(tool, name)
+                paths = _cite_resolutions(lambda call=call, session=session: call(session))
+                resolved.setdefault(tool, []).append((bool(paths), len(repo.rows(session))))
+    finally:
+        aiqt_hooks.time, aiqt_hooks._recovery_toplevel = saved[0], saved[1]
+    check("citeledger/no-resolution-past-deadline", resolved,
+          {tool: [(True, rows), (False, 0), (False, 0)] for tool, rows, _call in tools})
 
-    def stepped(step_name, after, session_of, call):
+    def stepped(step_name, after, session_of, call, seen=None):
         """call(session) once per clock position, with the clock moved to it by a stand-in around
-        aiqt_hooks.<step_name> (after the step's own work when after, else before it)."""
+        aiqt_hooks.<step_name> (after the step's own work when after, else before it). With seen, each
+        position's result is paired with seen(value) for each value the step returned there, so a vector
+        can tell how far the step itself went, not only what the call recorded."""
         saved_step = getattr(aiqt_hooks, step_name, None)
         out = []
         try:
             for name, offset in (("inside", -0.001), ("at", 0.0), ("outside", 0.001)):
                 clock = aiqt_hooks.time = _CiteClock(1000.0, 1000.0 + aiqt_hooks._CITE_BUDGET + offset, False)
+                returned = []
 
-                def stand_in(*args, clock=clock, **kwargs):
+                def stand_in(*args, clock=clock, returned=returned, **kwargs):
                     if not after:
                         clock.advance()
                     result = saved_step(*args, **kwargs)
                     clock.advance()
+                    returned.append(result)
                     return result
                 setattr(aiqt_hooks, step_name, stand_in)
-                out.append(call(session_of(name)))
+                result = call(session_of(name))
+                out.append(result if seen is None else (result, [seen(value) for value in returned]))
         finally:
             aiqt_hooks.time = saved[0]
             if saved_step is None:
@@ -3063,25 +3222,40 @@ def _citeledger_deadline_cases(tmp):
     def grep_rows(session):
         repo.grep(repo.root / "a.txt", "1:a1\n3:a3\n5:a5", session)
         return [(r["start"], r["end"]) for r in repo.rows(session)]
-    # Three hits that merge into three spans: at the deadline no span is built, and once the first row is
-    # digested at it no further row is.
+    # Three hits that merge into three spans: at the deadline _cite_merge itself returns no span (its own
+    # return is checked, since the digest step would also leave the ledger empty), and once the first row
+    # is digested at it no further row is.
     check("citeledger/merge-and-digest-stop-at-deadline",
-          (stepped("_cite_merge", False, "merge-{}".format, grep_rows),
+          (stepped("_cite_merge", False, "merge-{}".format, grep_rows,
+                   lambda spans: [(span[3], span[4]) for span in spans]),
            stepped("_cite_sha256", True, "digest-{}".format, grep_rows)),
-          ([[(1, 1), (3, 3), (5, 5)], [], []], [[(1, 1), (3, 3), (5, 5)], [(1, 1)], [(1, 1)]]))
+          ([([(1, 1), (3, 3), (5, 5)], [[(1, 1), (3, 3), (5, 5)]]), ([], [[]]), ([], [[]])],
+           [[(1, 1), (3, 3), (5, 5)], [(1, 1)], [(1, 1)]]))
+
+    def grep_words(session):
+        repo.bash("grep --line-number --color --regexp a1 a.txt", "1:a1\n", session)
+        return [(r["start"], r["end"]) for r in repo.rows(session)]
+    # A grep command's words: once the first long option has been read at the deadline, no further word is
+    # (the options _cite_long_option returned are checked, since the output scan would also record nothing).
+    check("citeledger/command-words-stop-at-deadline",
+          stepped("_cite_long_option", True, "words-{}".format, grep_words, lambda option: option[0]),
+          [([(1, 1)], ["line-number", "color", "regexp"]), ([], ["line-number"]), ([], ["line-number"])])
 
 
 def _citeledger_timing_cases(tmp):
     """One deadline bounds the probes, reads, scans and digests of a call. With the budget cut, each worst
-    shape is shown cut short by evidence a loaded runner cannot change, never by a wall clock: a git probe
-    slowed by the stand-in of _cite_stub_git leaves no "done" mark (it was cut off at the time left), a large
-    file read in slowed chunks and many files read slowly make fewer slowed reads than reading them whole
-    takes, and a huge grep output takes at most the budget plus one second of this process's CPU time (CPU
-    time, not elapsed time, so a runner busy with other work cannot stretch it). Each of the toplevel,
-    ls-tree and cat-file probes, slowed alone, is reached and cut off, and nothing is recorded; there the
-    budget is 2.5 seconds, so the probes before the slowed one finish well inside it on a busy runner, and
-    the slowed one is still cut off 2 seconds before its stand-in would finish."""
-    budget, slack = 0.5, 1.0
+    shape is shown reached and cut short by evidence a loaded runner cannot change, never by a wall clock: a
+    git probe slowed by the stand-in of _cite_stub_git leaves a "start" mark and no "done" mark (it was
+    reached and cut off), and every probe was given a timeout of at most the budget, never its 5 second
+    default (_cite_probe_timeouts); a large file read in slowed chunks and many files read slowly make at
+    least one slowed read and fewer than reading them whole takes; and a huge grep output takes at most
+    the budget plus one second of this process's CPU time (CPU time, not elapsed time, so a runner busy
+    with other work cannot stretch it). Each of the toplevel, ls-tree and cat-file probes, slowed alone, is
+    reached and cut off, and nothing is recorded. The probe and read vectors get a 2.5 second budget, so the
+    unslowed probes before the slowed step finish well inside it on a busy runner, and a slowed read takes
+    half a second, so a whole read of big.txt (9 reads) takes 4.5 seconds and of the many files (100 reads)
+    50: the budget cuts both short."""
+    budget, slack, cut_budget = 0.5, 1.0, 2.5
     big = b"x\n" * (4 * 1024 * 1024)
     files = {"tools/a.py": b"alpha = 1\n", "big.txt": big,
              "huge.txt": "".join("h{}\n".format(i) for i in range(1, 400001)).encode("utf-8")}
@@ -3099,7 +3273,7 @@ def _citeledger_timing_cases(tmp):
             target = False
         if target:
             reads["count"] += 1
-            time.sleep(0.25)
+            time.sleep(0.5)
         return real_read(fd, size)
 
     def slowed(paths, run):
@@ -3116,34 +3290,40 @@ def _citeledger_timing_cases(tmp):
     huge_out = "\n".join("{0}:h{0}".format(i) for i in range(1, 400001))
     saved_budget = aiqt_hooks._CITE_BUDGET
     try:
-        aiqt_hooks._CITE_BUDGET = budget
-        marks = _cite_stubbed(stub_dir, "*", tmp / "cite-mark-all", lambda: repo.bash(
-            "git show HEAD:tools/a.py", "alpha = 1\n", "slow-git"))
+        aiqt_hooks._CITE_BUDGET = cut_budget
+        timed = []
+        marks = _cite_stubbed(stub_dir, "*", tmp / "cite-mark-all", lambda: timed.append(_cite_probe_timeouts(
+            lambda: repo.bash("git show HEAD:tools/a.py", "alpha = 1\n", "slow-git"), cut_budget)))
         # A whole read of big.txt takes 9 reads (8 chunks of 1 MiB and the empty read at its end); of the
-        # first 50 many/ files (the per-call file bound), 2 each.
+        # first 50 many/ files (the per-call file bound), 2 each. At least one read shows the read was reached.
         big_reads = slowed([repo.root / "big.txt"], lambda: repo.call(
             "Read", {"file_path": str(repo.root / "big.txt")},
             {"type": "text", "file": {"filePath": str(repo.root / "big.txt"), "content": "x", "startLine": 1,
                                       "numLines": 1}}, "slow-read"))
         many_reads = slowed(many, lambda: repo.grep(repo.root / "many", many_out, "many-files"))
+        aiqt_hooks._CITE_BUDGET = budget
         began = time.process_time()
         repo.grep(repo.root / "huge.txt", huge_out, "huge-grep")
         cpu = time.process_time() - began
-        aiqt_hooks._CITE_BUDGET = 2.5
+        aiqt_hooks._CITE_BUDGET = cut_budget
         cut = []
         for name, word in (("toplevel", "--show-toplevel"), ("ls-tree", "ls-tree"), ("cat-file", "cat-file")):
-            left = _cite_stubbed(stub_dir, word, tmp / "cite-mark-{}".format(name), lambda name=name: repo.bash(
-                "git show HEAD:tools/a.py", "alpha = 1\n", "cut-" + name))
-            cut.append((name, left, repo.spans("cut-" + name)))
+            within = []
+            left = _cite_stubbed(stub_dir, word, tmp / "cite-mark-{}".format(name),
+                                 lambda name=name, within=within: within.append(_cite_probe_timeouts(
+                                     lambda: repo.bash("git show HEAD:tools/a.py", "alpha = 1\n", "cut-" + name),
+                                     cut_budget)))
+            cut.append((name, left, within, repo.spans("cut-" + name)))
     finally:
         aiqt_hooks._CITE_BUDGET = saved_budget
     check("citeledger/deadline-bounds-worst-shapes",
-          [("slow-git-probe", "done" not in marks, repo.rows("slow-git")), ("slow-file-read", big_reads < 9),
-           ("many-files", many_reads < 2 * 50), ("huge-grep-output", cpu <= budget + slack)],
-          [("slow-git-probe", True, []), ("slow-file-read", True), ("many-files", True),
+          [("slow-git-probe", marks, timed, repo.rows("slow-git")), ("slow-file-read", 0 < big_reads < 9),
+           ("many-files", 0 < many_reads < 2 * 50), ("huge-grep-output", cpu <= budget + slack)],
+          [("slow-git-probe", ["start"], [True], []), ("slow-file-read", True), ("many-files", True),
            ("huge-grep-output", True)])
     check("citeledger/slow-probe-cut-off", cut,
-          [("toplevel", ["start"], []), ("ls-tree", ["start"], []), ("cat-file", ["start"], [])])
+          [("toplevel", ["start"], [True], []), ("ls-tree", ["start"], [True], []),
+           ("cat-file", ["start"], [True], [])])
 
 
 def _citecheck_cases(tmp):
@@ -3711,15 +3891,17 @@ def _citecheck_show_cases(tmp):
 
 def _citecheck_deadline_cases(tmp):
     """One deadline bounds every git probe and cited-file read of the check: with the budget cut to 2.5
-    seconds and one kind of probe slowed (the stand-in of _cite_stub_git, which sleeps 4.5 seconds when one
+    seconds and one kind of probe slowed (the stand-in of _cite_stub_git, which sleeps 8 seconds when one
     of its arguments is the slowed word), or a cited file of 8 MiB read in chunks slowed by half a second
     each, each of the session's toplevel probe, a git -C repository's toplevel probe, the base resolution,
-    the merge base, the diff probe and the file read is cut short, and what it could not finish is named:
-    the repository not resolved, or the range not judged (budget). Cut short is shown by evidence a loaded
-    runner cannot change, never by a wall clock: the slowed probe leaves no "done" mark, and the slowed file
-    read makes fewer reads than the 9 a whole read takes (8 chunks of 1 MiB and the empty read at its end).
-    The budget leaves the probes before the slowed one ample time on a busy runner, and still cuts the
-    slowed one off 2 seconds before its stand-in would finish."""
+    the merge base, the diff probe and the file read is reached and cut short, and what it could not finish
+    is named: the repository not resolved, or the range not judged (budget). Reached and cut short are shown
+    by evidence a loaded runner cannot change, never by a wall clock: the slowed probe leaves a "start" mark
+    and no "done" mark, every probe was given a timeout of at most the budget, never its 5 second default
+    (_cite_probe_timeouts), and the slowed file read makes at least one read and fewer than the 9 a whole
+    read takes (8 chunks of 1 MiB and the empty read at its end). The budget leaves the probes before the
+    slowed one ample time on a busy runner, and still cuts the slowed one off 5.5 seconds before its
+    stand-in would finish."""
     repo = _CiteRepo(tmp / "citecheck-slow", {"tools/a.py": b"a1\na2\n", "big.txt": b"x\n" * (4 * 1024 * 1024)})
     other = _CiteRepo(tmp / "citecheck-slow-other", {"lib/x.py": b"x1\n"})
     real_read, big = os.read, os.stat(str(repo.root / "big.txt"))
@@ -3749,29 +3931,32 @@ def _citecheck_deadline_cases(tmp):
         aiqt_hooks._CITECHK_BUDGET = 2.5
         for name, word, command in shapes:
             del reads[:]
-            outcome = []
+            outcome, within = [], []
 
-            def run(name=name, command=command, word=word, outcome=outcome):
+            def run(name=name, command=command, word=word, outcome=outcome, within=within):
                 try:
                     if word is None:
                         os.read = slow_read
-                    outcome.extend(_citecheck_run(repo.root, command, "slow-" + name))
+                    within.append(_cite_probe_timeouts(
+                        lambda: outcome.extend(_citecheck_run(repo.root, command, "slow-" + name)), 2.5))
                 finally:
                     os.read = real_read
             marks = _cite_stubbed(stub_dir, word or "", tmp / "citecheck-mark-{}".format(name), run)
             verdict, note, new = outcome
-            got.append((name, "done" not in marks and len(reads) < 9, verdict,
+            got.append((name, marks, 0 < len(reads) < 9, within, verdict,
                         "before it resolved the repository" in note, "incomplete (budget)" in note,
                         [(c["cite"], c["class"]) for r in new for c in r["detail"]["citations"]]))
     finally:
         aiqt_hooks._CITECHK_BUDGET = saved_budget
+    # Each slowed probe is reached and cut off ("start" alone, with no slowed read); the file read is
+    # reached and cut short (no slowed probe, and between 1 and 8 slowed reads).
     check("citeledger/check-deadline-bounds-slow-probes", got,
-          [("toplevel", True, "warn", True, False, []),
-           ("other-toplevel", True, "warn", False, True, [("lib/x.py:1", "unjudged")]),
-           ("base", True, "warn", False, True, [("tools/a.py:1", "unjudged")]),
-           ("merge-base", True, "warn", False, True, [("tools/a.py:1", "unjudged")]),
-           ("diff", True, "warn", False, True, [("tools/a.py:1", "unjudged")]),
-           ("file-read", True, "warn", False, True, [("big.txt:1", "unjudged")])])
+          [("toplevel", ["start"], False, [True], "warn", True, False, []),
+           ("other-toplevel", ["start"], False, [True], "warn", False, True, [("lib/x.py:1", "unjudged")]),
+           ("base", ["start"], False, [True], "warn", False, True, [("tools/a.py:1", "unjudged")]),
+           ("merge-base", ["start"], False, [True], "warn", False, True, [("tools/a.py:1", "unjudged")]),
+           ("diff", ["start"], False, [True], "warn", False, True, [("tools/a.py:1", "unjudged")]),
+           ("file-read", [], True, [True], "warn", False, True, [("big.txt:1", "unjudged")])])
 
 
 def _cite_unpaired(roadmap):
