@@ -118,11 +118,14 @@ over a generated corpus; every PreToolUse mode exits 2 with the named refusal wh
 past a short test budget, a fail-open mode keeps its result, and the timer is cancelled before the decision
 is written to stdout; the shared timer window restores a caller's timer elapsed-aware, nests, and refuses a
 borrow it cannot make faithfully; it gives the caller's state back wherever its own expiry lands (tiny
-windows in a loop, and the expiry delivered at the entry of __exit__) and when a caller expiry interrupts
-its take of the timer; any other exception out of the window fails a PreToolUse call closed and leaves a
-fail-open mode a warning; and each PreToolUse handler decides its worst measured input shapes at 64 KB,
-256 KB and 1 MB within CPU-time bounds set from a measured run, under a wall-clock hang guard that is not
-itself a bound. The timer and timing checks run in a child process.
+windows in a loop, and the expiry delivered at the entry of __exit__); a signal delivered at any
+instruction of its take or restore is held until it has fully taken or fully given back, with a caller
+expiry delivered once; a failing restore operation is retried, or leaves the window recorded as broken,
+with nothing left for a later call; any other exception out of the window fails a PreToolUse call closed
+and leaves a fail-open mode a warning; and each PreToolUse handler decides its worst measured input shapes
+at 64 KB, 256 KB and 1 MB within CPU-time bounds set from a measured run and the 8-second wall-clock gate
+(a case over that gate alone is re-timed once before it fails), under a 60-second hang guard. The timer and
+timing checks run in a child process.
 
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
@@ -144,6 +147,7 @@ import ast
 import collections
 import contextlib
 import datetime
+import dis
 import hashlib
 import io
 import json
@@ -2445,8 +2449,10 @@ _DEADLINE_BOUNDS = {65536: 1.5, 262144: 3.0, 1048576: 7.0}
 # the same call in production, so a regression whose time goes to waiting (a sleep, a lock, a slow
 # filesystem), which the CPU bounds do not see, fails here as that call would fail closed there. Against
 # the slowest wall-clock times above (at most 0.10, 0.49 and 2.07 s) the 8-second gate leaves a margin of
-# about 80, 16 and 3.9 times: a host loaded enough to stretch the 1 MB case more than about 3.9 times
-# fails it, as the same call would then fail closed on that host.
+# about 80, 16 and 3.9 times. A case over this bound but within its CPU bound is re-timed once before it
+# fails on wall-clock time alone, so one stall of a loaded host does not fail it; a regression that waits
+# fails both runs, and so does a host loaded enough to stretch the 1 MB case more than about 3.9 times on
+# both, as the same call would then fail closed on that host.
 _DEADLINE_WALL_BOUND = aiqt_hooks.PRETOOL_BUDGET_SECONDS
 # Each case runs under a _DeadlineWindow of this many wall-clock seconds, a hang guard only: it ends a case
 # that would run on for minutes, so the run reports it instead of stalling. The wall-clock gate is
@@ -2471,47 +2477,57 @@ def _cpu_seconds():
     return time.process_time() + children.children_user + children.children_system
 
 
+def _deadline_shape_case(name, shape, size, cwd):
+    """One (handler, shape, size) case, in-process under a _DeadlineWindow of _DEADLINE_HANG_SECONDS:
+    (cpu_seconds, wall_seconds, outcome), the outcome being the reduced decision, "deadline" when the window
+    fired, "hard-block" for an exit 2, or "crash: <type>"."""
+    tool, tool_input = _DEADLINE_SHAPES[shape](size, cwd)
+    data = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input,
+            "cwd": cwd, "session_id": "deadline-session", "tool_use_id": "deadline-call"}
+    window = aiqt_hooks._DeadlineWindow(_DEADLINE_HANG_SECONDS)
+    began, cpu_began = time.monotonic(), _cpu_seconds()
+    try:
+        with window:
+            code, stdout_obj, _stderr = aiqt_hooks.HANDLERS[name](data)
+        outcome = "hard-block" if code == 2 else _reduce_result(code, stdout_obj)
+    except aiqt_hooks._HookDeadline as exc:
+        if exc.args[:1] != (window,):
+            raise
+        outcome = "deadline"
+    except Exception as exc:
+        outcome = "crash: {}".format(type(exc).__name__)
+    return _cpu_seconds() - cpu_began, time.monotonic() - began, outcome
+
+
 def _deadline_shape_runs(tmp, sizes):
-    """Every (handler, shape, size) case once, each in-process under a _DeadlineWindow of
-    _DEADLINE_HANG_SECONDS: [(handler, shape, size, cpu_seconds, wall_seconds, outcome)], the outcome being
-    the reduced decision, "deadline" when the window fired, "hard-block" for an exit 2, or "crash: <type>"."""
+    """Every (handler, shape, size) case once (_deadline_shape_case): [(handler, shape, size, cwd,
+    cpu_seconds, wall_seconds, outcome)]."""
     plain, orch = _deadline_fixtures(tmp)
     runs = []
     for name, shapes in sorted(_DEADLINE_CASES.items()):
-        handler = aiqt_hooks.HANDLERS[name]
         cwd = str(orch if name.startswith(("orch_", "review_")) else plain)
         for shape in shapes:
             for size in sorted(sizes):
-                tool, tool_input = _DEADLINE_SHAPES[shape](size, cwd)
-                data = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input,
-                        "cwd": cwd, "session_id": "deadline-session", "tool_use_id": "deadline-call"}
-                window = aiqt_hooks._DeadlineWindow(_DEADLINE_HANG_SECONDS)
-                began, cpu_began = time.monotonic(), _cpu_seconds()
-                try:
-                    with window:
-                        code, stdout_obj, _stderr = handler(data)
-                    outcome = "hard-block" if code == 2 else _reduce_result(code, stdout_obj)
-                except aiqt_hooks._HookDeadline as exc:
-                    if exc.args[:1] != (window,):
-                        raise
-                    outcome = "deadline"
-                except Exception as exc:
-                    outcome = "crash: {}".format(type(exc).__name__)
-                runs.append((name, shape, size, _cpu_seconds() - cpu_began, time.monotonic() - began, outcome))
+                runs.append((name, shape, size, cwd) + _deadline_shape_case(name, shape, size, cwd))
     return runs
 
 
 def _deadline_shape_failures(tmp):
     """(dl-shape) Every PreToolUse handler has shapes here, and on each shape at 64 KB, 256 KB and 1 MB it
     reaches a decision within the hang guard, that size's CPU-time bound and the wall-clock bound, denying
-    where the case carries a hazard."""
+    where the case carries a hazard. A case over the wall-clock bound alone is re-timed once, and fails
+    only when the re-timed run is over it too (or fails another check)."""
     out = []
     missing = sorted(name for name, event in aiqt_hooks.HANDLER_EVENT.items()
                      if event == aiqt_hooks.PRETOOL and name not in _DEADLINE_CASES)
     if missing:
         out.append("(dl-shape-coverage) PreToolUse handlers with no timed shape: {}".format(", ".join(missing)))
-    for name, shape, size, cpu, wall, outcome in _deadline_shape_runs(tmp, _DEADLINE_SIZES):
+    for name, shape, size, cwd, cpu, wall, outcome in _deadline_shape_runs(tmp, _DEADLINE_SIZES):
         label = "(dl-shape-{}-{}-{})".format(name, shape, size)
+        if outcome != "deadline" and cpu <= _DEADLINE_BOUNDS[size] and wall > _DEADLINE_WALL_BOUND:
+            first_wall = wall
+            cpu, wall, outcome = _deadline_shape_case(name, shape, size, cwd)
+            label += " (re-timed once after {:.2f}s wall-clock)".format(first_wall)
         if outcome == "deadline":
             out.append("{} reached no decision within the {:g}-second hang guard".format(
                 label, _DEADLINE_HANG_SECONDS))
@@ -2727,8 +2743,8 @@ def _deadline_race_failures(count=200000):
     before). Those loops pass whenever their rare interleavings do not occur, so they are kept only as a
     wider net: the deterministic injections carry the discrimination, here (the expiry delivered at the
     entry of __exit__, unnested and nested: signal.raise_signal from the sys.settrace call event of
-    __exit__, before any of its own code runs) and in _deadline_take_failures and
-    _deadline_restore_fault_failures."""
+    __exit__, before any of its own code runs) and in _deadline_take_failures, _deadline_defer_failures,
+    _deadline_enclosing_restore_failures, _deadline_rearm_failures and _deadline_restore_fault_failures."""
     out = []
 
     def caller_alarm(signum, frame):
@@ -2817,49 +2833,78 @@ def _deadline_race_failures(count=200000):
     return out
 
 
+class _Later:
+    """aiqt_hooks.time, with monotonic() read `ahead` seconds later than the clock, so the window counts
+    that much more time as used than has passed."""
+
+    def __init__(self, ahead):
+        self.ahead = ahead
+
+    def monotonic(self):
+        return time.monotonic() + self.ahead
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def _window_codes():
+    """The code objects of _DeadlineWindow's own functions (its methods and static methods)."""
+    cls = aiqt_hooks._DeadlineWindow
+    return {getattr(cls, name).__code__ for name in vars(cls) if hasattr(getattr(cls, name), "__code__")}
+
+
+def _window_tracer(window, *stages):
+    """A sys.settrace tracer over the frames of window's own code (a method called on window, or a static
+    method called from one) that runs each stage's act() once, in order, at the first opcode where that
+    stage's when(frame) holds, and the list of (function, line) the stages ran at."""
+    codes = _window_codes()
+    at = []
+
+    def mine(frame):
+        if frame.f_code not in codes:
+            return False
+        if "self" in frame.f_code.co_varnames:
+            return frame.f_locals.get("self") is window
+        return frame.f_back is not None and frame.f_back.f_locals.get("self") is window
+
+    def tracer(frame, event, arg):
+        if event == "call" and not mine(frame):
+            return None
+        frame.f_trace_opcodes = True  # set again on each event: Python 3.14 starts opcode events from a line event
+        if event == "opcode" and len(at) < len(stages) and stages[len(at)][0](frame):
+            act = stages[len(at)][1]
+            at.append((frame.f_code.co_name, frame.f_lineno))
+            act()
+        return tracer
+    return tracer, at
+
+
 def _deadline_take_failures(count=50000):
     """(dl-take-*) The take of the caller's timer and the swap of its disposition cannot lose either, and an
-    enclosing window's deadline delivered there leaves that window's caller alone. Each case but the last
-    delivers a signal deterministically, from an opcode trace event of __enter__:
+    enclosing window's deadline delivered there reaches its owner. Each case but the last delivers a signal
+    deterministically, from an opcode trace event of the window's own frames:
     dl-take-raises: a caller expiry at the first instruction that finds the caller's timer taken and its
-    disposition not yet swapped, with a caller handler that raises. That exception must leave the with
-    statement and the caller's periodic timer must be back, less the time used, with its interval.
+    disposition not yet swapped, with a caller handler that raises. That handler must run once, and its
+    exception must leave the with statement with the caller's periodic timer back, less the time used.
     dl-take-swap-raises: a SIGUSR1 whose handler raises, at the first instruction that finds SIGALRM bound
     to the window (the swap has happened). The caller must get back its own disposition, not the window's
     handler, and its periodic timer.
     dl-take-enclosing: the outer window's expiry at the inner window's first instruction after the take.
     The outer window's deadline must reach its owner, with the caller's 30-second timer and disposition as
     the outer window gave them back, not the outer window's dead 5-second countdown.
-    dl-take-pending: a periodic caller timer that has expired with its SIGALRM still pending (SIGALRM is
-    blocked after the borrow's checks, so the take reads (0, interval)), and SIGALRM unblocked at the first
-    instruction after the take. The expiry must be delivered once, to the caller's handler, and the timer
-    must come back due one interval after the take, with its interval.
+    dl-take-pending: at the first instruction run with SIGALRM blocked, a periodic caller timer is made to
+    expire with its SIGALRM left pending, so the take reads (0, interval). The window must count the
+    caller's timer as due and end at once with its own deadline, the expiry must be delivered once, to the
+    caller's handler, and the timer must come back due one interval after the take, with its interval.
     dl-take-pending-race, a wider net that passes whenever its interleaving does not occur: `count`
     windows entered as a periodic caller timer of one millisecond comes due 1 to 40 microseconds after it
     is set, each of which must leave that timer's interval in place."""
     out = []
-    enter_code = aiqt_hooks._DeadlineWindow.__enter__.__code__
     calls = []
 
-    def entry_tracer(window, *stages):
-        """A sys.settrace tracer for window's __enter__ that runs each stage's act() once, in order, at the
-        first opcode where that stage's when(frame) holds, and the list of the lines they ran at."""
-        at = []
-
-        def tracer(frame, event, arg):
-            if event == "call" and (frame.f_code is not enter_code or frame.f_locals.get("self") is not window):
-                return None
-            frame.f_trace_opcodes = True  # set again on each event: Python 3.14 starts opcode events from a line event
-            if event == "opcode" and len(at) < len(stages) and stages[len(at)][0](frame):
-                act = stages[len(at)][1]
-                at.append(frame.f_lineno)
-                act()
-            return tracer
-        return tracer, at
-
     def enter_traced(window, *stages):
-        """Enter and leave window with an entry_tracer set: (the lines the stages ran at, what escaped)."""
-        tracer, at = entry_tracer(window, *stages)
+        """Enter and leave window with a _window_tracer set: (where the stages ran, what escaped)."""
+        tracer, at = _window_tracer(window, *stages)
         escaped = None
         sys.settrace(tracer)
         try:
@@ -2880,6 +2925,7 @@ def _deadline_take_failures(count=50000):
         return getattr(signal.getsignal(signal.SIGALRM), "__self__", None) is window
 
     def raising(signum, frame):
+        calls.append(signum)
         raise _CallerAlarm("caller alarm")
 
     def counting(signum, frame):
@@ -2904,10 +2950,12 @@ def _deadline_take_failures(count=50000):
         handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
     finally:
         reset()
-    if not (at and escaped == "the caller's exception" and periodic_back(handler, timer, raising)):
+    if not (at and escaped == "the caller's exception" and periodic_back(handler, timer, raising)
+            and calls == [signal.SIGALRM]):
         out.append("(dl-take-raises) a caller handler raising on an expiry delivered just after the take must "
-                   "get its periodic timer back, got delivery at {!r}, escaped {}, handler {!r}, timer {!r}"
-                   .format(at, escaped, handler, timer))
+                   "run once and get its periodic timer back, got delivery at {!r}, escaped {}, handler {!r}, "
+                   "timer {!r}, caller deliveries {}".format(at, escaped, handler, timer, len(calls)))
+    calls.clear()
 
     window = aiqt_hooks._DeadlineWindow(5.0)
     saved_usr1 = signal.signal(signal.SIGUSR1, raises_other)
@@ -2924,10 +2972,11 @@ def _deadline_take_failures(count=50000):
         out.append("(dl-take-swap-raises) another signal's handler raising just after the swap must leave the "
                    "caller its own disposition and periodic timer, got delivery at {!r}, escaped {}, handler "
                    "{!r}, timer {!r}, caller deliveries {}".format(at, escaped, handler, timer, len(calls)))
+    calls.clear()
 
     outer, inner = aiqt_hooks._DeadlineWindow(5.0), aiqt_hooks._DeadlineWindow(5.0)
-    tracer, at = entry_tracer(inner, (lambda frame: taken(frame) and bound_to(outer),
-                                      lambda: signal.raise_signal(signal.SIGALRM)))
+    tracer, at = _window_tracer(inner, (lambda frame: taken(frame) and bound_to(outer),
+                                        lambda: signal.raise_signal(signal.SIGALRM)))
     caught = None
     signal.signal(signal.SIGALRM, counting)
     signal.setitimer(signal.ITIMER_REAL, 30.0)
@@ -2947,37 +2996,37 @@ def _deadline_take_failures(count=50000):
     finally:
         reset()
     if not (at and caught == "the outer deadline" and handler is counting and timer[1] == 0.0
-            and 29.0 < timer[0] <= 30.0 and not calls):
+            and 29.0 < timer[0] <= 30.0 and not calls and not inner.armed and not outer.armed):
         out.append("(dl-take-enclosing) an outer window's expiry delivered just after an inner window's take "
                    "must reach the outer window's owner and leave the caller's timer as the outer window gave "
-                   "it back, got delivery at {!r}, {}, handler {!r}, timer {!r}, caller deliveries {}".format(
-                       at, caught, handler, timer, len(calls)))
+                   "it back, got delivery at {!r}, {}, handler {!r}, timer {!r}, caller deliveries {}, armed "
+                   "{} and {}".format(at, caught, handler, timer, len(calls), inner.armed, outer.armed))
+    calls.clear()
 
     seen = []
 
     def make_pending():
-        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
         signal.setitimer(signal.ITIMER_REAL, 1e-6, 30.0)
         waited = time.monotonic() + 1.0
         while signal.SIGALRM not in signal.sigpending() and time.monotonic() < waited:
             time.sleep(1e-3)
         seen.append(signal.getitimer(signal.ITIMER_REAL))
 
+    window = aiqt_hooks._DeadlineWindow(5.0)
     signal.signal(signal.SIGALRM, counting)
     try:
-        at, escaped = enter_traced(
-            aiqt_hooks._DeadlineWindow(5.0), (lambda frame: "began" in frame.f_locals, make_pending),
-            (taken, lambda: signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})))
+        at, escaped = enter_traced(window, (
+            lambda frame: signal.SIGALRM in signal.pthread_sigmask(signal.SIG_BLOCK, ()), make_pending))
         handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
     finally:
-        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
         reset()
-    if not (len(at) == 2 and escaped is None and seen == [(0.0, 30.0)] and calls == [signal.SIGALRM]
-            and periodic_back(handler, timer, counting)):
-        out.append("(dl-take-pending) a periodic caller timer taken with its expiry pending must be delivered "
-                   "once and come back due one interval later, got stages at {!r}, escaped {}, taken as "
-                   "{!r}, caller deliveries {}, handler {!r}, timer {!r}".format(
+    if not (at and escaped == "_HookDeadline" and seen == [(0.0, 30.0)] and calls == [signal.SIGALRM]
+            and periodic_back(handler, timer, counting) and not window.armed):
+        out.append("(dl-take-pending) a periodic caller timer taken with its expiry pending must end the window "
+                   "at once, be delivered once and come back due one interval later, got stage at {!r}, "
+                   "escaped {}, taken as {!r}, caller deliveries {}, handler {!r}, timer {!r}".format(
                        at, escaped, seen, len(calls), handler, timer))
+    calls.clear()
 
     lost = 0
     signal.signal(signal.SIGALRM, counting)
@@ -2996,6 +3045,252 @@ def _deadline_take_failures(count=50000):
     if lost:
         out.append("(dl-take-pending-race) {} of {} windows entered as a periodic caller timer came due left "
                    "that timer with no interval".format(lost, count))
+    return out
+
+
+def _deadline_defer_failures():
+    """(dl-defer-*) A signal delivered at any instruction of the window's take or restore is held until the
+    window has fully taken or fully given back. A SIGUSR1 is raised from an opcode trace event at each
+    instruction of the window's own frames in turn (one run per instruction, its handler raising or not),
+    in four cases: a 5-second window under a caller with a counting SIGALRM handler and a periodic
+    30-second timer, unnested or nested in a 600-second window, whose body either ends (no caller expiry
+    due: none may be delivered) or moves the window's clock 60 seconds on and raises SIGALRM as the
+    window's expiry (the caller's timer due: one delivery). Each run must see the SIGUSR1 handler run
+    once, with the window either fully holding the timer and disposition (its handler, its countdown) or
+    not holding them at all (the caller's handler and timer); the raising handler's exception must leave
+    the with statement (in the nested case with the caller's timer due, it or the outer deadline,
+    whichever Python raises last), and otherwise the due deadline; the caller must get back its handler and
+    periodic timer with the deliveries due; and no window may be left armed or broken. Not swept: the
+    instructions of __exit__ before its first statement and the return instruction of __enter__, where no
+    code of the window can run (the class docstring states that limit)."""
+    out = []
+    calls = []
+    exit_code = aiqt_hooks._DeadlineWindow.__exit__.__code__
+    enter_code = aiqt_hooks._DeadlineWindow.__enter__.__code__
+    returns = {dis.opmap[name] for name in ("RETURN_VALUE", "RETURN_CONST") if name in dis.opmap}
+
+    def counting(signum, frame):
+        calls.append(signum)
+
+    def run(nested, due, index, raises):
+        """One run, with SIGUSR1 raised at the window's instruction `index`: what went wrong, or "" (with
+        index None, no SIGUSR1 is raised and the number of instructions swept is returned)."""
+        calls.clear()
+        seen = []
+        counted = [0]
+        signal.signal(signal.SIGALRM, counting)
+        signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
+        outer = aiqt_hooks._DeadlineWindow(600.0) if nested else None
+        window = aiqt_hooks._DeadlineWindow(5.0)
+        interval = 0.0 if nested else 30.0
+
+        def callers(handler):
+            return getattr(handler, "__self__", None) is outer if nested else handler is counting
+
+        def usr1(signum, frame):
+            handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+            holding = (window.armed and getattr(handler, "__self__", None) is window
+                       and timer[1] == 0.0 and 0 < timer[0] <= 5.0)
+            given = not window.armed and callers(handler) and timer[1] == interval and 0 <= timer[0] <= 30.0
+            # Nested, the outer window may have given back the caller's state too (its deadline due).
+            both = (nested and not window.armed and not outer.armed and handler is counting
+                    and timer[1] == 30.0 and 0 < timer[0] <= 30.0)
+            seen.append(holding or given or both)
+            if raises:
+                raise _CallerAlarm("another signal")
+
+        def when(frame):
+            if frame.f_code is exit_code and frame.f_lineno <= exit_code.co_firstlineno + 1:
+                return False
+            if frame.f_code is enter_code and frame.f_code.co_code[frame.f_lasti] in returns:
+                return False
+            counted[0] += 1
+            return counted[0] - 1 == index
+
+        tracer, at = _window_tracer(window, (when, lambda: signal.raise_signal(signal.SIGUSR1)))
+        ran, escaped, after_inner = [], None, None
+        saved_usr1 = signal.signal(signal.SIGUSR1, usr1)
+        try:
+            try:
+                try:
+                    with outer if nested else contextlib.nullcontext():
+                        sys.settrace(tracer)
+                        try:
+                            with window:
+                                ran.append(True)
+                                if due:
+                                    aiqt_hooks.time = _Later(60.0)
+                                    signal.raise_signal(signal.SIGALRM)
+                        finally:
+                            sys.settrace(None)
+                            after_inner = (signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL))
+                finally:
+                    # When SIGUSR1's handler raises as the mask is put back, Python runs the SIGALRM handler
+                    # pending behind it at its next check for signals, which may come after the with
+                    # statements: run it here, with the window's clock still moved on.
+                    signal.pthread_sigmask(signal.SIG_BLOCK, ())
+            except _CallerAlarm:
+                escaped = "the other signal's exception"
+            except aiqt_hooks._HookDeadline as exc:
+                escaped = ("the outer deadline" if nested and exc.args[:1] == (outer,)
+                           else "the window's deadline" if exc.args[:1] == (window,) else "another deadline")
+            except BaseException as exc:
+                escaped = type(exc).__name__
+            final = (signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL))
+        finally:
+            sys.settrace(None)
+            aiqt_hooks.time = time
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+            signal.signal(signal.SIGUSR1, saved_usr1)
+        if index is None:
+            return counted[0]
+        fired = due and bool(ran)
+        if raises:
+            want = ("the other signal's exception",) + (("the outer deadline",) if nested and fired else ())
+        else:
+            want = (("the outer deadline" if nested else "the window's deadline") if fired else None,)
+        handler, timer = final
+        problems = []
+        if not at:
+            problems.append("no injection")
+        if seen != [True]:
+            problems.append("handler runs {!r} (True: the window fully held or fully given back)".format(seen))
+        if escaped not in want:
+            problems.append("escaped {}, want {}".format(escaped, " or ".join(map(str, want))))
+        if not (handler is counting and timer[1] == 30.0
+                and (0 < timer[0] <= 30.0 if fired else 29.0 < timer[0] <= 30.0)):
+            problems.append("caller left {!r} with {!r}".format(handler, timer))
+        if calls != ([signal.SIGALRM] if fired else []):
+            problems.append("caller deliveries {}".format(len(calls)))
+        if window.armed or getattr(window, "broken", False) or (outer is not None and outer.armed):
+            problems.append("a window left armed or broken")
+        if nested and not fired and not (getattr(after_inner[0], "__self__", None) is outer
+                                         and after_inner[1][1] == 0.0 and 0 < after_inner[1][0] <= 30.0):
+            problems.append("the outer window left {!r}".format(after_inner))
+        return "at {!r}: {}".format(at, "; ".join(problems)) if problems else ""
+
+    try:
+        for nested in (False, True):
+            for due in (False, True):
+                total = run(nested, due, None, False)
+                for raises in (False, True):
+                    label = "(dl-defer-{}-{}-{})".format("nested" if nested else "unnested",
+                                                         "due" if due else "exit", "raising" if raises else "quiet")
+                    failed = [problem for problem in (run(nested, due, index, raises) for index in range(total))
+                              if problem]
+                    if not total or failed:
+                        out.append("{} {} of {} instructions failed{}".format(
+                            label, len(failed), total, "".join("; " + problem for problem in failed[:3])))
+    finally:
+        sys.settrace(None)
+        aiqt_hooks.time = time
+    return out
+
+
+def _deadline_enclosing_restore_failures():
+    """(dl-enclosing-restore) An enclosing window's expiry that falls due during an inner window's restore
+    is delivered once the inner window has fully given back. A 5-second window nested in a 600-second one,
+    under a caller with a counting handler and a periodic 30-second timer, ends normally; SIGALRM is raised,
+    as the outer window's expiry, from an opcode trace event at each instruction of the inner window's
+    frames once the outer window's handler is back (one run per instruction). The outer deadline must reach
+    its owner each time, with the caller's handler and periodic timer back, no caller delivery, and neither
+    window left armed."""
+    out = []
+    calls = []
+
+    def counting(signum, frame):
+        calls.append(signum)
+
+    def run(index):
+        calls.clear()
+        counted = [0]
+        signal.signal(signal.SIGALRM, counting)
+        signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
+        outer, inner = aiqt_hooks._DeadlineWindow(600.0), aiqt_hooks._DeadlineWindow(5.0)
+
+        def when(frame):
+            if getattr(signal.getsignal(signal.SIGALRM), "__self__", None) is not outer:
+                return False
+            counted[0] += 1
+            return counted[0] - 1 == index
+
+        tracer, at = _window_tracer(inner, (when, lambda: signal.raise_signal(signal.SIGALRM)))
+        escaped = None
+        try:
+            try:
+                with outer:
+                    with inner:
+                        sys.settrace(tracer)
+            except aiqt_hooks._HookDeadline as exc:
+                escaped = "the outer deadline" if exc.args[:1] == (outer,) else "another deadline"
+            except BaseException as exc:
+                escaped = type(exc).__name__
+            finally:
+                sys.settrace(None)
+            handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        if index is None:
+            return counted[0]
+        if (at and escaped == "the outer deadline" and handler is counting and timer[1] == 30.0
+                and 29.0 < timer[0] <= 30.0 and not calls and not inner.armed and not outer.armed):
+            return ""
+        return "at {!r}: escaped {}, handler {!r}, timer {!r}, caller deliveries {}, armed {} and {}".format(
+            at, escaped, handler, timer, len(calls), inner.armed, outer.armed)
+
+    total = run(None)
+    failed = [problem for problem in (run(index) for index in range(total)) if problem]
+    if not total or failed:
+        out.append("(dl-enclosing-restore) {} of {} instructions failed{}".format(
+            len(failed), total, "; first " + failed[0] if failed else ""))
+    return out
+
+
+def _deadline_rearm_failures():
+    """(dl-rearm-once) A caller timer re-armed by the restore whose expiry falls due before the restore has
+    finished is delivered once. A one-shot 30-second caller timer with a handler that raises; the body moves
+    the window's clock so the restore finds 3 ms left, and the first instruction of the window's frames
+    after that re-arm waits 50 ms, past the expiry. The caller's handler must run exactly once, its
+    exception must leave the with statement, and the caller must get back its handler with the timer
+    inactive."""
+    out = []
+    calls = []
+
+    def raising(signum, frame):
+        calls.append(signum)
+        raise _CallerAlarm("caller alarm")
+
+    window = aiqt_hooks._DeadlineWindow(5.0)
+    tracer, at = _window_tracer(window, (
+        lambda frame: (signal.getsignal(signal.SIGALRM) is raising
+                       and 0 < signal.getitimer(signal.ITIMER_REAL)[0] < 0.01),
+        lambda: time.sleep(0.05)))
+    signal.signal(signal.SIGALRM, raising)
+    signal.setitimer(signal.ITIMER_REAL, 30.0)
+    escaped = None
+    try:
+        try:
+            with window:
+                aiqt_hooks.time = _Later(30.0 - 0.003)
+                sys.settrace(tracer)
+        except _CallerAlarm:
+            escaped = "the caller's exception"
+        except BaseException as exc:
+            escaped = type(exc).__name__
+        finally:
+            sys.settrace(None)
+            aiqt_hooks.time = time
+        handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+    if not (at and escaped == "the caller's exception" and calls == [signal.SIGALRM] and handler is raising
+            and timer == (0.0, 0.0) and not window.armed):
+        out.append("(dl-rearm-once) a re-armed caller timer falling due during the restore must be delivered "
+                   "once, got wait at {!r}, escaped {}, caller deliveries {}, handler {!r}, timer {!r}".format(
+                       at, escaped, len(calls), handler, timer))
     return out
 
 
@@ -3022,48 +3317,38 @@ class _FaultySignal:
         return faulty
 
 
-# The restore operations of _DeadlineWindow._give_back: (label, the signal function, which of its calls are
-# that operation). The delivery's fault comes after its call, as an exception from raise_signal does in
-# practice (the caller's handler, or another signal's, raising once the signal is delivered).
+# The restore operations of _DeadlineWindow._give_back, in order: (label, the signal function, which of its
+# calls are that operation).
 _RESTORE_OPERATIONS = (
     ("cancel", "setitimer", lambda args: args[1:] == (0,)),
-    ("disposition", "signal", lambda args: True),
+    ("discard", "signal", lambda args: args[1] is signal.SIG_IGN),
+    ("disposition", "signal", lambda args: args[1] is not signal.SIG_IGN),
     ("rearm", "setitimer", lambda args: len(args) == 3),
     ("deliver", "raise_signal", lambda args: True),
 )
 
 
 def _deadline_restore_fault_failures():
-    """(dl-restore-fault-*) An exception from any restore operation leaves the window's caller its
-    disposition and timer, or a later _give_back restores them. Each operation is made to raise
+    """(dl-restore-fault-*) Each restore operation (cancel the window's timer, discard its pending expiry,
+    reinstall the caller's disposition, re-arm the caller's timer, queue a due expiry) is made to raise
     signal.ItimerError by a _FaultySignal installed inside the window, for a caller's periodic 30-second
-    timer (unnested) and for a 600-second outer window (nested, which must then give its own caller back
-    an inactive timer). "once": the restore must finish in the same call and the error must leave the with
-    statement. "twice", for the operations that can run again: the error must leave the with statement and
-    a later _give_back must finish the restore. The delivery runs from the window's own expiry at a caller
-    timer due 0.05 s in (in the nested case, the outer window's expiry delivered by the inner window's
-    restore delivers it); the caller's handler must run exactly once, and not again on a later _give_back."""
+    timer (unnested) and for a 600-second outer window (nested), raising on its first call ("once") and on
+    its first two calls ("twice"). Each case is checked at return from the with statement, before any
+    later call. "once": the restore must finish (the caller's disposition and timer back, or in the nested
+    case the outer window's, and after the outer window the caller's), the error must leave the with
+    statement, and the window must be neither armed nor broken. "twice": the error must leave the with
+    statement and the window must be recorded as broken and not armed; in the nested case the outer window
+    must still give the caller back its state. In every case a later _give_back of the inner window, made
+    only after the outer window has exited, must change nothing. The delivery runs from the window's own expiry at a
+    caller timer due 0.05 s in: the caller's handler must run once (in the nested case through the outer
+    window, whose deadline then leaves the with statement when the inner restore finished), or not at all
+    where the unnested delivery failed twice. "deliver-after" makes raise_signal raise once after queuing
+    the signal: the retry queues it again, and the caller's handler must still run once."""
     out = []
     fired = []
 
     def caller_alarm(signum, frame):
         fired.append(signum)
-
-    def borrow_and_fail(window, faulty, wait):
-        """Enter window, install faulty inside it, sleep `wait` seconds (so the window's own expiry runs the
-        restore when it comes first), and leave: the text of the injected error that escaped, or the name
-        of whatever else did."""
-        try:
-            with window:
-                aiqt_hooks.signal = faulty
-                time.sleep(wait)
-        except signal.ItimerError as exc:
-            return str(exc)
-        except BaseException as exc:
-            return type(exc).__name__
-        finally:
-            aiqt_hooks.signal = signal
-        return None
 
     def state():
         return signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
@@ -3074,68 +3359,78 @@ def _deadline_restore_fault_failures():
     def outer_back(handler, timer, outer):
         return getattr(handler, "__self__", None) is outer and timer[1] == 0.0 and 599.0 < timer[0] <= 600.0
 
+    def unchanged(before, after):
+        """The same disposition and timer, the countdown only run on (by less than 10 ms), not re-armed."""
+        (handler, (value, interval)), (handler_after, (value_after, interval_after)) = before, after
+        return (handler == handler_after and interval == interval_after
+                and (value == value_after == 0.0 or 0.0 <= value - value_after < 0.01))
+
+    cases = [(label, name, matches, nested, times, False) for label, name, matches in _RESTORE_OPERATIONS
+             for nested in (False, True) for times in (1, 2)]
+    cases += [("deliver", "raise_signal", _RESTORE_OPERATIONS[-1][2], nested, 1, True) for nested in (False, True)]
     try:
-        for label, name, matches in _RESTORE_OPERATIONS:
+        for label, name, matches, nested, times, after in cases:
             due = label == "deliver"
-            for nested in (False, True):
-                for times in (1,) if due else (1, 2):
-                    case = "(dl-restore-fault-{}-{}-{})".format(
-                        label, "nested" if nested else "unnested", "once" if times == 1 else "twice")
-                    want = "injected {} fault".format(name)
-                    fired.clear()
-                    signal.signal(signal.SIGALRM, caller_alarm)
-                    signal.setitimer(signal.ITIMER_REAL, 0)
-                    if due or not nested:
-                        signal.setitimer(signal.ITIMER_REAL, 0.05 if due else 30.0, 30.0)
-                    inner = aiqt_hooks._DeadlineWindow(5.0)
-                    faulty = _FaultySignal(name, matches, times, after=due)
-                    if due:
-                        outer = aiqt_hooks._DeadlineWindow(600.0) if nested else contextlib.nullcontext()
-                        try:
-                            with outer:
-                                with inner:
-                                    aiqt_hooks.signal = faulty
-                                    time.sleep(1.0)
-                        except signal.ItimerError as exc:
-                            escaped = str(exc)
-                        except BaseException as exc:
-                            escaped = type(exc).__name__
-                        else:
-                            escaped = None
-                        finally:
-                            aiqt_hooks.signal = signal
-                        first = state()
-                        inner._give_back()
-                        if nested:
-                            outer._give_back()
-                        later, count = state(), len(fired)
-                        if not (escaped == want and caller_back(*first) and caller_back(*later) and count == 1):
-                            out.append("{} the caller's expiry must be delivered once, with its disposition and "
-                                       "periodic timer back, when raise_signal raises after delivering it, got "
-                                       "escaped {!r}, state {!r} then {!r}, deliveries {}".format(
-                                           case, escaped, first, later, count))
-                        continue
-                    if not nested:
-                        escaped = borrow_and_fail(inner, faulty, 0.0)
-                        first = state()
-                        inner._give_back()
-                        later = state()
-                        good = caller_back(*later) and (times == 2 or caller_back(*first))
-                    else:
-                        outer = aiqt_hooks._DeadlineWindow(600.0)
-                        with outer:
-                            escaped = borrow_and_fail(inner, faulty, 0.0)
-                            first = state()
-                            inner._give_back()
-                            later = state()
-                        good = (outer_back(*later, outer) and (times == 2 or outer_back(*first, outer))
-                                and state() == (caller_alarm, (0.0, 0.0)))
-                    if not (escaped == want and good and not fired):
-                        out.append("{} an injected fault in the restore must leave the error raised and the "
-                                   "caller's disposition and timer back ({}), got escaped {!r}, state {!r} "
-                                   "then {!r} after a later _give_back, deliveries {}".format(
-                                       case, "after a later _give_back" if times == 2 else "at once", escaped,
-                                       first, later, len(fired)))
+            case = "(dl-restore-fault-{}{}-{}-{})".format(label, "-after" if after else "",
+                                                         "nested" if nested else "unnested",
+                                                         "once" if times == 1 else "twice")
+            want = "injected {} fault".format(name)
+            fired.clear()
+            signal.signal(signal.SIGALRM, caller_alarm)
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            if due or not nested:
+                signal.setitimer(signal.ITIMER_REAL, 0.05 if due else 30.0, 30.0)
+            outer = aiqt_hooks._DeadlineWindow(600.0) if nested else contextlib.nullcontext()
+            inner = aiqt_hooks._DeadlineWindow(5.0)
+            faulty = _FaultySignal(name, matches, times, after=after)
+            inside = armed_at_return = None
+            try:
+                with outer:
+                    try:
+                        with inner:
+                            aiqt_hooks.signal = faulty
+                            time.sleep(1.0 if due else 0.0)
+                    finally:
+                        aiqt_hooks.signal = signal
+                        armed_at_return = inner.armed
+                        inside = state()
+            except signal.ItimerError as exc:
+                escaped = str(exc)
+            except aiqt_hooks._HookDeadline as exc:
+                escaped = "the outer deadline" if exc.args[:1] == (outer,) else "another deadline"
+            except BaseException as exc:
+                escaped = type(exc).__name__
+            else:
+                escaped = None
+            finally:
+                aiqt_hooks.signal = signal
+            first = state()
+            inner._give_back()
+            later, count = state(), len(fired)
+            broken = getattr(inner, "broken", False) is True
+            problems = []
+            if armed_at_return or inner.armed or broken != (times == 2) or (nested and outer.armed):
+                problems.append("inner armed {} at return from the with statement, broken {}".format(
+                    armed_at_return, getattr(inner, "broken", None)))
+            if not unchanged(first, later):
+                problems.append("a later _give_back changed {!r} to {!r}".format(first, later))
+            if due:
+                want_escaped = "the outer deadline" if nested and times == 1 else want
+                want_count = 0 if times == 2 and not nested else 1
+                if escaped != want_escaped or count != want_count or not caller_back(*first):
+                    problems.append("escaped {!r}, deliveries {}, state {!r}".format(escaped, count, first))
+            else:
+                if escaped != want or count:
+                    problems.append("escaped {!r}, deliveries {}".format(escaped, count))
+                if nested:
+                    if times == 1 and not outer_back(*inside, outer):
+                        problems.append("inside the outer window {!r}".format(inside))
+                    if first != (caller_alarm, (0.0, 0.0)):
+                        problems.append("after the outer window {!r}".format(first))
+                elif times == 1 and not caller_back(*first):
+                    problems.append("caller left {!r}".format(first))
+            if problems:
+                out.append("{} {}".format(case, "; ".join(problems)))
     finally:
         aiqt_hooks.signal = signal
         signal.setitimer(signal.ITIMER_REAL, 0)
@@ -3161,21 +3456,9 @@ def _deadline_window_error_failures():
         calls.append(signum)
         raise RuntimeError("caller alarm")
 
-    class Later:
-        """aiqt_hooks.time, with monotonic() read `ahead` seconds later than the clock."""
-
-        def __init__(self, ahead):
-            self.ahead = ahead
-
-        def monotonic(self):
-            return time.monotonic() + self.ahead
-
-        def __getattr__(self, name):
-            return getattr(time, name)
-
     def allows_on_error(_data):
         try:
-            aiqt_hooks.time = Later(60.0)
+            aiqt_hooks.time = _Later(60.0)
             signal.raise_signal(signal.SIGALRM)
         except Exception:
             return (0, None, None)
@@ -3247,13 +3530,14 @@ class _UnprintableBase(BaseException):
 
 
 def _deadline_result_failures():
-    """(dl-result-*, dl-unprintable-*) main() keeps its mode's exit whatever a handler returns or raises. A
-    stub handler returns a malformed result (a stderr text whose truth test raises, or that is bytes; an
-    exit code of 1, 256, 2 ** 100 or "0"): a PreToolUse mode must exit 2 with a failing-closed note and a
-    fail-open mode must warn on exit 0, while (0, None, "note") and (2, None, "held") keep their code and
-    write their stderr text. An exception whose str() raises, from the handler (an Exception and a
-    BaseException), from the payload read, or from the stdout write of a decision, must leave the same
-    exits, with the fail-open warning still written."""
+    """(dl-result-*, dl-unprintable-*, dl-deadline-message) main() keeps its mode's exit whatever a handler
+    returns or raises. A stub handler returns a malformed result (a stderr text whose truth test raises, or
+    that is bytes; an exit code of 1, 256, 2 ** 100 or "0"): a PreToolUse mode must exit 2 with a
+    failing-closed note and a fail-open mode must warn on exit 0, while (0, None, "note") and (2, None,
+    "held") keep their code and write their stderr text. An exception whose str() raises, from the handler
+    (an Exception and a BaseException), from the payload read, or from the stdout write of a decision, must
+    leave the same exits, with the fail-open warning still written. A deadline refusal whose message cannot
+    be built (a payload whose encode raises MemoryError) must still exit 2 with a failing-closed note."""
     out = []
 
     class RaisingTruth:
@@ -3335,6 +3619,23 @@ def _deadline_result_failures():
     if not closed(got):
         out.append("(dl-unprintable-stdout) a stdout write failing with an exception whose str() raises must "
                    "fail a PreToolUse call closed with exit 2, got {!r}".format(got))
+
+    class Unencodable(str):
+        def encode(self, *args, **kwargs):
+            raise MemoryError("the payload cannot be encoded")
+
+    class UnencodableReader:
+        def read(self):
+            return Unencodable(_DEADLINE_PAYLOAD)
+    try:
+        with _stub_handler("diff_source_pretool", _sleeper(1.0)):
+            code, err, _seconds = _main_run("diff_source_pretool", UnencodableReader(), budget=0.1)
+    except BaseException as exc:
+        code, err = "raised {}".format(type(exc).__name__), ""
+    if not (code == 2 and "failing closed" in err):
+        out.append("(dl-deadline-message) a deadline refusal whose message cannot be built (the payload's "
+                   "encode raising) must still fail closed with exit 2 and a note, got exit {!r} and {!r}"
+                   .format(code, err))
     return out
 
 
@@ -3342,7 +3643,8 @@ def _deadline_child(tmp):
     """The deadline checks that set timers and dispositions, plus the shape timings, in this (child)
     process; returns their failures."""
     return (_deadline_path_failures() + _deadline_restore_failures() + _deadline_race_failures()
-            + _deadline_take_failures() + _deadline_restore_fault_failures()
+            + _deadline_take_failures() + _deadline_defer_failures() + _deadline_enclosing_restore_failures()
+            + _deadline_rearm_failures() + _deadline_restore_fault_failures()
             + _deadline_window_error_failures() + _deadline_result_failures()
             + _deadline_shape_failures(Path(tmp)))
 
