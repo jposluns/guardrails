@@ -1574,7 +1574,11 @@ containment.
   throwaway stores, the step 8 fixtures included. A throwaway store at 1.3.0 whose imported series
   must grade valid uses `import_status = "none"` and a preserved original for each imported record
   whose `source_sha256` matches, under the reading step 10 labels for its check (a) of re-sends that
-  supersede immutable history. Treat a missing imported leaf of an enabled type other than
+  supersede immutable history. That valid grade, and the empty-input evaluation in your fresh store,
+  are subject to an open question: section 17 says that under activated 1.3.0 tooling every 1.3.0
+  store is at homes 1, where C-IMPORTED-PROVENANCE reports cannot-evaluate, an empty imported series
+  included, so until homes-1 grading is decided and added neither your fresh store nor that
+  throwaway store reaches doctor VALID. Treat a missing imported leaf of an enabled type other than
   `legacy_fragment` as a finding, and an imported leaf for `legacy_fragment` as one too: section 4.2
   requires init and the upgrade to create the imported leaves "for every enabled type except
   `legacy_fragment`" (this is a reading of that rule, not a check the specification names).

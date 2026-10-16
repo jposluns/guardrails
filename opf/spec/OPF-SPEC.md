@@ -963,7 +963,9 @@ machine-proven. Preserved originals remain the restoration authority.
 
 Imported records and their worklog entries MUST be immutable after publication; corrections MUST be
 a fresh import run retaining the old evidence. A conforming imported series can reach doctor VALID:
-it MUST NOT enter the legacy importer or module-schema deferral seam. C-IMPORTED-SCHEMA checks
+it MUST NOT enter the legacy importer or module-schema deferral seam. That VALID is subject to the
+open question of section 17: every activated 1.3.0 store is at homes 1, where C-IMPORTED-PROVENANCE
+reports cannot-evaluate until homes-1 grading is decided and added. C-IMPORTED-SCHEMA checks
 this envelope and missingness; C-IMPORTED-IDS checks the series grammar, counters and no-deletion;
 C-IMPORTED-PROVENANCE re-reads each preserved original and verifies `source_sha256`.
 C-CONTAINMENT recognizes the imported managed leaves, C-LINKS resolves the union of both series,
@@ -1600,6 +1602,8 @@ The bump also activates the homes-1 recognition of the adoption and import contr
 the four imported-series checks of section 4.2; the upgrade itself MUST NOT create such a folder.
 Earlier stores compose their applicable deltas with this delta; repeated upgrade is a verified
 no-op only after full doctor VALID.
+That VALID is subject to the open question of section 17: until homes-1 grading is decided and
+added, no activated 1.3.0 store reaches it, so no repeated upgrade into 1.3.0 is a verified no-op.
 The 1.3.0 delta remains a target contract until a tested upgrade and its required readers
 activate; import writing is a separate later activation.
 Declaring a spec_version above the tooling's supported version MUST be refused at validation
@@ -1918,6 +1922,8 @@ plan digest, and hence its apply-archived retirement preimage under completion c
 transaction runs, and an archived source is already out of the live tree, so its recorded
 retirement changes no live path. `import_status` MUST become `"complete"` only when every migrate
 source completes on those terms; import is never complete on a state that is not doctor-VALID.
+That doctor VALID is subject to the open question of section 17: until homes-1 grading is decided
+and added, no activated 1.3.0 store reaches it, so no import completes.
 This proves source accounting and preservation, not byte-level mapping coverage or semantic
 fidelity. No writer-side leftover accounting is required.
 
@@ -2619,11 +2625,14 @@ The gates in this standard are strong where they are strong and say so where the
   after completion, a tampered retire preimage no record references included, is outside doctor's
   coverage until homes 2 activates. This bullet discloses that target contract's residual and
   claims no shipped tooling behaviour. Version-control history over the tracked store is the
-  control. Imported-record provenance is not graded on homes 1. For a homes-1 store that declares
-  the imported series, activated 1.3.0 tooling's C-IMPORTED-PROVENANCE reports cannot-evaluate, so
-  it gives no assurance about the preserved originals that imported records reference until homes 2
-  activates for that store or homes-1 grading is added. Whether homes 1 is graded remains an open
-  question.
+  control. Imported-record provenance is not graded on homes 1. The homes-2 contract is for
+  `spec_version = "2.0.0"` and no homes-1 store is migrated to homes 2 (section 4.2), so under
+  activated 1.3.0 tooling every 1.3.0 store is a homes-1 store that declares the imported series.
+  For such a store, C-IMPORTED-PROVENANCE reports cannot-evaluate, an empty imported series
+  included, so it gives no assurance about the preserved originals that imported records reference.
+  Until homes-1 grading is decided and added, no activated 1.3.0 store therefore reaches doctor
+  VALID, and no import completes, because section 14.1 never completes an import on a state that
+  is not doctor-VALID. Whether homes 1 is graded remains an open question.
 - Store resolution fails closed on a pointer that does not resolve and on zero or multiple
   manifests at the target; it cannot detect a second store that no pointer names, placed somewhere
   the tooling was never aimed.

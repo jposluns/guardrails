@@ -3687,9 +3687,11 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # imported series (imported_series_active, homes 2) from the rows C-ID-SPACE gathered under the same flag,
     # those outside their leaf series included, so a pass covers every row of every readable leaf.
     # A store that declares the imported series under supporting tooling at homes 1 has its leaves and bundles
-    # registered by containment, but no imported row is gathered there, so the check cannot evaluate it.
-    # Whether homes 1 is graded is open; until then the check fails closed rather than pass unread records,
-    # so it gives no provenance assurance on homes 1, the residual spec 17 discloses.
+    # registered by containment, but no imported row is gathered there, so the check cannot evaluate it, an
+    # empty imported series included. Every activated 1.3.0 store is such a store: homes 2 needs spec_version
+    # 2.0.0 and spec 4.2 migrates no homes-1 store. Whether homes 1 is graded is open; until homes-1 grading
+    # is decided and added, the check fails closed rather than pass unread records, so no activated 1.3.0
+    # store reaches doctor VALID and no import completes, the consequence spec 17 states.
     if "C-IMPORTED-PROVENANCE" in rep.required:
         rep.ran("C-IMPORTED-PROVENANCE")
         if imported:
@@ -5740,6 +5742,11 @@ def self_test():
             check("provenance-homes1-stale-digest-cannot-evaluate", _h1_only_provenance(_h1_stale))
             _h1_none = run(_h1_machine(_p_row(1)))
             check("provenance-homes1-no-evidence-cannot-evaluate", _h1_only_provenance(_h1_none))
+            # An empty imported series reads the same: no row is gathered on homes 1, so the check records
+            # CANNOT-EVALUATE with nothing to grade, and the store does not reach VALID (red when an empty
+            # series passes, which would grade VALID a store whose imported rows were never read).
+            _h1_empty = run(_h1_machine())
+            check("provenance-homes1-empty-series-cannot-evaluate", _h1_only_provenance(_h1_empty))
         finally:
             _p_g["required_checks"] = _h1_prev_rc
             _p_g["IMPORTED_CONTENT_CHECKS"] = _h1_prev_icc
@@ -5955,7 +5962,7 @@ def self_test():
                 _IMPORT_EVIDENCE_HOME, _p_bundle_files({_p_src: _p_text, _r_moved: "x\n"})))
             _r_adopt_files = _r_kind_files("adoption", _r_adopt, {
                 _r_arch: "old\n", ".working/archive/moved/adopted/OLD.md": "moved\n"})
-            check("adoption-home-listing-failure-leaves-adoption-archive-ungraded", _r_first_listing_fails(
+            check("adoption-home-listing-failure-leaves-archive-and-move-destination-ungraded", _r_first_listing_fails(
                 _rel(_opf_store.IMPORTED_REL, "adoption"), _r_adopt_files))
             _r_root_w = _p_bundle_files({_p_src: _p_text, _r_moved: "x\n"})
             _r_root_w.update(_r_adopt_files)
