@@ -13047,11 +13047,13 @@ def _rdp_gitlink_entry(repo, relpath, want):
 # git apply accepts but git does not write are refused, not read: a localized marker, a context marker
 # that only added lines follow, an added-line marker that more added lines follow, and a backslash line
 # other than the exact marker right after a hunk's counted lines or their marker. Others are read (an
-# added-line marker that a removed line follows, an empty line as context), and an ordinary line after a
-# hunk's counted lines is read as prose, while one that begins as a diff header or a marker does is
-# refused as outside a file section; either way each hunk is consumed by its header's counts, so no path
-# is hidden. A file section opens at a `diff --git` line, or at a `--- ` line naming a
-# path, which a `+++ ` line and a hunk header must follow; its extended headers are the git header lines
+# added-line marker that a removed line follows, an empty line as context). After a hunk's counted lines,
+# git's exact no-newline marker is read as the marker; any other line beginning with a backslash there is
+# refused; a hunk header, a `diff --git` line or a `--- ` line naming a path goes on to the next hunk or
+# section; a line that begins as another diff header is refused as outside a file section; and any other
+# line is read as prose. Either way each hunk is consumed by its header's counts, so no path is hidden. A
+# file section opens at a `diff --git` line, or at a `--- ` line naming a path, which a `+++ ` line and a
+# hunk header must follow; its extended headers are the git header lines
 # below; each hunk is consumed by the line counts of its own header, so an added line that reads `++ b/x`
 # (shown as `+++ b/x`) is content, never a header, and by git's exact `\ No newline at end of file` marker
 # where git writes one: after the last line of each side of the file it marks (a marker after a removed
@@ -13093,10 +13095,10 @@ _RDP_DIFF_STRAY = _RDP_DIFF_EXTENDED + ("rename old ", "rename new ", "diff -", 
 _RDP_DIFF_HUNK = re.compile(r"@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@")
 # The one marker git writes after a hunk line whose file ends without a newline. Among a hunk's counted
 # lines, git apply reads a line beginning with a backslash and a space as one when it is at least eleven
-# characters long and rejects a shorter one as a corrupt patch; right after a hunk's counted lines it
-# accepts any such line, reading one of eleven characters or more as a marker and passing over a shorter
-# one. The census refuses every such line other than this exact marker in both places, and a line
-# beginning so is never prose.
+# bytes long (counted in bytes before the line feed, so a short line of non-ASCII text can reach it) and
+# rejects a shorter one as a corrupt patch; right after a hunk's counted lines it accepts any such line,
+# reading one of eleven bytes or more as a marker and passing over a shorter one. The census refuses every
+# such line other than this exact marker in both places, and a line beginning so is never prose.
 _RDP_DIFF_NO_NEWLINE = "\\ No newline at end of file"
 # The sides of the file a marker after each kind of hunk line marks.
 _RDP_DIFF_MARKS = {" ": ("old", "new"), "": ("old", "new"), "-": ("old",), "+": ("new",)}

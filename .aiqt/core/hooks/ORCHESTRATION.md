@@ -470,12 +470,14 @@ accepts but git does not write are refused rather than read: a localized no-newl
 marker that only added lines follow, an added-line marker that more added lines follow, and a line
 beginning with a backslash, other than git's exact marker, right after a hunk's counted lines or
 their marker. Not every such form is refused: an added-line marker that a removed line follows and an
-empty line read as context are read, and an ordinary line after a hunk's counted lines is read as
-prose, while one that begins as a diff header or a marker does is refused as outside a file section.
-Either way each hunk is still consumed by the line counts in its header, so no path is hidden. A file
-section opens at a `diff --git` line, or at a `---` line naming a path, which a `+++` line and a hunk
-header must follow. Each hunk is consumed by the line counts in its own header, so an added line
-that reads `++ b/x` (shown as `+++ b/x`) is content, not a header. Git's exact
+empty line read as context are read. After a hunk's counted lines, git's exact no-newline marker is
+read as the marker; any other line beginning with a backslash there is refused; a hunk header, a
+`diff --git` line or a `---` line naming a path goes on to the next hunk or section; a line that
+begins as another diff header is refused as outside a file section; and any other line is read as
+prose. Either way each hunk is still consumed by the line counts in its header, so no path is hidden.
+A file section opens at a `diff --git` line, or at a `---` line naming a path, which a `+++` line
+and a hunk header must follow. Each hunk is consumed by the line counts in its own header, so an
+added line that reads `++ b/x` (shown as `+++ b/x`) is content, not a header. Git's exact
 `\ No newline at end of file` marker is read only where git writes one, after the last line of each
 side of the file it marks. A marker after a removed line marks the old side, after an added line the
 new side, and after a context line both. So a marker is read only where the hunk header's count for
@@ -507,10 +509,11 @@ only `diff --cc` and `diff --combined`, for a merge, which are refused as combin
 `diff -ruN` output is refused too). A `---` line naming a path always opens a section.
 
 Among a hunk's counted lines, `git apply` reads a line beginning with a backslash and a space as a
-no-newline marker when it is at least eleven characters long and rejects a shorter one as a corrupt
-patch; right after a hunk's counted lines it accepts any such line, reading one of eleven characters
-or more as a marker and passing over a shorter one. The census refuses every such line other than
-git's exact marker in both places.
+no-newline marker when it is at least eleven bytes long (counted in bytes before the line feed, so a
+short line of non-ASCII text can reach it) and rejects a shorter one as a corrupt patch; right after
+a hunk's counted lines it accepts any such line, reading one of eleven bytes or more as a marker and
+passing over a shorter one. The census refuses every such line other than git's exact marker in both
+places.
 
 - More than one `Review-draft:` line, a relative draft path, a draft that cannot be read (missing, a
   symlink, not a regular file, over the cap, not UTF-8, a NUL), an empty `Review-skip:` value, and a

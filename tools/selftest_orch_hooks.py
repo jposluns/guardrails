@@ -1357,8 +1357,9 @@ def _rdp_draft_cases(base):
     # hunk header, a hunk with more removed lines than it counts, a diff --git line naming two paths with no
     # rename or copy header, a quoted name with an unknown escape, and diff --git lines naming their paths
     # under b/ and then a/ as git diff -R writes them, above a mode change (bare and C-quoted), a binary
-    # change and a pure rename, none of which has a --- line to name the prefix: the reason names the swap.
-    # The first row is the control.
+    # change, a pure rename, an empty file and a pure copy (the last two as git 2.55 writes them for the
+    # deletion of an empty file and, with -C --find-copies-harder, the deletion of a duplicate), none of
+    # which has a --- line to name the prefix: the reason names the swap. The first row is the control.
     swapped = "names its paths under b/ and then a/, git's default prefixes swapped, as git diff -R writes them"
     bad_sections = (
         ("", "(control)"),
@@ -1386,6 +1387,9 @@ def _rdp_draft_cases(base):
         ("diff --git b/src/c.png a/src/c.png\nindex 1592e5c..8352675 100644\n"
          "Binary files b/src/c.png and a/src/c.png differ\n", swapped),
         ("diff --git b/src/b.py a/old.txt\nsimilarity index 100%\nrename from src/b.py\nrename to old.txt\n",
+         swapped),
+        ("diff --git b/src/e.txt a/src/e.txt\ndeleted file mode 100644\nindex e69de29..0000000\n", swapped),
+        ("diff --git b/src/b.py a/src/dup.py\nsimilarity index 100%\ncopy from src/b.py\ncopy to src/dup.py\n",
          swapped))
     check("rdp/draft-unparseable-unverifiable", _read_as([(real + s, w) for s, w in bad_sections], "bad"),
           [("allow", False)] + [("unverifiable", True)] * (len(bad_sections) - 1))
