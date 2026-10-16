@@ -1043,14 +1043,20 @@ CONFIG_MEMBER_BOUNDS = {
     # end), at the member's current legs, leg table and vectors: one complete run took 1667.7 s wall
     # and passed.
     # ESTIMATED (SIZING's model that wall time grows in proportion to load5 once load5 exceeds the
-    # CPU count, applied to that standalone run): 3600 s, about 2.2 times that run, covers
-    # load5 up to about 49 scaled from the run's starting load5 (about 70 from its ending load5).
+    # CPU count, applied to that standalone run): 3600 s, about 2.2 times that run (3600 / 1667.7 =
+    # 2.159), covers load5 up to about 51.8 scaled from the run's start (its starting load5, 22.8,
+    # sits below the 24 CPUs, where the model adds no growth, so it scales from 24: 24 x 2.159 =
+    # 51.8), and about 70 from its ending load5 (32.6 x 2.159 = 70.4).
     # DELIBERATE SHORTER DEADLINE: 3600 s sits far BELOW this member's own worst case (its per-leg
     # bounds alone sum to 8839 s, about 2.5 hours, and its self-test's worst case with the negative
     # leg, cleanup deadlines and vectors is 10877 s; see _LEG_CEILING_S and _job_worst_case_s in the
     # member itself), exactly as the default's comment above sanctions: this lane owns no member's
-    # verdict, and cutting a stalled rerun short is cannot-evaluate, never a pass or a fail of the
-    # member.
+    # verdict, and reaching this 3600 s bound is cannot-evaluate, never a pass or a fail of the
+    # member. The member's OWN inner bounds are read differently: when one of its legs is killed at
+    # its leg bound, ended by a signal, or its flip is not evaluated, the member itself exits 2, and
+    # this lane reads any non-zero member exit as a definite offender (_split_offenders: only this
+    # suite's own recorded timeout is cannot-evaluate), so under lane load such a trip reads here as
+    # a FAIL of the member, not as cannot-evaluate.
     ("tools/check_opf_standalone_closure.py", "--self-test"): 3600,
 }
 # After the process-group kill: the bounded drain of output still held by a descendant that left

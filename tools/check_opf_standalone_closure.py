@@ -22,9 +22,20 @@ Exit convention (matches the repo's gates):
   0  the isolated opf/ subtree verifies (closure holds)
   1  a real finding (a subset gate failed in isolation: closure is broken)
   2  malformed input or a harness error (fail-closed): opf/ absent/unreadable, copy failed, no interpreter,
-     a per-leg bound that cannot be derived, or a leg killed at its wall-clock bound (named as the bound
-     tripping, never as a failure the leg reported; see _LEG_CEILING_S for how each bound is derived),
-     with any cleanup after that kill that did not complete named beside it (CLEANUP INCOMPLETE)
+     a per-leg bound that cannot be derived, a leg killed at its wall-clock bound (named as the bound
+     tripping, never as a failure the leg reported; see _LEG_CEILING_S for how each bound is derived), or
+     a leg ended by a signal this gate did not send (named by its signal: another process, the OOM killer
+     or an interpreter crash, never a failure the leg reported), with any cleanup after a kill that did
+     not complete named beside it (CLEANUP INCOMPLETE); a real finding beside any of these still exits 1
+One bound is DELIBERATELY SHORTER than the work its leg is sanctioned to do: opf-tooling-selftest's,
+below the budget opf.py grants its own blocked-isolation leg, because a bound above that budget would not
+fit the CI job (see _LEG_CEILING_S); its trip is reported as the bound tripping (exit 2), never as a
+failure the leg reported. A run under load heavier than the recorded ceilings' can trip a healthy leg's
+bound and exit 2 (see _LOAD_HEADROOM).
+--self-test follows the same convention: 1 only for a definite failure (the real opf/ does not verify,
+the flipped copy is NOT caught, or a self-test vector fails), and 2 when a leg or the flip could not be
+evaluated (a bound kill, a signal, a harness failure, a bound that cannot be derived, or any flip
+outcome other than the exact failure the flipped import produces; see _negative_verdict), each named.
 """
 import sys
 
@@ -91,7 +102,8 @@ _SUBSET = [
 
 # Per-leg wall-clock bounds (rule kill-timeout-exceeds-callee-wait). A bound exists to cut off a hung leg,
 # so it must sit ABOVE the work the leg is sanctioned to do: one flat constant below a leg's real work
-# kills a correctly-running leg. Each leg bound is the LARGEST of:
+# kills a correctly-running leg. ONE bound is a deliberate exception, opf-tooling-selftest's (see
+# DELIBERATE SHORTER DEADLINE below). Each leg bound is the LARGEST of:
 #   * _LOAD_HEADROOM times the slowest run of that leg recorded on this tree (_LEG_CEILING_S);
 #   * a DELIBERATE DEADLINE derived from the leg's own sources: the SUM of the literal wait SITES they
 #     declare (numeric literals in timeout= arguments and `timeout` parameter defaults, read from the
@@ -120,12 +132,12 @@ _SUBSET = [
 # that changes opf/ CARRIES THESE FIGURES FORWARD AS INFERRED, not measured, until the legs are
 # re-measured at the refreshed tree.
 # _LOAD_HEADROOM is the allowance for a slower or more loaded host than that run's. The multiplier is
-# an INFERENCE, not a measurement, and no observation checks it: the host carried other work during the
-# run, but a host loaded beyond it adds contention these ceilings do not hold, and nothing here shows
-# that such contention slows every leg alike. A leg that outgrows its bound trips it (exit 2,
-# fail-closed), never passes clean. Two larger figures bear on it. Both were REPORTED during work on
-# another change and measured at that change's tree (another branch; no revision, date or host was
-# recorded). Both are UNVERIFIED: neither has been reproduced, and neither checks the multiplier.
+# an INFERENCE, not a measurement, and no observation supports it (one measured run contradicts it, see
+# below): the host carried other work during the run, but a host loaded beyond it adds contention these
+# ceilings do not hold, and such contention does not slow every leg alike. A leg that outgrows its bound
+# trips it (exit 2, fail-closed), never passes clean. Two larger figures bear on it. Both were REPORTED
+# during work on another change and measured at that change's tree (another branch; no revision, date
+# or host was recorded). Both are UNVERIFIED: neither has been reproduced, and neither checks the multiplier.
 #   * opf.py --self-test took 1348.7 s on a loaded host, 2.78 times this table's 485.6 s. Were this
 #     tree's run that slow, 3 x 486 = 1458 s would cover it by 109.3 s.
 #   * adopt-apply's self-test took 812.8 s inside a loaded opf.py --self-test run (opf.py runs the
@@ -139,7 +151,32 @@ _SUBSET = [
 # 25.1). That is one run at one load: it shows no in-process slowdown here, and says nothing about the
 # heavier load or the host behind the reported figures.
 # The multiplier is capped by the job fit (_job_worst_case_s against the 21600 s default job limit):
-# on this table the worst case is 20576 s at 3 and 22772 s at 4.
+# on this table the worst case is 20576 s at 3 and 22772 s at 4, and the largest multiplier that fits
+# is 3.474.
+# The multiplier does NOT cover the one loaded run measured against it, and cannot. One --self-test
+# run on 2026-10-15, at the revision carrying this table, at load5 about 50 (between 42 and 61 while it
+# ran), passed (exit 0) with three legs past their ceilings by unequal factors: opf-doctor-selftest
+# took 299.3 s, 4.34 times its 69 s ceiling; opf-init-selftest 299.6 s, 1.31 times its 228 s;
+# opf-pack-manifest-selftest 28.7 s, 1.69 times its 17 s. opf-doctor-selftest finished inside its
+# 1140 s bound only because its declared-wait term sets that bound (3 x 69 = 207 s alone would have
+# killed it). That is one run at one load, REPORTED by its account and not reproduced here. Covering it
+# on the headroom term alone needs a multiplier of at least 4.337 (299.3 / 69), above 4, where the job
+# worst case is already 22772 s, over the 21600 s limit. So the multiplier stays 3, and a run under such
+# load CAN exit 2 on a healthy leg: each leg whose bound is the headroom term alone (on this table
+# opf-homes-selftest 273 s, opf-tooling-selftest 1458 s, opf-adopt-selftest 456 s and
+# opf-oplock-selftest 324 s) trips its bound once it runs more than 3 times its ceiling. That exit 2 is
+# reported as the bound tripping, never as a pass and never as a finding.
+# DELIBERATE SHORTER DEADLINE: opf-tooling-selftest. READ FROM SOURCE (opf/tools/opf.py, the watchdog
+# regression runner's budgets), opf.py --self-test grants its blocked-isolation leg ALONE
+# 31 * _deadline_case_budget(180) = 31 * (180 + 5 + 1) = 5766 s (31 isolation cases, each its 180 s
+# timeout, the 5 s fixture cleanup grace and the 1 s receipt allowance), so the whole self-test grants
+# itself more; this leg's bound (1458 s on this table, 3 x its 486 s ceiling) sits far below that. A
+# bound above it, 5766 + 60 = 5826 s, counts in both sweeps and in the negative leg: 3 x (5826 - 1458)
+# = 13104 s more, a job worst case of 33680 s, over the 21600 s limit. So this bound takes the
+# kill-timeout rule's exception (AGENTS.md): a deliberately shorter deadline, above the leg's recorded
+# run and cutting a longer run short on purpose, with reaching it attributed to the deadline (LEG BOUND
+# EXCEEDED, exit 2; the self-test's negative leg, under the same bound, reports its trip as cannot
+# evaluate, exit 2), never as a failure the leg reported and never as a pass.
 _LEG_CEILING_S = {
     "opf-homes-selftest": 91,  # measured: 90.1 s at load5 13.7
     "opf-homes-contract": 1,  # measured: 0.4 s at load5 13.9
@@ -181,7 +218,7 @@ _DRAIN_MARGIN_S = 10
 # below the floor and requires every leg whose other terms then sit below the floor to be raised to
 # exactly the floor. At the former 120 s floor this table's job worst case is 22236 s at a headroom of
 # 3, over the job limit, and no single multiplier both covers the reported 1348.7 s figure above (that
-# needs at least 2.776) and fits the job (that allows at most 2.705).
+# needs at least 2.775: 1348.7 / 486 = 2.7751) and fits the job (that allows at most 2.705).
 _MIN_LEG_BOUND_S = 60
 
 _CI_WORKFLOW = Path(".github") / "workflows" / "quality.yml"
@@ -555,6 +592,15 @@ def _tail(output, keep=3):
     return "\n".join((output or b"").decode("utf-8", "replace").splitlines()[-keep:])
 
 
+def _signal_name(rc):
+    """The signal that ended a leg whose return code is rc (subprocess reports signal N as -N), by name
+    and number, or by number alone when this platform does not name it."""
+    try:
+        return "{} (signal {})".format(signal.Signals(-rc).name, -rc)
+    except ValueError:
+        return "signal {}".format(-rc)
+
+
 def _kill_and_reap(proc, drain_s=_DRAIN_MARGIN_S, killpg=os.killpg):
     """Kill the timed-out leg's process GROUP (the leg was started as its own session leader, so every
     descendant that has not itself left the group shares it), then drain its output and reap its
@@ -618,7 +664,8 @@ def _run_one(opf_root, script, args, run_dir, env, bound_s, keep=3, drain_s=_DRA
     unless the descendant itself left the group with setpgid() or setsid(), the disclosed residual on
     _kill_and_reap (such a survivor is neither killed nor reaped). Returns
     (rc, tail_of_output, elapsed_s, launched, cleanup): rc is None when the leg was killed at its bound
-    (the bound tripped; the leg itself reported nothing), launched is False for a harness failure (a
+    (the bound tripped; the leg itself reported nothing), a negative rc is a signal this runner did not
+    send (-N for signal N; the leg reported nothing either), launched is False for a harness failure (a
     missing script, an interpreter that could not start) whose rc 2 is this runner's verdict, NEVER an
     outcome the leg reported, whatever text it carries, and cleanup lists the named faults of a kill
     whose cleanup did not complete (_kill_and_reap; empty otherwise). cwd is run_dir, which is OUTSIDE
@@ -662,13 +709,16 @@ def _run_subset(opf_root, run_dir, bounds):
 
 def _report(results):
     """Print one line per leg and the verdict, and return the exit code. A leg that ITSELF exited
-    non-zero is a finding (1). A leg killed at its bound is reported as the bound tripping, and a leg
-    that never launched (launched False: a missing script or an interpreter that could not start) as a
-    harness failure, never as a failure the leg reported; either way, with no finding beside it the
-    gate cannot evaluate closure (2), and never reads as clean. A killed leg whose cleanup did not
-    complete (row[6], the named faults from _kill_and_reap: an unreaped leader, a pipe still held by an
-    escaped descendant) is reported as CLEANUP INCOMPLETE by name, and never reads as clean either."""
-    failed = [row for row in results if row[1] not in (0, None) and row[4]]
+    non-zero (a positive status) is a finding (1). A leg killed at its bound is reported as the bound
+    tripping, a leg ended by a signal this gate did not send (a negative status: another process, the
+    OOM killer, or an interpreter crash) by that signal's name, and a leg that never launched (launched
+    False: a missing script or an interpreter that could not start) as a harness failure, never as a
+    failure the leg reported; in each case, with no finding beside it the gate cannot evaluate closure
+    (2), and never reads as clean. A killed leg whose cleanup did not complete (row[6], the named faults
+    from _kill_and_reap: an unreaped leader, a pipe still held by an escaped descendant) is reported as
+    CLEANUP INCOMPLETE by name, and never reads as clean either."""
+    failed = [row for row in results if row[4] and row[1] is not None and row[1] > 0]
+    signalled = [row for row in results if row[4] and row[1] is not None and row[1] < 0]
     unlaunched = [row for row in results if not row[4]]
     timed_out = [row for row in results if row[1] is None]
     uncleaned = [row for row in results if row[6]]
@@ -679,6 +729,9 @@ def _report(results):
             status = "OK ({:.1f}s of its {}s bound)".format(elapsed, bound)
         elif rc is None:
             status = "TIMED OUT (killed at its {}s bound)".format(bound)
+        elif rc < 0:
+            status = "ENDED BY {} after {:.1f}s (not this gate's kill; the leg reported nothing)".format(
+                _signal_name(rc), elapsed)
         else:
             status = "FAILED rc={} ({:.1f}s)".format(rc, elapsed)
         print("  {:38s} {}".format(name, status))
@@ -692,6 +745,13 @@ def _report(results):
               "harness's, never the leg's, whatever text it carries):", file=sys.stderr)
         for name, _rc, tail, _elapsed, _launched, _bound, _cleanup in unlaunched:
             print("  {}: {}".format(name, tail.replace("\n", " | ")), file=sys.stderr)
+    if signalled:
+        print("STANDALONE CLOSURE: NOT EVALUATED (a signal this gate did not send ended each leg below "
+              "before it reported: another process, the OOM killer, or an interpreter crash; closure was "
+              "not evaluated for it):", file=sys.stderr)
+        for name, rc, tail, elapsed, _launched, _bound, _cleanup in signalled:
+            print("  {}: ended by {} after {:.1f}s; last output: {}".format(
+                name, _signal_name(rc), elapsed, tail.replace("\n", " | ") or "(none)"), file=sys.stderr)
     if timed_out:
         print("STANDALONE CLOSURE: LEG BOUND EXCEEDED (the gate killed each leg below at its wall-clock bound; "
               "the bound tripped, not a failure the leg reported, so closure was not evaluated for it):",
@@ -706,7 +766,7 @@ def _report(results):
             print("  {}: {}".format(name, "; ".join(cleanup)), file=sys.stderr)
     if failed:
         return 1
-    if timed_out or unlaunched or uncleaned:
+    if timed_out or signalled or unlaunched or uncleaned:
         return 2
     print("STANDALONE CLOSURE: OK (opf/ verifies itself with no AIQT tree reachable)")
     return 0
@@ -715,31 +775,38 @@ def _report(results):
 def run(root, ceilings=None):
     """Materialize opf/ alone and run the subset in isolation. Returns 0 (closure holds), 1 (a subset gate
     failed: closure broken), or 2 (harness error, opf/ unreadable, a leg with no ceiling row, refused
-    before any leg launches, or a leg killed at its bound), fail-closed. ceilings defaults to
-    _LEG_CEILING_S (the self-test passes a table missing a row)."""
+    before any leg launches, or a leg killed at its bound or ended by a signal), fail-closed. ceilings
+    defaults to _LEG_CEILING_S (the self-test passes a table missing a row)."""
+    return _run_closure(root, ceilings)[0]
+
+
+def _run_closure(root, ceilings=None):
+    """run(), returning (exit code, results): results is the per-leg rows _report read, or None when
+    the run stopped before any leg ran (the self-test's positive leg names each leg it could not
+    evaluate from them)."""
     opf_src = Path(root) / "opf"
     if not (opf_src.is_dir() and (opf_src / "tools" / "opf.py").is_file()):
         print("error: opf/ subtree not found under {} (cannot evaluate closure)".format(root),
               file=sys.stderr)
-        return 2
+        return 2, None
     tmp = Path(tempfile.mkdtemp(prefix="opf-closure-"))
     try:
         try:
             opf_root = _materialize(opf_src, tmp)
         except OSError as exc:
             print("error: could not materialize the isolated opf/ copy: {}".format(exc), file=sys.stderr)
-            return 2
+            return 2, None
         try:
             bounds = _leg_bounds(opf_root / "tools", ceilings)
         except _BoundError as exc:
             print("error: cannot derive the per-leg bounds: {}".format(exc), file=sys.stderr)
-            return 2
+            return 2, None
         try:
             results = _run_subset(opf_root, tmp, bounds)
         except AssertionError as exc:
             print("STANDALONE CLOSURE: FAILED:", str(exc), file=sys.stderr)
-            return 1
-        return _report(results)
+            return 1, None
+        return _report(results), results
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1280,16 +1347,32 @@ def _timeout_vectors_self_test(required):
                  ("BROKEN", "CLOSURE: OK", "FAILED rc=2")),
                 ([(leg, None, tail, elapsed, True, bound, [unreaped])], 2,
                  ("LEG BOUND EXCEEDED", "CLEANUP INCOMPLETE", "{}: {}".format(leg, unreaped)),
-                 ("BROKEN", "CLOSURE: OK"))):
+                 ("BROKEN", "CLOSURE: OK")),
+                # A leg ended by a signal this gate did not send (a negative status: another process,
+                # the OOM killer) reported nothing: cannot evaluate, naming the signal, never BROKEN.
+                ([("opf-tooling-selftest", -9, "partial", 12.0, True, bound, [])], 2,
+                 ("ENDED BY SIGKILL (signal 9)", "NOT EVALUATED",
+                  "opf-tooling-selftest: ended by SIGKILL (signal 9)"),
+                 ("BROKEN", "CLOSURE: OK", "FAILED rc=-9")),
+                ([("opf-tooling-selftest", -9, "partial", 12.0, True, bound, []),
+                  ("opf-homes-contract", 1, "boom", 1.0, True, 120, [])], 1,
+                 ("BROKEN", "opf-homes-contract (rc=1): boom",
+                  "opf-tooling-selftest: ended by SIGKILL (signal 9)"),
+                 ("CLOSURE: OK", "opf-tooling-selftest (rc=-9)"))):
             out = io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
                 code = _report(rows)
             said = out.getvalue()
             if code != want_code or not all(w in said for w in want) or any(r in said for r in refused):
                 raise AssertionError("closure/timeout-report (exit {}): {!r}".format(code, said))
+        if _signal_name(-200) != "signal 200":
+            raise AssertionError("closure/unnamed-signal-not-named-by-number: {!r}".format(
+                _signal_name(-200)))
         print("RED hang -> cut off at its bound and reported as LEG BOUND EXCEEDED (exit 2; exit 1 "
               "beside a real failure; a leg that never launched -> NOT EVALUATED, exit 2, never "
-              "BROKEN; a killed leg whose leader is unreaped -> CLEANUP INCOMPLETE naming it, exit 2)")
+              "BROKEN; a killed leg whose leader is unreaped -> CLEANUP INCOMPLETE naming it, exit 2; "
+              "a leg ended by a signal this gate did not send -> NOT EVALUATED naming the signal, "
+              "exit 2, never BROKEN, and exit 1 beside a real failure)")
         # A readiness file holding anything but whole pids (a partly written file included) is a
         # named self-test failure, never a traceback.
         partly = tmp / "partly-written.pid"
@@ -1444,51 +1527,88 @@ def _timeout_vectors_self_test(required):
 
 
 _INJECTED_EDGE = "check_versions"
+# The one outcome the flipped copy produces: opf.py's guarded bootstrap (_bootstrap) maps the injected
+# module's ImportError to its exit 2 and this one line, before any self-test runs. Observed on
+# 2026-10-15 at this change's opf/ tree: the flipped opf.py --self-test exited 2, printing exactly this
+# line and nothing else.
+_FLIP_EXIT = 2
+_FLIP_OUTPUT = "opf: cannot bootstrap: {} (cannot evaluate)".format(_INJECTED_EDGE)
 
 
 def _negative_verdict(rc, tail, bound, launched):
-    """The negative leg's verdict: None when the re-introduced upward edge was caught, else the failure
-    text. Caught requires a failure the leg ITSELF reported: launched False is the runner's STRUCTURAL
-    harness-failure flag and is never credited whatever text it carries (a launch error under a path
-    that contains the token names the token without ever evaluating the flip), rc None is the bound
-    tripping, rc 0 is a pass; and the leg-reported failure must name the injected upward import, so an
-    unrelated failure is a self-test failure, never silent coverage credit."""
+    """The negative leg's verdict: None when the re-introduced upward edge was caught, else (exit code,
+    text). Caught requires EXACTLY the outcome the flipped import produces: the leg launched, exited
+    _FLIP_EXIT, and its whole output is the one _FLIP_OUTPUT line (tail holds the output's last lines,
+    so a tail equal to that one line is the whole output). A clean pass (rc 0) is the flip NOT caught,
+    a definite failure (1). Every other outcome leaves the flip unevaluated (2), never coverage credit:
+    launched False (the runner's STRUCTURAL harness-failure flag, rejected whatever text it carries: a
+    launch error under a path that contains the token names the token without evaluating the flip), rc
+    None (the bound tripped), a negative rc (a signal the runner did not send), and any other status or
+    output, the token included (an unrelated failure that mentions it, another cannot-bootstrap line,
+    the right line under another status or beside other output)."""
+    shown = (tail or "").replace("\n", " | ") or "(no output)"
     if not launched:
-        return ("negative: the flipped leg never launched (a harness failure is never coverage, "
-                "whatever its text): {}".format((tail or "").replace("\n", " | ") or "(no output)"))
+        return 2, ("negative: the flipped leg never launched (a harness failure is never coverage, "
+                   "whatever its text; the flip was not evaluated): {}".format(shown))
     if rc is None:
-        return ("negative: the flipped opf.py --self-test was killed at its {}s bound "
-                "(the bound tripped; the flip was not evaluated)".format(bound))
+        return 2, ("negative: the flipped opf.py --self-test was killed at its {}s bound "
+                   "(the bound tripped; the flip was not evaluated)".format(bound))
+    if rc < 0:
+        return 2, ("negative: the flipped opf.py --self-test was ended by {}, a signal this gate did "
+                   "not send (the flip was not evaluated): {}".format(_signal_name(rc), shown))
     if rc == 0:
-        return ("negative: a re-introduced upward edge (import check_versions) was NOT "
-                "caught in isolation (the gate would give no coverage)")
-    if _INJECTED_EDGE not in (tail or ""):
-        return ("negative: the leg exited rc={} without naming the injected upward import {!r} (an "
-                "unrelated failure is not coverage): {}".format(
-                    rc, _INJECTED_EDGE, (tail or "").replace("\n", " | ") or "(no output)"))
+        return 1, ("negative: a re-introduced upward edge (import check_versions) was NOT "
+                   "caught in isolation (the gate would give no coverage)")
+    if rc != _FLIP_EXIT or tail != _FLIP_OUTPUT:
+        return 2, ("negative: the leg exited rc={} with output other than the flipped import's exact "
+                   "failure (exit {} and the one line {!r}), so the flip was not evaluated (a failure "
+                   "that merely mentions {!r} is never coverage): {}".format(
+                       rc, _FLIP_EXIT, _FLIP_OUTPUT, _INJECTED_EDGE, shown))
     return None
 
 
 def _negative_verdict_self_test():
-    """The negative-leg verdict is discriminating: only a leg-reported failure naming the injected
-    import counts as caught; a bound kill, a clean pass, an unrelated failure, and a harness failure
-    (launched False: a missing script or an interpreter that could not start) are each a self-test
-    failure. The harness-failure rejection is STRUCTURAL: a real launch failure whose pathname contains
-    the token, so that its text names the token, is still rejected."""
-    caught = _negative_verdict(2, "opf: cannot bootstrap: check_versions (cannot evaluate)", 600, True)
+    """The negative-leg verdict is discriminating: only the flipped import's exact failure (exit
+    _FLIP_EXIT, output exactly _FLIP_OUTPUT) counts as caught; a clean pass is a definite failure (1);
+    a bound kill, a signal, a harness failure (launched False: a missing script or an interpreter that
+    could not start), an unrelated failure, and every non-zero exit that carries the token but is not
+    that failure each leave the flip unevaluated (2). The harness-failure rejection is STRUCTURAL: a
+    real launch failure whose pathname contains the token, so that its text names the token, is still
+    rejected."""
+    caught = _negative_verdict(_FLIP_EXIT, _FLIP_OUTPUT, 600, True)
     if caught is not None:
-        raise AssertionError("closure/negative-verdict-rejects-a-genuine-catch: " + caught)
-    print("PASS closure/negative-verdict-accepts-a-leg-naming-the-injected-import")
-    for rc, tail, launched, label in (
-            (None, "", True, "bound-kill"),
-            (0, "SELF-TEST PASS", True, "clean-pass"),
+        raise AssertionError("closure/negative-verdict-rejects-a-genuine-catch: {!r}".format(caught))
+    print("PASS closure/negative-verdict-accepts-the-exact-flipped-import-failure")
+    for rc, tail, launched, label, want_code in (
+            (None, "", True, "bound-kill", 2),
+            (0, "SELF-TEST PASS", True, "clean-pass", 1),
             (2, "could not launch the interpreter: [Errno 2] No such file or directory", False,
-             "launch-error"),
+             "launch-error", 2),
             (2, "could not launch the interpreter: [Errno 2] No such file or directory: "
-                "'/sandbox/check_versions/bin/python3'", False, "launch-error-naming-the-token"),
-            (1, "SELF-TEST FAIL: unrelated", True, "unrelated-failure")):
-        if _negative_verdict(rc, tail, 600, launched) is None:
-            raise AssertionError("closure/negative-verdict-not-red: {} (rc={!r})".format(label, rc))
+                "'/sandbox/check_versions/bin/python3'", False, "launch-error-naming-the-token", 2),
+            (1, "SELF-TEST FAIL: unrelated", True, "unrelated-failure", 2),
+            # A non-zero exit that carries the token but is not the flipped import's failure: an
+            # unrelated failure whose text mentions it, another cannot-bootstrap line naming it, the
+            # exact line under another status or beside other output, the bare import traceback (not
+            # the shape the guarded bootstrap prints), and a signal after the exact line.
+            (1, "unrelated assertion failed; debug path /tmp/check_versions/cache", True,
+             "unrelated-failure-naming-the-token", 2),
+            (2, "opf: cannot bootstrap: a helper module could not be read (PermissionError: "
+                "/x/check_versions.py) (cannot evaluate)", True, "other-bootstrap-line-naming-the-token",
+             2),
+            (1, _FLIP_OUTPUT, True, "exact-line-under-exit-1", 2),
+            (3, _FLIP_OUTPUT, True, "exact-line-under-exit-3", 2),
+            (2, "SELF-TEST FAIL: opf-store\n" + _FLIP_OUTPUT, True, "exact-line-beside-other-output", 2),
+            (1, "ModuleNotFoundError: No module named 'check_versions'", True,
+             "bare-import-traceback", 2),
+            (-9, _FLIP_OUTPUT, True, "signal-after-the-exact-line", 2)):
+        verdict = _negative_verdict(rc, tail, 600, launched)
+        if verdict is None or verdict[0] != want_code:
+            raise AssertionError("closure/negative-verdict-not-red: {} (rc={!r}): {!r}, want exit "
+                                 "{}".format(label, rc, verdict, want_code))
+    signalled = _negative_verdict(-9, _FLIP_OUTPUT, 600, True)
+    if "SIGKILL (signal 9)" not in signalled[1]:
+        raise AssertionError("closure/negative-signal-not-named: {!r}".format(signalled))
     # REAL harness failures through _run_one, under a path that contains the token, one per
     # launched-False producer: the missing-script branch names the script's full path, and the
     # interpreter-launch branch (an EXISTING script, an interpreter path that does not exist, so Popen
@@ -1515,50 +1635,67 @@ def _negative_verdict_self_test():
                     or _INJECTED_EDGE not in (tail or "")):
                 raise AssertionError("closure/negative-launch-fixture-shape: {} (rc={!r}, launched={!r}, "
                                      "tail={!r})".format(label, rc, launched, tail))
-            if _negative_verdict(rc, tail, 600, launched) is None:
+            verdict = _negative_verdict(rc, tail, 600, launched)
+            if verdict is None or verdict[0] != 2:
                 raise AssertionError("closure/negative-verdict-not-red: a real {} failure whose path "
-                                     "contains {!r}".format(label, _INJECTED_EDGE))
+                                     "contains {!r}: {!r}".format(label, _INJECTED_EDGE, verdict))
     finally:
         sys.executable = real_interpreter
         shutil.rmtree(tmp, ignore_errors=True)
-    print("RED negative-leg bound-kill, clean-pass, unrelated-failure, launch-error, and a real "
-          "missing-script failure and a real interpreter-launch failure under a path containing {!r} "
-          "-> each is a self-test failure, never coverage credit".format(_INJECTED_EDGE))
+    print("RED negative-leg clean-pass -> a definite failure (exit 1); bound-kill, a signal, "
+          "unrelated-failure, launch-error, every non-zero exit carrying {!r} that is not the flipped "
+          "import's exact failure (exit {} and its one line), and a real missing-script failure and a "
+          "real interpreter-launch failure under a path containing it -> each not evaluated (exit 2), "
+          "never coverage credit".format(_INJECTED_EDGE, _FLIP_EXIT))
 
 
-def self_test_main():
-    """Prove the gate fails without the self-containment property (change-carries-check). The bound and
-    verdict legs run first and fast: the per-leg bounds cover each leg's table-derived need (the floor
-    term included, shown raising bounds under a launch margin lowered below it) and fit the CI job,
-    time-scaled stub legs show a flat bound below the recorded work killing a correct leg while
-    a hang is still cut off and named (descendants that stayed in the leg's process group included),
-    the post-kill cleanup closes the pipe and names what it could not complete on every path the
-    cleanup doubles script (a failed group kill, whether or not the leader kill was delivered; a drain
-    timeout or OSError; a reap timeout or OSError), and the negative-leg verdict is shown
-    discriminating. The positive leg runs run() over the real
-    opf/ and requires 0. The negative leg materializes opf/ alone, then RE-INTRODUCES the pre-move
-    upward edge (opf/tools/_opf_store.py importing `_parse` from AIQT `check_versions` instead of the
-    extracted `_semver`); with no AIQT tree reachable that import fails, so the leg must itself report
-    a failure NAMING the injected import (a leg killed at its bound, a harness or launch failure
-    (rejected structurally, whatever its text), or an unrelated failure does not count as caught; see
-    _negative_verdict). A gate that passed the deliberately-broken copy would provide no coverage."""
-    root = repo_root()
-    try:
-        _pack_manifest_registration_self_test()
-        _adopt_observe_registration_self_test()
-        _import_batch_registration_self_test()
-        _negative_verdict_self_test()
-        _cleanup_doubles_self_test()
-        required = _bounds_self_test(root)
-        _timeout_vectors_self_test(required)
-    except (AssertionError, _BoundError, OSError) as exc:
-        print("SELF-TEST FAIL:", str(exc), file=sys.stderr)
+def _positive_verdict(code, results):
+    """The positive leg's verdict from _run_closure's (exit code, results): None when closure holds
+    (0), (1, text) when a leg failed in isolation (1), and (2, text) for every other code, naming each
+    leg that was not evaluated (killed at its bound, ended by a signal, never launched, or its cleanup
+    incomplete) or, with no results, the run refused before any leg ran (its reason printed above), so
+    a bound kill reads as the bound tripping, never as the real opf/ failing to verify."""
+    if code == 0:
+        return None
+    if code == 1:
+        return 1, "positive: the real opf/ subtree did not verify in isolation (expected closure)"
+    named = []
+    for name, rc, _tail_text, _elapsed, launched, bound, cleanup in results or ():
+        if not launched:
+            named.append("{} never launched (a harness failure)".format(name))
+        elif rc is None:
+            named.append("{} killed at its {}s bound (the bound tripped)".format(name, bound))
+        elif rc < 0:
+            named.append("{} ended by {}".format(name, _signal_name(rc)))
+        if cleanup:
+            named.append("{} cleanup incomplete: {}".format(name, "; ".join(cleanup)))
+    reason = "; ".join(named) or "refused before any leg ran (its reason is printed above)"
+    return 2, ("positive: closure was not evaluated for the real opf/ (exit {}, never a closure "
+               "failure): {}".format(code, reason))
+
+
+def _self_test_outcome(verdicts):
+    """Print each verdict that is not None ((exit code, text)) and return the self-test's exit code: 1
+    when any is a definite failure, else 2 when any leg was not evaluated, else 0. A definite failure
+    outranks a leg that could not be evaluated, as in _report."""
+    found = [verdict for verdict in verdicts if verdict is not None]
+    for code, text in found:
+        print("SELF-TEST {}: {}".format("FAIL" if code == 1 else "CANNOT EVALUATE", text),
+              file=sys.stderr)
+    if any(code == 1 for code, _text in found):
         return 1
-    failures = []
+    return 2 if found else 0
+
+
+def _closure_legs(root, required, run_closure=None, run_one=None):
+    """The self-test's positive and negative legs over root's opf/, returning the self-test's exit code
+    (_self_test_outcome). run_closure and run_one default to _run_closure and _run_one; the routing
+    vector passes stubs (_verdict_routing_self_test), so the wiring it holds is this one."""
+    run_closure = _run_closure if run_closure is None else run_closure
+    run_one = _run_one if run_one is None else run_one
 
     # Positive: the real opf/ subtree verifies itself in isolation.
-    if run(root) != 0:
-        failures.append("positive: the real opf/ subtree did not verify in isolation (expected closure)")
+    verdicts = [_positive_verdict(*run_closure(root))]
 
     # Negative (deliberate flip): a surviving upward edge must be caught.
     opf_src = Path(root) / "opf"
@@ -1570,30 +1707,145 @@ def self_test_main():
         flipped = text.replace("from _semver import _parse",
                                "from check_versions import _parse", 1)
         if flipped == text:
-            failures.append("negative: could not locate the _semver import to flip (fixture drift)")
+            verdicts.append((2, "negative: could not locate the _semver import to flip (fixture drift; "
+                                "the flip was not evaluated)"))
         else:
             store.write_text(flipped, encoding="utf-8")
             env = _isolated_env()
             bound = required["opf-tooling-selftest"][0]
-            rc, tail, _elapsed, launched, cleanup = _run_one(opf_root, "opf.py", ["--self-test"], tmp,
-                                                             env, bound, keep=40)
-            verdict = _negative_verdict(rc, tail, bound, launched)
-            if verdict is not None:
-                failures.append(verdict)
+            rc, tail, _elapsed, launched, cleanup = run_one(opf_root, "opf.py", ["--self-test"], tmp,
+                                                            env, bound, keep=40)
+            verdicts.append(_negative_verdict(rc, tail, bound, launched))
             if cleanup:
-                failures.append("negative: the cleanup after the flipped leg's kill did not complete: "
-                                "{}".format("; ".join(cleanup)))
+                verdicts.append((2, "negative: the cleanup after the flipped leg's kill did not "
+                                    "complete: {}".format("; ".join(cleanup))))
     except OSError as exc:
-        failures.append("negative: harness error building the broken copy: {}".format(exc))
+        verdicts.append((2, "negative: harness error building the broken copy (the flip was not "
+                            "evaluated): {}".format(exc)))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    return _self_test_outcome(verdicts)
 
-    if failures:
-        for f in failures:
-            print("SELF-TEST FAIL: {}".format(f), file=sys.stderr)
+
+def _verdict_routing_self_test():
+    """The self-test's own exit follows the gate's convention. run() exit 2 (a leg killed at its bound,
+    ended by a signal, or never launched, or a run refused before any leg ran) makes the positive leg
+    NOT EVALUATED, naming each such leg with its bound or signal, and the self-test exit 2, never the
+    positive-failure text or exit 1; run() exit 1 is the real opf/ failing to verify (1); 0 is clean;
+    a flip outcome that is not the exact failure leaves the self-test at 2; and a definite failure
+    outranks a leg that could not be evaluated. The wiring is held through _closure_legs, the legs
+    self_test_main runs, with both runners stubbed over a throwaway tree that holds only the import
+    the flip rewrites: the copy and the flip are real, and nothing is launched."""
+    killed = ("opf-doctor-selftest", None, "partial", 1140.3, True, 1140, [])
+    clean = ("opf-homes-contract", 0, "", 0.4, True, 120, [])
+    for code, rows, want_code, want in (
+            (2, [killed, clean], 2, "opf-doctor-selftest killed at its 1140s bound"),
+            (2, [("opf-tooling-selftest", -9, "", 12.0, True, 1458, []), clean], 2,
+             "opf-tooling-selftest ended by SIGKILL (signal 9)"),
+            (2, [("opf-homes-contract", 2, "could not launch the interpreter: boom", 0.0, False, 120,
+                  [])], 2, "opf-homes-contract never launched"),
+            (2, [killed[:6] + (["leader-unreaped: leader pid 4242"],)], 2,
+             "opf-doctor-selftest cleanup incomplete: leader-unreaped"),
+            (2, None, 2, "refused before any leg ran"),
+            (1, [("opf-homes-contract", 1, "boom", 1.0, True, 120, [])], 1, "did not verify")):
+        verdict = _positive_verdict(code, rows)
+        if (verdict is None or verdict[0] != want_code or want not in verdict[1]
+                or (want_code == 2 and "did not verify" in verdict[1])):
+            raise AssertionError("closure/positive-verdict (run() exit {}): {!r}, want exit {} naming "
+                                 "{!r}".format(code, verdict, want_code, want))
+    if _positive_verdict(0, [clean]) is not None:
+        raise AssertionError("closure/positive-verdict-rejects-a-clean-run")
+    caught = (_FLIP_EXIT, _FLIP_OUTPUT, 0.1, True, [])
+    flips = []
+
+    def flip_runner(result):
+        def run_one(opf_root, script, args, _run_dir, _env, bound, keep=3):
+            flips.append(((opf_root / "tools" / "_opf_store.py").read_text(encoding="utf-8"), script,
+                          args, bound))
+            return result
+        return run_one
+
+    tmp = Path(tempfile.mkdtemp(prefix="opf-closure-routing-"))
+    try:
+        os.makedirs(tmp / "opf" / "tools")
+        (tmp / "opf" / "tools" / "_opf_store.py").write_text("from _semver import _parse\n",
+                                                             encoding="utf-8")
+        for label, positive, negative, want_code, want, refused in (
+                ("bound-kill", (2, [killed, clean]), caught, 2,
+                 ("SELF-TEST CANNOT EVALUATE: positive", "opf-doctor-selftest killed at its 1140s bound"),
+                 ("SELF-TEST FAIL", "did not verify")),
+                ("refused-before-any-leg", (2, None), caught, 2, ("refused before any leg ran",),
+                 ("SELF-TEST FAIL",)),
+                ("unrelated-flip-failure-naming-the-token", (0, [clean]),
+                 (1, "unrelated assertion failed; debug path /tmp/check_versions/cache", 0.1, True, []),
+                 2, ("SELF-TEST CANNOT EVALUATE: negative",), ("SELF-TEST FAIL",)),
+                ("flip-not-caught-beside-a-bound-kill", (2, [killed]), (0, "SELF-TEST PASS", 0.1, True, []),
+                 1, ("SELF-TEST FAIL: negative", "SELF-TEST CANNOT EVALUATE: positive"), ()),
+                ("positive-failure", (1, None), caught, 1, ("SELF-TEST FAIL: positive",), ()),
+                ("clean", (0, [clean]), caught, 0, (), ("SELF-TEST",))):
+            del flips[:]
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                code = _closure_legs(tmp, {"opf-tooling-selftest": (1458, 486, 0)},
+                                     run_closure=lambda _root, positive=positive: positive,
+                                     run_one=flip_runner(negative))
+            said = out.getvalue()
+            if (code != want_code or not all(w in said for w in want) or any(r in said for r in refused)
+                    or flips != [("from check_versions import _parse\n", "opf.py", ["--self-test"],
+                                  1458)]):
+                raise AssertionError("closure/self-test-routing: {} (exit {}, want {}; flips {!r}): "
+                                     "{!r}".format(label, code, want_code, flips, said))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("RED run() exit 2 (a leg killed at its bound, a signal, a leg never launched, an incomplete "
+          "cleanup, or a run refused before any leg) -> the positive leg CANNOT EVALUATE naming each "
+          "leg and its bound or signal, self-test exit 2, never the positive-failure text; run() exit "
+          "1 -> exit 1; an unrelated flip failure naming the token -> exit 2; the flip not caught "
+          "beside a bound kill -> exit 1")
+
+
+def self_test_main():
+    """Prove the gate fails without the self-containment property (change-carries-check). The bound and
+    verdict legs run first and fast: the per-leg bounds cover each leg's table-derived need (the floor
+    term included, shown raising bounds under a launch margin lowered below it) and fit the CI job,
+    time-scaled stub legs show a flat bound below the recorded work killing a correct leg while
+    a hang is still cut off and named (descendants that stayed in the leg's process group included),
+    the post-kill cleanup closes the pipe and names what it could not complete on every path the
+    cleanup doubles script (a failed group kill, whether or not the leader kill was delivered; a drain
+    timeout or OSError; a reap timeout or OSError), and the negative-leg verdict and the self-test's own
+    exit routing are shown discriminating. The positive leg runs the gate over the real opf/ and
+    requires 0: exit 1 is a failure, and exit 2 (a leg killed at its bound or ended by a signal, a leg
+    never launched, or a run refused before any leg) is CANNOT EVALUATE naming each such leg
+    (_positive_verdict). The negative leg materializes opf/ alone, then RE-INTRODUCES the pre-move
+    upward edge (opf/tools/_opf_store.py importing `_parse` from AIQT `check_versions` instead of the
+    extracted `_semver`); with no AIQT tree reachable that import fails, so the leg must produce
+    exactly the failure the flipped import produces (a clean pass is a failure; a leg killed at its
+    bound, a signal, a harness or launch failure (rejected structurally, whatever its text), and any
+    other failure, one naming the injected import included, leave the flip unevaluated; see
+    _negative_verdict). A gate that passed the deliberately-broken copy would provide no coverage. Exit
+    1 when anything definite failed, else 2 when anything could not be evaluated (_self_test_outcome)."""
+    root = repo_root()
+    try:
+        _pack_manifest_registration_self_test()
+        _adopt_observe_registration_self_test()
+        _import_batch_registration_self_test()
+        _negative_verdict_self_test()
+        _verdict_routing_self_test()
+        _cleanup_doubles_self_test()
+        required = _bounds_self_test(root)
+        _timeout_vectors_self_test(required)
+    except AssertionError as exc:
+        print("SELF-TEST FAIL:", str(exc), file=sys.stderr)
         return 1
-    print("SELF-TEST PASS: standalone closure holds for opf/, and a re-introduced upward edge is caught.")
-    return 0
+    except (_BoundError, OSError) as exc:
+        print("SELF-TEST CANNOT EVALUATE: {} (a bound that cannot be derived or a harness error, never "
+              "a self-test failure)".format(exc), file=sys.stderr)
+        return 2
+    code = _closure_legs(root, required)
+    if code == 0:
+        print("SELF-TEST PASS: standalone closure holds for opf/, and a re-introduced upward edge is "
+              "caught.")
+    return code
 
 
 def main():
