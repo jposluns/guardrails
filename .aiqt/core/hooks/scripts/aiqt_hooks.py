@@ -1913,14 +1913,21 @@ AI_IDENTITY_RE = re.compile(
     r"(?i)\b(claude|anthropic|openai|chatgpt|codex|copilot|gemini|gpt-?[0-9o][a-z0-9.-]*)\b"
     r"|@anthropic\.com|@openai\.com")
 COMMIT_VERBS = ("commit", "merge", "cherry-pick", "am", "rebase", "revert", "commit-tree")
-# A Co-Authored-By trailer inside a single token; its value runs to the token end (the token IS the
-# quoted message, so no shell quote can appear within it). Each whitespace run is taken whole (\s*+), as in the
-# fallback's co-author context (_RAW_IDENTITY_CONTEXTS): giving a run back one character at a time cost time
-# quadratic in its length when the token ends after it (a message of a trailer name and a long run of newlines).
-# Taking a run whole changes a match only where nothing but whitespace and at most one ':' follows the trailer
-# name to the end of the token: the value found there names no AI identity and no later match can start, so the
-# reader finds the same AI identities in the same order.
-CO_AUTHOR_RE = re.compile(r"(?i)co[- ]?authored[- ]?by\s*+:?\s*+([^\n]{1,160})")
+# A Co-Authored-By trailer inside a single token; its value is up to 160 characters, to the end of its line (the
+# token IS the quoted message, so no shell quote can appear within it). The regex matches the trailer name alone
+# and reads the value in a lookahead, so a scan of its matches (_co_author_ai) resumes right after each name and
+# reaches every trailer name in the token, one inside an earlier trailer's value included: a second trailer on the
+# same line, which a regex that consumed the value passed over when its search resumed after that value (a first
+# value of 140 characters ends inside a later 'Co-authored-by: Claude' and names no AI). The only 'c' in a trailer
+# name is its first letter, so two names cannot overlap, and each place a trailer can start is read with the value
+# that the regex consuming the value found there. Each whitespace run is taken whole (\s*+), as in the fallback's
+# co-author context (_RAW_IDENTITY_CONTEXTS): giving a run back one character at a time cost time quadratic in its
+# length when the token ends after it (a message of a trailer name and a long run of newlines). Taking a run whole
+# changes a match only where nothing but whitespace and at most one ':' follows the trailer name to the end of the
+# token: the value found there names no AI identity and no later match can start, so the reader finds the same AI
+# identities. The whitespace runs after a name end before the next name starts, so a token costs time linear in
+# its length.
+CO_AUTHOR_RE = re.compile(r"(?i)co[- ]?authored[- ]?by(?=\s*+:?\s*+([^\n]{1,160}))")
 # Identity-assignment tokens (any segment): a git-identity env var, or a user.name/user.email config
 # value in the '-c user.name=VALUE' inline shape.
 GIT_ENV_RE = re.compile(r"(?is)^GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)=(.*)$")
@@ -1931,24 +1938,26 @@ USER_CONF_EQ_RE = re.compile(r"(?is)^user\.(?:name|email)=(.*)$")
 # _commit_identity_fallback). A value runs to whitespace or a shell separator/quote. The --author context
 # matches every prefix that git reads as --author (--au, --aut, --auth, --autho, --author; no other git commit
 # option starts with 'au'), with '=' or whitespace before the value, so the fallback is no weaker on that option
-# than the token reader. The co-author context takes each whitespace run whole (\s*+), since it also judges a
-# command too long to read, of any length: giving a run back one character at a time cost time quadratic in its
-# length when a quote or the end of the command follows it (a run of newlines, which no value can start with).
-# Taking a run whole changes a match only there, and the value that giving part of the run back would find
-# holds only whitespace or a ':', which names no AI identity, and covers no place the context can start, so the
-# context finds the same AI identities in the same order. The user.name context takes each whitespace run whole
-# too, since it judges a command the tokenizer cannot parse at any length up to the read limit: splitting a run
-# between two whitespace quantifiers at each space in it cost time quadratic in the run's length when no value
-# can start after it (a run of spaces before a quote that does not close). Its name is followed by a whitespace
-# run, '=' and a whitespace run, or else by a whitespace run that holds a space (the lookahead). No value starts
-# with whitespace, so either way a value starts after the whole run, where it started when the run was split,
-# and when no value starts after the '=', the '=' itself is the value, as it was when a space before it was
-# taken for the separator: the context finds the same values. The identity variable and user.name contexts judge
-# a command too long to read only when it holds none of their names (_cmtidn_identity_word), so there they find
-# no place to start.
+# than the token reader. Like CO_AUTHOR_RE, the co-author context matches the trailer name alone and reads its
+# value, up to 160 characters, in a lookahead, so the scan reaches every trailer name, one inside an earlier
+# trailer's value included, each with the value that the context consuming the value found there. It takes each
+# whitespace run whole (\s*+), since it also judges a command too long to read, of any length: giving a run back
+# one character at a time cost time quadratic in its length when a quote or the end of the command follows it (a
+# run of newlines, which no value can start with). Taking a run whole changes a match only there, and the value
+# that giving part of the run back would find holds only whitespace or a ':', which names no AI identity, and
+# covers no place the context can start, so the context finds the same AI identities. The user.name context takes
+# each whitespace run whole too, since it judges a command the tokenizer cannot parse at any length up to the read
+# limit: splitting a run between two whitespace quantifiers at each space in it cost time quadratic in the run's
+# length when no value can start after it (a run of spaces before a quote that does not close). Its name is
+# followed by a whitespace run, '=' and a whitespace run, or else by a whitespace run that holds a space (the
+# lookahead). No value starts with whitespace, so either way a value starts after the whole run, where it started
+# when the run was split, and when no value starts after the '=', the '=' itself is the value, as it was when a
+# space before it was taken for the separator: the context finds the same values. The identity variable and
+# user.name contexts judge a command too long to read only when it holds none of their names
+# (_cmtidn_identity_word), so there they find no place to start.
 _VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s\"';|&]+)"
 _RAW_IDENTITY_CONTEXTS = (
-    (re.compile(r"(?i)co[- ]?authored[- ]?by\s*+:?\s*+([^\n\"']{1,160})"), "co-author trailer"),
+    (re.compile(r"(?i)co[- ]?authored[- ]?by(?=\s*+:?\s*+([^\n\"']{1,160}))"), "co-author trailer"),
     (re.compile(r"(?i)--au(?:t(?:h(?:o(?:r)?)?)?)?[=\s]\s*" + _VALUE), "--author value"),
     (re.compile(r"(?i)\bGIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)\s*=\s*" + _VALUE), "git identity variable"),
     (re.compile(r"(?i)\buser\.(?:name|email)(?:\s*+=\s*+|(?=[^\S ]*+ )\s*+)" + _VALUE),
@@ -2009,7 +2018,25 @@ def _cmtidn_option(tok, short, long):
     return None, None
 
 
-def _commit_message_and_author_ai(tokens):
+def _co_author_ai(tok, judged):
+    """A hit label for the first Co-Authored-By trailer in the word tok whose value names an AI identity, else
+    None. Every trailer name in the word is read, one inside an earlier trailer's value included
+    (CO_AUTHOR_RE), so a word costs time linear in its length, though a word of repeated trailer names reads up
+    to about 13 times as many characters as it holds (each name is at least 12 characters long and has its own
+    value of up to 160). judged maps each word already judged for the command to its result, so a word that a
+    run line repeats from the line it is built from, or that both readings of a line hold, is scanned once."""
+    if tok in judged:
+        return judged[tok]
+    hit = None
+    for m in CO_AUTHOR_RE.finditer(tok):
+        if AI_IDENTITY_RE.search(m.group(1)):
+            hit = "co-author trailer {!r}".format(m.group(1).strip()[:80])
+            break
+    judged[tok] = hit
+    return hit
+
+
+def _commit_message_and_author_ai(tokens, judged):
     """A hit label if this git commit segment names an AI identity in an --author value or in a
     Co-Authored-By trailer (scanned as a substring of a token, so the trailer that lives inside the
     single quoted -m message token is caught), else None. Each word is read as a git commit option
@@ -2023,21 +2050,22 @@ def _commit_message_and_author_ai(tokens):
     -m --author X), a safe-direction over-deny that the maintainer chose to keep. The bare message body is
     deliberately NOT matched against the identity set: a legitimate message that merely mentions an AI product
     name (e.g. -m 'fix claude adapter') is not a recorded AI identity, and denying it would be a false positive;
-    only a trailer or an --author value records identity."""
+    only a trailer or an --author value records identity. judged holds the trailer results of the words already
+    judged for the command (_co_author_ai)."""
     n = len(tokens)
     i = 0
     while i < n:
         tok = tokens[i]
-        m = CO_AUTHOR_RE.search(tok)
-        if m and AI_IDENTITY_RE.search(m.group(1)):
-            return "co-author trailer {!r}".format(m.group(1).strip()[:80])
+        hit = _co_author_ai(tok, judged)
+        if hit is not None:
+            return hit
         kind, value = _cmtidn_option(tok, _CMTIDN_COMMIT_SHORT, _CMTIDN_COMMIT_LONG)
         if kind is not None and value is None and i + 1 < n:
             i += 1
             value = tokens[i]  # the option's value word, never read as an option
-            m = CO_AUTHOR_RE.search(value) if kind in ("message", "trailer") else None
-            if m and AI_IDENTITY_RE.search(m.group(1)):
-                return "co-author trailer {!r}".format(m.group(1).strip()[:80])
+            hit = _co_author_ai(value, judged) if kind in ("message", "trailer") else None
+            if hit is not None:
+                return hit
             if value.startswith("--author="):
                 kind, value = "author", value[len("--author="):]  # the over-deny kept above
             elif (i + 1 < n and _cmtidn_option(value, {}, _CMTIDN_COMMIT_LONG) == ("author", None)
@@ -2250,10 +2278,14 @@ _CMTIDN_RUN_BOUNDS = ("git runs a command line that could not be parsed, or comm
 # user.name context of _RAW_IDENTITY_CONTEXTS take each whitespace run whole, since giving a run back one character
 # at a time cost time quadratic in its length (about 53 s and 130 s of CPU time at this length, for a commit message
 # of a trailer name and a run of newlines and for user.name and a run of spaces before a quote that does not close,
-# against about 0.01 s with each run taken whole). A longer command raises ValueError with _CMTIDN_TOO_LONG before
-# any reading starts, and the handler's fallback denies it when it names an AI anywhere and holds a word that can
-# record an identity, or when a raw-string context finds an AI identity in it (_commit_identity_fallback), in time
-# that grows with its length.
+# against about 0.01 s with each run taken whole). CO_AUTHOR_RE also gives each trailer name in a word its own
+# value of up to 160 characters, so a word of repeated trailer names costs several times one pass over it, and
+# each distinct word is scanned once for the command (_co_author_ai): a commit message of repeated trailer names
+# in git rebase -x lines nested seven deep, each ending in a locale quote so that both readings read it, took up
+# to about 0.6 s at this length. A longer command raises ValueError with _CMTIDN_TOO_LONG before any reading
+# starts, and the handler's fallback denies it when it names an AI anywhere and holds a word that can record an
+# identity, or when a raw-string context finds an AI identity in it, in time that grows with its length, so a
+# long enough command outlasts the timeout (_commit_identity_fallback).
 _CMTIDN_READ_LIMIT = 128 << 10
 _CMTIDN_TOO_LONG = "the command is longer than the commit-identity check reads within the hook timeout"
 # An AI name as AI_IDENTITY_RE spells it but with no word boundary, so that a name the reader would find in a
@@ -2350,7 +2382,8 @@ def find_ai_authorship(command):
     bound = _CMTIDN_RUN_SCALE * len(command) + _CMTIDN_RUN_FLOOR
     unread = [False]
     try:
-        hit = _cmtidn_line_ai(command, 0, {True: [bound], False: [bound], None: [bound]}, unread, [True, False])
+        hit = _cmtidn_line_ai(command, 0, {True: [bound], False: [bound], None: [bound]}, unread, [True, False],
+                              {})
     except ValueError:
         if not unread[0]:
             raise
@@ -2360,7 +2393,7 @@ def find_ai_authorship(command):
     return hit
 
 
-def _cmtidn_line_ai(command, depth, budgets, unread, paths):
+def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
     """find_ai_authorship over one command line at a run-line nesting depth. The line is judged under both
     readings, the locale reading and the literal '$' reading (the locale flag of _segments True and False),
     once when they agree, which they do on a line holding no $". paths lists the readings whose own reading of
@@ -2374,9 +2407,10 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths):
     shared tokenizer cannot parse under a reading. Such a line is not read, but the other segments of the
     command and of every line being read still are, and so are the other run lines within the bounds; once the
     bounds that a reading charges are spent it builds no further run line, and each rebase reads its options
-    only up to the next rebase subcommand (_cmtidn_run_lines), so the cost stays linear. A parse error in the
-    command itself (depth 0) raises: at once when neither reading parses it, and otherwise after the other
-    reading has found nothing."""
+    only up to the next rebase subcommand (_cmtidn_run_lines), so the cost stays linear. judged maps each word
+    already scanned for a co-author trailer, on this line or another line of the command, to its result
+    (_co_author_ai). A parse error in the command itself (depth 0) raises: at once when neither reading parses
+    it, and otherwise after the other reading has found nothing."""
     readings = []  # (the readings that read the line so, its segments)
     error = None
     for locale in (True, False):
@@ -2407,7 +2441,7 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths):
                 return hit
             subs = list(_cmtidn_git_commands(tokens))
             if any(tokens[k] in COMMIT_VERBS for k in subs):
-                hit = _commit_message_and_author_ai(tokens)
+                hit = _commit_message_and_author_ai(tokens, judged)
                 if hit is not None:
                     return hit
             rebases = [k for k in subs if tokens[k] == "rebase"]
@@ -2423,7 +2457,8 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths):
                         unread[0] = True  # left to the conservative fallback unless something read sets an identity
                         if depth >= _CMTIDN_RUN_DEPTH or all(spent):
                             break
-                    hit = _cmtidn_line_ai(line, depth + 1, budgets, unread, [key for key in keys if key is not None])
+                    hit = _cmtidn_line_ai(line, depth + 1, budgets, unread, [key for key in keys if key is not None],
+                                          judged)
                     if hit is not None:
                         return hit
     if error is not None and depth == 0:
@@ -2458,8 +2493,12 @@ def _commit_identity_fallback(command, error):
     is judged by the raw-string contexts, as a command the tokenizer cannot parse is, so an AI --author value or
     co-author trailer in it denies when git runs under another name (gi?, "$G"); a heredoc that writes a file
     naming an AI product, with no trailer, --author value or identity assignment in it, is allowed. This
-    judgement has no length bound, so its cost grows with the command's length: on the costliest shapes
-    measured it took up to about 0.2 s of CPU time at 1,048,576 characters and 3.6 s at 16,777,216.
+    judgement has no length bound, so its cost grows with the command's length. The costliest shapes measured
+    are commands made of repeated co-author trailer names, since the co-author context reads each name with its
+    own value of up to 160 characters: they took up to about 0.5 s of CPU time at 1,048,576 characters, 9.3 s
+    at 16,777,216 and 13.5 s at 25,165,824, so a command of about 17 to 24 MiB or longer can outlast the
+    10-second hook timeout. The platform contract this file records (the module docstring) does not say that a
+    hook stopped at its timeout refuses the call, so such a command may run with no deny from this check.
     With a run line left unread it first denies when an AI identity appears ANYWHERE in the
     command once every backslash-newline, backslash and quote is removed, since quoting or escaping in the
     unread line can split or build an option name or value that no raw-string context sees (--"auth"=...,

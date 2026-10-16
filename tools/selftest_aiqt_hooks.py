@@ -11059,6 +11059,117 @@ def _main_isolated(monitor):
                                         _ci_reason[-200:],
                                         "; the longer command was not run" if _ci_size == 16 << 10 else ""))
                     break
+        # Every co-author trailer name in a word is read, each with its own value of up to 160 characters, where the
+        # reader read only the first trailer name of a word and the raw-string scan resumed its search after each
+        # value. A second trailer on the same line after a first value of 140 characters, which ends inside it
+        # (ci-wr174), one after more than 160 characters of a first value (ci-wr175) and one on a later line of the
+        # message (ci-wr176) deny through the reader, with the second trailer's value as the hit; trailers that name
+        # no AI identity allow (ci-wr-c52, ci-wr-c53). The form of ci-wr174 with an -F process substitution, which
+        # the tokenizer cannot parse (ci-wr177), and given to a git spelled gi? and padded with spaces past the read
+        # limit (ci-wr178) deny through the raw-string scan, with a reason that names the second trailer's value.
+        # Each of the five deny vectors allowed while the reader read only the first trailer name of a word and the
+        # raw-string scan resumed after each value.
+        _ci_overlap = "-m 'co-authored-by: " + "x" * 140 + " co-authored-by: Claude <c@x>'"
+        for _ci_label, _ci_cmd in (
+                ("(ci-wr174) an AI co-author trailer inside the 160-character value of an earlier trailer on the "
+                 "same line denies", "git commit " + _ci_overlap),
+                ("(ci-wr175) an AI co-author trailer after more than 160 characters of an earlier trailer's value "
+                 "denies", "git commit -m 'co-authored-by: " + "x" * 200 + " co-authored-by: Claude <c@x>'"),
+                ("(ci-wr176) an AI co-author trailer on the line after another trailer of the same message denies",
+                 "git commit -m 'fix\n\nCo-authored-by: Alice <a@x>\nCo-authored-by: Claude <c@x>'")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+            _ci_got = _ci_find(_ci_cmd)
+            if _ci_got != "co-author trailer 'Claude <c@x>'":
+                failures.append("{}: the reader gave {!r} (want \"co-author trailer 'Claude <c@x>'\")"
+                                .format(_ci_label, _ci_got))
+        ciexpect("(ci-wr-c52) a co-author trailer inside an earlier trailer's value that names no AI identity allows",
+                 "git commit -m 'co-authored-by: " + "x" * 140 + " co-authored-by: Alice <a@x>'", "allow")
+        ciexpect("(ci-wr-c53) co-author trailers on two lines of a message that name no AI identity allow",
+                 "git commit -m 'fix\n\nCo-authored-by: Alice <a@x>\nCo-authored-by: Bob <b@x>'", "allow")
+        _ci_gi = "/usr/bin/gi? commit " + _ci_overlap
+        _ci_denies.append("git commit " + _ci_overlap + " -F <(echo x)")
+        for _ci_label, _ci_cmd in (
+                ("(ci-wr177) the form of ci-wr174 with an -F process substitution, which the tokenizer cannot parse, "
+                 "denies through the raw-string scan", _ci_denies[-1]),
+                ("(ci-wr178) the form of ci-wr174 given to a git spelled gi? and padded past the read limit denies "
+                 "through the raw-string scan", _ci_gi + " " * (aiqt_hooks._CMTIDN_READ_LIMIT + 202 - len(_ci_gi)))):
+            _ci_code, _ci_out = cig({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                     "tool_input": {"command": _ci_cmd}})[:2]
+            _ci_got = _reduce_result(_ci_code, _ci_out)
+            _ci_reason = ((_ci_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+            if (_ci_got != "deny" or "could not be read in full" not in _ci_reason
+                    or "(co-author trailer 'Claude <c@x>')" not in _ci_reason):
+                failures.append("{}: over {} characters expected deny with a reason from the raw-string scan "
+                                "naming \"co-author trailer 'Claude <c@x>'\", got {} with the reason {!r}".format(
+                                    _ci_label, len(_ci_cmd), _ci_got, _ci_reason[-200:]))
+        # The co-author regexes find, at every place a trailer can start, the value that the earlier regexes, which
+        # consumed the value and gave each whitespace run back one character at a time, found there, whenever it
+        # names an AI identity, and the user.name context finds the same matches as the earlier one, which split a
+        # whitespace run between its two whitespace quantifiers (ci-wr-regex-equiv). Over every string of up to four
+        # of the co-author words below: the AI-naming values, with their places, that CO_AUTHOR_RE and the co-author
+        # context of _RAW_IDENTITY_CONTEXTS find equal those that the two earlier co-author regexes find when
+        # matched at each 'c' or 'C' of the string; the reader's trailer result is a hit exactly when one of those
+        # values is, and it is the earlier reader's hit, from its first match only, whenever that hit names an AI
+        # identity. Over every string of up to five of the user.name words, the user.name context finds the same
+        # matches, places and values as the earlier one. The floors keep the check from passing on strings that
+        # hold no such value.
+        _ci_contexts = {_ci_label: _ci_regex for _ci_regex, _ci_label in aiqt_hooks._RAW_IDENTITY_CONTEXTS}
+        _ci_pairs = ((re.compile(r"co[- ]?authored[- ]?by\s*:?\s*([^\n]{1,160})", re.IGNORECASE),
+                      aiqt_hooks.CO_AUTHOR_RE),
+                     (re.compile(r"co[- ]?authored[- ]?by\s*:?\s*([^\n\"']{1,160})", re.IGNORECASE),
+                      _ci_contexts["co-author trailer"]))
+        _ci_user = (re.compile(r"\buser\.(?:name|email)\s*[= ]\s*" + aiqt_hooks._VALUE, re.IGNORECASE),
+                    _ci_contexts["user.name/user.email value"])
+        _ci_ai = aiqt_hooks.AI_IDENTITY_RE
+
+        def _ci_strings(words, most):
+            """Every string of up to most of words, the empty string included."""
+            level = [""]
+            yield ""
+            for _ in range(most):
+                level = [text + word for text in level for word in words]
+                yield from level
+
+        _ci_bad = []
+        # the AI-naming values the earlier co-author regexes find, the reader hits the earlier reader missed, and
+        # the user.name matches
+        _ci_counts = [0, 0, 0]
+        for _ci_text in _ci_strings(("co-authored-by", "Co-Authored-By: ", "coauthored by", ":", " ", "\n", "\t",
+                                     "\xa0", '"', "'", "Claude", "Co-authored-by:Claude", "x" * 140 + " ", "gpt4",
+                                     "_"), 4):
+            _ci_starts = [k for k, ch in enumerate(_ci_text) if ch in "cC"]
+            _ci_named = []
+            for _ci_old, _ci_cur in _ci_pairs:
+                _ci_want = []
+                for _ci_k in _ci_starts:
+                    _ci_m = _ci_old.match(_ci_text, _ci_k)
+                    if _ci_m and _ci_ai.search(_ci_m.group(1)):
+                        _ci_want.append((_ci_k, _ci_m.group(1)))
+                _ci_got = [(m.start(), m.group(1)) for m in _ci_cur.finditer(_ci_text) if _ci_ai.search(m.group(1))]
+                if _ci_got != _ci_want:
+                    _ci_bad.append((_ci_cur.pattern, _ci_text, _ci_got[:2], _ci_want[:2]))
+                _ci_counts[0] += len(_ci_want)
+                _ci_named.append(_ci_want)
+            _ci_hit = aiqt_hooks._co_author_ai(_ci_text, {})
+            _ci_first = _ci_pairs[0][0].search(_ci_text)
+            if (_ci_hit is not None) != bool(_ci_named[0]):
+                _ci_bad.append(("the reader", _ci_text, _ci_hit, _ci_named[0][:2]))
+            elif _ci_first and _ci_ai.search(_ci_first.group(1)):
+                if _ci_hit != "co-author trailer {!r}".format(_ci_first.group(1).strip()[:80]):
+                    _ci_bad.append(("the earlier reader's hit", _ci_text, _ci_hit, _ci_first.group(1)))
+            elif _ci_hit is not None:
+                _ci_counts[1] += 1
+        for _ci_text in _ci_strings(("user.name", "user.email", "=", " ", "\t", '"', "'", "Claude", ";", "x"), 5):
+            _ci_want = [(m.span(), m.group(1)) for m in _ci_user[0].finditer(_ci_text)]
+            _ci_got = [(m.span(), m.group(1)) for m in _ci_user[1].finditer(_ci_text)]
+            if _ci_got != _ci_want:
+                _ci_bad.append((_ci_user[1].pattern, _ci_text, _ci_got[:2], _ci_want[:2]))
+            _ci_counts[2] += len(_ci_want)
+        if _ci_bad or _ci_counts[0] < 10000 or _ci_counts[1] < 100 or _ci_counts[2] < 1000:
+            failures.append("(ci-wr-regex-equiv) {} differences from the earlier co-author and user.name regexes, "
+                            "first {!r}, over {} AI-naming co-author values, {} reader hits that the earlier reader "
+                            "missed and {} user.name matches (want none, and at least 10000, 100 and 1000)".format(
+                                len(_ci_bad), _ci_bad[:3], _ci_counts[0], _ci_counts[1], _ci_counts[2]))
         # A command longer than _CMTIDN_READ_LIMIT characters is not read, so no reading of it can outlast the hook
         # timeout: find_ai_authorship raises ValueError with _CMTIDN_TOO_LONG before the tokenizer is called, and
         # the handler's fallback, whose own cost grows with the command's length (_commit_identity_fallback), denies
