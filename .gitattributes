@@ -690,6 +690,7 @@ tools/check_opf_standalone_closure.py text eol=lf
 tools/check_overclaim.py text eol=lf
 tools/check_portability.py text eol=lf
 tools/check_python_floor.py text eol=lf
+tools/check_python_host_pin.py text eol=lf
 tools/check_python_launcher_isolation.py text eol=lf
 tools/check_record_drift.py text eol=lf
 tools/check_record_sections.py text eol=lf
