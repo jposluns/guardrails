@@ -2067,9 +2067,9 @@ def diff_source_pretool(data):
     except ValueError:
         return _diff_source_fallback(command)
     # Each backquote substitution is read as a command line of its own, and a possible producer is judged
-    # with every segment read past its leading reserved and grouping words (_command_lines), so a producer
-    # inside a compound or a substitution is judged as the bare form is; a stage's pipe neighbour is always
-    # taken from its own line. The possible-producer scope itself reads every word of the unread segment.
+    # with every segment read past its leading reserved and grouping words (_command_lines); the lexer
+    # splits an unquoted $(...) into segments of its own. A stage's pipe neighbour is always taken from its
+    # own line. The possible-producer scope itself reads every word of the unread segment.
     unread = [segments] + _substitution_lines(segments)
     possibles = [(line, index, seg) for raw_line, line in zip(unread, _command_lines(segments))
                  for index, (raw_seg, seg) in enumerate(zip(raw_line, line)) if _is_possible_producer(raw_seg)]
@@ -2469,8 +2469,8 @@ def bash_absolute_paths(data):
     # unparseable construct is left to the human's own permission flow (a disclosed residual), rather than
     # over-asking on every such command. This is the conservative-floor boundary, not a proof of safety.
     # Each segment is read past its leading reserved and grouping words, and each backquote substitution as
-    # a command line of its own (_command_flow), so a 'then cd rel' or a redirect inside a double-quoted
-    # substitution is judged as the bare form is.
+    # a command line of its own (_command_flow), so the cd of 'then cd rel' is read as a cd, and a redirect
+    # inside a backquote substitution, double-quoted too, is read on that substitution's line.
     segments = _command_flow(_lex_command(command, partial=True)[0])
     reasons = []       # relative/opaque cd or NON-destructive redirect: an allow-note convention nudge
     deny_reasons = []  # a DESTRUCTIVE truncating redirect to a relative/opaque target: fail-closed deny
@@ -9163,8 +9163,9 @@ def commit_msg_subst(data):
     except ValueError:
         return _commit_msg_subst_fallback(command)
     # Each segment is read past its leading reserved and grouping words, and each backquote substitution as
-    # a command line of its own (_command_flow), so a git commit inside a compound or a substitution is
-    # judged as the bare form is.
+    # a command line of its own (_command_flow), so a git commit after a leading reserved or grouping word
+    # or inside a backquote substitution is read as a git commit; the lexer splits an unquoted $(...) into
+    # segments of its own.
     for seg in _command_flow(segments):
         hit = _commit_msg_subst_hit(seg)
         if hit is None:
