@@ -464,15 +464,21 @@ names it as drafted. The hook reads the draft once, by its absolute path, under 
 split on LF only, as `git apply` reads a patch. Unlike a brief, a draft under `/proc` or `/dev` (such
 as `/dev/shm`) is not withheld, since the census is made from what the hook itself reads there.
 
-The draft is a git diff (`git diff`, `git diff --cached` or `git format-patch` output), read by git's
-own grammar, as `git mailinfo` and `git apply` read one. A file section opens at a `diff --git` line,
-or at a `---` line naming a path, which a `+++` line and a hunk header must follow. Each hunk is
-consumed by the line counts in its own header, so an added line that reads `++ b/x` (shown as
-`+++ b/x`) is content, not a header, and by git's exact `\ No newline at end of file` marker wherever
-one follows a context, removed or added line, at most once for each side of the file (a marker after
-a context line marks both sides). A line after a hunk's counted lines and its marker is not part of
-the hunk: as `git apply` reads it, it is prose unless it opens a section or begins as a diff header or
-a marker does, so a hunk with extra lines after its counted ones is not refused for them. A section
+The draft is a git diff (`git diff`, `git diff --cached` or `git format-patch` output). The census
+reads it conservatively, as the diff output git writes by default: a form that `git apply` accepts
+but git does not write, such as a localized no-newline marker or a marker that more added lines
+follow, is refused rather than read. A file section opens at a `diff --git` line, or at a
+`---` line naming a path, which a `+++` line and a hunk header must follow. Each hunk is consumed by
+the line counts in its own header, so an added line that reads `++ b/x` (shown as `+++ b/x`) is
+content, not a header. Git's exact `\ No newline at end of file` marker is read only where git writes
+one, after the last line of each side of the file it marks. A marker after a removed line marks the
+old side, after an added line the new side, and after a context line both. So a marker is read only
+where the hunk header's count for each side it marks is met, and only in the section's last hunk. A
+line after a hunk's counted lines and its marker is not part of the hunk: as `git apply` reads it, it
+is prose unless it opens a section or begins as a diff header or a marker does, so a hunk with extra
+lines after its counted ones is not refused for them. The exception is a line right after the
+counted lines, or right after their marker, that begins with a backslash, with or without a space
+after it: git writes nothing there but its exact marker, so any other such line is refused. A section
 completes with a hunk, a binary marker (`Binary files ... differ` or `GIT binary patch`), or a
 creation, deletion, mode change, rename or copy header. A section names at most one old path (its
 `---`, `rename from` and `copy from` headers) and one new path (its `+++`, `rename to` and `copy to`
@@ -512,8 +518,13 @@ path always opens a section.
   headers), an unreadable quoted name, a hunk header that cannot be read, a hunk that ends before its
   header's counts are met or holds more lines for one side than its header counts while the other
   side's count is not yet met, a hunk line beginning with a backslash that is not git's exact
-  `\ No newline at end of file` marker after a context, removed or added line, a second marker for
-  one side of the file, and a diff header or marker line outside a section.
+  `\ No newline at end of file` marker after a context, removed or added line, a marker before the
+  last line its hunk header counts for a side it marks (such as a marker after a removed line that
+  another removed line follows, or one after a context line in the middle of a hunk, as `git diff -w`
+  can write), a hunk after a marker in its section, any other line beginning with a backslash right
+  after a hunk's counted lines or their marker, and a diff header or marker line outside a section.
+  Where a `diff --git` line names its paths under `b/` and then `a/`, as `git diff -R` writes it, the
+  reason names that swap.
 - A header or hunk line that ends in a carriage return before its LF is withheld as `UNVERIFIABLE:`,
   with a reason naming CRLF, since a header's names would end in the return. This covers a draft
   saved with CRLF line ends, which must be written again with LF line ends, and a draft holding a

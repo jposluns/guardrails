@@ -13043,12 +13043,16 @@ def _rdp_gitlink_entry(repo, relpath, want):
 
 
 # The draft path census. A worker draft is a git diff; the census reads the paths its headers name, never
-# its prose, and reads the draft by git's own grammar, as git mailinfo and git apply do. A file section
-# opens at a `diff --git` line, or at a `--- ` line naming a path, which a `+++ ` line and a hunk header
-# must follow; its extended headers are the git header lines below; each hunk is consumed by the line
-# counts of its own header, so an added line that reads `++ b/x` (shown as `+++ b/x`) is content, never a
-# header, and by git's exact `\ No newline at end of file` marker wherever one follows a context, removed
-# or added line, at most once for each side of the file (a marker after a context line marks both). A
+# its prose, and reads the draft conservatively, as the diff output git writes by default: a form git
+# apply accepts but git does not write (a localized marker, or a marker that more added lines follow) is
+# refused, not read. A file section opens at a `diff --git` line, or at a `--- ` line naming a
+# path, which a `+++ ` line and a hunk header must follow; its extended headers are the git header lines
+# below; each hunk is consumed by the line counts of its own header, so an added line that reads `++ b/x`
+# (shown as `+++ b/x`) is content, never a header, and by git's exact `\ No newline at end of file` marker
+# where git writes one: after the last line of each side of the file it marks (a marker after a removed
+# line marks the old side, after an added line the new side, after a context line both), so only where
+# its hunk header's count for each of those sides is met, and with no hunk after it in its section. Any
+# other line beginning with a backslash, in a hunk or right after its counted lines, is refused. A
 # section completes with a hunk, a binary marker, or a creation, deletion, mode change, rename or copy
 # header; one that does not (a draft cut short inside it) cannot be read. A section names at most one old
 # path (its `---`, `rename from` and `copy from` headers) and one new path (its `+++`, `rename to` and
@@ -13062,7 +13066,8 @@ def _rdp_gitlink_entry(repo, relpath, want):
 # marker does, which is never prose: a truncated or mangled section would otherwise drop out of the census
 # unseen. A header or hunk line that ends in a carriage return before its LF (a CRLF draft, or a hunk of a
 # CRLF file) cannot be read either, since a header's names would carry the return, and neither can a
-# transfer-encoded mailbox part or a submodule shown inline.
+# transfer-encoded mailbox part or a submodule shown inline. A `diff --git` line naming its paths under
+# b/ and then a/, as git diff -R writes it, is refused with a reason naming that swap.
 _RDP_DIFF_EXTENDED = ("old mode ", "new mode ", "deleted file mode ", "new file mode ", "similarity index ",
                       "dissimilarity index ", "index ", "rename from ", "rename to ", "copy from ", "copy to ")
 # The extended headers that complete a section with no hunk, and the pairs git writes together.
@@ -13143,11 +13148,12 @@ def _rdp_diff_name(value, prefix):
     return name[len(prefix):]
 
 
-def _rdp_diff_git_line(rest):
-    """The one path a `diff --git` line names twice, rest being the text after `diff --git `: the a/ name
-    and the b/ name, both C-quoted or both bare (as git writes one path twice), must be the same path; None
-    otherwise (two names, which git writes only with rename or copy headers, or a line that cannot be
-    read)."""
+def _rdp_diff_git_line(rest, prefixes=("a/", "b/")):
+    """The one path a `diff --git` line names twice, rest being the text after `diff --git `: the name
+    under the first of prefixes (git's a/) and the name under the second (b/), both C-quoted or both bare
+    (as git writes one path twice), must be the same path; None otherwise (two names, which git writes only
+    with rename or copy headers, or a line that cannot be read)."""
+    first_prefix, second_prefix = prefixes
     if rest.startswith('"'):
         got = _rdp_diff_quoted(rest, 0)
         if got is None or rest[got[1]:got[1] + 2] != ' "':
@@ -13164,17 +13170,17 @@ def _rdp_diff_git_line(rest):
             return None
     else:
         return None
-    if not first.startswith("a/") or not second.startswith("b/") or first[2:] != second[2:] \
-            or not first[2:]:
+    if not first.startswith(first_prefix) or not second.startswith(second_prefix) \
+            or first[len(first_prefix):] != second[len(second_prefix):] or not first[len(first_prefix):]:
         return None
-    return first[2:]
+    return first[len(first_prefix):]
 
 
-def _rdp_diff_git_names(rest, old, new):
-    """Whether a `diff --git` line, rest being the text after `diff --git `, names a/old and then b/new,
-    each C-quoted or bare, as git writes the line for that pair; with both names known, a name holding a
-    space or ` b/` reads one way only."""
-    for name, gap in (("a/" + old, " "), ("b/" + new, "")):
+def _rdp_diff_git_names(rest, old, new, prefixes=("a/", "b/")):
+    """Whether a `diff --git` line, rest being the text after `diff --git `, names old and then new under
+    prefixes (git's a/ and b/), each C-quoted or bare, as git writes the line for that pair; with both names
+    known, a name holding a space or ` b/` reads one way only."""
+    for name, gap in ((prefixes[0] + old, " "), (prefixes[1] + new, "")):
         if rest.startswith('"'):
             got = _rdp_diff_quoted(rest, 0)
             if got is None or got[0] != name:
@@ -13190,6 +13196,22 @@ def _rdp_diff_git_names(rest, old, new):
     return rest == ""
 
 
+def _rdp_diff_swapped(line, old, new):
+    """The reason a `diff --git` line cannot be read where it names its paths under b/ and then a/, git's
+    default prefixes swapped, as git diff -R writes them: the one path it names twice when old and new (the
+    paths the section's other headers name) are both None, otherwise old and then new; None when the line
+    does not read so."""
+    rest = line[len("diff --git "):]
+    if old is None and new is None:
+        swapped = _rdp_diff_git_line(rest, ("b/", "a/")) is not None
+    else:
+        swapped = _rdp_diff_git_names(rest, old or new, new or old, ("b/", "a/"))
+    if not swapped:
+        return None
+    return ("the header {!r} names its paths under b/ and then a/, git's default prefixes swapped, as git "
+            "diff -R writes them".format(line[:80]))
+
+
 def _rdp_diff_crlf(line):
     """The reason a draft header or hunk line that ends in a carriage return before its LF (a CRLF line end)
     cannot be read, or None for any other line."""
@@ -13199,24 +13221,29 @@ def _rdp_diff_crlf(line):
             "draft saved with CRLF line ends, or a hunk of a file whose lines end in CRLF".format(line[:80]))
 
 
-def _rdp_diff_marker(line, after, marked):
-    """None when line, a hunk line that begins with a backslash, is git's no-newline marker in its place:
-    after a context, removed or added line (after, the first character of the line before it, None after
-    a hunk header), and for a side of the file not already marked in this section (marked, a set this
-    adds the sides to); otherwise the reason it cannot be read."""
+def _rdp_diff_marker(line, after, left, inside):
+    """None when line, which begins with a backslash and stands among a hunk's counted lines (inside) or
+    right after them, is git's no-newline marker in its place: after a context, removed or added line
+    (after, the first character of the line before it, None after a hunk header), and after the last line
+    the hunk header counts for each side of the file it marks (left, the lines still to come for each
+    side), as git writes one only after a side's last line; otherwise the reason it cannot be read."""
     why = _rdp_diff_crlf(line)
     if why is not None:
         return why
-    if line != _RDP_DIFF_NO_NEWLINE:
+    if line != _RDP_DIFF_NO_NEWLINE and inside:
         return ("the hunk line {!r} is no context, removed or added line, and not git's no-newline marker "
                 "{!r}".format(line[:80], _RDP_DIFF_NO_NEWLINE))
+    if line != _RDP_DIFF_NO_NEWLINE:
+        return ("the line {!r} right after a hunk's counted lines begins with a backslash and is not git's "
+                "no-newline marker {!r}, the only such line git writes there".format(
+                    line[:80], _RDP_DIFF_NO_NEWLINE))
     if after not in _RDP_DIFF_MARKS:
         return "a no-newline marker follows no context, removed or added line"
-    sides = _RDP_DIFF_MARKS[after]
-    if marked.intersection(sides):
-        return "a no-newline marker marks a side of the file already marked ({})".format(
-            " and ".join(s for s in sides if s in marked))
-    marked.update(sides)
+    early = [side for side in _RDP_DIFF_MARKS[after] if left[side] > 0]
+    if early:
+        return ("a no-newline marker stands before the last line its hunk header counts for the {} {} of the "
+                "file, and git writes one only after the last line of each side it marks".format(
+                    " and ".join(early), "sides" if len(early) > 1 else "side"))
     return None
 
 
@@ -13225,13 +13252,18 @@ def _rdp_diff_hunks(lines, i):
     counts (a context line counts in both, an empty line as context, as git apply reads one, and a
     no-newline marker in neither) and by the marker that may follow its last counted line; (None, reason)
     for a malformed or truncated hunk, a line that begins with a backslash and is not git's exact marker
-    after a context, removed or added line, a second marker for one side of the file, or a line that ends
-    in a carriage return."""
-    marked = set()
+    after a context, removed or added line, a marker before the last line its hunk header counts for a
+    side of the file it marks, a hunk after a marker in its section (git writes one only in a section's
+    last hunk), or a line that ends in a carriage return."""
+    marked = False
     while i < len(lines) and lines[i].startswith("@@ "):
         why = _rdp_diff_crlf(lines[i])
         if why is not None:
             return (None, why)
+        if marked:
+            return (None, "the hunk header {!r} follows a no-newline marker in its section, and git writes one "
+                    "only after the last line of each side it marks, in a section's last hunk".format(
+                        lines[i][:80]))
         match = _RDP_DIFF_HUNK.match(lines[i])
         if match is None:
             return (None, "the hunk header {!r} cannot be read".format(lines[i][:80]))
@@ -13253,9 +13285,10 @@ def _rdp_diff_hunks(lines, i):
             elif mark == "+":
                 new -= 1
             elif mark == "\\":
-                why = _rdp_diff_marker(lines[i], after, marked)
+                why = _rdp_diff_marker(lines[i], after, dict(old=old, new=new), True)
                 if why is not None:
                     return (None, why)
+                marked = True
             else:
                 return (None, "the hunk line {!r} is no context, removed or added line".format(lines[i][:80]))
             if old < 0 or new < 0:
@@ -13263,9 +13296,10 @@ def _rdp_diff_hunks(lines, i):
             after = mark
             i += 1
         while i < len(lines) and lines[i].startswith("\\"):
-            why = _rdp_diff_marker(lines[i], after, marked)
+            why = _rdp_diff_marker(lines[i], after, dict(old=old, new=new), False)
             if why is not None:
                 return (None, why)
+            marked = True
             after = "\\"
             i += 1
     return (i, None)
@@ -13278,8 +13312,9 @@ def _rdp_diff_section(lines, i):
     a section that ends with no hunk, binary marker, or creation, deletion, mode, rename or copy header, a
     rename, copy or mode header without its pair, a `diff --git` line naming two paths with no rename or
     copy header, path headers naming two old or two new paths, a `diff --git` line that does not name the
-    old and new paths the other headers name, a malformed or truncated hunk, or a header or hunk line
-    ending in a carriage return."""
+    old and new paths the other headers name (one naming them under b/ and then a/, as git diff -R writes
+    it, with a reason that says so), a malformed or truncated hunk, or a header or hunk line ending in a
+    carriage return."""
     line = lines[i]
     git = line.startswith("diff --git ")
     heads, sides, complete = set(), dict(old=set(), new=set()), False
@@ -13343,11 +13378,12 @@ def _rdp_diff_section(lines, i):
     if old is None and new is None:
         name = _rdp_diff_git_line(line[len("diff --git "):]) if git else None
         if name is None:
-            return (None, None, "the header {!r} cannot be read as one path".format(line[:80]))
+            why = _rdp_diff_swapped(line, None, None) if git else None
+            return (None, None, why or "the header {!r} cannot be read as one path".format(line[:80]))
         return (i, {name}, None)
     if git and not _rdp_diff_git_names(line[len("diff --git "):], old or new, new or old):
-        return (None, None, "the section {!r} names {} in its ---, +++, rename or copy headers, which disagree "
-                "with its diff --git line, as git never writes them".format(
+        return (None, None, _rdp_diff_swapped(line, old, new) or "the section {!r} names {} in its ---, +++, "
+                "rename or copy headers, which disagree with its diff --git line, as git never writes them".format(
                     line[:80], _rdp_listing(sorted({old, new} - {None}))))
     if "copy to " in heads and "rename to " not in heads:
         return (i, {new}, None)

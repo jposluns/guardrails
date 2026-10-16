@@ -1355,7 +1355,11 @@ def _rdp_draft_cases(base):
     # the cause its reason names: a combined diff, git's --no-prefix and mnemonic prefixes, a --- line with
     # no +++ line, a truncated hunk, a hunk line that is no context, removed or added line, an unreadable
     # hunk header, a hunk with more removed lines than it counts, a diff --git line naming two paths with no
-    # rename or copy header, and a quoted name with an unknown escape. The first row is the control.
+    # rename or copy header, a quoted name with an unknown escape, and diff --git lines naming their paths
+    # under b/ and then a/ as git diff -R writes them, above a mode change (bare and C-quoted), a binary
+    # change and a pure rename, none of which has a --- line to name the prefix: the reason names the swap.
+    # The first row is the control.
+    swapped = "names its paths under b/ and then a/, git's default prefixes swapped, as git diff -R writes them"
     bad_sections = (
         ("", "(control)"),
         ("diff --cc src/a.py\nindex 1,2..3\n--- a/src/a.py\n+++ b/src/a.py\n@@@ -1,1 -1,1 +1,1 @@@\n- a = 1\n"
@@ -1376,7 +1380,13 @@ def _rdp_draft_cases(base):
          "+a = 2\n+b = 2\n", "holds more lines than its header counts"),
         ("diff --git a/src/a.py b/src/d.py\nold mode 100644\nnew mode 100755\n", "cannot be read as one path"),
         ('diff --git "a/src/a\\q.py" "b/src/a\\q.py"\nold mode 100644\nnew mode 100755\n',
-         "cannot be read as one path"))
+         "cannot be read as one path"),
+        ("diff --git b/src/a.py a/src/a.py\nold mode 100755\nnew mode 100644\n", swapped),
+        ('diff --git "b/caf\\303\\251.sh" "a/caf\\303\\251.sh"\nold mode 100755\nnew mode 100644\n', swapped),
+        ("diff --git b/src/c.png a/src/c.png\nindex 1592e5c..8352675 100644\n"
+         "Binary files b/src/c.png and a/src/c.png differ\n", swapped),
+        ("diff --git b/src/b.py a/old.txt\nsimilarity index 100%\nrename from src/b.py\nrename to old.txt\n",
+         swapped))
     check("rdp/draft-unparseable-unverifiable", _read_as([(real + s, w) for s, w in bad_sections], "bad"),
           [("allow", False)] + [("unverifiable", True)] * (len(bad_sections) - 1))
     # A draft that names no file in a diff header: prose with a separator and a diffstat, or nothing at all.
@@ -1538,32 +1548,56 @@ def _rdp_draft_cases(base):
     check("rdp/draft-stray-marker-unverifiable", ("\n-old\ndiff --git a/src/a.py" in real,
                                                   _read_as(stray_marks, "nomark")),
           (True, [("allow", False)] * 2 + [("unverifiable", True)] * (len(stray_marks) - 2)))
-    # Inside a hunk and after its counted lines, only git's exact marker is read, after a context, removed
-    # or added line, at most once for each side of the file (a marker after a context line marks both):
-    # a section for src/a.py appended to the valid draft is read with each side marked once (the
-    # controls) and refused with any other backslash line, a localized marker, a marker after the hunk
-    # header or after another marker, and a second marker for one side, inside or after the hunk.
+    # Inside a hunk and right after its counted lines, only git's exact marker is read, and only where git
+    # writes one: after the last line its hunk header counts for each side of the file it marks (a marker
+    # after a removed line marks the old side, after an added line the new side, after a context line
+    # both), in the section's last hunk. A section for src/a.py appended to the valid draft is read with
+    # each side marked after its last line (the controls; the third, an added-line marker that a removed
+    # line follows, shows that a marker bounds only the sides it marks) and refused with any other
+    # backslash line in the hunk or right after its counted lines or their marker, a localized marker, a
+    # marker after the hunk header or after another marker, a marker before the last line of a side it
+    # marks (each kind, and with a second marker for that side after it), and a hunk after a marker (one
+    # among the earlier hunk's counted lines, with and without a marker in the later hunk, or one right
+    # after them).
+    # Each row's section alone was run through real git apply --check against the file its old side
+    # describes. The controls apply. Of the rows that check the marker's place, git applies those with a
+    # backslash line right after the counted lines or their marker, a context marker that only added
+    # lines follow, and an added-line marker that more added lines follow (only the old side must match
+    # the file). It refuses a removed-line marker that another removed line follows and a context marker
+    # that a removed line follows as not applying, and applies the same hunks without their markers. It
+    # refuses each hunk after a marker too, but also with the markers removed, so that refusal does not
+    # turn on the marker.
     a_head = "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n"
-    not_exact = "not git's no-newline marker"
+    not_exact = "is no context, removed or added line, and not git's no-newline marker"
+    after_hunk = "right after a hunk's counted lines begins with a backslash and is not git's no-newline marker"
     no_line = "follows no context, removed or added line"
-    twice = "a side of the file already marked"
+    early = "stands before the last line its hunk header counts for the {} of the file"
+    later = "follows a no-newline marker in its section"
     bad_marks = (
         ("@@ -1 +1 @@\n-a = 1\n" + no_nl + "+a = 2\n" + no_nl, "(control)"),
         ("@@ -1,2 +1,2 @@\n-a = 1\n+a = 2\n b\n" + no_nl, "(control)"),
+        ("@@ -1,2 +1 @@\n-a = 1\n+a = 2\n" + no_nl + "-b\n", "(control)"),
         ("@@ -1 +1 @@\n-a = 1\n\\ garbage\n+a = 2\n", not_exact),
-        ("@@ -1 +1 @@\n-a = 1\n+a = 2\n\\ garbage\n", not_exact),
-        ("@@ -1 +1 @@\n-a = 1\n+a = 2\n\\No newline at end of file\n", not_exact),
+        ("@@ -1 +1 @@\n-a = 1\n+a = 2\n\\ garbage\n", after_hunk),
+        ("@@ -1 +1 @@\n-a = 1\n+a = 2\n\\No newline at end of file\n", after_hunk),
+        ("@@ -1 +1 @@\n-a = 1\n+a = 2\n" + no_nl + "\\x not a marker\n", after_hunk),
         ("@@ -1 +1 @@\n-a = 1\n\\ Kein Zeilenumbruch am Dateiende.\n+a = 2\n", not_exact),
         ("@@ -1 +1 @@\n" + no_nl + "-a = 1\n+a = 2\n", no_line),
         ("@@ -1 +1 @@\n-a = 1\n" + no_nl + no_nl + "+a = 2\n", no_line),
         ("@@ -1 +1 @@\n-a = 1\n+a = 2\n" + no_nl + no_nl, no_line),
-        ("@@ -1,2 +1 @@\n-a = 1\n" + no_nl + "-b\n" + no_nl + "+a = 2\n", twice + " (old)"),
-        ("@@ -1,2 +1 @@\n a = 1\n" + no_nl + "-b\n" + no_nl, twice + " (old)"),
-        ("@@ -1 +1,2 @@\n-a = 1\n+a = 2\n" + no_nl + "+b\n" + no_nl, twice + " (new)"),
-        ("@@ -1 +1 @@\n-a = 1\n" + no_nl + "+a = 2\n@@ -3 +3 @@\n-c\n" + no_nl + "+d\n", twice + " (old)"))
+        ("@@ -1,2 +1,2 @@\n-a = 1\n" + no_nl + "-b\n+x\n+y\n", early.format("old side")),
+        ("@@ -1,2 +1,2 @@\n a = 1\n" + no_nl + "-b\n+c\n", early.format("old and new sides")),
+        ("@@ -1,2 +1,2 @@\n-z\n a = 1\n" + no_nl + "+b\n", early.format("new side")),
+        ("@@ -1 +1,2 @@\n-a = 1\n+a = 2\n" + no_nl + "+b\n", early.format("new side")),
+        ("@@ -1,2 +1 @@\n-a = 1\n" + no_nl + "-b\n" + no_nl + "+a = 2\n", early.format("old side")),
+        ("@@ -1,2 +1 @@\n a = 1\n" + no_nl + "-b\n" + no_nl, early.format("old side")),
+        ("@@ -1 +1,2 @@\n-a = 1\n+a = 2\n" + no_nl + "+b\n" + no_nl, early.format("new side")),
+        ("@@ -1 +1 @@\n-a = 1\n" + no_nl + "+a = 2\n@@ -3 +3 @@\n-c\n" + no_nl + "+d\n", later),
+        ("@@ -1 +1 @@\n-a = 1\n" + no_nl + "+a = 2\n@@ -3 +3 @@\n-c\n+d\n", later),
+        ("@@ -1 +1 @@\n-a = 1\n+a = 2\n" + no_nl + "@@ -3 +3 @@\n-c\n+d\n", later))
     check("rdp/draft-marker-malformed-unverifiable", _read_as([(real + a_head + h, w) for h, w in bad_marks],
                                                                "badmark"),
-          [("allow", False)] * 2 + [("unverifiable", True)] * (len(bad_marks) - 2))
+          [("allow", False)] * 3 + [("unverifiable", True)] * (len(bad_marks) - 3))
     # A section names at most one old path and one new path, and its diff --git line names exactly those, as
     # git writes them from one pair; a section whose headers disagree is refused, not counted by one of
     # them. The controls are the valid draft and a pure rename section whose headers agree; refused are
