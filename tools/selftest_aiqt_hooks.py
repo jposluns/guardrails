@@ -93,7 +93,11 @@ gave it before the shared reading existed. The table does not cover gate_weakeni
 tier, which still reads the command's own records, or the two orchestration guards (orch_truncation_guard,
 orch_untracked_wait_loop), whose shared reading tools/selftest_orch_hooks.py checks. The wx-* cases pin each
 wrapped example that the git_discard, gate_weakening, diff_source_pretool and bash_absolute_paths texts name
-to the exact decision the text states, so a behaviour change that makes one of those sentences false fails.
+to the decision the text states (allow, allow with a note, or deny). They check reason text only where a
+bash_absolute_paths case names a target, and they wrap the diff_source_pretool shapes only in the wrappers
+_WX_DIFF_WRAPPERS lists (if, the ! negation, time, a brace group, a subshell, an && list, an unquoted $(...)
+and a backquote substitution). A change that alters only a git_discard, gate_weakening or diff_source_pretool
+reason, or only the decision under a wrapper outside that list, does not fail them.
 
 It also covers the secrets-shift-left guard (secrets_shift_left, secsec): a Write content, an Edit
 new_string, or a Bash command that carries an obvious hardcoded secret (a provider-token prefix or a
@@ -2370,8 +2374,8 @@ def _test_compound_subject(failures):
 
 
 # The wrapped examples the guard texts in .aiqt/core/hooks/manifest.toml name, each with the exact decision
-# the text states (diff_source_pretool, gate_weakening and bash_absolute_paths with no cwd). A behaviour change
-# that makes one of those sentences false fails here.
+# the text states (diff_source_pretool, gate_weakening and bash_absolute_paths with no cwd). A change to one of
+# those decisions fails here; the module docstring states what these cases do not check.
 _WX_DIFF_SOURCE = (
     ("git diff --stat", "allow-note"),
     ("git log --oneline", "allow-note"),
@@ -2415,8 +2419,20 @@ _WX_ABS_PATHS = (
     ("x=`echo x &> /tmp/out.txt`", "deny", "'/tmp/out.txt`'"),
     ("x=`echo x >| /tmp/out.txt`", "deny", "'/tmp/out.txt`'"),
     ("echo x 2>/dev/null", "allow", None),
+    ("echo x >>/dev/null", "allow", None),
     ("x=`echo x 2>/dev/null`", "deny", "'/dev/null`'"),
     ("x=`echo x >/dev/null`", "deny", "'/dev/null`'"),
+    ("x=`echo x &>/dev/null`", "deny", "'/dev/null`'"),
+    ("x=`echo x >|/dev/null`", "deny", "'/dev/null`'"),
+    ("x=`echo x >>/dev/null`", "allow-note", "'/dev/null`'"),
+    ("x=`echo x 2>>/dev/null`", "allow-note", "'/dev/null`'"),
+    ("echo x 2>&1", "allow", None),
+    ("x=`echo x 2>&1`", "deny", "'1`'"),
+    ("x=`echo x > /tmp/out.txt 2>&1`", "deny", "'1`'"),
+    ("x=`echo x 2>&-`", "deny", "'-`'"),
+    ("x=`echo x 2>&1 `", "allow", None),
+    ("x=$(echo x 2>&1)", "allow", None),
+    ('x="`echo x 2>&1`"', "allow", None),
     ("x=`echo x > /tmp/out.txt `", "allow", None),
     ("x=`echo x > /tmp/out.txt y`", "allow", None),
     ("x=$(echo x > /tmp/out.txt)", "allow", None),

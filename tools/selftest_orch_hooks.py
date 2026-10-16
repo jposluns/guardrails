@@ -4239,12 +4239,28 @@ def _main_isolated(report_path=None):
         # The wrapped examples this guard's text names: a loop whose header is not the first word of its
         # segment, a loop inside an unquoted $(...), and a canonical loop beside an unquoted $(...) are
         # 'indeterminate', unless a backquote substitution in the command holds a 'match' (checked first).
-        check("wl/time-header-indeterminate",
-              (clf("time " + BASE), clf("time -p " + BASE), clf("! " + BASE), clf("FOO=1 " + BASE)),
-              ("indeterminate",) * 4)
-        check("wl/dollar-subst-loop-indeterminate", clf("x=$(" + BASE + ")"), "indeterminate")
-        check("wl/dollar-subst-beside-indeterminate", clf("echo $(date); " + BASE), "indeterminate")
-        check("wl/dollar-subst-backquote-match", clf("echo $(date) `" + BASE + "`"), "match")
+        TIME_HEADERS = tuple(lead + BASE for lead in ("time ", "time -p ", "! ", "FOO=1 "))
+        DOLLAR_LOOP = "x=$(" + BASE + ")"
+        DOLLAR_BESIDE = "echo $(date); " + BASE
+        DOLLAR_BACKQUOTE = "echo $(date) `" + BASE + "`"
+        check("wl/time-header-indeterminate", tuple(clf(cmd) for cmd in TIME_HEADERS), ("indeterminate",) * 4)
+        check("wl/dollar-subst-loop-indeterminate", clf(DOLLAR_LOOP), "indeterminate")
+        check("wl/dollar-subst-beside-indeterminate", clf(DOLLAR_BESIDE), "indeterminate")
+        check("wl/dollar-subst-backquote-match", clf(DOLLAR_BACKQUOTE), "match")
+        # The decision the text states for each, at the handlers: this guard denies the backquote 'match', and
+        # it allows each 'indeterminate' form while the truncation guard denies it on the same event.
+        check("wl/handler-deny-dollar-subst-backquote", _verdict(wl(DOLLAR_BACKQUOTE)), "deny")
+        check("wl/degrade-time-header-guard-allows", tuple(_verdict(wl(cmd)) for cmd in TIME_HEADERS),
+              ("allow",) * 4)
+        check("wl/degrade-time-header-trunc-denies", tuple(_verdict(tg(cmd)) for cmd in TIME_HEADERS),
+              ("deny",) * 4)
+        for guard_cid, trunc_cid, cmd in [
+                ("wl/degrade-dollar-subst-loop-guard-allows", "wl/degrade-dollar-subst-loop-trunc-denies",
+                 DOLLAR_LOOP),
+                ("wl/degrade-dollar-subst-beside-guard-allows", "wl/degrade-dollar-subst-beside-trunc-denies",
+                 DOLLAR_BESIDE)]:
+            check(guard_cid, _verdict(wl(cmd)), "allow")
+            check(trunc_cid, _verdict(tg(cmd)), "deny")
         check("wl/for-header-variable-probe-match",
               (clf("for gh in 1 2; do sleep 5; done &"), clf("for curl in a; do sleep 5; done &")),
               ("match", "match"))
