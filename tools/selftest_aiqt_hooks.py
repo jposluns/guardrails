@@ -10110,11 +10110,14 @@ def _main_isolated(monitor):
         # === L11 cross-hook redirect vectors (commit_identity): a redirect no longer hides an AI --author,
         # a co-author trailer, or an identity assignment ==================================================
         cig = aiqt_hooks.commit_identity
+        _ci_denies = []  # every command a vector below wants denied, for the check on commands too long to read
 
         def ciexpect(label, command, want):
             got = _decision(cig, command)
             if got != want:
                 failures.append("{}: expected {}, got {}".format(label, want, got))
+            if want == "deny":
+                _ci_denies.append(command)
 
         ciexpect("(ci-l11a) redirect before 'commit' does not hide an AI --author, denies",
                  'git >/dev/null commit --author="Claude <c@x>" -m x', "deny")
@@ -10260,17 +10263,34 @@ def _main_isolated(monitor):
                  'sudo -- git log --grep git commit --author="Claude <c@x>"', "allow")
         ciexpect("(ci-wr-c17) the git log after a wrapper option carrying '=' is the command, allows",
                  'env --chdir=/repo git log --grep git commit --author="Claude <c@x>"', "allow")
-        # The commit-message reader reads a value-taking option's value word as that value: an --author word
-        # given as -m's message or -F's file name records no author (ci-wr-c18 to ci-wr-c20 denied when every
-        # word was read as an option); the word after a consumed value is read again (ci-wr35), and a --trailer
-        # value is message text scanned for a co-author trailer (ci-wr36).
-        ciexpect("(ci-wr-c18) a wrapped commit whose -m message is spelled as an AI --author records no author, "
-                 "allows",
-                 'env git commit -m --author="Claude <c@x>"', "allow")
-        ciexpect("(ci-wr-c19) a commit whose -m message is spelled as an AI --author records no author, allows",
-                 'git commit -m --author="Claude <c@x>"', "allow")
-        ciexpect("(ci-wr-c20) a commit whose -F file name is spelled as an AI --author records no author, allows",
-                 'git commit -F --author="Claude <c@x>"', "allow")
+        # The commit-message reader reads a value-taking option's value word as that value; the word after a
+        # consumed value is read again (ci-wr35), and a --trailer value is message text scanned for a co-author
+        # trailer (ci-wr36). An --author=VALUE word given as the next-word value of -m or -F (any spelling the
+        # reader takes as one) records no author, since git takes it as the message or as the message file's
+        # name, but it still denies when VALUE names an AI identity, as it did when every word was read as an
+        # option: a change toward allow is held until the maintainer decides it, so this over-deny is kept. So the
+        # -m, -F, -am, -aF and --mess forms deny (ci-wr127 to ci-wr131, each allowed while the value word was read
+        # only as the message or file name), and so do the same forms behind a wrapper word and in a run line
+        # (ci-wr132 to ci-wr134), a stricter over-deny, since they were allowed before wrapped commands and run
+        # lines were read. Controls: after -m, an --author= word naming a human, and an --auth= word naming an AI
+        # identity, which is not the --author= form denied before, allow (ci-wr-c45, ci-wr-c46).
+        ciexpect("(ci-wr127) a commit whose -m message is spelled as an AI --author denies (the over-deny kept "
+                 "until the maintainer decides it)",
+                 'git commit -m --author="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr128) a commit whose -F file name is spelled as an AI --author denies (the over-deny kept "
+                 "until the maintainer decides it)",
+                 'git commit -F --author="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr132) a wrapped commit whose -m message is spelled as an AI --author denies (the over-deny "
+                 "kept until the maintainer decides it)",
+                 'env git commit -m --author="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr134) a commit in a foreach operand whose -m message is spelled as an AI --author denies "
+                 "(the over-deny kept until the maintainer decides it)",
+                 'git submodule foreach git commit -m --author="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr-c45) a commit whose -m message is spelled as a human --author allows",
+                 'git commit -m --author="Maint Ainer <m@example.invalid>"', "allow")
+        ciexpect("(ci-wr-c46) a commit whose -m message is an AI --auth= word, which git reads as --author only "
+                 "as an option, allows",
+                 'git commit -m --auth="Claude <c@x>"', "allow")
         ciexpect("(ci-wr35) an AI --author after an -F file name is read, denies",
                  'git commit -F msg.txt --author="Claude <c@x>"', "deny")
         ciexpect("(ci-wr36) an AI co-author trailer in a --trailer value denies",
@@ -10279,9 +10299,10 @@ def _main_isolated(monitor):
         # value is the rest of the word or, when nothing follows, the next word and only that word. In git
         # commit -am -m --author=X the cluster takes -m as its message and the --author after it is a real
         # author (ci-wr37 to ci-wr42 allowed when the cluster was one unknown word and the second -m took the
-        # --author word); the cluster's next-word value spelled as an AI --author records only a message
-        # (ci-wr-c21 to ci-wr-c23 denied then). Controls: a value that shares the cluster's word consumes no
-        # next word (ci-wr43), and -S takes only the rest of its own word, never the next one (ci-wr44).
+        # --author word); the cluster's next-word value spelled as an AI --author records only a message, and
+        # still denies, the over-deny kept above (ci-wr129, ci-wr130, and ci-wr133 behind a wrapper word).
+        # Controls: a value that shares the cluster's word consumes no next word (ci-wr43), and -S takes only the
+        # rest of its own word, never the next one (ci-wr44).
         ciexpect("(ci-wr37) an -am cluster takes the next -m as its message, so the --author after it is read, "
                  "denies",
                  'git commit -am -m --author="Claude <c@x>"', "deny")
@@ -10300,23 +10321,25 @@ def _main_isolated(monitor):
         ciexpect("(ci-wr42) an -am cluster takes the next --message as its message, so the --author after it is "
                  "read, denies",
                  'git commit -am --message --author="Claude <c@x>"', "deny")
-        ciexpect("(ci-wr-c21) an -am cluster whose message is spelled as an AI --author records no author, allows",
-                 'git commit -am --author="Claude <c@x>"', "allow")
-        ciexpect("(ci-wr-c22) a wrapped -am cluster whose message is spelled as an AI --author records no author, "
-                 "allows",
-                 'env git commit -am --author="Claude <c@x>"', "allow")
-        ciexpect("(ci-wr-c23) an -aF cluster whose file name is spelled as an AI --author records no author, "
-                 "allows",
-                 'git commit -aF --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr129) an -am cluster whose message is spelled as an AI --author denies (the over-deny kept "
+                 "until the maintainer decides it)",
+                 'git commit -am --author="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr133) a wrapped -am cluster whose message is spelled as an AI --author denies (the "
+                 "over-deny kept until the maintainer decides it)",
+                 'env git commit -am --author="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr130) an -aF cluster whose file name is spelled as an AI --author denies (the over-deny "
+                 "kept until the maintainer decides it)",
+                 'git commit -aF --author="Claude <c@x>"', "deny")
         ciexpect("(ci-wr43) an -amfoo cluster carries its message, so the --author after it is read, denies",
                  'git commit -amfoo --author="Claude <c@x>"', "deny")
         ciexpect("(ci-wr44) an -Sm cluster gives -S the key id m and takes no next word, so the --author after "
                  "it is read, denies",
                  'git commit -Sm --author="Claude <c@x>"', "deny")
         # A long option is read as git reads an abbreviation: a prefix that only one long name starts with is
-        # that option (ci-wr45 to ci-wr47 allowed when only exact names were read, ci-wr-c24 denied then); a
-        # prefix that several names share is ambiguous, git refuses it, and it takes no value (ci-wr48, a
-        # control that turns red if the first matching name is taken).
+        # that option (ci-wr45 to ci-wr47 allowed when only exact names were read), and --mess is --message, whose
+        # next-word value spelled as an AI --author still denies, the over-deny kept above (ci-wr131); a prefix
+        # that several names share is ambiguous, git refuses it, and it takes no value (ci-wr48, a control that
+        # turns red if the first matching name is taken).
         ciexpect("(ci-wr45) an AI value of --auth=, which git reads as --author, denies",
                  'git commit --auth="Claude <c@x>" -m x', "deny")
         ciexpect("(ci-wr46) an AI value of --auth, which git reads as --author, denies",
@@ -10324,9 +10347,9 @@ def _main_isolated(monitor):
         ciexpect("(ci-wr47) --fil, which git reads as --file, takes -m as its file name, so the --author after "
                  "it is read, denies",
                  'git commit --fil -m --author="Claude <c@x>"', "deny")
-        ciexpect("(ci-wr-c24) --mess, which git reads as --message, takes an AI --author word as its message, "
-                 "allows",
-                 'git commit --mess --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr131) --mess, which git reads as --message, takes an AI --author word as its message, and "
+                 "denies (the over-deny kept until the maintainer decides it)",
+                 'git commit --mess --author="Claude <c@x>"', "deny")
         ciexpect("(ci-wr48) --re, a prefix of three long names, takes no value, so the --author after it is read, "
                  "denies",
                  'git commit --re --author="Claude <c@x>"', "deny")
@@ -10930,12 +10953,12 @@ def _main_isolated(monitor):
         # read, so a segment of many wrapped rebase commands costs time linear in its length, where reading the
         # rest of the segment for each of them cost time quadratic in it (about 1.5 s to 4 s of CPU time at 64
         # KiB for the two forms below). The bound is the handler's CPU time in this process over 'sudo -E git rebase
-        # x ...' and over 'sudo -E git rebase -x x ...', each padded to 64 KiB and to 1 MiB: 0.5 s at 64 KiB and
-        # 8 s at 1 MiB, the same bound per character, against at most about 0.045 s and 0.65 s measured, a
-        # margin of about 11 times. The run-line read is counted through a shim, so a handler that allows a long
-        # command without reading it fails too: every rebase of the command is read, and in the -x form each
-        # one's exec line is built. For each form the 1 MiB command runs only when the 64 KiB one is within its
-        # bound, so a quadratic reader fails in seconds rather than running for many minutes.
+        # x ...' and over 'sudo -E git rebase -x x ...', each padded to 64 KiB and to _CMTIDN_READ_LIMIT, the
+        # longest command the reader reads (128 KiB): 0.5 s at 64 KiB and 1 s at 128 KiB, the same bound per
+        # character, against at most about 0.035 s and 0.07 s measured, a margin of about 14 times. The run-line
+        # read is counted through a shim, so a handler that allows a long command without reading it fails too:
+        # every rebase of the command is read, and in the -x form each one's exec line is built. For each form the
+        # 128 KiB command runs only when the 64 KiB one is within its bound, so a quadratic reader fails in seconds.
         _ci_saved = aiqt_hooks._cmtidn_run_lines
         _ci_counts = [0, 0]  # the rebase reads, and the run lines built
 
@@ -10949,7 +10972,7 @@ def _main_isolated(monitor):
         try:
             aiqt_hooks._cmtidn_run_lines = _ci_counted_rebase_lines
             for _ci_unit in (" -E git rebase x", " -E git rebase -x x"):
-                for _ci_size, _ci_cap in ((64 << 10, 0.5), (1 << 20, 8.0)):
+                for _ci_size, _ci_cap in ((64 << 10, 0.5), (aiqt_hooks._CMTIDN_READ_LIMIT, 1.0)):
                     _ci_reps = (_ci_size - 4) // len(_ci_unit)
                     _ci_cmd = "sudo" + _ci_unit * _ci_reps
                     _ci_cmd += " " * (_ci_size - len(_ci_cmd))
@@ -10964,10 +10987,88 @@ def _main_isolated(monitor):
                                         "{} rebase reads and {} run lines){}".format(
                                             len(_ci_cmd), _ci_unit, _ci_got, _ci_spent, _ci_counts[0],
                                             _ci_counts[1], _ci_cap, _ci_want[0], _ci_want[1],
-                                            "; the 1 MiB command was not run" if _ci_size < 1 << 20 else ""))
+                                            "; the longer command was not run" if _ci_size == 64 << 10 else ""))
                         break
         finally:
             aiqt_hooks._cmtidn_run_lines = _ci_saved
+        # A command longer than _CMTIDN_READ_LIMIT characters is not read, so the decision ends well inside the
+        # hook timeout: find_ai_authorship raises ValueError with _CMTIDN_TOO_LONG before the tokenizer is called,
+        # and the handler's fallback denies an AI name anywhere in the command once its quotes, backslashes, '$'
+        # signs and newlines are removed, with no word boundary needed around the name. ci-wr-long-limit pins the
+        # limit just under, at and just past it. Over the costliest command shape measured, repeated wrapped git
+        # bisect run words nested three deep and ending in a locale quote, padded to 1 MiB, which took about 7 s of
+        # CPU time to read in full, each decision below is made within 1 s of CPU time: an AI --author value that
+        # an ANSI-C quote splits, an AI --author value after a quote character that the reader keeps, and an AI
+        # co-author trailer that a backslash-newline splits deny, as the reader denies them (ci-wr135 to ci-wr137);
+        # a commit message that merely names an AI product, or holds an AI name inside a longer word, denies
+        # (ci-wr138, ci-wr139, the disclosed over-deny); and a command that names no AI identity allows
+        # (ci-wr-c47). Each was decided only once the whole command had been read. The fallback's scan finds an AI
+        # name in every command that a vector above denies through the reader (ci-wr-long-superset), so a command
+        # past the limit that the reader would deny is denied.
+        _ci_limit = aiqt_hooks._CMTIDN_READ_LIMIT
+        _ci_saved = aiqt_hooks._segments
+        _ci_calls = [0]
+
+        def _ci_counted_segments(*args, **kwargs):
+            _ci_calls[0] += 1
+            return _ci_saved(*args, **kwargs)
+
+        _ci_cmd = 'git commit --author="Claude <c@x>" -m x'
+        try:
+            aiqt_hooks._segments = _ci_counted_segments
+            for _ci_len in (_ci_limit - 1, _ci_limit, _ci_limit + 1):
+                _ci_calls[0] = 0
+                try:
+                    _ci_got = aiqt_hooks.find_ai_authorship(_ci_cmd + " " * (_ci_len - len(_ci_cmd)))
+                except ValueError as exc:
+                    _ci_got = exc
+                if _ci_len > _ci_limit:
+                    _ci_ok = (isinstance(_ci_got, ValueError) and str(_ci_got) == aiqt_hooks._CMTIDN_TOO_LONG
+                              and not _ci_calls[0])
+                else:
+                    _ci_ok = _ci_got == "--author value 'Claude <c@x>'" and _ci_calls[0] > 0
+                if not _ci_ok:
+                    failures.append("(ci-wr-long-limit) a {}-character command under a {}-character limit gave {!r} "
+                                    "after {} tokenizer calls (want {})".format(
+                                        _ci_len, _ci_limit, _ci_got, _ci_calls[0],
+                                        "the too-long ValueError before any tokenizer call" if _ci_len > _ci_limit
+                                        else "the --author hit, read by the tokenizer"))
+        finally:
+            aiqt_hooks._segments = _ci_saved
+        _ci_unit = ' -E git bisect run sudo -E git bisect run sudo -E git bisect run x$"y"'
+        _ci_wide = "sudo" + _ci_unit * ((1 << 20) // len(_ci_unit))
+        for _ci_label, _ci_tail, _ci_want in (
+                ("(ci-wr135) an AI --author value that an ANSI-C quote splits, past the read limit, denies",
+                 "; git commit --author=Cl$'aude <c@x>' -m x", "deny"),
+                ("(ci-wr136) an AI --author value after a quote character that the reader keeps, past the read "
+                 "limit, denies", "; git commit --author=\"x'Cl\"aude -m x", "deny"),
+                ("(ci-wr137) an AI co-author trailer that a backslash-newline splits, past the read limit, denies",
+                 '; git commit -m x --trailer "Co-authored-by: Cl\\\naude"', "deny"),
+                ("(ci-wr138) a commit message that merely names an AI product, past the read limit, denies (the "
+                 "disclosed over-deny)", '; git commit -m "fix claude adapter"', "deny"),
+                ("(ci-wr139) a commit message that holds an AI name inside a longer word, past the read limit, "
+                 "denies (the disclosed over-deny)", '; git commit -m "thanks Claudette"', "deny"),
+                ("(ci-wr-c47) a command past the read limit that names no AI identity allows",
+                 "; git commit -m x", "allow")):
+            _ci_start = time.process_time()
+            _ci_got = _decision(cig, _ci_wide + _ci_tail)
+            _ci_spent = time.process_time() - _ci_start
+            if _ci_got != _ci_want or _ci_spent > 1.0:
+                failures.append("{}: over {} characters expected {} within 1 s of CPU time, got {} after {:.2f} s"
+                                .format(_ci_label, len(_ci_wide + _ci_tail), _ci_want, _ci_got, _ci_spent))
+        _ci_out = cig({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                       "tool_input": {"command": _ci_cmd + " " * _ci_limit}})[1]
+        _ci_reason = ((_ci_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+        if "{} characters long".format(len(_ci_cmd) + _ci_limit) not in _ci_reason or "'Claude'" not in _ci_reason:
+            failures.append("(ci-wr-long-reason) the deny of a command past the read limit gave the reason {!r} "
+                            "(want one that names its length and the AI identity 'Claude')".format(_ci_reason))
+        _ci_read = [_ci_c for _ci_c in _ci_denies if isinstance(_ci_find(_ci_c), str)]
+        _ci_missed = [_ci_c for _ci_c in _ci_read if not aiqt_hooks._AI_NAME_ANYWHERE_RE.search(
+            aiqt_hooks._CMTIDN_UNREAD_CHARS_RE.sub("", _ci_c))]
+        if len(_ci_read) < 100 or _ci_missed:
+            failures.append("(ci-wr-long-superset) of {} commands the reader denies, the scan for a command too long "
+                            "to read finds no AI name in {!r} (want an AI name in each of at least 100)"
+                            .format(len(_ci_read), _ci_missed[:5]))
 
         # secsec (EN-5 PR-C): decision-signal battery for the secrets-shift-left guard.
         # === secrets_shift_left (secsec): an obvious hardcoded secret in a Write/Edit/Bash write-form ==
