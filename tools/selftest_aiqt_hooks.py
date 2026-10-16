@@ -8191,7 +8191,7 @@ def _main_isolated(monitor):
         brexpect("(H25b) worktree add --detach --no-detach -b <name> creation denies (no silent allow)",
                  "git worktree add --detach --no-detach -b h25b /tmp/wt-nd orphan-start", "deny")
 
-        # H26: fail-safe-ASK redesign (Architect 2026-09-02, round-7 cap). Any unclassifiable option shape
+        # H26: fail-safe-ASK redesign (maintainer decision 2026-09-02, round-7 cap). Any unclassifiable option shape
         # ASKs rather than silently allowing OR falsely denying; the confidently-clean forms still probe.
         brexpect("(H26a) branch --list --no-list (negation flips classifier) denies",
                  "git branch --list --no-list qa orphan-start", "deny")
@@ -8963,7 +8963,7 @@ def _main_isolated(monitor):
         dexpect("(l11-r1) DISCLOSED boundary: a non-git 'mydiff' name allows (no git word to detect)",
                 "mydiff --color", "allow")
 
-        # === L11 proof E (Architect refinement): a benign 'git log' commit listing ALLOWS; a git log with
+        # === L11 proof E (maintainer refinement): a benign 'git log' commit listing ALLOWS; a git log with
         # any extra/unknown flag, a patch flag, a redirect, or a pipe stays airtight-narrow ================
         dexpect("(l11-e1) bare git log allows (proof E: a listing, no diff)", "git log", "allow")
         dexpect("(l11-e2) git log --oneline allows (proof E)", "git log --oneline", "allow")
@@ -8990,7 +8990,7 @@ def _main_isolated(monitor):
                 "git log --graph --abbrev-commit --reverse main", "allow")
         dexpect("(l11-e10c) git log --name-only allows via proof B (a file-list summary, like git diff "
                 "--name-only), not proof E", "git log --name-only", "allow")
-        # Value-taking / unknown / count flags are NOT proven benign -> ASK (Architect's airtight line):
+        # Value-taking / unknown / count flags are NOT proven benign -> ASK (the maintainer's airtight line):
         # a value-swallowing option is exactly the grammar this design refuses to parse.
         dexpect("(l11-e11) git log -5 allows with a note (a numeric count flag is not on the allowlist)",
                 "git log -5", "allow-note")
