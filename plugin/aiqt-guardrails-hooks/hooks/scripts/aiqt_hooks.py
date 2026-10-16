@@ -9049,12 +9049,14 @@ def _heredoc_openers(command):
     """Every heredoc opener bash would act on in a raw Bash command, in source order, each read through to its
     terminator by _heredoc_body. An opener is a << that is not part of a here-string <<<, and that is not
     quoted, escaped, commented out, inside arithmetic ($((...)), $[...], ((...))) or the subscript of an
-    assignment (name[...]= where an assignment can stand, or [...]= in a compound assignment name=(...)),
-    inside a ${...} parameter expansion, or inside a backtick substitution or ANSI-C $'...' text (both
-    skipped unread). A << inside a $(...) command substitution or a <(...)/>(...) process substitution IS
-    an opener, also within double quotes, in arithmetic, in a subscript or in a ${...}; a <( directly inside
-    double quotes or in arithmetic is literal text, as in bash. A << whose delimiter word
-    _parse_heredoc_delim cannot read is returned with delim None and terminated False.
+    assignment (name[...]= where an assignment can stand, which a redirection's target never is, or [...]=
+    in a compound assignment name=(...)), inside a ${...} parameter expansion, or inside a backtick
+    substitution or ANSI-C $'...' text (both skipped unread). Quotes inside arithmetic or a subscript are
+    read as in a command, so a ] or ) inside them does not end it. A << inside a $(...) command
+    substitution or a <(...)/>(...) process substitution IS an opener, also within double quotes, in
+    arithmetic, in a subscript or in a ${...}; a <( directly inside double quotes or in arithmetic is literal
+    text, as in bash. A << whose delimiter word _parse_heredoc_delim cannot read is returned with delim None
+    and terminated False.
     Bodies are read in bash's order. Each command context (the command, and each $(...), <(...) or >(...)
     in it at any depth) keeps its own pending openers, and a newline of that context reads only its own
     pending bodies, in the order their openers appeared; the pending bodies of the contexts around it wait
@@ -9111,15 +9113,16 @@ def _heredoc_openers(command):
             continue
         if kind == "cmd" and word_start and c not in " \t\n;&|<>()#" and not (c == "\\" and nx == "\n"):
             # the first character of a word. Bash reads name[...] as an assignment's subscript, in which << is a
-            # shift, only where an assignment can stand (not after a command word, and not as an argument of a
-            # declaration builtin), and [...] at the start of a word inside a compound assignment's parentheses
+            # shift, only where an assignment can stand (not after a command word, not as an argument of a
+            # declaration builtin, and never as a redirection's target, as in >f[1<<EOF]), and [...] at the
+            # start of a word inside a compound assignment's parentheses
             match = _HEREDOC_NAME_RE.match(command, i)
             j = match.end() if match else i
             digits = i
             while digits < n and command[digits].isdigit():
                 digits += 1
-            if (frame[4] and c == "[" or match and frame[3] in ("command", "assign")
-                    and command.startswith("[", j)):
+            if not redirect and (frame[4] and c == "[" or match and frame[3] in ("command", "assign")
+                                 and command.startswith("[", j)):
                 stack.append(["bracket", 0, False, True])
                 word_start = False
                 i = (i if c == "[" else j) + 1
@@ -9148,9 +9151,10 @@ def _heredoc_openers(command):
                 word_start = False
             i += 2
             continue
-        if kind in ("arith", "bracket") and c not in "$`\"":
-            # << here is a shift; a $(...), ${...} or nested arithmetic, a backtick or a double-quoted string
-            # inside it is read below as it is elsewhere, so a heredoc in a $(...) in arithmetic is checked
+        if kind in ("arith", "bracket") and c not in "$`\"'":
+            # << here is a shift; a $(...), ${...} or nested arithmetic, a backtick, or a single- or
+            # double-quoted string inside it is read below as it is elsewhere, so a heredoc in a $(...) in
+            # arithmetic is checked, and a ] or ) inside quotes (p[']']=x, $(( ')' ))) does not end it
             if kind == "bracket" and frame[3] and c in "<>" and nx == "(":
                 stack.append(["cmd", 0, [], "command", False])  # bash runs a <(...) inside a subscript
                 word_start = True
@@ -9205,7 +9209,7 @@ def _heredoc_openers(command):
                 word_start = False
             i += 1
             continue
-        if c == "'":  # in a command or a ${...}: literal to the next single quote
+        if c == "'":  # in a command, a ${...}, arithmetic or a subscript: literal to the next single quote
             close = command.find("'", i + 1)
             i = n if close < 0 else close + 1
             word_start = False
@@ -9263,6 +9267,10 @@ def _heredoc_openers(command):
             i = end
             continue
         if c in "<>" and nx == "(":  # a process substitution runs a command
+            if redirect:  # it is a redirection's target (cat < <(...)), read as a target word is read below
+                redirect = False
+                if frame[3] == "assign":
+                    frame[3] = ""
             stack.append(["cmd", 0, [], "command", False])
             word_start = True
             i += 2
