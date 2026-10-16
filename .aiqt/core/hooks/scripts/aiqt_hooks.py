@@ -2020,16 +2020,19 @@ def _cmtidn_option(tok, short, long):
 
 # The longest name that AI_IDENTITY_RE matches between word boundaries ('anthropic'): a match that a co-author
 # value holds and the shorter value of an earlier trailer that it overlaps does not starts at most this many
-# characters less one before the shorter value's end (_ai_value_match). A name match that ends at or before that
-# end lies in the shorter value, whose end is a word boundary after the name's last letter, so the match that the
-# shorter value lacks ends past it. The gpt alternative has no length bound, but a gpt match whose fixed part
-# (gpt, an optional '-' and a digit or 'o', at most 5 characters) ends at or before that end gives the shorter
-# value a match of its own, which stops at the first character of the tail that is not a word character, or at
-# the shorter value's end after a word character, each a word boundary. Each address alternative holds a name
+# characters less one before the shorter value's end (_ai_value_match). Each name ends with a word character, so
+# a name match that ends at or before that end lies in the shorter value, whose end is a word boundary after the
+# name's last character, and the match that the shorter value lacks ends past it. The gpt alternative has no
+# length bound, but each of its fixed parts (gpt, an optional '-' and a digit or 'o', at most 5 characters) ends
+# with a word character too, so a gpt match whose fixed part ends at or before that end gives the shorter value a
+# match of its own, which stops at the first character of the tail that is not a word character, or at the
+# shorter value's end after a word character, each a word boundary. Each address alternative holds a name
 # alternative between two characters that are not word characters (@anthropic.com holds anthropic), so it
-# matches only where that name matches too. The self-test (ci-wr-ai-margin) computes these lengths from
-# AI_IDENTITY_RE's own parse and fails when one exceeds this constant, or when a scan with this constant one
-# smaller finds the same values on strings whose AI name the end of an earlier value cuts.
+# matches only where that name matches too. The self-test (ci-wr-ai-margin) computes the names, every fixed part
+# and the addresses from AI_IDENTITY_RE's own parse, and fails when a name or a fixed part is longer than this
+# constant or can begin or end with a character that is not a word character, when an earlier value that ends
+# exactly at the end of one names no AI identity, or when a scan with this constant one smaller finds the same
+# values on strings whose AI name the end of an earlier value cuts.
 _AI_NAME_LONGEST = 9
 _WORD_CHAR_RE = re.compile(r"\w")
 
@@ -2040,7 +2043,7 @@ def _ai_value_match(regex, text):
     whole, finds, with each character of text searched a bounded number of times. regex is CO_AUTHOR_RE or a
     context of _RAW_IDENTITY_CONTEXTS, whose values start in order and end in order. The other contexts consume
     their values, so no two overlap and each is searched whole. The co-author regexes read each value, of up to
-    160 characters, in a lookahead, so in a word of repeated trailer names each character lies in up to about 13
+    160 characters, in a lookahead, so in a word of repeated trailer names each character lies in up to 14
     values. Once a value is found to name no AI identity, a later value that it overlaps and that ends where it
     ends can hold a match only at its first character, and one that ends past it only there or in a match that
     ends past that end, which starts at most _AI_NAME_LONGEST - 1 characters before it; so such a value is
@@ -2049,8 +2052,8 @@ def _ai_value_match(regex, text):
     ':' or space after it), so there that character is matched on the value itself. Each character is so
     searched at most twice (where a later value ends past an earlier one that it overlaps, the earlier one ends
     160 characters after its start, and the starts are at least 12 characters apart), and the match at a
-    value's first character reads at most 14 characters, except that a gpt name there reads its tail of letters
-    and digits to the end of the run or of the value, as the plain scan does."""
+    value's first character reads at most 14 characters, except that a gpt name there reads its tail of letters,
+    digits, hyphens and dots to the end of the run or of the value, as the plain scan does."""
     reached = 0  # the end of the last value searched
     for m in regex.finditer(text):
         start, end = m.span(1)
@@ -2339,8 +2342,8 @@ _CMTIDN_RUN_BOUNDS = ("git runs a command line that could not be parsed, or comm
 # searched whole (the highest of three single runs on one host). A longer command raises ValueError with
 # _CMTIDN_TOO_LONG before any reading starts, and the handler's fallback denies it when it names an AI anywhere
 # and holds a word that can record an identity, or when a raw-string context finds an AI identity in it, in time
-# that grows with its length, so a command of about 40 to 48 MiB or longer can outlast the timeout
-# (_commit_identity_fallback).
+# that grows with its length: on the measuring host a command of about 40 to 48 MiB or longer can outlast the
+# timeout, and on a slower host a shorter one can (_commit_identity_fallback).
 _CMTIDN_READ_LIMIT = 128 << 10
 _CMTIDN_TOO_LONG = "the command is longer than the commit-identity check reads within the hook timeout"
 # An AI name as AI_IDENTITY_RE spells it but with no word boundary, so that a name the reader would find in a
@@ -2554,10 +2557,10 @@ def _commit_identity_fallback(command, error):
     end of the one before it, less _AI_NAME_LONGEST - 1 characters (_ai_value_match): the highest of three
     single runs on one host took about 0.26 s of CPU time at 1,048,576 characters, 4.0 s at 16,777,216 and 6.3 s
     at 25,165,824 (with each value searched whole, 0.59 s, 8.7 s and 14.0 s on the same host), and 7.3 s at
-    33,554,432, 8.9 s at 41,943,040 and 10.3 s at 50,331,648, so a command of about 40 to 48 MiB or longer can
-    outlast the 10-second hook timeout. The platform contract this file records (the module docstring) does not
-    say that a hook stopped at its timeout refuses the call, so such a command may run with no deny from this
-    check.
+    33,554,432, 8.9 s at 41,943,040 and 10.3 s at 50,331,648, so on the measuring host a command of about 40 to
+    48 MiB or longer can outlast the 10-second hook timeout, and on a slower host a shorter one can. The platform
+    contract this file records (the module docstring) does not say that a hook stopped at its timeout refuses the
+    call, so such a command may run with no deny from this check.
     With a run line left unread it first denies when an AI identity appears ANYWHERE in the
     command once every backslash-newline, backslash and quote is removed, since quoting or escaping in the
     unread line can split or build an option name or value that no raw-string context sees (--"auth"=...,

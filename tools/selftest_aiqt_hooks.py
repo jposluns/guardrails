@@ -11188,15 +11188,40 @@ def _main_isolated(monitor):
             for _ci_regex in (_ci_contexts["--author value"], _ci_contexts["git identity variable"]):
                 _ci_counts[3] += _ci_fast_check(_ci_regex, _ci_text, _ci_bad) is not None
         # The faster scan's margin, _AI_NAME_LONGEST, computed from AI_IDENTITY_RE's own parse (ci-wr-ai-margin):
-        # the names of its word-bounded group, the fixed part of that group's one alternative of unbounded length
-        # (the gpt one, whose tail is a repeated one-character class before the closing word boundary), and the
+        # the names of its word-bounded group, every fixed part of that group's one alternative of unbounded length
+        # (the gpt one, whose tail is a repeated one-character class before the closing word boundary), each a
+        # sequence of character classes, one for each way through its optional parts and alternatives, and the
         # addresses, its other alternatives, each of which must hold a name of the group between two characters that
-        # are not word characters, so that it matches only where that name does. The check fails when a name or that
-        # fixed part is longer than _AI_NAME_LONGEST, when an address holds no name so, when the parse has a shape
-        # this check does not know, or when the straddle strings give the faster scan with _AI_NAME_LONGEST one
-        # smaller no difference from the plain scan, so the constant is no larger than the scan needs.
+        # are not word characters, so that it matches only where that name does. The scan's argument also needs each
+        # name and each fixed part to end with a word character, as the pattern matches it, its flags included: an
+        # earlier value that ends where such a name or fixed part ends then ends in a word boundary after a word
+        # character, so it holds that name, or a gpt match of its own. The check requires each to begin with a word
+        # character as well, so that a name match is a whole word. It fails when a name or a fixed part is longer
+        # than _AI_NAME_LONGEST, or can begin or end with a character that is not a word character, when an address
+        # holds no name so, when the parse has a shape this check does not know, when an earlier value of the
+        # straddle strings that ends exactly at the end of a name or a fixed part names no AI identity, or when the
+        # straddle strings give the faster scan with _AI_NAME_LONGEST one smaller no difference from the plain scan,
+        # so the constant is no larger than the scan needs.
         _ci_margin = []
-        _ci_names, _ci_fixed, _ci_addresses = [], [], []
+        _ci_names, _ci_fixed, _ci_addresses, _ci_paths = [], [], [], []
+        _ci_flags = aiqt_hooks.AI_IDENTITY_RE.flags
+        # every character that is not a word character, which no class at either end of a name or fixed part may match
+        _ci_nonword = re.sub(r"\w+", "", "".join(map(chr, range(sys.maxunicode + 1))))
+
+        def _ci_word_only(chars):
+            """Whether a character class, a tuple of (lowest, highest) code point ranges, matches only word
+            characters under AI_IDENTITY_RE's flags (with re.IGNORECASE, a class of word characters can match one
+            that is not a word character through its case: a class of the Greek small letter iota matches U+0345)."""
+            return re.compile("[" + "".join(re.escape(chr(_ci_lo)) + ("-" + re.escape(chr(_ci_hi)) if _ci_hi > _ci_lo
+                                                                         else "") for _ci_lo, _ci_hi in chars) + "]",
+                              _ci_flags).search(_ci_nonword) is None
+
+        def _ci_shown(path):
+            """A sequence of character classes written as a pattern, for a failure message."""
+            return "".join(chr(_ci_c[0][0]) if _ci_c == ((_ci_c[0][0],) * 2,) else "[" + "".join(
+                chr(_ci_lo) + ("-" + chr(_ci_hi) if _ci_hi > _ci_lo else "") for _ci_lo, _ci_hi in _ci_c) + "]"
+                for _ci_c in path)
+
         try:
             from re import _constants as _ci_sre, _parser as _ci_parser
         except ImportError:  # the parser is private to the interpreter: a release without it fails the check closed
@@ -11217,6 +11242,45 @@ def _main_isolated(monitor):
                     return "".join(chr(_ci_av) for _ci_op, _ci_av in pattern.data)
                 return None
 
+            def _ci_classes(items):
+                """Every sequence of character classes that the parsed items match, one class, a tuple of (lowest,
+                highest) code point ranges, for each character: one sequence for each way through their optional
+                parts and alternatives. None for an item of a shape this check does not know (a class that is not
+                a list of characters and ranges, a group that sets flags, a repeat of more than 16 or of another
+                kind) or for more than 256 sequences, so the check fails closed."""
+                paths = [()]
+                for op, av in items:
+                    if op is _ci_sre.LITERAL:
+                        options = [(((av, av),),)]
+                    elif op is _ci_sre.IN and all(_ci_op in (_ci_sre.LITERAL, _ci_sre.RANGE) for _ci_op, _ci_av in av):
+                        options = [(tuple((_ci_av, _ci_av) if _ci_op is _ci_sre.LITERAL else _ci_av
+                                          for _ci_op, _ci_av in av),)]
+                    elif op is _ci_sre.BRANCH or (op is _ci_sre.SUBPATTERN and not av[1] and not av[2]):
+                        options = []
+                        for _ci_sub in (av[1] if op is _ci_sre.BRANCH else [av[-1]]):
+                            _ci_got = _ci_classes(_ci_sub.data)
+                            if _ci_got is None:
+                                return None
+                            options += _ci_got
+                    elif op is _ci_sre.MAX_REPEAT and av[1] <= 16:
+                        _ci_once = _ci_classes(av[2].data)
+                        if _ci_once is None:
+                            return None
+                        options, _ci_level = [], [()]
+                        for _ci_count in range(av[1] + 1):
+                            if _ci_count >= av[0]:
+                                options += _ci_level
+                            if _ci_count < av[1]:
+                                _ci_level = [p + q for p in _ci_level for q in _ci_once]
+                            if len(options) > 256 or len(_ci_level) > 256:
+                                return None
+                    else:
+                        return None
+                    paths = [p + q for p in paths for q in options]
+                    if len(paths) > 256:
+                        return None
+                return paths
+
             for _ci_alt in _ci_alternatives(_ci_tree):
                 _ci_items = list(_ci_alt.data)
                 if _ci_literal(_ci_alt) is not None:
@@ -11230,7 +11294,12 @@ def _main_isolated(monitor):
                             _ci_names.append(_ci_literal(_ci_name))
                         elif (_ci_tail[0] is _ci_sre.MAX_REPEAT and _ci_tail[1][1] == _ci_sre.MAXREPEAT
                               and [_ci_op for _ci_op, _ci_av in _ci_tail[1][2].data] == [_ci_sre.IN]):
-                            _ci_fixed.append(_ci_parser.SubPattern(_ci_tree.state, _ci_parts[:-1]).getwidth()[1])
+                            _ci_got = _ci_classes(_ci_parts[:-1])
+                            if _ci_got is None:
+                                _ci_margin.append("a fixed part of the word-bounded group of unknown shape")
+                            else:
+                                _ci_paths += _ci_got
+                                _ci_fixed.append(max(len(_ci_p) for _ci_p in _ci_got))
                         else:
                             _ci_margin.append("an alternative of the word-bounded group of unknown shape")
                 else:
@@ -11244,26 +11313,56 @@ def _main_isolated(monitor):
             _ci_margin.append("the longest name or fixed part is {!r} characters long (names {!r}, fixed parts {!r}), "
                               "against _AI_NAME_LONGEST {}".format(_ci_longest, _ci_names, _ci_fixed,
                                                                    aiqt_hooks._AI_NAME_LONGEST))
+        # each name and each fixed part begins and ends with a word character, whatever character its first and last
+        # classes match
+        for _ci_path in [tuple(((ord(_ci_ch),) * 2,) for _ci_ch in _ci_n) for _ci_n in _ci_names] + _ci_paths:
+            if not (_ci_path and _ci_word_only(_ci_path[0]) and _ci_word_only(_ci_path[-1])):
+                _ci_margin.append("the name or fixed part {!r} can begin or end with a character that is not a word "
+                                  "character".format(_ci_shown(_ci_path)))
+
+        def _ci_straddle(d, w):
+            """Two co-author trailers whose first value, of 160 characters, ends d characters into the word w in the
+            second value, each with whether a space, a '<' or a ':' stands before w: after each of those, and right
+            after the second trailer name, where the second value starts with w."""
+            for sep in (" ", "<", ":"):
+                yield True, ("co-authored-by: yyyy co-authored-by: " + "x" * (139 - d - len(sep)) + sep + w
+                             + " <a@x>")
+            yield False, "co-authored-by: " + "x" * (145 - d) + " co-authored-by" + w + " <a@x>"
 
         def _ci_straddles(words):
-            """Two co-author trailers whose first value, of 160 characters, ends d characters into the word w in the
-            second value, for each word w of words and every d from 0 to len(w) + 1: after a space, a '<' or a ':',
-            and right after the second trailer name, where the second value starts with w."""
+            """The straddle strings (_ci_straddle) of each word w of words, for every d from 0 to len(w) + 1."""
             for w in words:
                 for d in range(len(w) + 2):
-                    for sep in (" ", "<", ":"):
-                        yield d, w, ("co-authored-by: yyyy co-authored-by: " + "x" * (139 - d - len(sep)) + sep + w
-                                     + " <a@x>")
-                    yield d, w, "co-authored-by: " + "x" * (145 - d) + " co-authored-by" + w + " <a@x>"
+                    for _ci_sep, _ci_text in _ci_straddle(d, w):
+                        yield d, w, _ci_text
 
-        _ci_words = _ci_names + _ci_addresses + ["gpt4", "gpt-4o", "gpto", "gpt-4.1-mini", "gpt4" + "a" * 20 + "_",
-                                                 "gpt-4" + "0" * 12 + "\xe9"]
+        # Each fixed part spelled with the lowest code point of each of its classes, and with the highest, followed by
+        # nothing, or by a run of 12 tail characters that are not word characters and a letter, so that an earlier
+        # value can end in that run more than _AI_NAME_LONGEST characters after the match starts.
+        _ci_fixed_words = sorted({"".join(chr(_ci_pick(_ci_r[_ci_k] for _ci_r in _ci_c)) for _ci_c in _ci_p)
+                                  for _ci_p in _ci_paths for _ci_pick, _ci_k in ((min, 0), (max, 1))})
+        _ci_tails = ("", "-" * 12 + "x", "." * 12 + "x")
+        _ci_words = (_ci_names + _ci_addresses + [_ci_f + _ci_t for _ci_f in _ci_fixed_words for _ci_t in _ci_tails]
+                     + ["gpt4", "gpt-4o", "gpto", "gpt-4.1-mini", "gpt4" + "a" * 20 + "_", "gpt-4" + "0" * 12 + "\xe9"])
         _ci_co = (aiqt_hooks.CO_AUTHOR_RE, _ci_contexts["co-author trailer"])
         for _ci_d, _ci_w, _ci_text in _ci_straddles(_ci_words):
             for _ci_regex in _ci_co:
                 _ci_plain = _ci_fast_check(_ci_regex, _ci_text, _ci_bad)
                 _ci_counts[3] += _ci_plain is not None
                 _ci_counts[4] += _ci_plain is not None and _ci_plain.start() > 0 and 0 < _ci_d < len(_ci_w)
+        # The straddle strings whose earlier value ends exactly at the end of a name or a fixed part, after a space,
+        # a '<' or a ':': that value names an AI identity on its own, as the scan's argument needs.
+        _ci_lacking = []
+        for _ci_w, _ci_d in ([(_ci_n, len(_ci_n)) for _ci_n in _ci_names]
+                             + [(_ci_f + _ci_t, len(_ci_f)) for _ci_f in _ci_fixed_words for _ci_t in _ci_tails]):
+            for _ci_sep, _ci_text in _ci_straddle(_ci_d, _ci_w):
+                for _ci_regex in _ci_co:
+                    _ci_first = _ci_regex.match(_ci_text)
+                    if _ci_sep and (_ci_first is None or not _ci_ai.search(_ci_first.group(1))):
+                        _ci_lacking.append(_ci_w[:_ci_d])
+        if _ci_lacking:
+            _ci_margin.append("an earlier value that ends exactly at the end of {!r} names no AI identity".format(
+                sorted(set(_ci_lacking))))
         _ci_shrunk = []
         _ci_saved_margin = aiqt_hooks._AI_NAME_LONGEST
         try:
