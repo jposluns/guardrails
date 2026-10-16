@@ -410,7 +410,7 @@ _Segment = collections.namedtuple(
                  "argv_leading_tilde"))
 
 
-def _read_word(command, i, n):
+def _read_word(command, i, n, locale=False):
     """Read exactly ONE shell word starting at index i (which must be at a word character, never a space,
     newline, or metacharacter). Returns (text, opaque, started, all_digits, leading_tilde, new_i): text is
     the quote/escape decoded word, opaque is True if it carried an unquoted
@@ -423,7 +423,10 @@ def _read_word(command, i, n):
     after the tilde stay relative), while a quote or expansion AFTER the prefix-closing '/' (e.g. ~/$VAR) does
     not block it. Stops at an
     unquoted space, tab, newline, or metacharacter. Raises ValueError on an unbalanced quote or an
-    unterminated escape."""
+    unterminated escape. With locale True, an unquoted bash locale quote $"..." is read as the double-quoted
+    string bash reads when no message catalogue translates it (the '$' dropped, so Cl$""aude is Claude);
+    otherwise its '$' stays an ordinary opaque character, as every caller but the commit-identity check reads
+    it."""
     chars = []
     opaque = False
     started = False
@@ -456,6 +459,14 @@ def _read_word(command, i, n):
             break
         was_started = started  # whether the word had begun BEFORE this char (a leading tilde needs it False)
         started = True
+        if locale and c == "$" and i + 1 < n and command[i + 1] == '"':
+            # bash locale quoting $"...": the text is looked up in the current locale's message catalogue
+            # and, when no translation applies, the '$' is dropped and the rest is a double-quoted string, read
+            # by the branch below. The word stays opaque, as its '$' made it before, since a catalogue can
+            # replace the text at run time.
+            opaque = True
+            i += 1
+            c = '"'
         if c == "'":  # single quote: everything literal, no escapes, until the next "'"
             if tilde_prefix_open:  # a quote inside the tilde-prefix disables bash expansion: stays relative
                 leading_tilde = False
@@ -788,7 +799,7 @@ def _skip_heredoc_bodies(command, i, n, heredocs):
     return i
 
 
-def _lex_command(command, partial=False):
+def _lex_command(command, partial=False, locale=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
     '{fd}>' redirect, or a malformed redirect), so the caller falls back conservatively rather than acting on
@@ -802,7 +813,10 @@ def _lex_command(command, partial=False):
     the whole command parsed). This lets the Bash abspth floor still inspect a resolvable PREFIX (an
     earlier relative cd/redirect) even when a LATER segment is unparseable, rather than discarding every
     parsed segment on the first heredoc/here-string/process-substitution. The default partial=False keeps
-    the list-returning, raise-on-error contract every other caller relies on."""
+    the list-returning, raise-on-error contract every other caller relies on.
+
+    locale is passed to _read_word for every word: True reads a bash locale quote $"..." as a double-quoted
+    string, and the default False keeps the reading every other caller relies on."""
     n = len(command)
     segments = []
     argv = []
@@ -832,7 +846,7 @@ def _lex_command(command, partial=False):
         # treats '#' at a word start as a comment, so the redirect has no target): cannot-evaluate, ASK.
         if k >= n or command[k] == "\n" or command[k] in _METACHARS or command[k] == "#":
             raise ValueError("malformed redirect: no target")
-        target, t_opaque, started, _digits, t_ltilde, k2 = _read_word(command, k, n)
+        target, t_opaque, started, _digits, t_ltilde, k2 = _read_word(command, k, n, locale)
         if not started:
             raise ValueError("malformed redirect target")
         redirects.append(_classify_redirect(op, src_fd, target, t_opaque, t_ltilde))
@@ -886,7 +900,7 @@ def _lex_command(command, partial=False):
                     raise ValueError("unsupported shell construct: {}".format(op))
                 i = consume_redirect(op, oplen, i, None)
                 continue
-            text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n)
+            text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n, locale)
             # An IO_NUMBER: an entirely-unquoted-digit word IMMEDIATELY adjacent to a '<'/'>' redirect
             # operator is that redirect's source fd, consumed as fd syntax, never left in argv. '2>file' ->
             # fd 2; but '2 > file' (spaced), "'2'>file"/'\2>file' (quoted/escaped), and 'x2>file' keep it.
@@ -927,14 +941,15 @@ def _lex_command(command, partial=False):
     return segments
 
 
-def _segments(command):
+def _segments(command, locale=False):
     """Compatibility projection over _lex_command: a list of (argv, sep_after) tuples, argv being the
     quote-decoded words with shell REDIRECTION removed (so a leading/interspersed/trailing redirect no
     longer pollutes the token stream) and sep_after the ending operator or "". Raises ValueError on a
     parse error or unsupported construct so callers fall back conservatively. Existing consumers
     (protected_line, gate_weakening, git_explicit_binding, git_discard, find_ai_authorship) read
-    redirect-free argv automatically; diff_source_pretool uses the richer _Segment records directly."""
-    return [(seg.argv, seg.sep_after) for seg in _lex_command(command)]
+    redirect-free argv automatically; diff_source_pretool uses the richer _Segment records directly.
+    locale is passed to _lex_command; only the commit-identity reader (_cmtidn_line_ai) sets it."""
+    return [(seg.argv, seg.sep_after) for seg in _lex_command(command, locale=locale)]
 
 
 # A leading inline shell env-var assignment (FOO=bar or the APPEND form FOO+=bar) that PREFIXES a command,
@@ -2174,11 +2189,11 @@ _CMTIDN_REBASE_LONG = {
 # many characters of such lines one command may make the check read, as a multiple of its own length plus a
 # floor, so a command built to nest or repeat them costs time linear in its length. A line past either bound
 # is left unread, and so is a line, at any depth, that the shared tokenizer cannot parse (an unbalanced quote
-# in a foreach operand or an exec value): every other segment of the command and every other run line is
-# still judged, so such a line cannot hide an AI identity that the reader can read. Only when none of them
-# sets one does find_ai_authorship raise ValueError with _CMTIDN_RUN_BOUNDS, so the handler judges the
-# command with its conservative fallback, which then denies an AI identity anywhere in the command once its
-# quotes and backslashes are removed (_commit_identity_fallback).
+# in a foreach operand or an exec value): every other segment of the command and every other run line within
+# the bounds is still judged, so such a line cannot hide an AI identity that the reader can read. Only when
+# none of them sets one does find_ai_authorship raise ValueError with _CMTIDN_RUN_BOUNDS, so the handler
+# judges the command with its conservative fallback, which then denies an AI identity anywhere in the command
+# once its quotes and backslashes are removed (_commit_identity_fallback).
 _CMTIDN_RUN_DEPTH = 8
 _CMTIDN_RUN_SCALE = 8
 _CMTIDN_RUN_FLOOR = 4096
@@ -2235,7 +2250,9 @@ def find_ai_authorship(command):
     trailer, --author value) on a segment that runs a git commit-family command, found by
     _cmtidn_git_commands behind leading reserved words, a function or coprocess name, VAR=value words and
     wrapper words (env, sudo, ...), and the same on each command line that a git command runs from its
-    operands (_cmtidn_run_lines). Raises ValueError on a shell parse error in the command itself (via
+    operands (_cmtidn_run_lines). The command and each run line are tokenized with bash locale quoting read
+    as double-quoted text (_segments with locale True), so a name that $"" splits inside a word (Cl$""aude)
+    is read joined, as bash joins it. Raises ValueError on a shell parse error in the command itself (via
     _segments), and ValueError(_CMTIDN_RUN_BOUNDS) when a run line was left unread, because it could not be
     parsed or was past the bounds (_CMTIDN_RUN_DEPTH), and nothing read sets an AI identity; the handler turns
     either into the conservative fallback."""
@@ -2251,11 +2268,11 @@ def _cmtidn_line_ai(command, depth, budget, unread):
     characters of run lines still to be read, shared by every nested line of the command, and unread a one-item
     list set to True when a run line is left unread: one past the bounds, or one (depth above 0) that the
     shared tokenizer cannot parse. Such a line is not read, but the other segments of the command and of every
-    line being read still are, and so are the other run lines; once the length bound is spent no further run
-    line is built, and each rebase reads its options only up to the next rebase subcommand
+    line being read still are, and so are the other run lines within the bounds; once the length bound is spent
+    no further run line is built, and each rebase reads its options only up to the next rebase subcommand
     (_cmtidn_run_lines), so the cost stays linear. A parse error in the command itself (depth 0) raises."""
     try:
-        segments = _segments(command)
+        segments = _segments(command, locale=True)
     except ValueError:
         if depth == 0:
             raise
@@ -2295,12 +2312,15 @@ def _commit_identity_fallback(command, unread_line):
     deny on a hit. With a run line left unread it first denies when an AI identity appears ANYWHERE in the
     command once every backslash-newline, backslash and quote is removed, since quoting or escaping in the
     unread line can split or build an option name or value that no raw-string context sees (--"auth"=...,
-    --author=C"laude ...", a backslash-newline before the value); the cost is a disclosed over-deny of such a
-    command whose text merely names an AI product. Never silent-allow a plausibly-violating command the check
-    could not read in full."""
+    --author=C"laude ...", a backslash-newline before the value), or once the '$' before each double quote is
+    removed as well, since bash drops the '$' of a locale quote $"..." (--author=Cl$""aude ...); the cost is a
+    disclosed over-deny of such a command whose text merely names an AI product, and the second form also joins
+    the text around a '$' that bash keeps (one inside double quotes, or one escaped), the same safe direction.
+    Never silent-allow a plausibly-violating command the check could not read in full."""
     if unread_line:
-        match = AI_IDENTITY_RE.search(
-            command.replace("\\\n", "").replace("\\", "").replace('"', "").replace("'", ""))
+        text = command.replace("\\\n", "").replace("\\", "")
+        match = (AI_IDENTITY_RE.search(text.replace('"', "").replace("'", ""))
+                 or AI_IDENTITY_RE.search(text.replace('$"', "").replace('"', "").replace("'", "")))
         if match:
             reason = ("AIQT rule cmtidn (commit-identity): git runs a command line that could not be parsed, or "
                       "command lines nested or repeated past the check's bounds, so a line was left unread, and "

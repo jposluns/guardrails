@@ -10483,13 +10483,13 @@ def _main_isolated(monitor):
                             "that names the bounds and the AI identity 'Claude')".format(_ci_reason))
         # A run line that cannot be parsed (an unbalanced quote in a foreach operand or a rebase exec value, at any
         # depth and behind any of the three run-line forms) is left unread like one past the bounds: every other
-        # segment and every other run line is still read, so a git commit beside it is judged on its words, a
-        # quote-split value or option name included (ci-wr84 to ci-wr92, each allowed when the parse error ended
-        # the read and the raw-string contexts judged the command), and when nothing read sets an AI identity the
-        # scan for an AI identity anywhere judges the command, so an AI --author that a quote splits inside the
-        # unparseable line denies (ci-wr93). An unparseable run line in a command that merely names an AI product
-        # denies (ci-wr94, the disclosed over-deny); ci-wr93 and ci-wr94 were allowed then too. Control: an
-        # unparseable run line in a command that names no AI identity allows (ci-wr-c37).
+        # segment and every other run line within the bounds is still read, so a git commit beside it is judged on
+        # its words, a quote-split value or option name included (ci-wr84 to ci-wr92, each allowed when the parse
+        # error ended the read and the raw-string contexts judged the command), and when nothing read sets an AI
+        # identity the scan for an AI identity anywhere judges the command, so an AI --author that a quote splits
+        # inside the unparseable line denies (ci-wr93). An unparseable run line in a command that merely names an
+        # AI product denies (ci-wr94, the disclosed over-deny); ci-wr93 and ci-wr94 were allowed then too.
+        # Control: an unparseable run line in a command that names no AI identity allows (ci-wr-c37).
         ciexpect("(ci-wr84) an AI --author value that a quote splits, in the segment after a foreach operand that "
                  "cannot be parsed, denies",
                  'git submodule foreach "echo \'x"; git commit --author=C"laude <c@x>" -m x', "deny")
@@ -10584,6 +10584,85 @@ def _main_isolated(monitor):
                  "product read that line once and allow",
                  "sudo" + " -E git rebase" * 20 + " -x "
                  + shlex.quote('git commit -m "fix claude adapter"' + "; true" * 160), "allow")
+        # bash reads a locale quote $"..." as a double-quoted string when no message catalogue translates it, so a
+        # name that $"" splits inside a word is the joined name. The command and each run line are tokenized that
+        # way: an AI --author value, co-author trailer, git identity variable or user.name value so split denies
+        # in the command itself (ci-wr106 to ci-wr111), in a foreach operand, a rebase exec value, a git bisect
+        # run line and a run line two deep (ci-wr112 to ci-wr115), and in the segment after a run line that
+        # cannot be parsed (ci-wr116, ci-wr-locale-read). With a line left unread, the scan for an AI identity
+        # anywhere also removes the '$' before each double quote, so the split name inside a run line that cannot
+        # be parsed or past the bound denies (ci-wr117, ci-wr118). Each was allowed when the '$' was read as a
+        # literal character. Controls: a split name that joins to a human name allows, in the command and in a run
+        # line (ci-wr-c39, ci-wr-c40), and a '$' inside double quotes stays a literal character, as bash reads it,
+        # so a trailer it splits there allows (ci-wr-c41).
+        ciexpect("(ci-wr106) an AI --author= value that $\"\" splits inside a word denies",
+                 "git commit --author=Cl$\"\"'aude <c@x>' -m x", "deny")
+        ciexpect("(ci-wr107) an AI --author value given as the next word, its tail in a locale quote, denies",
+                 'git commit -m x --author C$"laude <c@x>"', "deny")
+        ciexpect("(ci-wr108) an AI co-author trailer in a --trailer value that a locale quote splits denies",
+                 'git commit -m x --trailer "Co-authored-by: Cl"$"aude <c@x>"', "deny")
+        ciexpect("(ci-wr109) an AI co-author trailer in a -m message that a locale quote splits denies",
+                 'git commit -m x -m "Co-authored-by: Cl"$"aude <c@x>"', "deny")
+        ciexpect("(ci-wr110) an AI git identity variable value that $\"\" splits denies",
+                 'GIT_AUTHOR_NAME=Cl$""aude git commit -m x', "deny")
+        ciexpect("(ci-wr111) an AI user.name value that $\"\" splits denies",
+                 'git -c user.name=Cl$""aude commit -m x', "deny")
+        ciexpect("(ci-wr112) an AI --author value that $\"\" splits in a foreach operand denies",
+                 "git submodule foreach 'git commit --author=Cl$\"\"aude -m x'", "deny")
+        ciexpect("(ci-wr113) an AI --author value that $\"\" splits in a rebase exec value denies",
+                 "git rebase -x 'git commit --amend --no-edit --author=Cl$\"\"aude' main", "deny")
+        ciexpect("(ci-wr114) an AI --author value that $\"\" splits in a git bisect run line denies",
+                 'git bisect run git commit --author=Cl$""aude -m x', "deny")
+        ciexpect("(ci-wr115) an AI --author value that $\"\" splits in a run line two deep denies",
+                 'git submodule foreach "git submodule foreach \'git commit --author=Cl\\$\\"\\"aude -m x\'"', "deny")
+        ciexpect("(ci-wr116) an AI --author value that $\"\" splits, in the segment after a foreach operand that "
+                 "cannot be parsed, denies",
+                 'git submodule foreach "echo \'x"; git commit --author=Cl$""\'aude <c@x>\' -m x', "deny")
+        ciexpect("(ci-wr117) an AI --author value that $\"\" splits inside a foreach operand that cannot be parsed "
+                 "denies",
+                 'git submodule foreach "git commit --author=Cl\\$\\"\\"aude -m \'x"', "deny")
+        ciexpect("(ci-wr118) an AI --author value that $\"\" splits after a foreach nest past the bound denies",
+                 _ci_deep + 'git commit --author=Cl$""aude -m x', "deny")
+        ciexpect("(ci-wr-c39) a --author value that $\"\" splits into a human name allows",
+                 "git commit --author=Ma$\"\"int'ainer <m@example.invalid>' -m x", "allow")
+        ciexpect("(ci-wr-c40) a --author value that $\"\" splits into a human name in a foreach operand allows",
+                 "git submodule foreach 'git commit --author=Ma$\"\"intainer -m x'", "allow")
+        ciexpect("(ci-wr-c41) a $ inside double quotes stays a literal character, so a co-author trailer it splits "
+                 "there allows",
+                 'git commit -m x -m "Co-authored-by: Cl$""aude <c@x>"', "allow")
+        # ci-wr116 is denied by the reader itself: find_ai_authorship returns the --author hit of the segment after
+        # the unparseable line rather than leaving the command to the fallback, whose scan for an AI identity
+        # anywhere would deny it as well.
+        _ci_cmd = 'git submodule foreach "echo \'x"; git commit --author=Cl$""\'aude <c@x>\' -m x'
+        try:
+            _ci_got = aiqt_hooks.find_ai_authorship(_ci_cmd)
+        except ValueError as exc:
+            _ci_got = exc
+        if _ci_got != "--author value 'Claude <c@x>'":
+            failures.append("(ci-wr-locale-read) {!r} gave {!r} (want the --author hit read in the segment after "
+                            "the unparseable line, \"--author value 'Claude <c@x>'\")".format(_ci_cmd, _ci_got))
+        # The shared tokenizer reads a locale quote as a double-quoted string only when its caller asks
+        # (locale=True, which only the commit-identity reader passes): by default the '$' stays a literal
+        # character, so every other guard reads the same words as before. Either way each word keeps the same
+        # opacity, since a message catalogue can replace a locale quote's text at run time; a '$' inside double
+        # quotes, or one escaped, is a literal character in both readings, as bash reads it (ci-wr-locale-lex).
+        # _segments keeps the literal '$' reading by default (ci-wr-locale-default).
+        _ci_cmd = 'x Cl$""aude $"a b" "c$"d e\\$"f"'
+        _ci_want = {False: [(["x", "Cl$aude", "$a b", "c$d", "e$f"], True, [False, True, True, True, False])],
+                    True: [(["x", "Claude", "a b", "c$d", "e$f"], True, [False, True, True, True, False])]}
+        for _ci_locale, _ci_lex_want in _ci_want.items():
+            try:
+                _ci_lex = [(seg.argv, seg.opaque_shell, seg.argv_opaque)
+                           for seg in aiqt_hooks._lex_command(_ci_cmd, locale=_ci_locale)]
+            except (TypeError, ValueError) as exc:
+                _ci_lex = "{}: {}".format(type(exc).__name__, exc)
+            if _ci_lex != _ci_lex_want:
+                failures.append("(ci-wr-locale-lex) the tokenizer with locale={} read {!r} as {!r} (want {!r})"
+                                .format(_ci_locale, _ci_cmd, _ci_lex, _ci_lex_want))
+        _ci_got = aiqt_hooks._segments(_ci_cmd)
+        if _ci_got != [(_ci_want[False][0][0], "")]:
+            failures.append("(ci-wr-locale-default) _segments read {!r} as {!r} by default (want the literal '$' "
+                            "reading {!r})".format(_ci_cmd, _ci_got, [(_ci_want[False][0][0], "")]))
 
         # The wrapper scan is ONE pass: each word of a wrapped segment is read a bounded number of times. Every
         # -c value below is spelled git, so each one also starts a candidate still reading its options; a
