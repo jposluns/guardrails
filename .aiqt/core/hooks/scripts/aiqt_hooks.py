@@ -16868,26 +16868,26 @@ class _DeadlineWindow:
     once, to the caller's handler, as the mask is put back.
     Any other SIGALRM pending at the restore (one sent while the mask was held, say) is left pending and
     reaches the caller's handler the same way, except where the restore takes it for the window's own
-    expiry: when the window's timer had run out and `_unheard` is still set, the SIGALRM pending is
-    discarded as that expiry even when it came from elsewhere (the paragraph on _fire's reads below states
-    the residual case and the other ways this happens). The kernel keeps at most one pending instance of a standard
-    signal, which leaves two merges: a SIGALRM from elsewhere pending with the window's own expiry (in either
-    order) is discarded with it, and a caller expiry that came due and another SIGALRM pending at the restore
-    reach the caller's handler as one delivery. A re-armed periodic timer whose next expiry also falls due
-    before the mask is put back adds no second delivery: the kernel can hold one SIGALRM pending for the
-    process and one for the thread, both are delivered on return from the call that puts the mask back,
+    expiry: when the window's timer had run out, read by a cancel whose first run returned, and `_unheard` is
+    still set, the SIGALRM pending is discarded as that expiry even when it came from elsewhere (the paragraph
+    on _fire's reads below states the residual case). The kernel keeps at most one pending instance of a
+    standard signal, which leaves two merges: a SIGALRM from elsewhere pending with the window's own expiry
+    (in either order) is discarded with it, and a caller expiry that came due and another SIGALRM pending at
+    the restore reach the caller's handler as one delivery. A re-armed periodic timer whose next expiry also
+    falls due before the mask is put back adds no second delivery: the kernel can hold one SIGALRM pending for
+    the process and one for the thread, both are delivered on return from the call that puts the mask back,
     before Python runs any handler, and Python runs a signal's handler once for all the deliveries it has
     received since it last ran handlers (observed on Linux with Python 3.14.4: a timer expiry and a
     raise_signal both pending ran the handler once). An enclosing window's expiry that falls due during the
-    restore is delivered the same way, after the inner window has fully finished. The restore discards
-    nothing where it cannot know that the SIGALRM pending is the window's own expiry: after an arming
-    setitimer that raised (`_unheard` is set only once it has returned), after a cancel whose first run
-    raised (_twice says why), or after a read in _fire that raised; a window's own expiry then pending
-    reaches the caller's handler. Nothing in the hook installs SIG_DFL for SIGALRM: main() runs the window
-    under the disposition the process inherited. Under SIG_DFL, the disposition main() normally inherits,
-    that delivery kills the hook process by SIGALRM, so it ends without the exit 2 that fails a PreToolUse
-    call closed. An inherited SIG_IGN stays ignored across exec, and under it that delivery is ignored, not
-    fatal.
+    restore is delivered the same way, after the inner window has fully finished. The restore discards nothing
+    where it cannot know that the SIGALRM pending is the window's own expiry: after an arming setitimer that
+    raised (`_unheard` is set only once it has returned), after a cancel whose first run raised (_twice says
+    why), or after a read in _fire that raised; a window's own expiry then pending reaches the caller's
+    handler. Nothing in the hook installs SIG_DFL for SIGALRM: main(), run as the hook process, runs the
+    window under the disposition that process inherited. Under SIG_DFL, the disposition the hook process
+    normally inherits, that delivery kills the hook process by SIGALRM, so it ends without the exit 2 that
+    fails a PreToolUse call closed. An inherited SIG_IGN stays ignored across exec, and under SIG_IGN the
+    pending signal is discarded (not fatal).
 
     An operation of the restore that raises (setitimer, signal.signal, sigpending or raise_signal failing)
     is tried once more inside the same blocked section; the restore then goes on, and the first exception
@@ -16922,13 +16922,14 @@ class _DeadlineWindow:
     and discarded: one sent once the mask is set, when the window's expiry arrived just before the call that
     sets it and _fire runs inside that call. _fire then reads the timer run out and a SIGALRM pending, as in
     the ordering the other way round (a SIGALRM from elsewhere just before that call, the window's expiry
-    once the mask is set), so neither of its reads can tell the two apart. The maintainer has chosen to
-    keep this discard as a disclosed residual. It is not the only way a SIGALRM from elsewhere is discarded
-    as the window's expiry. A SIGALRM from elsewhere pending together with the window's expiry merges with
-    it and is discarded with it (the restore above). While the window is live, Python runs _fire once for
-    every SIGALRM received since it last ran handlers, so a SIGALRM from elsewhere that arrives after the
-    window's expiry but before the main thread next checks for signals (during a long C call, say) is
-    taken with that expiry and never reaches the caller. And the limits below state two more: after a
+    once the mask is set), so neither of its reads can tell the two apart. This discard is kept as a disclosed
+    residual. It is not the only way a SIGALRM from elsewhere is discarded as the window's expiry; the ways
+    that follow are examples, and the list is not exhaustive. A SIGALRM from elsewhere pending together with
+    the window's expiry merges with it and is discarded with it (the restore above). While the window is live,
+    or once its exit has begun with the window still armed, Python runs _fire once for all the SIGALRMs
+    received since it last ran handlers, so a SIGALRM from elsewhere and the window's expiry that both arrive,
+    in either order, before the main thread next checks for signals (during a long C call, say) are handled as
+    one, and the one from elsewhere never reaches the caller. And the limits below state two more: after a
     handler that raises at the entry of _fire has taken that expiry with it, and after another thread has
     taken it.
 
