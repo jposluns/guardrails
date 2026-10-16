@@ -1683,10 +1683,11 @@ def _run_checks():
         based.append((rc, calls, "refusing to wait" in output))
         check("ci/wait-pr-probe-base-not-main", based, [(1, 0, True), (0, 5, False), (0, 5, False)])
 
-        # A pull request GitHub reports CONFLICTING is refused at once, before the first poll and
-        # mid-wait alike: the probe runs before every poll, and here the head turns CONFLICTING after
-        # the first poll, as it does when another pull request merges. One MERGEABLE pull request into
-        # main at this head is enough beside a CONFLICTING sibling.
+        # A pull request GitHub reports CONFLICTING is refused at once when the associated pull requests,
+        # read on the same probe read, show no merge into main at this head (here they hold none at all),
+        # before the first poll and mid-wait alike: the probe runs before every poll, and here the head
+        # turns CONFLICTING after the first poll, as it does when another pull request merges. One
+        # MERGEABLE pull request into main at this head is enough beside a CONFLICTING sibling.
         conflicted = pull(9, head_sha, mergeable=False)
         conflicts = []
         for polls, probes, timeout in (
@@ -1694,9 +1695,9 @@ def _run_checks():
                 ([[page([pending_b])]], [probe_read(pull(9, head_sha)), probe_read(conflicted)], "60")):
             rc, output, calls = fixture.invoke(polls, wait=True, timeout=timeout, probes=probes)
             conflicts.append((rc, calls, fixture.probe_reads,
-                              "pull request #9 CONFLICTING with main now, so no new pull_request run "
-                              "will start for it while that holds; a run that started earlier may "
-                              "still finish" in output))
+                              "pull request #9 CONFLICTING with main now, and none with this head was "
+                              "merged into main, so no new pull_request run will start for it while "
+                              "that holds; a run that started earlier may still finish" in output))
         rc, output, calls = fixture.invoke(green_polls, wait=True,
                                            probes=[probe_read(conflicted, pull(10, head_sha))])
         conflicts.append((rc, calls, fixture.probe_reads, "CONFLICTING" in output))
@@ -1861,8 +1862,11 @@ def _run_checks():
 
         # Combining the reads keeps only a pull request still open at this head into the base: one listed
         # into main whose own read, though MERGEABLE, shows it retargeted to dev, or at another head,
-        # changed between the reads, so it is re-read, never waited on; the next read refuses at once
-        # (#14 into dev), or the last read refuses (no open pull request at this head).
+        # changed between the reads, so it is re-read, never waited on; the next read refuses (#14 into
+        # dev), at once here because its read of the associated pull requests succeeds and shows no
+        # merge (where that read fails at every read, the probe is cannot-evaluate, exit 2, at its 12th
+        # read: see ci/wait-pr-probe-associated-read), or the last read refuses (no open pull request at
+        # this head).
         kept = []
         for record, then, cause in ((pull(14, head_sha, base="dev"), pull(14, head_sha, base="dev"),
                                      "targets main now (#14 into dev)"),
@@ -1953,14 +1957,14 @@ def _run_checks():
                (0, 5, 16, [5] * 11 + [15] * 4, False), (1, 0, 12, [5] * 11, True)])
 
         # A pull request merged into the base with this head, read when no open pull request at this
-        # head targets the base, is not refused: the probe says so and stops, and the runs decide as for
-        # any other wait. MERGEABLE on three probes, then merged on the fourth (as auto-merge can do once
-        # the checks pass, within the settle window): the wait settles green on the runs, with no fifth
-        # probe. Merged after one green poll, then a failed run: exit 1 on the run. Merged at the first
-        # probe, with no run ever registered: TIMEOUT (exit 1). The merge is never a pass. An open pull
-        # request at this head into dev only, beside the merge into main, is no refusal either: the wait
-        # settles green on the runs. The commit's associated pull requests are read by this commit's
-        # SHA, once: only when no open pull request at this head targets the base.
+        # head into the base reads MERGEABLE, is not refused: the probe says so and stops, and the runs
+        # decide as for any other wait. MERGEABLE on three probes, then merged on the fourth (as
+        # auto-merge can do once the checks pass, within the settle window): the wait settles green on
+        # the runs, with no fifth probe. Merged after one green poll, then a failed run: exit 1 on the
+        # run. Merged at the first probe, with no run ever registered: TIMEOUT (exit 1). The merge is
+        # never a pass. An open pull request at this head into dev only, beside the merge into main, is
+        # no refusal either: the wait settles green on the runs. The commit's associated pull requests
+        # are read by this commit's SHA, once: never on a read that finds a MERGEABLE pull request.
         merged_read = probe_read(associated=[closed_pull(21, head_sha)])
         mergeable_read = probe_read(pull(21, head_sha))
         associated_argv = ["api", "repos/{}/commits/{}/pulls?per_page=100".format(FIXTURE_REPO, head_sha),
@@ -2004,8 +2008,11 @@ def _run_checks():
         # time check (absent, not a string, or empty) and of the record check (number not a number), and
         # a response of no pages at all, are each cannot-evaluate (exit 2) at once, never read as merged
         # or unmerged. A failed associated read other than a permanent form is re-read: once, then a
-        # MERGEABLE read waits; at every read, with no open pull request listed, cannot-evaluate (exit 2)
-        # at the 12th read with no runs read, never the exit 1 refusal of no open pull request.
+        # MERGEABLE read waits; at every read, with no open pull request listed, or only one into
+        # another base (#7 into dev), cannot-evaluate (exit 2) at the 12th read with no runs read, never
+        # the exit 1 refusal of no open pull request or of another base. That second case guards a rule
+        # the script already had before the associated read also followed a CONFLICTING, UNKNOWN or
+        # changed read (a listing into another base was already followed by it): it passes there too.
         merged_record = closed_pull(25, head_sha)
         associated_malformed = ("malformed pull-request response: the pull requests associated with "
                                 "{}".format(head_sha))
@@ -2022,12 +2029,64 @@ def _run_checks():
             green_polls, wait=True,
             probes=[dict(probe_read(), associated_error="gh: HTTP 502"), probe_read(pull(25, head_sha))])
         associated_cases.append((rc, calls, fixture.probe_reads, "cannot evaluate" in output))
-        rc, output, calls = fixture.invoke(
-            green_polls, wait=True, probes=[dict(probe_read(), associated_error="gh: HTTP 502")])
-        associated_cases.append((rc, calls, fixture.probe_reads,
-                                 "cannot evaluate: the pull-request read failed" in output))
+        for listed in (probe_read(), probe_read(pull(7, head_sha, base="dev"))):
+            rc, output, calls = fixture.invoke(
+                green_polls, wait=True, probes=[dict(listed, associated_error="gh: HTTP 502")])
+            associated_cases.append((rc, calls, fixture.probe_reads,
+                                     "cannot evaluate: the pull-request read failed" in output))
         check("ci/wait-pr-probe-associated-read", associated_cases,
-              [(2, 0, 1, True)] * 5 + [(0, 5, 6, False), (2, 0, 12, True)])
+              [(2, 0, 1, True)] * 5 + [(0, 5, 6, False)] + [(2, 0, 12, True)] * 2)
+
+        # A pull request merged into main with this head, read in the associated pull requests, lets the
+        # runs decide also when the listing still holds an open pull request at this head into main that
+        # does not read MERGEABLE: a listing read just after the merge that still shows the merged #27
+        # open, though its own read shows it closed; a CONFLICTING sibling #28 beside the merged #21;
+        # and an UNKNOWN sibling #29 beside it. Each says so, stops probing after its first read, and
+        # settles green on the runs. Without that read each ends cannot-evaluate (exit 2) after 12
+        # reads, or is refused (exit 1) at once.
+        # Controls, where the associated read shows no merge into main at this head: #27 closed without
+        # a merge, a sibling merged into dev, and one merged at another head each keep the outcome the
+        # listing and own reads give (changed or UNKNOWN at every read, cannot-evaluate at the 12th; a
+        # CONFLICTING #28 refused at once), reading the associated pull requests on every read; against
+        # the script before this rule they differ only in the associated reads counted (and in the
+        # CONFLICTING refusal's text, which now names the merge). An associated read that fails at every
+        # read beside the CONFLICTING #28 is a failed read, cannot-evaluate (exit 2) at the 12th read,
+        # never the refusal, which that script gave at once. A MERGEABLE #30 beside the merged #21 keeps
+        # its path: the probe never reads the associated pull requests, and runs before every poll, as
+        # it did there.
+        stale = pull(27, head_sha, state="closed", mergeable=None)
+        conflicted_sibling = pull(28, head_sha, mergeable=False)
+        unknown_sibling = pull(29, head_sha, mergeable=None)
+        merged_sibling = closed_pull(21, head_sha)
+        merged_note = "with {} as its head was merged into main".format(head_sha)
+        beside = []
+        for probe, marker in (
+                (probe_read(pull(27, head_sha), records={"27": stale},
+                            associated=[closed_pull(27, head_sha)]), "pull request #27 " + merged_note),
+                (probe_read(conflicted_sibling, associated=[merged_sibling]),
+                 "pull request #21 " + merged_note),
+                (probe_read(unknown_sibling, associated=[merged_sibling]),
+                 "pull request #21 " + merged_note),
+                (probe_read(pull(27, head_sha), records={"27": stale},
+                            associated=[closed_pull(27, head_sha, merged=False)]),
+                 "cannot evaluate: the open pull request into main for this head changed between the "
+                 "listing and its own read, still after 12 reads"),
+                (probe_read(conflicted_sibling, associated=[closed_pull(21, head_sha, base="dev")]),
+                 "pull request #28 CONFLICTING with main now, and none with this head was merged into "
+                 "main"),
+                (probe_read(unknown_sibling, associated=[closed_pull(21, "e" * 40)]),
+                 "pull request #29 as UNKNOWN (not yet computed), still after 12 reads"),
+                (dict(probe_read(conflicted_sibling), associated_error="gh: HTTP 502"),
+                 "cannot evaluate: the pull-request read failed (raw: gh: HTTP 502), still after 12 "
+                 "reads"),
+                (probe_read(pull(30, head_sha), associated=[merged_sibling]), merged_note)):
+            rc, output, calls = fixture.invoke(green_polls, wait=True, probes=[probe])
+            beside.append((rc, calls, fixture.probe_reads,
+                           sum(argv == associated_argv for argv in fixture.gh_argv), marker in output))
+        check("ci/wait-pr-probe-merged-beside-candidate", beside,
+              [(0, 5, 1, 1, True)] * 3
+              + [(2, 0, 12, 12, True), (1, 0, 1, 1, True), (2, 0, 12, 12, True), (2, 0, 12, 12, True),
+                 (0, 5, 5, 0, False)])
 
     # Round 7: main() must print every collected failure and map the exit code by the module docstring's
     # rule on every path. Each case runs a nested main() on seeded state and restores the real state.

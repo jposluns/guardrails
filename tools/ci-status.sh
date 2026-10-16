@@ -19,17 +19,18 @@
 # `actions/runs` listing back to a lower bound derived from the commit's committer date, keeping the
 # runs whose head_sha is exactly this commit. Both need only Actions: Read. Under --wait, THE
 # PULL-REQUEST PROBE below also reads the repository's open pull requests (`pulls`) and, when none at
-# this head targets the base, the pull requests associated with this commit (`commits/<sha>/pulls`): on
-# a public repository those are public data, expected to need no further permission (not verified
-# live); a private repository's token also needs Pull requests: Read, or every --wait exits 2.
+# this head into the base reads MERGEABLE, the pull requests associated with this commit
+# (`commits/<sha>/pulls`): on a public repository those are public data, expected to need no further
+# permission (not verified live); a private repository's token also needs Pull requests: Read, or
+# every --wait exits 2.
 #
 # Usage:
 #   tools/ci-status.sh                              # current HEAD, report once
 #   tools/ci-status.sh <sha>                        # a given commit, report once
 #   tools/ci-status.sh <sha> --wait                 # poll until terminal, bounded and fail-loud,
-#                                                   # refusing a head that has no open pull request
-#                                                   # into the base now and none merged into it, or
-#                                                   # only CONFLICTING ones (THE PULL-REQUEST PROBE)
+#                                                   # refusing a head that, with none merged into
+#                                                   # the base, has no open pull request into it now
+#                                                   # or only CONFLICTING ones (THE PULL-REQUEST PROBE)
 #   tools/ci-status.sh <sha> --require-base main    # additionally trust only pull_request runs
 #                                                   # recorded against base main, and require a
 #                                                   # conforming completed successful run of the
@@ -41,19 +42,19 @@
 # Exit codes: 0 success, 1 failed / timed out / not-yet-terminal on a one-shot check, a run that
 # does not satisfy --require-base, or no conforming completed successful run of the required
 # workflow file under --require-base (report-once refuses at once; --wait refuses after its
-# settle window), a --wait whose head has no open pull request (still at the last of the probe's
-# reads) and none merged into the base, whose open pull request targets another base, or whose pull
-# request GitHub reports CONFLICTING (see THE PULL-REQUEST PROBE below; a head merged into the base is
-# decided by its runs alone), 2 no run found, API error, a malformed run record (in one-shot
-# and --wait mode alike), a missing, unusable or repeated --require-base or --require-workflow
-# value, the repository cannot be determined (see THE REPOSITORY IS THE CHECKOUT'S OWN below), or a
-# --wait whose pull-request probe is refused the pull requests, reads a malformed response, or at its
-# bound still reads UNKNOWN, a pull request that changed between the listing and its own read, or a
-# failed read (a response that is not valid JSON included). So a head with no open pull request is
-# refused (exit 1) only when the last read also reads its associated pull requests: where that
-# associated read fails at every read, and in none of the PERMANENT forms, the probe makes all 12
-# reads (11 re-reads) and exits 2 (before the probe read the associated pull requests, such a head
-# was refused at once, exit 1).
+# settle window), a --wait whose head, with none merged into the base, has no open pull request
+# (still at the last of the probe's reads), only open pull requests into another base, or only open
+# pull requests into the base that GitHub reports CONFLICTING (see THE PULL-REQUEST PROBE below; a
+# head merged into the base is decided by its runs alone), 2 no run found, API error, a malformed run
+# record (in one-shot and --wait mode alike), a missing, unusable or repeated --require-base or
+# --require-workflow value, the repository cannot be determined (see THE REPOSITORY IS THE
+# CHECKOUT'S OWN below), or a --wait whose pull-request probe is refused the pull requests, reads a
+# malformed response, or at its bound still reads UNKNOWN, a pull request that changed between the
+# listing and its own read, or a failed read (a response that is not valid JSON included). So each of
+# those three refusals (exit 1) comes only from a read that also read the head's associated pull
+# requests: where that associated read fails at every read, and in none of the PERMANENT forms, the
+# probe makes all 12 reads (11 re-reads) and exits 2 (before the probe read the associated pull
+# requests, each of the three was refused at once, exit 1).
 # Report-once (no --wait) never returns 0 for a non-terminal run.
 set -uo pipefail
 
@@ -641,12 +642,17 @@ report() {
 # and GitHub's Actions documentation states that a pull_request workflow does not run while the pull
 # request has a merge conflict (not verified live here). So under --wait, before EVERY poll, not only
 # the first, the probe lists the repository's open pull requests and keeps those whose head SHA is
-# exactly this commit. It refuses (exit 1, naming the cause, before that poll reads any run) at once
-# when none of them targets PR_BASE (the --require-base value, else main; each pull request is named
-# with its base) or GitHub reports every one into PR_BASE CONFLICTING, and when none is open at all
-# (closed, never opened, or its branch moved to another head) only if that still holds at the last of
-# its reads (RE-READS below). WHAT A REFUSAL ESTABLISHES: only the state the probe read, and so that
-# no new pull_request run will start for this head while that state holds. A run that started
+# exactly this commit. It refuses (exit 1, naming the cause, before that poll reads any run) when none
+# of them targets PR_BASE (the --require-base value, else main; each pull request is named with its
+# base) or GitHub reports every one into PR_BASE CONFLICTING, and when none is open at all (closed,
+# never opened, or its branch moved to another head), but only on a read whose read of the associated
+# pull requests (MERGED below) succeeds and shows no merge into PR_BASE with this head: the first two
+# at once on such a read, the third only if it still holds at the last of its reads (RE-READS below).
+# A refusal never rests on a failed associated read: a failure in a PERMANENT form below is
+# cannot-evaluate (exit 2) at once, and any other is re-read, so an associated read that fails at
+# every read ends the probe cannot-evaluate (exit 2) at its last read, whatever the listing and the
+# pull requests' own reads showed. WHAT A REFUSAL ESTABLISHES: only the state the probe read, and so
+# that no new pull_request run will start for this head while that state holds. A run that started
 # earlier, while the pull request was open and mergeable, may still be running and may still finish;
 # the refusal is chosen because the head cannot merge into PR_BASE through a pull request as it
 # stands, not because no run can come. Every poll is probed because a head that is mergeable when the
@@ -654,14 +660,18 @@ report() {
 # lets the poll proceed. Report-once mode runs no probe: it waits on nothing and reports the runs as
 # they are. The probe can only refuse a wait or stop probing, never produce a pass: a green verdict
 # still rests on the runs alone.
-# MERGED: when no open pull request at this head targets PR_BASE, the probe also reads the pull
-# requests GitHub associates with this commit (repos/OWNER/REPO/commits/SHA/pulls, paginated). One
-# that is closed with a merge time (.merged_at), whose head SHA is this commit and whose base is
-# PR_BASE, was merged into PR_BASE with this head (auto-merge can do that as soon as the checks pass,
-# within the settle window), and the head is not refused: the probe says so, stops for the rest of
-# the wait (a merge is final), and the runs decide as for any other wait, a green verdict (exit 0)
+# MERGED: when no open pull request at this head into PR_BASE reads MERGEABLE (none at this head is
+# listed, each one at this head targets another base, or the own reads of those into PR_BASE show
+# each CONFLICTING, UNKNOWN, or no longer open at this head into PR_BASE, as a listing read just
+# after a merge can still show the merged pull request open), the probe also reads the pull requests
+# GitHub associates with this commit (repos/OWNER/REPO/commits/SHA/pulls, paginated). One that is
+# closed with a merge time (.merged_at), whose head SHA is this commit and whose base is PR_BASE, was
+# merged into PR_BASE with this head (auto-merge can do that as soon as the checks pass, within the
+# settle window), and the head is neither refused nor re-read: the probe says so, stops for the rest
+# of the wait (a merge is final), and the runs decide as for any other wait, a green verdict (exit 0)
 # only when they settle all successful. A pull request at this head closed without that merge, or
-# merged into another base, and a merge that read does not show, keep the refusal. GitHub's REST
+# merged into another base, and a merge that read does not show, keep the refusal or the re-read the
+# other reads give. A read that finds a MERGEABLE pull request skips this read. GitHub's REST
 # documentation states that for a commit on the default branch this read lists only the merged pull
 # request that introduced it, and otherwise the merged and open pull requests associated with it (not
 # verified live, nor how soon a merge appears there); a merge that introduced this commit through
@@ -717,6 +727,8 @@ report() {
 # AVAILABILITY COST (disclosed, accepted): a head with no open pull request is refused only at the
 # last of the probe's reads: up to 55 seconds of sleep after the first, plus the 11 re-reads' own
 # time, each re-read making two paginated API reads (the listing and the associated pull requests).
+# Every probe read that finds no MERGEABLE pull request makes the associated read, so a CONFLICTING,
+# UNKNOWN or changed read also costs that one paginated API read more.
 # RESIDUAL (disclosed, not closed): neither the poll sleep nor the probe's re-reads consult
 # CI_STATUS_TIMEOUT, so a wait can end up to about 70 seconds past its deadline (the POLL_SECONDS
 # sleep of 15 seconds after the last deadline check, then up to 55 seconds of probe re-reads), plus
@@ -832,15 +844,40 @@ pr_refused() {
 # One probe read: prints one TSV row from CI_STATUS_PR_JQ, or returns 1 with the raw gh or jq
 # diagnostic and, for a response the jq program refused, the label pr_refused gives it.
 pr_probe_read() {
-  local listing listed associated merged number record checked records=""
+  local listing listed outcome associated merged number record checked records=""
   {
     listing="$(gh api "repos/$REPO/pulls?state=open&per_page=100" --paginate --slurp)" || return 1
     if ! listed="$(printf '%s\n' "$listing" | pr_jq list)"; then
       pr_refused "$listing" "the open pull-request listing"
       return 1
     fi
-    if [ "${listed%%$'\t'*}" = "none" ] || [ "${listed%%$'\t'*}" = "base" ]; then
-      # No open pull request at this head targets PR_BASE: was one with this head merged into it?
+    outcome="$listed"
+    if [ "${listed%%$'\t'*}" = "candidates" ]; then
+      for number in ${listed#*$'\t'}; do
+        # jq prints a large number in exponent form (1E+300), which this refuses before it reaches a URL.
+        if ! [[ "$number" =~ ^[123456789][0123456789]*$ ]]; then
+          echo "unexpected pull-request probe output"
+          return 1
+        fi
+        record="$(gh api "repos/$REPO/pulls/$number")" || return 1
+        # Each response is checked on its own, before the reads are combined, so a record of another
+        # pull request, or a second record in the same response, can never stand in for this one.
+        if ! checked="$(printf '%s\n' "$record" | pr_jq record "$number")"; then
+          pr_refused "$record" "the read of pull request #${number}" \
+            "is not exactly one well-formed record of #${number}"
+          return 1
+        fi
+        records+="$checked"$'\n'
+      done
+      if ! outcome="$(printf '%s' "$records" | pr_jq merge)"; then
+        echo "malformed pull-request response: the pull-request reads"
+        return 1
+      fi
+    fi
+    if [ "${outcome%%$'\t'*}" != "mergeable" ]; then
+      # No open pull request at this head into PR_BASE reads MERGEABLE (none at this head is listed,
+      # each targets another base, or the own reads show each one into PR_BASE CONFLICTING, UNKNOWN,
+      # or no longer open at this head into PR_BASE): was one with this head merged into PR_BASE?
       associated="$(gh api "repos/$REPO/commits/$SHA/pulls?per_page=100" --paginate --slurp)" ||
         return 1
       if ! merged="$(printf '%s\n' "$associated" | pr_jq associated)"; then
@@ -852,30 +889,7 @@ pr_probe_read() {
         return 0
       fi
     fi
-    if [ "${listed%%$'\t'*}" != "candidates" ]; then
-      printf '%s\n' "$listed"
-      return 0
-    fi
-    for number in ${listed#*$'\t'}; do
-      # jq prints a large number in exponent form (1E+300), which this refuses before it reaches a URL.
-      if ! [[ "$number" =~ ^[123456789][0123456789]*$ ]]; then
-        echo "unexpected pull-request probe output"
-        return 1
-      fi
-      record="$(gh api "repos/$REPO/pulls/$number")" || return 1
-      # Each response is checked on its own, before the reads are combined, so a record of another
-      # pull request, or a second record in the same response, can never stand in for this one.
-      if ! checked="$(printf '%s\n' "$record" | pr_jq record "$number")"; then
-        pr_refused "$record" "the read of pull request #${number}" \
-          "is not exactly one well-formed record of #${number}"
-        return 1
-      fi
-      records+="$checked"$'\n'
-    done
-    if ! printf '%s' "$records" | pr_jq merge; then
-      echo "malformed pull-request response: the pull-request reads"
-      return 1
-    fi
+    printf '%s\n' "$outcome"
   } 2>&1
 }
 
@@ -935,7 +949,7 @@ pr_probe() {
           exit 1
           ;;
         conflicting)
-          echo "RESULT: refusing to wait: GitHub reports pull request ${detail} CONFLICTING with ${PR_BASE} now, so no new pull_request run will start for it while that holds; a run that started earlier may still finish, but the pull request cannot merge as it stands. Resolve the conflict (a refresh push moves the head SHA)."
+          echo "RESULT: refusing to wait: GitHub reports pull request ${detail} CONFLICTING with ${PR_BASE} now, and none with this head was merged into ${PR_BASE}, so no new pull_request run will start for it while that holds; a run that started earlier may still finish, but the pull request cannot merge as it stands. Resolve the conflict (a refresh push moves the head SHA)."
           exit 1
           ;;
         unknown) cause="GitHub reports the mergeability of pull request ${detail} as UNKNOWN (not yet computed)" ;;
