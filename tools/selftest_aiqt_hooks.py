@@ -10630,6 +10630,48 @@ def _main_isolated(monitor):
         ciexpect("(ci-wr-c41) a $ inside double quotes stays a literal character, so a co-author trailer it splits "
                  "there allows",
                  'git commit -m x -m "Co-authored-by: Cl$""aude <c@x>"', "allow")
+        # The command and each run line are also judged with the '$' of a locale quote read as a literal
+        # character, as before locale quoting was read, and an AI identity either reading finds denies: an AI name
+        # followed directly by a locale quote, which the locale reading joins into one word naming no AI identity
+        # (Claude$"bot" read as Claudebot), denies as it did, a change toward allow being held until the
+        # maintainer decides it. So an --author value, a co-author trailer and a git identity variable so spelled
+        # deny (ci-wr119 to ci-wr121), and so do an --author value in a foreach operand, quoted or not, and in a
+        # run line that only the locale reading of the command builds (ci-wr122 to ci-wr124). A command that only
+        # the literal reading can parse (a {$"x"}> word, which the locale reading takes for an fd-variable
+        # redirect) is read under that reading, so the quote-split AI --author value in it denies (ci-wr125), and
+        # when that reading leaves a run line unread, the scan for an AI identity anywhere judges the command, so
+        # the quote-split AI --author value in an unparseable foreach operand denies (ci-wr126). Each was allowed
+        # when only the locale reading was judged. Controls: a name that both readings read as a human name allows
+        # (ci-wr-c42), and so does a command that only the literal reading can parse and that names no AI
+        # identity, with no run line or with one left unread (ci-wr-c43, ci-wr-c44).
+        ciexpect("(ci-wr119) an AI --author value followed directly by a locale quote denies",
+                 'git commit --author=Claude$"bot" -m x', "deny")
+        ciexpect("(ci-wr120) an AI co-author trailer followed directly by a locale quote denies",
+                 'git commit -m x -m "Co-authored-by: Claude"$"bot"', "deny")
+        ciexpect("(ci-wr121) an AI git identity variable value followed directly by a locale quote denies",
+                 'GIT_AUTHOR_NAME=Claude$"bot" git commit -m x', "deny")
+        ciexpect("(ci-wr122) an AI --author value followed directly by a locale quote in a foreach operand denies",
+                 "git submodule foreach 'git commit --author=Claude$\"bot\" -m x'", "deny")
+        ciexpect("(ci-wr123) an AI --author value followed directly by a locale quote in unquoted foreach operands "
+                 "denies",
+                 'git submodule foreach git commit --author=Claude$"bot" -m x', "deny")
+        ciexpect("(ci-wr124) an AI --author value followed directly by a locale quote in a run line that only the "
+                 "locale reading of the command builds denies",
+                 "git submodule $\"foreach\" 'git commit --author=Claude$\"bot\" -m x'", "deny")
+        ciexpect("(ci-wr125) a quote-split AI --author value in a command that only the literal reading can parse "
+                 "denies",
+                 'git commit --author=Cl""aude -m x {$"x"}>/dev/null', "deny")
+        ciexpect("(ci-wr126) a quote-split AI --author value in an unparseable foreach operand of a command that only "
+                 "the literal reading can parse denies",
+                 'echo {$"x"}>/dev/null; git submodule foreach "git commit --author=C\\"laude <c@x>\\" -m \'x"', "deny")
+        ciexpect("(ci-wr-c42) a --author value that both readings read as a human name allows",
+                 'git commit --author=Ma$"intainer" -m x', "allow")
+        ciexpect("(ci-wr-c43) a command that only the literal reading can parse and that names no AI identity "
+                 "allows",
+                 'echo {$"x"}>/dev/null; git commit -m x', "allow")
+        ciexpect("(ci-wr-c44) a command that only the literal reading can parse, with a run line left unread, that "
+                 "names no AI identity allows",
+                 'echo {$"x"}>/dev/null; git submodule foreach "echo \'x"; git commit -m x', "allow")
         # ci-wr116 is denied by the reader itself: find_ai_authorship returns the --author hit of the segment after
         # the unparseable line rather than leaving the command to the fallback, whose scan for an AI identity
         # anywhere would deny it as well.
@@ -10778,6 +10820,58 @@ def _main_isolated(monitor):
             if not isinstance(_ci_got, str):
                 failures.append("(ci-wr-run-after) {!r} gave {!r} (want the --author hit read past the bound)"
                                 .format(_ci_cmd[-60:], _ci_got))
+        # The run lines that each reading alone builds are read within a length bound of that reading's own, and
+        # those that only a mix of the two readings builds within a third, so lines that a reading does not build
+        # cannot spend the bound of the lines it reads alone (ci-wr-locale-bound). With the scale set to 0, each
+        # command below is judged with the floor just under, at and just over the characters of run lines that
+        # its AI --author line takes on its own reading's bound, and just under and at the characters that one
+        # bound charged with every line would take: just under the first, the line is left unread and the bounds
+        # error is raised, and from it on the hit is returned. In the first command the exec value 'git bisect run
+        # echo $"z"' builds 'echo z' under the locale reading and "echo '$z'" under the literal one, before an exec
+        # value with an AI --author that both readings build. In the second, git bisect run builds the AI --author
+        # value only under the literal reading (an AI name followed directly by a locale quote), after the run line
+        # of the locale reading, which names no AI identity. In the third, a foreach and a rebase exec that only
+        # the locale reading of the command reads build the lines of the first, and "echo '$z'", which only a mix
+        # of the readings builds, is charged to the third bound. A line past one reading's bound is left unread
+        # even when the other reading reads it, so the fourth command, the first with a commit message that merely
+        # names an AI product, raises the bounds error until the literal reading's lines fit its bound too.
+        _ci_saved = (aiqt_hooks._CMTIDN_RUN_SCALE, aiqt_hooks._CMTIDN_RUN_FLOOR)
+        _ci_split = 'git bisect run echo $"z"'
+        _ci_last = 'git commit --author="Claude <c@x>" -m x'
+        _ci_named = 'git commit -m "fix claude adapter"'
+        _ci_hit = "--author value 'Claude <c@x>'"
+        _ci_lit = "git commit '--author=Claude$bot' -m x"
+        _ci_loc = "git commit --author=Claudebot -m x"
+        _ci_one = len(_ci_split) + len("echo z") + len(_ci_last)
+        _ci_all = _ci_one + len("echo '$z'")
+        _ci_named_one = len(_ci_split) + len("echo z") + len(_ci_named)
+        _ci_named_lit = len(_ci_split) + len("echo '$z'") + len(_ci_named)
+        _ci_cases = (
+            ("git rebase -x {} -x {} main".format(shlex.quote(_ci_split), shlex.quote(_ci_last)),
+             ((_ci_one - 1, ValueError), (_ci_one, _ci_hit), (_ci_one + 1, _ci_hit), (_ci_all - 1, _ci_hit),
+              (_ci_all, _ci_hit))),
+            ('git bisect run git commit --author=Claude$"bot" -m x',
+             tuple((_ci_floor, "--author value 'Claude$bot'" if _ci_floor >= len(_ci_lit) else ValueError)
+                   for _ci_floor in (len(_ci_lit) - 1, len(_ci_lit), len(_ci_lit) + 1,
+                                     len(_ci_loc) + len(_ci_lit) - 1, len(_ci_loc) + len(_ci_lit)))),
+            ("git submodule $\"foreach\" {}; git rebase $\"-x\" {} main".format(shlex.quote(_ci_split),
+                                                                              shlex.quote(_ci_last)),
+             ((_ci_one - 1, ValueError), (_ci_one, _ci_hit), (_ci_one + 1, _ci_hit), (_ci_all - 1, _ci_hit),
+              (_ci_all, _ci_hit))),
+            ("git rebase -x {} -x {} main".format(shlex.quote(_ci_split), shlex.quote(_ci_named)),
+             ((_ci_named_one - 1, ValueError), (_ci_named_one, ValueError), (_ci_named_one + 1, ValueError),
+              (_ci_named_lit - 1, ValueError), (_ci_named_lit, None), (_ci_named_lit + 1, None))))
+        try:
+            aiqt_hooks._CMTIDN_RUN_SCALE = 0
+            for _ci_cmd, _ci_floors in _ci_cases:
+                for _ci_floor, _ci_want in _ci_floors:
+                    aiqt_hooks._CMTIDN_RUN_FLOOR = _ci_floor
+                    _ci_got = _ci_find(_ci_cmd)
+                    if _ci_got != _ci_want:
+                        failures.append("(ci-wr-locale-bound) {!r} under a {}-character bound gave {!r} (want {!r})"
+                                        .format(_ci_cmd, _ci_floor, _ci_got, _ci_want))
+        finally:
+            aiqt_hooks._CMTIDN_RUN_SCALE, aiqt_hooks._CMTIDN_RUN_FLOOR = _ci_saved
         # Reading each rebase's options only up to the next rebase subcommand finds the same exec lines as reading
         # them to the end of the segment: over these segments of several wrapped rebase commands (exec values
         # before and after each rebase word, an exec value and a directory value spelled rebase, a next rebase

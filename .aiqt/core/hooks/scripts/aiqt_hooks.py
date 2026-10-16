@@ -425,8 +425,8 @@ def _read_word(command, i, n, locale=False):
     unquoted space, tab, newline, or metacharacter. Raises ValueError on an unbalanced quote or an
     unterminated escape. With locale True, an unquoted bash locale quote $"..." is read as the double-quoted
     string bash reads when no message catalogue translates it (the '$' dropped, so Cl$""aude is Claude);
-    otherwise its '$' stays an ordinary opaque character, as every caller but the commit-identity check reads
-    it."""
+    otherwise its '$' stays an ordinary opaque character, as every other caller reads it and as the
+    commit-identity check reads it too, alongside the locale reading."""
     chars = []
     opaque = False
     started = False
@@ -948,7 +948,8 @@ def _segments(command, locale=False):
     parse error or unsupported construct so callers fall back conservatively. Existing consumers
     (protected_line, gate_weakening, git_explicit_binding, git_discard, find_ai_authorship) read
     redirect-free argv automatically; diff_source_pretool uses the richer _Segment records directly.
-    locale is passed to _lex_command; only the commit-identity reader (_cmtidn_line_ai) sets it."""
+    locale is passed to _lex_command; only the commit-identity reader (_cmtidn_line_ai) sets it, and it reads
+    each line with it set and unset."""
     return [(seg.argv, seg.sep_after) for seg in _lex_command(command, locale=locale)]
 
 
@@ -2187,13 +2188,14 @@ _CMTIDN_REBASE_LONG = {
     "reschedule-failed-exec": None, "reapply-cherry-picks": None}
 # How deep the command lines that git runs from its operands may nest (a foreach that runs a foreach) and how
 # many characters of such lines one command may make the check read, as a multiple of its own length plus a
-# floor, so a command built to nest or repeat them costs time linear in its length. A line past either bound
-# is left unread, and so is a line, at any depth, that the shared tokenizer cannot parse (an unbalanced quote
-# in a foreach operand or an exec value): every other segment of the command and every other run line within
-# the bounds is still judged, so such a line cannot hide an AI identity that the reader can read. Only when
-# none of them sets one does find_ai_authorship raise ValueError with _CMTIDN_RUN_BOUNDS, so the handler
-# judges the command with its conservative fallback, which then denies an AI identity anywhere in the command
-# once its quotes and backslashes are removed (_commit_identity_fallback).
+# floor, kept for each reading of the lines and for the lines that only a mix of the readings builds
+# (_cmtidn_line_ai), so a command built to nest or repeat them costs time linear in its length. A line past
+# either bound is left unread, and so is a line, at any depth, that the shared tokenizer cannot parse (an
+# unbalanced quote in a foreach operand or an exec value): every other segment of the command and every other
+# run line within the bounds is still judged, so such a line cannot hide an AI identity that the reader can
+# read. Only when none of them sets one does find_ai_authorship raise ValueError with _CMTIDN_RUN_BOUNDS, so
+# the handler judges the command with its conservative fallback, which then denies an AI identity anywhere in
+# the command once its quotes and backslashes are removed (_commit_identity_fallback).
 _CMTIDN_RUN_DEPTH = 8
 _CMTIDN_RUN_SCALE = 8
 _CMTIDN_RUN_FLOOR = 4096
@@ -2250,56 +2252,100 @@ def find_ai_authorship(command):
     trailer, --author value) on a segment that runs a git commit-family command, found by
     _cmtidn_git_commands behind leading reserved words, a function or coprocess name, VAR=value words and
     wrapper words (env, sudo, ...), and the same on each command line that a git command runs from its
-    operands (_cmtidn_run_lines). The command and each run line are tokenized with bash locale quoting read
-    as double-quoted text (_segments with locale True), so a name that $"" splits inside a word (Cl$""aude)
-    is read joined, as bash joins it. Raises ValueError on a shell parse error in the command itself (via
-    _segments), and ValueError(_CMTIDN_RUN_BOUNDS) when a run line was left unread, because it could not be
-    parsed or was past the bounds (_CMTIDN_RUN_DEPTH), and nothing read sets an AI identity; the handler turns
-    either into the conservative fallback."""
+    operands (_cmtidn_run_lines). The command and each run line are judged under two readings, and an AI
+    identity that either finds is returned: bash locale quoting read as double-quoted text (_segments with
+    locale True), so a name that $"" splits inside a word (Cl$""aude) is read joined, as bash joins it, and the
+    literal '$' reading every other guard uses (locale False), so a name followed directly by a locale quote
+    (Claude$"bot", which the first reading joins into Claudebot) still denies as it did before locale quoting
+    was read: a change toward allow is held until the maintainer decides it. The run lines that each reading
+    alone builds are read within a length bound of that reading's own, and those that only a mix of the two
+    builds within a third, so the lines one reading builds cannot spend the bound of the other: every line that
+    one reading alone reads is still read, and no command that one reading alone denies is allowed. Raises
+    ValueError on a shell parse error in the command itself (via _segments; under one reading only, after the
+    other reading has found nothing and left no run line unread), and ValueError(_CMTIDN_RUN_BOUNDS) when a run
+    line was left unread, because it could not be parsed or was past the bounds (_CMTIDN_RUN_DEPTH), and
+    nothing read sets an AI identity; the handler turns either into the conservative fallback."""
+    bound = _CMTIDN_RUN_SCALE * len(command) + _CMTIDN_RUN_FLOOR
     unread = [False]
-    hit = _cmtidn_line_ai(command, 0, [_CMTIDN_RUN_SCALE * len(command) + _CMTIDN_RUN_FLOOR], unread)
+    try:
+        hit = _cmtidn_line_ai(command, 0, {True: [bound], False: [bound], None: [bound]}, unread, [True, False])
+    except ValueError:
+        if not unread[0]:
+            raise
+        hit = None  # one reading cannot parse the command, and the other left a run line unread
     if hit is None and unread[0]:
         raise ValueError(_CMTIDN_RUN_BOUNDS)
     return hit
 
 
-def _cmtidn_line_ai(command, depth, budget, unread):
-    """find_ai_authorship over one command line at a run-line nesting depth, with budget a one-item list of the
-    characters of run lines still to be read, shared by every nested line of the command, and unread a one-item
-    list set to True when a run line is left unread: one past the bounds, or one (depth above 0) that the
-    shared tokenizer cannot parse. Such a line is not read, but the other segments of the command and of every
-    line being read still are, and so are the other run lines within the bounds; once the length bound is spent
-    no further run line is built, and each rebase reads its options only up to the next rebase subcommand
-    (_cmtidn_run_lines), so the cost stays linear. A parse error in the command itself (depth 0) raises."""
-    try:
-        segments = _segments(command, locale=True)
-    except ValueError:
-        if depth == 0:
-            raise
-        unread[0] = True  # a run line that cannot be parsed is left unread, like one past the bounds
-        return None
-    for tokens, _sep in segments:
-        hit = _identity_assignment_ai(tokens)
-        if hit is not None:
-            return hit
-        subs = list(_cmtidn_git_commands(tokens))
-        if any(tokens[k] in COMMIT_VERBS for k in subs):
-            hit = _commit_message_and_author_ai(tokens)
+def _cmtidn_line_ai(command, depth, budgets, unread, paths):
+    """find_ai_authorship over one command line at a run-line nesting depth. The line is judged under both
+    readings, the locale reading and the literal '$' reading (the locale flag of _segments True and False),
+    once when they agree, which they do on a line holding no $". paths lists the readings whose own reading of
+    the command and of every run line down to this one builds this line, and is empty when only a mix of the
+    two does. budgets maps each reading, and None for such a mix, to a one-item list of the characters of run
+    lines still to be read within that bound, shared by every nested line of the command: each run line that a
+    reading of this line builds is charged to the bound of each reading in paths that reads this line so, or to
+    the None bound when there is none, and is read while one of those bounds is not spent, so every line that
+    one reading alone reads is read, within that reading's bound, as that reading alone reads it. unread is a
+    one-item list set to True when a run line is left unread: one past a bound, or one (depth above 0) that the
+    shared tokenizer cannot parse under a reading. Such a line is not read, but the other segments of the
+    command and of every line being read still are, and so are the other run lines within the bounds; once the
+    bounds that a reading charges are spent it builds no further run line, and each rebase reads its options
+    only up to the next rebase subcommand (_cmtidn_run_lines), so the cost stays linear. A parse error in the
+    command itself (depth 0) raises: at once when neither reading parses it, and otherwise after the other
+    reading has found nothing."""
+    readings = []  # (the readings that read the line so, its segments)
+    error = None
+    for locale in (True, False):
+        if not locale and '$"' not in command:
+            for same, _read in readings:
+                same.append(locale)  # the readings differ only at a $" (_read_word): one serves for both
+            break
+        try:
+            segments = _segments(command, locale=locale)
+        except ValueError as exc:
+            error = error or exc
+            continue
+        for same, read in readings:
+            if read == segments:
+                same.append(locale)
+                break
+        else:
+            readings.append(([locale], segments))
+    if error is not None and depth > 0:
+        unread[0] = True  # a run line that a reading cannot parse is left unread, like one past the bounds
+    elif error is not None and not readings:
+        raise error
+    for same, segments in readings:
+        keys = [reading for reading in paths if reading in same] or [None]
+        for tokens, _sep in segments:
+            hit = _identity_assignment_ai(tokens)
             if hit is not None:
                 return hit
-        rebases = [k for k in subs if tokens[k] == "rebase"]
-        stops = dict(zip(rebases, rebases[1:]))
-        for k in subs:
-            if budget[0] < 0:
-                break  # the length bound is spent: no further run line is built
-            for line in _cmtidn_run_lines(tokens, k, stops.get(k, len(tokens))):
-                budget[0] -= len(line)
-                if depth >= _CMTIDN_RUN_DEPTH or budget[0] < 0:
-                    unread[0] = True  # left to the conservative fallback unless something read sets an identity
-                    break
-                hit = _cmtidn_line_ai(line, depth + 1, budget, unread)
+            subs = list(_cmtidn_git_commands(tokens))
+            if any(tokens[k] in COMMIT_VERBS for k in subs):
+                hit = _commit_message_and_author_ai(tokens)
                 if hit is not None:
                     return hit
+            rebases = [k for k in subs if tokens[k] == "rebase"]
+            stops = dict(zip(rebases, rebases[1:]))
+            for k in subs:
+                if all(budgets[key][0] < 0 for key in keys):
+                    break  # the length bound is spent: no further run line is built
+                for line in _cmtidn_run_lines(tokens, k, stops.get(k, len(tokens))):
+                    for key in keys:
+                        budgets[key][0] -= len(line)
+                    spent = [budgets[key][0] < 0 for key in keys]
+                    if depth >= _CMTIDN_RUN_DEPTH or any(spent):
+                        unread[0] = True  # left to the conservative fallback unless something read sets an identity
+                        if depth >= _CMTIDN_RUN_DEPTH or all(spent):
+                            break
+                    hit = _cmtidn_line_ai(line, depth + 1, budgets, unread, [key for key in keys if key is not None])
+                    if hit is not None:
+                        return hit
+    if error is not None and depth == 0:
+        raise error
     return None
 
 
