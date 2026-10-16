@@ -463,6 +463,35 @@ _CNSDIF_BASE_DECISIONS = {
     "git --namespace --name-only diff-tree -r --binary HEAD~1 HEAD": "allow-note",
     "git --namespace x diff --stat --binary --name-only": "allow-note",
     "git diff --no-index --stat --binary --name-o a b": "allow-note",
+    "git format-patch --stdout --no-stdout -1 --stat": "allow-note",
+    "git format-patch --no-stdout --stdout -1 --stat": "allow-note",
+    "git format-patch --stdout -1 -n --no-stdout --stat": "allow-note",
+    "git format-patch --stdout -1 --subject-prefix --no-stdout --stat": "allow-note",
+    "git format-patch --stdout -1 -v --no-stdout --stat": "allow-note",
+    "git --namespace --stat diff": "allow-note",
+    "git --namespace x diff --stat": "allow-note",
+    "git --namespace -- diff --stat": "deny",
+    "git format-patch --stdout --no-stdout -1 --stat --output=/dev/stdout": "allow-note",
+    "git format-patch --stdout --no-stdout -1 --stat --output /dev/stdout": "allow-note",
+    "git format-patch --stdout --no-stdout -1 --stat --output=/dev/fd/1": "allow-note",
+    "git format-patch --stdout --no-stdout -1 --numstat --output=/dev/stdout": "allow-note",
+    "git format-patch --stdout --no-stdout -1 --shortstat --output=/dev/stdout": "allow-note",
+    "git format-patch --stdout --no-stdout -1 --stat --output=/dev/stderr": "allow-note",
+    "git format-patch -1 --output --stdout --no-stdout /dev/stderr": "allow-note",
+    "git format-patch --stdout --no-stdout -1 --stat --binary": "allow-note",
+    "git format-patch --stdout --no-stdout -1 --stat -n --binary": "allow-note",
+    "git format-patch --stdout --no-stdout -1 --stat --binary --output=/dev/stdout": "allow-note",
+    "git format-patch -1 --output=/dev/stdout": "allow-note",
+    "git format-patch -1 --stat --output=/dev/stdout": "allow-note",
+    "git format-patch -1 --output /dev/stderr": "allow-note",
+    "git format-patch -1 --output --no-stdout /dev/stderr": "allow-note",
+    "git format-patch -1 --output=/dev/stdout | cat": "allow-note",
+    "git format-patch -1 --stat --output=/dev/stdout | cat": "allow-note",
+    "git format-patch -1 --output /dev/stderr | cat": "allow-note",
+    "git format-patch -1": "allow-note",
+    "git format-patch -1 --output=real.txt": "allow-note",
+    "git format-patch -1 -o /dev/stdout": "allow-note",
+    "git format-patch --stdout --no-stdout -1 --stat -o /dev/stdout": "allow-note",
 }
 
 # The deliberate relaxations: each console-diff vector that decides less strictly than its base decision in
@@ -5415,30 +5444,61 @@ def _main_isolated(monitor):
                "git --work-tree={} restore --staged --work file.txt".format(str(cf1_decoy)), "deny",
                cwd=str(cf1_wt))
         _wta_env = {"GIT_CONFIG_GLOBAL": str(tmp / "wta-gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
-        _wta_saved = {_wta_k: os.environ.get(_wta_k) for _wta_k in _wta_env}  # restored as found, set or unset
-        for _wta_k, _wta_v in _wta_env.items():
-            os.environ[_wta_k] = _wta_v
+
+        @contextlib.contextmanager
+        def _wta_environ(values):
+            saved = {key: os.environ.get(key) for key in values}  # restored as found, set or unset
+            for key, value in values.items():
+                os.environ[key] = value
+            try:
+                yield
+            finally:
+                for key, old in saved.items():
+                    if old is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = old
+
+        # The suite unset both variables at its start, so a restore that unset them whatever they held would pass
+        # unseen. Each is given a known value before these cases, other than the one they set, and must hold it
+        # after them (wta-env-kept); then each in turn starts unset beside the other's known value, and after a
+        # pass through the same restore it must be unset and the other must hold its value (wta-env-unset). Both
+        # are unset again afterwards, as the suite started them.
+        _wta_seed = {"GIT_CONFIG_GLOBAL": str(tmp / "wta-seed-gitconfig"), "GIT_CONFIG_NOSYSTEM": "0"}
+        os.environ.update(_wta_seed)
         try:
-            if not aiqt_hooks._ambient_repo_view_override():
-                failures.append("(wta-env) GIT_CONFIG_GLOBAL and GIT_CONFIG_NOSYSTEM must read as an ambient "
-                                "repository-view override")
-            expect("(wta-restore) under ambient GIT_CONFIG_* a --work-tree (outside) worktree restore DENIES",
-                   "git --work-tree={} restore --staged --work file.txt".format(str(cf1_decoy)), "deny",
-                   cwd=str(cf1_wt))
-            expect("(wta-reset) under ambient GIT_CONFIG_* a --work-tree (outside) reset --hard DENIES",
-                   "git --work-tree={} reset --hard".format(str(cf1_decoy)), "deny", cwd=str(cf1_wt))
-            expect("(wta-c) under ambient GIT_CONFIG_* a -C <decoy> --work-tree=<decoy> worktree restore DENIES",
-                   "git -C {0} --work-tree={0} restore --staged --worktree file.txt".format(str(cf1_decoy)), "deny",
-                   cwd=str(cf1_wt))
-            expect("(wta-self) under ambient GIT_CONFIG_* a --work-tree naming the session repository allows "
-                   "with a note", "git --work-tree={} restore --staged --worktree file.txt".format(str(cf1_wt)),
-                   "allow-note", cwd=str(cf1_wt))
+            with _wta_environ(_wta_env):
+                if not aiqt_hooks._ambient_repo_view_override():
+                    failures.append("(wta-env) GIT_CONFIG_GLOBAL and GIT_CONFIG_NOSYSTEM must read as an ambient "
+                                    "repository-view override")
+                expect("(wta-restore) under ambient GIT_CONFIG_* a --work-tree (outside) worktree restore DENIES",
+                       "git --work-tree={} restore --staged --work file.txt".format(str(cf1_decoy)), "deny",
+                       cwd=str(cf1_wt))
+                expect("(wta-reset) under ambient GIT_CONFIG_* a --work-tree (outside) reset --hard DENIES",
+                       "git --work-tree={} reset --hard".format(str(cf1_decoy)), "deny", cwd=str(cf1_wt))
+                expect("(wta-c) under ambient GIT_CONFIG_* a -C <decoy> --work-tree=<decoy> worktree restore DENIES",
+                       "git -C {0} --work-tree={0} restore --staged --worktree file.txt".format(str(cf1_decoy)),
+                       "deny", cwd=str(cf1_wt))
+                expect("(wta-self) under ambient GIT_CONFIG_* a --work-tree naming the session repository allows "
+                       "with a note", "git --work-tree={} restore --staged --worktree file.txt".format(str(cf1_wt)),
+                       "allow-note", cwd=str(cf1_wt))
+            for _wta_k, _wta_v in _wta_seed.items():
+                if os.environ.get(_wta_k) != _wta_v:
+                    failures.append("(wta-env-kept) {} held {!r} before the --work-tree cases and {!r} after them"
+                                    .format(_wta_k, _wta_v, os.environ.get(_wta_k)))
+            for _wta_unset in _wta_seed:
+                os.environ.update(_wta_seed)
+                del os.environ[_wta_unset]
+                with _wta_environ(_wta_env):
+                    pass
+                _wta_want = {**_wta_seed, _wta_unset: None}
+                _wta_got = {_wta_k: os.environ.get(_wta_k) for _wta_k in _wta_seed}
+                if _wta_got != _wta_want:
+                    failures.append("(wta-env-unset) with {} unset before the restore, the variables read {!r} "
+                                    "after it, not {!r}".format(_wta_unset, _wta_got, _wta_want))
         finally:
-            for _wta_k, _wta_old in _wta_saved.items():
-                if _wta_old is None:
-                    os.environ.pop(_wta_k, None)
-                else:
-                    os.environ[_wta_k] = _wta_old
+            for _wta_k in _wta_seed:
+                os.environ.pop(_wta_k, None)
 
         # === CLAUDE-F1: a redirected/ambient 'checkout-index' (sub outside the recognized lossy-verb set,
         # flagged by the raw scan) entering the view-override branch DENIES (was allowed with no snapshot). ==
@@ -7596,14 +7656,15 @@ def _main_isolated(monitor):
                 "git diff --stat --line-prefix X --binary", "deny")
         dexpect("(cnsdif-bin-val6) a --binary after the '--' that --decorate-refs takes denies",
                 "git log -1 --decorate-refs -- --binary", "deny")
-        # git format-patch --stdout prints the patch beside every summary selector it accepts, and its -n is
-        # --numbered, which takes no value: git 2.55.0 printed the patch for git format-patch --stdout -1 beside
-        # --stat, --stat=80, --numstat and --shortstat, beside --stat with -n before a --binary and with -v taking
-        # --binary as its reroll count, and with a --name-only that a later --no-patch drops. Each allowed with a
-        # note before. git refuses --name-only without a later --no-patch and printed nothing, and that command
-        # denies too, a safe-direction over-deny.
-        dexpect("(cnsdif-fp-n) a --binary after the -n of git format-patch, its --numbered, denies",
-                "git format-patch --stdout -1 --stat -n --binary", "deny")
+        # git format-patch --stdout prints the patch beside every summary selector it accepts: git 2.55.0 printed
+        # the patch for git format-patch --stdout -1 beside --stat, --stat=80, --numstat and --shortstat, beside
+        # --stat with -n before a --binary and with -v taking --binary as its reroll count, and with a --name-only
+        # that a later --no-patch drops. Each allowed with a note before, and the summary short-circuit
+        # (_diff_emits_only_summary) decides each, the -n one included, which denies whether or not -n is read as
+        # taking the next word. git refuses --name-only without a later --no-patch and printed nothing, and that
+        # command denies too, a safe-direction over-deny.
+        dexpect("(cnsdif-fp-n) the summary short-circuit denies git format-patch --stdout beside --stat with -n "
+                "before a --binary", "git format-patch --stdout -1 --stat -n --binary", "deny")
         dexpect("(cnsdif-fp-v) git format-patch --stdout beside --stat with -v taking --binary denies",
                 "git format-patch --stdout -1 --stat -v --binary", "deny")
         dexpect("(cnsdif-fp-stat) git format-patch --stdout beside --stat denies",
@@ -7618,15 +7679,103 @@ def _main_isolated(monitor):
                 "git format-patch --stdout -1 --name-only --no-patch", "deny")
         dexpect("(cnsdif-fp-refused) git format-patch --stdout beside --name-only, which git refuses, denies",
                 "git format-patch --stdout -1 --name-only", "deny")
+        # git reads --stdout and --no-stdout in order and the later one wins (_diff_always_patch): git 2.55.0 wrote
+        # a patch file and printed only its name for git format-patch --stdout --no-stdout -1 --stat, which allows
+        # with a note again, and printed the patch for the reverse order, which denies. A --no-stdout right after
+        # the -n of format-patch, its --numbered, cancels the --stdout too (git wrote a file), and that vector
+        # fails if -n is read as taking the next word (_DIFF_SUB_FLAG_LETTERS); one that --subject-prefix or -v
+        # takes as its value does not cancel it (git printed the patch for each). The first and the -n one detect
+        # the cancel. The reverse order and the two value cases are controls: each denied before the cancel was
+        # read, and each fails if the cancel is read where git does not read it.
+        dexpect("(cnsdif-fp-nostdout) a --no-stdout after the --stdout of git format-patch allows with a note",
+                "git format-patch --stdout --no-stdout -1 --stat", "allow-note")
+        dexpect("(cnsdif-fp-stdout-last) control: a --stdout after a --no-stdout on git format-patch denies",
+                "git format-patch --no-stdout --stdout -1 --stat", "deny")
+        dexpect("(cnsdif-fp-nostdout-n) a --no-stdout after the -n of git format-patch, its --numbered, allows "
+                "with a note", "git format-patch --stdout -1 -n --no-stdout --stat", "allow-note")
+        dexpect("(cnsdif-fp-nostdout-val) control: a --no-stdout that --subject-prefix takes as its value denies",
+                "git format-patch --stdout -1 --subject-prefix --no-stdout --stat", "deny")
+        dexpect("(cnsdif-fp-nostdout-v) control: a --no-stdout that -v takes as its reroll count denies",
+                "git format-patch --stdout -1 -v --no-stdout --stat", "deny")
+        # With --stdout cancelled git accepts --output, and git format-patch writes its whole patch there whatever
+        # summary selector is beside it: git 2.55.0 printed the patch on stdout for each of these with --stat,
+        # --numstat or --shortstat beside --output=/dev/stdout, --output /dev/stdout or --output=/dev/fd/1, and
+        # on stderr beside --output=/dev/stderr. A console target among the diversions of git format-patch is
+        # judged before any summary selector (_is_console_dump), so each denies. Its own parser takes --stdout and
+        # --no-stdout out of the words before the diff options are read, so a separated --output may take a later
+        # word: git wrote the patch to stderr for git format-patch -1 --output --stdout --no-stdout /dev/stderr,
+        # which denies too. No --binary counts once --stdout is cancelled (_diff_binary_enables_patch): git wrote
+        # a file for the --binary pair, which allows with a note, and those two detect that change. The other
+        # vectors here denied before the cancel was read, so each is a control: the six beside a summary selector
+        # and the one beside --binary fail if the summary short-circuit decides before a console target is read,
+        # and the separated one fails if a later word is not read as the target of its --output.
+        dexpect("(cnsdif-fp-nostdout-out) control: a --output=/dev/stdout beside --stat after a cancelled --stdout "
+                "denies", "git format-patch --stdout --no-stdout -1 --stat --output=/dev/stdout", "deny")
+        dexpect("(cnsdif-fp-nostdout-out-sep) control: a separated --output /dev/stdout beside --stat after a "
+                "cancelled --stdout denies", "git format-patch --stdout --no-stdout -1 --stat --output /dev/stdout",
+                "deny")
+        dexpect("(cnsdif-fp-nostdout-out-fd) control: a --output=/dev/fd/1 beside --stat after a cancelled --stdout "
+                "denies", "git format-patch --stdout --no-stdout -1 --stat --output=/dev/fd/1", "deny")
+        dexpect("(cnsdif-fp-nostdout-out-numstat) control: a --output=/dev/stdout beside --numstat after a "
+                "cancelled --stdout denies",
+                "git format-patch --stdout --no-stdout -1 --numstat --output=/dev/stdout", "deny")
+        dexpect("(cnsdif-fp-nostdout-out-shortstat) control: a --output=/dev/stdout beside --shortstat after a "
+                "cancelled --stdout denies",
+                "git format-patch --stdout --no-stdout -1 --shortstat --output=/dev/stdout", "deny")
+        dexpect("(cnsdif-fp-nostdout-out-stderr) control: a --output=/dev/stderr beside --stat after a cancelled "
+                "--stdout denies", "git format-patch --stdout --no-stdout -1 --stat --output=/dev/stderr", "deny")
+        dexpect("(cnsdif-fp-nostdout-out-later) control: a separated --output that takes the word after the "
+                "--stdout and --no-stdout format-patch takes out denies",
+                "git format-patch -1 --output --stdout --no-stdout /dev/stderr", "deny")
+        dexpect("(cnsdif-fp-nostdout-bin) a --binary beside --stat after a cancelled --stdout allows with a note",
+                "git format-patch --stdout --no-stdout -1 --stat --binary", "allow-note")
+        dexpect("(cnsdif-fp-nostdout-bin-n) a --binary after -n beside --stat after a cancelled --stdout allows "
+                "with a note", "git format-patch --stdout --no-stdout -1 --stat -n --binary", "allow-note")
+        dexpect("(cnsdif-fp-nostdout-bin-out) control: a --output=/dev/stdout beside --binary and --stat after a "
+                "cancelled --stdout denies",
+                "git format-patch --stdout --no-stdout -1 --stat --binary --output=/dev/stdout", "deny")
+        # git format-patch with no --stdout word writes its whole patch to a --output too: git 2.55.0 printed the
+        # patch on stdout for git format-patch -1 --output=/dev/stdout and the same with --stat, and on stderr for
+        # git format-patch -1 --output /dev/stderr and for git format-patch -1 --output --no-stdout /dev/stderr,
+        # where its own parser takes --no-stdout out before --output takes the next word; each through | cat too.
+        # A console --output on git format-patch is judged before the producer gate (_is_console_dump), so each
+        # denies; each allowed with a note before. The controls write files or are refused and keep their allow
+        # with a note: git format-patch -1 fails if a format-patch with no --stdout is made a producer, the one
+        # with --output=real.txt fails if a --output naming no console target counts, and the one with -o
+        # /dev/stdout, which git refused (/dev/stdout is not a directory), fails if a -o word counts there. A -o
+        # naming a console target still denies on a producer, as it did before the cancel was read, although git
+        # refused that command too: the last control fails if the check before the summary short-circuit goes.
+        dexpect("(cnsdif-fp-out-console) a --output=/dev/stdout on git format-patch with no --stdout denies",
+                "git format-patch -1 --output=/dev/stdout", "deny")
+        dexpect("(cnsdif-fp-out-console-stat) a --output=/dev/stdout beside --stat on git format-patch with no "
+                "--stdout denies", "git format-patch -1 --stat --output=/dev/stdout", "deny")
+        dexpect("(cnsdif-fp-out-console-stderr) a separated --output /dev/stderr on git format-patch with no "
+                "--stdout denies", "git format-patch -1 --output /dev/stderr", "deny")
+        dexpect("(cnsdif-fp-out-console-later) a separated --output that takes the word after the --no-stdout "
+                "format-patch takes out denies", "git format-patch -1 --output --no-stdout /dev/stderr", "deny")
+        dexpect("(cnsdif-fp-out-console-cat) a --output=/dev/stdout on git format-patch with no --stdout piped "
+                "into cat denies", "git format-patch -1 --output=/dev/stdout | cat", "deny")
+        dexpect("(cnsdif-fp-out-console-stat-cat) a --output=/dev/stdout beside --stat on git format-patch with "
+                "no --stdout piped into cat denies", "git format-patch -1 --stat --output=/dev/stdout | cat", "deny")
+        dexpect("(cnsdif-fp-out-console-stderr-cat) a separated --output /dev/stderr on git format-patch with no "
+                "--stdout piped into cat denies", "git format-patch -1 --output /dev/stderr | cat", "deny")
+        dexpect("(cnsdif-fp-files) control: git format-patch -1, which writes a file, allows with a note",
+                "git format-patch -1", "allow-note")
+        dexpect("(cnsdif-fp-files-out) control: a --output=real.txt on git format-patch with no --stdout allows "
+                "with a note", "git format-patch -1 --output=real.txt", "allow-note")
+        dexpect("(cnsdif-fp-files-o) control: a -o /dev/stdout on git format-patch with no --stdout, which git "
+                "refuses, allows with a note", "git format-patch -1 -o /dev/stdout", "allow-note")
+        dexpect("(cnsdif-fp-nostdout-o) control: a -o /dev/stdout beside --stat after a cancelled --stdout, which "
+                "git refuses, denies", "git format-patch --stdout --no-stdout -1 --stat -o /dev/stdout", "deny")
         # git format-patch refuses --output beside --stdout (git 2.55.0 exited 128 for git format-patch --stdout -1
         # --output=real.txt), and its own parser takes its options out before the diff options are read, so a
         # --output word there either stops git or is an option's value: git 2.55.0 printed the patch on stdout,
         # each line prefixed with --output=real.txt, with -n, --binary or --stdout between --line-prefix and the
-        # --output word. A --output word never makes its stdout a decoy, so each denies: the first denied before
-        # only because -n was read as taking the word, and the others, the refused command included, allowed with
-        # a note.
-        dexpect("(cnsdif-fp-out-n) a --output word after -n, the --line-prefix value on git format-patch, denies",
-                "git format-patch --stdout -1 --line-prefix -n --output=real.txt", "deny")
+        # --output word. A --output word never makes its stdout a decoy, so each denies. The first is a control:
+        # it denied before too, since -n was read as taking the word; the others, the refused command included,
+        # allowed with a note.
+        dexpect("(cnsdif-fp-out-n) control: a --output word after -n, the --line-prefix value on git format-patch, "
+                "denies", "git format-patch --stdout -1 --line-prefix -n --output=real.txt", "deny")
         dexpect("(cnsdif-fp-out-bin) a --output word after --binary, the --line-prefix value on git format-patch, "
                 "denies", "git format-patch --stdout -1 --line-prefix --binary --output=real.txt", "deny")
         dexpect("(cnsdif-fp-out-stdout) a --output word after --stdout, the --line-prefix value, denies",
@@ -7645,6 +7794,17 @@ def _main_isolated(monitor):
                 "git --namespace --name-only diff-tree -r --binary HEAD~1 HEAD", "deny")
         dexpect("(cnsdif-bin-glob-c) a --name-only after the subcommand, beside a git option, allows with a note",
                 "git --namespace x diff --stat --binary --name-only", "allow-note")
+        # Nor is it read as a summary selector: git 2.55.0 gave --stat to --namespace and printed the patch for git
+        # --namespace --stat diff, which allowed with a note before and denies. The control, a --stat after the
+        # subcommand beside a git option, keeps its allow with a note. A boundary word before the subcommand still
+        # ends the summary scan, a safe-direction over-deny kept: git --namespace -- diff --stat printed only the
+        # stat and denies, as it did before, so that vector is a control too.
+        dexpect("(cnsdif-sum-glob) a --stat that is the --namespace value denies",
+                "git --namespace --stat diff", "deny")
+        dexpect("(cnsdif-sum-glob-c) a --stat after the subcommand, beside a git option, allows with a note",
+                "git --namespace x diff --stat", "allow-note")
+        dexpect("(cnsdif-sum-glob-eoo) control: a -- that is the --namespace value still ends the summary scan "
+                "and denies", "git --namespace -- diff --stat", "deny")
         # Under --no-index an abbreviated suppressing option beside a full --binary still denies, although git
         # 2.55.0 printed no patch for it: the revision-walk reading counts the full --binary and reads no
         # abbreviation, a safe-direction over-deny kept (it allowed with a note before --binary counted).
@@ -7689,9 +7849,13 @@ def _main_isolated(monitor):
         # The --binary test starts after the subcommand and reads -n as each producer does: a --binary after the
         # -n of git format-patch counts, one after the -n of git log is its count and does not (git refused
         # '--binary' as a count), a --name-only that git --namespace takes is not read, and with no subcommand to
-        # start after the answer is True, toward deny.
+        # start after the answer is True, toward deny. That last case is checked here only: both callers reach the
+        # test only for a segment _is_diff_producer has judged by its subcommand, so no decision depends on it.
+        # No --binary counts for a git format-patch whose --stdout a later --no-stdout cancels, since it then
+        # writes a file (git 2.55.0).
         for _bargv, _bwant in (
                 (["git", "format-patch", "--stdout", "-1", "--stat", "-n", "--binary"], True),
+                (["git", "format-patch", "--stdout", "--no-stdout", "-1", "--stat", "--binary"], False),
                 (["git", "log", "-1", "--stat", "-n", "--binary"], False),
                 (["git", "--namespace", "--name-only", "diff", "--stat", "--binary"], True),
                 (["git", "--namespace", "x", "diff", "--stat", "--binary", "--name-only"], False),
@@ -7700,6 +7864,33 @@ def _main_isolated(monitor):
                 if aiqt_hooks._diff_binary_enables_patch(_bargv, _bends) is not _bwant:
                     failures.append("(cnsdif-bin-scan) _diff_binary_enables_patch({!r}, {}) must be {}"
                                     .format(_bargv, _bends.__name__, _bwant))
+        # The --stdout of git format-patch stands unless a later --no-stdout in an option position cancels it: not
+        # one after -- or --end-of-options, not one an option before it may take as its value, and not one before
+        # the subcommand, while the -n of format-patch takes no value; only format-patch is read.
+        for _fargv, _fwant in (
+                (["git", "format-patch", "--stdout", "--no-stdout", "-1"], False),
+                (["git", "format-patch", "--no-stdout", "--stdout", "-1"], True),
+                (["git", "format-patch", "--stdout", "-1", "-n", "--no-stdout"], False),
+                (["git", "format-patch", "--stdout", "-1", "-v", "--no-stdout"], True),
+                (["git", "format-patch", "--stdout", "-1", "--", "--no-stdout"], True),
+                (["git", "format-patch", "--stdout", "-1", "--end-of-options", "--no-stdout"], True),
+                (["git", "--namespace", "--", "format-patch", "--stdout", "--no-stdout"], False),
+                (["git", "--stdout", "--namespace", "--no-stdout", "format-patch", "-1"], True),
+                (["git", "format-patch", "-1"], False),
+                (["git", "diff", "--stdout"], False)):
+            if aiqt_hooks._diff_always_patch(_fargv) is not _fwant:
+                failures.append("(cnsdif-fp-always) _diff_always_patch({!r}) must be {}".format(_fargv, _fwant))
+        # The summary selector is read after the subcommand only, while a boundary word before it still ends the
+        # scan, and with no subcommand none counts.
+        for _sargv, _swant in (
+                (["git", "--namespace", "--stat", "diff"], False),
+                (["git", "--namespace", "x", "diff", "--stat"], True),
+                (["git", "--namespace", "--", "diff", "--stat"], False),
+                (["git", "--namespace", "--stat"], False)):
+            for _sends in aiqt_hooks._DIFF_OPTION_READINGS:
+                if aiqt_hooks._diff_emits_only_summary(_sargv, _sends) is not _swant:
+                    failures.append("(cnsdif-sum-scan) _diff_emits_only_summary({!r}, {}) must be {}"
+                                    .format(_sargv, _sends.__name__, _swant))
         _vnames = aiqt_hooks._GIT_LONG_OPTS["diff --no-index"]
         for _vname in sorted((aiqt_hooks._DIFF_VALUE_NAMES | aiqt_hooks._DIFF_LONG_PATCH_NAMES
                               | aiqt_hooks._DIFF_PATCH_OFF_NAMES | aiqt_hooks._DIFF_PATCH_CLEAR_NAMES
