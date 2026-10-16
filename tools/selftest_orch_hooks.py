@@ -4236,6 +4236,15 @@ def _main_isolated(report_path=None):
         check("wl/handler-deny-time-dashdash-sleep", _verdict(wl(TIME_DD_SLEEP)), "deny")
         check("wl/handler-deny-time-dashdash-probe", _verdict(wl(TIME_DD_PROBE)), "deny")
         check("wl/backquote-line-match", clf("x=`while true; do gh pr checks 42; sleep 30; done &`"), "match")
+        # The wrapped examples this guard's text names: a loop whose header is not the first word of its
+        # segment, a loop inside an unquoted $(...), and a canonical loop beside an unquoted $(...) are
+        # 'indeterminate', unless a backquote substitution in the command holds a 'match' (checked first).
+        check("wl/time-header-indeterminate",
+              (clf("time " + BASE), clf("time -p " + BASE), clf("! " + BASE), clf("FOO=1 " + BASE)),
+              ("indeterminate",) * 4)
+        check("wl/dollar-subst-loop-indeterminate", clf("x=$(" + BASE + ")"), "indeterminate")
+        check("wl/dollar-subst-beside-indeterminate", clf("echo $(date); " + BASE), "indeterminate")
+        check("wl/dollar-subst-backquote-match", clf("echo $(date) `" + BASE + "`"), "match")
         check("wl/for-header-variable-probe-match",
               (clf("for gh in 1 2; do sleep 5; done &"), clf("for curl in a; do sleep 5; done &")),
               ("match", "match"))
