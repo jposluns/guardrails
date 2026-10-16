@@ -14,7 +14,9 @@ GIT_* variable and leaving the process environment scrubbed. Second, ROUTING che
 the fixture class is statically confirmed to call its scrub (per member, so removing one member's
 routing fails at that member's own named check), tightened by function-SCOPED checks (the named
 self-test entry itself calls the in-place scrub as a top-level statement with no process-launching
-call before it), explicit hook-fixture env checks, an OPF inherited-env probe, and TRUST checks
+call before it, or, for an entry wrapped in fixture_git_lifecycle(), enters the lifecycle as a
+top-level with whose body calls the isolated main, with no scrub, launch or os.environ access
+before it), explicit hook-fixture env checks, an OPF inherited-env probe, and TRUST checks
 (every literal `git ... archive ...` launch in the two members that read the checkout under test
 passes env=caller_env_without_git(), so the scrub cannot regress
 a foreign-owned checkout to a rc=128 refusal). Third, an end-to-end leak probe: the originally
@@ -255,15 +257,20 @@ _LAUNCH_NAMES = frozenset({
     "execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp", "execvpe",
     "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe",
 })
+_LIFECYCLE_NAME = "fixture_git_lifecycle"
 
 
-def _scrub_scoped_first(member_path, func_name, scrub_name):
+def _scrub_scoped_first(member_path, func_name, scrub_name, isolated=None):
     """True when the named function calls scrub_name as a TOP-LEVEL statement of its OWN body
     (function-scoped: a call anywhere else in the file cannot satisfy this) with no
     recognized direct process-launching call before it. This is a syntactic check, with
     the indirect-call and reachability residuals documented above. Read from a parsed AST; a missing
     or duplicated function, a missing top-level scrub, an earlier launch call, or an unreadable
-    or unparseable member is a loud failure value, never a silent pass."""
+    or unparseable member is a loud failure value, never a silent pass.
+
+    A scrub_name of fixture_git_lifecycle selects the stricter lifecycle form instead
+    (_lifecycle_scoped_first), which also needs isolated, the name of the isolated main the
+    entry point delegates to."""
     try:
         tree = ast.parse(member_path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError, ValueError) as exc:
@@ -284,8 +291,10 @@ def _scrub_scoped_first(member_path, func_name, scrub_name):
         owner = funcs[0]
     if not isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return "{} is not a function".format(func_name)
+    if scrub_name == _LIFECYCLE_NAME:
+        return _lifecycle_scoped_first(owner, func_name, isolated)
     body = owner.body
-    # Lifecycle wrappers may put the context inside try/finally for extra restoration.
+    # A call or context inside a top-level try/finally (extra restoration) counts as top level.
     body = [inner for stmt in body
             for inner in (stmt.body if isinstance(stmt, ast.Try) else [stmt])]
     for stmt in body:
@@ -301,6 +310,72 @@ def _scrub_scoped_first(member_path, func_name, scrub_name):
                 return "{}(): a process-launching call ({}) precedes the {}() scrub".format(
                     func_name, _call_name(node), scrub_name)
     return "{}(): no top-level {}() call".format(func_name, scrub_name)
+
+
+def _lifecycle_scoped_first(owner, func_name, isolated):
+    """The lifecycle form of _scrub_scoped_first: True when the first top-level with statement
+    (one in a top-level try body counts) that names fixture_git_lifecycle() enters it as its
+    first context, and the body of that with calls isolated, the isolated main, as a top-level
+    statement and the function calls it nowhere else. The lifecycle saves the caller's environment
+    and only then scrubs, so no statement before that with may call scrub_git_environment(), make
+    a recognized process-launching call, read or change os.environ (putenv and unsetenv
+    included), call fixture_git_lifecycle() outside that with, or call isolated; imports,
+    module-path setup and other statements that do none of these may come first. A bare
+    fixture_git_lifecycle() call never enters the context, so it isolates nothing and cannot
+    satisfy this. Syntactic, with the residuals documented above (a helper, alias or indirect
+    call that does any of these is outside it); any other shape is a loud failure value, never a
+    silent pass."""
+    if not isolated:
+        return "{}(): the lifecycle form needs the isolated main's name".format(func_name)
+    body = [inner for stmt in owner.body
+            for inner in (stmt.body if isinstance(stmt, ast.Try) else [stmt])]
+    for stmt in body:
+        if isinstance(stmt, ast.With) and any(
+                isinstance(item.context_expr, ast.Call)
+                and _call_name(item.context_expr) == _LIFECYCLE_NAME for item in stmt.items):
+            entered = stmt
+            break
+        for node in ast.walk(stmt):
+            if ((isinstance(node, ast.Attribute) and node.attr == "environ")
+                    or (isinstance(node, ast.Name) and node.id == "environ")):
+                return "{}(): a statement before the {}() with touches os.environ".format(
+                    func_name, _LIFECYCLE_NAME)
+            if not isinstance(node, ast.Call):
+                continue
+            name = _call_name(node)
+            if name == "scrub_git_environment":
+                return "{}(): a scrub_git_environment() call precedes the {}() with".format(
+                    func_name, _LIFECYCLE_NAME)
+            if name in _LAUNCH_NAMES:
+                return "{}(): a process-launching call ({}) precedes the {}() with".format(
+                    func_name, name, _LIFECYCLE_NAME)
+            if name in ("putenv", "unsetenv"):
+                return "{}(): a {}() call before the {}() with changes the environment".format(
+                    func_name, name, _LIFECYCLE_NAME)
+            if name == _LIFECYCLE_NAME:
+                return "{}(): {}() is called without being entered by a top-level with".format(
+                    func_name, _LIFECYCLE_NAME)
+            if name == isolated:
+                return "{}(): {}() is called before the {}() with".format(
+                    func_name, isolated, _LIFECYCLE_NAME)
+    else:
+        return "{}(): no top-level with {}()".format(func_name, _LIFECYCLE_NAME)
+    first = entered.items[0].context_expr
+    if not (isinstance(first, ast.Call) and _call_name(first) == _LIFECYCLE_NAME):
+        return "{}(): {}() is not the first context its with enters".format(
+            func_name, _LIFECYCLE_NAME)
+    inside = sum(1 for stmt in entered.body
+                 if isinstance(stmt, (ast.Expr, ast.Return, ast.Assign))
+                 and isinstance(stmt.value, ast.Call) and _call_name(stmt.value) == isolated)
+    if not inside:
+        return "{}(): the {}() with does not call {}() as a top-level statement".format(
+            func_name, _LIFECYCLE_NAME, isolated)
+    anywhere = sum(1 for node in ast.walk(owner)
+                   if isinstance(node, ast.Call) and _call_name(node) == isolated)
+    if anywhere != inside:
+        return "{}(): {}() is also called outside the {}() with".format(
+            func_name, isolated, _LIFECYCLE_NAME)
+    return True
 
 
 def _archive_reads_use_caller_env(member_path, fixture_calls=False):

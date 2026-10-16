@@ -2264,21 +2264,33 @@ def _core_lanes(base):
              "_suite_isolated", "fixture_env", "_scrubbed_env", False),
     ):
         check(check_id, _binding_calls(ROOT / member, owner, binding, factory, launches), True)
-    for check_id, member, owner in (
-            ("scope/check-manifest", "tools/check_manifest.py", "self_test_main"),
-            ("scope/check-record-sections", "tools/check_record_sections.py", "self_test"),
-            ("scope/qa-adapter", "tools/_qa_adapter.py", "_self_test"),
-            ("scope/gen-manifest", "tools/gen_manifest.py", "self_test_main"),
-            # These entries lead with the lifecycle alone: it scrubs after saving the caller's
-            # environment, so a scrub before it would make it restore the scrubbed values.
-            ("scope/check-portability", "tools/check_portability.py", "self_test_main"),
-            ("scope/selftest-orch-hooks", "tools/selftest_orch_hooks.py", "main"),
-            ("scope/selftest-aiqt-hooks", "tools/selftest_aiqt_hooks.py", "main"),
-            ("scope/check-release-build", "tools/check_release_build.py", "self_test_main"),
-            ("scope/check-release-delta", "tools/check_release_delta.py", "self_test_main"),
+    # Each entry enters fixture_git_lifecycle() as the first context of a top-level with whose
+    # body calls the named isolated main as a top-level statement, and calls that main nowhere
+    # else; no statement before the with calls scrub_git_environment(), launches a process,
+    # touches os.environ or calls the lifecycle without entering it. The lifecycle saves the
+    # caller's environment and then scrubs, so a scrub before it would make it restore the
+    # scrubbed values.
+    for check_id, member, owner, isolated in (
+            ("scope/check-manifest", "tools/check_manifest.py", "self_test_main",
+             "_self_test_main_isolated"),
+            ("scope/check-record-sections", "tools/check_record_sections.py", "self_test",
+             "_self_test_isolated"),
+            ("scope/qa-adapter", "tools/_qa_adapter.py", "_self_test", "_self_test_isolated"),
+            ("scope/gen-manifest", "tools/gen_manifest.py", "self_test_main",
+             "_self_test_main_isolated"),
+            ("scope/check-portability", "tools/check_portability.py", "self_test_main",
+             "_self_test_main_isolated"),
+            ("scope/selftest-orch-hooks", "tools/selftest_orch_hooks.py", "main",
+             "_main_isolated"),
+            ("scope/selftest-aiqt-hooks", "tools/selftest_aiqt_hooks.py", "main",
+             "_main_with_recorder"),
+            ("scope/check-release-build", "tools/check_release_build.py", "self_test_main",
+             "_self_test_main_isolated"),
+            ("scope/check-release-delta", "tools/check_release_delta.py", "self_test_main",
+             "_self_test_main_isolated"),
     ):
-        check(check_id, _scrub_scoped_first(ROOT / member, owner,
-                                           "fixture_git_lifecycle"), True)
+        check(check_id, _scrub_scoped_first(ROOT / member, owner, "fixture_git_lifecycle",
+                                            isolated), True)
     check("trust/caller-env-archive-only", _caller_env_archive_only(), True)
 
     check("route/selftest-aiqt-hooks-fixture-env",

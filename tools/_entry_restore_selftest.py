@@ -17,7 +17,13 @@ full suite is too long to run twice, and running it again from inside its own se
 recurse; what is under test is the wrapper. The stand-in also records the environment it sees and
 requires the complete fixture scrub to be in effect there (HOME and XDG_CONFIG_HOME at the scratch
 home, the global and system config pinned to os.devnull with GIT_CONFIG_NOSYSTEM=1, the maintenance
-pins set, no other GIT_* variable), so an entry point cannot pass by dropping its isolation.
+pins set, no other GIT_* variable) and the lifecycle's git wrapper in effect, as
+fixture_git_lifecycle() sets it: PATH is a fresh directory in front of the caller's PATH, git
+resolves to the executable wrapper there, and the wrapper reasserts the system-config pins and runs
+the caller's git with the auto-maintenance -c pins. So an entry point that drops the scrub, or saves,
+scrubs and restores by hand without the lifecycle, fails. The call is then repeated around a stand-in
+that raises: the caller's environment must again come back exactly, and the stand-in's own exception
+must come out of the entry point.
 
 The child is this module's _child_main, reached through a fixed -c bootstrap that puts this
 directory on the module path; the module has no __main__ block of its own.
@@ -26,10 +32,12 @@ Imported only by a self-test; nothing here runs on a production path."""
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 PROBE_KEY = "GIT_AIQT_CALLER_PROBE"
 PROBE_VALUE = "kept"
@@ -41,9 +49,10 @@ _CHILD_BOOTSTRAP = ("import sys; sys.path.insert(0, sys.argv[1]); import _entry_
 def entry_restore_failures(tool, entry, inner, timeout=300):
     """Run the restore probe for tool's entry point (a function name) whose isolated main is inner
     (the module-level function name the entry point calls inside the lifecycle). Returns a list of
-    failure strings, empty when the caller's environment came back exactly and the scrub was in
-    effect inside. A child that cannot be launched, times out, or reports no result is a failure,
-    never a silent pass."""
+    failure strings, empty when the caller's environment came back exactly, both after a return and
+    after the stand-in's exception came through, and the scrub and the git wrapper were in effect
+    inside. A child that cannot be launched, times out, or reports no result is a failure, never a
+    silent pass."""
     label = "{} {}()".format(os.path.basename(str(tool)), entry)
     argv = [sys.executable, "-I", "-B", "-c", _CHILD_BOOTSTRAP,
             os.path.dirname(os.path.abspath(__file__)), str(tool), entry, inner]
@@ -81,9 +90,68 @@ def _diff(before, after):
     return out
 
 
+class _StandInRaised(Exception):
+    """What the raising stand-in throws; the entry point must let this very exception through."""
+
+
+def _wrapper_view():
+    """Inside the lifecycle: the PATH in effect, what git resolves to on it, the git file in PATH's
+    first directory, and that file's text (None when it is not a readable executable file)."""
+    path = os.environ.get("PATH", "")
+    candidate = os.path.join(path.split(os.pathsep, 1)[0], "git")
+    text = None
+    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        try:
+            text = Path(candidate).read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            text = None
+    return {"path": path, "candidate": candidate, "which": shutil.which("git"), "text": text}
+
+
+def _wrapper_problems(view, caller, fixture_env):
+    """How the git wrapper seen inside the lifecycle (view, from _wrapper_view) differs from what
+    fixture_git_lifecycle() sets up for the caller environment caller: a fresh directory in front
+    of the caller's PATH, holding the executable git that git resolves to, which exports
+    GIT_CONFIG_NOSYSTEM=1 and GIT_CONFIG_SYSTEM=os.devnull and execs the caller's git with every
+    _NO_AUTO_MAINTENANCE pin as a -c option."""
+    caller_path = caller.get("PATH", os.defpath)
+    directory, sep, rest = view["path"].partition(os.pathsep)
+    if not sep or rest != caller_path or not directory or directory in caller_path.split(
+            os.pathsep):
+        return ["inside the lifecycle, PATH is {!r}, not a fresh git wrapper directory in front of "
+                "the caller's PATH {!r}".format(view["path"], caller_path)]
+    problems = []
+    if view["which"] != view["candidate"]:
+        problems.append("inside the lifecycle, git resolves to {!r}, not the wrapper {!r}".format(
+            view["which"], view["candidate"]))
+    if view["text"] is None:
+        return problems + ["inside the lifecycle, the git wrapper {!r} is not a readable "
+                           "executable file".format(view["candidate"])]
+    lines = view["text"].splitlines()
+    for line in ("export GIT_CONFIG_NOSYSTEM=1",
+                 "export GIT_CONFIG_SYSTEM=" + shlex.quote(os.devnull)):
+        if line not in lines:
+            problems.append("the git wrapper has no {!r} line".format(line))
+    real_git = shutil.which("git", path=caller.get("PATH"))
+    want = ["exec", os.path.abspath(real_git) if real_git else None]
+    for key, value in fixture_env._NO_AUTO_MAINTENANCE:
+        want += ["-c", "{}={}".format(key, value)]
+    want.append("$@")
+    execs = [line for line in lines if line.startswith("exec ")]
+    try:
+        got = [shlex.split(line) for line in execs]
+    except ValueError:
+        got = None
+    if got != [want]:
+        problems.append("the git wrapper's exec lines {!r} do not run the caller's git {!r} with "
+                        "the auto-maintenance pins".format(execs, want[1]))
+    return problems
+
+
 def _child(tool, entry, inner):
     """Child side: set the caller environment, call the entry point in-process with inner replaced
-    by a stand-in, and return the list of problems found."""
+    by a stand-in, first one returning 0 and then one raising, and return the list of problems
+    found."""
     import importlib.util
     problems = []
     home = tempfile.mkdtemp(prefix="aiqt-entry-restore-home-")
@@ -101,9 +169,12 @@ def _child(tool, entry, inner):
         if not callable(getattr(module, inner, None)):
             return ["{} has no function {}".format(tool, inner)]
         seen = []
+        raising = []
 
         def stand_in(*_args, **_kwargs):
-            seen.append((dict(os.environ), _git_fixture_env.git_fixture_env()))
+            seen.append((dict(os.environ), _git_fixture_env.git_fixture_env(), _wrapper_view()))
+            if raising:
+                raise raising[0]
             return 0
 
         setattr(module, inner, stand_in)
@@ -117,7 +188,7 @@ def _child(tool, entry, inner):
             problems.append("the entry point called its isolated main {} times, expected 1".format(
                 len(seen)))
         else:
-            inside, expected = seen[0]
+            inside, expected, view = seen[0]
             pinned = ("HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL",
                       "GIT_CONFIG_SYSTEM") + _git_fixture_env._MAINTENANCE_PIN_VARS
             for key in pinned:
@@ -130,6 +201,26 @@ def _child(tool, entry, inner):
             if extra:
                 problems.append("inside the lifecycle, caller GIT_* variables survive the scrub: "
                                 "{}".format(", ".join(extra)))
+            problems.extend(_wrapper_problems(view, caller, _git_fixture_env))
+        # The same call around a stand-in that raises: the environment comes back exactly on the
+        # way out, and the stand-in's own exception, not a return value or another exception,
+        # comes out of the entry point.
+        raising.append(_StandInRaised("raised by the restore probe's stand-in"))
+        del seen[:]
+        caller = dict(os.environ)
+        try:
+            rc = getattr(module, entry)()
+        except BaseException as exc:
+            if exc is not raising[0]:
+                problems.append("around a raising stand-in, the entry point raised {!r} instead "
+                                "of the stand-in's exception".format(exc))
+        else:
+            problems.append("around a raising stand-in, the entry point returned {!r} instead "
+                            "of letting the exception through".format(rc))
+        problems.extend("after a raising call, " + d for d in _diff(caller, dict(os.environ)))
+        if len(seen) != 1:
+            problems.append("around a raising stand-in, the entry point called its isolated main "
+                            "{} times, expected 1".format(len(seen)))
     finally:
         shutil.rmtree(home, ignore_errors=True)
     return problems
