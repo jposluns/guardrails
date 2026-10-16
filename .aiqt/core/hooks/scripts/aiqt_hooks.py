@@ -13728,21 +13728,25 @@ def citation_read_recorder(data):
 # git -C path to the directory it is relative to; for a command that lexes and holds a backslash-newline,
 # the search of the here-document operators and double-quoted strings that lexing read for a here-document
 # delimiter one splits (each visited once, and the command not lexed again); for a command that does not lex,
-# the search of its text for arithmetic expansions and for here-documents with an unquoted delimiter; the
-# split of each text into lines before its scan (at the text's size); and the orchestration registry read
-# that locates the state directory (read whole, as every hook here reads it) and the guard-events append. A
-# command's standard input (-F -) is the here-document bash gives it, its last standard-input redirection
-# (a later one that duplicates fd 0 onto itself, such as <&0, leaves it), read once however many -F -
-# options name it; where that redirection is no here-document of the command, standard input is named as
-# not read (so is a here-document moved there through another descriptor, as in <<'A' 3<&0 <&3, which bash
-# gives the command: a note, never a hidden citation). A command that does not lex is scanned as written,
-# and so is one in which a backslash-newline splits the delimiter of a here-document whose operator the
-# lexer reads (quoted or not), or of one that bash reads as unquoted inside a command substitution in a
-# double-quoted string; the expansion of each here-document with an unquoted delimiter in such a command is
-# named as not read. A command is found after the reserved words that begin its segment, so one in a brace
-# group, after '!', 'if' or 'then', or after time -- or coproc is read. Each text is scanned once, in the
-# order the command's options name it, and a cited or body-file path longer than _CITECHK_PATH_SHOWN
-# characters is shown in the note and the row shortened to that many characters (_citechk_short).
+# or that is read both ways, the search of its text for arithmetic expansions and for here-documents with an
+# unquoted delimiter; the split of each text into lines before its scan (at the text's size); and the
+# orchestration registry read that locates the state directory (read whole, as every hook here reads it) and
+# the guard-events append. A command's standard input (-F -) is the here-document bash gives it, its last
+# standard-input redirection (a later one that duplicates fd 0 onto itself, such as <&0, leaves it), read
+# once however many -F - options name it; where that redirection is no here-document of the command,
+# standard input is named as not read (so is a here-document moved there through another descriptor, as in
+# <<'A' 3<&0 <&3, which bash gives the command: a note, never a hidden citation). A command that does not
+# lex is scanned as written, and so is one in which a backslash-newline splits the delimiter of a
+# here-document whose operator the lexer reads (quoted or not), or of one that bash reads as unquoted inside
+# a command substitution in a double-quoted string; the expansion of each here-document with an unquoted
+# delimiter in such a command is named as not read. Where the walk through such a string meets what it does
+# not follow as bash does (_citechk_substituted_ops), the command is read both ways: lexed, with every
+# message and body file read, and scanned as written, with those expansions named. A command is found after
+# the reserved words that begin its segment, so one in a brace group, after '!', 'if' or 'then', or after
+# time -- or coproc is read.
+# Each text is scanned once, in the order the command's options name it, and a cited or body-file path
+# longer than _CITECHK_PATH_SHOWN characters is shown in the note and the row shortened to that many
+# characters (_citechk_short).
 _CITECHK_BODY_MAX = 1024 * 1024          # a message or body file larger than this is not read (noted)
 _CITECHK_LEDGER_MAX = 2 * _CITE_CAP      # a ledger generation larger than this is not read (noted)
 _CITECHK_MAX_CITES = 200                 # at most this many citations are judged per Bash call
@@ -13759,20 +13763,26 @@ _CITECHK_PREFILTER = re.compile(r"\bcommit\b|\bpr\b")
 _CITECHK_RAW_KINDS = ((re.compile(r"\bgit\b[^\n;&|]*\bcommit\b"), "git-commit"),
                       (re.compile(r"\bgh\b[^\n;&|]*\bpr\s+create\b"), "gh-pr-create"),
                       (re.compile(r"\bgh\b[^\n;&|]*\bpr\s+edit\b"), "gh-pr-edit"))
-# Why the expansions of an unquoted here-document in such a command are named as not read.
+# Why the expansions of an unquoted here-document in such a command are named as not read: in a command that
+# does not lex, and in one read both ways (_citechk_commands).
 _CITECHK_EXPANDED = ("its delimiter is unquoted, so bash expands parameters, command substitutions and "
                      "arithmetic in its body, and the command does not lex, so only its text as written was "
                      "scanned")
-# The characters _citechk_substituted_ops follows in a double-quoted string: a backslash, a backtick, the '$'
-# of '$(', '$((' or $'...', a single quote, a parenthesis, the first '<' of '<<', and a '#' after a blank, a
-# newline, ';', '&', '|', a parenthesis or a backtick (a '#' after any other character is inside a word, and
-# passing over it here keeps a string of them from costing a step each).
-_CITECHK_SUBST_MARKS = re.compile(r"[\\`$'()<]|(?<=[ \t\n;&|()`])#")
-# What ends an ANSI-C quote (its closing quote) and a comment inside backticks (the closing backtick or a
-# newline), each found past the backslash escapes before it (_citechk_end): in a comment a backslash does not
-# escape the newline that ends it.
+_CITECHK_EXPANDED_BOTH = ("its delimiter is unquoted, so bash expands parameters, command substitutions and "
+                          "arithmetic in its body, and the command's text was scanned only as written")
+# What _citechk_substituted_ops names where a substitution, quote, comment or delimiter word is still open at
+# the string's closing quote: bash reads on through that quote, so the lexer's reading of what follows it is
+# not bash's.
+_CITECHK_OPEN_AT_QUOTE = "a command substitution still open at its closing quote"
+# The characters _citechk_substituted_ops stops at in a double-quoted string: a backslash, a backtick, a '$',
+# a single quote, a parenthesis, a '<', a '#' after a blank, a newline, ';', '&', '|' or a parenthesis, and a
+# word 'case' after one of those or a backtick. Bash begins a comment only at a '#' that begins a word, so a
+# '#' after any other character is passed over: inside a word, or after '<' or '>', where bash reads a
+# comment that leaves the redirection without a target, a syntax error that runs nothing. Passing over it
+# keeps a string of them from costing a step each.
+_CITECHK_SUBST_MARKS = re.compile(r"[\\`$'()<]|(?<=[ \t\n;&|()])#|(?<=[ \t\n;&|()`])case(?=[ \t\n])")
+# What ends an ANSI-C quote: its closing quote, found past the backslash escapes before it (_citechk_end).
 _CITECHK_ANSI_END = re.compile(r"\\.|'", re.S)
-_CITECHK_TICK_COMMENT_END = re.compile(r"\\[^\n]|[`\n]")
 # The reserved words after which bash reads a command in the same segment ({ git commit ...; }, ! git commit,
 # if git commit, then, elif, else, while, until, do, time and coproc): passed over to the command, with
 # time's -p and a '--' after time or its -p, and with coproc's NAME where bash reads one, before a compound
@@ -13992,8 +14002,8 @@ def _citechk_expanded_heredocs(command):
 
 
 def _citechk_end(regex, command, i, n):
-    """The index of the character in command[i:n] that ends what regex reads (_CITECHK_ANSI_END or
-    _CITECHK_TICK_COMMENT_END), past the escapes it matches, or -1 where none does."""
+    """The index of the character in command[i:n] that ends what regex reads (_CITECHK_ANSI_END), past the
+    escapes it matches, or -1 where none does."""
     for found in regex.finditer(command, i, n):
         if found.end() == found.start() + 1:
             return found.start()
@@ -14003,38 +14013,42 @@ def _citechk_end(regex, command, i, n):
 def _citechk_substituted_ops(command, start, end):
     """The index, in order, of each '<<' (not a here-string's '<<<') in the double-quoted string
     command[start:end] (from its opening quote to just past its closing one, as the lexer reads it) that
-    lies inside a command substitution there, $(...) or backticks, where bash reads it as an operator: not
-    inside single quotes or an ANSI-C quote $'...' (with its backslash escapes) in that substitution, not in
-    a comment there, not inside an arithmetic expansion $((...)) in it, and not after an escaping backslash.
-    A comment begins at a '#' that begins a word once bash has removed the backslash-newlines before it:
-    just after the substitution's opening, or after an unescaped blank, newline, ';', '&', '|', or '(' or
-    ')' that opens or closes no substitution (in x#y, a\\ #y, ${#v} or $(a)#b it is part of a word). It runs
-    to the end of its line or, inside backticks, to the closing one where that comes first (a backslash
-    there escapes a backtick, not the newline), since bash takes the backticks' text before it reads a
-    comment there; one that runs to the string's closing quote ends the walk, as bash reads on past that
-    quote. The string is visited once, from each of these characters to the next (_CITECHK_SUBST_MARKS),
-    following only these quotes, comments, parentheses and backticks. It does not follow a double quote, a
-    parameter expansion's braces, a case pattern's ')' or a here-document's body inside a substitution, nor
-    that bash ends backticks at the first unescaped backtick, one inside quotes included. So a double quote
-    there ends the string the lexer reads, hiding a '<<' after it; a case pattern's ')' is read as the
-    substitution's end, hiding a split delimiter after it whose body bash expands (git commit -m "$(case x
-    in x) cat <<E\\, a newline, OF, the body, EOF and ;; esac)"); and a '$((' is read as arithmetic where
-    bash reads a command substitution of a subshell ($((cat <<B ...) )) (each a note the command does not
-    get). A '<<' in a here-document's body there counts, and a '(', ')' or backtick read otherwise than bash
-    reads it, in such a body, a case pattern or a quote inside backticks, can place text after the
-    substitution's end inside it (each a note the command did not earn, and a message or body file the
-    command names is then not read). A '#' after a blank inside braces (${x/ #/y}), which bash reads as
-    text, is read as a comment to the end of its line: a '<<' there is hidden, and where that line holds the
-    substitution's ')', text after it is read as inside it. One entry is kept for each substitution open,
-    with a count of the '(' open inside it."""
-    opened, parens, last, tick = [], [], end - 1, False  # opened: "$(", "$((" (a shift there) or "`"
-    # glue: just past the latest escape or substitution's close; lead: where the run of backslash-newlines
-    # that ends at glue begins, or -1 where a '#' at glue is part of a word
+    lies inside a command substitution $(...) there, where bash reads it as an operator; or, at the first
+    place where the walk would read the string otherwise than bash may, a phrase naming what it met there,
+    after which it yields nothing more (_citechk_split_delim then reads the command both ways). Inside $(...)
+    it follows single quotes, an ANSI-C quote $'...' with its backslash escapes, a backslash escape, an
+    arithmetic expansion $((...)) that closes with '))' (a '<<' there is a shift), parentheses, and a comment,
+    which begins at a '#' that begins a word once bash has removed the backslash-newlines before it: just
+    after the substitution's opening, or after an unescaped blank, newline, ';', '&', '|', or '(' or ')' that
+    opens or closes no substitution (a '#' after an escaped character, after a substitution's close, or after
+    any other character is passed over: inside a word, as in x#y, a\\ #y or $(a)#b, or after '<' or '>',
+    where bash reads a comment that leaves the redirection without a target, a syntax error that runs
+    nothing). A comment runs to the end of its line. Backticks are followed only where
+    their text, to the next backtick, holds no backslash and no '#' (bash removes some backslashes there
+    before it reads that text, and ends it at the first backtick, one inside a quote included); inside them a
+    '<<' with no newline after it in that text has an empty body and yields nothing. Named instead, in the
+    order the walk meets them: a backslash or a '#' inside backticks, a quote there that holds the closing
+    backtick, and a '<<' there with a newline after it (its body); '${' anywhere in the string, and a '$'
+    before a backslash-newline; '$[', an arithmetic command '((', a process substitution '<(' or '>(' (each
+    also where a backslash-newline splits its two characters) and a case command in a substitution, and a
+    '<<' that a backslash-newline splits there; a quote inside $((...)), and a '$((' that does not close
+    with '))' (bash reads it as a substitution of a subshell); and a substitution, quote or comment still
+    open at the string's closing quote, which bash reads on past (a double quote inside a substitution, for
+    example), so the lexer's reading of what follows it is not bash's. The string is visited once, from each
+    of the characters in _CITECHK_SUBST_MARKS to the next, with a search of each backtick's text for its
+    end, a backslash and a '#'. One entry is kept for each substitution open, with a count of the '(' open
+    inside it."""
+    opened, parens, last, tick = [], [], end - 1, -1  # opened: "$(", "$((" (a shift there) or "`"
+    # tick: the index of the closing backtick while backticks are open; glue: just past the latest escape or
+    # substitution's close; lead: where the run of backslash-newlines that ends at glue begins, or -1 where a
+    # character at glue follows an escaped character or a close
     glue, lead = -1, -1
     found = _CITECHK_SUBST_MARKS.search(command, start + 1, last)
     while found is not None:
         k = found.start()
         c, step = command[k], 1
+        at = lead if k == glue else k  # where its word would begin, before any backslash-newlines
+        before = command[at - 1] if at != -1 else ""  # what bash reads just before it ("" after an escape)
         if c == "\\":
             step = 2  # an escaped character, or a backslash-newline, which bash removes
             if not command.startswith("\n", k + 1):
@@ -14043,15 +14057,31 @@ def _citechk_substituted_ops(command, start, end):
                 lead = k  # where a run of backslash-newlines begins
             glue = k + 2
         elif c == "`":
-            if tick:  # a backtick closes the one open, and whatever opened after it
+            if tick != -1:  # the closing backtick closes whatever opened after the opening one
                 while opened.pop() != "`":
                     parens.pop()
                 parens.pop()
+                tick = -1
             else:
+                tick = command.find("`", k + 1, last)
+                if tick == -1:
+                    yield _CITECHK_OPEN_AT_QUOTE
+                    return
+                if command.find("\\", k + 1, tick) != -1:
+                    yield "a backslash inside backticks"
+                    return
+                if command.find("#", k + 1, tick) != -1:
+                    yield "a '#' inside backticks"
+                    return
                 opened.append("`")
                 parens.append(0)
-            tick = not tick
         elif c == "$":
+            if command.startswith("{", k + 1):
+                yield "a parameter expansion's braces"
+                return
+            if command.startswith("\\\n", k + 1):
+                yield "a backslash-newline after a '$'"
+                return
             if command.startswith("((", k + 1):
                 opened.append("$((")
                 parens.append(0)
@@ -14060,103 +14090,152 @@ def _citechk_substituted_ops(command, start, end):
                 opened.append("$(")
                 parens.append(0)
                 step = 2
+            elif opened and opened[-1] != "$((" and command.startswith("[", k + 1):
+                yield "an arithmetic expansion $[...]"
+                return
             elif opened and opened[-1] != "$((" and command.startswith("'", k + 1):  # an ANSI-C quote
                 close = _citechk_end(_CITECHK_ANSI_END, command, k + 2, last)
+                if tick != -1 and (close == -1 or close > tick):
+                    yield "a quote inside backticks that holds the closing backtick"
+                    return
                 if close == -1:
+                    yield _CITECHK_OPEN_AT_QUOTE
                     return
                 step = close + 1 - k
         elif not opened:
             pass  # text of the double-quoted string itself
         elif c == "'":
-            if opened[-1] != "$((":  # single quotes inside a command substitution
-                close = command.find("'", k + 1, last)
-                if close == -1:
-                    return
-                step = close + 1 - k
+            if opened[-1] == "$((":
+                yield "a quote inside an arithmetic expansion"
+                return
+            close = command.find("'", k + 1, last)
+            if tick != -1 and (close == -1 or close > tick):
+                yield "a quote inside backticks that holds the closing backtick"
+                return
+            if close == -1:
+                yield _CITECHK_OPEN_AT_QUOTE
+                return
+            step = close + 1 - k
         elif c == "#":
-            at = lead if k == glue else k  # where the word would begin, before any backslash-newlines
-            if opened[-1] != "$((" and at != -1 and (command[at - 1] in " \t\n;&|()"
-                                                     or (command[at - 1] == "`" and tick)):
-                if tick:  # bash ends the backticks' text, and so a comment in it, at the closing one
-                    close = _citechk_end(_CITECHK_TICK_COMMENT_END, command, k, last)
-                else:
-                    close = command.find("\n", k, last)
+            if opened[-1] != "$((" and at != -1 and before in " \t\n;&|()":
+                close = command.find("\n", k, last)
                 if close == -1:
+                    yield _CITECHK_OPEN_AT_QUOTE
                     return
                 step = close - k
         elif c == "(":
+            if opened[-1] != "$((" and before in ("<", ">"):
+                yield "a process substitution"
+                return
+            if opened[-1] != "$((" and before == "(":
+                yield "an arithmetic command ((...))"
+                return
             parens[-1] += 1
         elif c == ")":
             if parens[-1]:
                 parens[-1] -= 1
             elif opened[-1] != "`":
-                if opened.pop() == "$((" and command.startswith(")", k + 1):
+                if opened.pop() == "$((":
+                    if not command.startswith(")", k + 1):
+                        yield "a '$((' that does not close with '))'"
+                        return
                     step = 2  # the second ')' of '))'
                 parens.pop()
                 glue, lead = k + step, -1  # a '#' just after a substitution's close is in its word
-        elif opened[-1] != "$((" and command.startswith("<<", k):
+        elif opened[-1] == "$((":
+            pass  # a 'case' or a '<' inside arithmetic: a word, or a comparison or a shift
+        elif c == "c":
+            yield "a case command"
+            return
+        elif before == "<":
+            yield "a backslash-newline inside '<<'"
+            return
+        elif command.startswith("<<", k):
             if command.startswith("<", k + 2):
                 step = 3  # a here-string
+            elif tick != -1:  # in backticks bash reads the delimiter and the body inside their text
+                if command.find("\n", k + 2, tick) != -1:
+                    yield "a here-document's body"
+                    return
+                step = 2  # no newline follows there: an empty body
             else:
                 yield k
                 step = 2
         found = _CITECHK_SUBST_MARKS.search(command, k + step, last)
+    if opened:
+        yield _CITECHK_OPEN_AT_QUOTE
 
 
 def _citechk_split_delim(command, spans):
-    """Whether command, a command that lexes, holds a here-document operator '<<' or '<<-' whose delimiter
-    word a backslash-newline splits, at a place where the lexer's reading of it (spans, as _lex_command
-    reports them) shows that bash reads one. Bash removes each backslash-newline outside single quotes
-    before it reads the word: for <<E\\, a newline and OF it reads the unquoted delimiter EOF and expands
-    the body, and for <<E\\, a newline and 'OF', <<$\\, a newline and 'EOF', <<"E"\\, a newline and OF, or
-    <<"E\\, a newline and OF" it reads the quoted EOF. Two places count. One is a '<<' that the lexer reads
-    as a quoted here-document's operator, whose delimiter word, as _parse_heredoc_delim reads it, holds a
-    backslash-newline: _parse_heredoc_delim, which the lexer uses, reads that backslash as quoting the
-    newline (inside double quotes it keeps both), so the delimiter it reads holds a newline, which no line
-    can, the body runs to the end of the command, and a later command in it gives no item. A
+    """How the citation check reads command, a command that lexes, from the places the lexer's reading of it
+    shows (spans, as _lex_command reports them): ("raw", None) where a backslash-newline splits a
+    here-document delimiter at a place where bash reads one, ("both", what) where the walk through a
+    double-quoted string meets what it does not follow as bash does before it finds one (what names it,
+    _citechk_substituted_ops), and ("lexed", None) otherwise. Bash removes each backslash-newline outside
+    single quotes before it reads the word: for <<E\\, a newline and OF it reads the unquoted delimiter EOF
+    and expands the body, and for <<E\\, a newline and 'OF', <<$\\, a newline and 'EOF', <<"E"\\, a newline
+    and OF, or <<"E\\, a newline and OF" it reads the quoted EOF. Two places count for "raw". One is a '<<'
+    that the lexer reads as a quoted here-document's operator, whose delimiter word, as _parse_heredoc_delim
+    reads it, holds a backslash-newline: _parse_heredoc_delim, which the lexer uses, reads that backslash as
+    quoting the newline (inside double quotes it keeps both), so the delimiter it reads holds a newline,
+    which no line can, the body runs to the end of the command, and a later command in it gives no item. A
     backslash-newline inside single quotes ('E\\, a newline and OF'), which bash keeps, counts too, although
     bash also runs that body to the end, and so does a '<<' inside $((...)), which the lexer reads as an
     operator and bash as a shift (each a note the command did not earn, and a message or body file the
-    command names is then not read). The other is a '<<' inside a command substitution in a double-quoted
-    string that the lexer reads (_citechk_substituted_ops), whose split delimiter reads as unquoted once
-    each backslash-newline is removed: the lexer reads that string as text, but bash runs the here-document
-    and expands its body (git commit -m "$(cat <<E\\, a newline, OF, the body and EOF)"), an expansion
-    that only the scan of the command as written names. Any other '<<' does not count: one the lexer
-    passes over or reads as text, inside quotes, a comment or a here-document's body, or after an escaped
-    '<'; one inside single quotes, an ANSI-C quote, a comment or $((...)) in such a substitution; a split
-    delimiter there that bash reads as quoted, whose body the lexed string holds as bash gives it; and one
-    whose delimiter word runs to the string's closing quote, which keeps the command lexed because bash
-    expands no body there: inside $(...) it reads on through that quote, so the delimiter is quoted, and at
-    a closing backtick it reads an unquoted delimiter that ends there, with an empty body. Each span is
-    visited once and the command is not lexed again, so the time this takes grows with the command's
-    length."""
-    if "\\\n" not in command:
-        return False
-    n = len(command)
+    command names is then not read). The other is a '<<' inside a command substitution $(...) in a
+    double-quoted string that the lexer reads, met before anything the walk does not follow, whose split
+    delimiter reads as unquoted once each backslash-newline is removed: the lexer reads that string as text,
+    but bash runs the here-document and expands its body (git commit -m "$(cat <<E\\, a newline, OF, the
+    body and EOF)"), an expansion that only the scan of the command as written names. A '<<' there that
+    does not count is read on past: one inside single quotes, an ANSI-C quote, a comment or $((...)) in
+    such a substitution, and one whose delimiter no backslash-newline splits or that bash reads as quoted.
+    The walk does not follow the body after such a '<<', so a newline after its delimiter in the string
+    reads the command both ways, and so do a delimiter word that does not parse and one that runs to the
+    string's closing quote (inside $(...) bash reads on through that quote). Only the spans that begin
+    before the last '<' ahead of the last backslash-newline are read, since a split operator or delimiter
+    lies before that backslash-newline and a string after that '<' cannot change how bash or the lexer
+    reads one; a double-quoted string with no '$' or backtick holds no substitution and is passed over. Each
+    span is visited once and the command is not lexed again, so the time this takes grows with the
+    command's length."""
+    join = command.rfind("\\\n")
+    if join == -1:
+        return "lexed", None
+    reach, n = command.rfind("<", 0, join), len(command)
     for start, end in spans:
+        if start > reach:
+            break
         if command[start] == "<":  # a quoted here-document's '<<', which the lexer reads
             parsed = _parse_heredoc_delim(command, end, n)
             if parsed is not None and "\\\n" in command[end:parsed[3]]:
-                return True
+                return "raw", None
             continue
-        if command.find("\\\n", start, end) == -1 or command.find("<<", start, end) == -1:
+        if command.find("$", start, end) == -1 and command.find("`", start, end) == -1:
             continue
         text, joins, j = None, [], 0  # the string without its backslash-newlines, and where each was
         for at in _citechk_substituted_ops(command, start, end):
+            if isinstance(at, str):
+                return "both", at
             parsed = _parse_heredoc_delim(command, at + 2, end - 1)
-            if parsed is None or parsed[3] == end - 1 or "\\\n" not in command[at + 2:parsed[3]]:
-                continue  # a word that runs to the closing quote: bash expands no body there (see above)
-            if text is None:
-                text, k = command[start:end - 1].replace("\\\n", ""), command.find("\\\n", start, end)
-                while k != -1:
-                    joins.append(k)
-                    k = command.find("\\\n", k + 2, end)
-            while j < len(joins) and joins[j] < at:
-                j += 1
-            joined = _parse_heredoc_delim(text, at - start - 2 * j + 2, len(text))
-            if joined is not None and not joined[0]:
-                return True
-    return False
+            if parsed is None:
+                return "both", "a here-document delimiter that does not parse"
+            if parsed[3] == end - 1:
+                return "both", _CITECHK_OPEN_AT_QUOTE
+            if "\\\n" in command[at + 2:parsed[3]]:
+                if text is None:
+                    text, k = command[start:end - 1].replace("\\\n", ""), command.find("\\\n", start, end)
+                    while k != -1:
+                        joins.append(k)
+                        k = command.find("\\\n", k + 2, end)
+                while j < len(joins) and joins[j] < at:
+                    j += 1
+                joined = _parse_heredoc_delim(text, at - start - 2 * j + 2, len(text))
+                if joined is None:
+                    return "both", "a here-document delimiter that does not parse"
+                if not joined[0]:
+                    return "raw", None
+            if command.find("\n", parsed[3], end - 1) != -1:
+                return "both", "a here-document's body"
+    return "lexed", None
 
 
 def _citechk_keeps_stdin(red):
@@ -14166,20 +14245,40 @@ def _citechk_keeps_stdin(red):
     return red.op in ("<&", ">&") and target.isascii() and target.isdigit() and int(target) == 0
 
 
+def _citechk_as_written(command, cwd, parse, reason):
+    """The command, scanned whole as body text, as the one item of the first git commit or gh pr create or
+    edit that its text names (none where it names none): parse is "raw" or "both", and each here-document
+    with an unquoted delimiter that its text shows (_citechk_expanded_heredocs) is named as not read, with
+    reason, since bash expands parameters, command substitutions and arithmetic in such a body and the scan
+    sees only the text as written."""
+    hits = sorted((found.start(), kind) for regex, kind in _CITECHK_RAW_KINDS for found in [regex.search(command)]
+                  if found)
+    if not hits:
+        return []
+    unread = [("expanded <<{} here-document".format(_citechk_short(delim)), reason)
+              for delim in _citechk_expanded_heredocs(command)]
+    return [{"cmd": hits[0][1], "parse": parse, "texts": [("command text", command)], "unread": unread,
+             "repo": cwd, "base": None}]
+
+
 def _citechk_commands(command, cwd, deadline):
     """The git commit and gh pr create or edit commands of a Bash command, each a dict: cmd (git-commit,
-    gh-pr-create or gh-pr-edit), parse ("lexed", or "raw" where the command does not lex and its whole text
-    is scanned as body text), texts [(label, text)] in the order the command's options name them, unread
-    [(label, reason)], repo (the directory the command runs in, after a git -C; None without an absolute
-    session cwd) and base (a gh --base value). A command in which a backslash-newline splits a
-    here-document delimiter where bash reads one (_citechk_split_delim, from the places the lexing read) is
-    scanned as one that does not lex: at an operator the lexer reads, quoted or not, the lexer reads a
-    delimiter that no line can match and runs that body to the end of the command, later commands included,
-    and in a command substitution in a double-quoted string, where bash reads that delimiter as unquoted,
-    the lexer reads as text a body bash expands. A raw command names, as not read, the expansion of each
-    here-document with an unquoted delimiter that its text shows (_citechk_expanded_heredocs): bash expands
-    parameters, command substitutions and arithmetic in such a body, and the scan saw only the text as
-    written. A command is found after any reserved words that begin its segment (_CITECHK_LEADING), so one
+    gh-pr-create or gh-pr-edit), parse ("lexed"; "raw" where the command does not lex and its whole text is
+    scanned as body text; or "both"), texts [(label, text)] in the order the command's options name them,
+    unread [(label, reason)], repo (the directory the command runs in, after a git -C; None without an
+    absolute session cwd), base (a gh --base value) and, where parse is "both", why (what the walk met). A
+    command in which a backslash-newline splits a here-document delimiter where bash reads one
+    (_citechk_split_delim, from the places the lexing read) is scanned as one that does not lex: at an
+    operator the lexer reads, quoted or not, the lexer reads a delimiter that no line can match and runs that
+    body to the end of the command, later commands included, and in a command substitution in a
+    double-quoted string, where bash reads that delimiter as unquoted, the lexer reads as text a body bash
+    expands. A raw command names, as not read, the expansion of each here-document with an unquoted delimiter
+    that its text shows (_citechk_as_written). A command whose double-quoted string holds what the walk there
+    does not follow as bash does, before any such delimiter, is read both ways, since the walk cannot tell
+    which reading bash makes: its commands as lexed, every message and body file read, and after them the
+    item that the raw scan gives, all with parse "both"; a citation both readings find is judged in each,
+    so it can be listed twice. A command is found after any reserved words that begin its segment
+    (_CITECHK_LEADING), so one
     inside a brace group, after '!', 'if' or 'then', or after time -- or coproc is read; a redirection of
     the group as a whole (after its '}') is not the command's own. A message or body file resolves against
     repo and is read by _citechk_read_body within the check's deadline. "-" is standard input, one stream
@@ -14191,17 +14290,11 @@ def _citechk_commands(command, cwd, deadline):
     heredocs, spans = [], []
     try:
         segments = _lex_command(command, heredocs=heredocs, spans=spans)
-        if _citechk_split_delim(command, spans):
+        parse, why = _citechk_split_delim(command, spans)
+        if parse == "raw":
             raise ValueError("a here-document delimiter split by a backslash-newline")
     except ValueError:
-        hits = sorted((found.start(), kind) for regex, kind in _CITECHK_RAW_KINDS
-                      for found in [regex.search(command)] if found)
-        if not hits:
-            return []
-        unread = [("expanded <<{} here-document".format(_citechk_short(delim)), _CITECHK_EXPANDED)
-                  for delim in _citechk_expanded_heredocs(command)]
-        return [{"cmd": hits[0][1], "parse": "raw", "texts": [("command text", command)], "unread": unread,
-                 "repo": cwd, "base": None}]
+        return _citechk_as_written(command, cwd, "raw", _CITECHK_EXPANDED)
     stdin = {}  # segment index: (redirects before it, body) of its last here-document
     for index, before, body in heredocs:
         stdin[index] = before, body
@@ -14239,7 +14332,7 @@ def _citechk_commands(command, cwd, deadline):
         else:
             continue
         inline_names, file_names = _CITECHK_SOURCES[kind]
-        item = {"cmd": kind, "parse": "lexed", "texts": [], "unread": [], "repo": repo, "base": None}
+        item = {"cmd": kind, "parse": parse, "texts": [], "unread": [], "repo": repo, "base": None}
         here = stdin.get(index)
         if here is not None and any(red.src_fd == 0 and not _citechk_keeps_stdin(red)
                                     for red in seg.redirects[here[0]:]):
@@ -14273,6 +14366,10 @@ def _citechk_commands(command, cwd, deadline):
                 else:
                     item["texts"].append((label, text))
         out.append(item)
+    if parse == "both":
+        out += _citechk_as_written(command, cwd, "both", _CITECHK_EXPANDED_BOTH)
+        for item in out:
+            item["why"] = why
     return out
 
 
@@ -14749,6 +14846,12 @@ def _citechk_run(data):
     for item in commands:
         for label, reason in item["unread"]:
             parts.append("The {} {} was not read: {}.".format(_CITECHK_LABELS[item["cmd"]], label, reason))
+    both = next((item["why"] for item in commands if item.get("why")), None)  # one Bash command, one reason
+    if both is not None:
+        parts.append("This command was read both ways, as lexed (each message and body file read) and as written "
+                     "(its text scanned, with the expansion of each here-document with an unquoted delimiter "
+                     "named), because a double-quoted string in it holds {}, which this check does not follow "
+                     "as bash does; a citation both readings find is judged in each.".format(both))
     if ledger_faulty and status == "no-session":
         parts.append("The payload carries no session id, so this session's citation ledger cannot be found and "
                      "no cited range can be matched to a read.")
@@ -14783,7 +14886,8 @@ def _citechk_run(data):
             or (ledger_faulty and any(r["class"] != "exempt-verifier" for r in item["results"])) \
             or item["over_cap"] > 0
         detail = {"v": 1, "control": "citation-read-check", "cmd": item["cmd"], "parse": item["parse"],
-                  "session": key, "ledger": status, "ledger_rows": len(rows), "budget_exhausted": budget,
+                  "parse_why": item.get("why"), "session": key, "ledger": status, "ledger_rows": len(rows),
+                  "budget_exhausted": budget,
                   "citations": [{"cite": r["cite"], "class": r["class"], "form": r["form"]}
                                 for r in item["results"]],
                   "not_judged_past_cap": item["over_cap"], "dropped_not_citation": item["dropped"],
@@ -14811,7 +14915,8 @@ def citation_read_check(data):
     with no command string, and a session cwd that resolves to no git toplevel (a toplevel probe the
     deadline cuts short is named in a note instead). A ledger that cannot be read, a missing session id, a
     body file that cannot be read, a body on standard input it cannot see, the expansion of a here-document
-    with an unquoted delimiter in a command that does not lex, and an exhausted budget (one that stops the
+    with an unquoted delimiter in a command that does not lex or that is read both ways (_citechk_commands;
+    the note says why it was), and an exhausted budget (one that stops the
     scan of the message texts included), citation cap, file cap, read bound, path bound or link bound (a
     path the check would resolve that is longer than _CITE_MAX_PATH characters, or whose resolution would
     follow more than _CITE_MAX_LINKS symlinks or meets a symlink loop) are each named in the note, never a

@@ -4486,7 +4486,9 @@ def _citecheck_step_cases(tmp):
     splits a here-document delimiter where bash reads one (at an operator the lexer reads, quoted or not, or
     unquoted inside a command substitution in double quotes), is scanned as written and names the expansion
     of each here-document with an unquoted delimiter as not read (a shift inside a one-line $((...)) is
-    none), and each rule that decides where such a delimiter counts is shown to decide its vector, which
+    none); one whose double-quoted string holds what the walk there does not follow as bash does is read
+    both ways, its message and body files read and its text scanned as written, and its note and rows say so
+    and why; and each rule that decides where such a delimiter counts is shown to decide its vector, which
     gives another result under a variant of the hook without that rule; a command is read after the
     reserved words that begin its segment (a brace group's '{', '!', 'if', 'then', 'do', 'time -p',
     'time --', 'coproc'). The scan of a message stops at the deadline: a stand-in pattern moves the clock on
@@ -4724,21 +4726,40 @@ def _citecheck_step_cases(tmp):
     # which no expansion is named, or after a split '<<' inside $((...)), which the lexer reads as an
     # operator and bash as a shift. Inside single quotes bash keeps the backslash-newline and also runs the
     # body to the end, so the later command scanned there is a note the command did not earn. A here-document
-    # inside a command substitution in double quotes, $(...) or backticks, is real: bash expands its body,
-    # which the lexer reads as text, so with a split delimiter that bash reads as unquoted the command is
-    # scanned as written and that expansion named, also on the line after a comment in the substitution, after
-    # a '#' inside a word (x#y, ${#v}, $(true)#z), which begins no comment, and in backticks after a comment
-    # that the closing backtick ends. One that bash reads as quoted (also with backslash-newlines earlier in
-    # the string, which the offset of the '<<' in the string without them allows for), one whose delimiter word
-    # runs to the string's closing quote (at a closing backtick bash reads an unquoted delimiter with an empty
-    # body, so nothing is expanded), and a '<<' inside single quotes, an ANSI-C quote with an escaped quote, a
-    # comment (from a '#' at the substitution's opening or after a blank, to its newline) or $((...)) in such a
-    # substitution, leaves the command lexed with its -F file read. A look-alike the lexer does not read as an
-    # operator, inside quotes (after a substitution closes, too), a comment or a quoted here-document's body
-    # (also one that, with '<(' for its '<<', would be the line that closes that body), or after an escaped
-    # '<', leaves the command lexed, so its -F file (after the escaped '<', its -m value) is read, and so do
-    # nine of them.
+    # inside a command substitution $(...) in double quotes is real: bash expands its body, which the lexer
+    # reads as text, so with a split delimiter that bash reads as unquoted the command is scanned as written
+    # and that expansion named, also on the line after a comment in the substitution, after a '#' inside a
+    # word (x#y, $(true)#z), after an escaped blank (a\ #y) and after a '#' that a run of backslash-newlines
+    # joins to a word. A '<<' inside single quotes, an ANSI-C quote with an escaped quote, a comment (from a
+    # '#' at the substitution's opening, after an opening '(', a blank, a tab, a newline, ';', '&' or '|', to
+    # its newline) or $((...)) in such a substitution leaves the command lexed with its -F file read. A
+    # look-alike the lexer does not read as an operator, inside quotes (after a substitution closes, too), a
+    # comment or a quoted here-document's body (also one that, with '<(' for its '<<', would be the line that
+    # closes that body), or after an escaped '<', leaves the command lexed, so its -F file (after the escaped
+    # '<', its -m value) is read, and so do nine of them. Where the walk through such a string meets what it
+    # does not follow as bash does, the command is read both ways, lexed with its -m value or -F file read and
+    # scanned as written with each unquoted here-document's expansion named, and the note and each row say so
+    # and why: a backslash or a '#' inside backticks (a doubled backslash, a backslash-newline in a comment
+    # there, a split delimiter there), '${' (in ${x/;#/y}, ${x:-|#} and ${x/ #/y}), a process substitution
+    # (<(true)#z), a case command, a double quote inside the substitution, a delimiter word that runs to the
+    # string's closing quote, a backslash-newline after a '$' or inside '<<', an arithmetic command ((...)),
+    # $[...], a '$((' that closes as a substitution of a subshell, and a here-document's body after a '<<'
+    # that does not decide (a split delimiter bash reads as quoted, also after earlier backslash-newlines,
+    # and the common quoted here-document in -m when a backslash-newline follows the string, whose citation
+    # both readings find and so judge twice).
     split, commands, later = {}, {}, "git commit -m 'see tools/a.py:1'\n"
+    expansion, both_ways = "The git commit message expanded <<", "This command was read both ways"
+    body, plain = "OF\nsee tools/${F}.py:1\nEOF\n", "OF\nsee $F\nEOF\n"
+
+    def read_split(command, session):
+        """One check of command: the verdict, each row's parse, reason, citations, sources and sources not
+        read, whether the note names an expansion, and the reason the note gives for reading it both ways."""
+        verdict, note, rows = _citecheck_run(steps.root, command, session)
+        why = note.partition("because a double-quoted string in it holds ")[2].partition(", which this check")[0]
+        return (verdict, [(r["detail"]["parse"], r["detail"]["parse_why"],
+                           [c["cite"] for c in r["detail"]["citations"]], r["detail"]["sources"],
+                           r["detail"]["sources_unread"]) for r in rows],
+                expansion in note, why if both_ways in note else None)
     for name, command in (("mid", "git commit -F - <<E\\\nOF\nsee tools/a.py:1\nEOF\n"),
                           ("mid-dollar", "git commit -F - <<E\\\nOF\nsee $(printf tools/a.py):1\nEOF\n"),
                           ("lead", "git commit -F - <<\\\nEOF\nsee tools/a.py:1\nEOF\n"),
@@ -4759,76 +4780,149 @@ def _citecheck_step_cases(tmp):
                           ("look-alike-collision", "git commit -F msg.txt; cat <<'x <(E\\'\nx <<E\\\nOF\nx <(E\\\n"),
                           ("look-alike-after-subst", "git commit -F msg.txt; echo \"$(date) x <<E\\\nOF y\""),
                           ("look-alike-many", "git commit -F msg.txt; echo" + " \"x <<E\\\nOF y\"" * 9),
-                          ("subst-double", "git commit -m \"$(cat <<E\\\nOF\nsee tools/${F}.py:1\nEOF\n)\""),
-                          ("backticks-double", "git commit -m \"`cat <<E\\\nOF\nsee tools/${F}.py:1\nEOF\n`\""),
+                          ("subst-double", "git commit -m \"$(cat <<E\\\n" + body + ")\""),
+                          ("backticks-double", "git commit -m \"`cat <<E\\\n" + body + "`\""),
                           ("subst-quoted", "git commit -F msg.txt; echo \"$(cat <<E\\\n'OF'\nx\nEOF\n)\""),
                           ("subst-single", "git commit -F msg.txt; echo \"$(echo 'x <<E\\\nOF y')\""),
                           ("subst-arith", "git commit -F msg.txt; echo \"$((x<<\\\n2))\""),
                           ("subst-comment", "git commit -F msg.txt; echo \"$( # <<E\\\n# OF\n: )\""),
                           ("subst-comment-after", "git commit -F msg.txt; echo \"$(true # x <<E\\\nOF\n)\""),
-                          ("subst-comment-line", "git commit -m \"$(echo a # x\ncat <<E\\\nOF\nsee tools/${F}.py:1\n"
-                                                 "EOF\n)\""),
-                          ("subst-hash-word", "git commit -m \"$(: x#y ${#v} $(true)#z; cat <<E\\\nOF\n"
-                                              "see tools/${F}.py:1\nEOF\n)\""),
-                          ("backticks-comment", "git commit -m \"`echo a # x` `cat <<E\\\nOF\nsee tools/${F}.py:1\n"
-                                                "EOF\n`\""),
+                          ("subst-comment-line", "git commit -m \"$(echo a # x\ncat <<E\\\n" + body + ")\""),
+                          ("subst-hash-word", "git commit -m \"$(: x#y $(true)#z; cat <<E\\\n" + body + ")\""),
+                          ("backticks-comment", "git commit -m \"`echo a # x` `cat <<E\\\n" + body + "`\""),
                           ("subst-ansi-c", "git commit -F msg.txt; echo \"$(echo $'x\\' <<E\\\nOF y')\""),
                           ("subst-joins-before", "git commit -F msg.txt; echo \"a\\\nb\\\nc\\\n $(cat <<E\\\n'OF'\n"
                                                  "abc ${HOME}\nEOF\n)\""),
-                          ("backticks-to-quote", "git commit -F msg.txt; echo \"`cat <<E\\\nOF`\"")):
+                          ("backticks-to-quote", "git commit -F msg.txt; echo \"`cat <<E\\\nOF`\""),
+                          ("subst-escaped-blank", "git commit -m \"$(: \\\na\\ #y; cat <<E\\\n" + body + ")\""),
+                          ("subst-join-run", "git commit -m \"$(:\\\n\\\n#x; cat <<E\\\n" + body + ")\""),
+                          ("subst-comment-at-open", "git commit -F msg.txt; echo \"$(#x <<E\\\nOF\n)\""),
+                          ("subst-comment-at-paren", "git commit -F msg.txt; echo \"$( (#x <<E\\\nOF\n) )\""),
+                          ("subst-comment-after-tab", "git commit -F msg.txt; echo \"$(true\t# <<E\\\nOF\n)\""),
+                          ("subst-comment-after-semicolon", "git commit -F msg.txt; echo \"$(true;# <<E\\\nOF\n)\""),
+                          ("subst-comment-after-ampersand", "git commit -F msg.txt; echo \"$(true&# <<E\\\nOF\n)\""),
+                          ("subst-comment-after-pipe", "git commit -F msg.txt; echo \"$(true|# <<E\\\nOF\ncat)\""),
+                          ("backticks-comment-at-open", "git commit -F msg.txt; echo \"`#x <<E\\\nOF\n`\""),
+                          ("backticks-hash", "git commit -F msg.txt; echo \"`#x <<E`\\\ny\""),
+                          ("backticks-doubled-backslash", "git commit -m \"`echo a\\\\ #y; cat <<E\\\n" + body + "`\""),
+                          ("backticks-comment-join", "git commit -F msg.txt; echo \"`: # x \\\n<<E\\\nOF\nsee ${F}"
+                                                     "\nEOF\n`\""),
+                          ("subst-procsub-hash", "git commit -m \"$(echo <(true)#z; cat <<E\\\n" + body + ")\""),
+                          ("subst-brace-semicolon", "git commit -m \"$(: ${x/;#/y}; cat <<E\\\n" + body + ")\""),
+                          ("subst-brace-pipe", "git commit -m \"$(echo g ${x:-|#} h; cat <<E\\\n" + body + ")\""),
+                          ("subst-brace-blank", "git commit -F msg.txt; echo \"$(: ${x/ #/y})\n <<E\\\nOF y\""),
+                          ("subst-case", "git commit -m \"$(case x in x) cat <<E\\\n" + plain + ";; esac)\""),
+                          ("subst-double-quote", "git commit -F msg.txt; echo \"$(echo \"x\"; cat <<E\\\n" + body
+                                                 + ")\""),
+                          ("subst-word-to-quote", "git commit -F msg.txt; echo \"$(cat <<E\\\nOF\"Q\"\nx${F}\nEOFQ"
+                                                  "\n)\""),
+                          ("subst-dollar-join", "git commit -m \"$\\\n(cat <<E\\\n" + body + ")\""),
+                          ("subst-lt-join", "git commit -m \"$(cat <\\\n<E\\\n" + body + ")\""),
+                          ("subst-arith-command", "git commit -F msg.txt; echo \"$( ((x=1<<\\\n2)); echo $x)\""),
+                          ("subst-dollar-bracket", "git commit -F msg.txt; echo \"$(echo $[1<<\\\n2])\""),
+                          ("subst-arith-subshell", "git commit -m \"$((cat <<E\\\n" + plain + ") )\""),
+                          ("subst-quoted-heredoc-then-join", "git commit -m \"$(cat <<'EOF'\nsee tools/a.py:1\nEOF"
+                                                             "\n)\" \\\n--no-edit")):
         commands[name] = command
-        verdict, note, rows = _citecheck_run(steps.root, command, "split-delim-" + name)
-        split[name] = (verdict, [(r["detail"]["parse"], [c["cite"] for c in r["detail"]["citations"]],
-                                  r["detail"]["sources"], r["detail"]["sources_unread"]) for r in rows],
-                       "The git commit message expanded <<" in note)
-    by_raw = [("raw", ["tools/a.py:1"], ["command text"], named("EOF"))]
-    by_quoted = [("raw", ["tools/a.py:1"], ["command text"], [])]
-    by_file = ("warn", [("lexed", ["tools/a.py:1"], ["-F msg.txt"], [])], False)
-    by_text = ("warn", [("raw", [], ["command text"], named("EOF"))], True)
+        split[name] = read_split(command, "split-delim-" + name)
+
+    def named_both(*delims):
+        return ["expanded <<{} here-document: {}".format(delim, reason_both) for delim in delims]
+
+    def by_value(why):
+        """A -m value whose body cites only through ${F} or $F, read both ways: no citation either way, and
+        the expansion of <<EOF named by the scan as written."""
+        return ("warn", [("both", why, [], ["-m value"], []), ("both", why, [], ["command text"], named_both("EOF"))],
+                True, why)
+
+    def by_both(why, *delims):
+        """-F msg.txt read, and the command scanned as written with the expansion of each delimiter named."""
+        return ("warn", [("both", why, ["tools/a.py:1"], ["-F msg.txt"], []),
+                         ("both", why, [], ["command text"], named_both(*delims))], bool(delims), why)
+    reason_both = ("its delimiter is unquoted, so bash expands parameters, command substitutions and arithmetic in "
+                   "its body, and the command's text was scanned only as written")
+    by_raw = [("raw", None, ["tools/a.py:1"], ["command text"], named("EOF"))]
+    by_quoted = [("raw", None, ["tools/a.py:1"], ["command text"], [])]
+    by_file = ("warn", [("lexed", None, ["tools/a.py:1"], ["-F msg.txt"], [])], False, None)
+    by_text = ("warn", [("raw", None, [], ["command text"], named("EOF"))], True, None)
+    in_ticks, hash_in_ticks, braces = "a backslash inside backticks", "a '#' inside backticks", \
+        "a parameter expansion's braces"
+    open_at_quote, heredoc_body = "a command substitution still open at its closing quote", "a here-document's body"
     check("citeledger/check-split-heredoc-delim", split,
-          {"mid": ("warn", by_raw, True), "mid-dollar": ("warn", [("raw", [], ["command text"], named("EOF"))], True),
-           "lead": ("warn", by_raw, True), "dash": ("warn", by_raw, True), "later": ("warn", by_raw, True),
-           "quoted": ("warn", by_quoted, False), "later-quoted": ("warn", by_quoted, False),
-           "later-ansi-c": ("warn", by_quoted, False), "later-quoted-part": ("warn", by_quoted, False),
-           "later-in-double-quotes": ("warn", by_quoted, False), "later-arith": ("warn", by_quoted, False),
-           "later-in-single-quotes": ("warn", by_quoted, False), "look-alike-single": by_file,
+          {"mid": ("warn", by_raw, True, None),
+           "mid-dollar": ("warn", [("raw", None, [], ["command text"], named("EOF"))], True, None),
+           "lead": ("warn", by_raw, True, None), "dash": ("warn", by_raw, True, None),
+           "later": ("warn", by_raw, True, None), "quoted": ("warn", by_quoted, False, None),
+           "later-quoted": ("warn", by_quoted, False, None), "later-ansi-c": ("warn", by_quoted, False, None),
+           "later-quoted-part": ("warn", by_quoted, False, None),
+           "later-in-double-quotes": ("warn", by_quoted, False, None), "later-arith": ("warn", by_quoted, False, None),
+           "later-in-single-quotes": ("warn", by_quoted, False, None), "look-alike-single": by_file,
            "look-alike-double": by_file, "look-alike-comment": by_file, "look-alike-body": by_file,
-           "look-alike-escaped": ("warn", [("lexed", ["tools/a.py:1"], ["-m value"], [])], False),
+           "look-alike-escaped": ("warn", [("lexed", None, ["tools/a.py:1"], ["-m value"], [])], False, None),
            "look-alike-collision": by_file, "look-alike-after-subst": by_file, "look-alike-many": by_file,
-           "subst-double": ("warn", [("raw", [], ["command text"], named("EOF"))], True),
-           "backticks-double": ("warn", [("raw", [], ["command text"], named("EOF"))], True),
-           "subst-quoted": by_file, "subst-single": by_file, "subst-arith": by_file, "subst-comment": by_file,
-           "subst-comment-after": by_file, "subst-comment-line": by_text, "subst-hash-word": by_text,
-           "backticks-comment": by_text, "subst-ansi-c": by_file, "subst-joins-before": by_file,
-           "backticks-to-quote": by_file})
+           "subst-double": by_text, "backticks-double": by_value(in_ticks), "subst-quoted": by_both(heredoc_body),
+           "subst-single": by_file, "subst-arith": by_file, "subst-comment": by_file, "subst-comment-after": by_file,
+           "subst-comment-line": by_text, "subst-hash-word": by_text, "backticks-comment": by_value(hash_in_ticks),
+           "subst-ansi-c": by_file, "subst-joins-before": by_both(heredoc_body),
+           "backticks-to-quote": by_both(in_ticks), "subst-escaped-blank": by_text, "subst-join-run": by_text,
+           "subst-comment-at-open": by_file, "subst-comment-at-paren": by_file, "subst-comment-after-tab": by_file,
+           "subst-comment-after-semicolon": by_file, "subst-comment-after-ampersand": by_file,
+           "subst-comment-after-pipe": by_file, "backticks-comment-at-open": by_both(in_ticks, "EOF"),
+           "backticks-hash": by_both(hash_in_ticks), "backticks-doubled-backslash": by_value(in_ticks),
+           "backticks-comment-join": by_both(in_ticks, "EOF"), "subst-procsub-hash": by_value("a process substitution"),
+           "subst-brace-semicolon": by_value(braces), "subst-brace-pipe": by_value(braces),
+           "subst-brace-blank": by_both(braces, "EOF"), "subst-case": by_value("a case command"),
+           "subst-double-quote": by_both(open_at_quote, "EOF"), "subst-word-to-quote": by_both(open_at_quote),
+           "subst-dollar-join": by_value("a backslash-newline after a '$'"),
+           "subst-lt-join": by_value("a backslash-newline inside '<<'"),
+           "subst-arith-command": by_both("an arithmetic command ((...))", "2"),
+           "subst-dollar-bracket": by_both("an arithmetic expansion $[...]", "2]"),
+           "subst-arith-subshell": by_value("a '$((' that does not close with '))'"),
+           "subst-quoted-heredoc-then-join": ("warn", [("both", heredoc_body, ["tools/a.py:1"], ["-m value"], []),
+                                                       ("both", heredoc_body, ["tools/a.py:1"], ["command text"], [])],
+                                              False, heredoc_body)})
     # Each rule of the walk through a double-quoted substitution and of the split-delimiter decision decides
     # its vector above: under a variant of the hook with that rule removed (_hook_variant: one line of
     # _citechk_substituted_ops or _citechk_split_delim replaced) the vector gives the other result pinned here.
     # The rules: a substitution ends at its ')'; single quotes, an ANSI-C quote and $((...)) in it; a comment
-    # in it, which begins at a '#' that begins a word and ends at its newline or, in backticks, at the closing
-    # one; the joined delimiter read as quoted; the offset of the '<<' past earlier backslash-newlines; and a
-    # delimiter word that runs to the string's closing quote. Four of these vectors (after the substitution's
-    # close, in single quotes, in $((...)) and with a quoted joined delimiter) give their result above under a
-    # hook that finds split delimiters by lexing the command again, so alone they are continuity coverage; the
-    # variants are what show that each rule decides them.
+    # in it, which begins at a '#' that begins a word (just after '$(' or an opening '(', or after a blank, a
+    # tab, ';', '&' or '|'; not just after a substitution's close, an escaped blank, or a run of
+    # backslash-newlines that follows a word) and ends at its newline; a '#' inside backticks; '${'; the
+    # joined delimiter read as quoted; the offset of the '<<' past earlier backslash-newlines; and a delimiter
+    # word that runs to the string's closing quote. Four of these vectors (after the substitution's close, in
+    # single quotes, in $((...)) and with a quoted joined delimiter) give their result above under a hook that
+    # finds split delimiters by lexing the command again, so alone they are continuity coverage; the variants
+    # are what show that each rule decides them. The x#y in subst-hash-word is passed over both by the
+    # characters the walk stops at and by the comment rule, so no one-line variant shows it; its variant
+    # removes only the rule for a '#' just after a substitution's close ($(true)#z).
     walk, decide = "_citechk_substituted_ops", "_citechk_split_delim"
     texts, base, variants = _hook_functions(walk, decide), tmp / "citecheck-variants", {}
     base.mkdir()
+    starts = 'before in " \\t\\n;&|()"'
     for name, func, old, new in (("look-alike-after-subst", walk, 'elif opened[-1] != "`":', "elif False:"),
-                                 ("subst-single", walk, 'if opened[-1] != "$((":  # single', "if False:  # single"),
+                                 ("subst-single", walk, "elif c == \"'\":", "elif False:"),
                                  ("subst-arith", walk, 'if command.startswith("((", k + 1):', "if False:"),
-                                 ("subst-quoted", decide, "if joined is not None and not joined[0]:",
-                                  "if joined is not None:"),
+                                 ("subst-quoted", decide, "if not joined[0]:", "if True:"),
                                  ("subst-comment", walk, 'elif c == "#":', "elif False:"),
                                  ("subst-comment-after", walk, 'elif c == "#":', "elif False:"),
                                  ("subst-comment-line", walk, 'close = command.find("\\n", k, last)', "close = -1"),
-                                 ("subst-hash-word", walk, 'if opened[-1] != "$((" and at != -1 and (',
-                                  'if opened[-1] != "$((" and (True or '),
-                                 ("backticks-comment", walk, "if tick:  # bash ends", "if False:  # bash ends"),
+                                 ("subst-hash-word", walk, "glue, lead = k + step, -1  # a '#' just after",
+                                  "pass  # a '#' just after"),
                                  ("subst-ansi-c", walk, "elif opened and opened[-1] != \"$((\" and "
                                                         "command.startswith(\"'\", k + 1):", "elif False:"),
                                  ("subst-joins-before", decide, "at - start - 2 * j + 2", "at - start + 2"),
-                                 ("backticks-to-quote", decide, "parsed[3] == end - 1 or ", "")):
+                                 ("subst-word-to-quote", decide, "if parsed[3] == end - 1:", "if False:"),
+                                 ("subst-escaped-blank", walk, "lead = -1  # a '#' just after an escaped",
+                                  "pass  # a '#' just after an escaped"),
+                                 ("subst-join-run", walk, "elif k != glue:", "elif True:"),
+                                 ("subst-comment-at-open", walk, starts, 'before in " \\t\\n;&|)"'),
+                                 ("subst-comment-at-paren", walk, starts, 'before in " \\t\\n;&|)"'),
+                                 ("subst-comment-after-tab", walk, starts, 'before in " \\n;&|()"'),
+                                 ("subst-comment-after-semicolon", walk, starts, 'before in " \\t\\n&|()"'),
+                                 ("subst-comment-after-ampersand", walk, starts, 'before in " \\t\\n;|()"'),
+                                 ("subst-comment-after-pipe", walk, starts, 'before in " \\t\\n;&()"'),
+                                 ("backticks-hash", walk, 'if command.find("#", k + 1, tick) != -1:', "if False:"),
+                                 ("subst-brace-semicolon", walk, 'if command.startswith("{", k + 1):', "if False:")):
         variant = _hook_variant(base, func, texts.get(func, ""), old, new)
         if variant is None:
             variants[name] = "no variant: {!r} does not occur exactly once in {}".format(old, func)
@@ -4836,20 +4930,21 @@ def _citecheck_step_cases(tmp):
         original = getattr(aiqt_hooks, func)
         setattr(aiqt_hooks, func, variant)
         try:
-            verdict, note, rows = _citecheck_run(steps.root, commands[name], "split-variant-" + name)
+            variants[name] = read_split(commands[name], "split-variant-" + name)
         finally:
             setattr(aiqt_hooks, func, original)
-        variants[name] = (verdict, [(r["detail"]["parse"], [c["cite"] for c in r["detail"]["citations"]],
-                                     r["detail"]["sources"], r["detail"]["sources_unread"]) for r in rows],
-                          "The git commit message expanded <<" in note)
-    by_scan = ("allow", [("raw", [], ["command text"], [])], False)
-    by_value = ("allow", [("lexed", [], ["-m value"], [])], False)
+    by_scan = ("allow", [("raw", None, [], ["command text"], [])], False, None)
+    lexed_value = ("allow", [("lexed", None, [], ["-m value"], [])], False, None)
     check("citeledger/check-split-heredoc-variants", variants,
-          {"look-alike-after-subst": by_text, "subst-single": by_text, "subst-arith": by_scan,
-           "subst-quoted": by_scan, "subst-comment": ("warn", [("raw", [], ["command text"], named("E#"))], True),
-           "subst-comment-after": by_text, "subst-comment-line": by_value, "subst-hash-word": by_value,
-           "backticks-comment": by_value, "subst-ansi-c": by_text, "subst-joins-before": by_scan,
-           "backticks-to-quote": by_scan})
+          {"look-alike-after-subst": by_text, "subst-single": by_text,
+           "subst-arith": by_both("an arithmetic command ((...))"), "subst-quoted": by_scan,
+           "subst-comment": ("warn", [("raw", None, [], ["command text"], named("E#"))], True, None),
+           "subst-comment-after": by_text, "subst-comment-line": by_value(open_at_quote),
+           "subst-hash-word": by_value(braces), "subst-ansi-c": by_text, "subst-joins-before": by_scan,
+           "subst-word-to-quote": by_scan, "subst-escaped-blank": by_value(braces), "subst-join-run": by_value(braces),
+           "subst-comment-at-open": by_text, "subst-comment-at-paren": by_text, "subst-comment-after-tab": by_text,
+           "subst-comment-after-semicolon": by_text, "subst-comment-after-ampersand": by_text,
+           "subst-comment-after-pipe": by_text, "backticks-hash": by_file, "subst-brace-semicolon": lexed_value})
     # A command after the reserved words that begin its segment is read: in a brace group, after '!', 'if'
     # or 'then', after 'do', after 'time -p', after a '--' that follows time or its -p, and after coproc,
     # with the NAME bash reads before a compound command. Where bash runs another command, none is read: a
