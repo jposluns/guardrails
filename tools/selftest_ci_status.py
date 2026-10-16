@@ -145,7 +145,9 @@ import sys
 # The pull-request probe's reads are answered from "probes", a list of probe reads advanced by each
 # read of the open pull-request listing (the last one repeats): a dict with "listing" (the slurped
 # pages) and "records" (each pull request's own record by number; an absent number is Not Found),
-# or with "error" (the listing read fails).
+# or with "error" (the listing read fails). Optionally, "listing_raw" replaces the listing with text
+# served as it is, "raw_records" serves a number's read as the text given (invalid JSON, or two
+# documents), and "record_errors" makes a number's read fail with the diagnostic given.
 args = sys.argv[1:]
 with open(os.environ["MOCK_GH_ARGV_LOG"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps(args) + "\n")
@@ -173,9 +175,19 @@ if endpoint == pulls + "?state=open&per_page=100" or endpoint.startswith(pulls +
         print(probe["error"], file=sys.stderr)
         sys.exit(probe.get("exit", 1))
     if endpoint == pulls + "?state=open&per_page=100":
-        print(json.dumps(probe["listing"]))
+        if "listing_raw" in probe:
+            sys.stdout.write(probe["listing_raw"])
+        else:
+            print(json.dumps(probe["listing"]))
         sys.exit(0)
-    record = probe["records"].get(endpoint[len(pulls) + 1:])
+    number = endpoint[len(pulls) + 1:]
+    if number in probe.get("record_errors", {}):
+        print(probe["record_errors"][number], file=sys.stderr)
+        sys.exit(1)
+    if number in probe.get("raw_records", {}):
+        sys.stdout.write(probe["raw_records"][number])
+        sys.exit(0)
+    record = probe["records"].get(number)
     if record is None:
         print("gh: Not Found (HTTP 404)", file=sys.stderr)
         sys.exit(1)
@@ -251,12 +263,15 @@ else:
 FAKE_SLEEP = r"""import os
 import sys
 
+# Every sleep is also appended to the sleep log, so a case can pin the spacing of re-reads.
 try:
     seconds = int(sys.argv[1])
     with open(os.environ["MOCK_CLOCK"], "r", encoding="utf-8") as handle:
         now = int(handle.read().strip())
     with open(os.environ["MOCK_CLOCK"], "w", encoding="utf-8") as handle:
         handle.write(str(now + seconds) + "\n")
+    with open(os.environ["MOCK_SLEEP_LOG"], "a", encoding="utf-8") as handle:
+        handle.write(str(seconds) + "\n")
 except (IndexError, OSError, ValueError) as exc:
     print("sleep fixture: {}".format(exc), file=sys.stderr)
     sys.exit(1)
@@ -386,13 +401,15 @@ def pull(number, head_sha, base="main", mergeable=True, state="open"):
             "mergeable": mergeable}
 
 
-def probe_read(*pulls, records=None):
+def probe_read(*pulls, records=None, raw_records=None, record_errors=None):
     # One read of the pull-request probe: the listing holds the given pull requests on one page, and
-    # each one's own read serves it in full, unless records replaces that by number.
+    # each one's own read serves it in full, unless records replaces that by number (raw_records and
+    # record_errors, by number too, serve raw text or a failed read instead; see FAKE_GH).
     listed = [{key: value for key, value in item.items() if key != "mergeable"} for item in pulls]
     served = {str(item["number"]): item for item in pulls}
     served.update(records or {})
-    return {"listing": [listed], "records": served}
+    return {"listing": [listed], "records": served, "raw_records": raw_records or {},
+            "record_errors": record_errors or {}}
 
 
 def jq_program():
@@ -468,6 +485,8 @@ class Fixture:
         self.probe_counter = base / "probe-calls.txt"
         self.probe_reads = 0
         self.clock = base / "clock.txt"
+        self.sleep_log = base / "sleeps.txt"
+        self.sleeps = []
         self.scan_log = base / "scan-pages.txt"
         self.scan_pages = []
         self.argv_log = base / "gh-argv.txt"
@@ -512,6 +531,7 @@ class Fixture:
         self.counter.write_text("0\n", encoding="utf-8")
         self.probe_counter.write_text("0\n", encoding="utf-8")
         self.scan_log.write_text("", encoding="utf-8")
+        self.sleep_log.write_text("", encoding="utf-8")
         self.argv_log.write_text("", encoding="utf-8")
         self.git_argv_log.write_text("", encoding="utf-8")
         self.clock.write_text("{}\n".format(clock), encoding="utf-8")
@@ -524,6 +544,7 @@ class Fixture:
         env["MOCK_GH_COUNTER"] = str(self.counter)
         env["MOCK_GH_PROBE_COUNTER"] = str(self.probe_counter)
         env["MOCK_CLOCK"] = str(self.clock)
+        env["MOCK_SLEEP_LOG"] = str(self.sleep_log)
         env["MOCK_GH_SCAN_LOG"] = str(self.scan_log)
         env["MOCK_GH_ARGV_LOG"] = str(self.argv_log)
         env["MOCK_GH_REPO"] = served
@@ -541,6 +562,7 @@ class Fixture:
                                 capture_output=True, timeout=30)
         calls = int(self.counter.read_text(encoding="utf-8").strip())
         self.probe_reads = int(self.probe_counter.read_text(encoding="utf-8").strip())
+        self.sleeps = [int(line) for line in self.sleep_log.read_text(encoding="utf-8").split()]
         self.scan_pages = [int(line) for line in self.scan_log.read_text(encoding="utf-8").split()]
         self.gh_argv = [json.loads(line) for line in self.argv_log.read_text(encoding="utf-8").splitlines()]
         self.git_argv = [json.loads(line)
@@ -1601,16 +1623,19 @@ def _run_checks():
         check("ci/repo-override-mismatch-not-echoed", not_echoed, [(2, [], True, False, False, False)] * 3)
         fixture.set_remote("origin", FIXTURE_ORIGIN)
 
-        # THE PULL-REQUEST PROBE: under --wait, a head no pull_request run will come for is refused at
-        # once (exit 1, one probe read, no runs read), naming the cause, however green its runs read:
-        # no open pull request at all, or only one whose head is another commit.
+        # THE PULL-REQUEST PROBE: under --wait, a head with no open pull request now is refused at once
+        # (exit 1, one probe read, no runs read), naming the cause, however green its runs read: no open
+        # pull request at all, or only one whose head is another commit. The refusal claims only that no
+        # new pull_request run will start while that holds, never that an earlier run cannot finish.
         green_polls = [[page([success_a])]]
         no_pr = []
         for probes in ([probe_read()], [probe_read(pull(2, "e" * 40))]):
             rc, output, calls = fixture.invoke(green_polls, wait=True, probes=probes)
             no_pr.append((rc, calls, fixture.probe_reads,
-                          "no open pull request has {} as its head".format(head_sha) in output))
-        check("ci/wait-pr-probe-no-open-pull-request", no_pr, [(1, 0, 1, True)] * 2)
+                          "no open pull request has {} as its head now".format(head_sha) in output,
+                          "no new pull_request run will start for it while that holds; a run that "
+                          "started earlier may still finish" in output))
+        check("ci/wait-pr-probe-no-open-pull-request", no_pr, [(1, 0, 1, True, True)] * 2)
 
         # The base is the --require-base value, else main: an open pull request at this head into dev is
         # refused by name under a plain --wait, waited on under --require-base dev, and a sibling at the
@@ -1621,8 +1646,9 @@ def _run_checks():
                                    path=quality_path)
         based = []
         rc, output, calls = fixture.invoke(green_polls, wait=True, probes=[probe_read(into_dev)])
-        based.append((rc, calls, "no open pull request for {} targets main (#7 into dev)".format(
-            head_sha) in output))
+        based.append((rc, calls, "no open pull request for {} targets main now (#7 into dev), so no "
+                      "new pull_request run into main will start for it while that holds; a run that "
+                      "started earlier may still finish".format(head_sha) in output))
         rc, output, calls = fixture.invoke([[page([dev_quality])]], wait=True,
                                            probes=[probe_read(into_dev)],
                                            extra_args=("--require-base", "dev"))
@@ -1643,7 +1669,9 @@ def _run_checks():
                 ([[page([pending_b])]], [probe_read(pull(9, head_sha)), probe_read(conflicted)], "60")):
             rc, output, calls = fixture.invoke(polls, wait=True, timeout=timeout, probes=probes)
             conflicts.append((rc, calls, fixture.probe_reads,
-                              "pull request #9 CONFLICTING with main" in output))
+                              "pull request #9 CONFLICTING with main now, so no new pull_request run "
+                              "will start for it while that holds; a run that started earlier may "
+                              "still finish" in output))
         rc, output, calls = fixture.invoke(green_polls, wait=True,
                                            probes=[probe_read(conflicted, pull(10, head_sha))])
         conflicts.append((rc, calls, fixture.probe_reads, "CONFLICTING" in output))
@@ -1705,6 +1733,103 @@ def _run_checks():
         every.append((rc, calls, fixture.probe_reads,
                       any("/pulls" in arg for argv in fixture.gh_argv for arg in argv)))
         check("ci/wait-pr-probe-every-poll-not-report-once", every, [(0, 5, 5), (0, 1, 0, False)])
+
+        # Each pull request's own read must answer with exactly one record numbered as requested,
+        # checked on its own before the reads are combined: a record of another pull request (a
+        # MERGEABLE #8 for the read of #7), two records in one response (a CONFLICTING #7, then a
+        # MERGEABLE #8), and an array holding the record are each a malformed response naming the read,
+        # cannot-evaluate (exit 2) at once: one read, no runs read.
+        identities = []
+        for served in ({"records": {"7": pull(8, head_sha)}},
+                       {"raw_records": {"7": json.dumps(pull(7, head_sha, mergeable=False))
+                                        + json.dumps(pull(8, head_sha))}},
+                       {"records": {"7": [pull(7, head_sha)]}}):
+            rc, output, calls = fixture.invoke(green_polls, wait=True,
+                                               probes=[probe_read(pull(7, head_sha), **served)])
+            identities.append((rc, calls, fixture.probe_reads,
+                               "the read of pull request #7 is not exactly one well-formed record of #7"
+                               in output))
+        check("ci/wait-pr-probe-record-identity", identities, [(2, 0, 1, True)] * 3)
+
+        # A response gh returned that is not valid JSON, the listing or one pull request's own read, is a
+        # malformed response where jq fails to parse it: cannot-evaluate (exit 2) at once, never re-read
+        # as a transient failure, although the next read would wait.
+        unparsable = []
+        for first in ({"listing_raw": "[[{", "records": {}},
+                      probe_read(pull(12, head_sha), raw_records={"12": "<html>Bad Gateway</html>"})):
+            rc, output, calls = fixture.invoke(green_polls, wait=True,
+                                               probes=[first, probe_read(pull(12, head_sha))])
+            unparsable.append((rc, calls, fixture.probe_reads, "jq: parse error" in output,
+                               "malformed pull-request response" in output))
+        check("ci/wait-pr-probe-not-json", unparsable, [(2, 0, 1, True, True)] * 2)
+
+        # Not found is an HTTP 404 status, never a 404 inside a longer number: a 502 whose diagnostic
+        # names pulls/4041, or an "HTTP 404" followed by another digit, is a transient failure, re-read
+        # once before a MERGEABLE read waits, while an HTTP 404 that does not say Not Found, at the end
+        # of the diagnostic or followed by more text, is still cannot-evaluate at once.
+        gateway = "gh: HTTP 502: Bad Gateway (https://api.github.com/repos/fixture/repository/pulls/4041)"
+        statuses = []
+        for probes in ([probe_read(pull(4041, head_sha), record_errors={"4041": gateway}),
+                        probe_read(pull(4041, head_sha))],
+                       [{"error": "gh: HTTP 4041"}, probe_read(pull(12, head_sha))],
+                       [{"error": "gh: HTTP 404"}],
+                       [{"error": "gh: HTTP 404 (https://api.github.com/repos/fixture/repository/pulls)"}]):
+            rc, output, calls = fixture.invoke(green_polls, wait=True, probes=probes)
+            statuses.append((rc, calls, fixture.probe_reads, "cannot evaluate" in output))
+        check("ci/wait-pr-probe-not-found-status", statuses,
+              [(0, 5, 6, False), (0, 5, 6, False), (2, 0, 1, True), (2, 0, 1, True)])
+
+        # Combining the reads keeps only a pull request still open at this head into the base: one listed
+        # into main whose own read, though MERGEABLE, shows it retargeted to dev, or at another head,
+        # changed between the reads, so it is re-read, never waited on; the next read refuses.
+        kept = []
+        for record, then, cause in ((pull(14, head_sha, base="dev"), pull(14, head_sha, base="dev"),
+                                     "targets main now (#14 into dev)"),
+                                    (pull(14, "e" * 40), pull(14, "e" * 40),
+                                     "no open pull request has {} as its head now".format(head_sha))):
+            rc, output, calls = fixture.invoke(
+                green_polls, wait=True,
+                probes=[probe_read(pull(14, head_sha), records={"14": record}), probe_read(then)])
+            kept.append((rc, calls, fixture.probe_reads,
+                         "changed between the listing and its own read" in output, cause in output))
+        check("ci/wait-pr-probe-merge-keeps-base", kept, [(1, 0, 2, True, True)] * 2)
+
+        # A listing of no pages at all is malformed, cannot-evaluate (exit 2) at once, never read as no
+        # open pull request; one empty page is the empty listing, refused as no open pull request.
+        empty = []
+        for listing in ([], [[]]):
+            rc, output, calls = fixture.invoke(green_polls, wait=True,
+                                               probes=[{"listing": listing, "records": {}}])
+            empty.append((rc, calls, fixture.probe_reads, "malformed pull-request listing" in output))
+        check("ci/wait-pr-probe-empty-page-list", empty, [(2, 0, 1, True), (1, 0, 1, False)])
+
+        # Re-reads are 5 seconds apart: two UNKNOWN reads, then a MERGEABLE one, sleep 5 seconds twice
+        # before the first poll; the 15-second poll sleeps then follow until the wait settles green.
+        rc, _output, calls = fixture.invoke(green_polls, wait=True,
+                                            probes=[undecided, undecided, probe_read(pull(11, head_sha))])
+        check("ci/wait-pr-probe-retry-spacing", (rc, calls, fixture.probe_reads, fixture.sleeps),
+              (0, 5, 7, [5, 5, 15, 15, 15, 15]))
+
+        # One listed record per clause of the record check, each otherwise an open pull request at this
+        # head into main (not an object; number not a number, 0, -1, or 15.5; state not a string; head
+        # not an object; head SHA not a string; base not an object; base branch not a string, or
+        # empty), and one single read per clause of the .mergeable check (absent, or the string "true"):
+        # each is refused by the jq program's own check, cannot-evaluate (exit 2) at once.
+        well_formed = {"number": 15, "state": "open", "head": {"sha": head_sha}, "base": {"ref": "main"}}
+        clauses = []
+        for item in ("#15", dict(well_formed, number="15"), dict(well_formed, number=0),
+                     dict(well_formed, number=-1), dict(well_formed, number=15.5),
+                     dict(well_formed, state=1), dict(well_formed, head=head_sha),
+                     dict(well_formed, head={"sha": 15}), dict(well_formed, base="main"),
+                     dict(well_formed, base={"ref": 15}), dict(well_formed, base={"ref": ""})):
+            rc, output, calls = fixture.invoke(green_polls, wait=True,
+                                               probes=[{"listing": [[item]], "records": {}}])
+            clauses.append((rc, calls, fixture.probe_reads, "malformed pull-request listing" in output))
+        for record in (well_formed, pull(15, head_sha, mergeable="true")):
+            rc, output, calls = fixture.invoke(
+                green_polls, wait=True, probes=[probe_read(pull(15, head_sha), records={"15": record})])
+            clauses.append((rc, calls, fixture.probe_reads, "malformed pull-request record" in output))
+        check("ci/wait-pr-probe-malformed-clauses", clauses, [(2, 0, 1, True)] * 13)
 
     # Round 7: main() must print every collected failure and map the exit code by the module docstring's
     # rule on every path. Each case runs a nested main() on seeded state and restores the real state.

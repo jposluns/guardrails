@@ -827,6 +827,13 @@ expected-check-ids = [
   "ci/wait-pr-probe-read-failure",
   "ci/wait-pr-probe-changed-between-reads",
   "ci/wait-pr-probe-every-poll-not-report-once",
+  "ci/wait-pr-probe-record-identity",
+  "ci/wait-pr-probe-not-json",
+  "ci/wait-pr-probe-not-found-status",
+  "ci/wait-pr-probe-merge-keeps-base",
+  "ci/wait-pr-probe-empty-page-list",
+  "ci/wait-pr-probe-retry-spacing",
+  "ci/wait-pr-probe-malformed-clauses",
   "ci/finalise-harness-error-keeps-failures",
 ]
 [[suite]]
