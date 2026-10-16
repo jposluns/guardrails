@@ -2943,6 +2943,24 @@ def _main_isolated(report_path=None):
               "deny")
         check("trunc/fg-metachar-comment-quote-shift-denies",
               _verdict(bg("echo a;# it's\nsleep 5 & echo done # '", rib=False)), "deny")
+        # The shared '#' comment rule (bash 5.3 reaches the `&` or the pipe in each non-control row below): a
+        # `)` that closes a parenthesis opened inside a word ends no word, so `x=$(true)#;` keeps the `#`
+        # literal under the bash rule and the later carriage-return `#` is no comment to bash either; a `#`
+        # inside an unquoted ${...} is expansion text; a comment inside a backquote substitution ends at the
+        # closing backquote. Each was a silent allow (or an allow-note) before this fix. The blank-led `#` rows
+        # are CONTROLS: a real word-start comment still drops the rest of the line, as it does in bash.
+        check("trunc/fg-subst-glued-hash-detach-denies",
+              _verdict(bg("x=$(true)#;\r# ; sleep 5 &", rib=False)), "deny")
+        check("trunc/fg-param-expansion-hash-detach-denies",
+              _verdict(bg("echo ${x:- #} & sleep 5", rib=False)), "deny")
+        check("trunc/fg-backquote-comment-detach-denies",
+              _verdict(bg("x=`true #` & sleep 5", rib=False)), "deny")
+        check("trunc/fg-subst-spaced-hash-comment-allows",
+              _verdict(bg("x=$(true) # & sleep 5", rib=False)), "allow")
+        check("trunc/bg-subst-glued-hash-head-denies",
+              _verdict(bg("x=$(true)#; python3 build.py | head")), "deny")
+        check("trunc/bg-subst-spaced-hash-head-allows-note",
+              _verdict(bg("x=$(true) #; python3 build.py | head")), "warn")
         # A scan that ends inside an open quote denies with a reason about the quote, not a false claim
         # that a bare '&' was found (before this fix it reused the bare-& detach reason).
         uq = bg("cat > f <<'EOF'\nthe user's file\nEOF", rib=False)
@@ -4173,6 +4191,20 @@ def _main_isolated(report_path=None):
         # a redirect on the `done` terminator makes its raw not a bare `done`: 'none', not a wrong match.
         check("wl/done-redirect-none",
               clf("while true; do gh x; sleep 1; done >log &"), "none")
+        # The shared '#' comment rule: a `#` inside an unquoted ${...} is expansion text and a comment inside
+        # a backquote substitution ends at its closing backquote, so the detached `done &` after either is
+        # seen (bash runs it); before the fix the `#` hid the rest of the line and the loop read 'none'. The
+        # raw word scan reads its own segment by the same rule; a blank-led `#` stays a comment (control).
+        check("wl/param-expansion-hash-match",
+              clf("while true; do gh pr checks 42; sleep 30; echo ${x:- #}; done &"), "match")
+        check("wl/backquote-comment-match",
+              clf("while true; do gh pr checks 42; sleep 30; x=`true #`; done &"), "match")
+        check("wl/raw-words-param-expansion-hash-literal",
+              aiqt_hooks._orch_raw_unquoted_words("echo ${x:- #} done"), ["echo", "${x:-", "#}", "done"])
+        check("wl/raw-words-backquote-comment-ends",
+              aiqt_hooks._orch_raw_unquoted_words("echo `true # c` done"), ["echo", "`true", "`", "done"])
+        check("wl/raw-words-spaced-comment-dropped",
+              aiqt_hooks._orch_raw_unquoted_words("echo x # done"), ["echo", "x"])
         # run_in_background true with an inner trailing `done &` is still 'match' (predicate ignores rib).
         check("wl/deny-rib-true-inner-detach", clf(BASE), "match")
         # NEGATIVE fixtures (this control): every one is 'none'.

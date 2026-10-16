@@ -7365,6 +7365,81 @@ def _main_isolated(monitor):
                 ([["git", "diff"]], []))
         texpect("(tok-17b) mid-word '#' stays literal",
                 _argv("git commit -m ticket#123"), [["git", "commit", "-m", "ticket#123"]])
+        # A '#' opens a comment only at the START of a word (bash 5.3: 'x=$(true)#; echo SECOND' prints
+        # SECOND). A ')' that closes a parenthesis opened directly after a word character ends no word, so the
+        # '#' after it is literal and the next command stays visible; so is a '#' inside an unquoted ${...},
+        # and a comment inside a backquote substitution ends at the closing backquote.
+        texpect("(tok-17c) '#' after a command substitution's ')' is literal, the next command is seen",
+                _argv("x=$(true)#; git commit --no-verify -m x"),
+                [["x=$"], ["true"], ["#"], ["git", "commit", "--no-verify", "-m", "x"]])
+        texpect("(tok-17d) '#' after an arithmetic expansion's '))' is literal",
+                _argv("x=$((1))#; git x"), [["x=$"], [], ["1"], [], ["#"], ["git", "x"]])
+        texpect("(tok-17e) '#' after an array assignment's ')' is literal",
+                _argv("a=(1 2)#; git x"), [["a="], ["1", "2"], ["#"], ["git", "x"]])
+        texpect("(tok-17f) a continuation between the ')' and the '#' keeps the '#' literal",
+                _argv("x=$(true)\\\n#; git x"), [["x=$"], ["true"], ["#"], ["git", "x"]])
+        texpect("(tok-17g) '#' after a blank inside an unquoted ${...} is expansion text",
+                _argv("echo ${x:- #}; git x"), [["echo", "${x:-", "#}"], ["git", "x"]])
+        texpect("(tok-17h) a comment inside a backquote substitution ends at the closing backquote",
+                _argv("x=`true #`; git x"), [["x=`true", "`"], ["git", "x"]])
+        texpect("(tok-17i) after a 'case' word a ')' is not paired, so the '#' after it stays literal",
+                _argv("(x=$(case a in a) true;; esac)#; git x)"),
+                [[], ["x=$"], ["case", "a", "in", "a"], ["true"], [], ["esac"], ["#"], ["git", "x"], []])
+        try:
+            _t17j = _argv("echo ${x:- >#}; git x")
+        except ValueError as exc:
+            _t17j = "ValueError: {}".format(exc)
+        texpect("(tok-17j) a redirect target '#' inside an open ${...} follows the same rule (no raise)",
+                _t17j, [["echo", "${x:-"], ["git", "x"]])
+        _t17 = aiqt_hooks._lex_command("x=$(true)#")[2]
+        texpect("(tok-17k) the glued '#' word is opaque (part of a word that carried a substitution)",
+                (_t17.argv, _t17.argv_opaque, _t17.opaque_shell), (["#"], [True], True))
+        texpect("(tok-17l) a '~' that continues a glued word is not a leading tilde",
+                [s.argv_leading_tilde for s in aiqt_hooks._lex_command("x=$(true)~/a")],
+                [[False], [False], [False]])
+        # Controls: a '#' at a real word start stays a comment.
+        texpect("(tok-17m) control: a blank before the '#' keeps it a comment",
+                _argv("x=$(true) #; git x"), [["x=$"], ["true"], []])
+        texpect("(tok-17n) control: '#' after a subshell's ')' is a comment",
+                _argv("(true)#; git x"), [[], ["true"], []])
+        texpect("(tok-17o) control: '#' after an arithmetic command's '))' is a comment",
+                _argv("((1))#; git x"), [[], [], ["1"], [], []])
+        texpect("(tok-17p) control: '#' after ';' is a comment",
+                _argv("true;# git x"), [["true"], []])
+        texpect("(tok-17q) control: a continuation then a blank before the '#' keeps it a comment",
+                _argv("x=$(true)\\\n #; git x"), [["x=$"], ["true"], []])
+        texpect("(tok-17r) control: inside a backquote a comment still ends at a newline that comes first",
+                _argv("x=`true #c\necho in`; git x"), [["x=`true"], ["echo", "in`"], ["git", "x"]])
+        # Every guard that reads the lexer output: each shape denies bare (git_stash_ref notes) and must still
+        # do so behind a word-glued '#' (each of these prefixes let the shape through before the fix), while
+        # the same prefix with a blank before the '#' comments the shape out, as bash does.
+        _hash_rows = [
+            (aiqt_hooks.gate_weakening, "", "git commit --no-verify -m x", "deny", "allow"),
+            (aiqt_hooks.diff_source_pretool, "", "git diff", "deny", "allow-note"),
+            (aiqt_hooks.commit_msg_subst, "", 'git commit -m "a$(id)"', "deny", "allow"),
+            (aiqt_hooks.commit_identity, "", 'git commit -m x --author="Claude <noreply@anthropic.com>"',
+             "deny", "allow"),
+            (aiqt_hooks.git_explicit_binding, "", "git add -A && git push", "deny", "allow"),
+            (aiqt_hooks.git_stash_ref, "", "git stash pop", "allow-note", "allow"),
+            (aiqt_hooks.branch_root, "", "git checkout --orphan x", "deny", "allow"),
+            (aiqt_hooks.bash_absolute_paths, "", "echo hi > out.txt", "deny", "allow"),
+            (aiqt_hooks.protected_line, "git status; ", "git push --force origin main", "deny", "allow"),
+            (aiqt_hooks.git_discard, "", "g'it' re'set' --hard", "deny", "allow"),
+        ]
+        _hash_prefixes = ("x=$(true)#; ", "x=$((1))#; ", "a=(1 2)#; ", "x=$(true)\\\n#; ",
+                          "echo ${x:- #}; ", "x=`true #`; ")
+        for _hg, _hlead, _hshape, _hwant, _hcontrol in _hash_rows:
+            for _hp in ("",) + _hash_prefixes:
+                _hcmd = _hlead + _hp + _hshape
+                _hgot = _decision(_hg, _hcmd)
+                if _hgot != _hwant:
+                    failures.append("(hash-glued) {} on {!r}: expected {}, got {}".format(
+                        _hg.__name__, _hcmd, _hwant, _hgot))
+            _hcmd = _hlead + "x=$(true) #; " + _hshape
+            _hgot = _decision(_hg, _hcmd)
+            if _hgot != _hcontrol:
+                failures.append("(hash-control) {} on {!r}: the blank-led '#' must comment the shape out, "
+                                "expected {}, got {}".format(_hg.__name__, _hcmd, _hcontrol, _hgot))
         # A '..'-normalized device target and a decoy-real target under '..' do not classify file-real.
         texpect("(tok-18a) '/tmp/../dev/stdout' normalizes to a /dev device target",
                 _redir("git diff > /tmp/../dev/stdout"),
