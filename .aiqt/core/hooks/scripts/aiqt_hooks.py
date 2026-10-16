@@ -1920,12 +1920,12 @@ CO_AUTHOR_RE = re.compile(r"(?i)co[- ]?authored[- ]?by\s*:?\s*([^\n]{1,160})")
 # value in the '-c user.name=VALUE' inline shape.
 GIT_ENV_RE = re.compile(r"(?is)^GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)=(.*)$")
 USER_CONF_EQ_RE = re.compile(r"(?is)^user\.(?:name|email)=(.*)$")
-# Fallback-only raw-string contexts, used when the shared tokenizer cannot parse the command, a command line
+# Fallback-only raw-string contexts, used when the shared tokenizer cannot parse the command, or a command line
 # that git runs from its operands is left unread, because the tokenizer cannot parse it or it is past the
-# run-line bounds, or the command is too long to read (see _commit_identity_fallback). A value runs to whitespace
-# or a shell separator/quote. The --author context matches every prefix that git reads as --author (--au, --aut,
-# --auth, --autho, --author; no other git commit option starts with 'au'), with '=' or whitespace before the
-# value, so the fallback is no weaker on that option than the token reader.
+# run-line bounds (see _commit_identity_fallback, which judges a command too long to read without them). A
+# value runs to whitespace or a shell separator/quote. The --author context matches every prefix that git reads
+# as --author (--au, --aut, --auth, --autho, --author; no other git commit option starts with 'au'), with '=' or
+# whitespace before the value, so the fallback is no weaker on that option than the token reader.
 _VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s\"';|&]+)"
 _RAW_IDENTITY_CONTEXTS = (
     (re.compile(r"(?i)co[- ]?authored[- ]?by\s*:?\s*([^\n\"']{1,160})"), "co-author trailer"),
@@ -1942,9 +1942,10 @@ _RAW_IDENTITY_CONTEXTS = (
 # message text, which a co-author trailer can live in, so it is scanned for one; 'file' (-F) is the name of the
 # file git reads the message from; 'value' (a commit, a template, a date, a mode or a number) is passed over;
 # None takes no value from the next word (a flag, or -S, -u, --gpg-sign and --untracked-files, whose optional
-# value can only share their own word). A next-word value of -m or -F that has the form --author=VALUE is still
-# judged as an --author value, a safe-direction over-deny kept until the maintainer decides it, since git takes
-# that word as the message or as the message file's name and records no author from it
+# value can only share their own word). A next-word value of any value-taking option that has the form
+# --author=VALUE is still judged as an --author value, and so is the word after a next-word value that is
+# --author or a prefix git reads as --author, a safe-direction over-deny kept until the maintainer decides it,
+# since git takes that word as the option's value and records no author from it
 # (_commit_message_and_author_ai). 'verify' and 'post-rewrite' are the positive spellings git also accepts for
 # --no-verify and --no-post-rewrite. Every long name is listed, since git reads a prefix that only one long name
 # starts with as that option (_cmtidn_option).
@@ -1994,13 +1995,14 @@ def _commit_message_and_author_ai(tokens):
     (_cmtidn_option), so a value-taking option's value is read as that value before anything else, whether it
     shares the option's word (--author=X, -mMSG) or is the next word (--author X, -am MSG): an --author value is
     judged, a message value is scanned for a trailer, and a next-word value is never read as an option. One
-    exception keeps an earlier deny: a next-word value of -m or -F (any spelling _cmtidn_option reads as one)
-    that has the form --author=VALUE is judged as an --author value, though git takes it as the message or as
-    the message file's name and records no author from it (git commit -m --author=X), a safe-direction over-deny
-    kept until the maintainer decides it. The bare message body is deliberately NOT matched against the identity
-    set: a legitimate message that merely mentions an AI product name (e.g. -m 'fix claude adapter') is not a
-    recorded AI identity, and denying it would be a false positive; only a trailer or an --author value records
-    identity."""
+    exception keeps an earlier deny: a next-word value of ANY value-taking option (any spelling _cmtidn_option
+    reads as one) that has the form --author=VALUE is judged as an --author value, and so is the word after a
+    next-word value that is --author or a prefix git reads as --author, though git takes the value word as that
+    option's value and records no author from it (git commit -m --author=X, git commit -C --author=X, git commit
+    -m --author X), a safe-direction over-deny kept until the maintainer decides it. The bare message body is
+    deliberately NOT matched against the identity set: a legitimate message that merely mentions an AI product
+    name (e.g. -m 'fix claude adapter') is not a recorded AI identity, and denying it would be a false positive;
+    only a trailer or an --author value records identity."""
     n = len(tokens)
     i = 0
     while i < n:
@@ -2015,8 +2017,11 @@ def _commit_message_and_author_ai(tokens):
             m = CO_AUTHOR_RE.search(value) if kind in ("message", "trailer") else None
             if m and AI_IDENTITY_RE.search(m.group(1)):
                 return "co-author trailer {!r}".format(m.group(1).strip()[:80])
-            if kind in ("message", "file") and value.startswith("--author="):
+            if value.startswith("--author="):
                 kind, value = "author", value[len("--author="):]  # the over-deny kept above
+            elif (i + 1 < n and _cmtidn_option(value, {}, _CMTIDN_COMMIT_LONG) == ("author", None)
+                  and AI_IDENTITY_RE.search(tokens[i + 1])):
+                return "--author value {!r}".format(tokens[i + 1].strip()[:80])  # the over-deny kept above
         if kind == "author" and value is not None and AI_IDENTITY_RE.search(value):
             return "--author value {!r}".format(value.strip()[:80])
         i += 1
@@ -2220,7 +2225,7 @@ _CMTIDN_RUN_BOUNDS = ("git runs a command line that could not be parsed, or comm
 # this length costs up to about 1 s, a tenth of the timeout; that margin is for a host several times slower than
 # the one measured and for the other PreToolUse hooks the platform runs on the same command at the same time. A
 # longer command raises ValueError with _CMTIDN_TOO_LONG before any reading starts, and the handler's fallback
-# denies an AI name anywhere in it (_commit_identity_fallback).
+# denies it when it names an AI anywhere and holds a word that can record an identity (_commit_identity_fallback).
 _CMTIDN_READ_LIMIT = 128 << 10
 _CMTIDN_TOO_LONG = "the command is longer than the commit-identity check reads within the hook timeout"
 # An AI name as AI_IDENTITY_RE spells it but with no word boundary, so that a name the reader would find in a
@@ -2232,6 +2237,20 @@ _CMTIDN_TOO_LONG = "the command is longer than the commit-identity check reads w
 # leave a word boundary.
 _AI_NAME_ANYWHERE_RE = re.compile(AI_IDENTITY_RE.pattern.replace(r"\b", ""))
 _CMTIDN_UNREAD_CHARS_RE = re.compile(r"[\\\"'$\n]")
+# The words that can record an identity, which a command too long to read must also hold before its AI name
+# denies it (_cmtidn_identity_word): the reader judges an --author value or a trailer only on a segment whose
+# git command it finds by a word that is git or a path ending in /git, and a run line only under such a git
+# command, and it judges an identity assignment only in a word that starts with a GIT_AUTHOR_ or GIT_COMMITTER_
+# variable name, or with user.name or user.email. Each such word holds its letters in the command with only the
+# characters of _CMTIDN_UNREAD_CHARS_RE between them, so the variable and config names are sought in the command
+# once those characters are dropped, as the AI name is. git is sought as a whole word: its letters with only
+# those characters between them (g$'i't), and no letter, digit or underscore directly before or after it in the
+# command as written, so a dropped character counts as a word boundary too. A word of the command starts after
+# a space, a tab, a newline or an operator, and git in a path follows a '/', so a git at the start of a line,
+# whose newline the dropping removes (EOF, a newline, then git commit ...), is still found. A command that runs
+# git under another name (a variable, a function, an alias) is outside the reader too.
+_CMTIDN_GIT_WORD_RE = re.compile(r"(?<!\w)g[\\\"'$\n]*i[\\\"'$\n]*t(?!\w)")
+_CMTIDN_IDENTITY_NAME_RE = re.compile(r"(?i)GIT_(?:AUTHOR|COMMITTER)_|user\.(?:name|email)")
 
 
 def _cmtidn_run_lines(tokens, k, stop):
@@ -2384,18 +2403,28 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths):
     return None
 
 
+def _cmtidn_identity_word(command):
+    """A word of command that can record an identity, as a match object: its first git word
+    (_CMTIDN_GIT_WORD_RE), else its first GIT_AUTHOR_, GIT_COMMITTER_, user.name or user.email name once the
+    characters of _CMTIDN_UNREAD_CHARS_RE are dropped (_CMTIDN_IDENTITY_NAME_RE); None when it holds neither."""
+    return (_CMTIDN_GIT_WORD_RE.search(command)
+            or _CMTIDN_IDENTITY_NAME_RE.search(_CMTIDN_UNREAD_CHARS_RE.sub("", command)))
+
+
 def _commit_identity_fallback(command, error):
     """FAIL-SAFE conservative scan when find_ai_authorship could not read the command in full, error being the
-    text of the ValueError it raised: the shared tokenizer cannot parse the command (an unbalanced quote or an
-    unsupported construct), a command line that git runs from its operands was left unread, because the
-    tokenizer cannot parse it or it is past the run-line bounds, and nothing read set an AI identity
-    (_CMTIDN_RUN_BOUNDS), or the command is longer than the check reads within the hook timeout
-    (_CMTIDN_TOO_LONG): scan the RAW string of the whole command for an AI identity in a Co-Authored-By trailer,
-    an --author value (any prefix git reads as --author), a git-identity env var, or a user.name/user.email value;
-    deny on a hit. A command too long to read is first denied when an AI name appears ANYWHERE in it once every
-    quote, backslash, '$' and newline is removed, with no word boundary needed around the name
-    (_AI_NAME_ANYWHERE_RE), so every name the reader could have found denies; the cost is a disclosed over-deny
-    of such a command whose text merely names an AI product or holds a name inside a longer word (Claudette).
+    text of the ValueError it raised. A command longer than the check reads within the hook timeout
+    (_CMTIDN_TOO_LONG) is denied when an AI name appears ANYWHERE in it once every quote, backslash, '$' and
+    newline is removed, with no word boundary needed around the name (_AI_NAME_ANYWHERE_RE), and it also holds a
+    word that can record an identity (_cmtidn_identity_word), so a command that the reader would deny is denied;
+    any other command that long is allowed, with no raw-string scan. The cost is a disclosed over-deny of such a
+    command whose text merely names an AI product or holds a name inside a longer word (Claudette) and that holds
+    git as a word or an identity variable or config name, a heredoc body included. Otherwise the shared
+    tokenizer cannot parse the command (an unbalanced quote or an unsupported construct), or a command line that
+    git runs from its operands was left unread, because the tokenizer cannot parse it or it is past the run-line
+    bounds, and nothing read set an AI identity (_CMTIDN_RUN_BOUNDS): scan the RAW string of the whole command for
+    an AI identity in a Co-Authored-By trailer, an --author value (any prefix git reads as --author), a
+    git-identity env var, or a user.name/user.email value; deny on a hit.
     With a run line left unread it first denies when an AI identity appears ANYWHERE in the
     command once every backslash-newline, backslash and quote is removed, since quoting or escaping in the
     unread line can split or build an option name or value that no raw-string context sees (--"auth"=...,
@@ -2406,16 +2435,18 @@ def _commit_identity_fallback(command, error):
     Never silent-allow a plausibly-violating command the check could not read in full."""
     if error == _CMTIDN_TOO_LONG:
         match = _AI_NAME_ANYWHERE_RE.search(_CMTIDN_UNREAD_CHARS_RE.sub("", command))
-        if match:
-            reason = ("AIQT rule cmtidn (commit-identity): the command is {} characters long, more than the {} "
-                      "that the check reads within the hook timeout, and it names an AI identity ({!r}) once its "
-                      "quotes, backslashes, '$' signs and newlines are removed; failing closed, since the unread "
-                      "command can set an AI --author, trailer or identity. Remove it and commit as the maintainer; "
-                      "a long command that only mentions an AI product can be split into shorter commands."
-                      .format(len(command), _CMTIDN_READ_LIMIT, match.group(0)))
-            return _deny(reason,
-                         "AIQT guardrail: denied a command too long for the commit-identity check to read that "
-                         "names an AI identity (rule cmtidn, fail-safe).")
+        word = _cmtidn_identity_word(command) if match else None
+        if word is None:
+            return _allow()  # no AI name, or no git word or identity variable or config name
+        reason = ("AIQT rule cmtidn (commit-identity): the command is {} characters long, more than the {} that "
+                  "the check reads within the hook timeout, and it names an AI identity ({!r}) once its quotes, "
+                  "backslashes, '$' signs and newlines are removed, and holds a word that can record one ({!r}); "
+                  "failing closed, since the unread command can set an AI --author, trailer or identity. Remove it "
+                  "and commit as the maintainer; a long command that only mentions an AI product can be split into "
+                  "shorter commands.".format(len(command), _CMTIDN_READ_LIMIT, match.group(0), word.group(0)))
+        return _deny(reason,
+                     "AIQT guardrail: denied a command too long for the commit-identity check to read that "
+                     "names an AI identity (rule cmtidn, fail-safe).")
     if error == _CMTIDN_RUN_BOUNDS:
         text = command.replace("\\\n", "").replace("\\", "")
         match = (AI_IDENTITY_RE.search(text.replace('"', "").replace("'", ""))
