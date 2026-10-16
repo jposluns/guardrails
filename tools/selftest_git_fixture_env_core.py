@@ -2201,39 +2201,57 @@ def _restore_probe_wrapper_checks():
     own wrapper and refuses each mutant of it for its own reason alone: a wrapper that prints a
     stand-in record, or plants one that does not carry this run's nonce, without running the
     caller's git, exports GIT_DIR, exits before its exec line, runs the caller's git twice or
-    overrides a pin. The git-dir mutant that also overrides a pin must not count as refused for
-    git-dir's reason. env/restore-probe-lifecycle-wrapper-accepted is a positive control: it fails
-    if the wrapper check refuses the lifecycle's own wrapper, not if a refusal is removed, which
-    only the mutant rows show. The rows are written out so the execution gate's static layer
-    reads every id; env/restore-probe-mutants-covered requires them to name exactly the wrappers
-    the probe reports on, so a mutant added there needs its row here."""
+    overrides a pin. The git-dir mutant that also overrides a pin must be refused for both defects
+    and, judged under git-dir's reason and again under pin-override's, must count as refused for
+    neither alone. Those two judgements go through the same verdict line as the six mutants, and
+    their rows expect the verdict's refusal, compared up to the ": " that starts the problems it
+    lists: a verdict line that lets any matching problem count fails both, and one that drops the
+    exactly-one-problem rule fails the pin-override one.
+    env/restore-probe-lifecycle-wrapper-accepted is a positive control: it fails if the wrapper
+    check refuses the lifecycle's own wrapper, not if a refusal is removed, which only the mutant
+    rows show. The rows are written out so the execution gate's static layer reads every id;
+    env/restore-probe-mutants-covered requires them to name exactly the wrappers and judgements
+    the probe reports on, so one added there needs its row here."""
     from _entry_restore_selftest import wrapper_mutant_failures
     found = wrapper_mutant_failures()
     covered = []
-    for check_id, name in (
+    not_alone = ("the wrapper check refused the git-dir-and-pin-override mutant wrapper for other "
+                 "than its own reason alone")
+    for check_id, name, want in (
         # Positive control: guards against over-refusal, not against a removed refusal.
-        ("env/restore-probe-lifecycle-wrapper-accepted", "lifecycle"),
-        ("env/restore-probe-refuses-stdout-record", "stdout-record"),
-        ("env/restore-probe-refuses-stale-nonce", "stale-nonce"),
-        ("env/restore-probe-refuses-git-dir", "git-dir"),
-        ("env/restore-probe-refuses-exit-before-exec", "exit-before-exec"),
-        ("env/restore-probe-refuses-runs-twice", "runs-twice"),
-        ("env/restore-probe-refuses-pin-override", "pin-override"),
-        ("env/restore-probe-mutant-second-defect-refused", "git-dir-and-pin-override"),
+        ("env/restore-probe-lifecycle-wrapper-accepted", "lifecycle", []),
+        ("env/restore-probe-refuses-stdout-record", "stdout-record", []),
+        ("env/restore-probe-refuses-stale-nonce", "stale-nonce", []),
+        ("env/restore-probe-refuses-git-dir", "git-dir", []),
+        ("env/restore-probe-refuses-exit-before-exec", "exit-before-exec", []),
+        ("env/restore-probe-refuses-runs-twice", "runs-twice", []),
+        ("env/restore-probe-refuses-pin-override", "pin-override", []),
+        ("env/restore-probe-mutant-second-defect-refused", "git-dir-and-pin-override", []),
+        ("env/restore-probe-second-defect-not-counted-as-git-dir",
+         "git-dir-and-pin-override judged as git-dir", [not_alone]),
+        ("env/restore-probe-second-defect-not-counted-as-pin-override",
+         "git-dir-and-pin-override judged as pin-override", [not_alone]),
     ):
         covered.append(name)
-        check(check_id, found.get(name, ["no wrapper check result for " + name]), [])
+        got = found.get(name, ["no wrapper check result for " + name])
+        if want:
+            # A refusal is expected: compare it without the problems it lists after ": ".
+            got = [report.partition(": ")[0] for report in got]
+        check(check_id, got, want)
     check("env/restore-probe-mutants-covered", sorted(covered), sorted(found))
 
 
 def _restore_probe_argument_checks(base):
-    """The restore probe's argument check (tools/_entry_restore_selftest.py) over two synthetic
+    """The restore probe's argument check (tools/_entry_restore_selftest.py) over three synthetic
     tools written under base. In each, entry(flag) enters the lifecycle and returns iso(...): one
-    passes flag on, the other passes the constant False in its place, as a self_test that drops
-    its red_on_revert would. The first, run with flag True and with flag False, must be accepted;
-    it is a positive control, failing if the probe refuses a conforming entry point, not if the
-    argument check is removed. The second, run with flag True, must be refused for the argument
-    it passed and nothing else, after the return and after the raise."""
+    passes flag on, one passes the constant False in its place, as a self_test that drops its
+    red_on_revert would, and one passes the constant [{'flag': 1}]. The first, run with flag True,
+    with flag False and with flag [{'flag': True}], must be accepted; it is a positive control,
+    failing if the probe refuses a conforming entry point, not if the argument check is removed.
+    The second, run with flag True, must be refused for the argument it passed and nothing else,
+    after the return and after the raise. The third, run with flag [{'flag': True}], must be
+    refused the same way: its argument differs only in a type nested in a list and an object (1
+    for True), which a comparison of top-level types alone would let through."""
     from _entry_restore_selftest import entry_restore_failures
     source = ("def entry(flag):\n"
               "    from _git_fixture_env import fixture_git_lifecycle\n"
@@ -2247,16 +2265,26 @@ def _restore_probe_argument_checks(base):
     forwards.write_text(source.format("flag"), encoding="utf-8")
     constant = synthetic / "passes_constant.py"
     constant.write_text(source.format("False"), encoding="utf-8")
+    nested = synthetic / "passes_nested_int.py"
+    nested.write_text(source.format("[{'flag': 1}]"), encoding="utf-8")
     # Positive control: guards against over-refusal, not against a removed argument check.
     check("env/restore-probe-forwarded-argument-accepted",
           entry_restore_failures(forwards, "entry", "iso", args=(True,))
-          + entry_restore_failures(forwards, "entry", "iso", args=(False,)), [])
+          + entry_restore_failures(forwards, "entry", "iso", args=(False,))
+          + entry_restore_failures(forwards, "entry", "iso", args=([{"flag": True}],)), [])
     shown = ("the entry point called its isolated main with arguments [False] and keywords {}, "
              "expected exactly the probe's arguments [True] and no keywords")
     check("env/restore-probe-refuses-constant-argument",
           entry_restore_failures(constant, "entry", "iso", args=(True,)),
           ["passes_constant.py entry(): " + shown,
            "passes_constant.py entry(): around a raising stand-in, " + shown])
+    shown = ("the entry point called its isolated main with arguments [[{'flag': 1}]] and "
+             "keywords {}, expected exactly the probe's arguments [[{'flag': True}]] and no "
+             "keywords")
+    check("env/restore-probe-refuses-nested-type-change",
+          entry_restore_failures(nested, "entry", "iso", args=([{"flag": True}],)),
+          ["passes_nested_int.py entry(): " + shown,
+           "passes_nested_int.py entry(): around a raising stand-in, " + shown])
 
 
 def _core_lanes(base):
