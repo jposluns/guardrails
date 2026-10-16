@@ -61,10 +61,13 @@ rule cannot evaluate (fail-closed). `--self-test` proves the gate FAILS on a see
 provenance id, a host path, a hashed codename, and the role name in a tracked file outside SCOPE_RELPATHS)
 and passes clean generic content, so removing a layer makes a case fail. The self-test exits 0 only when
 every case ran and passed, and 1 when a case failed, also when it skipped a case (it then lists the cases
-it did not run). It exits 3 when no case failed and it skipped a case: a run whose child sentinel matches
-its parent pid (as a child a parent self-test launches does), a top-level run whose inherited-probe
-sentinel matches its parent pid, or a run on a platform that cannot run a case. A run that skipped a case
-never exits 0.
+it did not run). It exits 3 only when no case failed and it skipped a case, which it does by three routes:
+a run whose child sentinel matches its parent pid (as a child a parent self-test launches does) skips cases
+19 to 23, a top-level run whose inherited-probe sentinel matches its parent pid skips case 23, and a run in
+which os.symlink raises OSError, NotImplementedError or AttributeError while case 11 or case 12 makes its
+dangling symlink (an incapable platform, but also a permission or filesystem error on a capable one) skips
+that case. A host without FIFO support has no route to exit 3: case 19 skips, case 23 then fails for the
+FIFO failures its mutated copy cannot report, and the run exits 1. A run that skipped a case never exits 0.
 """
 import sys
 
@@ -386,12 +389,13 @@ def self_test_main():
 
 # A self-test that launches a child self-test sets _CHILD_SENTINEL in the child's environment to its OWN pid,
 # and the child skips the subprocess-launching cases 19 to 23 (its parent runs them; a child running them
-# would recurse). Case 23 likewise sets _INHERITED_PROBE to its own pid in the run it launches, which skips
-# case 23 alone. A value is honoured only when it equals this process's parent pid. That match does not
-# prove a self-test launched this process: a caller that exports its own pid, a "1" reaching a run whose
-# parent is PID 1, or a pid reused by an unrelated parent is honoured as well. So a run that skipped a case
-# and failed none, a recognized child included, exits 3; a run that failed a case exits 1 whether or not it
-# also skipped one; neither exits 0. A parent accepts a child only by exit 3 together with the child line.
+# would recurse). Case 23 likewise sets _INHERITED_PROBE to its own pid in three of the runs it launches (its
+# two mutated lanes and its clean lane), which skips case 23 alone. A value is honoured only when it equals
+# this process's parent pid. That match does not prove a self-test launched this process: a caller that
+# exports its own pid, a "1" reaching a run whose parent is PID 1, or a pid reused by an unrelated parent is
+# honoured as well. So a run that skipped a case and failed none, a recognized child included, exits 3; a
+# run that failed a case exits 1 whether or not it also skipped one; neither exits 0. A parent accepts a
+# child only by exit 3 together with the child line.
 _CHILD_SENTINEL = "AIQT_INTERNAL_NAMES_SELFTEST_CHILD"
 _INHERITED_PROBE = "AIQT_INTERNAL_NAMES_SELFTEST_INHERITED_PROBE"
 # The exit status of a self-test that skipped a case and failed none: never 0, and distinct from 1, which a
@@ -412,8 +416,9 @@ def _stale_sentinel_values(own_pid, parent_pid):
     "1" and parent_pid unless this run or its parent is PID 1: a run that is PID 1 gets parent_pid and
     own_pid + 1 (["0", "2"] for a parent pid 0), or own_pid + 2 when parent_pid is own_pid + 1, and a run
     whose parent is PID 1 gets "1" and own_pid + 1. A replacement need not be a stale pid (own_pid + 1 can
-    name a live process); it is an inherited value only because it is not own_pid. Self-test case 24 calls
-    this directly with an own pid and a parent pid of 1. The case always runs two lanes and never skips one."""
+    name a live process); it is an inherited value only because it is not own_pid. Self-test case 24 makes
+    four direct calls, as (own_pid, parent_pid): (7, 5), (1, 0), (1, 2) and (7, 1). When case 23 runs, it
+    runs one lane for each of the two values."""
     values = []
     for candidate in ("1", str(parent_pid), str(own_pid + 1), str(own_pid + 2)):
         if len(values) < 2 and candidate != str(own_pid) and candidate not in values:
@@ -952,6 +957,12 @@ def _self_test():
             #     this script unmutated as a top-level --self-test with only _INHERITED_PROBE naming this
             #     process, so it fails no case and skips this one, and must exit 3 with the SELF-TEST
             #     INCOMPLETE line naming this case; a top-level run that skipped a case and exited 0 fails it.
+            #     A platform lane then runs a second scratch copy as a top-level --self-test with neither
+            #     sentinel set, so neither sentinel route can account for its exit. That copy's case 11
+            #     symlink creation raises OSError, so it skips case 11 the way a platform without symlinks
+            #     does, and its case 23 is cut out (it launches nothing, so it cannot recurse, and adds no
+            #     not-run line). It must exit 3 with the SELF-TEST INCOMPLETE line naming case 11, so a run
+            #     that returns 0 unless it is a recognized child or an inherited-probe run fails this lane.
             lifecycle_entry = ("    from _git_fixture_env import fixture_git_lifecycle\n"
                                "    with fixture_git_lifecycle():\n"
                                "        return _self_test()\n")
@@ -977,11 +988,23 @@ def _self_test():
                 if mutant.count(original) != 1:
                     unbuildable.append("{!r} occurs {} times".format(original, mutant.count(original)))
                 mutant = mutant.replace(original, replacement)
+            # The platform lane's copy: case 11 cannot create its symlink, and case 23 runs no lane.
+            platform_mutations = (
+                ("os.symlink(str(tmp / \"no-such-scope-target\"), str(broken))",
+                 "raise OSError(\"symlink creation is disabled in this copy\")"),
+                ("if _set_by_launcher(_INHERITED_PROBE):\n                not_run.append(inherited_skip)\n",
+                 "if True:\n                pass\n"))
+            platform_copy = source
+            for original, replacement in platform_mutations:
+                if platform_copy.count(original) != 1:
+                    unbuildable.append("{!r} occurs {} times".format(original, platform_copy.count(original)))
+                platform_copy = platform_copy.replace(original, replacement)
+            platform_skip = "case 11 (a dangling symlink could not be created)"
             inherited_skip = "case 23 (the inherited-probe sentinel matched the parent pid)"
             if _set_by_launcher(_INHERITED_PROBE):
                 not_run.append(inherited_skip)
             elif unbuildable:
-                failures.append("the inherited-sentinel case could not build its mutated copy (each mutated source "
+                failures.append("the inherited-sentinel case could not build its mutated copies (each mutated source "
                                 "text must occur once): {}".format("; ".join(unbuildable)))
             else:
                 inherited_dir = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-inherited-"))
@@ -1024,6 +1047,29 @@ def _self_test():
                                         "err={!r}".format(proc.returncode, proc.stdout, proc.stderr))
                 except subprocess.TimeoutExpired:
                     failures.append("a top-level self-test that skips case 23 timed out")
+                platform_dir = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-platform-"))
+                try:
+                    for name in ("_walk.py", "check_leaks.py", "_git_fixture_env.py"):
+                        shutil.copy(str(Path(toolsdir) / name), str(platform_dir / name))
+                    (platform_dir / "check_internal_names.py").write_text(platform_copy, encoding="utf-8")
+                    platform_env = dict(caller)
+                    platform_env.pop(_CHILD_SENTINEL, None)
+                    platform_env.pop(_INHERITED_PROBE, None)
+                    try:
+                        proc = subprocess.run(
+                            [sys.executable, "-I", "-B", str(platform_dir / "check_internal_names.py"),
+                             "--self-test"], capture_output=True, text=True, timeout=1200, env=platform_env)
+                        incomplete = any(line.startswith("SELF-TEST INCOMPLETE:") and platform_skip in line
+                                         for line in proc.stdout.splitlines())
+                        if proc.returncode != _INCOMPLETE_EXIT or not incomplete:
+                            failures.append("a top-level self-test with neither sentinel set that fails no case and "
+                                            "cannot create case 11's symlink must exit 3 with a SELF-TEST "
+                                            "INCOMPLETE line naming case 11, got rc={} out={!r} err={!r}".format(
+                                                proc.returncode, proc.stdout, proc.stderr))
+                    except subprocess.TimeoutExpired:
+                        failures.append("a top-level self-test that cannot create case 11's symlink timed out")
+                finally:
+                    shutil.rmtree(platform_dir, ignore_errors=True)
 
         # 24. DISCRIMINATING (the inherited child-sentinel values case 23 runs, by direct calls, so no real
         #     PID 1 run is needed): "1" and the parent pid normally, and the replacements
@@ -1074,12 +1120,15 @@ def _self_test():
           "shim, since the gate drops GIT_CONFIG_SYSTEM), so the gate's tracked-file read does not read the "
           "caller's home, XDG or system configuration during the self-test; an in-process self_test_main() "
           "restores the caller's environment exactly; a top-level self-test whose environment already holds "
-          "the child sentinel as an inherited value (\"1\" and its parent pid, a stale pid, or the replacement "
-          "values used where the run or its parent is PID 1) still runs cases 19 to 22, and direct calls show "
-          "those replacements are two distinct values other than the run's own pid; a run that fails no case "
-          "but skips one exits 3, never 0, shown for a launched "
-          "child (child line) and for a top-level run whose inherited-probe sentinel matches its parent pid "
-          "(SELF-TEST INCOMPLETE line), the same return a run on a platform that cannot run a case takes; "
+          "the child sentinel as an inherited value still runs cases 19 to 22, shown through a mutated copy "
+          "for the two values this host gives (\"1\" and the run's parent pid where neither the run nor its "
+          "parent is PID 1), while the replacement values used where the run or its parent is PID 1 are "
+          "covered only by four direct calls, which show each result is two distinct values other than the "
+          "run's own pid; a run that fails no case but skips one exits 3, never 0, shown for a launched child "
+          "(child line), for a top-level run whose inherited-probe sentinel matches its parent pid, and for a "
+          "top-level run with neither sentinel set whose case 11 symlink creation raises (SELF-TEST INCOMPLETE "
+          "line each); exit 3 applies only when no case failed, so a host without FIFO support, where case 19 "
+          "skips and case 23 then fails because the FIFO failure messages it requires are missing, exits 1; "
           "a run that fails a case and skips one exits 1 and lists the case it did not run; a malformed "
           "hashes file is reported, never a silent empty denylist; a "
           "non-UTF-8 in-scope surface fails closed as unscannable, never a silent skip; a broken symlink "
