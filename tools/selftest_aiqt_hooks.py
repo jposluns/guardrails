@@ -385,6 +385,35 @@ _CNSDIF_BASE_DECISIONS = {
     "git diff --no-index --stat --u a b": "allow-note",
     "git diff --no-index -S -- --output=/dev/stderr a b | less": "deny",
     "git diff -p -- --output=/dev/tty > f.txt": "deny",
+    "git diff --line-prefix --output=real.txt": "allow-note",
+    "git diff --line-prefix --output real.txt": "allow-note",
+    "git diff --line-prefix X --output=real.txt": "allow-note",
+    "git diff --line-prefix X --output real.txt": "allow-note",
+    "git diff --line-prefix=X --output=real.txt": "allow-note",
+    "git diff --src-prefix --output=real.txt": "allow-note",
+    "git diff -I --output=real.txt": "allow-note",
+    "git diff -wI --output=real.txt": "allow-note",
+    "git diff -Ix --output=real.txt": "allow-note",
+    "git diff --author --output=real.txt": "allow-note",
+    "git diff --no-index --line --output=real.txt a b": "allow-note",
+    "git log -p --decorate-refs --output=real.txt": "allow-note",
+    "git format-patch --stdout --subject-prefix --output=real.txt": "allow-note",
+    "git diff --cached --output=real.txt": "allow-note",
+    "git diff --stat --binary": "allow-note",
+    "git diff --no-index --stat --binary a b": "allow-note",
+    "git diff --no-index --stat --bin a b": "allow-note",
+    "git diff --no-index --stat --b a b": "allow-note",
+    "git show --stat --binary HEAD": "allow-note",
+    "git log --stat --binary": "allow-note",
+    "git stash show --stat --binary": "allow-note",
+    "git diff-tree -r --stat --binary HEAD~1 HEAD": "allow-note",
+    "git range-diff --stat --binary main one two": "allow-note",
+    "git diff --stat --word-diff": "allow-note",
+    "git diff --stat --color-words": "allow-note",
+    "git diff --stat --word-diff-regex=.": "allow-note",
+    "git diff --stat -W": "allow-note",
+    "git diff --stat --raw": "allow-note",
+    "git show --stat -c --combined-all-paths HEAD": "allow-note",
 }
 
 # The deliberate relaxations: each console-diff vector that decides less strictly than its base decision in
@@ -5326,6 +5355,36 @@ def _main_isolated(monitor):
         # so it DENIES. (Before the fix it snapshotted the clean decoy and allow-noted a false recovery.)
         expect("(cf1c-worktree-split-denies) --work-tree (outside) worktree discard DENIES (split state)",
                "git --work-tree={} reset --hard".format(str(cf1_decoy)), "deny", cwd=str(cf1_wt))
+        # The --work-tree redirect is read from the command alone, so an ambient GIT_* variable does not switch off
+        # its deny. These cases set GIT_CONFIG_GLOBAL and GIT_CONFIG_NOSYSTEM themselves, since the suite runs with
+        # neither: each allowed with a note before, snapshotting only the session directory. Under such a variable
+        # the worktree must also lie inside the session directory's repository, which is the one snapshotted, so
+        # a -C <decoy> --work-tree=<decoy> discard denies too. The control, a --work-tree naming the session
+        # repository itself, keeps its allow with a note, and the clean-environment case denies as before.
+        expect("(wta-clean) --work-tree (outside) worktree restore with a clean environment DENIES",
+               "git --work-tree={} restore --staged --work file.txt".format(str(cf1_decoy)), "deny",
+               cwd=str(cf1_wt))
+        _wta_env = {"GIT_CONFIG_GLOBAL": str(tmp / "wta-gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
+        for _wta_k, _wta_v in _wta_env.items():
+            os.environ[_wta_k] = _wta_v
+        try:
+            if not aiqt_hooks._ambient_repo_view_override():
+                failures.append("(wta-env) GIT_CONFIG_GLOBAL and GIT_CONFIG_NOSYSTEM must read as an ambient "
+                                "repository-view override")
+            expect("(wta-restore) under ambient GIT_CONFIG_* a --work-tree (outside) worktree restore DENIES",
+                   "git --work-tree={} restore --staged --work file.txt".format(str(cf1_decoy)), "deny",
+                   cwd=str(cf1_wt))
+            expect("(wta-reset) under ambient GIT_CONFIG_* a --work-tree (outside) reset --hard DENIES",
+                   "git --work-tree={} reset --hard".format(str(cf1_decoy)), "deny", cwd=str(cf1_wt))
+            expect("(wta-c) under ambient GIT_CONFIG_* a -C <decoy> --work-tree=<decoy> worktree restore DENIES",
+                   "git -C {0} --work-tree={0} restore --staged --worktree file.txt".format(str(cf1_decoy)), "deny",
+                   cwd=str(cf1_wt))
+            expect("(wta-self) under ambient GIT_CONFIG_* a --work-tree naming the session repository allows "
+                   "with a note", "git --work-tree={} restore --staged --worktree file.txt".format(str(cf1_wt)),
+                   "allow-note", cwd=str(cf1_wt))
+        finally:
+            for _wta_k in _wta_env:
+                os.environ.pop(_wta_k, None)
 
         # === CLAUDE-F1: a redirected/ambient 'checkout-index' (sub outside the recognized lossy-verb set,
         # flagged by the raw scan) entering the view-override branch DENIES (was allowed with no snapshot). ==
@@ -7340,6 +7399,96 @@ def _main_isolated(monitor):
         # patch lands in f.txt (git 2.55.0 wrote it there and opened no /dev/tty); a9923dbf denied it.
         dexpect("(cnsdif-relax-eoo-p) a --output pathspec after a -- that follows -p, redirected to a file, allows",
                 "git diff -p -- --output=/dev/tty > f.txt", "allow")
+        # A --output word that may be the value of the option before it makes stdout no decoy, so stdout is judged
+        # as well (git 2.55.0: git diff --line-prefix --output=real.txt, and --output a.txt with a.txt tracked,
+        # printed the patch on stdout with that word as each line's prefix and wrote no file): each allowed with
+        # a note before. The class: a diff option taking a value (--src-prefix, -I, -wI, and under --no-index the
+        # abbreviation --line of --line-prefix), a revision-walk option (--author) and a producer's own option
+        # (log --decorate-refs, format-patch --subject-prefix), each of which git 2.55.0 gave the --output word.
+        # The controls keep their decision: a --output after the separated value of --line-prefix (git wrote
+        # the patch to real.txt), after its attached value, after an -I with its value glued on, and after
+        # --cached, which takes no value.
+        dexpect("(cnsdif-val-lp1) a --output=real.txt that is the --line-prefix value denies",
+                "git diff --line-prefix --output=real.txt", "deny")
+        dexpect("(cnsdif-val-lp2) a separated --output that is the --line-prefix value denies",
+                "git diff --line-prefix --output real.txt", "deny")
+        dexpect("(cnsdif-val-c1) a --output after the separated --line-prefix value allows with a note",
+                "git diff --line-prefix X --output=real.txt", "allow-note")
+        dexpect("(cnsdif-val-c2) a separated --output after the separated --line-prefix value allows with a note",
+                "git diff --line-prefix X --output real.txt", "allow-note")
+        dexpect("(cnsdif-val-c3) a --output after an attached --line-prefix value allows with a note",
+                "git diff --line-prefix=X --output=real.txt", "allow-note")
+        dexpect("(cnsdif-val-src) a --output that is the --src-prefix value denies",
+                "git diff --src-prefix --output=real.txt", "deny")
+        dexpect("(cnsdif-val-short) a --output that is the -I value denies",
+                "git diff -I --output=real.txt", "deny")
+        dexpect("(cnsdif-val-cluster) a --output that is the value of the -I ending -wI denies",
+                "git diff -wI --output=real.txt", "deny")
+        dexpect("(cnsdif-val-c4) a --output after an -I with its value glued on allows with a note",
+                "git diff -Ix --output=real.txt", "allow-note")
+        dexpect("(cnsdif-val-walk) a --output that is the --author value denies",
+                "git diff --author --output=real.txt", "deny")
+        dexpect("(cnsdif-val-abbr) a --output that is the value of --line under --no-index denies",
+                "git diff --no-index --line --output=real.txt a b", "deny")
+        dexpect("(cnsdif-val-log) a --output that is the log --decorate-refs value denies",
+                "git log -p --decorate-refs --output=real.txt", "deny")
+        dexpect("(cnsdif-val-fp) a --output that is the format-patch --subject-prefix value denies",
+                "git format-patch --stdout --subject-prefix --output=real.txt", "deny")
+        dexpect("(cnsdif-val-c5) a --output after --cached, which takes no value, allows with a note",
+                "git diff --cached --output=real.txt", "allow-note")
+        # --binary implies --patch (git 2.55.0 printed the patch beside --stat for git diff, git show, git log,
+        # git stash show, git diff-tree and git range-diff, and under --no-index for --binary and each abbreviation
+        # from --bi on), so it is a patch enabler: each allowed with a note before. The controls print no patch
+        # beside --stat in git 2.55.0 and keep their decision: the ambiguous --b under --no-index (git refused it,
+        # could be --binary or --break-rewrites), --word-diff, --color-words, --word-diff-regex, -W, --raw, and
+        # -c with --combined-all-paths.
+        dexpect("(cnsdif-bin-diff) --binary beside --stat denies", "git diff --stat --binary", "deny")
+        dexpect("(cnsdif-bin-ni) --binary beside --stat under --no-index denies",
+                "git diff --no-index --stat --binary a b", "deny")
+        dexpect("(cnsdif-bin-abbr) the abbreviation --bin beside --stat under --no-index denies",
+                "git diff --no-index --stat --bin a b", "deny")
+        dexpect("(cnsdif-bin-show) --binary beside --stat on git show denies", "git show --stat --binary HEAD", "deny")
+        dexpect("(cnsdif-bin-log) --binary beside --stat on git log denies", "git log --stat --binary", "deny")
+        dexpect("(cnsdif-bin-stash) --binary beside --stat on git stash show denies",
+                "git stash show --stat --binary", "deny")
+        dexpect("(cnsdif-bin-tree) --binary beside --stat on git diff-tree denies",
+                "git diff-tree -r --stat --binary HEAD~1 HEAD", "deny")
+        dexpect("(cnsdif-bin-rd) --binary beside --stat on git range-diff denies",
+                "git range-diff --stat --binary main one two", "deny")
+        dexpect("(cnsdif-bin-c1) the ambiguous --b under --no-index allows with a note",
+                "git diff --no-index --stat --b a b", "allow-note")
+        dexpect("(cnsdif-bin-c2) --word-diff beside --stat allows with a note", "git diff --stat --word-diff",
+                "allow-note")
+        dexpect("(cnsdif-bin-c3) --color-words beside --stat allows with a note", "git diff --stat --color-words",
+                "allow-note")
+        dexpect("(cnsdif-bin-c4) --word-diff-regex beside --stat allows with a note",
+                "git diff --stat --word-diff-regex=.", "allow-note")
+        dexpect("(cnsdif-bin-c5) -W beside --stat allows with a note", "git diff --stat -W", "allow-note")
+        dexpect("(cnsdif-bin-c6) --raw beside --stat allows with a note", "git diff --stat --raw", "allow-note")
+        dexpect("(cnsdif-bin-c7) -c --combined-all-paths beside --stat allows with a note",
+                "git show --stat -c --combined-all-paths HEAD", "allow-note")
+        # The value-option predicate under each reading, and its tables against git's own lists: every diff value
+        # name and patch-enabler name is one git diff --no-index lists (_GIT_LONG_OPTS), so an abbreviation
+        # resolves to it there.
+        _vt = aiqt_hooks._diff_option_takes_word
+        _ve = aiqt_hooks._diff_ends_options
+        _vp = aiqt_hooks._diff_parser_ends_options
+        for _vsub, _vword, _vends, _vwant in (
+                ("diff", "--line-prefix", _ve, True), ("diff", "--line-prefix=X", _ve, False),
+                ("diff", "--line", _ve, False), ("diff", "--line", _vp, True), ("diff", "--l", _vp, True),
+                ("diff", "--s", _vp, False), ("diff", "--author", _ve, True), ("diff", "--cached", _vp, False),
+                ("diff", "-I", _ve, True), ("diff", "-wI", _vp, True), ("diff", "-Ix", _ve, False),
+                ("diff", "-pS", _ve, True), ("diff", "-US", _ve, False), ("diff", "-M", _ve, False),
+                ("diff", "-L", _ve, False), ("log", "-L", _ve, True), ("log", "--decorate-refs", _ve, True),
+                ("diff", "--decorate-refs", _ve, False), ("format-patch", "--subject-prefix", _ve, True),
+                ("format-patch", "-o", _ve, True), ("diff", "-o", _ve, False), ("diff", "--", _vp, False),
+                ("diff", "X", _ve, False)):
+            if _vt(_vsub, _vword, _vends) is not _vwant:
+                failures.append("(cnsdif-val-pred) _diff_option_takes_word({!r}, {!r}, {}) must be {}"
+                                .format(_vsub, _vword, _vends.__name__, _vwant))
+        _vnames = aiqt_hooks._GIT_LONG_OPTS["diff --no-index"]
+        for _vname in sorted((aiqt_hooks._DIFF_VALUE_NAMES | aiqt_hooks._DIFF_LONG_PATCH_NAMES) - _vnames):
+            failures.append("(cnsdif-val-names) {!r} is not a name git diff --no-index lists".format(_vname))
         # The option-parser predicate: a short word ending in a patch letter takes no value (-p and -u take
         # none, -U one only attached, and a letter that is an earlier letter's attached value leaves nothing to
         # take), so a '--' after it ends the options under that reading too; git 2.55.0 read the word after the
