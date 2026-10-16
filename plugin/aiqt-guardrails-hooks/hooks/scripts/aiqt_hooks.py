@@ -1274,17 +1274,23 @@ _RAW_DIFF_PRODUCER_RE = re.compile(
 
 
 def _has_patch_flag(tokens):
-    """True when a segment carries a patch flag (-p, -u, a --patch* form: --patch, --patch-with-stat,
-    --patch-with-raw, or --binary, which git documents as implying --patch), the flag that turns a
-    listing/plumbing/stash producer into a console patch and that also dumps the full diff alongside a
-    summary flag (git diff --stat -p). git 2.55.0 printed the patch for git log -1 --binary, git diff-tree -r
-    --binary, git diff-index --binary and git stash show --binary. Those producers read their options through
-    the revision walk, which refuses an abbreviation (git diff --stat --bin: 'invalid option'), so --binary
-    counts in full only. Clustered short patch flags (-wp), patch-implying options (-U/-c/--cc/-L), and
+    """True when a segment carries a patch flag, the flag that turns a listing/plumbing/stash producer into a
+    console patch and that also dumps the full diff alongside a summary flag (git diff --stat -p): -p, -u or a
+    --patch* word (--patch, --patch-with-stat, --patch-with-raw) in any position, or a --binary, which git
+    documents as implying --patch, that _diff_binary_enables_patch counts under either option reading
+    (_DIFF_OPTION_READINGS). git 2.55.0 printed the patch for git log -1 --binary, git diff-tree -r --binary, git
+    diff-index --binary and git stash show --binary. A --binary counts only when spelled in full with no '='
+    (git refuses --binary=x), in an option position: not as the value of the option before it (git log -1 -S
+    --binary and git log -1 --grep --binary print no patch) and not after the end of the options. Read in
+    order as git reads them, it does not count beside --name-only, --name-status or --check, nor when -s or
+    --no-patch follows it, nor beside --quiet for a producer other than log and show (git log -1 --binary -s
+    prints no patch, git log -1 -s --binary prints it). Those producers read their options through the
+    revision walk, which refuses an abbreviation (git log -1 --stat --bin: 'unrecognized argument'), so no
+    abbreviation counts here. Clustered short patch flags (-wp), patch-implying options (-U/-c/--cc/-L), and
     wrapped producers are NOT modelled here: the diff-dump guard is best-effort and those forms are a
     DISCLOSED lexical residual routed to a separate cnsdif hardening effort (F-119)."""
-    return any(t in _PATCH_FLAGS or t.startswith("--patch") or t.split("=", 1)[0] in _DIFF_LONG_PATCH_EXACT
-               for t in tokens)
+    return (any(t in _PATCH_FLAGS or t.startswith("--patch") for t in tokens)
+            or any(_diff_binary_enables_patch(tokens, ends, abbrev=False) for ends in _DIFF_OPTION_READINGS))
 
 
 # --- cnsdif git-show no-patch exemption (F-R2-2/F-R2-3): a position/argument/cluster-aware pass -------
@@ -1405,9 +1411,10 @@ def _is_diff_producer(tokens):
     (git show <commit>) EXCEPT in the blob-read form git show <ref>:<path> / :<path>, which prints one
     file's contents at a revision with no diff and is therefore NOT a producer (see _show_blob_selector).
     Patch-flag gated: log, the plumbing producers diff-tree, diff-index, diff-files, and stash 'show' (they
-    emit a listing by default and a patch only with -p/-u/--patch/--binary). stdout gated: format-patch (writes
-    numbered files by default and dumps to the console only with --stdout). Gating the plumbing/format-patch/
-    stash forms on their flag keeps the file-writing and name-only forms from a false positive."""
+    emit a listing by default and a patch only with -p/-u/--patch or a --binary _has_patch_flag counts). stdout
+    gated: format-patch (writes numbered files by default and dumps to the console only with --stdout). Gating
+    the plumbing/format-patch/stash forms on their flag keeps the file-writing and name-only forms from a false
+    positive."""
     sub, rest = _git_subcommand_rest(tokens)
     if sub in ("diff", "range-diff"):
         return True
@@ -1597,10 +1604,16 @@ def _diff_option_takes_word(sub, word, ends):
     _DIFF_VALUE_NAMES, _DIFF_WALK_VALUE_NAMES or sub's own _DIFF_SUB_VALUE_NAMES, or, under the
     option-parser reading, one _git_long_option resolves to a name of _DIFF_VALUE_NAMES; or a word of short
     options whose letters reach one of _DIFF_VALUE_LETTERS (or sub's own) as the last letter, before any
-    letter of _DIFF_GLUED_VALUE_LETTERS (git diff -wI --output=real.txt gives -I the word). A name read in one
-    table is read for every producer, and word is read as an option even when it may itself be the value of
-    the word before it (git diff -S --line-prefix --output=real.txt gives --line-prefix to -S and writes to
-    real.txt, not stdout, yet stdout is judged), each of which can only judge stdout more often."""
+    letter of _DIFF_GLUED_VALUE_LETTERS (git diff -wI --output=real.txt gives -I the word). A name of
+    _DIFF_VALUE_NAMES or _DIFF_WALK_VALUE_NAMES, and a letter of _DIFF_VALUE_LETTERS, is read for every
+    producer; a name of _DIFF_SUB_VALUE_NAMES, and a letter of _DIFF_SUB_VALUE_LETTERS, only for its own
+    producer (git diff --decorate-refs takes no word here). The diversion scan (_diff_output_diversions)
+    reads word as an option even when it may itself be the value of the word before it (git diff -S
+    --line-prefix --output=real.txt gives --line-prefix to -S and writes to real.txt, not stdout, yet stdout
+    is judged), which can only judge stdout more often. The --binary test (_diff_binary_enables_patch) reads
+    the words in order and skips the word an option takes, so there a name listed for an option that takes
+    no value would hide a --binary git reads as an option; the self-test holds _DIFF_VALUE_NAMES to the list
+    of git diff --no-index -h for that reason."""
     if word.startswith("--"):
         if "=" in word or word == "--":
             return False
@@ -1702,36 +1715,116 @@ def _final_stdout_dest(redirects):
 # NOPATCH on the ordinary (non-merge) commit the classifier sees; treating them as enablers would over-deny
 # the common `git show -c --stat` / `git show --cc --stat` summary form (verified NOPATCH against real git,
 # F-R2-5), so they stay summary-only allow-notes. On a merge commit whose combined diff is not empty, git 2.55.0
-# printed no patch beside --stat for -c or --cc either (_DIFF_LONG_PATCH_EXACT). -U is an enabler whatever its
+# printed no patch beside --stat for -c or --cc either (_DIFF_BINARY_NAME). -U is an enabler whatever its
 # attached value (`-U`, `-U3`); git rejects the separated `-U 3` form outright, so no separated value is skipped.
 _SUMMARY_PATCH_SHORT = frozenset(("p", "u", "U"))
 # The long patch-enabling names of git's diff options (_GIT_LONG_OPTS["diff --no-index"]), the --patch* and
-# --unified* family _SHOW_LONG_PATCH_PREFIXES matches as spelled and --binary, which an abbreviation resolves
-# to under the option-parser reading (_argv_has_patch_enabler).
-_DIFF_LONG_PATCH_NAMES = frozenset(("binary", "patch", "patch-with-raw", "patch-with-stat", "unified"))
-# The long patch enablers matched in full, under both readings, beside the prefixes of _SHOW_LONG_PATCH_PREFIXES:
-# --binary, which git documents as implying --patch. git 2.55.0 printed the patch beside --stat for git diff
-# --stat --binary, git show --stat --binary, git log -1 --stat --binary, git diff-tree -r --stat --binary, git
-# stash show --stat --binary and git range-diff --stat --binary, and under --no-index for --binary and each
-# abbreviation from --bi on (--b is ambiguous with --break-rewrites). Of the other options checked beside --stat
-# on a worktree change, a commit and a merge commit, none printed a patch: --word-diff in each mode,
-# --color-words, --word-diff-regex, -W/--function-context, -c, --cc, --combined-all-paths, -m, --dd,
-# --remerge-diff, --diff-merges, --raw without -p, and the display, algorithm and filter options of git diff
-# --no-index -h. --name-only, --name-status and --check print no patch even beside -p.
-_DIFF_LONG_PATCH_EXACT = frozenset(("--binary",))
+# --unified* family _SHOW_LONG_PATCH_PREFIXES matches as spelled, which an abbreviation resolves to under the
+# option-parser reading (_argv_has_patch_enabler).
+_DIFF_LONG_PATCH_NAMES = frozenset(("patch", "patch-with-raw", "patch-with-stat", "unified"))
+# --binary, which git documents as implying --patch, is a patch enabler where git prints the patch it turns on
+# (_diff_binary_enables_patch). git 2.55.0 printed the patch beside --stat for git diff --stat --binary, git
+# show --stat --binary, git log -1 --stat --binary, git diff-tree -r --stat --binary, git stash show --stat
+# --binary and git range-diff --stat --binary, and under --no-index for --binary and each abbreviation from --bi
+# on (--b is ambiguous with --break-rewrites). Of the other options checked beside --stat on a worktree change,
+# a commit and a merge commit, none printed a patch: --word-diff in each mode, --color-words, --word-diff-regex,
+# -W/--function-context, -c, --cc, --combined-all-paths, -m, --dd, --remerge-diff, --diff-merges, --raw without
+# -p, and the display, algorithm and filter options of git diff --no-index -h.
+_DIFF_BINARY_NAME = "binary"
+# The options beside which git prints no patch for --binary. git 2.55.0 ran git diff (on a worktree change and
+# between two commits), git show, git log -1, git diff-tree -r, git diff-index, git diff-files, git stash show,
+# git range-diff, git diff --no-index and git format-patch --stdout -1 with --binary and each candidate option
+# in both orders, and printed the patch on stdout in each case except these: beside --name-only, --name-status
+# or --check in either order, as beside -p (_DIFF_PATCH_OFF_NAMES); with -s or --no-patch after the last
+# --binary (_DIFF_PATCH_CLEAR_NAMES); and beside --quiet, unless a later --no-quiet undoes it, for every producer
+# but git log and git show, which printed the patch beside it (_DIFF_QUIET_PATCH_SUBS). git reads -s and
+# --no-patch in order: each drops the output formats given before it, a --binary and a --name-only,
+# --name-status or --check alike, so git log -1 -s --binary and git diff --name-only --no-patch --binary print
+# the patch, while git diff --no-patch --name-only --binary prints only the names; --quiet stays on after one.
+# An s in a short cluster is -s (git diff --name-only -ws --binary prints the patch) unless a letter before it
+# takes the rest of the word as its value (git log -1 -Ss gives s to -S). --raw, --stat, --numstat, --shortstat,
+# --summary, --dirstat, --compact-summary, --exit-code and -z left the patch in either order. git diff
+# --no-index and git range-diff read an abbreviation of each (--name-o, --che, --no-pa, --qu) as that option,
+# which the revision walk refused. git format-patch --stdout printed the patch whenever it ran: it reads -s as
+# --signoff, printed the patch beside --no-patch and --quiet, and refused --name-only, --name-status and --check
+# unless a later --no-patch dropped them, so for it (_DIFF_ALWAYS_PATCH_SUBS) none of these options is read.
+_DIFF_PATCH_OFF_NAMES = frozenset(("check", "name-only", "name-status"))
+_DIFF_PATCH_CLEAR_NAMES = frozenset(("no-patch",))
+_DIFF_QUIET_PATCH_SUBS = frozenset(("log", "show"))
+_DIFF_ALWAYS_PATCH_SUBS = frozenset(("format-patch",))
+
+
+def _diff_binary_enables_patch(argv, ends=_diff_ends_options, abbrev=None):
+    """True when a --binary in the option region of a git producer under the reading ends (one of
+    _DIFF_OPTION_READINGS) makes git print a patch. The words are read in order up to the end of the options
+    under that reading, and the word an option takes as its value (_diff_option_takes_word) is skipped, so
+    only a --binary in an option position counts: not one that is the value of the option before it (git log
+    -1 -S --binary gives it to -S and prints no patch), not one after the end of the options, and not one
+    carrying '=VALUE' (git refuses --binary=x). abbrev says whether a long word abbreviated to a prefix of
+    exactly one name of _GIT_LONG_OPTS["diff --no-index"] is read as that option, as git's option parser
+    reads it (git diff --no-index --stat --bin a b prints the patch); by default it is under the
+    option-parser reading only. The options beside it are read the same way and in order, as git reads them
+    (see _DIFF_PATCH_OFF_NAMES): an -s, alone or reached in a short cluster before any letter that takes the
+    rest of the word as its value, or an option of _DIFF_PATCH_CLEAR_NAMES drops each --binary and each option
+    of _DIFF_PATCH_OFF_NAMES given before it. The --binary counts when one is left, no option of
+    _DIFF_PATCH_OFF_NAMES is, and --quiet is not the later of --quiet and --no-quiet, which is read only for a
+    producer outside _DIFF_QUIET_PATCH_SUBS. Each of these options counts only without '=' (git refuses
+    --name-only=x). For a producer of _DIFF_ALWAYS_PATCH_SUBS none of them is read, so any --binary in an
+    option position counts. -p, -u, -U and the --patch* family are judged by _argv_has_patch_enabler alone,
+    whatever these options say."""
+    if abbrev is None:
+        abbrev = ends is _diff_parser_ends_options
+    sub = _git_subcommand_rest(argv)[0]
+    value_letters = _DIFF_VALUE_LETTERS + _DIFF_SUB_VALUE_LETTERS.get(sub, "") + _DIFF_GLUED_VALUE_LETTERS
+    always = sub in _DIFF_ALWAYS_PATCH_SUBS
+    binary = off = quiet = False
+    i = 0
+    n = len(argv)
+    while i < n and not ends(argv, i):
+        word = argv[i]
+        if word.startswith("--"):
+            if "=" in word:
+                name = None                      # git refuses a value on each option read here
+            elif abbrev:
+                name = _git_long_option("diff --no-index", word)
+            else:
+                name = word[2:]
+            if name == _DIFF_BINARY_NAME:
+                binary = True
+            elif name in _DIFF_PATCH_OFF_NAMES:
+                off = True
+            elif name in _DIFF_PATCH_CLEAR_NAMES and not always:
+                binary = off = False
+            elif name in ("quiet", "no-quiet") and sub not in _DIFF_QUIET_PATCH_SUBS:
+                quiet = name == "quiet"
+        elif word.startswith("-") and not always:
+            for letter in word[1:]:
+                if letter in value_letters:
+                    break                        # the rest of the word is that letter's value
+                if letter == "s":
+                    binary = off = False         # -s, alone or in a short cluster
+        if _diff_option_takes_word(sub, word, ends):
+            i += 1
+            if i < n and not ends(argv, i):
+                i += 1                           # the word the option takes is its value, not an option
+            continue
+        i += 1
+    return binary and (always or not (off or quiet))
 
 
 def _argv_has_patch_enabler(argv, ends=_diff_ends_options):
     """Argument-aware: True when a git producer's OPTION region (before a '--'/'--end-of-options' boundary)
     carries a patch-ENABLING option - one that makes git emit a patch even alongside a summary selector.
-    Enablers: -p/-u, -U/--unified, the --patch* long family, --binary (_DIFF_LONG_PATCH_EXACT), and any
-    short-option CLUSTER reaching a p/u/U letter. It reuses the same option sets and
+    Enablers: -p/-u, -U/--unified, the --patch* long family, a --binary _diff_binary_enables_patch counts under
+    the same reading, and any short-option CLUSTER reaching a p/u/U letter. It reuses the same option sets and
     value-argument/'--'-boundary parsing as the git-show no-patch exemption (mirroring _show_no_patch_exempt
     / _show_short_cluster_kind): a value-taking option (-L/-S/-G/-O/-o, and the separated-value long options
     _SHOW_LONG_REQ_VALUE) consumes its value, so a p/u/U spelled inside that value is not miscounted, and the
     '--' boundary ends the option region. It narrows the short patch-letter set to _SUMMARY_PATCH_SHORT
     (p/u/U, excluding the merge-only -c letter; see that constant), and the long enablers to the
-    --patch*/--unified* prefixes and --binary (excluding --cc, the merge-only combined-diff form). Any other
+    --patch*/--unified* prefixes (excluding --cc, the merge-only combined-diff form). These count beside
+    --name-only, --name-status, --check, -s and --no-patch as anywhere else, although git prints no patch for
+    git diff --name-only -p, an over-deny by design; only --binary is judged against those options. Any other
     (unknown) option is not a patch enabler; this predicate answers only 'is a patch forced on', leaving
     every other classification to the caller (F-R2-5). The
     region ends where the reading ends says (one of _DIFF_OPTION_READINGS; the revision-walk one by default,
@@ -1746,9 +1839,10 @@ def _argv_has_patch_enabler(argv, ends=_diff_ends_options):
     That option parser also accepts a long option abbreviated to a prefix of exactly one of its names, which
     git's revision walk refuses (git diff --stat --unif=3: 'invalid option'), so under that reading a long
     word git resolves to a patch enabler (_git_long_option, _DIFF_LONG_PATCH_NAMES) is one too: git diff
-    --no-index --stat --unif=3 a b, the same with --u, and git diff --no-index --stat --bin a b print the
-    patch (git 2.55.0). An abbreviated value-taking option is not read as consuming its value under either
-    reading, so the word after it is still judged, which can only find an enabler more often."""
+    --no-index --stat --unif=3 a b, and the same with --u, print the patch (git 2.55.0), as git diff
+    --no-index --stat --bin a b does through _diff_binary_enables_patch. An abbreviated value-taking option is
+    not read as consuming its value under either reading by this scan, so the word after it is still judged,
+    which can only find an enabler more often."""
     i = 0
     n = len(argv)
     while i < n:
@@ -1760,8 +1854,8 @@ def _argv_has_patch_enabler(argv, ends=_diff_ends_options):
             continue  # a bare operand (git, the subcommand, a ref) is not an option
         if tok.startswith("--"):
             base = tok.split("=", 1)[0]
-            if any(base.startswith(p) for p in _SHOW_LONG_PATCH_PREFIXES) or base in _DIFF_LONG_PATCH_EXACT:
-                return True                      # --patch* / --unified* / --binary long enabler
+            if any(base.startswith(p) for p in _SHOW_LONG_PATCH_PREFIXES):
+                return True                      # --patch* / --unified* long enabler
             if (ends is _diff_parser_ends_options
                     and _git_long_option("diff --no-index", tok) in _DIFF_LONG_PATCH_NAMES):
                 return True                      # an abbreviated enabler git's option parser resolves
@@ -1787,7 +1881,7 @@ def _argv_has_patch_enabler(argv, ends=_diff_ends_options):
         if found:
             return True
         i += 2 if consumes_next else 1
-    return False
+    return _diff_binary_enables_patch(argv, ends)
 
 
 def _diff_emits_only_summary(argv, ends=_diff_ends_options):

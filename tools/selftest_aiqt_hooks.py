@@ -414,6 +414,38 @@ _CNSDIF_BASE_DECISIONS = {
     "git diff --stat -W": "allow-note",
     "git diff --stat --raw": "allow-note",
     "git show --stat -c --combined-all-paths HEAD": "allow-note",
+    "git diff HEAD^ HEAD --name-only --binary": "allow-note",
+    "git log -1 --binary --no-patch --format=%h": "allow-note",
+    "git diff --name-status --binary": "allow-note",
+    "git diff --stat --binary --no-patch": "allow-note",
+    "git log -1 --binary -s": "allow-note",
+    "git log -1 --binary --oneline --name-only": "allow-note",
+    "git diff --binary --name-only --stat": "allow-note",
+    "git diff --stat --binary --quiet": "allow-note",
+    "git diff --no-index --stat --bin --name-s a b": "allow-note",
+    "git log -1 --binary -ws": "allow-note",
+    "git diff --no-patch --name-only --binary": "allow-note",
+    "git log -1 -s --binary": "allow-note",
+    "git diff --stat --no-patch --binary": "allow-note",
+    "git diff --binary --no-patch --binary --stat": "allow-note",
+    "git diff --name-only --no-patch --binary": "allow-note",
+    "git diff --name-only -ws --binary": "allow-note",
+    "git diff --stat --binary --line-prefix --name-only": "allow-note",
+    "git log -1 --binary --line-prefix --no-patch": "allow-note",
+    "git diff --stat --binary -- --name-only": "allow-note",
+    "git diff --stat --binary --quiet --no-quiet": "allow-note",
+    "git log -1 --binary --quiet": "allow-note",
+    "git diff --no-index --stat --no-pa --binary a b": "allow-note",
+    "git format-patch --stdout -1 --stat --binary --no-patch": "allow-note",
+    "git diff --name-only -p": "deny",
+    "git log -1 --name-only -p": "deny",
+    "git diff --stat --no-patch -p": "deny",
+    "git log -1 -S --binary --format=%h": "allow-note",
+    "git log -1 --grep --binary": "allow-note",
+    "git diff --stat --binary=x": "allow-note",
+    "git log -1 --stat --bin": "allow-note",
+    "git diff --stat --line-prefix X --binary": "allow-note",
+    "git log -1 --decorate-refs -- --binary": "allow-note",
 }
 
 # The deliberate relaxations: each console-diff vector that decides less strictly than its base decision in
@@ -7467,9 +7499,84 @@ def _main_isolated(monitor):
         dexpect("(cnsdif-bin-c6) --raw beside --stat allows with a note", "git diff --stat --raw", "allow-note")
         dexpect("(cnsdif-bin-c7) -c --combined-all-paths beside --stat allows with a note",
                 "git show --stat -c --combined-all-paths HEAD", "allow-note")
+        # --binary counts only where git prints the patch it turns on. git 2.55.0 printed no patch beside
+        # --name-only, --name-status or --check, with -s or --no-patch (alone or as the s of -ws) after the
+        # --binary, or beside --quiet on git diff, and these keep the allow with a note they had before --binary
+        # counted. The controls deny, since git printed the patch: an -s or --no-patch before the --binary, which
+        # drops the --name-only before it too, a --name-only or --no-patch that is the --line-prefix value, a
+        # --name-only pathspec after the '--' (with a tracked file of that name changed), a --quiet undone by a
+        # later --no-quiet, a --quiet on git log, the --no-index abbreviation --no-pa before the --binary, and git
+        # format-patch, which printed the patch beside --no-patch. The -p family is judged as before beside these
+        # options and denies, although git printed no patch for git diff --name-only -p.
+        dexpect("(cnsdif-bin-off1) --binary beside --name-only between two commits allows with a note",
+                "git diff HEAD^ HEAD --name-only --binary", "allow-note")
+        dexpect("(cnsdif-bin-off2) git log --binary followed by --no-patch allows with a note",
+                "git log -1 --binary --no-patch --format=%h", "allow-note")
+        dexpect("(cnsdif-bin-off3) --binary after --name-status allows with a note",
+                "git diff --name-status --binary", "allow-note")
+        dexpect("(cnsdif-bin-off4) --binary followed by --no-patch beside --stat allows with a note",
+                "git diff --stat --binary --no-patch", "allow-note")
+        dexpect("(cnsdif-bin-off5) git log --binary followed by -s allows with a note", "git log -1 --binary -s",
+                "allow-note")
+        dexpect("(cnsdif-bin-off6) git log --binary before --oneline --name-only allows with a note",
+                "git log -1 --binary --oneline --name-only", "allow-note")
+        dexpect("(cnsdif-bin-off7) --binary before --name-only and --stat allows with a note",
+                "git diff --binary --name-only --stat", "allow-note")
+        dexpect("(cnsdif-bin-off8) --binary beside --quiet on git diff allows with a note",
+                "git diff --stat --binary --quiet", "allow-note")
+        dexpect("(cnsdif-bin-off9) --bin beside --name-s under --no-index allows with a note",
+                "git diff --no-index --stat --bin --name-s a b", "allow-note")
+        dexpect("(cnsdif-bin-off10) git log --binary followed by the -s of -ws allows with a note",
+                "git log -1 --binary -ws", "allow-note")
+        dexpect("(cnsdif-bin-off11) a --name-only after --no-patch allows with a note",
+                "git diff --no-patch --name-only --binary", "allow-note")
+        dexpect("(cnsdif-bin-on1) git log -s before --binary denies", "git log -1 -s --binary", "deny")
+        dexpect("(cnsdif-bin-on2) --no-patch before --binary denies", "git diff --stat --no-patch --binary", "deny")
+        dexpect("(cnsdif-bin-on3) a --binary after --no-patch denies",
+                "git diff --binary --no-patch --binary --stat", "deny")
+        dexpect("(cnsdif-bin-on4) a --no-patch that drops the --name-only before it denies",
+                "git diff --name-only --no-patch --binary", "deny")
+        dexpect("(cnsdif-bin-on5) the -s of -ws that drops the --name-only before it denies",
+                "git diff --name-only -ws --binary", "deny")
+        dexpect("(cnsdif-bin-on6) a --name-only that is the --line-prefix value denies",
+                "git diff --stat --binary --line-prefix --name-only", "deny")
+        dexpect("(cnsdif-bin-on7) a --no-patch that is the git log --line-prefix value denies",
+                "git log -1 --binary --line-prefix --no-patch", "deny")
+        dexpect("(cnsdif-bin-on8) a --name-only pathspec after the '--' denies",
+                "git diff --stat --binary -- --name-only", "deny")
+        dexpect("(cnsdif-bin-on9) a --quiet undone by --no-quiet denies",
+                "git diff --stat --binary --quiet --no-quiet", "deny")
+        dexpect("(cnsdif-bin-on10) --binary beside --quiet on git log denies", "git log -1 --binary --quiet",
+                "deny")
+        dexpect("(cnsdif-bin-on11) the abbreviation --no-pa before --binary under --no-index denies",
+                "git diff --no-index --stat --no-pa --binary a b", "deny")
+        dexpect("(cnsdif-bin-on12) git format-patch --binary beside --no-patch denies",
+                "git format-patch --stdout -1 --stat --binary --no-patch", "deny")
+        dexpect("(cnsdif-bin-p1) -p beside --name-only denies as before", "git diff --name-only -p", "deny")
+        dexpect("(cnsdif-bin-p2) git log -p beside --name-only denies as before", "git log -1 --name-only -p",
+                "deny")
+        dexpect("(cnsdif-bin-p3) -p after --no-patch beside --stat denies as before",
+                "git diff --stat --no-patch -p", "deny")
+        # A --binary counts only as an option word: git 2.55.0 printed no patch for a --binary that is the value
+        # of -S or of --grep, refused --binary=x, and refused the abbreviation --bin on git log, whose options the
+        # revision walk reads, so these keep their allow with a note. The controls deny, since git printed the
+        # patch: a --binary after the separated --line-prefix value, and a --binary after the '--' that git log
+        # gives to --decorate-refs as its value.
+        dexpect("(cnsdif-bin-val1) a --binary that is the -S value allows with a note",
+                "git log -1 -S --binary --format=%h", "allow-note")
+        dexpect("(cnsdif-bin-val2) a --binary that is the --grep value allows with a note",
+                "git log -1 --grep --binary", "allow-note")
+        dexpect("(cnsdif-bin-val3) --binary=x, which git refuses, allows with a note", "git diff --stat --binary=x",
+                "allow-note")
+        dexpect("(cnsdif-bin-val4) the abbreviation --bin on git log allows with a note", "git log -1 --stat --bin",
+                "allow-note")
+        dexpect("(cnsdif-bin-val5) a --binary after the separated --line-prefix value denies",
+                "git diff --stat --line-prefix X --binary", "deny")
+        dexpect("(cnsdif-bin-val6) a --binary after the '--' that --decorate-refs takes denies",
+                "git log -1 --decorate-refs -- --binary", "deny")
         # The value-option predicate under each reading, and its tables against git's own lists: every diff value
-        # name and patch-enabler name is one git diff --no-index lists (_GIT_LONG_OPTS), so an abbreviation
-        # resolves to it there.
+        # name, patch-enabler name and name the --binary test reads is one git diff --no-index lists
+        # (_GIT_LONG_OPTS), so an abbreviation resolves to it there.
         _vt = aiqt_hooks._diff_option_takes_word
         _ve = aiqt_hooks._diff_ends_options
         _vp = aiqt_hooks._diff_parser_ends_options
@@ -7487,8 +7594,41 @@ def _main_isolated(monitor):
                 failures.append("(cnsdif-val-pred) _diff_option_takes_word({!r}, {!r}, {}) must be {}"
                                 .format(_vsub, _vword, _vends.__name__, _vwant))
         _vnames = aiqt_hooks._GIT_LONG_OPTS["diff --no-index"]
-        for _vname in sorted((aiqt_hooks._DIFF_VALUE_NAMES | aiqt_hooks._DIFF_LONG_PATCH_NAMES) - _vnames):
+        for _vname in sorted((aiqt_hooks._DIFF_VALUE_NAMES | aiqt_hooks._DIFF_LONG_PATCH_NAMES
+                              | aiqt_hooks._DIFF_PATCH_OFF_NAMES | aiqt_hooks._DIFF_PATCH_CLEAR_NAMES
+                              | {aiqt_hooks._DIFF_BINARY_NAME, "quiet", "no-quiet"}) - _vnames):
             failures.append("(cnsdif-val-names) {!r} is not a name git diff --no-index lists".format(_vname))
+        # git's own list of the long diff options that take a separated value, pinned here and not read from the
+        # hook. It was taken by running git diff --no-index -h with git version 2.55.0 and listing every long
+        # option that its help prints with a value after a space (--output <file>, --line-prefix <prefix>,
+        # --diff-filter [(A|C|D|M|R|T|U|X|B)...[*]]), a --[no-] option under its positive name; one printed with an
+        # optional '=' value only (--stat[=<width>...], --unified[=<n>], --color[=<when>]) takes no separated value.
+        # _DIFF_VALUE_NAMES must hold exactly these names: one missing from it lets a --output or --binary word
+        # that is that option's value be read as an option, and one it holds wrongly would hide a --binary git
+        # reads as an option, since the --binary test skips the word a listed option takes.
+        _vgit = frozenset((
+            "anchored", "color-moved-ws", "diff-algorithm", "diff-filter", "dst-prefix", "find-object",
+            "ignore-matching-lines", "inter-hunk-context", "line-prefix", "max-depth", "output",
+            "output-indicator-context", "output-indicator-new", "output-indicator-old", "rotate-to", "skip-to",
+            "src-prefix", "stat-count", "stat-graph-width", "stat-name-width", "stat-width", "word-diff-regex",
+            "ws-error-highlight"))
+
+        def _vgit_drift(table):
+            return sorted(_vgit - table), sorted(table - _vgit)
+
+        _vmissing, _vextra = _vgit_drift(aiqt_hooks._DIFF_VALUE_NAMES)
+        for _vname in _vmissing:
+            failures.append("(cnsdif-val-git-missing) {!r}, a value option git diff --no-index -h lists, is "
+                            "missing from _DIFF_VALUE_NAMES".format(_vname))
+        for _vname in _vextra:
+            failures.append("(cnsdif-val-git-extra) {!r} in _DIFF_VALUE_NAMES is no value option git diff "
+                            "--no-index -h lists".format(_vname))
+        # The comparison reports a removed name: with each listed name taken out of the table in turn, it names
+        # that one as missing.
+        for _vname in sorted(_vgit & aiqt_hooks._DIFF_VALUE_NAMES):
+            if _vgit_drift(aiqt_hooks._DIFF_VALUE_NAMES - {_vname})[0] != sorted(_vmissing + [_vname]):
+                failures.append("(cnsdif-val-git-drop) removing {!r} from _DIFF_VALUE_NAMES is not reported"
+                                .format(_vname))
         # The option-parser predicate: a short word ending in a patch letter takes no value (-p and -u take
         # none, -U one only attached, and a letter that is an earlier letter's attached value leaves nothing to
         # take), so a '--' after it ends the options under that reading too; git 2.55.0 read the word after the
