@@ -446,6 +446,23 @@ _CNSDIF_BASE_DECISIONS = {
     "git log -1 --stat --bin": "allow-note",
     "git diff --stat --line-prefix X --binary": "allow-note",
     "git log -1 --decorate-refs -- --binary": "allow-note",
+    "git format-patch --stdout -1 --stat -n --binary": "allow-note",
+    "git format-patch --stdout -1 --stat -v --binary": "allow-note",
+    "git format-patch --stdout -1 --stat": "allow-note",
+    "git format-patch --stdout -1 --stat=80": "allow-note",
+    "git format-patch --stdout -1 --numstat": "allow-note",
+    "git format-patch --stdout -1 --shortstat": "allow-note",
+    "git format-patch --stdout -1 --name-only --no-patch": "allow-note",
+    "git format-patch --stdout -1 --name-only": "allow-note",
+    "git format-patch --stdout -1 --line-prefix -n --output=real.txt": "allow-note",
+    "git format-patch --stdout -1 --line-prefix --binary --output=real.txt": "allow-note",
+    "git format-patch -1 --line-prefix --stdout --output=real.txt": "allow-note",
+    "git format-patch --stdout -1 --output=real.txt": "allow-note",
+    "git --namespace --name-only diff --stat --binary": "allow-note",
+    "git --namespace --quiet diff --stat --binary": "allow-note",
+    "git --namespace --name-only diff-tree -r --binary HEAD~1 HEAD": "allow-note",
+    "git --namespace x diff --stat --binary --name-only": "allow-note",
+    "git diff --no-index --stat --binary --name-o a b": "allow-note",
 }
 
 # The deliberate relaxations: each console-diff vector that decides less strictly than its base decision in
@@ -5388,8 +5405,9 @@ def _main_isolated(monitor):
         expect("(cf1c-worktree-split-denies) --work-tree (outside) worktree discard DENIES (split state)",
                "git --work-tree={} reset --hard".format(str(cf1_decoy)), "deny", cwd=str(cf1_wt))
         # The --work-tree redirect is read from the command alone, so an ambient GIT_* variable does not switch off
-        # its deny. These cases set GIT_CONFIG_GLOBAL and GIT_CONFIG_NOSYSTEM themselves, since the suite runs with
-        # neither: each allowed with a note before, snapshotting only the session directory. Under such a variable
+        # its deny. These cases set GIT_CONFIG_GLOBAL and GIT_CONFIG_NOSYSTEM themselves and then put back the value
+        # each had, or unset it, so the cases after them run in the environment the suite started with: each
+        # allowed with a note before, snapshotting only the session directory. Under such a variable
         # the worktree must also lie inside the session directory's repository, which is the one snapshotted, so
         # a -C <decoy> --work-tree=<decoy> discard denies too. The control, a --work-tree naming the session
         # repository itself, keeps its allow with a note, and the clean-environment case denies as before.
@@ -5397,6 +5415,7 @@ def _main_isolated(monitor):
                "git --work-tree={} restore --staged --work file.txt".format(str(cf1_decoy)), "deny",
                cwd=str(cf1_wt))
         _wta_env = {"GIT_CONFIG_GLOBAL": str(tmp / "wta-gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
+        _wta_saved = {_wta_k: os.environ.get(_wta_k) for _wta_k in _wta_env}  # restored as found, set or unset
         for _wta_k, _wta_v in _wta_env.items():
             os.environ[_wta_k] = _wta_v
         try:
@@ -5415,8 +5434,11 @@ def _main_isolated(monitor):
                    "with a note", "git --work-tree={} restore --staged --worktree file.txt".format(str(cf1_wt)),
                    "allow-note", cwd=str(cf1_wt))
         finally:
-            for _wta_k in _wta_env:
-                os.environ.pop(_wta_k, None)
+            for _wta_k, _wta_old in _wta_saved.items():
+                if _wta_old is None:
+                    os.environ.pop(_wta_k, None)
+                else:
+                    os.environ[_wta_k] = _wta_old
 
         # === CLAUDE-F1: a redirected/ambient 'checkout-index' (sub outside the recognized lossy-verb set,
         # flagged by the raw scan) entering the view-override branch DENIES (was allowed with no snapshot). ==
@@ -7574,6 +7596,60 @@ def _main_isolated(monitor):
                 "git diff --stat --line-prefix X --binary", "deny")
         dexpect("(cnsdif-bin-val6) a --binary after the '--' that --decorate-refs takes denies",
                 "git log -1 --decorate-refs -- --binary", "deny")
+        # git format-patch --stdout prints the patch beside every summary selector it accepts, and its -n is
+        # --numbered, which takes no value: git 2.55.0 printed the patch for git format-patch --stdout -1 beside
+        # --stat, --stat=80, --numstat and --shortstat, beside --stat with -n before a --binary and with -v taking
+        # --binary as its reroll count, and with a --name-only that a later --no-patch drops. Each allowed with a
+        # note before. git refuses --name-only without a later --no-patch and printed nothing, and that command
+        # denies too, a safe-direction over-deny.
+        dexpect("(cnsdif-fp-n) a --binary after the -n of git format-patch, its --numbered, denies",
+                "git format-patch --stdout -1 --stat -n --binary", "deny")
+        dexpect("(cnsdif-fp-v) git format-patch --stdout beside --stat with -v taking --binary denies",
+                "git format-patch --stdout -1 --stat -v --binary", "deny")
+        dexpect("(cnsdif-fp-stat) git format-patch --stdout beside --stat denies",
+                "git format-patch --stdout -1 --stat", "deny")
+        dexpect("(cnsdif-fp-stat80) git format-patch --stdout beside --stat=80 denies",
+                "git format-patch --stdout -1 --stat=80", "deny")
+        dexpect("(cnsdif-fp-numstat) git format-patch --stdout beside --numstat denies",
+                "git format-patch --stdout -1 --numstat", "deny")
+        dexpect("(cnsdif-fp-shortstat) git format-patch --stdout beside --shortstat denies",
+                "git format-patch --stdout -1 --shortstat", "deny")
+        dexpect("(cnsdif-fp-drop) git format-patch --stdout with a --name-only that --no-patch drops denies",
+                "git format-patch --stdout -1 --name-only --no-patch", "deny")
+        dexpect("(cnsdif-fp-refused) git format-patch --stdout beside --name-only, which git refuses, denies",
+                "git format-patch --stdout -1 --name-only", "deny")
+        # git format-patch refuses --output beside --stdout (git 2.55.0 exited 128 for git format-patch --stdout -1
+        # --output=real.txt), and its own parser takes its options out before the diff options are read, so a
+        # --output word there either stops git or is an option's value: git 2.55.0 printed the patch on stdout,
+        # each line prefixed with --output=real.txt, with -n, --binary or --stdout between --line-prefix and the
+        # --output word. A --output word never makes its stdout a decoy, so each denies: the first denied before
+        # only because -n was read as taking the word, and the others, the refused command included, allowed with
+        # a note.
+        dexpect("(cnsdif-fp-out-n) a --output word after -n, the --line-prefix value on git format-patch, denies",
+                "git format-patch --stdout -1 --line-prefix -n --output=real.txt", "deny")
+        dexpect("(cnsdif-fp-out-bin) a --output word after --binary, the --line-prefix value on git format-patch, "
+                "denies", "git format-patch --stdout -1 --line-prefix --binary --output=real.txt", "deny")
+        dexpect("(cnsdif-fp-out-stdout) a --output word after --stdout, the --line-prefix value, denies",
+                "git format-patch -1 --line-prefix --stdout --output=real.txt", "deny")
+        dexpect("(cnsdif-fp-out-refused) a --output beside --stdout, which git refuses, denies",
+                "git format-patch --stdout -1 --output=real.txt", "deny")
+        # A git option before the subcommand, and the word it takes as its value, is not read beside the --binary:
+        # git 2.55.0 gave --name-only and --quiet to --namespace and printed the patch for each of these, which
+        # allowed with a note before. The control, a --name-only after the subcommand, keeps its allow with a
+        # note, since git prints only the names.
+        dexpect("(cnsdif-bin-glob1) a --name-only that is the --namespace value denies",
+                "git --namespace --name-only diff --stat --binary", "deny")
+        dexpect("(cnsdif-bin-glob2) a --quiet that is the --namespace value denies",
+                "git --namespace --quiet diff --stat --binary", "deny")
+        dexpect("(cnsdif-bin-glob3) a --name-only that is the --namespace value before git diff-tree denies",
+                "git --namespace --name-only diff-tree -r --binary HEAD~1 HEAD", "deny")
+        dexpect("(cnsdif-bin-glob-c) a --name-only after the subcommand, beside a git option, allows with a note",
+                "git --namespace x diff --stat --binary --name-only", "allow-note")
+        # Under --no-index an abbreviated suppressing option beside a full --binary still denies, although git
+        # 2.55.0 printed no patch for it: the revision-walk reading counts the full --binary and reads no
+        # abbreviation, a safe-direction over-deny kept (it allowed with a note before --binary counted).
+        dexpect("(cnsdif-bin-abbr-off) an abbreviated --name-o beside a full --binary under --no-index denies",
+                "git diff --no-index --stat --binary --name-o a b", "deny")
         # The value-option predicate under each reading, and its tables against git's own lists: every diff value
         # name, patch-enabler name and name the --binary test reads is one git diff --no-index lists
         # (_GIT_LONG_OPTS), so an abbreviation resolves to it there.
@@ -7589,10 +7665,41 @@ def _main_isolated(monitor):
                 ("diff", "-L", _ve, False), ("log", "-L", _ve, True), ("log", "--decorate-refs", _ve, True),
                 ("diff", "--decorate-refs", _ve, False), ("format-patch", "--subject-prefix", _ve, True),
                 ("format-patch", "-o", _ve, True), ("diff", "-o", _ve, False), ("diff", "--", _vp, False),
-                ("diff", "X", _ve, False)):
+                ("diff", "X", _ve, False), ("diff", "-n", _ve, True), ("log", "-n", _vp, True),
+                ("format-patch", "-v", _ve, True), ("format-patch", "-nS", _ve, True),
+                ("format-patch", "-Sn", _ve, False)):
             if _vt(_vsub, _vword, _vends) is not _vwant:
                 failures.append("(cnsdif-val-pred) _diff_option_takes_word({!r}, {!r}, {}) must be {}"
                                 .format(_vsub, _vword, _vends.__name__, _vwant))
+        # git format-patch reads its own short options first, and git format-patch -h with git version 2.55.0
+        # lists -n, -N, -s, -k, -p and -q with no value, so none takes the next word there; -n is --numbered, not
+        # the count of the revision walk, which takes the next word on every other producer (git 2.55.0: git
+        # format-patch --stdout -1 -n --subject-prefix=ZZZ applied the prefix, git diff -n --binary refused
+        # '--binary' as a count). The letters are pinned here, not read from the hook.
+        _vfp_flags = "Nknpqs"
+        if sorted(aiqt_hooks._DIFF_SUB_FLAG_LETTERS.get("format-patch", "")) != sorted(_vfp_flags):
+            failures.append("(cnsdif-val-fp-flags) _DIFF_SUB_FLAG_LETTERS['format-patch'] must hold exactly the "
+                            "flag letters {!r} of git format-patch -h".format(_vfp_flags))
+        for _vletter in _vfp_flags:
+            for _vends in (_ve, _vp):
+                if _vt("format-patch", "-" + _vletter, _vends):
+                    failures.append("(cnsdif-val-fp-flag) git format-patch -{} takes no value, yet "
+                                    "_diff_option_takes_word gives it the next word under {}"
+                                    .format(_vletter, _vends.__name__))
+        # The --binary test starts after the subcommand and reads -n as each producer does: a --binary after the
+        # -n of git format-patch counts, one after the -n of git log is its count and does not (git refused
+        # '--binary' as a count), a --name-only that git --namespace takes is not read, and with no subcommand to
+        # start after the answer is True, toward deny.
+        for _bargv, _bwant in (
+                (["git", "format-patch", "--stdout", "-1", "--stat", "-n", "--binary"], True),
+                (["git", "log", "-1", "--stat", "-n", "--binary"], False),
+                (["git", "--namespace", "--name-only", "diff", "--stat", "--binary"], True),
+                (["git", "--namespace", "x", "diff", "--stat", "--binary", "--name-only"], False),
+                (["git", "--namespace"], True)):
+            for _bends in aiqt_hooks._DIFF_OPTION_READINGS:
+                if aiqt_hooks._diff_binary_enables_patch(_bargv, _bends) is not _bwant:
+                    failures.append("(cnsdif-bin-scan) _diff_binary_enables_patch({!r}, {}) must be {}"
+                                    .format(_bargv, _bends.__name__, _bwant))
         _vnames = aiqt_hooks._GIT_LONG_OPTS["diff --no-index"]
         for _vname in sorted((aiqt_hooks._DIFF_VALUE_NAMES | aiqt_hooks._DIFF_LONG_PATCH_NAMES
                               | aiqt_hooks._DIFF_PATCH_OFF_NAMES | aiqt_hooks._DIFF_PATCH_CLEAR_NAMES
@@ -7613,22 +7720,35 @@ def _main_isolated(monitor):
             "src-prefix", "stat-count", "stat-graph-width", "stat-name-width", "stat-width", "word-diff-regex",
             "ws-error-highlight"))
 
-        def _vgit_drift(table):
-            return sorted(_vgit - table), sorted(table - _vgit)
+        def _vgit_drift():
+            _vtable_now = aiqt_hooks._DIFF_VALUE_NAMES
+            return sorted(_vgit - _vtable_now), sorted(_vtable_now - _vgit)
 
-        _vmissing, _vextra = _vgit_drift(aiqt_hooks._DIFF_VALUE_NAMES)
+        _vmissing, _vextra = _vgit_drift()
         for _vname in _vmissing:
             failures.append("(cnsdif-val-git-missing) {!r}, a value option git diff --no-index -h lists, is "
                             "missing from _DIFF_VALUE_NAMES".format(_vname))
         for _vname in _vextra:
             failures.append("(cnsdif-val-git-extra) {!r} in _DIFF_VALUE_NAMES is no value option git diff "
                             "--no-index -h lists".format(_vname))
-        # The comparison reports a removed name: with each listed name taken out of the table in turn, it names
-        # that one as missing.
-        for _vname in sorted(_vgit & aiqt_hooks._DIFF_VALUE_NAMES):
-            if _vgit_drift(aiqt_hooks._DIFF_VALUE_NAMES - {_vname})[0] != sorted(_vmissing + [_vname]):
-                failures.append("(cnsdif-val-git-drop) removing {!r} from _DIFF_VALUE_NAMES is not reported"
-                                .format(_vname))
+        # The comparison and the hook's value predicate both read the hook's own table: with each listed name
+        # taken out of aiqt_hooks._DIFF_VALUE_NAMES in turn, the comparison names it as missing and the predicate
+        # gives that option no word; with stat, which git lists with an optional '=' value only, put in, the
+        # comparison names it as extra and the predicate gives --stat the next word. The table is restored after.
+        _vtable = aiqt_hooks._DIFF_VALUE_NAMES
+        try:
+            for _vname in sorted(_vgit & _vtable):
+                aiqt_hooks._DIFF_VALUE_NAMES = _vtable - {_vname}
+                if _vgit_drift() != (sorted(_vmissing + [_vname]), _vextra) or _vt("diff", "--" + _vname, _ve):
+                    failures.append("(cnsdif-val-git-drop) with {!r} taken out of the hook's _DIFF_VALUE_NAMES, the "
+                                    "comparison does not name it missing or the predicate still gives it a word"
+                                    .format(_vname))
+            aiqt_hooks._DIFF_VALUE_NAMES = _vtable | {"stat"}
+            if _vgit_drift() != (_vmissing, sorted(set(_vextra) | {"stat"})) or not _vt("diff", "--stat", _ve):
+                failures.append("(cnsdif-val-git-add) with 'stat' put in the hook's _DIFF_VALUE_NAMES, the comparison "
+                                "does not name it extra or the predicate gives --stat no word")
+        finally:
+            aiqt_hooks._DIFF_VALUE_NAMES = _vtable
         # The option-parser predicate: a short word ending in a patch letter takes no value (-p and -u take
         # none, -U one only attached, and a letter that is an earlier letter's attached value leaves nothing to
         # take), so a '--' after it ends the options under that reading too; git 2.55.0 read the word after the
