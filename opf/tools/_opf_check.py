@@ -191,12 +191,13 @@ _REQUIRED_SET = frozenset(REQUIRED_CHECKS)
 # roster, and so its report, is exactly REQUIRED_CHECKS.
 HOMES2_CHECKS = ("C-EVIDENCE-ENUM",)
 # The imported-content checks (C-IMPORTED-*, spec 8.2): the content grading of the imported-series
-# leaves, deferred until the spec 1.3.0 activation lands them, so EMPTY today. While it is empty the
-# activation tripwire in _check_containment routes any store that declares the imported series under
-# supporting tooling (_opf_store.imported_series_declared, at either homes generation) to
-# CANNOT-EVALUATE (the leaves would be registered as managed while nothing reads their content), and
-# the self-test asserts imported_content_checks_landed below: once SUPPORTED_SPEC_VERSION reaches
-# IMPORTED_SPEC_VERSION this roster must be non-empty, NEW ids in the exact imported-check grammar
+# leaves, deferred until the spec 1.3.0 activation lands them, so EMPTY today. Until it carries every
+# check in IMPORTED_ACTIVATION_CHECKS below, the activation tripwire in _check_containment routes any
+# store that declares the imported series under supporting tooling (_opf_store.imported_series_declared,
+# at either homes generation) to CANNOT-EVALUATE (the leaves would be registered as managed while
+# content no landed check reads stays unread), and the self-test asserts imported_content_checks_landed
+# below: once SUPPORTED_SPEC_VERSION reaches IMPORTED_SPEC_VERSION this roster must carry every
+# IMPORTED_ACTIVATION_CHECKS id, all of its ids NEW and in the exact imported-check grammar
 # (_IMPORTED_ID_RE below), disjoint from REQUIRED_CHECKS and HOMES2_CHECKS, and inside
 # required_checks(h) for EVERY homes generation h from 1 through SUPPORTED_HOMES (activating the
 # imported series and activating homes 2 are separate gates; today an active series is graded
@@ -212,6 +213,13 @@ HOMES2_CHECKS = ("C-EVIDENCE-ENUM",)
 # every series the containment flag admits (_opf_store.imported_series_declared, at either homes
 # generation), over every row of each readable imported leaf, a row outside its leaf series included.
 IMPORTED_CONTENT_CHECKS = ()
+# The imported-series checks activation must land: spec 4.2 requires activated 1.3.0 tooling to "add
+# the four section 8.3 imported-series checks to the doctor roster", and spec 8.3 names them. A roster
+# missing any one of them neither passes imported_content_checks_landed nor disarms the activation
+# tripwire, so landing C-IMPORTED-PROVENANCE alone cannot certify an imported series whose envelope and
+# missingness (C-IMPORTED-SCHEMA) and section 8.6 firewall (C-IMPORTED-SEGREGATION) nothing checks.
+IMPORTED_ACTIVATION_CHECKS = ("C-IMPORTED-SCHEMA", "C-IMPORTED-IDS", "C-IMPORTED-PROVENANCE",
+                              "C-IMPORTED-SEGREGATION")
 # The exact imported-check id grammar, matched in full: the C-IMPORTED- prefix, then one or more
 # runs of upper-case ASCII letters joined by single hyphens. The class is the one every id in
 # REQUIRED_CHECKS and HOMES2_CHECKS uses after its C-, and it admits the four imported-series checks
@@ -236,10 +244,14 @@ def imported_content_checks_landed():
     SAME support comparison the imported_series_declared gate reads (one shared helper, so the
     gate and this predicate cannot disagree about support): the
     content checks stay deferred, and the runtime tripwire in _check_containment covers a store that
-    declares the imported series under supporting tooling while this content-check roster stays empty
-    (a populated roster disarms it).
+    declares the imported series under supporting tooling while this content-check roster lacks any
+    IMPORTED_ACTIVATION_CHECKS id (only a roster carrying all four disarms it).
     Once support reaches the threshold, True ONLY when
-    IMPORTED_CONTENT_CHECKS is a non-empty roster of NEW ids, each a full match of the exact
+    IMPORTED_CONTENT_CHECKS carries every IMPORTED_ACTIVATION_CHECKS id, the four imported-series
+    checks spec 4.2 requires activation to add to the doctor roster (C-IMPORTED-SCHEMA,
+    C-IMPORTED-IDS, C-IMPORTED-PROVENANCE and C-IMPORTED-SEGREGATION, as spec 8.3 names them), so a
+    partial roster such as C-IMPORTED-PROVENANCE alone, or any three of the four, is refused; and
+    when it is a non-empty roster of NEW ids, each a full match of the exact
     imported-check grammar _IMPORTED_ID_RE (the C-IMPORTED- prefix, then upper-case ASCII letter
     runs joined by single hyphens; an id carrying whitespace, a lower-case or mixed-case prefix, or
     any other character is refused, never stripped or case-folded into a match), disjoint from
@@ -249,10 +261,11 @@ def imported_content_checks_landed():
     imported series (SUPPORTED_SPEC_VERSION) and activating homes 2 (SUPPORTED_HOMES) are SEPARATE
     gates: today an active series is graded against required_checks(1), so ids wired only into the
     homes-2 roster would bind no generation an active store is actually graded against. Raising
-    the support constant without landing the checks, or landing a placeholder roster, therefore
-    fails the suite through this predicate, and the runtime tripwire never stands alone. This
-    predicate grades ROSTER STRUCTURE only -- the ids exist, match the grammar, are NEW, and are
-    wired into every generation -- never what a registered check reads: a wired check that grades
+    the support constant without landing the checks, landing only some of the four, or landing a
+    placeholder roster therefore fails the suite through this predicate, and the runtime tripwire
+    never stands alone. This predicate grades ROSTER STRUCTURE only -- the four ids are present, every
+    id exists, matches the grammar, is NEW, and is wired into every generation -- never what a
+    registered check reads: a wired check that grades
     nothing is for review and for the report reconciliation (an id that never runs reads
     CANNOT-EVALUATE), not for this gate. Once the imported series is supported, the
     EVERY-generation bound assumes SUPPORTED_HOMES >= 1: below one supported generation the
@@ -263,6 +276,8 @@ def imported_content_checks_landed():
         return True
     ids = set(IMPORTED_CONTENT_CHECKS)
     if not ids:
+        return False
+    if not set(IMPORTED_ACTIVATION_CHECKS) <= ids:
         return False
     if not all(isinstance(cid, str) and _IMPORTED_ID_RE.fullmatch(cid) for cid in ids):
         return False
@@ -2713,21 +2728,23 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
     its inventory.toml, each inventory-<phase>.toml at its root, and the files those inventories list, in
     the bundle, under the Move destination .working/archive/moved/, or, for an adoption bundle, under its
     run's adoption archive .working/archive/adoption/<run-id>/. Every other path under .working/imported/
-    and .working/archive/ stays unregistered. While IMPORTED_CONTENT_CHECKS is empty, a store that sets
-    the flag is routed to CANNOT-EVALUATE (the activation tripwire below): registration without content
-    grading never certifies."""
+    and .working/archive/ stays unregistered. Until IMPORTED_CONTENT_CHECKS carries every
+    IMPORTED_ACTIVATION_CHECKS id, a store that sets the flag is routed to CANNOT-EVALUATE (the activation
+    tripwire below): registration without content grading never certifies."""
     cls = classify_containment(manifest_data, machine_rel, imported=imported)
     # The activation tripwire (spec 8.2/4.2): a store that declares the imported series under supporting
-    # tooling, at either homes generation, while every imported-content check (C-IMPORTED-*) is still
-    # deferred must never certify, or the imported leaves would be
+    # tooling, at either homes generation, while any of the four imported-series checks spec 4.2 requires
+    # (IMPORTED_ACTIVATION_CHECKS) is still deferred must never certify, or the imported leaves would be
     # registered as managed while nothing reads their content (the PRC-F1 N-1 blind spot, reopened
     # at activation). A CANNOT-EVALUATE, not a finding: the store is not known bad, the tooling is
-    # known incomplete. The spec 1.3.0 activation lands the checks, populates
-    # IMPORTED_CONTENT_CHECKS, and so disarms this.
-    if imported and not IMPORTED_CONTENT_CHECKS:
-        rep.cant("C-CONTAINMENT: the store declares the imported series under supporting tooling but every "
-                 "imported-content check (C-IMPORTED-*) is still deferred; the imported leaves would be "
-                 "certified unread, so the store cannot be evaluated (spec 8.2/4.2)")
+    # known incomplete. It tests the same subset imported_content_checks_landed requires, so a partial
+    # roster (C-IMPORTED-PROVENANCE alone, or any three of the four) keeps it armed: the spec 1.3.0
+    # activation lands all four checks, adds them to IMPORTED_CONTENT_CHECKS, and only so disarms this.
+    if imported and not set(IMPORTED_ACTIVATION_CHECKS) <= set(IMPORTED_CONTENT_CHECKS):
+        rep.cant("C-CONTAINMENT: the store declares the imported series under supporting tooling but not "
+                 "every imported-series check spec 4.2 requires (C-IMPORTED-*) has landed; the imported "
+                 "leaves would be certified partly or wholly unread, so the store cannot be evaluated "
+                 "(spec 8.2/4.2)")
     # Re-emit the classifier's collected messages in the ORIGINAL order (all malformed CANNOT-EVALUATEs, then
     # all colliding findings), exactly as the inline classification emitted them before the extraction.
     for msg in cls.malformed + cls.worklog_errors:
@@ -3265,8 +3282,12 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # C-NO-DELETION, C-CONTIGUITY, C-IMPORTED-PROVENANCE, the across-time checks and C-CONTAINMENT's
     # registration read for the imported series, so a store whose containment registers the imported leaves
     # also has them graded (spec 4.2/8.3). The prior imported baseline (_opf_observe) and the record verb's
-    # counter proof (_opf_record) read the same helper. Only C-EVIDENCE-ENUM, which reconciles the whole
-    # evidence tree, stays on homes 2 (spec 4.2: it reads nothing on homes 1).
+    # counter proof (_opf_record) read the same helper. What reads the homes-2 layout stays on homes 2 (spec
+    # 4.2), whatever this flag holds: C-EVIDENCE-ENUM, which reconciles the whole evidence tree and reads
+    # nothing on homes 1; the homes-2 control roots (_opf_store.store_control_roots); the typed staging roots
+    # under staging/ (_staged_run_roots, and containment's staged and kind roots with its staging-kind
+    # grading); the journals root containment skips; the evidence roots containment skips because
+    # C-EVIDENCE-ENUM reconciles them (classify_containment's evidence_roots); and the homes-2 residuals.
     imported = _opf_store.imported_series_declared(manifest_data)
 
     # --- C-ROSTER: reconcile the manifest [types] against the authoritative roster (spec 9/8.1) -------
@@ -4895,7 +4916,8 @@ def self_test():
               and ".working/toml/manifest.toml" in _is2_agi_scope["store"])
         # The tooling-side tripwire at the SHIPPED constants (red on a bare activation): once
         # SUPPORTED_SPEC_VERSION reaches IMPORTED_SPEC_VERSION the imported-content checks must
-        # exist, be NEW ids in the exact id grammar (never a placeholder reusing an id from
+        # include all four IMPORTED_ACTIVATION_CHECKS ids, exist, be NEW ids in the exact id
+        # grammar (never a placeholder reusing an id from
         # REQUIRED_CHECKS or HOMES2_CHECKS), and sit inside required_checks(h) for EVERY homes
         # generation h from 1 through SUPPORTED_HOMES. Activating the imported series and
         # activating homes 2 are SEPARATE gates: today an active series is graded against
@@ -4907,20 +4929,25 @@ def self_test():
               imported_content_checks_landed())
         # The SAME predicate under controlled versions, rosters, and wirings (every patched name
         # restored in finally; no store fixture runs inside this block). The empty, out-of-roster,
-        # reused-id, grammar and spelling, collision, battery, homes-2-only, omission, and
-        # no-generation vectors assert the False side at a raised support, and each arm is
-        # discriminated ON ITS OWN: deleting the non-empty, membership, grammar, disjointness, or
-        # generation-floor condition from the predicate, one at a time, reds a committed vector
-        # in an ordinary suite run. The generated batteries below also pin the grammar,
-        # collision, and membership tests against narrowing to some sorted ranks or tuple
+        # reused-id, grammar and spelling, collision, battery, partial-roster, homes-2-only,
+        # omission, and no-generation vectors assert the False side at a raised support, and each
+        # arm is discriminated ON ITS OWN: deleting the non-empty, all-four, membership, grammar,
+        # disjointness, or generation-floor condition from the predicate, one at a time, reds a
+        # committed vector in an ordinary suite run. The generated batteries below also pin the
+        # grammar, collision, and membership tests against narrowing to some sorted ranks or tuple
         # positions; their comment states the exact coverage and the set-order residual.
         _icc_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
         _icc_prev_homes = _opf_store.SUPPORTED_HOMES
         _icc_prev_roster = IMPORTED_CONTENT_CHECKS
+        _icc_prev_act = IMPORTED_ACTIVATION_CHECKS
         _icc_prev_rc = required_checks
         _icc_prev_req = REQUIRED_CHECKS
         _icc_prev_h2 = HOMES2_CHECKS
         _icc_g = globals()
+        # The four checks spec 4.2 requires activation to add, as spec 8.3 names them, written out here
+        # rather than read from IMPORTED_ACTIVATION_CHECKS, so a narrowed or widened constant reds the
+        # partial-roster and all-four vectors below.
+        _icc_four = ("C-IMPORTED-SCHEMA", "C-IMPORTED-IDS", "C-IMPORTED-PROVENANCE", "C-IMPORTED-SEGREGATION")
         try:
             # Unsupported tooling defers, whatever the roster holds (the deferral arm) and
             # whatever SUPPORTED_HOMES holds: with no supported generation the deferral still
@@ -4935,6 +4962,14 @@ def self_test():
             _opf_store.SUPPORTED_HOMES = _icc_prev_homes
             check("imported-content-gate-defers-while-unsupported",
                   _icc_unsup_empty and _icc_unsup_placeholder and _icc_unsup_nohomes)
+            # The vectors from here to the partial-roster vectors isolate the non-empty, membership,
+            # grammar and disjointness arms. A roster without all four activation ids would read red
+            # through the all-four arm whatever the arm under test does, so these stage that arm
+            # satisfied (IMPORTED_ACTIVATION_CHECKS patched to the empty tuple), exactly as they stage
+            # the arms they do not test through the wiring. The partial-roster vectors restore the
+            # shipped constant and grade the all-four arm itself, and every vector after them runs at
+            # the shipped constant with the four ids in its roster.
+            _icc_g["IMPORTED_ACTIVATION_CHECKS"] = ()
             # Supported tooling, empty roster: red (the non-empty arm).
             _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
             _icc_g["IMPORTED_CONTENT_CHECKS"] = ()
@@ -5103,18 +5138,42 @@ def self_test():
                 lambda homes, _rc=_icc_prev_rc, _w=_icc_quad: _rc(homes) + _w)
             check("imported-content-gate-multi-id-wired-green-once-supported",
                   _icc_battery(_icc_rotated, _icc_rotated_placed, lambda offender: None, 118, True))
-            # Supported, the legitimate activation wiring: a NEW id joined into
-            # required_checks(h) for every generation reads True, and the SAME id wired ONLY
-            # into the homes-2 roster stays red while generation 1 is supported, because an
-            # active series is graded against required_checks(1) today.
-            _icc_g["IMPORTED_CONTENT_CHECKS"] = ("C-IMPORTED-CONTENT",)
+            # The all-four arm, at the shipped IMPORTED_ACTIVATION_CHECKS: every id below is NEW, in
+            # the grammar, and wired into every required roster, so ONLY that arm refuses a partial
+            # roster. C-IMPORTED-PROVENANCE alone, the one imported-series check implemented today,
+            # is red (red when the arm is deleted, or reads any() of the four), and so is each roster
+            # of three of the four, every id left out in turn (red when the arm tests only some of
+            # the four ids). The four together read True in either order (red when the constant
+            # names a fifth id).
+            _icc_g["IMPORTED_ACTIVATION_CHECKS"] = _icc_prev_act
             _icc_g["required_checks"] = (
-                lambda homes, _rc=_icc_prev_rc: _rc(homes) + ("C-IMPORTED-CONTENT",))
+                lambda homes, _rc=_icc_prev_rc, _w=_icc_four: _rc(homes) + _w)
+            _icc_g["IMPORTED_CONTENT_CHECKS"] = ("C-IMPORTED-PROVENANCE",)
+            check("imported-content-gate-provenance-only-red-once-supported",
+                  not imported_content_checks_landed())
+            _icc_three = []
+            for _icc_left_out in _icc_four:
+                _icc_g["IMPORTED_CONTENT_CHECKS"] = tuple(c for c in _icc_four if c != _icc_left_out)
+                _icc_three.append(imported_content_checks_landed())
+            check("imported-content-gate-three-of-four-red-once-supported", _icc_three == [False] * 4)
+            _icc_g["IMPORTED_CONTENT_CHECKS"] = _icc_four
+            _icc_all_four = imported_content_checks_landed()
+            _icc_g["IMPORTED_CONTENT_CHECKS"] = tuple(reversed(_icc_four))
+            check("imported-content-gate-all-four-green-once-supported",
+                  _icc_all_four and imported_content_checks_landed())
+            # Supported, the legitimate activation wiring: the four ids and a further NEW id joined
+            # into required_checks(h) for every generation read True, and the four wired ONLY
+            # into the homes-2 roster stay red while generation 1 is supported, because an
+            # active series is graded against required_checks(1) today.
+            _icc_g["IMPORTED_CONTENT_CHECKS"] = _icc_four + ("C-IMPORTED-CONTENT",)
+            _icc_g["required_checks"] = (
+                lambda homes, _rc=_icc_prev_rc: _rc(homes) + _icc_four + ("C-IMPORTED-CONTENT",))
             check("imported-content-gate-legitimate-roster-green-once-supported",
                   imported_content_checks_landed())
+            _icc_g["IMPORTED_CONTENT_CHECKS"] = _icc_four
             _icc_g["required_checks"] = (
                 lambda homes, _rc=_icc_prev_rc:
-                _rc(homes) + (("C-IMPORTED-CONTENT",) if homes >= 2 else ()))
+                _rc(homes) + (_icc_four if homes >= 2 else ()))
             check("imported-content-gate-homes2-only-wiring-red-once-supported",
                   not imported_content_checks_landed())
             # The bound is EVERY supported generation, never the top or the bottom generation
@@ -5128,19 +5187,19 @@ def self_test():
                   not imported_content_checks_landed())
             _icc_g["required_checks"] = (
                 lambda homes, _rc=_icc_prev_rc:
-                _rc(homes) + (("C-IMPORTED-CONTENT",) if homes < 2 else ()))
+                _rc(homes) + (_icc_four if homes < 2 else ()))
             check("imported-content-gate-generation1-only-wiring-red-at-homes-2",
                   not imported_content_checks_landed())
             _icc_omissions = []
             for _icc_skip in range(1, _opf_store.SUPPORTED_HOMES + 1):
                 _icc_g["required_checks"] = (
                     lambda homes, _rc=_icc_prev_rc, _skip=_icc_skip:
-                    _rc(homes) if homes == _skip else _rc(homes) + ("C-IMPORTED-CONTENT",))
+                    _rc(homes) if homes == _skip else _rc(homes) + _icc_four)
                 _icc_omissions.append(imported_content_checks_landed())
             check("imported-content-gate-each-generation-omission-red-at-homes-2",
                   _icc_omissions == [False] * _opf_store.SUPPORTED_HOMES)
             _icc_g["required_checks"] = (
-                lambda homes, _rc=_icc_prev_rc: _rc(homes) + ("C-IMPORTED-CONTENT",))
+                lambda homes, _rc=_icc_prev_rc: _rc(homes) + _icc_four)
             check("imported-content-gate-every-generation-green-at-homes-2",
                   imported_content_checks_landed())
             # With the series still supported, below one supported generation the EVERY-generation
@@ -5153,6 +5212,7 @@ def self_test():
             _opf_store.SUPPORTED_SPEC_VERSION = _icc_prev_ssv
             _opf_store.SUPPORTED_HOMES = _icc_prev_homes
             _icc_g["IMPORTED_CONTENT_CHECKS"] = _icc_prev_roster
+            _icc_g["IMPORTED_ACTIVATION_CHECKS"] = _icc_prev_act
             _icc_g["required_checks"] = _icc_prev_rc
             _icc_g["REQUIRED_CHECKS"] = _icc_prev_req
             _icc_g["HOMES2_CHECKS"] = _icc_prev_h2
@@ -5696,11 +5756,14 @@ def self_test():
                   "8.3/8.8)"])
         # A homes-1 store that declares the imported series under supporting tooling (imported_series_declared)
         # is graded as the homes-2 store is (spec 4.2/8.3): containment registers its imported leaves and
-        # bundles, and the driver gathers its imported rows under the same flag. With the roster carrying the
-        # check and the activation tripwire disarmed, as activation would leave them (both patched, restored in
-        # finally), C-IMPORTED-PROVENANCE re-reads each cited original on homes 1. The store carries the zero
-        # imported counter row of every enabled type (spec 8.2), imported:BI at the rows it holds, and its run's
-        # prior carries the empty imported baseline the observer reads for it.
+        # bundles, and the driver gathers its imported rows under the same flag. IMPORTED_CONTENT_CHECKS is
+        # patched to the four activation ids, the smallest roster that disarms the activation tripwire, and
+        # required_checks to carry C-IMPORTED-PROVENANCE alone, the one of the four implemented, so the other
+        # three are absent from the report rather than unrun (both restored in finally): these vectors grade
+        # provenance on homes 1, not the full activated roster. C-IMPORTED-PROVENANCE re-reads each cited
+        # original on homes 1. The store carries the zero imported counter row of every enabled type (spec
+        # 8.2), imported:BI at the rows it holds, and its run's prior carries the empty imported baseline the
+        # observer reads for it.
         _h1_prev_rc = required_checks
         _h1_prev_icc = IMPORTED_CONTENT_CHECKS
         _h1_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
@@ -5726,7 +5789,7 @@ def self_test():
 
         try:
             _p_g["required_checks"] = lambda homes, _rc=_h1_prev_rc: _rc(homes) + ("C-IMPORTED-PROVENANCE",)
-            _p_g["IMPORTED_CONTENT_CHECKS"] = ("C-IMPORTED-PROVENANCE",)
+            _p_g["IMPORTED_CONTENT_CHECKS"] = _icc_four
             # The control, at the shipped support constant: a store that does not declare the series under
             # supporting tooling has nothing to grade, so the check passes and the store is VALID (red when the
             # check grades a store that does not declare the series).
@@ -5741,6 +5804,19 @@ def self_test():
             _h1_ok = _h1_run(_h1_machine(_p_row(1), _p_row(2)), working=_p_bundle_files())
             check("provenance-homes1-matching-original-passes",
                   _h1_graded(_h1_ok, VALID, [], []) and _h1_ok.checks.get("C-IMPORTED-PROVENANCE") == "PASS")
+            # A partial roster never disarms the activation tripwire (spec 4.2): with C-IMPORTED-PROVENANCE
+            # alone, and with each roster of three of the four, the store VALID above is held at CANNOT-EVALUATE
+            # by the tripwire alone while C-IMPORTED-PROVENANCE still passes (red when any non-empty roster, or
+            # any roster holding some of the four, disarms the tripwire).
+            _h1_partial = []
+            for _h1_roster in [("C-IMPORTED-PROVENANCE",)] + [
+                    tuple(c for c in _icc_four if c != _h1_left_out) for _h1_left_out in _icc_four]:
+                _p_g["IMPORTED_CONTENT_CHECKS"] = _h1_roster
+                _h1_pr = _h1_run(_h1_machine(_p_row(1), _p_row(2)), working=_p_bundle_files())
+                _h1_partial.append(_i3_tripwire_only(_h1_pr)
+                                   and _h1_pr.checks.get("C-IMPORTED-PROVENANCE") == "PASS")
+            _p_g["IMPORTED_CONTENT_CHECKS"] = _icc_four
+            check("provenance-homes1-partial-roster-tripwire-armed", _h1_partial == [True] * 5)
             # The preserved original no longer matches the source_sha256 its record carries (the inventory was
             # re-sealed over the new bytes): the C-IMPORTED-PROVENANCE finding naming the record, and nothing
             # else (red when the grading is keyed on homes 2 again).
@@ -5761,6 +5837,28 @@ def self_test():
             _h1_empty = _h1_run(_h1_machine())
             check("provenance-homes1-empty-series-passes",
                   _h1_graded(_h1_empty, VALID, [], []) and _h1_empty.checks.get("C-IMPORTED-PROVENANCE") == "PASS")
+            # An unreadable imported leaf on homes 1, unparseable or with no [[record]] array, is never read as an
+            # empty leaf, beside a matching bundle: C-IMPORTED-PROVENANCE is CANNOT-EVALUATE naming the imported:BI
+            # series whose leaf it could not read, the run names the leaf file, and neither its allocated id nor
+            # its prior record is reported deleted (red when the grading is keyed on homes 2 again: the leaf is
+            # then never read and the check passes).
+            _h1_leaf = ".working/toml/backlog_item.imported.index.toml"
+            _h1_unread_leaf = []
+            for _h1_text in ("record = [ not toml", "schema = 1\nrecord = 1\n"):
+                _h1_lm = _h1_machine(_p_row(1))
+                _h1_lm["backlog_item.imported.index.toml"] = _h1_text
+                _h1_lr = run(_h1_lm, working=_p_bundle_files(),
+                             obs=_i3_obs({"imported:BI-1": _record_digest(_p_row(1))}))
+                _h1_unread_leaf.append(
+                    _h1_lr is not None and _h1_lr.status == CANNOT_EVALUATE
+                    and _h1_lr.checks.get("C-IMPORTED-PROVENANCE") == "CANNOT-EVALUATE"
+                    and _i3_msgs(_h1_lr, "C-IMPORTED-PROVENANCE") == [
+                        "C-IMPORTED-PROVENANCE: the provenance of the imported:BI records is not evaluated, "
+                        "because their imported leaf could not be read (spec 8.3)"]
+                    and any(_h1_leaf in m for m in _h1_lr.cannot_evaluate)
+                    and not any("imported:BI" in m for m in _i3_msgs(_h1_lr, "C-NO-DELETION")
+                                + _i3_msgs(_h1_lr, "C-HISTORY-APPEND-ONLY")))
+            check("provenance-homes1-unreadable-leaf-cannot-evaluate", _h1_unread_leaf == [True, True])
             # A store whose declaration cannot be read stays CANNOT-EVALUATE: a spec_version that is not a
             # version string, one that is not SemVer, and none at all each fail C-MANIFEST, and nothing past it is
             # graded, so the stale original beside them is never passed or graded (red when the driver grades

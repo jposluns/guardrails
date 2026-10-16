@@ -3081,10 +3081,14 @@ def _self_test_contexts(check, root_fd, now):
         ctx.manifest = homes1
         check("the homes-1 1.3.0 proof holds with every imported row",
               _counter_state(ctx, ctx.counters.model)[1] == [])
+        # With imported:BI dropped, the one finding is the missing imported:BI row, the C-COUNTERS rule of the
+        # series (red when the proof is keyed on homes 2 again: every remaining imported row is then refused as
+        # not a two-letter namespace instead, and no missing-row finding is recorded).
         ctx = ctx_of(imported_partial)
         ctx.manifest = homes1
         check("a missing imported row breaks the homes-1 1.3.0 proof",
-              _counter_state(ctx, ctx.counters.model)[1] != [])
+              _counter_state(ctx, ctx.counters.model)[1]
+              == ["[counters] is missing a high-water for imported namespace 'imported:BI' (spec 8.2)"])
         _opf_store.SUPPORTED_SPEC_VERSION = prev_gates[1]
         _opf_store.SUPPORTED_HOMES = 2
         ctx = ctx_of(imported_full)
