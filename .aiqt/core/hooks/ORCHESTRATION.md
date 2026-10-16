@@ -465,9 +465,14 @@ split on LF only, as `git apply` reads a patch. Unlike a brief, a draft under `/
 as `/dev/shm`) is not withheld, since the census is made from what the hook itself reads there.
 
 The draft is a git diff (`git diff`, `git diff --cached` or `git format-patch` output). The census
-reads it conservatively, as the diff output git writes by default: a form that `git apply` accepts
-but git does not write, such as a localized no-newline marker or a marker that more added lines
-follow, is refused rather than read. A file section opens at a `diff --git` line, or at a
+reads it conservatively, as the diff output git writes by default, so some forms that `git apply`
+accepts but git does not write are refused rather than read: a localized no-newline marker, a context
+marker that only added lines follow, an added-line marker that more added lines follow, and a line
+beginning with a backslash, other than git's exact marker, right after a hunk's counted lines or
+their marker. Not every such form is refused: an added-line marker that a removed line follows, an
+empty line read as context, and lines after a hunk's counted lines are read. Either way each hunk is
+still consumed by the line counts in its header, so no path is hidden. A file section opens at a
+`diff --git` line, or at a
 `---` line naming a path, which a `+++` line and a hunk header must follow. Each hunk is consumed by
 the line counts in its own header, so an added line that reads `++ b/x` (shown as `+++ b/x`) is
 content, not a header. Git's exact `\ No newline at end of file` marker is read only where git writes
@@ -496,7 +501,8 @@ lines. A line that begins as a diff header or a marker does is not prose, wherev
 section, at the end, or before prose), since a section cut short or mangled would otherwise drop out
 of the census unseen: a `+++` line, a hunk header, an extended header such as `index` or
 `rename from` (including the older `rename old` and `rename new`), a binary marker, a line beginning
-with a backslash and a space (which `git apply` reads as a no-newline marker), and a `diff -` line
+with a backslash and a space (which `git apply` reads as a no-newline marker when it is at least
+eleven characters long, and rejects as a corrupt patch when shorter), and a `diff -` line
 other than `diff --git` (besides it, git writes only `diff --cc` and `diff --combined`, for a merge,
 which are refused as combined diffs, so `diff -ruN` output is refused too). A `---` line naming a
 path always opens a section.
@@ -520,11 +526,14 @@ path always opens a section.
   side's count is not yet met, a hunk line beginning with a backslash that is not git's exact
   `\ No newline at end of file` marker after a context, removed or added line, a marker before the
   last line its hunk header counts for a side it marks (such as a marker after a removed line that
-  another removed line follows, or one after a context line in the middle of a hunk, as `git diff -w`
-  can write), a hunk after a marker in its section, any other line beginning with a backslash right
-  after a hunk's counted lines or their marker, and a diff header or marker line outside a section.
-  Where a `diff --git` line names its paths under `b/` and then `a/`, as `git diff -R` writes it, the
-  reason names that swap.
+  another removed line follows, or one after a context line in the middle of a hunk, as `git diff -w`,
+  `-b` or `--ignore-space-at-eol` can write), a hunk after a marker in its section, any other line
+  beginning with a backslash right after a hunk's counted lines or their marker, and a diff header or
+  marker line outside a section. Where a `diff --git` line names its paths under `b/` and then `a/`, as
+  `git diff -R` writes it, in a section with no `---` line (a mode change, a binary change, an empty
+  file or a pure rename), the reason names that swap; a section with a `---` line, as most
+  `git diff -R` output has, is refused first with the reason that its `---` or `+++` line names no
+  path under git's prefix for its side.
 - A header or hunk line that ends in a carriage return before its LF is withheld as `UNVERIFIABLE:`,
   with a reason naming CRLF, since a header's names would end in the return. This covers a draft
   saved with CRLF line ends, which must be written again with LF line ends, and a draft holding a
