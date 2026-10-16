@@ -4370,7 +4370,19 @@ def _watchdog_completion_case(mode):
             refused = Path(directory, "refused")
             stalled = Path(directory, "stalled")
             diag = Path(directory, "diag")
+            guard = Path(directory, "guard")
             real_pdeathsig = emit._fixture_pdeathsig
+            # The authoritative exit status below (reap_subject) needs the
+            # subject of a dead guardian to reparent HERE: arm
+            # PR_SET_CHILD_SUBREAPER for this leg process (verified, loud
+            # where unsupported), so such a subject lingers as a zombie
+            # child of this process until a leg reaps it -- under the
+            # regression runner and standalone alike, where before only the
+            # runner made the zombie observable. Disarmed on the orderly
+            # path at the end of this case; a failing leg never reaches the
+            # disarm, and the self-test runs each leg in its own fixture
+            # process, which exits.
+            emit._fixture_subreaper()
 
             def hold(arm):
                 # Subject-side: publish the pid, wait for the release gate BEFORE
@@ -4405,33 +4417,80 @@ def _watchdog_completion_case(mode):
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
 
-            def subject_exit(target):
-                # The waitpid-style status a lingering zombie records
-                # (/proc stat exit_code, its LAST field): the authoritative
-                # reaper is the nearest subreaper ancestor (the outer
-                # guardian, under the regression runner), so this leg can
-                # only read, never waitpid. None for a reaped entry (a
-                # standalone run reparents the dead orphan to init), for a
-                # non-zombie, and for a withheld field (it then reads 0,
-                # which is also the clean exit no asserted death here can
-                # produce): the capture of the subject fd 2 discriminates
-                # the cause on every path; the status, where observable,
-                # must agree with it.
-                try:
-                    stat = Path("/proc", str(target), "stat").read_bytes()
-                except (FileNotFoundError, ProcessLookupError):
-                    return None
-                fields = stat.rsplit(b")", 1)[1].split()
-                code = int(fields[-1])
-                return code if fields[0] == b"Z" and code != 0 else None
+            def subject_lines(capture):
+                # The per-launch fd 2 redirect window covers the fork this
+                # process makes, so a warning block of the leg process
+                # itself (for example the CPython multi-threaded fork
+                # DeprecationWarning, which names THIS pid) can land in the
+                # capture alongside subject output; tolerate exactly that
+                # block -- a warning line naming this process and its
+                # indented source-text continuation -- and nothing else
+                # (FIX-559-R3 claude MINOR-2: with warnings made visible
+                # the leg wrote its own line into the capture and Leg 2
+                # failed falsely).
+                own = "(pid=%d)" % os.getpid()
+                kept = []
+                tolerated = False
+                for line in capture.splitlines():
+                    if own in line:
+                        tolerated = True
+                        continue
+                    if tolerated and line.startswith(" "):
+                        continue
+                    tolerated = False
+                    kept.append(line)
+                return kept
 
-            def launch_held(arm=True, ack_bound=30):
+            def reap_subject(target):
+                # The authoritative waitpid status: the subreaper flag
+                # armed above makes a subject whose guardian died a child
+                # of THIS process, so the leg both reaps it and records
+                # the status that close() cannot return. A target that is
+                # not (or is no longer) a child here has no authoritative
+                # status left: that is a cannot-evaluate failure, never
+                # acceptance (FIX-559-R3 codex MAJOR: the removed /proc
+                # helper read an already-reaped child as None and the legs
+                # accepted None, so a silent hold-gate exit 96 could
+                # satisfy Leg 2).
+                bound = _watchdog_deadline(30)
+                while True:
+                    try:
+                        pid, status = os.waitpid(target, os.WNOHANG)
+                    except ChildProcessError:
+                        raise AssertionError(
+                            "the subject exit status is unavailable: cannot "
+                            "evaluate the death cause of %d" % target)
+                    if pid == target:
+                        return status
+                    assert time.monotonic() < bound, (
+                        "the dead subject never became reapable")
+                    time.sleep(0.005)
+
+            def require_sigkill(target):
+                # The Leg 2 death-cause rule, authoritative on every path:
+                # the subject died by the SIGKILL close() sends -- never by
+                # the silent exit 96 of the 120 s hold gate, by the exit
+                # 125 of a setup error, or with an unavailable status read
+                # as acceptance (reap_subject refuses that loudly).
+                status = reap_subject(target)
+                assert os.WIFSIGNALED(status) and (
+                    os.WTERMSIG(status) == signal.SIGKILL), (
+                    "the subject died otherwise than by the close kill",
+                    status)
+
+            def launch_held(arm=True, ack_bound=30, capture_open=os.open,
+                            restore=os.dup2):
+                # capture_open and restore are fault seams for the two
+                # committed launch-cleanup vectors below (FIX-559-R3 codex
+                # MEDIUM); every production leg runs the real primitives,
+                # bound here at definition time.
                 import select
                 waiting.unlink(missing_ok=True)
                 release.unlink(missing_ok=True)
                 acked.unlink(missing_ok=True)
                 refused.unlink(missing_ok=True)
                 stalled.unlink(missing_ok=True)
+                guard.unlink(missing_ok=True)
                 diag.unlink(missing_ok=True)
                 marker.unlink(missing_ok=True)
                 child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
@@ -4440,56 +4499,83 @@ def _watchdog_completion_case(mode):
 
                 def publish_ack(fd):
                     # Guardian-side (the patch below is live at fork time):
-                    # publish the ack marker only on an OBSERVED successful
-                    # acknowledgment write (the helper reports True only when
-                    # os.write wrote the one byte), so a marker always means
-                    # the ack byte is buffered for the gated subject; a failed
-                    # write publishes the refusal instead, which the wait
-                    # below turns into a named launch failure, never a marker.
+                    # record this guardian pid first (the refused-write
+                    # vector asserts the failure path COLLECTED the
+                    # guardian -- only close() reaps it -- not merely that
+                    # the subject disappeared, which the drain of a live
+                    # guardian also causes), then publish the ack marker
+                    # only on an OBSERVED successful acknowledgment write
+                    # (the helper reports True only when os.write wrote the
+                    # one byte), so a marker always means the ack byte is
+                    # buffered for the gated subject; a failed write
+                    # publishes the refusal instead, which the wait below
+                    # turns into a named launch failure, never a marker.
+                    scratch = Path(directory, "guard.tmp")
+                    scratch.write_text(str(os.getpid()), encoding="ascii")
+                    scratch.rename(guard)  # atomic: never a partial PID
                     outcome = acked if real_ack(fd) else refused
                     scratch = Path(directory, outcome.name + ".tmp")
                     scratch.write_text(outcome.name, encoding="ascii")
                     scratch.rename(outcome)  # atomic: never a partial publication
 
-                # The subject's refusal evidence lands on its inherited fd 2
-                # (the traceback, then exit 125): route fd 2 to a per-launch
-                # capture for the window of the fork, so the legs below can
-                # assert WHY their subject died, never only that it died.
-                # Restored before anything else runs in this process.
-                saved_stderr = os.dup(2)
+                # ONE ownership-cleanup scope from construction (FIX-559-R3
+                # codex MEDIUM): the fixture above already owns a parked
+                # launcher, two sockets and a report file, so the capture
+                # setup, the start, the stderr restoration and the
+                # acknowledgment wait below all run inside this try, whose
+                # failure path collects the fixture. Before this round a
+                # fault in the capture setup or in the post-start
+                # restoration routed around that cleanup.
                 try:
-                    capture = os.open(diag, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    # The refusal evidence of the subject lands on its
+                    # inherited fd 2 (the traceback, then exit 125): route
+                    # fd 2 to a per-launch capture for the window of the
+                    # fork, so the legs below can assert WHY their subject
+                    # died, never only that it died. Restored right after
+                    # start() returns; the window still covers the fork
+                    # this process makes, so Leg 2 tolerates the warning
+                    # lines of the leg itself explicitly (subject_lines
+                    # above). The restoring finally pairs the dup2 with the
+                    # close, so a failed restoration still disposes the
+                    # saved descriptor.
+                    saved_stderr = os.dup(2)
                     try:
-                        os.dup2(capture, 2)
+                        capture = capture_open(
+                            diag, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                        try:
+                            os.dup2(capture, 2)
+                        finally:
+                            os.close(capture)
+                        with (patch.object(emit, "_fixture_pdeathsig",
+                                           lambda: hold(arm)),
+                              patch.object(emit, "_fixture_ack_subject",
+                                           publish_ack)):
+                            child.start()
                     finally:
-                        os.close(capture)
-                    with patch.object(emit, "_fixture_pdeathsig", lambda: hold(arm)), \
-                            patch.object(emit, "_fixture_ack_subject", publish_ack):
-                        child.start()
-                finally:
-                    os.dup2(saved_stderr, 2)
-                    os.close(saved_stderr)
-                try:
+                        try:
+                            restore(saved_stderr, 2)
+                        finally:
+                            os.close(saved_stderr)
                     bound = _watchdog_deadline(30)
                     while not waiting.exists():
-                        assert time.monotonic() < bound, \
-                            "the subject never reached its gate"
+                        assert time.monotonic() < bound, (
+                            "the subject never reached its gate")
                         time.sleep(0.005)
                     subject = int(waiting.read_text(encoding="ascii"))
                     # The gated subject publishes its pid BEFORE the guardian
                     # sends the receipt: wait for the receipt to be buffered on
                     # the control socket before any leg kills the guardian, so
                     # every leg exercises a DELIVERED receipt (the no-receipt
-                    # path is subject-receipt's leg).
-                    assert select.select([child.control], [], [], 30)[0], \
-                        "the subject receipt never arrived"
+                    # path is the leg of subject-receipt).
+                    assert select.select([child.control], [], [], 30)[0], (
+                        "the subject receipt never arrived")
                     # A buffered receipt does not order a kill against the
                     # ownership acknowledgment: the guardian writes the ack
                     # byte strictly AFTER the receipt send, so a SIGKILL
                     # landing in between (seen under host load as
                     # F-OPF-WATCHDOG-ORPHAN-TIMING) hands the gated subject an
                     # acknowledgment EOF once released, and a released subject
-                    # that reaches the ack read -- Leg 1's refuses EARLIER, at
+                    # that reaches the ack read -- Leg 1 refuses EARLIER, at
                     # _fixture_check_parent -- then refuses at
                     # _fixture_await_ack (which no leg here patches out)
                     # instead of exercising the stimulus under test: Flip A
@@ -4501,20 +4587,20 @@ def _watchdog_completion_case(mode):
                     # lands only after the ack byte is buffered and a released
                     # subject that reaches the ack read always reads it. The
                     # ORDERING no longer depends on host speed; the finite
-                    # bounds still do: this backstop and the subject's 120 s
-                    # hold gate bound the leg either way (at most 90 s of
-                    # bounded waits sit between the subject's waiting
-                    # publication and a leg's release, 30 s of headroom under
-                    # that gate).
+                    # bounds still do: this backstop and the 120 s hold gate
+                    # of the subject bound the leg either way (at most 90 s
+                    # of bounded waits sit between the waiting publication of
+                    # the subject and the release by a leg, 30 s of headroom
+                    # under that gate).
                     bound = _watchdog_deadline(ack_bound)
                     while not acked.exists():
-                        assert not refused.exists(), \
-                            "the ownership acknowledgment write failed: the launch is refused"
-                        assert time.monotonic() < bound, \
-                            "the ownership acknowledgment was never published"
+                        assert not refused.exists(), (
+                            "the ownership acknowledgment write failed: the launch is refused")
+                        assert time.monotonic() < bound, (
+                            "the ownership acknowledgment was never published")
                         if not stalled.exists():
                             # This wait, observably ENTERED: the gate the
-                            # barrier vector's held guardian releases its
+                            # barrier vector guardian, held, releases its
                             # acknowledgment on, so removing this ordering
                             # wait starves that barrier and turns the vector
                             # red.
@@ -4523,10 +4609,18 @@ def _watchdog_completion_case(mode):
                             scratch.rename(stalled)  # atomic: never partial
                         time.sleep(0.005)
                 except BaseException:
-                    # A failed launch never leaks its fixture: collect the
-                    # guardian (dead or alive; close() kills and proves the
-                    # receipt-identified subject either way) and surface the
-                    # LAUNCH failure, never the close's.
+                    # The failure path DISPOSES the fixture and surfaces the
+                    # LAUNCH failure, never a failure of the close: cancel
+                    # collects the guardian (dead, alive or never started)
+                    # through close(), which kills and proves the
+                    # receipt-identified subject where it has one, and its
+                    # cannot-evaluate refusals land in a list this path
+                    # deliberately discards. What this guarantees is
+                    # bounded by close() itself: proof of collection is
+                    # only what the fault and publication vectors below
+                    # assert, and a leg assertion that fails AFTER a launch
+                    # returned still cleans up nothing, the pre-existing
+                    # pattern (FIX-559-R3 claude MINOR-3).
                     cancel(child, [])
                     raise
                 return child, subject
@@ -4544,10 +4638,12 @@ def _watchdog_completion_case(mode):
             # shared the F-OPF-WATCHDOG-ORPHAN-TIMING race as a FALSE-PASS
             # window: with the parent check removed, an early kill let the
             # subject refuse at the ack read instead, and the leg passed
-            # without the protection it guards. The refusal REASON and, where
-            # a zombie is still observable, the refusal exit status are
-            # asserted, so a subject dead by the 120 s hold gate (exit 96,
-            # a silent capture) or by an unrelated setup error (a different
+            # without the protection it guards. The refusal REASON and the
+            # refusal exit status are asserted -- the status
+            # authoritatively, reaped by this process (the subreaper arm
+            # above keeps the zombie observable on every path) -- so a
+            # subject dead by the 120 s hold gate (exit 96, a silent
+            # capture) or by an unrelated setup error (a different
             # traceback) cannot satisfy this leg.
             child, subject = launch_held()
             os.kill(child.pid, signal.SIGKILL)
@@ -4556,11 +4652,12 @@ def _watchdog_completion_case(mode):
             await_state(subject, (None, "Z"), "the orphaned subject kept running")
             assert not marker.exists(), "an orphaned subject ran its callable"
             refusal = diag.read_text(encoding="ascii")
-            assert "subject orphaned before supervision" in refusal, \
-                ("the released subject died without its refusal", refusal)
-            status = subject_exit(subject)
-            assert status in (None, 125 << 8), \
-                ("the released subject died otherwise than its refusal exit", status)
+            assert "subject orphaned before supervision" in refusal, (
+                "the released subject died without its refusal", refusal)
+            status = reap_subject(subject)
+            assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 125, (
+                "the released subject died otherwise than its refusal exit",
+                status)
             failures = []
             cancel(child, failures)
             assert child.subject_pid == subject, (child.subject_pid, subject)
@@ -4569,10 +4666,11 @@ def _watchdog_completion_case(mode):
             # Leg 2: same stimulus, subject NEVER released: the guardian failure is
             # collected without an escalation, and close() itself must kill the
             # receipt-identified subject and prove its exit. The gated subject
-            # writes no refusal (it never left its hold gate: an empty
-            # capture) and, where a zombie is still observable, it died by
-            # close()'s SIGKILL, never by the 120 s gate's exit 96 or a setup
-            # error's exit 125.
+            # writes no refusal (it never left its hold gate: a capture with
+            # no subject lines) and the authoritative reaped status proves it
+            # died by the SIGKILL close() sends -- never by the exit 96 of
+            # the 120 s gate, by the exit 125 of a setup error, or with an
+            # unavailable status read as acceptance (FIX-559-R3 codex MAJOR).
             child, subject = launch_held()
             os.kill(child.pid, signal.SIGKILL)
             failures = []
@@ -4581,11 +4679,40 @@ def _watchdog_completion_case(mode):
             await_state(subject, (None, "Z"),
                         "close() left the live subject on a guardian failure")
             assert not marker.exists(), "the gated subject ran its callable"
-            assert diag.read_text(encoding="ascii") == "", \
-                "the gated subject left its hold gate"
-            status = subject_exit(subject)
-            assert status in (None, signal.SIGKILL), \
-                ("the gated subject died otherwise than by the close kill", status)
+            foreign = subject_lines(diag.read_text(encoding="ascii"))
+            assert foreign == [], ("the gated subject left its hold gate", foreign)
+            require_sigkill(subject)
+
+            # Cause vectors (FIX-559-R3 codex MAJOR): the SAME verdict helper
+            # Leg 2 relies on, fed each committed counter-cause, must reject
+            # it, never accept it. A probe child stands in for the dead
+            # subject: it exits the given code silently, like the hold gate
+            # or a setup refusal does, and is awaited to its zombie before
+            # the verdict reads it.
+            def dead_probe(code):
+                probe = os.fork()
+                if probe == 0:
+                    os._exit(code)
+                await_state(probe, ("Z",), "the cause probe never exited")
+                return probe
+
+            def rejected(cause, probe, note):
+                try:
+                    require_sigkill(probe)
+                except AssertionError as exc:
+                    assert cause in str(exc), (cause, str(exc))
+                else:
+                    raise AssertionError(note)
+
+            rejected("died otherwise than by the close kill", dead_probe(96),
+                     "a silent hold-gate exit 96 satisfied the close-kill verdict")
+            rejected("died otherwise than by the close kill", dead_probe(125),
+                     "a setup-error exit satisfied the close-kill verdict")
+            probe = dead_probe(96)
+            os.waitpid(probe, 0)  # already reaped elsewhere: no status is left
+            rejected("the subject exit status is unavailable", probe,
+                     "an already-reaped exit 96 was accepted instead of a "
+                     "cannot-evaluate failure")
 
             # Flip A: without the parent check (and with pdeathsig disarmed, which
             # a post-death arm cannot help anyway) the released orphan runs its
@@ -4603,6 +4730,7 @@ def _watchdog_completion_case(mode):
                 cancel(child, failures)  # close() still kills the receipt subject
                 assert failures, "the flip close was read as clean"
                 await_state(subject, (None, "Z"), "the flip cleanup did not complete")
+                require_sigkill(subject)  # dead by the close kill, proven
 
             # Flip B: without the close-side subject kill, a live subject survives
             # a guardian failure and close() names the surviving pid.
@@ -4617,6 +4745,7 @@ def _watchdog_completion_case(mode):
                 "flip: the subject died without its kill"
             os.kill(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
             await_state(subject, (None, "Z"), "the flip hygiene did not complete")
+            reap_subject(subject)  # clear the hygiene zombie (killed above)
 
             # Barrier: the guardian HOLDS its acknowledgment until this launch
             # observably reaches the marker wait (the stalled gate that wait
@@ -4657,12 +4786,14 @@ def _watchdog_completion_case(mode):
                 cancel(child, failures)
                 assert failures, "the barrier close was read as clean"
                 await_state(subject, (None, "Z"), "the barrier cleanup did not complete")
+                require_sigkill(subject)  # dead by the close kill, proven
 
             # Refused write: an acknowledgment write that fails with OSError
             # (EIO in the recorded failure class; /dev/full injects the same
             # handler deterministically) must surface as the NAMED launch
-            # failure and never as a marker. Red at the pin, where the helper
-            # swallowed the failure and the marker was published anyway.
+            # failure and never as a marker. Red at commit 0734fe9560e8 (the
+            # round that added the marker wait), where the helper swallowed
+            # the failure and the marker was published anyway.
             def eio_ack(fd):
                 # Guardian-side: the REAL helper, its write routed at a
                 # descriptor that refuses every write, so its own OSError
@@ -4689,6 +4820,15 @@ def _watchdog_completion_case(mode):
             assert not marker.exists(), "the refused launch ran its callable"
             leaked = int(waiting.read_text(encoding="ascii"))
             await_state(leaked, (None, "Z"), "the refused launch leaked its subject")
+            # The leak check above is not discriminating on its own: a LIVE
+            # guardian drains the gated subject itself once the control
+            # socket of the dropped fixture closes, cancel or no cancel
+            # (FIX-559-R3 claude MINOR-4). Only close() reaps the guardian,
+            # so with the failure-path cancel removed the guardian stays a
+            # lingering zombie child here and this check goes red.
+            collected_guardian = int(guard.read_text(encoding="ascii"))
+            await_state(collected_guardian, (None,),
+                        "the refused launch did not collect its guardian")
 
             # Missing publication: a guardian that dies between the receipt
             # send and its acknowledgment (the recorded race's own window)
@@ -4714,6 +4854,84 @@ def _watchdog_completion_case(mode):
                 "a dead guardian published an acknowledgment outcome"
             leaked = int(waiting.read_text(encoding="ascii"))
             await_state(leaked, (None, "Z"), "the unpublished launch leaked its subject")
+            require_sigkill(leaked)  # dead by the cleanup kill, proven
+
+            # Launch-cleanup fault vectors (FIX-559-R3 codex MEDIUM): the
+            # ownership scope opens at construction, so a fault during the
+            # capture setup (before any start) and one during the post-start
+            # stderr restoration must each surface as the injected error AND
+            # still collect the fixture; before this round both faults
+            # routed around the failure-path cancel. Collection is observed
+            # through the close call itself, recorded by the patch below.
+            collected = []
+            real_close = emit._FixtureProcess.close
+
+            def recording_close(fixture):
+                collected.append(fixture)
+                return real_close(fixture)
+
+            def refusing_capture(path, flags, mode):
+                # The real primitive against a genuinely occupied path: the
+                # O_EXCL refusal class itself, never a simulation of it.
+                occupied = Path(directory, "occupied")
+                occupied.write_text("occupied", encoding="ascii")
+                return os.open(occupied, flags, mode)
+
+            with patch.object(emit._FixtureProcess, "close", recording_close):
+                try:
+                    launch_held(capture_open=refusing_capture)
+                except FileExistsError:
+                    outcome = "capture refused"
+                else:
+                    outcome = None
+            assert outcome == "capture refused", (
+                "the pre-start fault was not the injected refusal", outcome)
+            assert collected, "the pre-start fault did not collect the fixture"
+            assert collected[0].pid is None, (
+                "the pre-start fault launched a guardian anyway")
+
+            def broken_restore(fd, target):
+                # The REAL restoration first (the leg keeps its stderr),
+                # then a deterministic failure exactly where a failed dup2
+                # would surface -- held until the guardian has PUBLISHED an
+                # acknowledgment outcome, which it writes strictly after
+                # the receipt send, so the collection below always finds
+                # the buffered receipt: no scheduling race.
+                os.dup2(fd, target)
+                bound = _watchdog_deadline(30)
+                while not acked.exists():
+                    assert time.monotonic() < bound, (
+                        "the faulted launch was never acknowledged")
+                    time.sleep(0.005)
+                raise OSError(5, "injected restoration failure")
+
+            del collected[:]
+            with patch.object(emit._FixtureProcess, "close", recording_close):
+                try:
+                    launch_held(restore=broken_restore)
+                except OSError as exc:
+                    outcome = str(exc)
+                else:
+                    outcome = None
+            assert outcome == "[Errno 5] injected restoration failure", (
+                "the restoration fault was not the injected error", outcome)
+            assert collected, "the restoration fault did not collect the fixture"
+            started = collected[0].subject_pid
+            assert started is not None, (
+                "the restoration fault collection had no subject receipt")
+            await_state(started, (None, "Z"),
+                        "the restoration fault leaked the started subject")
+
+            # Orderly-path disarm of the subreaper flag armed above. Every
+            # child this case created has been reaped here: the legs and
+            # their vectors reaped theirs (reap_subject), and the guardians
+            # that stayed alive reaped their own subjects before close()
+            # reaped them. A failing leg never reaches this disarm; its
+            # fixture process exits instead.
+            import ctypes
+            libc = ctypes.CDLL(None, use_errno=True)
+            if libc.prctl(36, 0, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+                raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER")
     elif mode == "escalation-subject":
         import time
         # QA16 MINOR-2 + QA17 F1: cancelling a wedged guardian is bounded AND kills
@@ -13333,16 +13551,25 @@ def _watchdog_regression_self_test():
         ("launch-cancel", 33), ("fd-hygiene-total", 92), ("nested-keep", 108),
         ("fd-census", 48), ("subject-gc", 32), ("guardian-preload", 20),
         ("subject-receipt", 784), ("subject-ack", 814),
-        # subject-orphan: the four production legs keep the pre-fix 1658
-        # timeout sum + 4 * 30 for the acknowledgment-published wait each
-        # launch makes before any leg kills the guardian
-        # (F-OPF-WATCHDOG-ORPHAN-TIMING); the three committed acknowledgment
-        # vectors add their declared waits term by term: the barrier flip
-        # 482 (launch 300 + 30 + 30 + 30, guardian zombie 30, orphan marker
-        # 30, cleanup 30, close 2), the refused write 422 (launch 390, leak
-        # check 30, close 2) and the missing publication 397 (its launch
-        # charges a 5 s marker bound: 365, leak check 30, close 2).
-        ("subject-orphan", 1658 + 4 * 30 + 482 + 422 + 397),
+        # subject-orphan: term by term at each code site. The four
+        # production legs: Leg 1 482 (launch 300 + 30 + 30 + 30 with the
+        # acknowledgment-published wait each launch makes before any leg
+        # kills the guardian, F-OPF-WATCHDOG-ORPHAN-TIMING; guardian zombie
+        # 30, subject exit 30, authoritative reap 30, close 2), Leg 2 452
+        # (launch 390, close 2, subject exit 30, reap 30), Flip A 512
+        # (launch 390, guardian zombie 30, orphan marker 30, close 2,
+        # cleanup 30, reap 30) and Flip B 452 (launch 390, close 2, hygiene
+        # 30, reap 30). The committed vectors: the three cause probes 180
+        # (three 30 s zombie waits, three 30 s reap bounds), the barrier
+        # flip 512 (as Flip A), the refused write 452 (launch 390, leak
+        # check 30, guardian collection 30, close 2), the missing
+        # publication 427 (its launch charges a 5 s marker bound: 365,
+        # leak check 30, reap 30, close 2), the pre-start fault 2 (its
+        # launch fails before any charged wait: close 2) and the
+        # restoration fault 362 (start 300, held acknowledgment 30,
+        # close 2, leak check 30).
+        ("subject-orphan", 482 + 452 + 180 + 512 + 452 + 512 + 452 + 427
+         + 2 + 362),
         # escalation-subject: 884 is the UPPER bound on the leg's declared
         # timeouts, not an exact base (two of its charges are fixture holds
         # charged at what REMAINS of their 300 s hold when start() runs, so
