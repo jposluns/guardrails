@@ -16880,14 +16880,13 @@ class _DeadlineWindow:
     received since it last ran handlers (observed on Linux with Python 3.14.4: a timer expiry and a
     raise_signal both pending ran the handler once). An enclosing window's expiry that falls due during the
     restore is delivered the same way, after the inner window has fully finished. The restore discards nothing
-    where it cannot know that the SIGALRM pending is the window's own expiry: after an arming setitimer that
-    raised (`_unheard` is set only once it has returned), after a cancel whose first run raised (_twice says
-    why), or after a read in _fire that raised; a window's own expiry then pending reaches the caller's
-    handler. Nothing in the hook installs SIG_DFL for SIGALRM: main(), run as the hook process, runs the
-    window under the disposition that process inherited. Under SIG_DFL, the disposition the hook process
-    normally inherits, that delivery kills the hook process by SIGALRM, so it ends without the exit 2 that
-    fails a PreToolUse call closed. An inherited SIG_IGN stays ignored across exec, and under SIG_IGN the
-    pending signal is discarded (not fatal).
+    in these cases: after an arming setitimer that raised (`_unheard` is set only once it has returned), after
+    a cancel whose first run raised (_twice says why), or after a read in _fire that raised; a window's own
+    expiry then pending reaches the caller's handler. Nothing in the hook installs SIG_DFL for SIGALRM:
+    main(), run as the hook process, runs the window under the disposition that process inherited. Under
+    SIG_DFL, the disposition the hook process normally inherits, that delivery kills the hook process by
+    SIGALRM, so it ends without the exit 2 that fails a PreToolUse call closed. An inherited SIG_IGN stays
+    ignored across exec, and under SIG_IGN the pending signal is discarded (not fatal).
 
     An operation of the restore that raises (setitimer, signal.signal, sigpending or raise_signal failing)
     is tried once more inside the same blocked section; the restore then goes on, and the first exception
@@ -16926,12 +16925,12 @@ class _DeadlineWindow:
     residual. It is not the only way a SIGALRM from elsewhere is discarded as the window's expiry; the ways
     that follow are examples, and the list is not exhaustive. A SIGALRM from elsewhere pending together with
     the window's expiry merges with it and is discarded with it (the restore above). While the window is live,
-    or once its exit has begun with the window still armed, Python runs _fire once for all the SIGALRMs
-    received since it last ran handlers, so a SIGALRM from elsewhere and the window's expiry that both arrive,
-    in either order, before the main thread next checks for signals (during a long C call, say) are handled as
-    one, and the one from elsewhere never reaches the caller. And the limits below state two more: after a
-    handler that raises at the entry of _fire has taken that expiry with it, and after another thread has
-    taken it.
+    with _fire installed and the main thread able to run handlers, Python runs _fire once for all the
+    SIGALRMs received since it last ran handlers, so a SIGALRM from elsewhere and the window's expiry that
+    both arrive, in either order, before the main thread next checks for signals (during a long C call, say)
+    are handled as one, and the one from elsewhere never reaches the caller. And the limits below state two
+    more: after a handler that raises at the entry of _fire has taken that expiry with it, and after another
+    thread has taken it.
 
     CPython runs a Python handler only where it checks for signals: at the entry of a function, at the
     back edge of a loop, and inside or on return from a call. So a handler can still run before the take or
