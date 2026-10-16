@@ -235,8 +235,12 @@ INVALID finding; tooling released before that ceiling grades such a store as leg
 disclosed residual of section 9.2. Activated 1.3.0
 tooling MUST register on homes 1 the imported managed leaves, the adoption archive
 `.working/archive/adoption/<run-id>/`, the Move destination `.working/archive/moved/`, and the
-evidence bundles `.working/imported/<kind>/<run-id>/`, all recognized by containment as OPF
-control area, and MUST add the four section 8.3 imported-series checks to the doctor roster.
+evidence bundles `.working/imported/<kind>/<run-id>/`, and MUST add the four section 8.3
+imported-series checks to the doctor roster. Containment recognizes those three evidence areas as
+OPF control area path by path, not as whole areas: it registers each bundle-root inventory, each
+file a bundle inventory claims, and the directories that hold them, and any other path there is an
+unregistered path (section 14.2). Where a bundle's claims cannot be read, containment cannot
+evaluate the areas that bundle may claim into and grades nothing there as unregistered.
 C-EVIDENCE-ENUM MUST NOT run or read anything until homes 2 is activated; on homes 1 the
 section 14.1 completion checks MUST carry the evidence digest verification themselves. The boundary
 below applies only to a store that declares both `homes = 2` and `spec_version = "2.0.0"` once
@@ -2606,15 +2610,17 @@ The gates in this standard are strong where they are strong and say so where the
   guarantee that rests on review and version-control history rather than machine enforcement; machine
   freezing and immutability begin at release cut.
 - On homes 1, under the section 4.2 target contract and only once activated 1.3.0 tooling
-  ships, the adoption and import control areas (`.working/imported/<kind>/<run-id>/`,
-  `.working/archive/adoption/<run-id>/` and `.working/archive/moved/`) are recognized by
-  containment but not re-enumerated by doctor: the completion checks verify their evidence
-  digests when they run, and C-EVIDENCE-ENUM is inactive until homes 2 (section 4.2), so a file
-  added or altered there after completion, a tampered retire preimage no record references
-  included, is outside doctor's coverage until homes 2 activates. This bullet discloses that
-  target contract's residual and claims no shipped tooling behaviour. Version-control history
-  over the tracked store is the control, and activated 1.3.0 tooling's C-IMPORTED-PROVENANCE
-  still re-verifies every preserved original an imported record references.
+  ships, containment registers the adoption and import control areas
+  (`.working/imported/<kind>/<run-id>/`, `.working/archive/adoption/<run-id>/` and
+  `.working/archive/moved/`) path by path from the bundle inventories, so a file added there that
+  no bundle inventory claims is an unregistered path (section 4.2). Containment does not re-verify
+  what an inventory claims: the completion checks verify their evidence digests when they run, and
+  C-EVIDENCE-ENUM is inactive until homes 2 (section 4.2), so a claimed file altered or removed
+  after completion, a tampered retire preimage no record references included, is outside doctor's
+  coverage until homes 2 activates. This bullet discloses that target contract's residual and
+  claims no shipped tooling behaviour. Version-control history over the tracked store is the
+  control, and activated 1.3.0 tooling's C-IMPORTED-PROVENANCE still re-verifies every preserved
+  original an imported record references.
 - Store resolution fails closed on a pointer that does not resolve and on zero or multiple
   manifests at the target; it cannot detect a second store that no pointer names, placed somewhere
   the tooling was never aimed.

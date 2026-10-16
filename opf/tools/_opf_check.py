@@ -2522,7 +2522,12 @@ def classify_containment(manifest_data, machine_rel, imported=False):
     .working/archive/moved) becomes a graded container (`evidence_homes`) whose contents the walk
     registers from the bundle inventories; the default False keeps every current store's
     grading unchanged, so the registration ships inert until activation raises
-    SUPPORTED_SPEC_VERSION to 1.3.0. Returns a ContainmentClassification."""
+    SUPPORTED_SPEC_VERSION to 1.3.0. A known gap, left for a later change: on such a homes-1 store an
+    [unmanaged] declaration under .working/imported/ or .working/archive/ that names, contains and sits
+    inside none of the evidence homes (.working/imported/unknown, .working/archive/loose.md) is valid, and
+    the walk skips what it covers, although spec 4.2 makes those reserved children store-tree control. On
+    homes 2 both roots are control roots, so the same declaration collides there. Returns a
+    ContainmentClassification."""
     mrel = machine_rel
     dp = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
     layout = dp.get("layout") if isinstance(dp, dict) else None
@@ -5937,6 +5942,61 @@ def self_test():
             # silently: the bundle is then one unregistered entry, and no CANNOT-EVALUATE names the failure).
             check("evidence-home-listing-failure-cannot-evaluate", _r_first_listing_fails(
                 _IMPORT_EVIDENCE_HOME, _p_bundle_files()))
+            # A failed listing also leaves ungraded every directory the unlisted bundles may claim into. Each vector
+            # puts a claimed file in each such directory, so leaving one out grades that file as unregistered: the
+            # Move destination after a kind-home failure (red when the kind home's reach omits it), the adoption
+            # archive after the adoption kind-home failure (red when that reach omits it), and both after a failure
+            # listing .working/imported itself (red when its reach omits either).
+            check("evidence-home-listing-failure-leaves-move-destination-ungraded", _r_first_listing_fails(
+                _IMPORT_EVIDENCE_HOME, _p_bundle_files({_p_src: _p_text, _r_moved: "x\n"})))
+            _r_adopt_files = _r_kind_files("adoption", _r_adopt, {_r_arch: "old\n"})
+            check("adoption-home-listing-failure-leaves-adoption-archive-ungraded", _r_first_listing_fails(
+                _rel(_opf_store.IMPORTED_REL, "adoption"), _r_adopt_files))
+            _r_root_w = _p_bundle_files({_p_src: _p_text, _r_moved: "x\n"})
+            _r_root_w.update(_r_adopt_files)
+            check("imported-root-listing-failure-leaves-evidence-reach-ungraded", _r_first_listing_fails(
+                _opf_store.IMPORTED_REL, _r_root_w))
+            # A phase inventory that vanishes between the bundle listing and its read leaves the bundle's claims
+            # unknown: a C-CONTAINMENT CANNOT-EVALUATE naming it, and the bundle, whose receipt only that inventory
+            # listed, is not graded (red when the vanished inventory is passed over: the bundle then registers from
+            # inventory.toml alone, its receipt is an unregistered finding, and no CANNOT-EVALUATE names the loss).
+            # The bundle's first listing removes the inventory once it is listed (_list_contained patched, restored
+            # in finally).
+            _r_vanished = []
+
+            def _r_vanishing(root_fd, reldir):
+                listing = _r_prev_lc(root_fd, reldir)
+                if reldir == _p_bundle and not _r_vanished:
+                    _r_vanished.append(reldir)
+                    os.unlink(_r_phase_inv, dir_fd=root_fd)
+                return listing
+
+            try:
+                _p_g["_list_contained"] = _r_vanishing
+                _r_va = run(_r_machine(), working=_r_phase_files(_r_phase_doc((_r_receipt, "schema = 1\n"))))
+            finally:
+                _p_g["_list_contained"] = _r_prev_lc
+            check("evidence-bundle-phase-inventory-vanished-cannot-evaluate",
+                  _r_va is not None and _r_vanished == [_p_bundle] and not _r_va.findings
+                  and len(_r_va.cannot_evaluate) == 2
+                  and "C-CONTAINMENT: listed inventory {!r} vanished".format(_r_phase_inv)
+                  in _i3_msgs(_r_va, "C-CONTAINMENT"))
+            # A legacy-format ingest inventory (opf.ingest.evidence-inventory/v1) on homes 1 is refused without
+            # migration or rewrite: a C-CONTAINMENT CANNOT-EVALUATE naming it, and neither its bundle nor the Move
+            # destination it claims into is graded (red when the legacy inventory is read as absent: the bundle and
+            # the moved file are then unregistered findings).
+            _r_lg_run = _r_runs["ingest"]
+            _r_lg_inv = _opf_store.evidence_inventory("ingest", _r_lg_run)
+            _r_lg_rows = {_opf_store.evidence_run("ingest", _r_lg_run) + "/payload/notes.md": "n\n", _r_moved: "x\n"}
+            _r_lg_w = {_p_w(p): t for p, t in _r_lg_rows.items()}
+            _r_lg_w[_p_w(_r_lg_inv)] = dict(_r_phase_doc(*sorted(_r_lg_rows.items())),
+                                             format="opf.ingest.evidence-inventory/v1")
+            _r_lg = run(_r_machine(), working=_r_lg_w)
+            check("evidence-bundle-legacy-ingest-inventory-cannot-evaluate",
+                  _r_lg is not None and not _r_lg.findings and len(_r_lg.cannot_evaluate) == 2
+                  and "C-CONTAINMENT: malformed ingest bundle inventory {!r}: legacy-ingest-inventory: old-format "
+                      "ingest inventory is unsupported; refused without migration or rewrite".format(_r_lg_inv)
+                  in _i3_msgs(_r_lg, "C-CONTAINMENT"))
             # A path that two bundles claim is claimed twice (spec 4.2): a C-CONTAINMENT CANNOT-EVALUATE naming
             # both bundles, and neither the later bundle nor the Move destination is graded (red when each bundle
             # keeps its own claim map: both then register, and only the tripwire is left).
@@ -6012,6 +6072,38 @@ def self_test():
         check("evidence-homes-unmanaged-declaration-collides-when-active",
               len(_r_eh_on.colliding) == len(_r_eh_paths) and _r_eh_on.valid_unmanaged == []
               and _r_eh_off.colliding == [] and _r_eh_off.valid_unmanaged == _r_eh_paths)
+        # The write guard refuses those declarations too, through the flag it derives itself
+        # (imported_series_declared): on a homes-1 store that declares the imported series under supporting
+        # tooling, plan_write_scope refuses an [unmanaged] declaration inside another kind home, inside the Move
+        # destination, or naming an adoption archive run, each with exactly its collision, and plans the same
+        # manifest at the shipped support constant (red when the guard omits classification.colliding, or
+        # classifies without the flag).
+        import _opf_write_guard
+        _r_wg_paths = (".working/imported/ingest/x", ".working/archive/moved/sub",
+                       ".working/archive/adoption/adopt-20260601T000000Z-0123456789abcdef")
+
+        def _r_wg_plan(path):
+            m = base_manifest()
+            m["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
+            m["unmanaged"] = dict(paths=[path])
+            try:
+                return _opf_write_guard.plan_write_scope(".working/toml", m, (".working/toml/manifest.toml",),
+                                                         "upgrade")
+            except _opf_write_guard.WriteGuardError as exc:
+                return str(exc)
+
+        _r_wg_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
+        try:
+            _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
+            _r_wg_on = [_r_wg_plan(p) for p in _r_wg_paths]
+        finally:
+            _opf_store.SUPPORTED_SPEC_VERSION = _r_wg_prev_ssv
+        _r_wg_off = [_r_wg_plan(p) for p in _r_wg_paths]
+        check("evidence-homes-unmanaged-declaration-refused-by-write-guard",
+              _r_wg_on == ["cannot plan upgrade writes: C-CONTAINMENT: unmanaged path {!r} collides with a managed "
+                           "store path (an unmanaged declaration cannot name or contain a managed file; spec "
+                           "14.2)".format(p) for p in _r_wg_paths]
+              and all(isinstance(s, dict) and ".working/toml/manifest.toml" in s["store"] for s in _r_wg_off))
         # The registration is the homes-1 one: generation 1 registers every evidence home, and generation 2, whose
         # evidence roots C-EVIDENCE-ENUM reconciles, registers none (red when the generation bound admits 2).
         _r_h2 = base_manifest()
