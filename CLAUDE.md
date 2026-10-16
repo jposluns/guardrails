@@ -64,7 +64,9 @@ leak-denylist check, an en/em dash check, an internal-link check, a site-integri
 changelog, rules, agents, and CLAUDE.md drift checks (generated files must match their sources), a
 version format and single-source check, a rule-placement check, a standards-mappings check, an
 adopter-conformance suite, an enforceability-ledger drift gate with a bidirectional roster-reconciliation check, and a standards-currency self-test. `tools/run_all_checks.sh` is the local mirror. Read CI status with `tools/ci-status.sh` (which
-reads `actions/runs`, needing only Actions: Read), never `gh pr checks` (a fine-grained token cannot read
+reads `actions/runs`, needing Actions: Read; under `--wait` it also reads pull requests: `pulls`, for
+which a private repository's token also needs Pull requests: Read, and `commits/<sha>/pulls`, expected
+to need the same (not verified live); see the script's header), never `gh pr checks` (a fine-grained token cannot read
 the Checks API) and never `commits/<sha>/status` (which always reads pending). The gate roster grows
 toward the full pack roster (portability, dogfood and adapter parity, version monotonicity).
 
