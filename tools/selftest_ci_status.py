@@ -1645,18 +1645,20 @@ def _run_checks():
         check("ci/repo-override-mismatch-not-echoed", not_echoed, [(2, [], True, False, False, False)] * 3)
         fixture.set_remote("origin", FIXTURE_ORIGIN)
 
-        # THE PULL-REQUEST PROBE: under --wait, a head with no open pull request, and none with this head
-        # merged into the base, is refused (exit 1, no runs read) at the last of the probe's 12 reads,
-        # naming the cause, however green its runs read: no open pull request at all, or only one whose
-        # head is another commit. The refusal claims only that no new pull_request run will start while
-        # that holds, never that an earlier run cannot finish.
+        # THE PULL-REQUEST PROBE: under --wait, a head with no open pull request, whose associated pull
+        # requests show none with this head merged into the base, is refused (exit 1, no runs read) at
+        # the last of the probe's 12 reads, naming the cause, however green its runs read: no open pull
+        # request at all, or only one whose head is another commit. The refusal claims only what the
+        # associated pull requests showed, and only that no new pull_request run will start while that
+        # holds, never that an earlier run cannot finish.
         green_polls = [[page([success_a])]]
         no_pr = []
         for probes in ([probe_read()], [probe_read(pull(2, "e" * 40))]):
             rc, output, calls = fixture.invoke(green_polls, wait=True, probes=probes)
             no_pr.append((rc, calls, fixture.probe_reads,
-                          "no open pull request has {} as its head now, and none with this head was "
-                          "merged into main".format(head_sha) in output,
+                          "no open pull request has {} as its head now, and the pull requests associated "
+                          "with {} show none with this head merged into main".format(head_sha, head_sha)
+                          in output,
                           "no new pull_request run will start for it while that holds; a run that "
                           "started earlier may still finish" in output))
         check("ci/wait-pr-probe-no-open-pull-request", no_pr, [(1, 0, 12, True, True)] * 2)
@@ -1670,10 +1672,10 @@ def _run_checks():
                                    path=quality_path)
         based = []
         rc, output, calls = fixture.invoke(green_polls, wait=True, probes=[probe_read(into_dev)])
-        based.append((rc, calls, "no open pull request for {} targets main now (#7 into dev), and none "
-                      "with this head was merged into main, so no new pull_request run into main will "
-                      "start for it while that holds; a run that started earlier may still "
-                      "finish".format(head_sha) in output))
+        based.append((rc, calls, "no open pull request for {} targets main now (#7 into dev), and the "
+                      "pull requests associated with {} show none with this head merged into main, so "
+                      "no new pull_request run into main will start for it while that holds; a run that "
+                      "started earlier may still finish".format(head_sha, head_sha) in output))
         rc, output, calls = fixture.invoke([[page([dev_quality])]], wait=True,
                                            probes=[probe_read(into_dev)],
                                            extra_args=("--require-base", "dev"))
@@ -1981,8 +1983,8 @@ def _run_checks():
                                         "900")):
             rc, output, calls = fixture.invoke(polls, wait=True, timeout=timeout, probes=probes)
             merged.append((rc, calls, fixture.probe_reads,
-                           "pull request #21 with {} as its head was merged into main".format(head_sha)
-                           in output,
+                           "the pull requests associated with {} show pull request #21 with this head "
+                           "merged into main".format(head_sha) in output,
                            "refusing to wait" in output,
                            sum(argv == associated_argv for argv in fixture.gh_argv)))
         check("ci/wait-pr-probe-merged-into-base", merged,
@@ -2001,9 +2003,10 @@ def _run_checks():
                 green_polls, wait=True,
                 probes=[probe_read(pull(22, head_sha))] * 3 + [probe_read(associated=[record])])
             unmerged.append((rc, calls, fixture.probe_reads,
-                             "no open pull request has {} as its head now, and none with this head was "
-                             "merged into main".format(head_sha) in output,
-                             "as its head was merged into" in output))
+                             "no open pull request has {} as its head now, and the pull requests "
+                             "associated with {} show none with this head merged into "
+                             "main".format(head_sha, head_sha) in output,
+                             "with this head merged into main; the pull-request probe stops" in output))
         check("ci/wait-pr-probe-closed-unmerged", unmerged, [(1, 3, 15, True, False)] * 4)
 
         # The associated read's records are checked like the listing's: one clause each of the merge
@@ -2062,15 +2065,16 @@ def _run_checks():
         conflicted_sibling = pull(28, head_sha, mergeable=False)
         unknown_sibling = pull(29, head_sha, mergeable=None)
         merged_sibling = closed_pull(21, head_sha)
-        merged_note = "with {} as its head was merged into main".format(head_sha)
+        merged_note = "with this head merged into main; the pull-request probe stops"
+        shown = "the pull requests associated with {} show pull request ".format(head_sha)
         beside = []
         for probe, marker in (
                 (probe_read(pull(27, head_sha), records={"27": stale},
-                            associated=[closed_pull(27, head_sha)]), "pull request #27 " + merged_note),
+                            associated=[closed_pull(27, head_sha)]), shown + "#27 " + merged_note),
                 (probe_read(conflicted_sibling, associated=[merged_sibling]),
-                 "pull request #21 " + merged_note),
+                 shown + "#21 " + merged_note),
                 (probe_read(unknown_sibling, associated=[merged_sibling]),
-                 "pull request #21 " + merged_note),
+                 shown + "#21 " + merged_note),
                 (probe_read(pull(27, head_sha), records={"27": stale},
                             associated=[closed_pull(27, head_sha, merged=False)]),
                  "cannot evaluate: the open pull request into main for this head changed between the "
@@ -2098,17 +2102,20 @@ def _run_checks():
         # runs). Text ("not-a-timestamp", "x"), a date without a time, an offset other than Z (+00:00
         # and +02:00; GitHub's REST documentation states it writes every timestamp in UTC with Z, not
         # verified live), fractional seconds, a trailing newline, and a calendar time that does not exist
-        # (February 29 of 2026, an hour of 24); and "not-a-timestamp" beside a CONFLICTING #28, where
-        # it would also have let the runs decide. Controls, with a valid timestamp: 2026-10-15T12:00:00Z
-        # and the leap day 2024-02-29T23:59:59Z each let the runs decide, and the note names only the
-        # merged pull request, with no claim about others open at this head (here the CONFLICTING #28).
+        # (February 29 of 2026, an hour of 24), each refused by the read back through fromdate and
+        # todate; a year of one digit (1-01-01T00:00:00Z, which todate writes back unchanged), refused
+        # by the form alone; and "not-a-timestamp" beside a CONFLICTING #28, where it would also have
+        # let the runs decide. Controls, with a valid timestamp: 2026-10-15T12:00:00Z and the leap day
+        # 2024-02-29T23:59:59Z each let the runs decide, and the note names only the merged pull
+        # request, with no claim about others open at this head (here the CONFLICTING #28).
         merged_at_cases = []
-        merged_only = ("pull request #21 with {} as its head was merged into main; the pull-request "
-                       "probe stops for the rest of this wait".format(head_sha))
+        merged_only = ("the pull requests associated with {} show pull request #21 with this head merged "
+                       "into main; the pull-request probe stops for the rest of this wait".format(head_sha))
         for merged_at, listed in (("not-a-timestamp", ()), ("x", ()), ("2026-10-15", ()),
                                   ("2026-10-15T12:00:00+00:00", ()), ("2026-10-15T14:00:00+02:00", ()),
                                   ("2026-10-15T12:00:00.000Z", ()), ("2026-10-15T12:00:00Z\n", ()),
                                   ("2026-02-29T12:00:00Z", ()), ("2026-10-15T24:00:00Z", ()),
+                                  ("1-01-01T00:00:00Z", ()),
                                   ("not-a-timestamp", (pull(28, head_sha, mergeable=False),)),
                                   ("2026-10-15T12:00:00Z", ()), ("2024-02-29T23:59:59Z", ()),
                                   ("2026-10-15T12:00:00Z", (pull(28, head_sha, mergeable=False),))):
@@ -2118,7 +2125,7 @@ def _run_checks():
             merged_at_cases.append((rc, calls, fixture.probe_reads, associated_malformed in output,
                                     merged_only in output))
         check("ci/wait-pr-probe-merged-at-timestamp", merged_at_cases,
-              [(2, 0, 1, True, False)] * 10 + [(0, 5, 1, False, True)] * 3)
+              [(2, 0, 1, True, False)] * 11 + [(0, 5, 1, False, True)] * 3)
 
     # Round 7: main() must print every collected failure and map the exit code by the module docstring's
     # rule on every path. Each case runs a nested main() on seeded state and restores the real state.

@@ -28,8 +28,9 @@
 #   tools/ci-status.sh                              # current HEAD, report once
 #   tools/ci-status.sh <sha>                        # a given commit, report once
 #   tools/ci-status.sh <sha> --wait                 # poll until terminal, bounded and fail-loud,
-#                                                   # refusing a head that, with none merged into
-#                                                   # the base, has no open pull request into it now
+#                                                   # refusing a head that, with no merge into the
+#                                                   # base shown in its associated pull requests,
+#                                                   # has no open pull request into it now
 #                                                   # or only CONFLICTING ones (THE PULL-REQUEST PROBE)
 #   tools/ci-status.sh <sha> --require-base main    # additionally trust only pull_request runs
 #                                                   # recorded against base main, and require a
@@ -42,10 +43,11 @@
 # Exit codes: 0 success, 1 failed / timed out / not-yet-terminal on a one-shot check, a run that
 # does not satisfy --require-base, or no conforming completed successful run of the required
 # workflow file under --require-base (report-once refuses at once; --wait refuses after its
-# settle window), a --wait whose head, with none merged into the base, has no open pull request
-# (still at the last of the probe's reads), only open pull requests into another base, or only open
-# pull requests into the base that GitHub reports CONFLICTING (see THE PULL-REQUEST PROBE below; a
-# head merged into the base is decided by its runs alone), 2 no run found, API error, a malformed run
+# settle window), a --wait whose head, with no merge into the base shown in its associated pull
+# requests, has no open pull request (still at the last of the probe's reads), only open pull
+# requests into another base, or only open pull requests into the base that GitHub reports
+# CONFLICTING (see THE PULL-REQUEST PROBE below; a head whose associated pull requests show a merge
+# into the base is decided by its runs alone), 2 no run found, API error, a malformed run
 # record (in one-shot and --wait mode alike), a missing, unusable or repeated --require-base or
 # --require-workflow value, the repository cannot be determined (see THE REPOSITORY IS THE
 # CHECKOUT'S OWN below), or a --wait whose pull-request probe is refused the pull requests, reads a
@@ -666,9 +668,9 @@ report() {
 # after a merge can still show the merged pull request open), the probe also reads the pull requests
 # GitHub associates with this commit (repos/OWNER/REPO/commits/SHA/pulls, paginated). One that is
 # closed with a merge time (.merged_at, a timestamp of the form given under PERMANENT below), whose
-# head SHA is this commit and whose base is PR_BASE, was
-# merged into PR_BASE with this head (auto-merge can do that as soon as the checks pass, within the
-# settle window), and the head is neither refused nor re-read: the probe says so, stops for the rest
+# head SHA is this commit and whose base is PR_BASE, is read as a merge into PR_BASE with this head
+# (auto-merge can merge one as soon as the checks pass, within the settle window), and the head is
+# neither refused nor re-read: the probe says what that read showed, stops for the rest
 # of the wait (a merge is final), and the runs decide as for any other wait, a green verdict (exit 0)
 # only when they settle all successful. A pull request at this head closed without that merge, or
 # merged into another base, and a merge that read does not show, keep the refusal or the re-read the
@@ -706,7 +708,8 @@ report() {
 # read. Every listed, associated and read record must carry a positive integer number, a string
 # state, a head SHA string and a nonempty base branch string; each single read a .mergeable of true,
 # false or null; and each associated record a .merged_at of null or a merge time as GitHub writes
-# one, an ISO 8601 UTC timestamp YYYY-MM-DDTHH:MM:SSZ that is a real calendar time. GitHub's REST
+# one, an ISO 8601 UTC timestamp of the form YYYY-MM-DDTHH:MM:SSZ that reads back unchanged through
+# jq's fromdate and todate (so a year of fewer than four digits is refused too). GitHub's REST
 # documentation states that it returns every timestamp in UTC in that form (not verified live), so
 # another string (no time, fractional seconds, an offset other than Z, even +00:00, or any other
 # text) is a malformed associated record, never a merge. Each single
@@ -768,8 +771,10 @@ def malformed_pull:
 def malformed_mergeable:
   (has("mergeable") | not)
   or ((.mergeable != null) and ((.mergeable | type) != "boolean"));
-# A merge time as GitHub writes one: YYYY-MM-DDTHH:MM:SSZ, a real UTC calendar time (a date such as
-# February 30 or an hour of 24, which jq would normalise to another time, does not read back the same).
+# A merge time as GitHub writes one: the form YYYY-MM-DDTHH:MM:SSZ, and a value that reads back
+# unchanged through the jq builtins fromdate and todate (2026-02-29 or an hour of 24 does not). Each
+# clause refuses a value the other accepts: the form refuses 1-01-01T00:00:00Z, the way todate writes
+# year 1, which reads back unchanged; the read back refuses a date or hour that does not exist.
 def merge_time:
   (type == "string")
   and test("\\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\\z")
@@ -948,15 +953,15 @@ pr_probe() {
         mergeable) return 0 ;;
         merged)
           PR_PROBE_MERGED=1
-          echo "NOTE: pull request ${detail} with ${SHA} as its head was merged into ${PR_BASE}; the pull-request probe stops for the rest of this wait, and the verdict rests on the runs alone, as they stand (the merge is not a pass)."
+          echo "NOTE: the pull requests associated with ${SHA} show pull request ${detail} with this head merged into ${PR_BASE}; the pull-request probe stops for the rest of this wait, and the verdict rests on the runs alone, as they stand (the merge is not a pass)."
           return 0
           ;;
         none)
-          cause="no open pull request has ${SHA} as its head, and none with this head was merged into ${PR_BASE} (a listing read just after a push can still show the old head)"
-          refusal="RESULT: refusing to wait: no open pull request has ${SHA} as its head now, and none with this head was merged into ${PR_BASE} (closed without that merge, never opened, or its branch moved on), still after ${PR_PROBE_READS} reads ${PR_PROBE_RETRY_SECONDS}s apart, so no new pull_request run will start for it while that holds; a run that started earlier may still finish, but this head cannot merge through a pull request as it stands."
+          cause="no open pull request has ${SHA} as its head, and the pull requests associated with ${SHA} show none with this head merged into ${PR_BASE} (a listing read just after a push can still show the old head)"
+          refusal="RESULT: refusing to wait: no open pull request has ${SHA} as its head now, and the pull requests associated with ${SHA} show none with this head merged into ${PR_BASE} (one may have closed, never opened, or moved to another head), still after ${PR_PROBE_READS} reads ${PR_PROBE_RETRY_SECONDS}s apart, so no new pull_request run will start for it while that holds; a run that started earlier may still finish, but this head cannot merge through a pull request as it stands."
           ;;
         base)
-          echo "RESULT: refusing to wait: no open pull request for ${SHA} targets ${PR_BASE} now (${detail}), and none with this head was merged into ${PR_BASE}, so no new pull_request run into ${PR_BASE} will start for it while that holds; a run that started earlier may still finish, but this head cannot merge into ${PR_BASE} through a pull request as it stands."
+          echo "RESULT: refusing to wait: no open pull request for ${SHA} targets ${PR_BASE} now (${detail}), and the pull requests associated with ${SHA} show none with this head merged into ${PR_BASE}, so no new pull_request run into ${PR_BASE} will start for it while that holds; a run that started earlier may still finish, but this head cannot merge into ${PR_BASE} through a pull request as it stands."
           exit 1
           ;;
         conflicting)
@@ -1049,7 +1054,7 @@ while :; do
     printf '%s  no workflow run registered for this commit yet\n' "$(date -u +%H:%M:%SZ)"
     [ "$WAIT" != "--wait" ] && exit 2
     if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-      echo "RESULT: TIMEOUT; no workflow run ever appeared for ${SHA}."
+      echo "RESULT: TIMEOUT; the last read before the deadline found no workflow run for ${SHA}."
       echo "  Check that a workflow is triggered by this event and branch."
       exit 1
     fi
