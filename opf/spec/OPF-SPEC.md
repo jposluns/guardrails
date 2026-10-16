@@ -2619,8 +2619,11 @@ The gates in this standard are strong where they are strong and say so where the
   after completion, a tampered retire preimage no record references included, is outside doctor's
   coverage until homes 2 activates. This bullet discloses that target contract's residual and
   claims no shipped tooling behaviour. Version-control history over the tracked store is the
-  control, and activated 1.3.0 tooling's C-IMPORTED-PROVENANCE still re-verifies every preserved
-  original an imported record references.
+  control. Imported-record provenance is not graded on homes 1. For a homes-1 store that declares
+  the imported series, activated 1.3.0 tooling's C-IMPORTED-PROVENANCE reports cannot-evaluate, so
+  it gives no assurance about the preserved originals that imported records reference until homes 2
+  activates for that store or homes-1 grading is added. Whether homes 1 is graded remains an open
+  question.
 - Store resolution fails closed on a pointer that does not resolve and on zero or multiple
   manifests at the target; it cannot detect a second store that no pointer names, placed somewhere
   the tooling was never aimed.

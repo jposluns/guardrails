@@ -2523,11 +2523,14 @@ def classify_containment(manifest_data, machine_rel, imported=False):
     registers from the bundle inventories; the default False keeps every current store's
     grading unchanged, so the registration ships inert until activation raises
     SUPPORTED_SPEC_VERSION to 1.3.0. A known gap, left for a later change: on such a homes-1 store an
-    [unmanaged] declaration under .working/imported/ or .working/archive/ that names, contains and sits
-    inside none of the evidence homes (.working/imported/unknown, .working/archive/loose.md) is valid, and
-    the walk skips what it covers, although spec 4.2 makes those reserved children store-tree control. On
-    homes 2 both roots are control roots, so the same declaration collides there. Returns a
-    ContainmentClassification."""
+    [unmanaged] declaration that equals or lies within .working/staging/ or .working/journals/
+    (.working/staging, .working/journals/record/x), or that lies within .working/imported/ or
+    .working/archive/ and names, contains and sits inside none of the evidence homes
+    (.working/imported/unknown, .working/archive/loose.md), is valid, and the walk skips what it covers,
+    although spec 4.2 makes all four reserved children (archive/, imported/, staging/, journals/)
+    store-tree control and spec 14.2 forbids an [unmanaged] declaration that equals, contains or lies
+    within them. On homes 2 all four are control roots, so each such declaration collides there. Returns
+    a ContainmentClassification."""
     mrel = machine_rel
     dp = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
     layout = dp.get("layout") if isinstance(dp, dict) else None
@@ -3685,7 +3688,8 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # those outside their leaf series included, so a pass covers every row of every readable leaf.
     # A store that declares the imported series under supporting tooling at homes 1 has its leaves and bundles
     # registered by containment, but no imported row is gathered there, so the check cannot evaluate it.
-    # Whether homes 1 is graded is open; until then the check fails closed rather than pass unread records.
+    # Whether homes 1 is graded is open; until then the check fails closed rather than pass unread records,
+    # so it gives no provenance assurance on homes 1, the residual spec 17 discloses.
     if "C-IMPORTED-PROVENANCE" in rep.required:
         rep.ran("C-IMPORTED-PROVENANCE")
         if imported:
@@ -5945,11 +5949,12 @@ def self_test():
             # A failed listing also leaves ungraded every directory the unlisted bundles may claim into. Each vector
             # puts a claimed file in each such directory, so leaving one out grades that file as unregistered: the
             # Move destination after a kind-home failure (red when the kind home's reach omits it), the adoption
-            # archive after the adoption kind-home failure (red when that reach omits it), and both after a failure
-            # listing .working/imported itself (red when its reach omits either).
+            # archive and the Move destination after the adoption kind-home failure (red when that reach omits
+            # either), and both after a failure listing .working/imported itself (red when its reach omits either).
             check("evidence-home-listing-failure-leaves-move-destination-ungraded", _r_first_listing_fails(
                 _IMPORT_EVIDENCE_HOME, _p_bundle_files({_p_src: _p_text, _r_moved: "x\n"})))
-            _r_adopt_files = _r_kind_files("adoption", _r_adopt, {_r_arch: "old\n"})
+            _r_adopt_files = _r_kind_files("adoption", _r_adopt, {
+                _r_arch: "old\n", ".working/archive/moved/adopted/OLD.md": "moved\n"})
             check("adoption-home-listing-failure-leaves-adoption-archive-ungraded", _r_first_listing_fails(
                 _rel(_opf_store.IMPORTED_REL, "adoption"), _r_adopt_files))
             _r_root_w = _p_bundle_files({_p_src: _p_text, _r_moved: "x\n"})
