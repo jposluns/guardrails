@@ -2018,20 +2018,72 @@ def _cmtidn_option(tok, short, long):
     return None, None
 
 
+# The longest name that AI_IDENTITY_RE matches between word boundaries ('anthropic'): a match that a co-author
+# value holds and the shorter value of an earlier trailer that it overlaps does not starts at most this many
+# characters less one before the shorter value's end (_ai_value_match). A name match that ends at or before that
+# end lies in the shorter value, whose end is a word boundary after the name's last letter, so the match that the
+# shorter value lacks ends past it. The gpt alternative has no length bound, but a gpt match whose fixed part
+# (gpt, an optional '-' and a digit or 'o', at most 5 characters) ends at or before that end gives the shorter
+# value a match of its own, which stops at the first character of the tail that is not a word character, or at
+# the shorter value's end after a word character, each a word boundary. Each address alternative holds a name
+# alternative between two characters that are not word characters (@anthropic.com holds anthropic), so it
+# matches only where that name matches too. The self-test (ci-wr-ai-margin) computes these lengths from
+# AI_IDENTITY_RE's own parse and fails when one exceeds this constant, or when a scan with this constant one
+# smaller finds the same values on strings whose AI name the end of an earlier value cuts.
+_AI_NAME_LONGEST = 9
+_WORD_CHAR_RE = re.compile(r"\w")
+
+
+def _ai_value_match(regex, text):
+    """The first match of regex in text whose value (group 1) names an AI identity, as AI_IDENTITY_RE.search
+    finds one in the value read alone, else None: the match that the plain scan, which searches each value
+    whole, finds, with each character of text searched a bounded number of times. regex is CO_AUTHOR_RE or a
+    context of _RAW_IDENTITY_CONTEXTS, whose values start in order and end in order. The other contexts consume
+    their values, so no two overlap and each is searched whole. The co-author regexes read each value, of up to
+    160 characters, in a lookahead, so in a word of repeated trailer names each character lies in up to about 13
+    values. Once a value is found to name no AI identity, a later value that it overlaps and that ends where it
+    ends can hold a match only at its first character, and one that ends past it only there or in a match that
+    ends past that end, which starts at most _AI_NAME_LONGEST - 1 characters before it; so such a value is
+    searched only from there, with the text before that place read for its word boundary. The value read alone
+    starts a word at its first character where the text has a word character before it (a trailer name with no
+    ':' or space after it), so there that character is matched on the value itself. Each character is so
+    searched at most twice (where a later value ends past an earlier one that it overlaps, the earlier one ends
+    160 characters after its start, and the starts are at least 12 characters apart), and the match at a
+    value's first character reads at most 14 characters, except that a gpt name there reads its tail of letters
+    and digits to the end of the run or of the value, as the plain scan does."""
+    reached = 0  # the end of the last value searched
+    for m in regex.finditer(text):
+        start, end = m.span(1)
+        if start >= reached:  # no value searched before overlaps this one, which is searched whole
+            if AI_IDENTITY_RE.search(m.group(1)):
+                return m
+            reached = end
+            continue
+        first = start
+        if _WORD_CHAR_RE.match(text, start - 1):
+            if AI_IDENTITY_RE.match(m.group(1)):
+                return m
+            first = start + 1
+        if end > reached:
+            if AI_IDENTITY_RE.search(text, max(first, reached - _AI_NAME_LONGEST + 1), end):
+                return m
+            reached = end
+    return None
+
+
 def _co_author_ai(tok, judged):
     """A hit label for the first Co-Authored-By trailer in the word tok whose value names an AI identity, else
     None. Every trailer name in the word is read, one inside an earlier trailer's value included
     (CO_AUTHOR_RE), so a word costs time linear in its length, though a word of repeated trailer names reads up
-    to about 13 times as many characters as it holds (each name is at least 12 characters long and has its own
-    value of up to 160). judged maps each word already judged for the command to its result, so a word that a
-    run line repeats from the line it is built from, or that both readings of a line hold, is scanned once."""
+    to about 13 times as many characters as it holds for the values (each name is at least 12 characters long
+    and has its own value of up to 160); the AI identity search of those values reads each character a bounded
+    number of times (_ai_value_match). judged maps each word already judged for the command to its result, so a
+    word that a run line repeats from the line it is built from, or that both readings of a line hold, is
+    scanned once."""
     if tok in judged:
         return judged[tok]
-    hit = None
-    for m in CO_AUTHOR_RE.finditer(tok):
-        if AI_IDENTITY_RE.search(m.group(1)):
-            hit = "co-author trailer {!r}".format(m.group(1).strip()[:80])
-            break
+    m = _ai_value_match(CO_AUTHOR_RE, tok)
+    hit = None if m is None else "co-author trailer {!r}".format(m.group(1).strip()[:80])
     judged[tok] = hit
     return hit
 
@@ -2279,13 +2331,16 @@ _CMTIDN_RUN_BOUNDS = ("git runs a command line that could not be parsed, or comm
 # at a time cost time quadratic in its length (about 53 s and 130 s of CPU time at this length, for a commit message
 # of a trailer name and a run of newlines and for user.name and a run of spaces before a quote that does not close,
 # against about 0.01 s with each run taken whole). CO_AUTHOR_RE also gives each trailer name in a word its own
-# value of up to 160 characters, so a word of repeated trailer names costs several times one pass over it, and
-# each distinct word is scanned once for the command (_co_author_ai): a commit message of repeated trailer names
-# in git rebase -x lines nested seven deep, each ending in a locale quote so that both readings read it, took up
-# to about 0.6 s at this length. A longer command raises ValueError with _CMTIDN_TOO_LONG before any reading
-# starts, and the handler's fallback denies it when it names an AI anywhere and holds a word that can record an
-# identity, or when a raw-string context finds an AI identity in it, in time that grows with its length, so a
-# long enough command outlasts the timeout (_commit_identity_fallback).
+# value of up to 160 characters, so a word of repeated trailer names costs several times one pass over it, though
+# the AI identity search reads only the part of each value past the end of the one before it, less
+# _AI_NAME_LONGEST - 1 characters (_ai_value_match), and each distinct word is scanned once for the command
+# (_co_author_ai): a commit message of repeated trailer names in git rebase -x lines nested seven deep, the
+# innermost ending in a locale quote, took up to about 0.15 s at this length, against 0.41 s with each value
+# searched whole (the highest of three single runs on one host). A longer command raises ValueError with
+# _CMTIDN_TOO_LONG before any reading starts, and the handler's fallback denies it when it names an AI anywhere
+# and holds a word that can record an identity, or when a raw-string context finds an AI identity in it, in time
+# that grows with its length, so a command of about 40 to 48 MiB or longer can outlast the timeout
+# (_commit_identity_fallback).
 _CMTIDN_READ_LIMIT = 128 << 10
 _CMTIDN_TOO_LONG = "the command is longer than the commit-identity check reads within the hook timeout"
 # An AI name as AI_IDENTITY_RE spells it but with no word boundary, so that a name the reader would find in a
@@ -2495,10 +2550,14 @@ def _commit_identity_fallback(command, error):
     naming an AI product, with no trailer, --author value or identity assignment in it, is allowed. This
     judgement has no length bound, so its cost grows with the command's length. The costliest shapes measured
     are commands made of repeated co-author trailer names, since the co-author context reads each name with its
-    own value of up to 160 characters: they took up to about 0.5 s of CPU time at 1,048,576 characters, 9.3 s
-    at 16,777,216 and 13.5 s at 25,165,824, so a command of about 17 to 24 MiB or longer can outlast the
-    10-second hook timeout. The platform contract this file records (the module docstring) does not say that a
-    hook stopped at its timeout refuses the call, so such a command may run with no deny from this check.
+    own value of up to 160 characters, though the AI identity search reads only the part of each value past the
+    end of the one before it, less _AI_NAME_LONGEST - 1 characters (_ai_value_match): the highest of three
+    single runs on one host took about 0.26 s of CPU time at 1,048,576 characters, 4.0 s at 16,777,216 and 6.3 s
+    at 25,165,824 (with each value searched whole, 0.59 s, 8.7 s and 14.0 s on the same host), and 7.3 s at
+    33,554,432, 8.9 s at 41,943,040 and 10.3 s at 50,331,648, so a command of about 40 to 48 MiB or longer can
+    outlast the 10-second hook timeout. The platform contract this file records (the module docstring) does not
+    say that a hook stopped at its timeout refuses the call, so such a command may run with no deny from this
+    check.
     With a run line left unread it first denies when an AI identity appears ANYWHERE in the
     command once every backslash-newline, backslash and quote is removed, since quoting or escaping in the
     unread line can split or build an option name or value that no raw-string context sees (--"auth"=...,
@@ -2538,17 +2597,17 @@ def _commit_identity_fallback(command, error):
                          "AIQT guardrail: denied a git command with a run line left unread (unparseable or past "
                          "the commit-identity bounds) that names an AI identity (rule cmtidn, fail-safe).")
     for regex, label in _RAW_IDENTITY_CONTEXTS:
-        for match in regex.finditer(command):
-            if AI_IDENTITY_RE.search(match.group(1)):
-                hit = "{} {!r}".format(label, match.group(1).strip()[:80])
-                reason = ("AIQT rule cmtidn (commit-identity): the command could not be read in full (a shell "
-                          "parse error such as unbalanced quotes, a command line that git runs that could not be "
-                          "parsed or was nested or repeated past the check's bounds, or a command longer than the "
-                          "check reads within the hook timeout) and it appears to set an AI identity ({}); failing "
-                          "closed. Remove it and commit as the maintainer.".format(hit))
-                return _deny(reason,
-                             "AIQT guardrail: denied a git command the check could not read in full that "
-                             "appears to record an AI commit identity (rule cmtidn, fail-safe).")
+        match = _ai_value_match(regex, command)
+        if match is not None:
+            hit = "{} {!r}".format(label, match.group(1).strip()[:80])
+            reason = ("AIQT rule cmtidn (commit-identity): the command could not be read in full (a shell "
+                      "parse error such as unbalanced quotes, a command line that git runs that could not be "
+                      "parsed or was nested or repeated past the check's bounds, or a command longer than the "
+                      "check reads within the hook timeout) and it appears to set an AI identity ({}); failing "
+                      "closed. Remove it and commit as the maintainer.".format(hit))
+            return _deny(reason,
+                         "AIQT guardrail: denied a git command the check could not read in full that "
+                         "appears to record an AI commit identity (rule cmtidn, fail-safe).")
     return _allow()
 
 

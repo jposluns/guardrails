@@ -11111,8 +11111,14 @@ def _main_isolated(monitor):
         # matched at each 'c' or 'C' of the string; the reader's trailer result is a hit exactly when one of those
         # values is, and it is the earlier reader's hit, from its first match only, whenever that hit names an AI
         # identity. Over every string of up to five of the user.name words, the user.name context finds the same
-        # matches, places and values as the earlier one. The floors keep the check from passing on strings that
-        # hold no such value.
+        # matches, places and values as the earlier one. Over the same strings, and every string of up to four of
+        # the --author and identity variable words below, the faster scan (_ai_value_match), which searches a value
+        # that an earlier one overlaps only from _AI_NAME_LONGEST - 1 characters before the earlier one's end,
+        # returns the match that the plain scan returns: the first match of the regex whose value, searched whole,
+        # names an AI identity. It does so too over strings of two co-author trailers whose first value, of 160
+        # characters, ends d characters into an AI name, address or gpt name in the second value, for every d from
+        # 0 to the word's length plus one, after a space, a '<' or a ':' and right after the second trailer name.
+        # The floors keep the check from passing on strings that hold no such value.
         _ci_contexts = {_ci_label: _ci_regex for _ci_regex, _ci_label in aiqt_hooks._RAW_IDENTITY_CONTEXTS}
         _ci_pairs = ((re.compile(r"co[- ]?authored[- ]?by\s*:?\s*([^\n]{1,160})", re.IGNORECASE),
                       aiqt_hooks.CO_AUTHOR_RE),
@@ -11130,10 +11136,20 @@ def _main_isolated(monitor):
                 level = [text + word for text in level for word in words]
                 yield from level
 
+        def _ci_fast_check(regex, text, bad):
+            """Append to bad when the faster scan returns another match of regex in text than the plain scan, and
+            return the plain scan's match."""
+            plain = next((m for m in regex.finditer(text) if _ci_ai.search(m.group(1))), None)
+            fast = aiqt_hooks._ai_value_match(regex, text)
+            if (plain and (plain.start(), plain.group(1))) != (fast and (fast.start(), fast.group(1))):
+                bad.append(("the faster scan", regex.pattern, text, fast and fast.start(), plain and plain.start()))
+            return plain
+
         _ci_bad = []
-        # the AI-naming values the earlier co-author regexes find, the reader hits the earlier reader missed, and
-        # the user.name matches
-        _ci_counts = [0, 0, 0]
+        # the AI-naming values the earlier co-author regexes find, the reader hits the earlier reader missed, the
+        # user.name matches, the plain scan's matches that the faster scan is compared with, and the straddle
+        # strings whose match is the second trailer, with the word cut by the first value's end
+        _ci_counts = [0, 0, 0, 0, 0]
         for _ci_text in _ci_strings(("co-authored-by", "Co-Authored-By: ", "coauthored by", ":", " ", "\n", "\t",
                                      "\xa0", '"', "'", "Claude", "Co-authored-by:Claude", "x" * 140 + " ", "gpt4",
                                      "_"), 4):
@@ -11150,6 +11166,7 @@ def _main_isolated(monitor):
                     _ci_bad.append((_ci_cur.pattern, _ci_text, _ci_got[:2], _ci_want[:2]))
                 _ci_counts[0] += len(_ci_want)
                 _ci_named.append(_ci_want)
+                _ci_counts[3] += _ci_fast_check(_ci_cur, _ci_text, _ci_bad) is not None
             _ci_hit = aiqt_hooks._co_author_ai(_ci_text, {})
             _ci_first = _ci_pairs[0][0].search(_ci_text)
             if (_ci_hit is not None) != bool(_ci_named[0]):
@@ -11165,11 +11182,111 @@ def _main_isolated(monitor):
             if _ci_got != _ci_want:
                 _ci_bad.append((_ci_user[1].pattern, _ci_text, _ci_got[:2], _ci_want[:2]))
             _ci_counts[2] += len(_ci_want)
-        if _ci_bad or _ci_counts[0] < 10000 or _ci_counts[1] < 100 or _ci_counts[2] < 1000:
+            _ci_counts[3] += _ci_fast_check(_ci_user[1], _ci_text, _ci_bad) is not None
+        for _ci_text in _ci_strings(("--author=", "--au ", "GIT_AUTHOR_NAME=", "Claude", "x", " ", '"', "'", "gpt4",
+                                     "_"), 4):
+            for _ci_regex in (_ci_contexts["--author value"], _ci_contexts["git identity variable"]):
+                _ci_counts[3] += _ci_fast_check(_ci_regex, _ci_text, _ci_bad) is not None
+        # The faster scan's margin, _AI_NAME_LONGEST, computed from AI_IDENTITY_RE's own parse (ci-wr-ai-margin):
+        # the names of its word-bounded group, the fixed part of that group's one alternative of unbounded length
+        # (the gpt one, whose tail is a repeated one-character class before the closing word boundary), and the
+        # addresses, its other alternatives, each of which must hold a name of the group between two characters that
+        # are not word characters, so that it matches only where that name does. The check fails when a name or that
+        # fixed part is longer than _AI_NAME_LONGEST, when an address holds no name so, when the parse has a shape
+        # this check does not know, or when the straddle strings give the faster scan with _AI_NAME_LONGEST one
+        # smaller no difference from the plain scan, so the constant is no larger than the scan needs.
+        _ci_margin = []
+        _ci_names, _ci_fixed, _ci_addresses = [], [], []
+        try:
+            from re import _constants as _ci_sre, _parser as _ci_parser
+        except ImportError:  # the parser is private to the interpreter: a release without it fails the check closed
+            _ci_margin.append("the interpreter's regular expression parser cannot be imported")
+        else:
+            _ci_tree = _ci_parser.parse(aiqt_hooks.AI_IDENTITY_RE.pattern)
+            _ci_bound = (_ci_sre.AT, _ci_sre.AT_BOUNDARY)
+
+            def _ci_alternatives(pattern):
+                """The alternatives of a parsed pattern, itself when it has none."""
+                if len(pattern.data) == 1 and pattern.data[0][0] is _ci_sre.BRANCH:
+                    return pattern.data[0][1][1]
+                return [pattern]
+
+            def _ci_literal(pattern):
+                """The string a parsed pattern of literal characters only matches, else None."""
+                if all(_ci_op is _ci_sre.LITERAL for _ci_op, _ci_av in pattern.data):
+                    return "".join(chr(_ci_av) for _ci_op, _ci_av in pattern.data)
+                return None
+
+            for _ci_alt in _ci_alternatives(_ci_tree):
+                _ci_items = list(_ci_alt.data)
+                if _ci_literal(_ci_alt) is not None:
+                    _ci_addresses.append(_ci_literal(_ci_alt))
+                elif (len(_ci_items) == 3 and _ci_items[0] == _ci_bound == _ci_items[2]
+                      and _ci_items[1][0] is _ci_sre.SUBPATTERN):
+                    for _ci_name in _ci_alternatives(_ci_items[1][1][-1]):
+                        _ci_parts = list(_ci_name.data)
+                        _ci_tail = _ci_parts[-1] if _ci_parts else None
+                        if _ci_literal(_ci_name) is not None:
+                            _ci_names.append(_ci_literal(_ci_name))
+                        elif (_ci_tail[0] is _ci_sre.MAX_REPEAT and _ci_tail[1][1] == _ci_sre.MAXREPEAT
+                              and [_ci_op for _ci_op, _ci_av in _ci_tail[1][2].data] == [_ci_sre.IN]):
+                            _ci_fixed.append(_ci_parser.SubPattern(_ci_tree.state, _ci_parts[:-1]).getwidth()[1])
+                        else:
+                            _ci_margin.append("an alternative of the word-bounded group of unknown shape")
+                else:
+                    _ci_margin.append("an alternative of unknown shape")
+        for _ci_address in _ci_addresses:
+            if not any(re.search(r"\W" + re.escape(_ci_n) + r"\W", _ci_address, re.IGNORECASE) for _ci_n in _ci_names):
+                _ci_margin.append("the address {!r} holds no name between two characters that are not word "
+                                  "characters".format(_ci_address))
+        _ci_longest = max([len(_ci_n) for _ci_n in _ci_names] + _ci_fixed, default=None)
+        if _ci_longest is None or _ci_longest > aiqt_hooks._AI_NAME_LONGEST or len(_ci_fixed) != 1:
+            _ci_margin.append("the longest name or fixed part is {!r} characters long (names {!r}, fixed parts {!r}), "
+                              "against _AI_NAME_LONGEST {}".format(_ci_longest, _ci_names, _ci_fixed,
+                                                                   aiqt_hooks._AI_NAME_LONGEST))
+
+        def _ci_straddles(words):
+            """Two co-author trailers whose first value, of 160 characters, ends d characters into the word w in the
+            second value, for each word w of words and every d from 0 to len(w) + 1: after a space, a '<' or a ':',
+            and right after the second trailer name, where the second value starts with w."""
+            for w in words:
+                for d in range(len(w) + 2):
+                    for sep in (" ", "<", ":"):
+                        yield d, w, ("co-authored-by: yyyy co-authored-by: " + "x" * (139 - d - len(sep)) + sep + w
+                                     + " <a@x>")
+                    yield d, w, "co-authored-by: " + "x" * (145 - d) + " co-authored-by" + w + " <a@x>"
+
+        _ci_words = _ci_names + _ci_addresses + ["gpt4", "gpt-4o", "gpto", "gpt-4.1-mini", "gpt4" + "a" * 20 + "_",
+                                                 "gpt-4" + "0" * 12 + "\xe9"]
+        _ci_co = (aiqt_hooks.CO_AUTHOR_RE, _ci_contexts["co-author trailer"])
+        for _ci_d, _ci_w, _ci_text in _ci_straddles(_ci_words):
+            for _ci_regex in _ci_co:
+                _ci_plain = _ci_fast_check(_ci_regex, _ci_text, _ci_bad)
+                _ci_counts[3] += _ci_plain is not None
+                _ci_counts[4] += _ci_plain is not None and _ci_plain.start() > 0 and 0 < _ci_d < len(_ci_w)
+        _ci_shrunk = []
+        _ci_saved_margin = aiqt_hooks._AI_NAME_LONGEST
+        try:
+            aiqt_hooks._AI_NAME_LONGEST = _ci_saved_margin - 1
+            for _ci_d, _ci_w, _ci_text in _ci_straddles(_ci_words):
+                for _ci_regex in _ci_co:
+                    _ci_fast_check(_ci_regex, _ci_text, _ci_shrunk)
+        finally:
+            aiqt_hooks._AI_NAME_LONGEST = _ci_saved_margin
+        if not _ci_shrunk:
+            _ci_margin.append("with _AI_NAME_LONGEST one smaller the faster scan finds the plain scan's match on every "
+                              "straddle string")
+        if _ci_margin:
+            failures.append("(ci-wr-ai-margin) {}".format("; ".join(_ci_margin)))
+        if (_ci_bad or _ci_counts[0] < 10000 or _ci_counts[1] < 100 or _ci_counts[2] < 1000
+                or _ci_counts[3] < 20000 or _ci_counts[4] < 100):
             failures.append("(ci-wr-regex-equiv) {} differences from the earlier co-author and user.name regexes, "
-                            "first {!r}, over {} AI-naming co-author values, {} reader hits that the earlier reader "
-                            "missed and {} user.name matches (want none, and at least 10000, 100 and 1000)".format(
-                                len(_ci_bad), _ci_bad[:3], _ci_counts[0], _ci_counts[1], _ci_counts[2]))
+                            "or of the faster scan from the plain scan, first {!r}, over {} AI-naming co-author "
+                            "values, {} reader hits that the earlier reader missed, {} user.name matches, {} matches "
+                            "of the plain scan compared and {} straddle strings whose match is the second trailer "
+                            "(want none, and at least 10000, 100, 1000, 20000 and 100)".format(
+                                len(_ci_bad), _ci_bad[:3], _ci_counts[0], _ci_counts[1], _ci_counts[2],
+                                _ci_counts[3], _ci_counts[4]))
         # A command longer than _CMTIDN_READ_LIMIT characters is not read, so no reading of it can outlast the hook
         # timeout: find_ai_authorship raises ValueError with _CMTIDN_TOO_LONG before the tokenizer is called, and
         # the handler's fallback, whose own cost grows with the command's length (_commit_identity_fallback), denies
