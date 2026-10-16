@@ -15,14 +15,20 @@ replaces the isolated main the entry point delegates to with a stand-in, calls t
 in-process with the positional arguments args, and requires os.environ to equal its snapshot from
 before the call exactly and every global binding of the tool's module to be the same object it was
 before the call (so a cached git executable rebound to the lifecycle's wrapper must be put back).
-helpers names helper calls the entry point makes before the lifecycle, each as a module global of
-the tool and an attribute of it (_selftest_exit_report and arm, for instance); each is replaced by a
-recorder, and the entry point must call each exactly once, with the caller's environment unchanged
-at that point. What a replaced helper itself does is outside the probe. The stand-in replaces the
-inner work because the full suite is too long to run twice, and running it again from inside its
-own self-test would recurse; what is under test is the wrapper. The stand-in also records the
-environment it sees and requires the complete fixture scrub to be in effect there and the
-lifecycle's git wrapper in effect.
+helpers names helper calls the entry point makes, each as a module global of the tool and an
+attribute of it (_selftest_exit_report and arm, for instance); each is replaced by a recorder, and
+the entry point must call each exactly once, with the caller's environment unchanged at that call.
+The probe checks the environment at the call, not where the call sits: a call made after the
+lifecycle has exited also sees the caller's environment. What keeps the real entry points' helper
+calls before the lifecycle is the scope allowlist's rule that nothing follows the lifecycle's with
+(_lifecycle_scoped_first in tools/selftest_git_fixture_env.py). What a replaced helper itself does
+is outside the probe. The stand-in replaces the inner work because the full suite is too long to
+run twice, and running it again from inside its own self-test would recurse; what is under test is
+the wrapper. The stand-in records the arguments it receives, which must be exactly args (same
+values and types, in order) with no keywords, so an entry point that passes its isolated main a
+constant in place of a parameter it was given fails whenever the probe passes a different value.
+It also records the environment it sees and requires the complete fixture scrub to be in effect
+there and the lifecycle's git wrapper in effect.
 The scrub values are checked against literals written here, never against git_fixture_env() itself,
 so a wrong value in the shared scrub is not both applied and expected: HOME and XDG_CONFIG_HOME at a
 fixture scratch home the probe creates and installs as the scrub's scratch home, GIT_CONFIG_GLOBAL
@@ -32,11 +38,13 @@ GIT_* variable. The git wrapper must be in effect as fixture_git_lifecycle() set
 fresh directory in front of the caller's PATH and git resolves to the wrapper there. The wrapper is
 then run, not read: the caller's git is a stand-in the probe writes in its own scratch directory at
 the front of the caller's PATH, so the wrapper's exec line points at it. Before each run the probe
-writes a fresh random nonce into a channel directory that only the probe and the stand-in use, and
-removes the records file there; the stand-in reads the nonce and appends one record, carrying it,
-the arguments and the stand-in's whole GIT_* environment, to that records file, and prints
-nothing. The probe requires exactly one record, carrying that run's nonce, so a wrapper that prints
-or plants a record without running the stand-in fails. The stand-in main runs the wrapper with
+writes a fresh random nonce into a channel directory it creates, and removes the records file
+there; the stand-in reads the nonce and appends one record, carrying it, the arguments and the
+stand-in's whole GIT_* environment, to that records file, and prints nothing. The probe requires
+exactly one record, and that record must carry this run's nonce, so a wrapper that only prints a
+record, or plants one that does not carry this run's nonce, fails. The nonce shows only that the
+record carries a value written for this run; it does not show that the stand-in wrote the record
+(see the residual below). The stand-in main runs the wrapper with
 fixed arguments under its own environment stripped of every GIT_* variable (as a production helper
 that scrubs GIT_* leaves it) and with GIT_CONFIG_NOSYSTEM=0 and GIT_CONFIG_SYSTEM at a decoy path,
 and requires the -c pins gc.auto=0, gc.autoDetach=false and maintenance.auto=false, in that order,
@@ -53,7 +61,16 @@ call as inside the first, so a lifecycle that isolates only its first use fails.
 wrapper_mutant_failures() checks that wrapper check itself: in a child with the same caller
 environment and stand-in git, it enters the lifecycle, requires the lifecycle's own wrapper to pass,
 and requires each wrapper _WRAPPER_MUTANTS names, made from the lifecycle's wrapper text by one
-edit, to be refused for the reason the table gives.
+edit, to be refused for the reason the table gives and nothing else. A mutant given a second,
+unrelated defect (_SECOND_DEFECT) must not count as refused for its own reason.
+
+Residual: the nonce is not hidden from the wrapper under test. The probe, the stand-in and the
+wrapper run as the same user, that user can read the channel directory, and the stand-in's script
+names the channel in clear, so a wrapper written to read the nonce and append a matching record
+itself passes the wrapper check without running the caller's git. A wrapper that runs the caller's
+git correctly and also launches some other executable passes too, because only runs of the
+stand-in leave records. Both are outside the probe, which refuses the wrapper defects
+_WRAPPER_MUTANTS names, not a wrapper written to defeat it.
 
 Residual: the probe installs its own scratch home (_git_fixture_env._SCRATCH_HOME), so the branch of
 _scratch_home() that creates that directory and registers its removal is not exercised here.
@@ -107,7 +124,8 @@ _NONCE_FILE = "nonce"
 _RECORDS_FILE = "records"
 _NO_RECORD = "the git wrapper did not run the caller's git exactly once (rc=0, 0 records)"
 # The wrappers the wrapper check must refuse, each made from the lifecycle's wrapper by one edit
-# (_wrapper_mutants), with the start of the problem it must be refused for.
+# (_wrapper_mutants), with the start of the problem it must be refused for: a mutant counts as
+# refused only when the wrapper check reports exactly one problem and that problem starts with it.
 _WRAPPER_MUTANTS = (
     # Prints a well-formed stand-in record on stdout and exits 0 without running the caller's git.
     ("stdout-record", _NO_RECORD),
@@ -123,18 +141,26 @@ _WRAPPER_MUTANTS = (
     # Sets gc.auto=1 after the pins, ahead of the arguments it was given.
     ("pin-override", "the git wrapper ran the caller's git with arguments"),
 )
+# The git-dir mutant given a second, unrelated defect: it also makes pin-override's edit. The
+# wrapper check reports both problems, and the mutant check must not count this wrapper as the
+# git-dir mutant refused for its own reason.
+_SECOND_DEFECT = "git-dir-and-pin-override"
 
 
 def entry_restore_failures(tool, entry, inner, args=(), helpers=(), timeout=300):
     """Run the restore probe for tool's entry point (a function name) whose isolated main is inner
     (the module-level function name the entry point calls inside the lifecycle), calling the entry
     point with the positional arguments args (JSON values) and with each (module global, attribute)
-    pair in helpers replaced by a recorder the entry point must call once before the lifecycle.
-    Returns a list of failure strings, empty when the caller's environment and the tool's module
-    globals came back exactly, both after a return and after the stand-in's exception came
-    through, and inside each of the two calls the scrub was in effect and the git wrapper ran the
-    caller's git with the pins. A child that cannot be launched, times out, or reports no result
-    is a failure, never a silent pass."""
+    pair in helpers replaced by a recorder the entry point must call exactly once, with the
+    caller's environment unchanged at that call. Only the environment at the call is checked, not
+    whether the call comes before the lifecycle: a call after the lifecycle has exited would pass
+    too, and the scope allowlist's rule that nothing follows the lifecycle's with is what keeps the
+    real entry points' calls before it. Returns a list of failure strings, empty when the caller's
+    environment and the tool's module globals came back exactly, both after a return and after the
+    stand-in's exception came through, and inside each of the two calls the isolated main received
+    exactly args and no keywords, the scrub was in effect and the git wrapper ran the caller's git
+    with the pins. A child that cannot be launched, times out, or reports no result is a failure,
+    never a silent pass."""
     label = "{} {}()".format(os.path.basename(str(tool)), entry)
     spec = json.dumps({"args": list(args), "helpers": [list(helper) for helper in helpers]})
     argv = [sys.executable, "-I", "-B", "-c", _CHILD_BOOTSTRAP,
@@ -162,12 +188,14 @@ def entry_restore_failures(tool, entry, inner, args=(), helpers=(), timeout=300)
 
 def wrapper_mutant_failures(timeout=120):
     """Check the probe's wrapper check against the lifecycle's own wrapper and the mutants of it
-    _WRAPPER_MUTANTS names, in a child. Returns a dict from "lifecycle" and each mutant name to a
-    list of failure strings: empty for "lifecycle" when the wrapper check found nothing wrong with
-    the lifecycle's wrapper, and empty for a mutant when the wrapper check refused it with a
-    problem starting with the table's reason. A child that cannot be launched, times out, or
-    reports no well-formed result gives every name that failure, never a silent pass."""
-    names = ["lifecycle"] + [name for name, _reason in _WRAPPER_MUTANTS]
+    _WRAPPER_MUTANTS names, in a child. Returns a dict from each name _mutant_result_names gives to
+    a list of failure strings: empty for "lifecycle" when the wrapper check found nothing wrong
+    with the lifecycle's wrapper, empty for a mutant when the wrapper check refused it with exactly
+    one problem, starting with the table's reason, and empty for _SECOND_DEFECT when the wrapper
+    check reported both of its defects and the mutant check did not count it as the git-dir mutant
+    refused for its own reason. A child that cannot be launched, times out, or reports no
+    well-formed result gives every name that failure, never a silent pass."""
+    names = _mutant_result_names()
     argv = [sys.executable, "-I", "-B", "-c", _CHILD_BOOTSTRAP,
             os.path.dirname(os.path.abspath(__file__)), _MUTANT_MODE]
     try:
@@ -192,6 +220,12 @@ def wrapper_mutant_failures(timeout=120):
             child.returncode, child.stderr.strip()[-600:])
         found = {name: found[name] + [failure] for name in names}
     return found
+
+
+def _mutant_result_names():
+    """The names wrapper_mutant_failures reports on: "lifecycle", each mutant _WRAPPER_MUTANTS
+    names, and _SECOND_DEFECT."""
+    return ["lifecycle"] + [name for name, _reason in _WRAPPER_MUTANTS] + [_SECOND_DEFECT]
 
 
 def _diff(before, after):
@@ -285,9 +319,11 @@ def _run_wrapper(candidate, inside, decoy, channel):
     """Inside the lifecycle: run the git wrapper candidate with _WRAPPER_ARGS under the environment
     inside stripped of every GIT_* variable, with GIT_CONFIG_NOSYSTEM=0 and GIT_CONFIG_SYSTEM=decoy
     added, so only the wrapper itself can supply the system-config pins. A fresh nonce is written
-    to channel and its records file removed first, so a record carrying the nonce can only come
-    from the stand-in git run during this call. Returns the stand-in git's record (a dict), or a
-    string saying why the stand-in git was not shown to run exactly once."""
+    to channel and its records file removed first, so a record that does not carry this call's
+    nonce, or one printed instead of written, is refused. The nonce does not show that the stand-in
+    git wrote the record: the wrapper under test can read the channel too (the module's residual).
+    Returns the one record carrying this call's nonce (a dict), or a string saying why no such
+    single record came back."""
     env = {key: value for key, value in inside.items() if not key.startswith("GIT_")}
     env["GIT_CONFIG_NOSYSTEM"] = "0"
     env["GIT_CONFIG_SYSTEM"] = decoy
@@ -354,15 +390,21 @@ def _wrapper_problems(view, caller, record):
     return problems
 
 
-def _seen_problems(seen, caller, home, fixture_home):
+def _seen_problems(seen, caller, home, fixture_home, args):
     """What the stand-in main saw during one call of the entry point (seen: one entry per call of
     the isolated main) against what the lifecycle must set up for the caller environment caller:
-    one call, the literal scrub pins and nothing else GIT_*, and the git wrapper in effect and
+    one call, made with exactly the probe's arguments args (same values and types, in order) and
+    no keywords, the literal scrub pins and nothing else GIT_*, and the git wrapper in effect and
     working."""
     if len(seen) != 1:
         return ["the entry point called its isolated main {} times, expected 1".format(len(seen))]
-    inside, view, record = seen[0]
+    inside, view, record, (received, keywords) = seen[0]
     problems = []
+    typed = [(type(value), value) for value in received]
+    if typed != [(type(value), value) for value in args] or keywords:
+        problems.append("the entry point called its isolated main with arguments {!r} and keywords "
+                        "{!r}, expected exactly the probe's arguments {!r} and no keywords".format(
+                            received, keywords, list(args)))
     expected = dict((("HOME", fixture_home), ("XDG_CONFIG_HOME", fixture_home)) + _EXPECTED_PINS)
     for key, value in expected.items():
         if inside.get(key) != value:
@@ -377,10 +419,10 @@ def _seen_problems(seen, caller, home, fixture_home):
     return problems + _wrapper_problems(view, caller, record)
 
 
-def _call_problems(caller, bound, module, recorded, seen, home, fixture_home):
-    """What one call of the entry point left wrong: os.environ after it against caller, the module's
-    namespace against bound, each helper's recorded calls (exactly one, made with the caller's
-    environment unchanged), and what the stand-in main saw inside (_seen_problems)."""
+def _call_problems(caller, bound, module, recorded, seen, home, fixture_home, args):
+    """What one call of the entry point with args left wrong: os.environ after it against caller,
+    the module's namespace against bound, each helper's recorded calls (exactly one, made with the
+    caller's environment unchanged), and what the stand-in main saw inside (_seen_problems)."""
     problems = ["after the call, " + d for d in _diff(caller, dict(os.environ))]
     problems.extend("after the call, " + d for d in _rebound(bound, dict(vars(module))))
     for label, calls in sorted(recorded.items()):
@@ -390,13 +432,14 @@ def _call_problems(caller, bound, module, recorded, seen, home, fixture_home):
         else:
             problems.extend("when {}() was called, ".format(label) + d
                             for d in _diff(caller, calls[0]))
-    return problems + _seen_problems(seen, caller, home, fixture_home)
+    return problems + _seen_problems(seen, caller, home, fixture_home, args)
 
 
 def _child(tool, entry, inner, args=(), helpers=()):
     """Child side: set the caller environment, call the entry point in-process with args, with inner
-    replaced by a stand-in and each helper by a recorder, first around a stand-in returning 0 and
-    then around one raising, and return the list of problems found."""
+    replaced by a stand-in that records the arguments it receives and each helper by a recorder,
+    first around a stand-in returning 0 and then around one raising, and return the list of
+    problems found."""
     import importlib.util
     problems = []
     home = tempfile.mkdtemp(prefix="aiqt-entry-restore-home-")
@@ -427,10 +470,11 @@ def _child(tool, entry, inner, args=(), helpers=()):
         seen = []
         raising = []
 
-        def stand_in(*_args, **_kwargs):
+        def stand_in(*received, **keywords):
             inside = dict(os.environ)
             view = _wrapper_view()
-            seen.append((inside, view, _run_wrapper(view["candidate"], inside, decoy, channel)))
+            seen.append((inside, view, _run_wrapper(view["candidate"], inside, decoy, channel),
+                         (list(received), dict(keywords))))
             if raising:
                 raise raising[0]
             return 0
@@ -440,7 +484,8 @@ def _child(tool, entry, inner, args=(), helpers=()):
         rc = getattr(module, entry)(*args)
         if rc != 0:
             problems.append("the entry point returned {!r} around a stand-in returning 0".format(rc))
-        problems.extend(_call_problems(caller, bound, module, recorded, seen, home, fixture_home))
+        problems.extend(_call_problems(caller, bound, module, recorded, seen, home, fixture_home,
+                                       args))
         # The same call around a stand-in that raises: the environment and the module's globals
         # come back exactly on the way out, the stand-in's own exception, not a return value or
         # another exception, comes out of the entry point, and the helpers, the scrub and the
@@ -460,7 +505,7 @@ def _child(tool, entry, inner, args=(), helpers=()):
             problems.append("around a raising stand-in, the entry point returned {!r} instead "
                             "of letting the exception through".format(rc))
         problems.extend("around a raising stand-in, " + problem for problem in _call_problems(
-            caller, bound, module, recorded, seen, home, fixture_home))
+            caller, bound, module, recorded, seen, home, fixture_home, args))
     finally:
         shutil.rmtree(home, ignore_errors=True)
         shutil.rmtree(fixture_home, ignore_errors=True)
@@ -470,10 +515,10 @@ def _child(tool, entry, inner, args=(), helpers=()):
 
 
 def _wrapper_mutants(text, channel):
-    """The wrappers _WRAPPER_MUTANTS names, made from the lifecycle's wrapper text, as (name, text,
-    the start of the problem the wrapper check must report), or None when the text has not exactly
-    one exec line ending in "$@" to make them from. channel is the stand-in git's channel, where
-    the stale-nonce wrapper plants its record."""
+    """The wrappers _WRAPPER_MUTANTS names, then _SECOND_DEFECT, made from the lifecycle's wrapper
+    text, as (name, text) pairs, or None when the text has not exactly one exec line ending in
+    "$@" to make them from. channel is the stand-in git's channel, where the stale-nonce wrapper
+    plants its record."""
     lines = text.splitlines(keepends=True)
     at = [index for index, line in enumerate(lines) if line.startswith("exec ")]
     tail_args = ' "$@"\n'
@@ -491,14 +536,31 @@ def _wrapper_mutants(text, channel):
         "runs-twice": line[len("exec "):] + line,
         "pin-override": line[:-len(tail_args)] + " -c gc.auto=1" + tail_args,
     }
-    return [(name, head + edits[name] + tail, reason) for name, reason in _WRAPPER_MUTANTS]
+    edits[_SECOND_DEFECT] = "export GIT_DIR=/nonexistent\n" + edits["pin-override"]
+    names = [name for name, _reason in _WRAPPER_MUTANTS] + [_SECOND_DEFECT]
+    return [(name, head + edits[name] + tail) for name in names]
+
+
+def _mutant_verdict(name, reason, problems):
+    """The failures for the mutant wrapper name, given the wrapper check's problems with it: none
+    when there is exactly one problem and it starts with reason, the mutant's own; otherwise one
+    failure saying the wrapper check accepted the mutant, or refused it for something other than
+    its own reason alone."""
+    if not problems:
+        return ["the wrapper check accepted the {} mutant wrapper".format(name)]
+    if len(problems) != 1 or not problems[0].startswith(reason):
+        return ["the wrapper check refused the {} mutant wrapper for other than its own reason "
+                "alone: {}".format(name, "; ".join(problems))]
+    return []
 
 
 def _mutant_child():
     """Child side of wrapper_mutant_failures: the restore probe's caller environment and stand-in
-    git, then, inside the lifecycle, the wrapper check over the lifecycle's own wrapper and over
-    each mutant of it. Returns a dict from "lifecycle" and each mutant name to its failures."""
-    names = ["lifecycle"] + [name for name, _reason in _WRAPPER_MUTANTS]
+    git, then, inside the lifecycle, the wrapper check over the lifecycle's own wrapper, over each
+    mutant of it and over _SECOND_DEFECT. Returns a dict from each name _mutant_result_names gives
+    to its failures."""
+    names = _mutant_result_names()
+    reasons = dict(_WRAPPER_MUTANTS)
     home = tempfile.mkdtemp(prefix="aiqt-entry-restore-home-")
     fixture_home = tempfile.mkdtemp(prefix="aiqt-entry-restore-fixture-home-")
     stand_in_bin = tempfile.mkdtemp(prefix="aiqt-entry-restore-git-")
@@ -521,17 +583,26 @@ def _mutant_child():
                 missing = ["the lifecycle's wrapper has no single exec line ending in \"$@\" to "
                            "make the mutant from"]
                 return {name: found.get(name, missing) for name in names}
-            for name, text, reason in built:
+            for name, text in built:
                 path = Path(mutants) / name
                 path.write_text(text, encoding="utf-8")
                 path.chmod(0o700)
                 problems = _wrapper_problems(view, caller, _run_wrapper(
                     str(path), inside, decoy, channel))
-                if not problems:
-                    found[name] = ["the wrapper check accepted the {} mutant wrapper".format(name)]
-                elif not any(problem.startswith(reason) for problem in problems):
-                    found[name] = ["the wrapper check refused the {} mutant wrapper for another "
-                                   "reason: {}".format(name, "; ".join(problems))]
+                if name != _SECOND_DEFECT:
+                    found[name] = _mutant_verdict(name, reasons[name], problems)
+                    continue
+                # The git-dir mutant with pin-override's edit too: the wrapper check must report
+                # both defects, and the mutant check must not count it as git-dir refused for its
+                # own reason.
+                both = (reasons["git-dir"], reasons["pin-override"])
+                if len(problems) != 2 or not all(
+                        any(problem.startswith(reason) for problem in problems) for reason in both):
+                    found[name] = ["the wrapper check refused the {} wrapper for {!r}, not for its "
+                                   "two defects".format(name, problems)]
+                elif not _mutant_verdict("git-dir", reasons["git-dir"], problems):
+                    found[name] = ["the mutant check counted the {} wrapper as the git-dir mutant "
+                                   "refused for its own reason".format(name)]
                 else:
                     found[name] = []
         return found

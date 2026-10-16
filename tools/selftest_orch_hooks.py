@@ -6800,10 +6800,12 @@ def _main_isolated(report_path=None):
     # fixture scrub in effect inside: the entry point is run in a child around a stand-in main,
     # once without a report path and once with one, so the branch that arms the execution report
     # before the lifecycle runs too. There _selftest_exit_report.arm is a recorder that must be
-    # called once, with the caller's environment unchanged; the path is handed only to it.
+    # called once, with the caller's environment unchanged; the path is handed only to it. The
+    # stand-in must receive exactly the arguments passed, so the first run passes None, the
+    # parameter's default, explicitly.
     from _entry_restore_selftest import entry_restore_failures
     check("harness/entry-restores-caller-env",
-          entry_restore_failures(__file__, "main", "_main_isolated")
+          entry_restore_failures(__file__, "main", "_main_isolated", args=(None,))
           + entry_restore_failures(__file__, "main", "_main_isolated",
                                    args=("entry-restore-report.json",),
                                    helpers=(("_selftest_exit_report", "arm"),)), [])

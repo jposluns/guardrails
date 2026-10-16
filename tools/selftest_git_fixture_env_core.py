@@ -7,7 +7,8 @@ In the original suite order this runner carries: layer 1, the shared scrub itsel
 the F-367 auto-maintenance probes, the repo-wide maintenance-pin tripwire scan and its planted
 red/contract legs, the in-place and caller-env child probes, the OPF inherited-env probe and the
 lifecycle system-pin checks); layer 2, the per-member routing, function-scoped routing (with the
-restore probe's wrapper check over the lifecycle's wrapper and mutants of it) and
+restore probe's wrapper check over the lifecycle's wrapper and mutants of it, and its argument
+check over synthetic entry points) and
 real-repository trust checks; the registry roster checks (including the prefixed-recursion
 exclusion over all four git-fixture-env suite ids); the OPF lifecycle graph checks; the
 member-timeout, member-close and verdict controls for the bounded config-member machinery; the
@@ -2041,7 +2042,9 @@ def _lifecycle_scope_checks():
     gate's static layer reads every id. The function is entry() in fixture.py except where a case
     needs another entry point's listed statements to reach the branch it tests. The first two are
     accepted: the conforming shape the others are built from, and the isolated main's call on the
-    entry point's own parameters and a constant. Each other shape is refused, and the refusal
+    entry point's own parameters and a constant. They are positive controls: they fail if the
+    check refuses a conforming entry point, not if one of its refusals is removed, which only the
+    refusal rows show. Each other shape is refused, and the refusal
     names what was refused. They cover an early return or raise, try statements with an except
     handler, a finally body or an else body, an os.environb write, an aliased from-import,
     environment access through getattr, a scrub, a path-setup variant, another entry point's
@@ -2067,6 +2070,7 @@ def _lifecycle_scope_checks():
         return ("entry(): {} passes {!r} to iso(); each argument may only be a parameter of "
                 "entry() or a constant".format(where, shown))
     for check_id, source, want, member in (
+        # Positive controls: these two guard against over-refusal, not against a removed refusal.
         ("scope/lifecycle-conforming-accepted", head + tail, True, plain),
         ("scope/lifecycle-parameter-arguments-accepted",
          "def entry(flag, *rest, mode=None, **options):\n" + imported
@@ -2194,16 +2198,20 @@ def _lifecycle_scope_checks():
 
 def _restore_probe_wrapper_checks():
     """The restore probe's wrapper check (tools/_entry_restore_selftest.py) passes the lifecycle's
-    own wrapper and refuses each mutant of it for its own reason: a wrapper that prints or plants
-    a stand-in record without running the caller's git, exports GIT_DIR, exits before its exec
-    line, runs the caller's git twice or overrides a pin. The rows are written out so the
-    execution gate's static layer reads every id; env/restore-probe-mutants-covered requires them
-    to name exactly the wrappers the probe reports on, so a mutant added there needs its row
-    here."""
+    own wrapper and refuses each mutant of it for its own reason alone: a wrapper that prints a
+    stand-in record, or plants one that does not carry this run's nonce, without running the
+    caller's git, exports GIT_DIR, exits before its exec line, runs the caller's git twice or
+    overrides a pin. The git-dir mutant that also overrides a pin must not count as refused for
+    git-dir's reason. env/restore-probe-lifecycle-wrapper-accepted is a positive control: it fails
+    if the wrapper check refuses the lifecycle's own wrapper, not if a refusal is removed, which
+    only the mutant rows show. The rows are written out so the execution gate's static layer
+    reads every id; env/restore-probe-mutants-covered requires them to name exactly the wrappers
+    the probe reports on, so a mutant added there needs its row here."""
     from _entry_restore_selftest import wrapper_mutant_failures
     found = wrapper_mutant_failures()
     covered = []
     for check_id, name in (
+        # Positive control: guards against over-refusal, not against a removed refusal.
         ("env/restore-probe-lifecycle-wrapper-accepted", "lifecycle"),
         ("env/restore-probe-refuses-stdout-record", "stdout-record"),
         ("env/restore-probe-refuses-stale-nonce", "stale-nonce"),
@@ -2211,10 +2219,44 @@ def _restore_probe_wrapper_checks():
         ("env/restore-probe-refuses-exit-before-exec", "exit-before-exec"),
         ("env/restore-probe-refuses-runs-twice", "runs-twice"),
         ("env/restore-probe-refuses-pin-override", "pin-override"),
+        ("env/restore-probe-mutant-second-defect-refused", "git-dir-and-pin-override"),
     ):
         covered.append(name)
         check(check_id, found.get(name, ["no wrapper check result for " + name]), [])
     check("env/restore-probe-mutants-covered", sorted(covered), sorted(found))
+
+
+def _restore_probe_argument_checks(base):
+    """The restore probe's argument check (tools/_entry_restore_selftest.py) over two synthetic
+    tools written under base. In each, entry(flag) enters the lifecycle and returns iso(...): one
+    passes flag on, the other passes the constant False in its place, as a self_test that drops
+    its red_on_revert would. The first, run with flag True and with flag False, must be accepted;
+    it is a positive control, failing if the probe refuses a conforming entry point, not if the
+    argument check is removed. The second, run with flag True, must be refused for the argument
+    it passed and nothing else, after the return and after the raise."""
+    from _entry_restore_selftest import entry_restore_failures
+    source = ("def entry(flag):\n"
+              "    from _git_fixture_env import fixture_git_lifecycle\n"
+              "    with fixture_git_lifecycle():\n"
+              "        return iso({})\n\n\n"
+              "def iso(flag):\n"
+              "    return 0\n")
+    synthetic = base / "restore-probe-arguments"
+    synthetic.mkdir()
+    forwards = synthetic / "forwards_parameter.py"
+    forwards.write_text(source.format("flag"), encoding="utf-8")
+    constant = synthetic / "passes_constant.py"
+    constant.write_text(source.format("False"), encoding="utf-8")
+    # Positive control: guards against over-refusal, not against a removed argument check.
+    check("env/restore-probe-forwarded-argument-accepted",
+          entry_restore_failures(forwards, "entry", "iso", args=(True,))
+          + entry_restore_failures(forwards, "entry", "iso", args=(False,)), [])
+    shown = ("the entry point called its isolated main with arguments [False] and keywords {}, "
+             "expected exactly the probe's arguments [True] and no keywords")
+    check("env/restore-probe-refuses-constant-argument",
+          entry_restore_failures(constant, "entry", "iso", args=(True,)),
+          ["passes_constant.py entry(): " + shown,
+           "passes_constant.py entry(): around a raising stand-in, " + shown])
 
 
 def _core_lanes(base):
@@ -2482,6 +2524,7 @@ def _core_lanes(base):
                                             isolated), True)
     _lifecycle_scope_checks()
     _restore_probe_wrapper_checks()
+    _restore_probe_argument_checks(base)
     check("trust/caller-env-archive-only", _caller_env_archive_only(), True)
 
     check("route/selftest-aiqt-hooks-fixture-env",

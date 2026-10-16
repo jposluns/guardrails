@@ -395,10 +395,12 @@ def _lifecycle_scoped_first(owner, func_name, isolated, member=""):
     values. Syntactic: what the permitted statements do when run (the lifecycle itself, an
     imported module's code, the listed statements) is outside it. The restore probe in each
     checked entry point's own self-test (tools/_entry_restore_selftest.py) runs the entry point
-    around a stand-in isolated main and checks the environment and the module's global bindings
-    after each call; it runs the listed helper call (selftest_orch_hooks.main's
-    _selftest_exit_report.arm) with a recorder in its place, so what that helper itself does is
-    outside both."""
+    around a stand-in isolated main, requires the stand-in to receive exactly the arguments the
+    probe passed, and checks the environment and the module's global bindings after each call; it
+    runs the listed helper call (selftest_orch_hooks.main's _selftest_exit_report.arm) with a
+    recorder in its place and checks only the environment at that call, so it is this check, which
+    lists that call as a "before" statement and refuses any statement after the with, that keeps
+    the call before the lifecycle; what that helper itself does is outside both."""
     lead = "{}(): ".format(func_name)
     if not isolated:
         return lead + "the lifecycle form needs the isolated main's name"
