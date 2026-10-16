@@ -258,7 +258,10 @@ def tracked_files(root):
     """The sorted tracked relpaths under `root` from `git ls-files -z --cached`, the role rule's input set.
     Pinned like gen_manifest's index read: the GIT_* environment is dropped (a repository-selecting variable
     cannot redirect the read), core.fsmonitor=false (a repository-configured hook never runs under a gate
-    read), protocol.allow=never and GIT_NO_LAZY_FETCH=1. No git, a nonzero exit, a timeout, an empty listing
+    read), protocol.allow=never and GIT_NO_LAZY_FETCH=1. Like that read, a real-checkout scan keeps the
+    caller's on-disk git configuration (where safe.directory trust for the checkout lives); the self-test
+    runs every call here inside the fixture git lifecycle (self_test_main), so it reads no caller home, XDG
+    or system configuration. No git, a nonzero exit, a timeout, an empty listing
     or an undecodable path raises OSError or UnicodeDecodeError to the fail-closed caller (exit 2), never an
     empty tree that would read as clean."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
@@ -357,8 +360,21 @@ def main():
         print("error: unrecognized option {!r}; fail closed".format(unknown[0]), file=sys.stderr)
         return 2
     if "--self-test" in argv:
-        return _self_test()
+        return self_test_main()
     return run_gate(root)
+
+
+def self_test_main():
+    """Run the self-test with every git call it makes, including the gate's own tracked-file read on its
+    fixture repository, isolated from the caller's git configuration: the shared fixture scrub points HOME
+    and XDG_CONFIG_HOME at a scratch directory and pins the global and system config away, and the fixture
+    git lifecycle's PATH wrapper reasserts the system-config pin after tracked_files drops the GIT_*
+    environment. A caller's home, XDG or system configuration (malformed or hostile) therefore cannot change
+    a self-test verdict or run a configured program."""
+    from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
+    scrub_git_environment()
+    with fixture_git_lifecycle():
+        return _self_test()
 
 
 # --- self-test --------------------------------------------------------------------------------------
@@ -547,7 +563,8 @@ def _self_test():
         # 14-17 run the real gate entry point (run_gate) on a fixture git repository, so the tracked-file
         # enumeration and its wiring into the gate are exercised, not only the helpers. Fixture git calls use
         # the shared hermetic fixture environment (no caller config, no auto-maintenance); only init and add
-        # run, and the gate's own ls-files read is pinned in tracked_files.
+        # run, and the gate's own ls-files read is pinned in tracked_files and runs inside the fixture git
+        # lifecycle self_test_main enters, so it reads no caller home, XDG or system configuration.
         import contextlib
         import io
         import _git_fixture_env
@@ -607,6 +624,31 @@ def _self_test():
             if "blob.zip" in report or "untracked.md" in report:
                 failures.append("a non-text-suffix non-UTF-8 file and an untracked file expected to be outside "
                                 "the role rule, got {!r}".format(report))
+            # DISCRIMINATING (no git call reads a global configuration): GIT_CONFIG_GLOBAL pointed at a
+            # malformed file must not change the gate's result. A control first proves the file breaks a git
+            # read that honours it; then the gate runs with it set in the process environment and must give
+            # the same exit code and report as the run above. A tracked-file read that inherits the caller's
+            # GIT_* environment instead of dropping it fails on the malformed file (exit 2) and fails this.
+            malformed = tmp / "malformed-global-gitconfig"
+            malformed.write_text("[core\n\tbroken\n", encoding="utf-8")
+            control = subprocess.run(["git", "-C", str(repo), "ls-files", "-z", "--cached"], capture_output=True,
+                                     env=_git_fixture_env.git_fixture_env(GIT_CONFIG_GLOBAL=str(malformed)),
+                                     timeout=60)
+            if control.returncode == 0:
+                failures.append("a malformed GIT_CONFIG_GLOBAL file expected to break a git read that honours it "
+                                "(the global-config vector would be vacuous), got rc=0")
+            saved_global = os.environ.get("GIT_CONFIG_GLOBAL")
+            os.environ["GIT_CONFIG_GLOBAL"] = str(malformed)
+            try:
+                poisoned = gate(repo)
+            finally:
+                if saved_global is None:
+                    os.environ.pop("GIT_CONFIG_GLOBAL", None)
+                else:
+                    os.environ["GIT_CONFIG_GLOBAL"] = saved_global
+            if poisoned != (rc, report):
+                failures.append("a malformed GIT_CONFIG_GLOBAL changed the gate result: rc={} {!r}, expected rc={} "
+                                "{!r}".format(poisoned[0], poisoned[1], rc, report))
             # 17. DISCRIMINATING (cannot evaluate fails closed): a tracked non-UTF-8 file with a text suffix is
             #     not skipped; the gate reports it as unevaluable and exits 2, the unreadable-input exit.
             #     Skipping every non-UTF-8 file, or treating it as clean, exits 1 and fails the case.
@@ -733,7 +775,8 @@ def _self_test():
           "is in SKIP_NAMES, exempts only the one internal-allow line, scans a binary-attributed file that "
           "decodes as UTF-8, skips a non-UTF-8 file with a non-text suffix and an untracked file, and exits 2 "
           "(cannot evaluate) on a tracked non-UTF-8 text file, a tracked file absent from the working tree and "
-          "a root that is not a git repository; a malformed hashes file is reported, never a silent empty denylist; a "
+          "a root that is not a git repository; a GIT_CONFIG_GLOBAL pointed at a malformed file does not "
+          "change the gate result (no git call reads a global configuration); a malformed hashes file is reported, never a silent empty denylist; a "
           "non-UTF-8 in-scope surface fails closed as unscannable, never a silent skip; a broken symlink "
           "(a present dentry with a missing target) at a scoped path and at the hash-file path each fails "
           "closed (re-raised), never read as absent; a scoped file "
