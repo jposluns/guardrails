@@ -3902,6 +3902,32 @@ def _citecheck_run(root, command, session):
     return _verdict(result), note, [r for r in rows()[before:] if r.get("kind") == "citint"]
 
 
+def _hook_functions(*names):
+    """The source text of each named top-level function of the hook, by name."""
+    import ast
+    source = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
+    rows = source.splitlines(keepends=True)
+    return {node.name: "".join(rows[node.lineno - 1:node.end_lineno]) for node in ast.parse(source).body
+            if isinstance(node, ast.FunctionDef) and node.name in names}
+
+
+def _hook_variant(tmp, name, text, old, new):
+    """The hook's function name, whose source is text, with the one occurrence of old in that text
+    replaced by new (None where old does not occur exactly once): written to a module under tmp and
+    loaded, its code bound to the hook's own globals, so it calls the hook's other functions and reads its
+    constants as the original does."""
+    import importlib.util
+    import types
+    if text.count(old) != 1:
+        return None
+    path = tmp / "variant{}.py".format(len(list(tmp.glob("variant*.py"))))
+    path.write_text(text.replace(old, new), encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return types.FunctionType(getattr(module, name).__code__, aiqt_hooks.__dict__, name)
+
+
 def _citecheck_show_cases(tmp):
     """A git show row counts for a citation as any row does, where the working tree's lines still hold the
     bytes it digested, whatever revision it named: a row of HEAD whose lines the working tree has since
@@ -4460,10 +4486,12 @@ def _citecheck_step_cases(tmp):
     splits a here-document delimiter where bash reads one (at an operator the lexer reads, quoted or not, or
     unquoted inside a command substitution in double quotes), is scanned as written and names the expansion
     of each here-document with an unquoted delimiter as not read (a shift inside a one-line $((...)) is
-    none), and a command is read after the reserved words that begin its segment (a brace
-    group's '{', '!', 'if', 'then', 'do', 'time -p', 'time --', 'coproc'). The scan of a message stops at
-    the deadline: a stand-in pattern moves the clock on at line 2 of the masking or of the search, line 3
-    is not scanned, and the note says no citation was checked, naming the budget."""
+    none), and each rule that decides where such a delimiter counts is shown to decide its vector, which
+    gives another result under a variant of the hook without that rule; a command is read after the
+    reserved words that begin its segment (a brace group's '{', '!', 'if', 'then', 'do', 'time -p',
+    'time --', 'coproc'). The scan of a message stops at the deadline: a stand-in pattern moves the clock on
+    at line 2 of the masking or of the search, line 3 is not scanned, and the note says no citation was
+    checked, naming the budget."""
     steps = _CiteRepo(tmp / "citecheck-steps", {"tools/a.py": b"a1\na2\n", "msg.txt": b"see tools/a.py:1\n",
                                                 "a.txt": b"a1\n", "b.txt": b"b1\n"}, links=(("tools/l.py", "a.py"),))
     root, budget = steps.top, aiqt_hooks._CITECHK_BUDGET
@@ -4698,13 +4726,19 @@ def _citecheck_step_cases(tmp):
     # body to the end, so the later command scanned there is a note the command did not earn. A here-document
     # inside a command substitution in double quotes, $(...) or backticks, is real: bash expands its body,
     # which the lexer reads as text, so with a split delimiter that bash reads as unquoted the command is
-    # scanned as written and that expansion named; one that bash reads as quoted, and a '<<' inside single
-    # quotes or $((...)) in such a substitution, leaves the command lexed. A look-alike the lexer does not
-    # read as an operator, inside quotes (after a substitution closes, too), a comment or a quoted
-    # here-document's body (also one that, with '<(' for its '<<', would be the line that closes that body),
-    # or after an escaped '<', leaves the command lexed, so its -F file (after the escaped '<', its -m value)
-    # is read, and so do nine of them.
-    split, later = {}, "git commit -m 'see tools/a.py:1'\n"
+    # scanned as written and that expansion named, also on the line after a comment in the substitution, after
+    # a '#' inside a word (x#y, ${#v}, $(true)#z), which begins no comment, and in backticks after a comment
+    # that the closing backtick ends. One that bash reads as quoted (also with backslash-newlines earlier in
+    # the string, which the offset of the '<<' in the string without them allows for), one whose delimiter word
+    # runs to the string's closing quote (at a closing backtick bash reads an unquoted delimiter with an empty
+    # body, so nothing is expanded), and a '<<' inside single quotes, an ANSI-C quote with an escaped quote, a
+    # comment (from a '#' at the substitution's opening or after a blank, to its newline) or $((...)) in such a
+    # substitution, leaves the command lexed with its -F file read. A look-alike the lexer does not read as an
+    # operator, inside quotes (after a substitution closes, too), a comment or a quoted here-document's body
+    # (also one that, with '<(' for its '<<', would be the line that closes that body), or after an escaped
+    # '<', leaves the command lexed, so its -F file (after the escaped '<', its -m value) is read, and so do
+    # nine of them.
+    split, commands, later = {}, {}, "git commit -m 'see tools/a.py:1'\n"
     for name, command in (("mid", "git commit -F - <<E\\\nOF\nsee tools/a.py:1\nEOF\n"),
                           ("mid-dollar", "git commit -F - <<E\\\nOF\nsee $(printf tools/a.py):1\nEOF\n"),
                           ("lead", "git commit -F - <<\\\nEOF\nsee tools/a.py:1\nEOF\n"),
@@ -4729,7 +4763,20 @@ def _citecheck_step_cases(tmp):
                           ("backticks-double", "git commit -m \"`cat <<E\\\nOF\nsee tools/${F}.py:1\nEOF\n`\""),
                           ("subst-quoted", "git commit -F msg.txt; echo \"$(cat <<E\\\n'OF'\nx\nEOF\n)\""),
                           ("subst-single", "git commit -F msg.txt; echo \"$(echo 'x <<E\\\nOF y')\""),
-                          ("subst-arith", "git commit -F msg.txt; echo \"$((x<<\\\n2))\"")):
+                          ("subst-arith", "git commit -F msg.txt; echo \"$((x<<\\\n2))\""),
+                          ("subst-comment", "git commit -F msg.txt; echo \"$( # <<E\\\n# OF\n: )\""),
+                          ("subst-comment-after", "git commit -F msg.txt; echo \"$(true # x <<E\\\nOF\n)\""),
+                          ("subst-comment-line", "git commit -m \"$(echo a # x\ncat <<E\\\nOF\nsee tools/${F}.py:1\n"
+                                                 "EOF\n)\""),
+                          ("subst-hash-word", "git commit -m \"$(: x#y ${#v} $(true)#z; cat <<E\\\nOF\n"
+                                              "see tools/${F}.py:1\nEOF\n)\""),
+                          ("backticks-comment", "git commit -m \"`echo a # x` `cat <<E\\\nOF\nsee tools/${F}.py:1\n"
+                                                "EOF\n`\""),
+                          ("subst-ansi-c", "git commit -F msg.txt; echo \"$(echo $'x\\' <<E\\\nOF y')\""),
+                          ("subst-joins-before", "git commit -F msg.txt; echo \"a\\\nb\\\nc\\\n $(cat <<E\\\n'OF'\n"
+                                                 "abc ${HOME}\nEOF\n)\""),
+                          ("backticks-to-quote", "git commit -F msg.txt; echo \"`cat <<E\\\nOF`\"")):
+        commands[name] = command
         verdict, note, rows = _citecheck_run(steps.root, command, "split-delim-" + name)
         split[name] = (verdict, [(r["detail"]["parse"], [c["cite"] for c in r["detail"]["citations"]],
                                   r["detail"]["sources"], r["detail"]["sources_unread"]) for r in rows],
@@ -4737,6 +4784,7 @@ def _citecheck_step_cases(tmp):
     by_raw = [("raw", ["tools/a.py:1"], ["command text"], named("EOF"))]
     by_quoted = [("raw", ["tools/a.py:1"], ["command text"], [])]
     by_file = ("warn", [("lexed", ["tools/a.py:1"], ["-F msg.txt"], [])], False)
+    by_text = ("warn", [("raw", [], ["command text"], named("EOF"))], True)
     check("citeledger/check-split-heredoc-delim", split,
           {"mid": ("warn", by_raw, True), "mid-dollar": ("warn", [("raw", [], ["command text"], named("EOF"))], True),
            "lead": ("warn", by_raw, True), "dash": ("warn", by_raw, True), "later": ("warn", by_raw, True),
@@ -4749,7 +4797,59 @@ def _citecheck_step_cases(tmp):
            "look-alike-collision": by_file, "look-alike-after-subst": by_file, "look-alike-many": by_file,
            "subst-double": ("warn", [("raw", [], ["command text"], named("EOF"))], True),
            "backticks-double": ("warn", [("raw", [], ["command text"], named("EOF"))], True),
-           "subst-quoted": by_file, "subst-single": by_file, "subst-arith": by_file})
+           "subst-quoted": by_file, "subst-single": by_file, "subst-arith": by_file, "subst-comment": by_file,
+           "subst-comment-after": by_file, "subst-comment-line": by_text, "subst-hash-word": by_text,
+           "backticks-comment": by_text, "subst-ansi-c": by_file, "subst-joins-before": by_file,
+           "backticks-to-quote": by_file})
+    # Each rule of the walk through a double-quoted substitution and of the split-delimiter decision decides
+    # its vector above: under a variant of the hook with that rule removed (_hook_variant: one line of
+    # _citechk_substituted_ops or _citechk_split_delim replaced) the vector gives the other result pinned here.
+    # The rules: a substitution ends at its ')'; single quotes, an ANSI-C quote and $((...)) in it; a comment
+    # in it, which begins at a '#' that begins a word and ends at its newline or, in backticks, at the closing
+    # one; the joined delimiter read as quoted; the offset of the '<<' past earlier backslash-newlines; and a
+    # delimiter word that runs to the string's closing quote. Four of these vectors (after the substitution's
+    # close, in single quotes, in $((...)) and with a quoted joined delimiter) give their result above under a
+    # hook that finds split delimiters by lexing the command again, so alone they are continuity coverage; the
+    # variants are what show that each rule decides them.
+    walk, decide = "_citechk_substituted_ops", "_citechk_split_delim"
+    texts, base, variants = _hook_functions(walk, decide), tmp / "citecheck-variants", {}
+    base.mkdir()
+    for name, func, old, new in (("look-alike-after-subst", walk, 'elif opened[-1] != "`":', "elif False:"),
+                                 ("subst-single", walk, 'if opened[-1] != "$((":  # single', "if False:  # single"),
+                                 ("subst-arith", walk, 'if command.startswith("((", k + 1):', "if False:"),
+                                 ("subst-quoted", decide, "if joined is not None and not joined[0]:",
+                                  "if joined is not None:"),
+                                 ("subst-comment", walk, 'elif c == "#":', "elif False:"),
+                                 ("subst-comment-after", walk, 'elif c == "#":', "elif False:"),
+                                 ("subst-comment-line", walk, 'close = command.find("\\n", k, last)', "close = -1"),
+                                 ("subst-hash-word", walk, 'if opened[-1] != "$((" and at != -1 and (',
+                                  'if opened[-1] != "$((" and (True or '),
+                                 ("backticks-comment", walk, "if tick:  # bash ends", "if False:  # bash ends"),
+                                 ("subst-ansi-c", walk, "elif opened and opened[-1] != \"$((\" and "
+                                                        "command.startswith(\"'\", k + 1):", "elif False:"),
+                                 ("subst-joins-before", decide, "at - start - 2 * j + 2", "at - start + 2"),
+                                 ("backticks-to-quote", decide, "parsed[3] == end - 1 or ", "")):
+        variant = _hook_variant(base, func, texts.get(func, ""), old, new)
+        if variant is None:
+            variants[name] = "no variant: {!r} does not occur exactly once in {}".format(old, func)
+            continue
+        original = getattr(aiqt_hooks, func)
+        setattr(aiqt_hooks, func, variant)
+        try:
+            verdict, note, rows = _citecheck_run(steps.root, commands[name], "split-variant-" + name)
+        finally:
+            setattr(aiqt_hooks, func, original)
+        variants[name] = (verdict, [(r["detail"]["parse"], [c["cite"] for c in r["detail"]["citations"]],
+                                     r["detail"]["sources"], r["detail"]["sources_unread"]) for r in rows],
+                          "The git commit message expanded <<" in note)
+    by_scan = ("allow", [("raw", [], ["command text"], [])], False)
+    by_value = ("allow", [("lexed", [], ["-m value"], [])], False)
+    check("citeledger/check-split-heredoc-variants", variants,
+          {"look-alike-after-subst": by_text, "subst-single": by_text, "subst-arith": by_scan,
+           "subst-quoted": by_scan, "subst-comment": ("warn", [("raw", [], ["command text"], named("E#"))], True),
+           "subst-comment-after": by_text, "subst-comment-line": by_value, "subst-hash-word": by_value,
+           "backticks-comment": by_value, "subst-ansi-c": by_text, "subst-joins-before": by_scan,
+           "backticks-to-quote": by_scan})
     # A command after the reserved words that begin its segment is read: in a brace group, after '!', 'if'
     # or 'then', after 'do', after 'time -p', after a '--' that follows time or its -p, and after coproc,
     # with the NAME bash reads before a compound command. Where bash runs another command, none is read: a
