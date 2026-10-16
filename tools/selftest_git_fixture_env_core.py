@@ -45,7 +45,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import selftest_git_fixture_env as _gfe  # noqa: E402
 import _selftest_exit_report  # noqa: E402
 import _git_fixture_env  # noqa: E402
-import _optlevel  # noqa: E402  the engine import put opf/tools on sys.path
+# opf/tools is put on sys.path HERE, as the engine does, so this runner's own search-root row in
+# tools/check_import_closure.py states a real insertion instead of an engine-import side effect
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "opf" / "tools"))
+import _optlevel  # noqa: E402  level-0 parses for the mutants, shared with opf/tools
 from selftest_git_fixture_env import (  # noqa: E402
     CANNOT_EVALUATE, CHECKS_MANIFEST, CONFIG_EXCLUSIONS, CONFIG_MEMBER_BOUNDS,
     CONFIG_MEMBER_BOUND_DEFAULT, CONFIG_MEMBER_DRAIN_SECONDS, CONFIG_MEMBER_REAP_SECONDS,
@@ -1874,9 +1877,9 @@ def _member_bound_checks(roster):
     every override and for one non-member argv that keeps the default (red when the lookup is
     bypassed).
     config/member-roster-figures: the sizing comment's roster figures hold against the live
-    roster (107 members, 105 in the malformed lane) and, with the sizing account's fixed
+    roster (108 members, 106 in the malformed lane) and, with the sizing account's fixed
     coverage (89 members timed or bounded, ten measured under the malformed lane), the derived
-    figures (18 members with no recorded time, 95 malformed-lane members unmeasured); red when
+    figures (19 members with no recorded time, 96 malformed-lane members unmeasured); red when
     a roster change leaves that comment stale."""
     from unittest.mock import patch
 
@@ -1884,10 +1887,10 @@ def _member_bound_checks(roster):
                  if _command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"]}
     # 89 and 10 are the sizing account's fixed coverage (see the SIZING comment above
     # CONFIG_MEMBER_BOUND_DEFAULT in the engine); the roster counts are live, so a roster change
-    # turns that comment's figures (107, 105, 18 and 95) red here.
+    # turns that comment's figures (108, 106, 19 and 96) red here.
     check("config/member-roster-figures",
           (len(roster), len(malformed), len(roster) - 89, len(malformed) - 10),
-          (107, 105, 18, 95))
+          (108, 106, 19, 96))
 
     record = ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert")
     opf_selftest = ("opf/tools/opf.py", "--self-test")

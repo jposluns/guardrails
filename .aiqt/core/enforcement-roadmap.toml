@@ -225,8 +225,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "liccmp"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["gate:import-closure"]
 
 [[rule]]
 corpus-id = "lvw001"
@@ -235,8 +235,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "mindep"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["gate:import-closure"]
 
 [[rule]]
 corpus-id = "mstreg"
@@ -530,8 +530,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "secsup"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["gate:import-closure"]
 
 [[rule]]
 corpus-id = "secsyn"
@@ -565,8 +565,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "secvde"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["gate:import-closure"]
 
 [[rule]]
 corpus-id = "secvln"
