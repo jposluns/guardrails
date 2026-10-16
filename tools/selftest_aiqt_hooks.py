@@ -10130,8 +10130,8 @@ def _main_isolated(monitor):
         # A git commit behind leading reserved words, a function or coprocess name, VAR=value words or a wrapper
         # word (env, timeout, command, exec, nohup, xargs, sudo, nice, setsid, stdbuf, time) is judged like the
         # bare form: behind a wrapper a git word starts a candidate git command, whatever the wrapper's own
-        # options and operands, until a candidate held to be the command (its git word not right after a word
-        # that may be an option taking it as a value) has its subcommand; a later git word is that command's
+        # options and operands, until a held candidate (its git word not right after a word that may be an option
+        # taking it as a value) has a git command name as its subcommand; a later git word is that command's
         # operand. Every deny vector from ci-wr1 to ci-wr26 but ci-wr25 (a path to git as the command word,
         # already read as git) allowed when only a segment whose command word is git was read; the controls pin
         # what the rule must not widen (an allowed identity, a lookup, a read-side verb, a word off the wrapper
@@ -10213,10 +10213,12 @@ def _main_isolated(monitor):
                  'nohup commit --author="Claude <c@x>"', "allow")
         # A function definition or a named coprocess whose body is a compound command: the NAME after function
         # or coproc is a name, and the body's git commit is read. ci-wr27, ci-wr29 and ci-wr30 allowed when the
-        # NAME was taken as the command word; ci-wr28's '(' already ended the segment before the body.
+        # NAME was taken as the command word. ci-wr28 is a lexer control, not a vector for the NAME rule: its '('
+        # ends the segment before the body, so it denied before that rule too.
         ciexpect("(ci-wr27) a function NAME { ... } body that runs git commit denies",
                  'function f { git commit --author="Claude <c@x>" -m x; }; f', "deny")
-        ciexpect("(ci-wr28) a function NAME () { ... } body that runs git commit denies",
+        ciexpect("(ci-wr28) lexer control: the '(' of function NAME () { ... } ends the segment, so the body's git "
+                 "commit is a segment of its own, denies",
                  'function f () { git commit --author="Claude <c@x>" -m x; }; f', "deny")
         ciexpect("(ci-wr29) a coproc NAME { ... } body that runs git commit denies",
                  'coproc C { git commit --author="Claude <c@x>" -m x; }', "deny")
@@ -10228,13 +10230,13 @@ def _main_isolated(monitor):
         # A -v after command's '--' is the program command runs, not a lookup option.
         ciexpect("(ci-wr31) command -- -v runs the program -v, not a lookup, so the git words are read, denies",
                  'command -- -v git commit --author="Claude <c@x>"', "deny")
-        # Behind a wrapper, a git word after the subcommand of the git command held to be the one the segment
-        # runs is that command's operand (ci-wr-c12 to ci-wr-c17 denied when every later git word started a
-        # git command); a git word right after a wrapper option may be that option's value, so its candidate
-        # does not end the scan (ci-wr32); a git word that a held candidate reads as its subcommand still starts
-        # a candidate, since a wrapped program off the list can run it (ci-wr33); and the read-side form behind
-        # a wrapper option still denies (ci-wr34, the disclosed over-deny). '-', '--' and an option carrying '='
-        # take no following value (ci-wr-c15 to ci-wr-c17).
+        # Behind a wrapper, a git word after the git command name that a held candidate reads as its subcommand is
+        # an operand of the git command the segment runs (ci-wr-c12 to ci-wr-c17 denied when every later git word
+        # started a git command); a git word right after a wrapper option may be that option's value, so its
+        # candidate does not end the scan (ci-wr32); a git word that a held candidate reads as its subcommand
+        # still starts a candidate, since a wrapped program off the list can run it (ci-wr33); and the read-side
+        # form behind a wrapper option still denies (ci-wr34, the disclosed over-deny). '-', '--' and an option
+        # carrying '=' take no following value (ci-wr-c15 to ci-wr-c17).
         ciexpect("(ci-wr32) a wrapper option value spelled git whose candidate reads a later word as its "
                  "subcommand does not hide the git commit after it, denies",
                  'sudo -u git -g wheel git commit --author="Claude <c@x>" -m x', "deny")
@@ -10272,6 +10274,122 @@ def _main_isolated(monitor):
                  'git commit -F msg.txt --author="Claude <c@x>"', "deny")
         ciexpect("(ci-wr36) an AI co-author trailer in a --trailer value denies",
                  'git commit -m x --trailer "Co-authored-by: Claude <c@x>"', "deny")
+        # A short option cluster is read as git reads it: letters up to the first one that takes a value, whose
+        # value is the rest of the word or, when nothing follows, the next word and only that word. In git
+        # commit -am -m --author=X the cluster takes -m as its message and the --author after it is a real
+        # author (ci-wr37 to ci-wr42 allowed when the cluster was one unknown word and the second -m took the
+        # --author word); the cluster's next-word value spelled as an AI --author records only a message
+        # (ci-wr-c21 to ci-wr-c23 denied then). Controls: a value that shares the cluster's word consumes no
+        # next word (ci-wr43), and -S takes only the rest of its own word, never the next one (ci-wr44).
+        ciexpect("(ci-wr37) an -am cluster takes the next -m as its message, so the --author after it is read, "
+                 "denies",
+                 'git commit -am -m --author="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr38) an -am cluster takes the next -F as its message, so the --author after it is read, "
+                 "denies",
+                 'git commit -am -F --author="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr39) an -am cluster takes the next -c as its message, so the --author after it is read, "
+                 "denies",
+                 'git commit -am -c --author="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr40) an -sm cluster takes the next --trailer as its message, so the --author after it is "
+                 "read, denies",
+                 'git commit -sm --trailer --author="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr41) a wrapped -am cluster takes the next -m as its message, so the --author after it is "
+                 "read, denies",
+                 'env git commit -am -m --author="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr42) an -am cluster takes the next --message as its message, so the --author after it is "
+                 "read, denies",
+                 'git commit -am --message --author="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr-c21) an -am cluster whose message is spelled as an AI --author records no author, allows",
+                 'git commit -am --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr-c22) a wrapped -am cluster whose message is spelled as an AI --author records no author, "
+                 "allows",
+                 'env git commit -am --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr-c23) an -aF cluster whose file name is spelled as an AI --author records no author, "
+                 "allows",
+                 'git commit -aF --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr43) an -amfoo cluster carries its message, so the --author after it is read, denies",
+                 'git commit -amfoo --author="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr44) an -Sm cluster gives -S the key id m and takes no next word, so the --author after "
+                 "it is read, denies",
+                 'git commit -Sm --author="Claude <c@x>"', "deny")
+        # A long option is read as git reads an abbreviation: a prefix that only one long name starts with is
+        # that option (ci-wr45 to ci-wr47 allowed when only exact names were read, ci-wr-c24 denied then); a
+        # prefix that several names share is ambiguous, git refuses it, and it takes no value (ci-wr48, a
+        # control that turns red if the first matching name is taken).
+        ciexpect("(ci-wr45) an AI value of --auth=, which git reads as --author, denies",
+                 'git commit --auth="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr46) an AI value of --auth, which git reads as --author, denies",
+                 'git commit --auth "Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr47) --fil, which git reads as --file, takes -m as its file name, so the --author after "
+                 "it is read, denies",
+                 'git commit --fil -m --author="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr-c24) --mess, which git reads as --message, takes an AI --author word as its message, "
+                 "allows",
+                 'git commit --mess --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr48) --re, a prefix of three long names, takes no value, so the --author after it is read, "
+                 "denies",
+                 'git commit --re --author="Claude <c@x>"', "deny")
+        # A command that git runs from its operands is read as a command of its own, bare or wrapped: the
+        # operands of git submodule foreach (its first operand is shell text) and git bisect run, and the value
+        # of git rebase --exec or -x in any spelling git accepts (ci-wr49 to ci-wr59 allowed when the operands
+        # of a held git command were never read; ci-wr49, ci-wr52 to ci-wr54 and ci-wr56 to ci-wr59 also
+        # allowed at the parent commit). A nest deeper than the bound is judged by the raw-string fallback
+        # (ci-wr60, ci-wr-c30). The controls keep a read-side command run from the operands allowed, and the
+        # value of another rebase option spelled -x is not an exec value (ci-wr-c29).
+        ciexpect("(ci-wr49) git submodule foreach runs its operands as a git commit, denies",
+                 'git submodule foreach git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr50) a wrapped git submodule foreach runs its operands as a git commit, denies",
+                 'env git submodule foreach git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr51) sudo git submodule foreach --recursive runs its operands as a git commit, denies",
+                 'sudo git submodule foreach --recursive git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr52) git submodule foreach runs its one operand as shell text that runs git commit, denies",
+                 "git submodule foreach 'git commit --author=\"Claude <c@x>\" -m x'", "deny")
+        ciexpect("(ci-wr53) a git submodule foreach inside a git submodule foreach is read too, denies",
+                 'git submodule foreach git submodule foreach git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr54) git bisect run runs its operands as a git commit, denies",
+                 'git bisect run git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr55) a wrapped git bisect run runs its operands as a git commit, denies",
+                 'timeout 600 git bisect run git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr56) git rebase -x runs its value as a shell command line, denies",
+                 "git rebase -x 'git commit --amend --no-edit --author=\"Claude <c@x>\"' main", "deny")
+        ciexpect("(ci-wr57) git rebase --exec= runs its value as a shell command line, denies",
+                 "git rebase --exec='git commit --amend --no-edit --author=\"Claude <c@x>\"' main", "deny")
+        ciexpect("(ci-wr58) the -x of an -ix cluster runs the next word as a shell command line, denies",
+                 "git rebase -ix 'git commit --amend --no-edit --author=\"Claude <c@x>\"' main", "deny")
+        ciexpect("(ci-wr59) a wrapped git rebase --ex, which git reads as --exec, runs its value, denies",
+                 "env git rebase --ex 'git commit --amend --no-edit --author=\"Claude <c@x>\"' main", "deny")
+        ciexpect("(ci-wr60) a foreach nest deeper than the bound falls back to the raw-string scan, denies",
+                 "git submodule foreach " * 10 + 'git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr-c25) git submodule foreach running a read-side git command allows",
+                 "git submodule foreach git status", "allow")
+        ciexpect("(ci-wr-c26) a wrapped git submodule foreach whose shell text runs git log --author allows",
+                 "env git submodule foreach 'git log --author=\"Claude <c@x>\"'", "allow")
+        ciexpect("(ci-wr-c27) git bisect run running git log --author allows",
+                 'git bisect run git log --author="Claude <c@x>"', "allow")
+        ciexpect("(ci-wr-c28) git rebase -x running git log --author allows",
+                 "git rebase -x 'git log --author=\"Claude <c@x>\"' main", "allow")
+        ciexpect("(ci-wr-c29) an --onto value spelled -x is not an exec option, so the word after it is an "
+                 "operand, allows",
+                 "git rebase --onto -x 'git commit --author=\"Claude <c@x>\"'", "allow")
+        ciexpect("(ci-wr-c30) a foreach nest deeper than the bound with no AI identity allows",
+                 "git submodule foreach " * 10 + "git commit -m x", "allow")
+        # A held candidate is taken to be the git command the segment runs only when its subcommand is a git
+        # command name: a git-named operand of a program off the wrapper list does not hide the git commit after
+        # it (ci-wr61, ci-wr62 allowed when every held candidate ended the scan); a wrapped git command whose
+        # subcommand is an alias leaves later git words read (ci-wr63, the disclosed over-deny); a git command
+        # run by such a program is still held at its own subcommand (ci-wr-c31, a control that turns red if a
+        # held candidate never ends the scan).
+        ciexpect("(ci-wr61) a lock file named git before flock's command does not hide the git commit, denies",
+                 'sudo flock /var/lock/git env git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr62) a chroot directory named git before chroot's command does not hide the git commit, "
+                 "denies",
+                 'sudo chroot /srv/git /usr/bin/env git commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-wr63) a wrapped git command whose subcommand is an alias keeps the later git words read, "
+                 "denies (the disclosed over-deny)",
+                 'env git lg --grep git commit --author="Claude <c@x>"', "deny")
+        ciexpect("(ci-wr-c31) the git log that chroot runs is held at its subcommand, so a later git word is its "
+                 "operand, allows",
+                 'sudo chroot /srv/git git log --grep git commit --author="Claude <c@x>"', "allow")
 
         # The wrapper scan is ONE pass: each word of a wrapped segment is read a bounded number of times. Every
         # -c value below is spelled git, so each one also starts a candidate still reading its options; a
@@ -10315,6 +10433,49 @@ def _main_isolated(monitor):
                             "{} word reads (want at most {})".format(len(_ci_long), _ci_subs[:4],
                                                                      len(_ci_long) - 1, _ci_long.reads,
                                                                      8 * len(_ci_long)))
+
+        # The command lines that git runs from its operands are read within two bounds, so a command built to nest
+        # or repeat them costs time linear in its length: past _CMTIDN_RUN_DEPTH nested lines, or past
+        # _CMTIDN_RUN_SCALE times the command's length plus _CMTIDN_RUN_FLOOR characters of run lines in all,
+        # find_ai_authorship raises ValueError and the handler judges the command with its raw-string fallback.
+        # Each bound is pinned just inside, at and just past its limit (the length bound with the scale set to 0,
+        # so the floor alone is the limit), and 300 wrapped git bisect run candidates, whose run lines each repeat
+        # the rest of the command one level deep, are pinned past the length bound.
+        _ci_depth = aiqt_hooks._CMTIDN_RUN_DEPTH
+        for _ci_nest in (_ci_depth - 1, _ci_depth, _ci_depth + 1):
+            _ci_cmd = "git submodule foreach " * _ci_nest + 'git commit --author="Claude <c@x>" -m x'
+            try:
+                _ci_got = aiqt_hooks.find_ai_authorship(_ci_cmd)
+            except ValueError:
+                _ci_got = ValueError
+            if (_ci_got is ValueError) != (_ci_nest > _ci_depth) or _ci_got is None:
+                failures.append("(ci-wr-run-depth) a foreach nest {} deep gave {!r} (want {})".format(
+                    _ci_nest, _ci_got, "ValueError" if _ci_nest > _ci_depth else "an --author hit"))
+        _ci_saved = (aiqt_hooks._CMTIDN_RUN_SCALE, aiqt_hooks._CMTIDN_RUN_FLOOR)
+        try:
+            aiqt_hooks._CMTIDN_RUN_SCALE = 0
+            # the one run line of this command is 'git commit -m x', 15 characters
+            for _ci_floor, _ci_want in ((16, False), (15, False), (14, True)):
+                aiqt_hooks._CMTIDN_RUN_FLOOR = _ci_floor
+                try:
+                    aiqt_hooks.find_ai_authorship("git submodule foreach git commit -m x")
+                    _ci_raised = False
+                except ValueError:
+                    _ci_raised = True
+                if _ci_raised != _ci_want:
+                    failures.append("(ci-wr-run-length) a 15-character run line under a {}-character bound "
+                                    "raised {} (want {})".format(_ci_floor, _ci_raised, _ci_want))
+        finally:
+            aiqt_hooks._CMTIDN_RUN_SCALE, aiqt_hooks._CMTIDN_RUN_FLOOR = _ci_saved
+        _ci_saved = aiqt_hooks._CMTIDN_RUN_DEPTH
+        try:
+            aiqt_hooks._CMTIDN_RUN_DEPTH = 1  # so only the length bound can raise
+            aiqt_hooks.find_ai_authorship("sudo" + " -E git bisect run x" * 300 + " -E git commit -m x")
+            failures.append("(ci-wr-run-repeat) 300 wrapped git bisect run lines did not pass the length bound")
+        except ValueError:
+            pass
+        finally:
+            aiqt_hooks._CMTIDN_RUN_DEPTH = _ci_saved
 
         # secsec (EN-5 PR-C): decision-signal battery for the secrets-shift-left guard.
         # === secrets_shift_left (secsec): an obvious hardcoded secret in a Write/Edit/Bash write-form ==
