@@ -1874,9 +1874,9 @@ def _member_bound_checks(roster):
     every override and for one non-member argv that keeps the default (red when the lookup is
     bypassed).
     config/member-roster-figures: the sizing comment's roster figures hold against the live
-    roster (107 members, 105 in the malformed lane) and, with the sizing account's fixed
+    roster (109 members, 107 in the malformed lane) and, with the sizing account's fixed
     coverage (89 members timed or bounded, ten measured under the malformed lane), the derived
-    figures (18 members with no recorded time, 95 malformed-lane members unmeasured); red when
+    figures (20 members with no recorded time, 97 malformed-lane members unmeasured); red when
     a roster change leaves that comment stale."""
     from unittest.mock import patch
 
@@ -1884,10 +1884,10 @@ def _member_bound_checks(roster):
                  if _command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"]}
     # 89 and 10 are the sizing account's fixed coverage (see the SIZING comment above
     # CONFIG_MEMBER_BOUND_DEFAULT in the engine); the roster counts are live, so a roster change
-    # turns that comment's figures (107, 105, 18 and 95) red here.
+    # turns that comment's figures (109, 107, 20 and 97) red here.
     check("config/member-roster-figures",
           (len(roster), len(malformed), len(roster) - 89, len(malformed) - 10),
-          (107, 105, 18, 95))
+          (109, 107, 20, 97))
 
     record = ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert")
     opf_selftest = ("opf/tools/opf.py", "--self-test")
