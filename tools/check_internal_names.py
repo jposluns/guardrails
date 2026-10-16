@@ -382,13 +382,31 @@ def self_test_main():
     environment. A caller's home, XDG or system configuration (malformed or hostile) therefore cannot change
     a self-test verdict or run a configured program. The lifecycle saves the environment before its scrub
     and restores it on exit, so no scrub runs here first: an in-process call leaves the caller's environment
-    exactly as it found it (self-test case 22). The snapshot taken here, before the lifecycle, is the caller
-    environment case 21 builds its child runs from: inside the lifecycle os.environ carries the fixture scrub
-    and the wrapper's PATH, so it no longer names the caller's own home, PATH or git."""
+    exactly as it found it (self-test case 22). The snapshot taken here, before the lifecycle (inside it
+    os.environ carries the fixture scrub and the wrapper's PATH), holds only the caller's _CALLER_VARS
+    entries, PATH and TMPDIR. Case 21's lanes and controls, the case 22 probe and case 23's lanes are built
+    from it, and every other variable they pass is a fixture value they set themselves. The git-fixture-env
+    trust check that allows caller_env_without_git() only as the env of literal archives of the real
+    checkout is syntactic: it matches that helper's name, so it would not see an inline copy of the helper's
+    body. This snapshot carries only the listed variables (no HOME, no XDG_* and no GIT_* variable), so it
+    is not a caller-environment use that check is meant to stop."""
     from _git_fixture_env import fixture_git_lifecycle
-    caller_env = dict(os.environ)
+    caller_env = _caller_snapshot(os.environ)
     with fixture_git_lifecycle():
         return _self_test(caller_env)
+
+
+# The only caller variables self-test cases 21 to 23 pass on to the runs they launch (see _caller_snapshot).
+# PATH finds the caller's git, which the lanes' PATH shims and the system-config pin put themselves in front
+# of; TMPDIR keeps those runs' fixture directories in the caller's temporary directory. No locale variable is
+# carried, so git prints untranslated messages, which the case 21 controls match ("bad config").
+_CALLER_VARS = ("PATH", "TMPDIR")
+
+
+def _caller_snapshot(environ):
+    """The _CALLER_VARS entries of `environ`, and nothing else from it: never HOME, XDG_CONFIG_HOME, any
+    other XDG_* variable or any GIT_* variable, so a run built from this reads no caller configuration."""
+    return {k: environ[k] for k in _CALLER_VARS if k in environ}
 
 
 # A self-test that launches a child self-test sets _CHILD_SENTINEL in the child's environment to its OWN pid,
@@ -849,11 +867,16 @@ def _self_test(caller_env=None):
             #     and XDG controls pin the host's system configuration away (the shim supplies the system
             #     control's), so no control reads the host's system file. The caller environment is the
             #     snapshot self_test_main takes before the lifecycle (a direct _self_test() call runs outside
-            #     the lifecycle and uses os.environ), without its GIT_* variables; each lane and control here
-            #     replaces HOME and XDG_CONFIG_HOME, so none of them reads the caller's own configuration.
+            #     the lifecycle and takes it from os.environ), reduced to _CALLER_VARS either way; each lane
+            #     and control here sets HOME and XDG_CONFIG_HOME to this case's own directories, so none of
+            #     them reads the caller's own configuration, and neither do the case 22 probe and case 23's
+            #     lanes, which carry no HOME or XDG_CONFIG_HOME from the caller.
             import shlex
-            caller = {k: v for k, v in (os.environ if caller_env is None else caller_env).items()
-                      if not k.startswith("GIT_")}
+            caller = _caller_snapshot(os.environ if caller_env is None else caller_env)
+            # When the caller's PATH is set, self_test_main's lifecycle has already searched it for git and
+            # raised RuntimeError("self-test requires git") before any case ran if it found none, so the
+            # real_git is None failures here and in case 23 are then reachable only where _self_test runs
+            # without the lifecycle (a direct _self_test() call).
             real_git = shutil.which("git", path=caller.get("PATH", os.defpath))
             poison = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-poison-"))
             try:
@@ -978,11 +1001,11 @@ def _self_test(caller_env=None):
             #     shim, which sets GIT_CONFIG_SYSTEM to its malformed file in front of this one, still
             #     reaches git and fails that lane as this case requires.
             lifecycle_entry = ("    from _git_fixture_env import fixture_git_lifecycle\n"
-                               "    caller_env = dict(os.environ)\n"
+                               "    caller_env = _caller_snapshot(os.environ)\n"
                                "    with fixture_git_lifecycle():\n"
                                "        return _self_test(caller_env)\n")
             scrub_entry = ("    from _git_fixture_env import scrub_git_environment\n"
-                           "    caller_env = dict(os.environ)\n"
+                           "    caller_env = _caller_snapshot(os.environ)\n"
                            "    scrub_git_environment()\n"
                            "    return _self_test(caller_env)\n")
             # Each (original, mutant) pair is source text that occurs exactly once in this file; the escaped
