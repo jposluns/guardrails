@@ -205,7 +205,8 @@ symlinks (for `git show`, the blob's repository path under the resolved toplevel
 the working tree), its path relative to the repository root (or null outside it, and for `git show` null
 unless the repository is the session's), a 1-based inclusive line span, the sha256 of the raw bytes of
 those lines (split on LF only, CR kept), the tool that read or wrote them and, for `git show`, the
-revision as the command named it. An append that would take a non-empty session file past 4 MiB first renames it
+revision exactly as the command typed it (not resolved, so the commit a moving name such as `HEAD` named
+then is not recorded). An append that would take a non-empty session file past 4 MiB first renames it
 onto `<key>.jsonl.1`, replacing the older generation (a later reader reads both); a row already present (equal in kind, tool, path,
 span, digest and revision) is skipped only while the file is under 256 KiB; creating a session file (a new
 session's, or the fresh one after a rotation) removes up to 50 regular files of

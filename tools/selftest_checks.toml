@@ -765,13 +765,20 @@ expected-check-ids = [
   "citeledger/edit-own-lines-only",
   "citeledger/grep-scope",
   "citeledger/grep-flag-parse",
+  "citeledger/grep-option-forms",
+  "citeledger/grep-long-value-next-word",
   "citeledger/dedup-key-separates-facts",
   "citeledger/max-files-boundary",
   "citeledger/max-rows-boundary",
   "citeledger/max-splits-boundary",
   "citeledger/edit-max-boundary",
   "citeledger/deadline-boundary",
+  "citeledger/probe-given-time-left",
+  "citeledger/span-and-within-deadline",
+  "citeledger/split-stops-at-deadline",
+  "citeledger/merge-and-digest-stop-at-deadline",
   "citeledger/deadline-bounds-worst-shapes",
+  "citeledger/slow-probe-cut-off",
   # ---------- the citation read check (bake) ----------
   "citeledger/commit-m-unread-warns",
   "citeledger/commit-m-read-silent",
@@ -812,12 +819,16 @@ expected-check-ids = [
   "citeledger/body-max-boundary",
   "citeledger/ledger-max-boundary",
   "citeledger/budget-noted",
+  "citeledger/check-digest-deadline",
   "citeledger/inert-outside-scope",
   "citeledger/check-fault-noted",
   "citeledger/bake-never-denies",
   "citeledger/check-deadline-probe-boundary",
   "citeledger/git-show-row-judged-at-working-tree",
   "citeledger/check-deadline-bounds-slow-probes",
+  # ---------- the citation hooks together ----------
+  "citeledger/roadmap-pairs-recorder-with-check",
+  "citeledger/state-dir-inside-tmp",
 ]
 
 [[suite]]
