@@ -1503,37 +1503,69 @@ def _is_possible_producer(seg):
 
 def _diff_ends_options(argv, j):
     """True when argv[j] ends the option region of a git diff producer for the output-diversion and
-    patch-flag scans. git's revision walk cuts its arguments at the FIRST '--' before it reads any option,
-    so a '--' ends the options whatever comes before it (git diff -p -- --output=real.txt prints the patch
-    on stdout and reads --output=real.txt as a pathspec, checked with git 2.55.0). An '--end-of-options'
-    right after an option word may be that option's value (_option_may_take_value: git diff -S
-    --end-of-options --output=/dev/stderr writes the patch to stderr), so it does not end them; one
-    anywhere else does."""
+    patch-flag scans under the revision-walk reading. git's revision walk cuts its arguments at the FIRST
+    '--' before it reads any option, so a '--' ends the options whatever comes before it (git diff -p --
+    --output=real.txt prints the patch on stdout and reads --output=real.txt as a pathspec, checked with git
+    2.55.0). An '--end-of-options' right after an option word may be that option's value
+    (_option_may_take_value: git diff -S --end-of-options --output=/dev/stderr writes the patch to stderr),
+    so it does not end them; one anywhere else does. The scans also read the option-parser reading
+    (_diff_parser_ends_options) and keep the stricter outcome (_DIFF_OPTION_READINGS)."""
     word = argv[j]
     if word == "--":
         return True
     return word in _DIFF_END_OF_OPTIONS and not (j > 0 and _option_may_take_value(argv[j - 1]))
 
 
+def _diff_option_takes_next(word):
+    """True when git's option parser may give the option word word the next word as its value: any word
+    _option_may_take_value admits, except a short word ending in a patch letter (_SUMMARY_PATCH_SHORT). -p
+    and -u take no value and -U takes one only attached, and a letter that is the attached value of an
+    earlier letter (-Sp) leaves nothing to take either, so the word takes none: git diff --no-index -p --
+    --output=x.txt a b, and the same with -u, -U, -wp or -Sp, reads --output=x.txt as a path and exits 129
+    without writing x.txt, while -pS -- --output=x.txt gives -S the '--' and writes x.txt (git 2.55.0). Any
+    other short word, and a long one with no '=', may take the next word (git diff --stat -- -p reads the
+    '--' as a possible --stat value although --stat takes one only after '=', a safe-direction over-read)."""
+    return _option_may_take_value(word) and (word.startswith("--") or word[-1] not in _SUMMARY_PATCH_SHORT)
+
+
+def _diff_parser_ends_options(argv, j):
+    """True when argv[j] ends the option region of a git diff producer under the option-parser reading.
+    Under --no-index, explicit or implied outside a repository, git reads the options with its option
+    parser, which gives a value-taking option the next word even when it is '--' (git diff --no-index -S --
+    --output=/dev/stderr a b writes the patch to stderr, and git diff --no-index --stat --word-diff-regex --
+    -p a b prints the patch, git 2.55.0). So a '--' or '--end-of-options' right after an option word that
+    may take a value (_diff_option_takes_next) does not end the options; one anywhere else does."""
+    return argv[j] in _DIFF_END_OF_OPTIONS and not (j > 0 and _diff_option_takes_next(argv[j - 1]))
+
+
+# The two readings of a git diff producer's option region. A producer is judged under each, and a console
+# patch found under either one counts (_is_console_dump), as does a diversion found under either one for
+# proofs C and D (_diff_any_diversion): the stricter outcome, since the guard cannot tell whether git runs
+# the revision walk or --no-index (implied outside a repository).
+_DIFF_OPTION_READINGS = (_diff_ends_options, _diff_parser_ends_options)
+
+
 # git diff/log write the diff to a --output/-o file instead of stdout, so a shell redirect or a pipe is a
 # DECOY when --output is present (proofs C and D must not apply). --output/-o takes a file value, inline
 # (--output=X / -oX) or separated (--output X / -o X).
-def _diff_output_diversion(argv):
+def _diff_output_diversion(argv, ends=_diff_ends_options):
     """Return (present, target) for a git --output/-o diff-output diversion before the end of the options
-    (_diff_ends_options), or (False, None). The target decides console vs file: the diff lands there, not on
-    stdout. A diversion read where git reads none hides a console patch behind a file target, so it can earn
-    an allow; what holds: the scan stops at the first '--', exactly where the revision walk does, and goes on
-    past an '--end-of-options' only right after an option word. Where that option takes a value, git agrees.
-    Where it takes none, git ends the options there and must read the next word as a revision: a word
-    spelled as a diversion names one only through a ref created with that name by git update-ref (git
-    branch and git tag refuse a name starting with '-'), and otherwise git refuses the command (git diff -p
-    --end-of-options --output=real.txt, git 2.55.0). Disclosed residue: under --no-index, explicit or implied
-    outside a repository, git reads the options with its option parser, which gives a value-taking option
-    the next word even when it is '--', so a diversion after such a '--' (git diff --no-index -S --
-    --output=out.txt a b writes out.txt) is missed and the stdout redirect or pipe decides."""
+    under one reading (ends, one of _DIFF_OPTION_READINGS; the revision-walk one by default), or (False,
+    None). The target decides console vs file: the diff lands there, not on stdout. The callers judge both
+    readings and keep the stricter outcome: a diversion to a console target under either one is a console
+    dump, and a diversion under either one keeps proofs C and D from applying, while a file diversion under
+    one reading never outweighs a console patch under the other. Under the revision-walk reading the scan
+    stops at the first '--', exactly where the revision walk does, and goes on past an '--end-of-options'
+    only right after an option word. Where that option takes a value, git agrees. Where it takes none, git
+    ends the options there and must read the next word as a revision: a word spelled as a diversion names
+    one only through a ref created with that name by git update-ref (git branch and git tag refuse a name
+    starting with '-'), and otherwise git refuses the command (git diff -p --end-of-options
+    --output=real.txt, git 2.55.0). Under the option-parser reading, the one --no-index uses, a '--' right
+    after an option word that may take a value does not end the scan either (_diff_parser_ends_options: git
+    diff --no-index -S -- --output=/dev/stderr a b writes the patch to stderr)."""
     end = len(argv)
     for j in range(len(argv)):
-        if _diff_ends_options(argv, j):
+        if ends(argv, j):
             end = j
             break
     i = 0
@@ -1547,6 +1579,12 @@ def _diff_output_diversion(argv):
             return True, word[2:]
         i += 1
     return False, None
+
+
+def _diff_any_diversion(argv):
+    """True when a --output/-o diversion is found under either option reading (_DIFF_OPTION_READINGS), so
+    the shell redirect or pipe may be a decoy and proofs C and D, which trust stdout, do not apply."""
+    return any(_diff_output_diversion(argv, ends)[0] for ends in _DIFF_OPTION_READINGS)
 
 
 def _final_stdout_dest(redirects):
@@ -1571,7 +1609,7 @@ def _final_stdout_dest(redirects):
 _SUMMARY_PATCH_SHORT = frozenset(("p", "u", "U"))
 
 
-def _argv_has_patch_enabler(argv):
+def _argv_has_patch_enabler(argv, ends=_diff_ends_options):
     """Argument-aware: True when a git producer's OPTION region (before a '--'/'--end-of-options' boundary)
     carries a patch-ENABLING option - one that makes git emit a patch even alongside a summary selector.
     Enablers: -p/-u, -U/--unified, the --patch* long family, and any short-option CLUSTER reaching a p/u/U
@@ -1583,20 +1621,20 @@ def _argv_has_patch_enabler(argv):
     see that constant), and the long enablers to the --patch*/--unified* prefixes (excluding --cc, the
     merge-only combined-diff form). Any other (unknown) option is not a patch enabler; this predicate
     answers only 'is a patch forced on', leaving every other classification to the caller (F-R2-5). The
-    region ends where _diff_ends_options says: at the first '--', where the revision walk ends it (git diff
-    --stat -- -p prints only the summary), or at an '--end-of-options' that does not follow an option word;
-    one right after an option word outside those value sets may be that option's value (git diff --stat
-    --word-diff-regex --end-of-options -p prints the patch), so the scan goes on past it, which can only find
-    an enabler more often. A listed value-taking option consumes its separated value before that test, a
-    '--' included. Disclosed residue: under --no-index git's option parser gives a value-taking option the
-    next word even when it is '--', so a patch flag after a '--' that follows a value-taking option outside
-    those value sets is missed (git diff --no-index --stat --word-diff-regex -- -p a b prints the patch,
-    git 2.55.0)."""
+    region ends where the reading ends says (one of _DIFF_OPTION_READINGS; the revision-walk one by default,
+    and the caller judges both). Under the revision-walk reading it ends at the first '--', where the
+    revision walk ends it (git diff --stat -- -p prints only the summary), or at an '--end-of-options' that
+    does not follow an option word; one right after an option word outside those value sets may be that
+    option's value (git diff --stat --word-diff-regex --end-of-options -p prints the patch), so the scan goes
+    on past it, which can only find an enabler more often. Under the option-parser reading, the one
+    --no-index uses, a '--' right after an option word that may take a value does not end it either
+    (_diff_parser_ends_options: git diff --no-index --stat --word-diff-regex -- -p a b prints the patch, git
+    2.55.0). A listed value-taking option consumes its separated value before that test, a '--' included."""
     i = 0
     n = len(argv)
     while i < n:
         tok = argv[i]
-        if _diff_ends_options(argv, i):
+        if ends(argv, i):
             break  # every remaining token is an operand (a pathspec/ref), never an option
         if not tok.startswith("-") or tok == "-":
             i += 1
@@ -1630,22 +1668,24 @@ def _argv_has_patch_enabler(argv):
     return False
 
 
-def _diff_emits_only_summary(argv):
+def _diff_emits_only_summary(argv, ends=_diff_ends_options):
     """Role-aware: True when a producer's OPTION region (before a '--'/'--end-of-options' boundary) carries
     a summary selector (--stat/--name-only/--name-status/--numstat/--shortstat, bare or '=value') and NO
     patch enabler. Distinguishes a genuine summary listing (git diff -M --stat, which is not a console patch
     dump and so ASKS rather than DENIES) from a summary token in a NON-option position (git diff -- --stat, a
     pathspec: a real dump) and from a summary with a co-present patch enabler (git diff --stat -p, or the
     argument-aware -U/--unified and p/u/U-cluster forms, still a full patch dump). Patch-enabler recognition
-    is argument-aware via _argv_has_patch_enabler, so -U/--unified and a p/u short cluster (git show -s --stat
-    -U3 / --unified=3 / -sp) are no longer mistaken for summary-only (F-R2-5)."""
+    is argument-aware via _argv_has_patch_enabler under the reading ends (one of _DIFF_OPTION_READINGS), so
+    -U/--unified and a p/u short cluster (git show -s --stat -U3 / --unified=3 / -sp) are no longer mistaken
+    for summary-only (F-R2-5). The summary selector counts only before the first boundary word under either
+    reading, which can only find a summary less often."""
     has_summary = False
     for word in argv:
         if word in _DIFF_END_OF_OPTIONS:
             break
         if word.split("=", 1)[0] in _SUMMARY_FLAGS:
             has_summary = True
-    return has_summary and not _argv_has_patch_enabler(argv)
+    return has_summary and not _argv_has_patch_enabler(argv, ends)
 
 
 def _seg_stdout_reaches_console(seg, segments, index):
@@ -1675,19 +1715,26 @@ def _is_console_dump(seg, segments, index):
     a confirmed dump - it routes to ASK instead), it is a git diff producer, it does not emit only a summary
     listing, and its output is proven to reach a console. When the producer diverts its output with
     --output/-o, THAT target decides (a /dev,/proc console target is a dump; a file or dynamic target is not
-    a confirmed dump, so it ASKS) and any shell redirect or pipe is a decoy. Otherwise stdout governs. Used
-    only to choose DENY over ASK; its absence never establishes an ALLOW."""
+    a confirmed dump, so it ASKS) and any shell redirect or pipe is a decoy. Otherwise stdout governs. The
+    option region is read under both readings (_DIFF_OPTION_READINGS), each judged on its own, and a console
+    patch under either one is a dump. Used only to choose DENY over ASK; its absence never establishes an
+    ALLOW."""
     if _command_word(seg.argv) != "git":
         return False  # an opaque/wrapped command word is not a proven git dump -> ASK, never DENY
     if not _is_diff_producer(seg.argv):
         return False
-    if _diff_emits_only_summary(seg.argv):
-        return False
-    diverted, out_target = _diff_output_diversion(seg.argv)
-    if diverted:
-        # the diff is written to the --output target, not stdout; the shell redirect/pipe is a decoy
-        return out_target is not None and _target_class(out_target, False) == "file-dev"
-    return _seg_stdout_reaches_console(seg, segments, index) == "console"
+    for ends in _DIFF_OPTION_READINGS:
+        if _diff_emits_only_summary(seg.argv, ends):
+            continue
+        diverted, out_target = _diff_output_diversion(seg.argv, ends)
+        if diverted:
+            # the diff is written to the --output target, not stdout; the shell redirect/pipe is a decoy
+            if out_target is not None and _target_class(out_target, False) == "file-dev":
+                return True
+            continue
+        if _seg_stdout_reaches_console(seg, segments, index) == "console":
+            return True
+    return False
 
 
 def _diff_proof_help(command):
@@ -1810,7 +1857,7 @@ def _diff_proof_realfile(segments):
         return False
     if not _is_possible_producer(seg):
         return False
-    if _diff_output_diversion(seg.argv)[0]:
+    if _diff_any_diversion(seg.argv):
         return False  # --output/-o governs where the diff lands; the shell redirect is a decoy
     return _final_stdout_dest(seg.redirects) == "file-real"
 
@@ -1829,7 +1876,7 @@ def _diff_proof_pager(segments):
         return False
     if not stage1.argv or stage1.argv[0] != "git" or not _is_possible_producer(stage1):
         return False
-    if _diff_output_diversion(stage1.argv)[0]:
+    if _diff_any_diversion(stage1.argv):
         return False  # --output/-o diverts the diff off the pipe; the pager is a decoy
     if stage2.redirects or stage2.opaque_shell:
         return False
@@ -3233,11 +3280,11 @@ def _checkout_switch_parse_options(pre):
 
 def _pathspec_file_scopes(pre, is_spelling):
     """True when the last --pathspec-from-file of the option region pre (is_spelling tells its spellings;
-    git reads the last one) makes a checkout or reset path-scoped by itself. Not when its value is a
-    separated '--' or '--end-of-options': git gives the option the next word whatever it is and reads the
-    words after it as options, so git checkout --pathspec-from-file -- -f and git reset
-    --pathspec-from-file -- --hard, with an empty file named '--', force a checkout of the whole tree and
-    reset it --hard (git 2.55.0); the role helper then judges the options after it."""
+    git reads the last one) makes a checkout path-scoped by itself. Not when its value is a separated '--'
+    or '--end-of-options': git gives the option the next word whatever it is and reads the words after it
+    as options, so git checkout --pathspec-from-file -- -f, with an empty file named '--', forces a checkout
+    of the whole tree (git 2.55.0); the role helper then judges the options after it. A reset does not use
+    this: its mode decides whatever --pathspec-from-file says (_reset_role)."""
     last = None
     for i, word in enumerate(pre):
         if is_spelling(word):
@@ -3371,17 +3418,28 @@ def _reset_role(args):
     scoped either way; option parsing stops at the first '--'/'--end-of-options' so a mode-looking operand
     past it is a pathspec, not a mode, unless that word is the value of a value-taking reset option
     (_discard_takes_value: git reset --pathspec-from -- --hard reads a pathspec file named '--' and resets
-    --hard), when the options go on past it. A --pathspec-from-file whose separated value is such a word
-    does not make the reset scoped by itself (_pathspec_file_scopes), so the mode after it decides: git reset
-    --pathspec-from-file -- --hard is a clobber. One naming an ordinary file (or joined with '=') stays
-    scoped even beside --hard, a disclosed under-read: git refuses a hard reset with paths, so it runs only
-    when the file lists none, as a whole-tree hard reset (git 2.55.0)."""
+    --hard), when the options go on past it. The mode decides whatever --pathspec-from-file says: git
+    refuses --hard, --soft, --merge and --keep with paths, so a reset carrying one of them and a pathspec
+    file runs only when the file lists none, as a whole-tree reset of that mode (git 2.55.0: git reset
+    --pathspec-from-file list --hard, with an empty list file, reset the whole tree --hard, and with a
+    listed path stopped with 'Cannot do hard reset with paths'), so that reset is a clobber, and the same
+    with --soft moves HEAD only. The separated value of --pathspec-from-file names the file, never a mode,
+    so it is skipped (git reset --pathspec-from-file --hard reads the file named --hard and resets the paths
+    it lists, mixed); the value of an abbreviated spelling is read like any word, which can only find a mode
+    more often. A pathspec-file reset with no mode, the default mixed reset of the listed paths, stays
+    scoped."""
     pre, _post, _had_sep = _split_pre_post(args, lambda word: _discard_takes_value("reset", word))
-    if _pathspec_file_scopes(pre, lambda word: word == "--pathspec-from-file"
-                             or word.startswith("--pathspec-from-file=")):
-        return ("scoped", "git reset --pathspec-from-file (a path-scoped reset from a file)")
+    pathspec_file = False
     mode = None  # "clobber" / "soft" / "scoped"
+    skip_value = False
     for a in pre:
+        if skip_value:
+            skip_value = False
+            continue  # the separated --pathspec-from-file value names the file, never a mode
+        if a == "--pathspec-from-file" or a.startswith("--pathspec-from-file="):
+            pathspec_file = True
+            skip_value = a == "--pathspec-from-file"
+            continue
         if not (a.startswith("--") and "=" not in a):
             continue
         name = a[2:]
@@ -3397,6 +3455,8 @@ def _reset_role(args):
         return ("clobber", "git reset --hard")
     if mode == "soft":
         return ("allow", None)  # HEAD-only: the index and worktree are untouched
+    if pathspec_file and mode is None:
+        return ("scoped", "git reset --pathspec-from-file (a path-scoped reset from a file)")
     return ("scoped", "git reset (an index or worktree reset that can drop staged or unstaged changes)")
 
 
