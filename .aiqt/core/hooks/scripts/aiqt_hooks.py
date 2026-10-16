@@ -181,6 +181,30 @@ decision whose stdout write failed exited 0, which allows. The floor guard above
 write-flush-os._exit shape inline, since it runs before any helper exists.
 The PYTHON-FLOOR comment below gives the floor guard's exits and the exit of an interpreter that cannot
 start this file, which fails first with Python's own exit.
+
+DEADLINE (PreToolUse): every PreToolUse mode that is not fail-open reads its payload and runs its check
+inside one _DeadlineWindow of PRETOOL_BUDGET_SECONDS (8 seconds: HOOK_TIMEOUT_SECONDS, the 10-second
+hooks.json timeout tools/gen_hooks.py renders, less 2), armed before the payload read. A check that has
+not decided by then is interrupted by _HookDeadline, a BaseException that no handler's except Exception
+branch catches, and the call fails CLOSED with exit 2 and a stderr line naming the handler, the budget and
+the input size and asking for smaller calls or long content moved into a file; the timer is cancelled
+before any decision is written. The raw 'git ... <verb>' fallback scans are _RawSequence probes of linear
+cost: the single regexes they replaced grew with the square or the cube of the command length, and five
+guards ran past the hook timeout on some shape at or below 64 KB. Measured in-process on a 24-core host
+with Python 3.14.4 (2026-10-15), the slowest PreToolUse handler call on the worst shapes
+tools/selftest_aiqt_hooks.py times took 0.09 s at 64 KB, 0.43 s at 256 KB and 1.73 s at 1 MB, and
+interpreter start-up adds about 0.1 to 0.2 s to each call. Outside the deadline: interpreter start-up and
+module import, which run before main(); a wait the interpreter cannot interrupt (a system call in
+uninterruptible sleep, such as a read from a hung network mount, or a long call into C code that does not
+check for signals), which holds the deadline back until it returns, as does review_dispatch_pin's wait for
+its worker thread when the kernel delivers the alarm to that thread (the wait ends within that guard's
+own 8-second budget plus a quarter second); cleanup that runs while the deadline
+unwinds (a finally block, killing and reaping a child process), which still counts against the platform's
+timeout; and a platform without SIGALRM and setitimer (Windows), a caller that blocks SIGALRM, or a call
+off the main thread, which run with no deadline. Whether the platform blocks or allows a PreToolUse call
+whose hook it stops at its own timeout has not been verified; the deadline makes the decision the
+dispatcher's own exit 2 instead. An interrupted git_discard recovery snapshot can leave a temporary index
+or unreferenced objects behind.
 """
 import sys
 
@@ -250,6 +274,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 
 PRETOOL = "PreToolUse"
@@ -259,6 +284,14 @@ STOP_EVENTS = ("Stop", "SubagentStop")
 # cannot block at all; an errored UserPromptSubmit stamp must never block a human prompt; a
 # PostToolUse recorder error must surface as a warning, not a tool failure. Doc-confirmed 2026-08-29.
 FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSubmit", "PostToolUse")
+# The platform stops a hook command at the timeout tools/gen_hooks.py writes into hooks.json (its
+# TIMEOUT); HOOK_TIMEOUT_SECONDS mirrors that value, and gen_hooks refuses to render (exit 2) when the two
+# differ, so both numbers come from that one source. main() gives every PreToolUse mode that is not
+# fail-open PRETOOL_BUDGET_SECONDS, counted from before the payload read, and fails closed with exit 2
+# when its check has not decided by then, so the refusal is written before the platform's own timeout.
+# gen_hooks also refuses a budget that is not at least one second below the timeout or not positive.
+HOOK_TIMEOUT_SECONDS = 10
+PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - 2.0
 
 
 # --- decision constructors ---------------------------------------------------------------------------
@@ -1266,10 +1299,39 @@ _DEV_PROC_TARGET_RE = re.compile(r"^/+(?:dev|proc)(?:/|$)")
 # It therefore cannot be proven a plain file lexically, so it is routed OPAQUE (ASK), never a proven
 # real-file ALLOW - matching how a '..' escape (equally cwd-dependent) is handled.
 _REL_DEV_PROC_TARGET_RE = re.compile(r"^(?:dev|proc)(?:/|$)")
+
+
+class _RawSequence:
+    """A raw-text probe whose steps must match IN ORDER: each step is searched once, from the end of the
+    previous step's leftmost match, and search() returns the last step's match or None. It decides the
+    same set as the single regex that joins the steps with a lazy '.*?' under re.DOTALL ('\\bgit\\b.*?\\bpush\\b'
+    and its siblings), at linear cost: that single regex retries the lazy gap from every match of the
+    first step, so on a command with many git words and no verb after them its cost grew with the square
+    of the command length, and with the cube for a three-step pattern (seconds at a few KB, past the hook
+    timeout well under 64 KB). Taking each step's leftmost match loses no solution because every step but
+    the last matches one fixed-length word, so the leftmost match also ends first, and a search started at
+    a position still reads the characters before it, so a word boundary or lookbehind at that position
+    sees the same neighbour it sees in the single regex. tools/selftest_aiqt_hooks.py holds every probe
+    built from this class equal to the single regex it replaced over a generated corpus."""
+    __slots__ = ("steps",)
+
+    def __init__(self, *patterns):
+        self.steps = tuple(re.compile(pattern) for pattern in patterns)
+
+    def search(self, text):
+        found, pos = None, 0
+        for step in self.steps:
+            found = step.search(text, pos)
+            if found is None:
+                return None
+            pos = found.end()
+        return found
+
+
 # Fallback-only broad producer probe over the RAW command, used only when _lex_command cannot parse the
 # command: an apparent 'git ... <producer>' ASKS (never a silent allow, never a regex-earned allow).
-_RAW_DIFF_PRODUCER_RE = re.compile(
-    r"(?is)\bgit\b.*?\b(?:diff|show|range-diff|log|diff-tree|diff-index|diff-files|format-patch)\b")
+_RAW_DIFF_PRODUCER_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\b(?:diff|show|range-diff|log|diff-tree|diff-index|diff-files|format-patch)\b")
 
 
 def _has_patch_flag(tokens):
@@ -2561,15 +2623,19 @@ _GIT_CONFIG_WRITE_FLAGS = frozenset((
     "-e", "--edit"))
 _EXPBND_WRAPPER_WORDS = frozenset(("command", "exec", "builtin", "env", "sudo"))
 _RAW_EXPBND_CD_RE = re.compile(r"(?i)(?:^|[\s;&|()])(?:cd|pushd|popd)(?=$|[\s;&|()])")
-_RAW_EXPBND_MUTATE_RE = re.compile(
-    r"(?is)\bgit\b.*?\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
+_RAW_EXPBND_MUTATE_RE = _RawSequence(
+    r"(?i)\bgit\b",
+    r"(?i)\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
     r"notes|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|worktree)\b")
-_RAW_EXPBND_PRUNING_FETCH_RE = re.compile(
-    r"(?is)\bgit\b.*?\bfetch\b.*?(?:--prune(?:-tags)?\b|(?<!\S)-[^\s]*p)")
-_RAW_EXPBND_BREADTH_RE = re.compile(
-    r"(?is)\bgit\b.*?(?:\badd\b.*?(?:--all\b|(?<!\S)-[^\s]*A|(?<!\S)(?:\.|:/)(?!\S))|"
-    r"\bcommit\b.*?(?:--all\b|(?<!\S)-[^\s]*a))")
-_RAW_EXPBND_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
+_RAW_EXPBND_PRUNING_FETCH_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\bfetch\b", r"(?i)--prune(?:-tags)?\b|(?<!\S)-[^\s]*p")
+# The whole-tree breadth probe is two sequences, git then add then an add breadth selector, or git then
+# commit then a commit breadth selector; a command shows breadth when either matches.
+_RAW_EXPBND_ADD_BREADTH_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\badd\b", r"(?i)--all\b|(?<!\S)-[^\s]*A|(?<!\S)(?:\.|:/)(?!\S)")
+_RAW_EXPBND_COMMIT_BREADTH_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\bcommit\b", r"(?i)--all\b|(?<!\S)-[^\s]*a")
+_RAW_EXPBND_PUSH_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bpush\b")
 
 
 def _is_abs_binding(value):
@@ -2824,7 +2890,8 @@ def _expbnd_fallback(command):
     if (_RAW_EXPBND_CD_RE.search(command) and
             (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command))):
         return _expbnd_target_ask("mutation")
-    if _RAW_EXPBND_BREADTH_RE.search(command) and _RAW_EXPBND_PUSH_RE.search(command):
+    if ((_RAW_EXPBND_ADD_BREADTH_RE.search(command) or _RAW_EXPBND_COMMIT_BREADTH_RE.search(command))
+            and _RAW_EXPBND_PUSH_RE.search(command)):
         return _expbnd_breadth_publish_deny("breadth operation")  # finding 11: breadth + publish -> deny
     return _allow()
 
@@ -6149,8 +6216,8 @@ _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests bod
 
 # Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct);
 # mirrors the _RAW_DIFF_PRODUCER_RE / _RAW_LOSSY_VERB_RE posture: conservative, over-matching, never
-# a silent allow. _RAW_PUSH_RE/_RAW_COMMIT_RE pair git with the verb in one pattern ((?is): case-fold,
-# '.' spans newlines). _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--for[a-z-]*' covers
+# a silent allow. _RAW_PUSH_RE/_RAW_COMMIT_RE pair git with a LATER verb (a _RawSequence, case-folded,
+# the gap spanning newlines). _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--for[a-z-]*' covers
 # --for/--force/--force-with-lease/--force-if-includes; the short cluster scan now admits a digit
 # ('-[A-Za-z0-9]*f'), so an ipv4/ipv6 '-4f'/'-6f' clustered with force is caught (F-117), and its
 # disclosed false-hit on an attached -o value ending in f ('-of') now also covers '-o4f'; the short
@@ -6175,7 +6242,7 @@ _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests bod
 # (env git push -'f' origin main, \-f, escaped +main) is not matched, because bash quote/escape removal
 # cannot be replicated by a raw-string regex; this is the same inherent lexical boundary as a
 # shell-expanded $VAR, disclosed and not chased (F-117/F-119).
-_RAW_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
+_RAW_PUSH_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bpush\b")
 _RAW_PUSH_FORCE_RE = re.compile(r"(?i)--for[a-z-]*|--mirror\b|--all\b|--branches\b|(?:^|[\s'\"])-[A-Za-z0-9]*f|(?:^|[\s'\"])\+\S")
 _RAW_PUSH_DELETE_RE = re.compile(
     r"(?i)--de[a-z-]*|--pru[a-z-]*|(?:^|[\s'\"])-[A-Za-z0-9]*d[A-Za-z0-9]*|(?:^|[\s'\"]):(?:refs/heads/|heads/)?(?:"
@@ -6199,7 +6266,7 @@ _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")
 _RAW_PUSH_MIRRORCFG_RE = re.compile(
     r"(?i)(?:^|[\s'\"])-c[\s'\"]+remote\.[^\s=]+\.mirror"
     r"|(?:^|[\s'\"])--config-env[=\s]['\"]*remote\.[^\s=]+\.mirror")
-_RAW_COMMIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
+_RAW_COMMIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
 
 # Commit proof contract. Recognizers establish syntax, never authorization.
 # The ordered evaluator supplies the evidence consumed by _commit_on_protected.
@@ -7964,9 +8031,9 @@ _GATE_ALTS = (
 # mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. '--no-ver'
 # deliberately also hits '--no-verbose' (an over-deny on the unparseable path only); the short cluster
 # probe requires a whitespace-preceded single-dash token so a long option ('--amend') never matches.
-_RAW_NOVERIFY_VERB_RE = re.compile(r"(?is)\bgit\b.*?\b(?:commit|merge|push|pull|rebase|am)\b")
+_RAW_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|merge|push|pull|rebase|am)\b")
 _RAW_NOVERIFY_RE = re.compile(r"(?i)--no-ver")
-_RAW_SHORT_NOVERIFY_VERB_RE = re.compile(r"(?is)\bgit\b.*?\b(?:commit|am)\b")
+_RAW_SHORT_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|am)\b")
 _RAW_SHORT_N_RE = re.compile(r"(?:^|\s)-[A-Za-z]*n\b")
 _RAW_CHECKER_RE = re.compile(
     r"(?i)\b(?:pytest|tox|nox|unittest|mypy|pyright|ruff|flake8|pylint|bandit|eslint|tsc|jest|"
@@ -7979,7 +8046,7 @@ _RAW_TRUNCATE_RE = re.compile(r"\|\s*(?:head|tail)\b")
 # checker's output may reach the sink through it, so the fallback notes it as it notes a raw '| head'.
 _RAW_FLOW_RE = re.compile(r"<<<|<\(|>\(")
 _RAW_SINK_WORD_RE = re.compile(r"\b(?:head|tail|cut)\b")
-_RAW_COMMIT_MSG_GIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
+_RAW_COMMIT_MSG_GIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
 _RAW_COMMIT_MSG_MARKER_RE = re.compile(r"`|\$\(")
 
 
@@ -16738,6 +16805,130 @@ HANDLER_EVENT = {
 }
 
 
+class _HookDeadline(BaseException):
+    """Raised inside a _DeadlineWindow when its deadline passes, carrying that window as its one argument
+    so a catcher can tell its own deadline from an enclosing window's. It derives from BaseException, not
+    Exception, so no handler's own `except Exception` (or narrower) branch, several of which allow on a
+    cannot-evaluate, can catch it and turn an overrun into a decision."""
+
+
+class _DeadlineWindow:
+    """The one shared, nesting-safe borrow of the process real-time timer (ITIMER_REAL and its SIGALRM
+    disposition), used as `with _DeadlineWindow(seconds):` once per instance. Inside the window,
+    _HookDeadline is raised when `seconds` have passed, or earlier when a timer the caller had already
+    set comes due first (the window never outlives the caller's own deadline).
+
+    The caller's timer is restored elapsed-aware, never verbatim: its countdown is taken with
+    setitimer(ITIMER_REAL, 0) and the time of the take is read from time.monotonic, the clock the kernel
+    counts ITIMER_REAL in, so on exit an active caller timer is re-armed with what it had left minus the
+    time the window used (to the microsecond setitimer resolves), keeping its repeat interval; an inactive one stays inactive; one that
+    came due during the window is delivered by signal.raise_signal once its handler is back (a periodic
+    one is first re-armed at the phase it would have reached, its expiries inside the window delivered as
+    the one notification the kernel itself would have left pending). Taking the timer before installing
+    the handler means a caller expiry that lands during entry runs the caller's handler: signal.signal()
+    runs a pending handler before it swaps. On exit the swap back likewise runs a late expiry of this
+    window's own timer through the window's handler, which ignores it once the window is closing, so that
+    expiry never reaches the caller. A nested window is just such a caller, so nesting restores each level.
+
+    The borrow is refused, and the window runs with no deadline at all (armed stays False, nothing is
+    changed), where it cannot be done faithfully: no finite positive `seconds` (the fail-open modes pass
+    None), a platform without setitimer, pthread_sigmask or raise_signal (Windows), a thread other than
+    the main thread (Python runs signal handlers only there), a caller that blocks SIGALRM (a deadline
+    could not fire, and its pending notification could not be kept apart from ours), or a SIGALRM
+    disposition not installed from Python (getsignal returns None, which cannot be reinstalled)."""
+    __slots__ = ("seconds", "armed", "_live", "_handler", "_timer", "_began")
+
+    def __init__(self, seconds):
+        self.seconds = seconds
+        self.armed = False
+        self._live = False
+        self._handler = self._timer = self._began = None
+
+    def _fire(self, signum, frame):
+        if self._live:
+            self._live = False
+            raise _HookDeadline(self)
+
+    def _can_borrow(self):
+        seconds = self.seconds
+        if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
+                or not math.isfinite(seconds) or seconds <= 0):
+            return False
+        if not all(hasattr(signal, name) for name in (
+                "setitimer", "ITIMER_REAL", "SIGALRM", "pthread_sigmask", "raise_signal")):
+            return False
+        if threading.current_thread() is not threading.main_thread():
+            return False
+        if signal.SIGALRM in signal.pthread_sigmask(signal.SIG_BLOCK, ()):
+            return False
+        return signal.getsignal(signal.SIGALRM) is not None
+
+    def __enter__(self):
+        if self.armed or not self._can_borrow():
+            return self
+        # The clock is read just before the take, so the window's use is never undercounted (a caller
+        # timer comes back at most microseconds early, never late) and nothing runs between the take and
+        # the guarded swap below.
+        began = time.monotonic()
+        taken = signal.setitimer(signal.ITIMER_REAL, 0)
+        try:
+            handler = signal.signal(signal.SIGALRM, self._fire)
+        except BaseException:
+            # A caller expiry pending at the take ran the caller's own handler inside signal.signal()
+            # and that handler raised: the swap did not happen, so give the caller its timer back.
+            self._handler, self._timer, self._began = signal.getsignal(signal.SIGALRM), taken, began
+            self.armed = True
+            self._give_back()
+            raise
+        self._handler, self._timer, self._began = handler, taken, began
+        self.armed = True
+        try:
+            self._live = True
+            left = taken[0]
+            signal.setitimer(signal.ITIMER_REAL, self.seconds if left <= 0 else min(self.seconds, left))
+        except BaseException:
+            self._give_back()
+            raise
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            self._live = False
+        finally:
+            self._give_back()
+        return False
+
+    def _give_back(self):
+        if not self.armed:
+            return
+        self.armed = False
+        self._live = False
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, self._handler)
+        value, interval = self._timer
+        if value <= 0:
+            return
+        left = value - (time.monotonic() - self._began)
+        if left > 0:
+            signal.setitimer(signal.ITIMER_REAL, left, interval)
+            return
+        if interval > 0:
+            signal.setitimer(signal.ITIMER_REAL, interval - (-left % interval), interval)
+        signal.raise_signal(signal.SIGALRM)
+
+
+def _deadline_message(handler_name, seconds, payload):
+    """The stderr refusal main() writes when a PreToolUse check runs out of its deadline: it names the
+    handler, the budget and the payload size, and the two ways to bring the input inside the budget."""
+    if payload is None:
+        size = "an input it had not finished reading"
+    else:
+        size = "an input of {} bytes".format(len(payload.encode("utf-8", "replace")))
+    return ("AIQT guardrail: the {} check could not reach a decision within its {:g}-second budget on {}; "
+            "failing closed. Split the command into smaller calls, or move long content into a file and "
+            "pass its path.".format(handler_name, seconds, size))
+
+
 def _dispatcher_fail_open_warn(handler_name, detail):
     """A fail-open dispatcher-level error for a Stop/SubagentStop/SessionStart/TeammateIdle/
     UserPromptSubmit/PostToolUse handler: a non-blocking systemMessage on exit 0, so no error on
@@ -16795,42 +16986,60 @@ def main(argv):
                 return 0
         _stderr_note("aiqt_hooks: {} ({}); failing closed".format(handler_name, detail))
         return 2
+    # The PreToolUse deadline: every mode that is not fail-open reads its payload and runs its handler
+    # inside one _DeadlineWindow of PRETOOL_BUDGET_SECONDS, armed before the read; when the check has not
+    # decided by then the window raises _HookDeadline and the call fails CLOSED with exit 2 and a stderr
+    # line naming the handler, the budget and the input size. The window closes (the timer is cancelled
+    # and any caller timer restored) before the decision below is written. A fail-open mode gets a
+    # window with no deadline, so its error posture is unchanged.
+    window = _DeadlineWindow(None if is_fail_open else PRETOOL_BUDGET_SECONDS)
+    payload = None
     try:
-        data = json.loads(sys.stdin.read())
-        if not isinstance(data, dict):
-            raise ValueError("payload is not a JSON object")
-    except Exception as exc:  # any failure to read the payload is an unreadable payload
-        # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload, and ALSO a
-        # RecursionError (deeply nested JSON) or a MemoryError: the old narrow except let those escape as a
-        # traceback with exit 1, which the platform treats as non-blocking. Every exception is named.
-        detail = "{}: {}".format(type(exc).__name__, exc)
-        if is_fail_open:
-            # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so no Stop
-            # payload (including a bare '{' or any garbage) can ever wedge the session. The warn print
-            # raising (a stdout that cannot be written or flushed) loses the warning and keeps the 0.
+        with window:
             try:
-                return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(detail))
-            except BaseException:
-                return 0
-        # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
-        # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
-        _stderr_note("aiqt_hooks: unreadable hook payload ({}); failing closed".format(detail))
-        return 2
-    try:
-        code, stdout_obj, stderr_text = HANDLERS[handler_name](data)
-    except Exception as exc:  # a handler crash is an unreadable result
-        if is_fail_open:
-            # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws on a
-            # pathological message): WARN and exit 0, never exit 2. The warn print raising (a stdout
-            # that cannot be written or flushed) loses the warning and keeps the 0.
+                payload = sys.stdin.read()
+                data = json.loads(payload)
+                if not isinstance(data, dict):
+                    raise ValueError("payload is not a JSON object")
+            except Exception as exc:  # any failure to read the payload is an unreadable payload
+                # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload, and
+                # ALSO a RecursionError (deeply nested JSON) or a MemoryError: the old narrow except let those
+                # escape as a traceback with exit 1, which the platform treats as non-blocking. Every exception
+                # is named.
+                detail = "{}: {}".format(type(exc).__name__, exc)
+                if is_fail_open:
+                    # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so
+                    # no Stop payload (including a bare '{' or any garbage) can ever wedge the session. The
+                    # warn print raising (a stdout that cannot be written or flushed) loses the warning and
+                    # keeps the 0.
+                    try:
+                        return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(detail))
+                    except BaseException:
+                        return 0
+                # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
+                # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
+                _stderr_note("aiqt_hooks: unreadable hook payload ({}); failing closed".format(detail))
+                return 2
             try:
-                return _dispatcher_fail_open_warn(
-                    handler_name, "handler crash: {}: {}".format(type(exc).__name__, exc))
-            except BaseException:
-                return 0
-        # A PreToolUse handler crash fails closed (block), not pass.
-        _stderr_note("aiqt_hooks: handler {} failed ({}: {}); failing closed".format(
-            handler_name, type(exc).__name__, exc))
+                code, stdout_obj, stderr_text = HANDLERS[handler_name](data)
+            except Exception as exc:  # a handler crash is an unreadable result
+                if is_fail_open:
+                    # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws
+                    # on a pathological message): WARN and exit 0, never exit 2. The warn print raising (a
+                    # stdout that cannot be written or flushed) loses the warning and keeps the 0.
+                    try:
+                        return _dispatcher_fail_open_warn(
+                            handler_name, "handler crash: {}: {}".format(type(exc).__name__, exc))
+                    except BaseException:
+                        return 0
+                # A PreToolUse handler crash fails closed (block), not pass.
+                _stderr_note("aiqt_hooks: handler {} failed ({}: {}); failing closed".format(
+                    handler_name, type(exc).__name__, exc))
+                return 2
+    except _HookDeadline as exc:
+        if exc.args[:1] != (window,):
+            raise  # an enclosing window's deadline (an in-process caller's), not this call's
+        _stderr_note(_deadline_message(handler_name, window.seconds, payload))
         return 2
     if stdout_obj is not None:
         try:

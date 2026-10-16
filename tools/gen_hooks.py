@@ -87,7 +87,15 @@ SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")     # a stable kebab-case control id
 CID_RE = re.compile(r"^[a-z0-9]{6,}$")        # a corpus-id (matches gen_rules' own shape)
 HANDLER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
-TIMEOUT = 10  # seconds; every control is a lexical scan, far under this
+TIMEOUT = 10  # seconds the platform gives each hook command; the one source of the hook's deadline
+# The dispatcher mirrors TIMEOUT as HOOK_TIMEOUT_SECONDS and derives its PreToolUse deadline from that
+# mirror as PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - <margin>, so main() fails closed (exit 2) with
+# a named reason before the platform's timeout. check_deadline refuses a mirror that differs from TIMEOUT
+# and a margin under DEADLINE_MIN_MARGIN or one that leaves no positive budget.
+DEADLINE_MIN_MARGIN = 1
+_HOOK_TIMEOUT_LINE_RE = re.compile(r"^HOOK_TIMEOUT_SECONDS = (\d+)$", re.M)
+_PRETOOL_BUDGET_LINE_RE = re.compile(
+    r"^PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - (\d+(?:\.\d+)?)$", re.M)
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
@@ -223,6 +231,25 @@ def cross_check(hooks, corpus_ids, script_text, name):
                              .format(where, hook["handler"], SCRIPT_NAME))
 
 
+def check_deadline(script_text):
+    """Fail closed (ValueError) unless the dispatcher derives its PreToolUse deadline from TIMEOUT: exactly
+    one `HOOK_TIMEOUT_SECONDS = <int>` line equal to TIMEOUT, and exactly one `PRETOOL_BUDGET_SECONDS =
+    HOOK_TIMEOUT_SECONDS - <margin>` line whose margin is at least DEADLINE_MIN_MARGIN and below TIMEOUT,
+    so the budget is positive and the refusal is written before the platform's timeout."""
+    timeouts = _HOOK_TIMEOUT_LINE_RE.findall(script_text)
+    margins = _PRETOOL_BUDGET_LINE_RE.findall(script_text)
+    if len(timeouts) != 1 or int(timeouts[0]) != TIMEOUT:
+        raise ValueError("scripts/{}: expected one line 'HOOK_TIMEOUT_SECONDS = {}' mirroring the hooks.json "
+                         "timeout, found {}".format(SCRIPT_NAME, TIMEOUT, timeouts or "none"))
+    if len(margins) != 1:
+        raise ValueError("scripts/{}: expected one line 'PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - "
+                         "<margin>', found {}".format(SCRIPT_NAME, len(margins)))
+    margin = float(margins[0])
+    if not DEADLINE_MIN_MARGIN <= margin < TIMEOUT:
+        raise ValueError("scripts/{}: the PreToolUse budget margin {:g} must be at least {} and below the "
+                         "{}-second timeout".format(SCRIPT_NAME, margin, DEADLINE_MIN_MARGIN, TIMEOUT))
+
+
 def render_hooks_json(hooks):
     """The plugin hooks.json, deterministic: events in KNOWN_EVENTS order, entries sorted by id,
     json.dumps(indent=2) plus a trailing newline. Shape per the doc-confirmed plugin schema:
@@ -274,6 +301,7 @@ def build_desired(root, src_dir):
     if not script_text.strip():
         raise ValueError("{} is empty".format(script_src))
     cross_check(hooks, corpus_ids, script_text, manifest_path.name)
+    check_deadline(script_text)
     return {HOOKS_JSON_REL: render_hooks_json(hooks),
             SCRIPT_REL: script_text,
             PLUGIN_JSON_REL: render_plugin_json(plugin)}
@@ -366,6 +394,9 @@ def main():
 #  12. render byte-identity: an otherwise-identical Stop hook renders the SAME hooks.json bytes whether
 #      its default is "block" or "warn" (default is authoring metadata, never rendered into output),
 #  13. a malformed/unknown default keyword fails closed (exit 2): the default whitelist.
+#  16. the PreToolUse deadline derives from TIMEOUT: a script whose HOOK_TIMEOUT_SECONDS differs from
+#      TIMEOUT, or that lacks either deadline line, fails closed (exit 2), and the margin is accepted from
+#      DEADLINE_MIN_MARGIN up to just below TIMEOUT and refused just outside either end.
 
 _APEX = """---
 corpus-id: apex01
@@ -392,9 +423,10 @@ slug: selftest-hook-rule
 A rule for the gen_hooks self-test corpus.
 """
 
+_SCRIPT_DEADLINE = "HOOK_TIMEOUT_SECONDS = {timeout}\nPRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - {margin}\n"
 _SCRIPT = """#!/usr/bin/env python3
 # self-test dispatcher stub
-def test_handler(data):
+""" + _SCRIPT_DEADLINE.format(timeout=TIMEOUT, margin="2.0") + """def test_handler(data):
     return (0, None, None)
 """
 
@@ -661,6 +693,31 @@ def self_test_main():
                 'event = "SessionStart"\nhandler = "test_handler"\ndefault = "block"')
         if run_quiet(ssblock, check=True) != 2:
             failures.append("default 'block' on SessionStart expected exit 2 (an overclaim)")
+
+        # 16. The deadline relation. Each case rewrites the stub's two deadline lines; a refused case
+        #     exits 2 (fail closed) and an accepted one generates (exit 0).
+        def deadline_case(label, text, want):
+            tree = tmp / ("deadline-" + label)
+            tree.mkdir()
+            _build_tree(tree)
+            script = tree / ".aiqt" / "core" / "hooks" / "scripts" / SCRIPT_NAME
+            body = script.read_text(encoding="utf-8")
+            default_lines = _SCRIPT_DEADLINE.format(timeout=TIMEOUT, margin="2.0")
+            if default_lines not in body:
+                failures.append("self-test setup: the stub carries no deadline lines")
+            script.write_text(body.replace(default_lines, text), encoding="utf-8")
+            if run_quiet(tree, check=False) != want:
+                failures.append("deadline relation ({}): expected exit {}".format(label, want))
+        deadline_case("mirror-differs", _SCRIPT_DEADLINE.format(timeout=TIMEOUT + 1, margin="2.0"), 2)
+        deadline_case("no-mirror", "PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - 2.0\n", 2)
+        deadline_case("no-budget", "HOOK_TIMEOUT_SECONDS = {}\n".format(TIMEOUT), 2)
+        deadline_case("literal-budget", "HOOK_TIMEOUT_SECONDS = {}\nPRETOOL_BUDGET_SECONDS = 8.0\n"
+                      .format(TIMEOUT), 2)
+        for margin, want in ((DEADLINE_MIN_MARGIN - 0.1, 2), (DEADLINE_MIN_MARGIN, 0),
+                             (DEADLINE_MIN_MARGIN + 0.1, 0), (TIMEOUT - 0.1, 0), (TIMEOUT, 2),
+                             (TIMEOUT + 0.1, 2)):
+            text = "{:g}".format(margin)
+            deadline_case("margin-" + text, _SCRIPT_DEADLINE.format(timeout=TIMEOUT, margin=text), want)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -679,8 +736,10 @@ def self_test_main():
           "the script, a missing handler script, an unreadable manifest, and a malformed default keyword "
           "all fail closed; the full 'warn' default policy holds across every known event (rejected on "
           "every non-warn event, accepted on every WARN_EVENTS event, plus warn+stage=bake on "
-          "PreToolUse and the SessionStart-cannot-block overclaim); and a Stop hook renders "
-          "byte-identical hooks.json whether its default is 'block' or 'warn'" + note)
+          "PreToolUse and the SessionStart-cannot-block overclaim); a Stop hook renders "
+          "byte-identical hooks.json whether its default is 'block' or 'warn'; and the dispatcher's "
+          "PreToolUse deadline must mirror TIMEOUT and leave a margin from DEADLINE_MIN_MARGIN up to just "
+          "below TIMEOUT (each end refused just outside it)" + note)
     return 0
 
 

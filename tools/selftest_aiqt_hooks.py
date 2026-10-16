@@ -112,6 +112,14 @@ the session is armed, and every cannot-evaluate denies once armed. Fixtures are 
 sibling repo, and a nested repo), with the declaration written into the redirected XDG_STATE_HOME and the
 floor synthesized in-tree, removed in the finally.
 
+It also covers the PreToolUse deadline posture (the dl-* checks): the hook's deadline derives from
+tools/gen_hooks.py TIMEOUT; each linear raw-scan probe decides what the single regex it replaced decided
+over a generated corpus; every PreToolUse mode exits 2 with the named refusal when a stub handler sleeps
+past a short test budget, a fail-open mode keeps its result, and the timer is cancelled before the decision
+is written; the shared timer window restores a caller's timer elapsed-aware, nests, and refuses a borrow
+it cannot make faithfully; and each PreToolUse handler decides its worst measured input shapes at 64 KB,
+256 KB and 1 MB within bounds set from a measured run. The timer and timing checks run in a child process.
+
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
 import sys
@@ -136,16 +144,21 @@ import hashlib
 import io
 import json
 import os
+import random
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
 from _git_fixture_env import _MAINTENANCE_PIN_VARS, git_fixture_env, scrub_git_environment  # noqa: E402
+import gen_hooks  # noqa: E402  (the one source of the hook timeout the deadline derives from)
 import gen_secret_patterns  # noqa: E402  (same tools dir, for the drift-gate F-129 self-test)
 
 sys.path.insert(0, str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts"))
@@ -2252,6 +2265,454 @@ def _test_git_stash_ref(failures):
     if (aiqt_hooks.HANDLERS.get("git_stash_ref") is not aiqt_hooks.git_stash_ref or
             aiqt_hooks.HANDLER_EVENT.get("git_stash_ref") != aiqt_hooks.PRETOOL):
         failures.append("(sr-wiring) git_stash_ref handler/event wiring is missing or wrong")
+
+
+# === PreToolUse deadline posture ======================================================================
+# main() runs every PreToolUse mode that is not fail-open inside one aiqt_hooks._DeadlineWindow of
+# PRETOOL_BUDGET_SECONDS and fails closed (exit 2) when its check has not decided by then, and the raw
+# 'git ... <verb>' scans are aiqt_hooks._RawSequence probes of linear cost. The checks that set timers or
+# SIGALRM dispositions, and the shape timings, run in a child process (_deadline_child), so that state
+# belongs to that process alone and a regression that hangs is cut by the child's timeout.
+
+# The single regexes the _RawSequence probes replaced: the reference the differential check holds each
+# probe equal to, over short texts where their super-linear cost does not matter.
+_RAW_SEQUENCE_REFERENCES = (
+    (("_RAW_DIFF_PRODUCER_RE",),
+     r"(?is)\bgit\b.*?\b(?:diff|show|range-diff|log|diff-tree|diff-index|diff-files|format-patch)\b"),
+    (("_RAW_EXPBND_MUTATE_RE",),
+     r"(?is)\bgit\b.*?\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
+     r"notes|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|worktree)\b"),
+    (("_RAW_EXPBND_PRUNING_FETCH_RE",), r"(?is)\bgit\b.*?\bfetch\b.*?(?:--prune(?:-tags)?\b|(?<!\S)-[^\s]*p)"),
+    (("_RAW_EXPBND_ADD_BREADTH_RE", "_RAW_EXPBND_COMMIT_BREADTH_RE"),
+     r"(?is)\bgit\b.*?(?:\badd\b.*?(?:--all\b|(?<!\S)-[^\s]*A|(?<!\S)(?:\.|:/)(?!\S))|"
+     r"\bcommit\b.*?(?:--all\b|(?<!\S)-[^\s]*a))"),
+    (("_RAW_EXPBND_PUSH_RE",), r"(?is)\bgit\b.*?\bpush\b"),
+    (("_RAW_PUSH_RE",), r"(?is)\bgit\b.*?\bpush\b"),
+    (("_RAW_COMMIT_RE",), r"(?is)\bgit\b.*?\bcommit\b"),
+    (("_RAW_NOVERIFY_VERB_RE",), r"(?is)\bgit\b.*?\b(?:commit|merge|push|pull|rebase|am)\b"),
+    (("_RAW_SHORT_NOVERIFY_VERB_RE",), r"(?is)\bgit\b.*?\b(?:commit|am)\b"),
+    (("_RAW_COMMIT_MSG_GIT_RE",), r"(?is)\bgit\b.*?\bcommit\b"),
+)
+# Words and joiners the differential corpus is drawn from: each verb, its case and word-boundary
+# neighbours, the breadth and prune selectors and their near misses, quotes, and the two non-ASCII letters
+# the case-folded patterns also match (a long s for s, a Kelvin sign for k).
+_RAW_SEQUENCE_WORDS = (
+    "git", "GIT", "Git", "xgit", "gitx", "git-x", "x-git", "push", "PUSH", "pushx", "commit", "Commit", "am",
+    "merge", "pull", "rebase", "add", "fetch", "diff", "show", "ſhow", "log", "range-diff", "worKtree",
+    "-A", "-a", "-xA", "-xa", "a-a", "--all", "--allx", "--prune", "--prune-tags", "--prunex", "-p", "-xp", "-P",
+    "p-p", ".", "..", ":/", ":/x", "./", "x", "-", "'", '"', "$(", ")")
+_RAW_SEQUENCE_JOINERS = (" ", "  ", "\n", "\t", ";", "", "/", "=", "-")
+# Half the corpus is drawn from the words the three-step probes need, so their orderings are well covered.
+_RAW_SEQUENCE_FOCUS = ("git", "Git", "xgit", "fetch", "add", "commit", "push", "-p", "-xp", "-A", "-a", "-xa",
+                       "--all", "--prune", "--prune-tags", ".", ":/", "x", "'")
+
+
+def _raw_sequence_failures(count=20000, seed=20261015):
+    """(dl-linear) Each _RawSequence probe (or, for the breadth probe, the pair joined by `or`) decides
+    exactly what the single regex it replaced decides, over every corpus word alone and `count` seeded
+    random joins of one to seven words (half from the focused words); the corpus must give each reference
+    both outcomes, so the comparison discriminates."""
+    out = []
+    rng = random.Random(seed)
+    texts = list(_RAW_SEQUENCE_WORDS)
+    for index in range(count):
+        vocabulary = _RAW_SEQUENCE_FOCUS if index % 2 else _RAW_SEQUENCE_WORDS
+        words = [rng.choice(vocabulary) for _ in range(rng.randint(1, 7))]
+        text = words[0]
+        for word in words[1:]:
+            text += rng.choice(_RAW_SEQUENCE_JOINERS) + word
+        texts.append(text)
+    for names, reference in _RAW_SEQUENCE_REFERENCES:
+        label = "+".join(names)
+        probes = [getattr(aiqt_hooks, name, None) for name in names]
+        if not all(isinstance(probe, aiqt_hooks._RawSequence) for probe in probes):
+            out.append("(dl-linear-type) {} is not built from _RawSequence".format(label))
+            continue
+        pattern = re.compile(reference)
+        hits = 0
+        for text in texts:
+            want = pattern.search(text) is not None
+            hits += want
+            if any(probe.search(text) is not None for probe in probes) != want:
+                out.append("(dl-linear-{}) decides {!r} differently from the regex it replaced".format(label, text))
+                break
+        if not 0 < hits < len(texts):
+            out.append("(dl-linear-{}) the corpus gives the reference only one outcome ({} of {} texts match)"
+                       .format(label, hits, len(texts)))
+    return out
+
+
+def _repeat(unit, size, tail=""):
+    return unit * max(1, (size - len(tail)) // len(unit)) + tail
+
+
+# The worst input shapes measured for the PreToolUse handlers on the pinned tree before this change (a
+# handler past the hook timeout on several of them), each built to about `size` bytes for a fixture
+# directory `base`: (tool_name, tool_input). An *_after shape puts a real hazard after the long prefix,
+# so the handler's deny has to arrive within the bound as well.
+_DEADLINE_SHAPES = {
+    "git_words": lambda n, base: ("Bash", {"command": _repeat("git ", n)}),
+    "git_words_in_dquotes": lambda n, base: ("Bash", {"command": _repeat('"git" ', n)}),
+    "git_words_unbal_dq": lambda n, base: ("Bash", {"command": _repeat("git ", n, '"')}),
+    "git_add_unbal": lambda n, base: ("Bash", {"command": _repeat("git add x ", n, "'")}),
+    "git_add_parsed": lambda n, base: ("Bash", {"command": _repeat("git add x ", n)}),
+    "git_push_words_unbal": lambda n, base: ("Bash", {"command": _repeat("git push ", n, "'")}),
+    "cd_git_fetch_unbal": lambda n, base: ("Bash", {"command": _repeat("cd x; git fetch y ", n, "'")}),
+    "git_segments_reset": lambda n, base: ("Bash", {"command": _repeat("git reset --hard; ", n)}),
+    "sep_semicolon": lambda n, base: ("Bash", {"command": _repeat("true;", n)}),
+    "redirects_many": lambda n, base: ("Bash", {"command": "echo x" + _repeat(" > a", n - 6)}),
+    "heredocs": lambda n, base: ("Bash", {"command": _repeat("cat <<EOF\nx\nEOF\n", n)}),
+    "nest_parens": lambda n, base: ("Bash", {"command": "(" * (n // 2 - 2) + "true" + ")" * (n // 2 - 2)}),
+    "nest_cmdsubst": lambda n, base: ("Bash", {"command": "echo " + "$(" * (n // 3 - 3) + "true"
+                                               + ")" * (n // 3 - 3)}),
+    "nest_cmdsubst_background": lambda n, base: ("Bash", {"command": "echo " + "$(" * (n // 3 - 3) + "true"
+                                                          + ")" * (n // 3 - 3), "run_in_background": True}),
+    "diff_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, "; git diff")}),
+    "push_force_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, "; git push --force origin main")}),
+    "noverify_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, "; git commit --no-verify -m x")}),
+    "subst_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, '; git commit -m "$(id)"')}),
+    "breadth_push_after_unbal": lambda n, base: ("Bash", {"command": _repeat(
+        "git add x ", n, "; git commit -a -m x; git push origin '")}),
+    "write_content": lambda n, base: ("Write", {"file_path": base + "/notes.txt", "content": "a" * n}),
+    "write_secretish": lambda n, base: ("Write", {"file_path": base + "/notes.txt", "content": _repeat("a=", n)}),
+    "write_deep_path": lambda n, base: ("Write", {"file_path": base + _repeat("/a", n - len(base)),
+                                                  "content": "x"}),
+    "read_deep_path": lambda n, base: ("Read", {"file_path": base + _repeat("/a", n - len(base))}),
+    "ask_long": lambda n, base: ("AskUserQuestion", {"questions": [{
+        "question": "q" * n, "header": "h", "multiSelect": False,
+        "options": [{"label": "a", "description": "b"}, {"label": "c", "description": "d"}]}]}),
+    "wakeup_long": lambda n, base: ("ScheduleWakeup", {"prompt": "p" * n, "delaySeconds": 60, "reason": "r"}),
+}
+_DEADLINE_CASES = {
+    "absolute_paths": ("write_content", "read_deep_path"),
+    "bash_absolute_paths": ("git_words", "redirects_many", "nest_parens"),
+    "branch_root": ("heredocs", "git_push_words_unbal", "nest_parens"),
+    "commit_identity": ("nest_parens", "git_words_unbal_dq"),
+    "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
+    "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
+    "gate_weakening": ("git_words_unbal_dq", "git_add_unbal", "git_push_words_unbal", "noverify_after"),
+    "gensrc_guard": ("write_content", "write_deep_path"),
+    "git_discard": ("git_segments_reset", "nest_parens"),
+    "git_explicit_binding": ("git_add_unbal", "cd_git_fetch_unbal", "breadth_push_after_unbal"),
+    "git_stash_ref": ("sep_semicolon", "cd_git_fetch_unbal", "nest_parens"),
+    "orch_ask_guard": ("ask_long",),
+    "orch_resume_barrier": ("git_words", "write_content"),
+    "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
+    "orch_untracked_wait_loop": ("git_words", "nest_cmdsubst"),
+    "orch_yield_tool": ("wakeup_long",),
+    "protected_line": ("git_words_unbal_dq", "push_force_after"),
+    "review_dispatch_pin": ("git_add_parsed", "nest_cmdsubst"),
+    "secrets_shift_left": ("cd_git_fetch_unbal", "nest_cmdsubst", "write_secretish"),
+    "write_scope_guard": ("write_content", "write_deep_path"),
+}
+# The (handler, shape) cases whose hazard must still be denied, each within its bound.
+_DEADLINE_DENY_CASES = frozenset((
+    ("commit_msg_subst", "subst_after"), ("diff_source_pretool", "diff_after"),
+    ("gate_weakening", "noverify_after"), ("git_explicit_binding", "breadth_push_after_unbal"),
+    ("protected_line", "push_force_after")))
+_DEADLINE_SIZES = (65536, 262144, 1048576)
+# Seconds one in-process handler call may take on a shape of that size. Measured on a 24-core host with
+# Python 3.14.4 (2026-10-15) after the linear scans, the slowest case took 0.09 s at 64 KB, 0.43 s at
+# 256 KB and 1.73 s at 1 MB (git_discard on nest_parens); before them, five handlers took 15 to 39 s or
+# more at 64 KB. Each bound is about 16, 7 and 4 times the measured worst and stays under
+# PRETOOL_BUDGET_SECONDS, so a slower runner passes while a return of super-linear growth does not.
+_DEADLINE_BOUNDS = {65536: 1.5, 262144: 3.0, 1048576: 7.0}
+_DEADLINE_CHILD_TIMEOUT = 900
+
+
+def _deadline_fixtures(tmp):
+    """A plain non-git directory and an orchestration repository (a version-1 registry), as cwds."""
+    plain = tmp / "deadline-plain"
+    plain.mkdir(parents=True, exist_ok=True)
+    orch = _init_repo(tmp / "deadline-orch")
+    (orch / ".aiqt").mkdir(exist_ok=True)
+    (orch / ".aiqt" / "orchestration.json").write_text('{"version": 1}\n', encoding="utf-8")
+    return plain, orch
+
+
+def _deadline_shape_runs(tmp, bounds):
+    """Every (handler, shape, size) case once, each in-process under a _DeadlineWindow of its size's
+    bound: [(handler, shape, size, seconds, outcome)], the outcome being the reduced decision, "deadline"
+    when the window fired, "hard-block" for an exit 2, or "crash: <type>"."""
+    plain, orch = _deadline_fixtures(tmp)
+    runs = []
+    for name, shapes in sorted(_DEADLINE_CASES.items()):
+        handler = aiqt_hooks.HANDLERS[name]
+        cwd = str(orch if name.startswith(("orch_", "review_")) else plain)
+        for shape in shapes:
+            for size in sorted(bounds):
+                tool, tool_input = _DEADLINE_SHAPES[shape](size, cwd)
+                data = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input,
+                        "cwd": cwd, "session_id": "deadline-session", "tool_use_id": "deadline-call"}
+                window = aiqt_hooks._DeadlineWindow(bounds[size])
+                began = time.monotonic()
+                try:
+                    with window:
+                        code, stdout_obj, _stderr = handler(data)
+                    outcome = "hard-block" if code == 2 else _reduce_result(code, stdout_obj)
+                except aiqt_hooks._HookDeadline as exc:
+                    if exc.args[:1] != (window,):
+                        raise
+                    outcome = "deadline"
+                except Exception as exc:
+                    outcome = "crash: {}".format(type(exc).__name__)
+                runs.append((name, shape, size, time.monotonic() - began, outcome))
+    return runs
+
+
+def _deadline_shape_failures(tmp):
+    """(dl-shape) Every PreToolUse handler has shapes here, and on each shape at 64 KB, 256 KB and 1 MB it
+    reaches a decision within that size's bound, denying where the case carries a hazard."""
+    out = []
+    missing = sorted(name for name, event in aiqt_hooks.HANDLER_EVENT.items()
+                     if event == aiqt_hooks.PRETOOL and name not in _DEADLINE_CASES)
+    if missing:
+        out.append("(dl-shape-coverage) PreToolUse handlers with no timed shape: {}".format(", ".join(missing)))
+    for name, shape, size, seconds, outcome in _deadline_shape_runs(tmp, _DEADLINE_BOUNDS):
+        label = "(dl-shape-{}-{}-{})".format(name, shape, size)
+        if outcome == "deadline" or seconds > _DEADLINE_BOUNDS[size]:
+            out.append("{} took {:.2f}s, over its {}s bound".format(label, seconds, _DEADLINE_BOUNDS[size]))
+        elif (name, shape) in _DEADLINE_DENY_CASES and outcome != "deny":
+            out.append("{} expected deny, got {}".format(label, outcome))
+        elif outcome not in ("allow", "allow-note", "deny"):
+            out.append("{} ended {}".format(label, outcome))
+    return out
+
+
+_DEADLINE_PAYLOAD = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                "tool_input": {"command": "git status"}, "cwd": "/"})
+
+
+def _main_run(mode, stdin=_DEADLINE_PAYLOAD, budget=None, stdout=None):
+    """aiqt_hooks.main([mode]) over stdin (a str or a reader), PRETOOL_BUDGET_SECONDS patched to budget
+    when one is given: (exit code, stderr text, seconds)."""
+    saved_stdin, saved_budget = sys.stdin, aiqt_hooks.PRETOOL_BUDGET_SECONDS
+    out, err = stdout if stdout is not None else io.StringIO(), io.StringIO()
+    try:
+        sys.stdin = io.StringIO(stdin) if isinstance(stdin, str) else stdin
+        if budget is not None:
+            aiqt_hooks.PRETOOL_BUDGET_SECONDS = budget
+        began = time.monotonic()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = aiqt_hooks.main([mode])
+        return code, err.getvalue(), time.monotonic() - began
+    finally:
+        sys.stdin, aiqt_hooks.PRETOOL_BUDGET_SECONDS = saved_stdin, saved_budget
+
+
+@contextlib.contextmanager
+def _stub_handler(mode, handler):
+    saved = aiqt_hooks.HANDLERS[mode]
+    aiqt_hooks.HANDLERS[mode] = handler
+    try:
+        yield
+    finally:
+        aiqt_hooks.HANDLERS[mode] = saved
+
+
+def _sleeper(seconds, result=(0, None, None)):
+    def handler(_data):
+        time.sleep(seconds)
+        return result
+    return handler
+
+
+def _deadline_path_failures():
+    """(dl-fires, dl-read, dl-fail-open, dl-cancelled) The deadline path, driven by handler stubs that sleep
+    past a short test budget: every PreToolUse mode exits 2 with the refusal naming the handler, the budget
+    and the input size; a deadline during the payload read exits 2 too; a fail-open mode keeps its result
+    (no deadline); and the timer is cancelled, with the caller's SIGALRM disposition back, before the
+    decision is written."""
+    out = []
+    size = len(_DEADLINE_PAYLOAD.encode("utf-8"))
+    for mode, event in sorted(aiqt_hooks.HANDLER_EVENT.items()):
+        if event in aiqt_hooks.FAIL_OPEN_EVENTS:
+            with _stub_handler(mode, _sleeper(0.3)):
+                code, err, _seconds = _main_run(mode, budget=0.05)
+            if code != 0 or "could not reach a decision" in err:
+                out.append("(dl-fail-open-{}) a fail-open mode must keep its result with no deadline, got "
+                           "exit {} and {!r}".format(mode, code, err))
+            continue
+        with _stub_handler(mode, _sleeper(1.0)):
+            code, err, seconds = _main_run(mode, budget=0.1)
+        want = ("AIQT guardrail: the {} check could not reach a decision within its 0.1-second budget on an "
+                "input of {} bytes; failing closed. Split the command into smaller calls, or move long content "
+                "into a file and pass its path.".format(mode, size))
+        if code != 2 or want not in err or seconds >= 0.8:
+            out.append("(dl-fires-{}) expected exit 2 with the deadline refusal within 0.8s, got exit {} after "
+                       "{:.2f}s and {!r}".format(mode, code, seconds, err))
+
+    class SlowStdin:
+        def read(self):
+            time.sleep(1.0)
+            return _DEADLINE_PAYLOAD
+    with _stub_handler("diff_source_pretool", _sleeper(0)):
+        code, err, seconds = _main_run("diff_source_pretool", SlowStdin(), budget=0.1)
+    if code != 2 or "on an input it had not finished reading" not in err or seconds >= 0.8:
+        out.append("(dl-read) a deadline during the payload read expected exit 2 naming the unread input, got "
+                   "exit {} after {:.2f}s and {!r}".format(code, seconds, err))
+
+    seen = []
+
+    class TimerProbe(io.StringIO):
+        def write(self, text):
+            seen.append((signal.getitimer(signal.ITIMER_REAL), signal.getsignal(signal.SIGALRM)))
+            return super().write(text)
+    deny = (0, {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": "dl-cancelled"}}, None)
+    probe = TimerProbe()
+    with _stub_handler("diff_source_pretool", lambda _data: deny):
+        code, _err, _seconds = _main_run("diff_source_pretool", stdout=probe)
+    if (code != 0 or "dl-cancelled" not in probe.getvalue() or not seen
+            or any(timer != (0.0, 0.0) or handler != signal.SIG_DFL for timer, handler in seen)):
+        out.append("(dl-cancelled) the decision must be written with the timer cancelled and SIGALRM back to "
+                   "the caller's disposition, saw exit {} and {!r}".format(code, seen))
+    return out
+
+
+def _deadline_restore_failures():
+    """(dl-restore-*, dl-nested-*, dl-refused-*) The shared window restores a caller's timer elapsed-aware:
+    an active single or periodic countdown comes back less the time the window used (never the saved value
+    verbatim) with its interval and handler; an inactive one stays inactive; one that comes due inside the
+    window ends the window there and is delivered once; a nested window passes an outer deadline to its
+    owner and the outer window restores what it found; and a caller that blocks SIGALRM, or a call off the
+    main thread, gets no deadline and keeps its state."""
+    out = []
+    fired = []
+
+    def caller_alarm(signum, frame):
+        fired.append(signum)
+
+    def as_caller(value, interval, stub_seconds, budget=None):
+        fired.clear()
+        signal.signal(signal.SIGALRM, caller_alarm)
+        signal.setitimer(signal.ITIMER_REAL, value, interval)
+        before = signal.getitimer(signal.ITIMER_REAL)
+        began = time.monotonic()
+        try:
+            with _stub_handler("diff_source_pretool", _sleeper(stub_seconds)):
+                code, err, _seconds = _main_run("diff_source_pretool", budget=budget)
+            used = time.monotonic() - began
+            return code, before, signal.getitimer(signal.ITIMER_REAL), used, signal.getsignal(signal.SIGALRM)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+
+    for label, interval in (("single", 0.0), ("periodic", 1800.0)):
+        code, before, after, used, handler = as_caller(3600.0, interval, 0.4)
+        if not (code == 0 and handler is caller_alarm and after[1] == interval and not fired
+                and before[0] - used - 0.1 <= after[0] <= before[0] - 0.3):
+            out.append("(dl-restore-{}) expected the caller countdown back less the {:.2f}s used, with its "
+                       "interval and handler, got exit {}, {!r} -> {!r}, fired {!r}".format(
+                           label, used, code, before, after, fired))
+    code, before, after, used, handler = as_caller(0.0, 0.0, 0.2)
+    if not (code == 0 and before == after == (0.0, 0.0) and handler is caller_alarm and not fired):
+        out.append("(dl-restore-inactive) an inactive caller timer must stay inactive, got exit {} and {!r}"
+                   .format(code, after))
+    code, before, after, used, handler = as_caller(0.2, 0.0, 1.0)
+    if not (code == 2 and fired == [signal.SIGALRM] and after == (0.0, 0.0) and handler is caller_alarm
+            and used < 0.8):
+        out.append("(dl-restore-due) a caller deadline due inside the window must end it and be delivered "
+                   "once, got exit {} after {:.2f}s, fired {!r}, timer {!r}".format(code, used, fired, after))
+    code, before, after, used, handler = as_caller(0.2, 0.5, 1.0)
+    if not (code == 2 and fired == [signal.SIGALRM] and after[1] == 0.5 and 0 < after[0] <= 0.5
+            and handler is caller_alarm):
+        out.append("(dl-restore-due-periodic) a periodic caller deadline due inside the window must be "
+                   "delivered once and resume its period, got exit {}, fired {!r}, timer {!r}".format(
+                       code, fired, after))
+
+    outer = aiqt_hooks._DeadlineWindow(0.3)
+    began = time.monotonic()
+    try:
+        with outer:
+            with _stub_handler("diff_source_pretool", _sleeper(1.5)):
+                caught = "returned {}".format(_main_run("diff_source_pretool")[0])
+    except aiqt_hooks._HookDeadline as exc:
+        caught = "outer" if exc.args[:1] == (outer,) else "another window"
+    used = time.monotonic() - began
+    if (caught != "outer" or used >= 1.0 or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0)
+            or signal.getsignal(signal.SIGALRM) != signal.SIG_DFL):
+        out.append("(dl-nested-outer) an enclosing window's deadline must reach that window's owner and leave "
+                   "the timer as found, got {} after {:.2f}s".format(caught, used))
+    with aiqt_hooks._DeadlineWindow(5.0):
+        with _stub_handler("diff_source_pretool", _sleeper(1.0)):
+            code, err, seconds = _main_run("diff_source_pretool", budget=0.1)
+        inside = signal.getitimer(signal.ITIMER_REAL)
+    if (code != 2 or seconds >= 0.8 or not 4.0 < inside[0] <= 5.0
+            or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0)
+            or signal.getsignal(signal.SIGALRM) != signal.SIG_DFL):
+        out.append("(dl-nested-inner) an inner deadline must end only the inner call and give the outer window "
+                   "its countdown back, got exit {} after {:.2f}s, outer timer {!r}".format(code, seconds, inside))
+
+    old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+    try:
+        with _stub_handler("diff_source_pretool", _sleeper(0.3)):
+            code, err, _seconds = _main_run("diff_source_pretool", budget=0.05)
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+        pending = signal.SIGALRM in signal.sigpending()
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+    if code != 0 or signal.SIGALRM not in mask or pending or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0):
+        out.append("(dl-refused-blocked) a caller blocking SIGALRM must get no deadline and keep its mask, got "
+                   "exit {}, pending {}".format(code, pending))
+    result = []
+    with _stub_handler("diff_source_pretool", _sleeper(0.3)):
+        worker = threading.Thread(target=lambda: result.append(_main_run("diff_source_pretool", budget=0.05)[0]))
+        worker.start()
+        worker.join(10)
+    if result != [0]:
+        out.append("(dl-refused-thread) a call off the main thread must get no deadline, got {!r}".format(result))
+    return out
+
+
+def _deadline_child(tmp):
+    """The deadline checks that set timers and dispositions, plus the shape timings, in this (child)
+    process; returns their failures."""
+    return (_deadline_path_failures() + _deadline_restore_failures()
+            + _deadline_shape_failures(Path(tmp)))
+
+
+def _deadline_relation_failures():
+    """(dl-relation, dl-base) The hook's deadline derives from gen_hooks.TIMEOUT with a margin in range, and
+    the deadline exception is a BaseException outside Exception."""
+    out = []
+    margin = gen_hooks.TIMEOUT - aiqt_hooks.PRETOOL_BUDGET_SECONDS
+    if (aiqt_hooks.HOOK_TIMEOUT_SECONDS != gen_hooks.TIMEOUT
+            or not gen_hooks.DEADLINE_MIN_MARGIN <= margin < gen_hooks.TIMEOUT):
+        out.append("(dl-relation) the hook's deadline must derive from gen_hooks.TIMEOUT ({}): "
+                   "HOOK_TIMEOUT_SECONDS {} and PRETOOL_BUDGET_SECONDS {}".format(
+                       gen_hooks.TIMEOUT, aiqt_hooks.HOOK_TIMEOUT_SECONDS, aiqt_hooks.PRETOOL_BUDGET_SECONDS))
+    if (not issubclass(aiqt_hooks._HookDeadline, BaseException)
+            or issubclass(aiqt_hooks._HookDeadline, Exception)):
+        out.append("(dl-base) _HookDeadline must derive from BaseException and not from Exception, so no "
+                   "handler's except Exception branch can catch it")
+    return out
+
+
+def _test_deadline_posture(failures, tmp):
+    """(dl-*) The PreToolUse deadline posture; see the section comment above."""
+    failures.extend(_deadline_relation_failures())
+    failures.extend(_raw_sequence_failures())
+    child_tmp = tmp / "deadline"
+    child_tmp.mkdir()
+    code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import selftest_aiqt_hooks as m; "
+            "sys.stdout.write(json.dumps(m._deadline_child(sys.argv[2])))")
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(Path(__file__).resolve().parent),
+                               str(child_tmp)], capture_output=True, text=True, timeout=_DEADLINE_CHILD_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        failures.append("(dl-child-timeout) the deadline child did not finish within {}s".format(
+            _DEADLINE_CHILD_TIMEOUT))
+        return
+    try:
+        found = json.loads(proc.stdout)
+    except ValueError:
+        found = None
+    if proc.returncode != 0 or not isinstance(found, list):
+        failures.append("(dl-child-failed) the deadline child failed (exit {}): {}".format(
+            proc.returncode, (proc.stdout + proc.stderr)[-2000:]))
+        return
+    failures.extend(found)
 
 
 def main():
@@ -11507,6 +11968,7 @@ def _main_isolated(monitor):
         _test_note_shape_pins(failures, tmp)
         _test_stream_failure_exits(failures)
         _test_stop_field_claim_check(failures, tmp)
+        _test_deadline_posture(failures, tmp)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
