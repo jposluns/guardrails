@@ -82,22 +82,33 @@
       under the lock (and locked itself, so the lock carries over to the file the rename puts
       at the path), given the register's permission bits and fsynced, and only after the
       under-lock re-check (the path still names the validated file's device and inode, the
-      file has no other hard link, and it still holds exactly the validated bytes) is the
-      temporary renamed over the register, still under the lock, after which the directory is
-      fsynced. Any failure before the rename (the temporary's creation, its lock, a failed or
-      short write, its permission bits, its fsync, the re-check, the rename itself) leaves the
-      register's bytes unchanged, since nothing was written to it, and removes the temporary
-      while its name still names this call's own file (a removal failure is named with the
-      temporary's path). OUTSIDE THE GUARANTEE: a crash after the rename and before the
+      file has no other hard link, and it still holds exactly the validated bytes) and the
+      check that the temporary's name still names the temporary (its lstat has the open
+      temporary's device and inode and is a regular file) is the temporary renamed over the
+      register, still under the lock, after which the directory is fsynced. The temporary is
+      created in the register's directory, so a commit needs write access to that directory.
+      Any failure before the rename (the temporary's creation, its lock, a failed or short
+      write, its permission bits, its fsync, the re-check, the temporary's name check, the
+      rename itself) leaves the register's bytes unchanged, since nothing was written to it,
+      and removes the temporary while its name still names this call's own file (a removal
+      failure is named with the temporary's path; the identity check and the unlink are two
+      system calls, so an entry put at the name between them is unlinked in the temporary's
+      place). OUTSIDE THE GUARANTEE: a crash after the rename and before the
       directory sync completes (the rename may then not be durable), and a directory-sync or
       --bootstrap anchor-write failure after the rename, which exits 2 saying the row is in
       the register; a crash before the rename can leave the temporary at its name beside an
       unchanged register; and the replacing file carries the register's permission bits but
       not its owner, group, ACLs or extended attributes. A writer that does not take the lock
-      (a hand edit, any other tool) is outside that serialization: the re-check catches one
-      that lands between the validation and the re-check, one landing between the re-check
-      and the rename (two system calls) is overwritten by the rename, and any other is caught
-      later by the mistakes-register gate, not here. A second RESIDUAL: the hard-link conflict
+      (a hand edit, any other tool) is outside that serialization. At the register, the
+      re-check catches one that lands between the validation and the re-check, one landing
+      between the re-check's last read and the rename (only the temporary's lstat runs in
+      between) is overwritten by the rename, and any other is caught later by the
+      mistakes-register gate, not here. At the temporary's name, the name check refuses an
+      entry swapped in from the temporary's creation up to that check, but one swapped in
+      between the check and the rename (two system calls, lstat then rename) is renamed over
+      the register unvalidated and the append reports success; the check proves which file the
+      name holds, not its bytes, so a writer that opens the temporary by name and rewrites it
+      before the rename is not caught here either. A second RESIDUAL: the hard-link conflict
       check on the registry declarations is point-in-time; a hard link created after that
       check is not caught by this appender and is left to the register gate. A third
       RESIDUAL: POSIX offers no race-free proof that the directory found at a name is the one
@@ -133,7 +144,9 @@
       Synthetic fixtures for the write-time validation: each refusal vector leaves the register
       and its anchor byte-identical (the first-row cleanup and left-in-place vectors assert
       their named outcomes instead), a failure injected at each commit step leaves the
-      register's bytes unchanged and no temporary file, every clean append is
+      register's bytes unchanged and no temporary file, a file or symlink swapped in at the
+      temporary's name before the rename is refused by that name and left in place with the
+      register byte-identical, every clean append is
       re-read and its landed last row and a clean verify_lines asserted, the serialization
       lock, the first-row creation re-checks (size and file identity) and the write binding
       are probed in place, an ordinary append to an untracked register with no anchor is
@@ -300,10 +313,16 @@ def _commit_failure(fd, path, raw, tmp_fd, tmp_path, content):
     path still names the validated file (device and inode), that the file has no other hard
     link (the rename would leave such a name at the old content) and that it still holds
     exactly RAW (its size, then its bytes, so an in-place rewrite of equal length is caught
-    too), and only then rename the temporary over the register. Returns None once the rename
-    has landed, else the refusal clause for the step that failed: every failure before the
-    rename leaves the register's bytes as they were, since nothing is ever written to it, and
-    the caller removes the temporary."""
+    too), then check that the temporary's name still names the temporary (its lstat has the
+    device and inode fstat read on TMP_FD after the fsync, and is a regular file, so a file or
+    symlink swapped in at the name is refused by that name), and only then rename the
+    temporary over the register. Returns None once the rename has landed, else the refusal
+    clause for the step that failed: every failure before the rename leaves the register's
+    bytes as they were, since nothing is ever written to it, and the caller removes the
+    temporary. RESIDUAL: the rename goes by name and POSIX offers no rename conditional on the
+    source's identity, so the name check and the rename are two system calls; an entry a
+    writer that ignores the lock puts at the temporary's name between them is renamed over the
+    register unvalidated, and this returns None."""
     try:
         fcntl.flock(tmp_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
@@ -324,6 +343,10 @@ def _commit_failure(fd, path, raw, tmp_fd, tmp_path, content):
         os.fsync(tmp_fd)
     except OSError as exc:
         return "the temporary file could not be synced to disk ({})".format(exc)
+    try:
+        st_tmp = os.fstat(tmp_fd)
+    except OSError as exc:
+        return "the temporary file cannot be inspected through its descriptor ({})".format(exc)
     try:
         st_fd = os.fstat(fd)
         st_path = os.lstat(str(path))
@@ -348,6 +371,19 @@ def _commit_failure(fd, path, raw, tmp_fd, tmp_path, content):
     if not same:
         return ("the register's bytes changed after the validation (same size, different "
                 "content: a writer rewrote it in place)")
+    # the rename goes by name, so the entry at the temporary's name must still be the regular
+    # file this call wrote and synced; the lstat and the rename stay two calls
+    try:
+        st_name = os.lstat(tmp_path)
+    except FileNotFoundError:
+        return "the temporary file {} is no longer at its name".format(tmp_path)
+    except OSError as exc:
+        return "the temporary file {} cannot be re-checked before the rename ({})".format(
+            tmp_path, exc)
+    if ((st_name.st_dev, st_name.st_ino) != (st_tmp.st_dev, st_tmp.st_ino)
+            or not stat.S_ISREG(st_name.st_mode)):
+        return ("the entry at the temporary file's name {} is no longer this call's temporary "
+                "(replaced after its creation)".format(tmp_path))
     try:
         os.replace(tmp_path, str(path))
     except OSError as exc:
@@ -358,7 +394,9 @@ def _commit_failure(fd, path, raw, tmp_fd, tmp_path, content):
 def _temp_removed(tmp_fd, tmp_path):
     """Remove the commit's temporary file after a failure before the rename, only while its name
     still names this call's own temporary (device and inode); returns the clause naming the
-    outcome, a removal failure by the temporary's path."""
+    outcome, a removal failure by the temporary's path. RESIDUAL: the identity check and the
+    unlink are two system calls, so an entry a writer puts at the name between them is
+    unlinked in the temporary's place."""
     try:
         st_fd = os.fstat(tmp_fd)
         st_path = os.lstat(tmp_path)
@@ -1025,9 +1063,10 @@ def cmd_append(a, _waits=0):
         # file created exclusively in the register's own directory under the lock, which is
         # synced and then renamed over the register, still under the lock, only after the
         # re-check that the path still names the validated file (or, for a first row, the file
-        # this call just created) with exactly the validated bytes (_commit_failure). The
-        # register itself is never written, so any failure before the rename leaves its bytes
-        # as they were; the temporary is then removed. For a freshly created register the
+        # this call just created) with exactly the validated bytes, and that the temporary's
+        # name still names the temporary (_commit_failure). The register itself is never
+        # written, so any failure before the rename leaves its bytes as they were; the
+        # temporary is then removed. For a freshly created register the
         # re-check is also the serialization check, since its lock is necessarily taken after
         # the creation: an appender that landed in between forces a refusal, never an
         # interleaved row. Only the interleavings the identity, link-count, size and byte
@@ -2134,6 +2173,81 @@ def self_test():
                 failures.append("{}: the refusal changed the anchor".format(name))
             if entry_state(commit_link) is not None:
                 vector_cleanup(name, commit_link.unlink)
+        # the rename goes by name: an entry a writer that ignores the lock swaps in at the
+        # temporary's name while the temporary is synced (a foreign file, or a symlink) is
+        # refused by that name and left in place, named, and a temporary removed from its name
+        # is refused; the register stays byte-identical, never the swapped-in entry
+        swap_side = repo / "commit-swap-side.jsonl"
+        swap_target = repo / "commit-swap-target.jsonl"
+        swap_target.write_bytes(b"TARGET\n")
+
+        def swap_in_file(at):
+            swap_side.write_bytes(b"FOREIGN UNVALIDATED\n")
+            real_c_replace(str(swap_side), at)
+
+        def swap_in_symlink(at):
+            os.symlink(str(swap_target), str(swap_side))
+            real_c_replace(str(swap_side), at)
+
+        for swap_tag, swap, reason, left_named in (
+                ("file", swap_in_file, "is no longer this call's temporary",
+                 "is not this call's temporary and was left in place"),
+                ("symlink", swap_in_symlink, "is no longer this call's temporary",
+                 "is not this call's temporary and was left in place"),
+                ("vanished", real_c_unlink, "is no longer at its name", None)):
+            name = "commit-temp-swapped-" + swap_tag
+            commit_reg.write_bytes(commit_seed)
+            before = snapshot(commit_reg)
+            os.fsync = fsync_after(
+                lambda swap=swap: swap(str(repo / temps_beside(commit_reg)[0])))
+            try:
+                rc, err = append(commit_reg, "MR-1", "accepted")
+            finally:
+                os.fsync = real_c_fsync
+            left = temps_beside(commit_reg)
+            if rc != 2 or reason not in err:
+                failures.append("{}: want exit 2 naming {!r}, got exit {}: {}".format(
+                    name, reason, rc, err.strip()))
+            if snapshot(commit_reg) != before:
+                failures.append("{}: the register or its anchor changed, want {!r}, got "
+                                "{!r}".format(name, before, snapshot(commit_reg)))
+            if left_named is None and left:
+                failures.append("{}: an entry was left at a temporary's name: {}".format(
+                    name, left))
+            if left_named is not None and (len(left) != 1 or "{} {}".format(
+                    repo / left[0], left_named) not in err):
+                failures.append("{}: the swapped-in entry should be left in place and named by "
+                                "its path, got {}: {}".format(name, left, err.strip()))
+            if os.path.islink(str(commit_reg)):
+                vector_cleanup(name, commit_reg.unlink)
+            vector_cleanup(name, lambda: [
+                os.unlink(str(repo / n)) for n in temps_beside(commit_reg)])
+        vector_cleanup("commit-temp-swapped", swap_target.unlink)
+        # an entry at the name with the temporary's device and inode is the temporary itself,
+        # a regular file, so no filesystem state fails only the regular-file test; an injected
+        # lstat result pins that test
+        real_c_lstat = os.lstat
+
+        def not_regular_lstat(p, *largs, **lkw):
+            st = real_c_lstat(p, *largs, **lkw)
+            if os.fspath(p).startswith(commit_tmp):
+                return os.stat_result((stat.S_IFLNK | 0o777,) + tuple(st)[1:])
+            return st
+
+        commit_reg.write_bytes(commit_seed)
+        before = snapshot(commit_reg)
+        os.lstat = not_regular_lstat
+        try:
+            rc, err = append(commit_reg, "MR-1", "accepted")
+        finally:
+            os.lstat = real_c_lstat
+        if (rc != 2 or "is no longer this call's temporary" not in err
+                or snapshot(commit_reg) != before or temps_beside(commit_reg)):
+            failures.append("commit-temp-name-not-regular: want exit 2 naming the temporary, "
+                            "the register unchanged and no temporary left, got exit {} with {}: "
+                            "{}".format(rc, temps_beside(commit_reg), err.strip()))
+        if os.path.islink(str(commit_reg)):
+            vector_cleanup("commit-temp-name-not-regular", commit_reg.unlink)
         commit_reg.write_bytes(commit_seed)
         # a temporary that cannot be removed is NAMED, with its path, in the refusal, and the
         # register still keeps its bytes
@@ -3949,9 +4063,13 @@ def self_test():
           "under-lock re-check of identity, size, bytes and hard links, the rename, and the "
           "kernel's own file-size limit) are refused as cannot-evaluate (exit 2), each "
           "leaving the register's bytes unchanged and no temporary file (a temporary that "
-          "cannot be removed is named by its path); --bootstrap lands a first row and "
-          "establishes the anchor --update-anchor would write, after which the ordinary "
-          "gate passes, before and after a following ordinary append, and a directory sync "
+          "cannot be removed is named by its path); a file or symlink swapped in at the "
+          "temporary's name, a temporary removed from its name and an injected non-regular "
+          "entry there are refused before the rename by that name (exit 2), the register "
+          "byte-identical and a swapped-in entry left in place and named; --bootstrap lands "
+          "a first row and establishes the anchor --update-anchor would write, after which "
+          "the ordinary gate passes, before and after a following ordinary append, and a "
+          "directory sync "
           "or anchor write failing after the rename exits 2 saying the row is in the "
           "register; the replacing file keeps the register's permission bits, and an "
           "appender that took its lock on a file another appender's commit replaced starts "
