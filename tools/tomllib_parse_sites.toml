@@ -695,7 +695,7 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/check_opf_record.py"
-function = "t74_live_holder_rule"
+function = "t74_never_seize_dead_run_release"
 form = "call"
 count = 1
 class = "EXEMPT"
