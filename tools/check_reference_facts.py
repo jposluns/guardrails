@@ -47,10 +47,13 @@ generator alone cannot assert:
     never non-code), so the public sentence cannot read
     complete while the release ships code the declaration places under a non-code prefix or does
     not place at all, and a declared row cannot outlive the files it names;
-  - the public instruction-budget note: README.md and INSTRUCTION-BUDGET.md each state the shipped
-    pack's measured PACK figure as the committed ratchet of .aiqt/core/instruction-budget.toml; the
-    stated figure must equal that ratchet, and the ratchet must still exceed the 120,000 figure the
-    note says the pack exceeds.
+  - the public instruction-budget section: README.md and INSTRUCTION-BUDGET.md each state the
+    committed ratchet of .aiqt/core/instruction-budget.toml as the most PACK the budget gate allows;
+    the stated figure must equal that ratchet, and the ratchet must still exceed the 120,000 figure
+    the note says the pack may exceed. The other figures the section states are bound to one
+    authoritative value each, on each page: the 150,000 session target (_SESSION_TARGET), the
+    pinned Claude Code build (claude-code-version in the budget source), and the loader's
+    120,000-character check (_BUDGET_FLOOR).
 
 BEST-EFFORT RESIDUAL (disclosed per the pack's own rule): this gate checks the specific fact copies
 enumerated above; it is not a semantic-equivalence prover for arbitrary prose, and `catalogue = "full"` is
@@ -71,9 +74,11 @@ a non-code prefix is not detected, the HTML leg deliberately over-detects (a com
 under-detection), and a row's plain-language label is a reviewed description this
 gate cannot semantically verify against the files under its prefix, all disclosed residuals. The
 instruction-budget
-note is pinned to the COMMITTED RATCHET, not to a fresh measurement: the budget gate holds PACK at or
-under the ratchet and prints a note whenever PACK falls below it, so a stale ratchet over a shrunken
-pack is surfaced there, not here.
+note is pinned to the COMMITTED RATCHET, not to a fresh measurement, and the pages state only the
+ratchet, never a measured PACK: the budget gate holds PACK at or under the ratchet and prints a note
+whenever PACK falls below it, so a stale ratchet over a shrunken pack is surfaced there, not here.
+The 150,000 target and the 120,000-character loader check are bound to this gate's own constants,
+not to Claude Code itself: whether a Claude Code build applies that check is not verified here.
 
   check_reference_facts.py              exit 0 clean, 1 finding, 2 unreadable/missing input (fail-closed)
   check_reference_facts.py --self-test
@@ -592,48 +597,97 @@ def check_release_code_declaration(root, findings, *, declaration=None, sources=
                             "release-manifest path; remove the row or fix the prefix".format(pref))
 
 
+# The two figures the pages state, each with one authoritative value: _BUDGET_FLOOR is the
+# loader's character check and the "budget to" antecedent, and _SESSION_TARGET is the project's
+# target for everything Claude Code loads at session start (and the ", not 150,000" aside).
+_BUDGET_FLOOR = 120000
+_SESSION_TARGET = 150000
 # The full public sentence, every part bound: the "budget to 120,000" antecedent (the figure the
-# note's "that figure" names; INSTRUCTION-BUDGET.md reads ", not 150,000" between them), the
-# "exceeds that figure" clause (so a page reworded
-# to "no longer exceeds" fails to match, a missing-note finding) and the figure with its unit and
-# the unit's explanatory suffix
+# note's "that figure" names; INSTRUCTION-BUDGET.md reads ", not 150,000" between them, the
+# aside built from _SESSION_TARGET), the "may exceed that figure" clause (so a page reworded
+# to "no longer exceeds" fails to match, a missing-note finding) and the committed ratchet with its
+# unit and the unit's explanatory suffix
 # (UTF-16 code units, the unit tools/check_instruction_budget.py counts and prints), bound through
 # the sentence terminator (the period, then whitespace or the end of the page), so changing the
 # unit, dropping it, rewording its suffix, extending the suffix ("counts in bytes"), or gluing
-# text after the period ("counts.in bytes") is a missing-note finding.
-_BUDGET_FLOOR = 120000
+# text after the period ("counts.in bytes") is a missing-note finding. The sentence states the
+# committed ratchet only, the most PACK the budget gate allows, never a measured PACK: this gate
+# reads the ratchet, not a measurement, so the page claims no more than the gate binds.
 _BUDGET_NOTE_RE = re.compile(
-    r"budget to ([0-9][0-9,]*)(?:, not 150,000)?\.\s*"
-    r"Today the shipped pack itself exceeds that figure: its measured PACK stands at the committed "
-    r"ratchet, ([0-9][0-9,]*) UTF-16 code units, the unit the budget gate counts\.(?!\S)")
+    r"budget to ([0-9][0-9,]*)(?:" + re.escape(", not " + format(_SESSION_TARGET, ",d")) + r")?\.\s*"
+    r"Today the shipped pack may exceed that figure: the budget gate allows it a PACK of up to the "
+    r"committed ratchet, ([0-9][0-9,]*) UTF-16 code units, the unit the budget gate counts\.(?!\S)")
+# The other figures the budget section states, one wording per figure per page, each captured as
+# the whole whitespace-free token (so a figure in another numeral form or with a suffix is read
+# and compared, never skipped) and compared with its one authoritative value: the session target
+# with _SESSION_TARGET, the build with claude-code-version in .aiqt/core/instruction-budget.toml,
+# and the loader's character check with _BUDGET_FLOOR. Words are joined by \s+ because the pages
+# wrap these sentences across lines. A page whose wording is absent is a finding, never a skip.
+_BUDGET_FIGURE_WORDINGS = (
+    ("README.md", "target", "the session target",
+     re.compile(r"under\s+(\S+)\s+characters\s+in\s+total\.")),
+    ("INSTRUCTION-BUDGET.md", "target", "the session target",
+     re.compile(r"Treat\s+(\S+)\s+characters\s+as\s+this\s+project's\s+target")),
+    ("README.md", "build", "the pinned Claude Code build",
+     re.compile(r"the\s+pinned\s+Claude\s+Code\s+build\s+the\s+gate\s+models\s+\(([^\s,)]+)")),
+    ("INSTRUCTION-BUDGET.md", "build", "the pinned Claude Code build",
+     re.compile(r"the\s+pinned\s+Claude\s+Code\s+build\s+the\s+gate\s+models\s+\(([^\s,)]+)")),
+    ("README.md", "loader", "the loader's character check",
+     re.compile(r"carries\s+its\s+own\s+(\S+?)-character\s+check")),
+    ("INSTRUCTION-BUDGET.md", "loader", "the loader's character check",
+     re.compile(r"carries\s+its\s+own\s+(\S+?)-character\s+check")),
+)
 
 
 def check_budget_note(root, findings):
-    """The public instruction-budget note against the committed ratchet it states: README.md and
+    """The public instruction-budget section against the values it states: README.md and
     INSTRUCTION-BUDGET.md each carry the _BUDGET_NOTE_RE sentence (the 120,000 antecedent the
-    note's "that figure" names, the exceeds-that-figure half,
+    note's "that figure" names, the may-exceed-that-figure half,
     the figure, and its UTF-16 code-unit label with its explanatory suffix all bound through the
     sentence terminator, so rewording any of them away or extending the suffix is a
     finding), the stated antecedent must equal _BUDGET_FLOOR, the figure must equal the ratchet of
     .aiqt/core/instruction-budget.toml
     (thousands-separated, as the pages print it), and the ratchet must still exceed the
-    _BUDGET_FLOOR figure the note says the shipped pack exceeds. Pinned to
-    the COMMITTED ratchet, not a fresh measurement (the budget gate holds PACK at or under the
-    ratchet and prints a lower-the-ratchet note when PACK falls below it); a missing or non-integer
-    ratchet, and a missing page, fail closed (exit 2)."""
-    ratchet = load_toml(root / ".aiqt" / "core" / "instruction-budget.toml").get("ratchet")
+    _BUDGET_FLOOR figure the note says the shipped pack may exceed. Each page's
+    _BUDGET_FIGURE_WORDINGS wording must be present, and every figure it captures must equal its
+    one authoritative value: the session target _SESSION_TARGET and the loader's check
+    _BUDGET_FLOOR (thousands-separated), and the build claude-code-version of the budget source.
+    Pinned to the COMMITTED ratchet, not a fresh measurement, and the pages state only the
+    ratchet (the budget gate holds PACK at or under the ratchet and prints a lower-the-ratchet
+    note when PACK falls below it); a missing or non-integer ratchet, a missing or non-string
+    claude-code-version, and a missing page, fail closed (exit 2)."""
+    budget = load_toml(root / ".aiqt" / "core" / "instruction-budget.toml")
+    ratchet = budget.get("ratchet")
     if not isinstance(ratchet, int) or isinstance(ratchet, bool) or ratchet <= 0:
         raise OSError(".aiqt/core/instruction-budget.toml: ratchet must be a positive integer")
+    build = budget.get("claude-code-version")
+    if not isinstance(build, str) or not build:
+        raise OSError(".aiqt/core/instruction-budget.toml: claude-code-version must be a non-empty "
+                      "string")
     want = format(ratchet, ",d")
     floor_want = format(_BUDGET_FLOOR, ",d")
+    figure_want = {"target": format(_SESSION_TARGET, ",d"), "build": build, "loader": floor_want}
+    texts = {}
     for rel in ("README.md", "INSTRUCTION-BUDGET.md"):
-        text = _read(root / rel)
+        texts[rel] = _read(root / rel)
+    for rel, key, label, pattern in _BUDGET_FIGURE_WORDINGS:
+        hits = pattern.findall(texts[rel])
+        if not hits:
+            findings.append("{}: the wording that states {} ({}) was not found; if the page was "
+                            "reworded, update _BUDGET_FIGURE_WORDINGS so the figure stays "
+                            "checked".format(rel, label, pattern.pattern))
+        for got in hits:
+            if got != figure_want[key]:
+                findings.append("{}: the page states {} as {}; its authoritative value is "
+                                "{}".format(rel, label, got, figure_want[key]))
+    for rel in ("README.md", "INSTRUCTION-BUDGET.md"):
+        text = texts[rel]
         hits = _BUDGET_NOTE_RE.findall(text)
         if not hits:
             findings.append("{}: the instruction-budget note (budget to 120,000 ... the shipped "
-                            "pack itself exceeds that "
-                            "figure: its measured PACK stands at the committed ratchet, N UTF-16 "
-                            "code units, the unit the budget gate counts.) was not found; if the "
+                            "pack may exceed that figure: the budget gate allows it a PACK of up "
+                            "to the committed ratchet, N UTF-16 code units, the unit the budget "
+                            "gate counts.) was not found; if the "
                             "page was reworded, update check_budget_note so the figure stays "
                             "checked".format(rel))
             continue
@@ -646,7 +700,7 @@ def check_budget_note(root, findings):
                 findings.append("{}: the budget note states PACK {}; the committed ratchet is "
                                 "{}".format(rel, got, want))
         if ratchet <= _BUDGET_FLOOR:
-            findings.append("{}: the page says the shipped pack exceeds {}, but the committed "
+            findings.append("{}: the page says the shipped pack may exceed {}, but the committed "
                             "ratchet is {}; reword the note".format(rel, floor_want, want))
 
 
@@ -780,7 +834,12 @@ def main():
 #      (INSTRUCTION-BUDGET.md's real wording) -> clean, and an aside naming another figure -> the
 #      missing-note finding,
 #  23c. the exceeds boundary: a ratchet exactly at 120,000 -> finding (at-boundary); one unit
-#      above -> clean (just outside).
+#      above -> clean (just outside),
+#  23d. the other budget figures, on each page: the session target, the pinned build and the
+#      loader's character check, each drifted alone -> a finding by its drift diagnostic; each
+#      wording reworded away -> the not-found diagnostic; the budget source's build moved under
+#      unchanged pages -> a build finding on both pages; a missing or non-string build -> exit 2;
+#      the earlier "measured PACK" wording restored -> the missing-note finding.
 # (1, 7, 12, 13, and 15 through 23 are the invariant-bearing cases; the rest complete the fail-closed
 # contract.)
 
@@ -892,13 +951,19 @@ _ENFORCEMENT_MD = (
     "| Enforced | 1 |\n| Preview only | 0 |\n| Pending | 0 |\n| None | 2 |\n"
 )
 
-# The instruction-budget fixtures for the budget-note leg: the committed ratchet, and the public note
-# stating it (the same sentence in the landing README and in INSTRUCTION-BUDGET.md).
-_BUDGET_TOML = "ratchet = 132775\n"
-_BUDGET_NOTE = ("Budget note: budget to 120,000. Today the shipped pack itself exceeds that figure: "
-                "its measured PACK stands at the committed ratchet, 132,775 UTF-16 code units, the "
+# The instruction-budget fixtures for the budget-note leg: the committed ratchet and the pinned
+# build, the public note stating the ratchet (the same sentence in the landing README and in
+# INSTRUCTION-BUDGET.md), and before it each page's session-target wording and the shared caveat
+# naming the build and the loader's check (wrapped across lines, as the real pages wrap them; the
+# landing page writes the build with a following comma, the budget page with a following space).
+_BUDGET_TOML = 'ratchet = 132775\nclaude-code-version = "9.8.7"\n'
+_BUDGET_CAVEAT = ("The loader of the pinned Claude Code build the gate\nmodels (9.8.7{after}) "
+                  "carries its own\n120,000-character check, so ")
+_BUDGET_NOTE = ("budget to 120,000. Today the shipped pack may exceed that figure: the budget gate "
+                "allows it a PACK of up to the committed ratchet, 132,775 UTF-16 code units, the "
                 "unit the budget gate counts.\n")
-_BUDGET_MD = "# Fixture Budget\n\n" + _BUDGET_NOTE
+_BUDGET_MD = ("# Fixture Budget\n\nTreat 150,000 characters as this project's target. "
+              + _BUDGET_CAVEAT.format(after=" in the budget source") + _BUDGET_NOTE)
 
 _LANDING = (
     "# Fixture Landing\n\n"
@@ -910,7 +975,8 @@ _LANDING = (
     "shipped gate or hook. | Controls |\n"
     "| **A standards crosswalk** | Mappings from the rules to 2 pinned external control catalogues. "
     "| Mappings |\n"
-    "\n" + _BUDGET_NOTE
+    "\nKeep it under 150,000\ncharacters in total. " + _BUDGET_CAVEAT.format(after=", pinned")
+    + _BUDGET_NOTE
 )
 
 # The release-manifest fixture: at least one path under every declared fixture prefix, code and
@@ -1410,11 +1476,17 @@ def self_test_main():
         #      the hundred points symbol U+1F4AF, and each die face U+2680 to U+2685) on the
         #      designated proof line is NOT read and the page stays clean (exit 0). A sweep
         #      widened to read any of them turns its vector red, so the module docstring's
-        #      disclosure must change with it.
+        #      disclosure must change with it. The anchor must occur exactly once in _LANDING
+        #      first, so a fixture edit that drops it is a failure, never a vector that passes
+        #      with its symbol never inserted.
         for tag, symbol in (("keycapten", "\U0001f51f"), ("hundredpoints", "\U0001f4af"),
                             ("dieface1", "\u2680"), ("dieface2", "\u2681"),
                             ("dieface3", "\u2682"), ("dieface4", "\u2683"),
                             ("dieface5", "\u2684"), ("dieface6", "\u2685")):
+            if _LANDING.count("Mapped to 2 frameworks.**") != 1:
+                failures.append("residual fixture {}: its anchor must appear exactly once in "
+                                "_LANDING".format(tag))
+                continue
             residual = tmp / ("residual-" + tag)
             _write_fixture(residual, landing=_LANDING.replace(
                 "Mapped to 2 frameworks.**", "Mapped to 2 frameworks.** ({} rules)".format(symbol), 1))
@@ -1786,7 +1858,7 @@ def self_test_main():
             failures.append("a page without the budget note expected exit 1")
         exceedsgone = tmp / "exceedsgone"
         _write_fixture(exceedsgone, landing=_LANDING.replace(
-            "itself exceeds that figure", "no longer exceeds that figure", 1))
+            "may exceed that figure", "no longer exceeds that figure", 1))
         if run_quiet(exceedsgone) != 1:
             failures.append("a budget note rewritten to say the pack no longer exceeds the 120,000 "
                             "figure expected exit 1 (the exceeds half is bound)")
@@ -1794,7 +1866,7 @@ def self_test_main():
         _write_fixture(budgetlow,
                        landing=_LANDING.replace("132,775 UTF-16 code units", "100,000 UTF-16 code units"),
                        budget_md=_BUDGET_MD.replace("132,775 UTF-16 code units", "100,000 UTF-16 code units"),
-                       budget_toml="ratchet = 100000\n")
+                       budget_toml=_BUDGET_TOML.replace("132775", "100000"))
         if run_quiet(budgetlow) != 1:
             failures.append("a budget note kept after the ratchet fell to 120,000 or below expected "
                             "exit 1")
@@ -1900,7 +1972,7 @@ def self_test_main():
                                                 "120,000 UTF-16 code units"),
                        budget_md=_BUDGET_MD.replace("132,775 UTF-16 code units",
                                                     "120,000 UTF-16 code units"),
-                       budget_toml="ratchet = 120000\n")
+                       budget_toml=_BUDGET_TOML.replace("132775", "120000"))
         if run_quiet(atfloor) != 1:
             failures.append("a ratchet exactly at the 120,000 floor expected exit 1 (at-boundary)")
         overfloor = tmp / "overfloor"
@@ -1909,10 +1981,99 @@ def self_test_main():
                                                 "120,001 UTF-16 code units"),
                        budget_md=_BUDGET_MD.replace("132,775 UTF-16 code units",
                                                     "120,001 UTF-16 code units"),
-                       budget_toml="ratchet = 120001\n")
+                       budget_toml=_BUDGET_TOML.replace("132775", "120001"))
         if run_quiet(overfloor) != 0:
             failures.append("a ratchet one unit above the 120,000 floor expected exit 0 "
                             "(just-outside boundary)")
+
+        # 23d. every other figure the budget section states, drifted alone on each page -> a
+        #      finding asserted by its own diagnostic naming the page, the figure and the
+        #      drifted value (removing that page's _BUDGET_FIGURE_WORDINGS entry, or comparing
+        #      with anything but the authoritative value, turns its vector red); each wording
+        #      reworded away on each page -> the not-found diagnostic; the budget source's
+        #      claude-code-version moved while the pages keep the old build -> a finding on BOTH
+        #      pages (the build is read from the budget source, not from a literal); a missing or
+        #      non-string claude-code-version -> exit 2 (fail-closed). Every anchor must occur
+        #      exactly once in its page fixture first.
+        figure_drifts = (
+            ("target", "the session target", "under 150,000\ncharacters", "under 160,000\ncharacters",
+             "Treat 150,000 characters", "Treat 160,000 characters", "160,000"),
+            ("build", "the pinned Claude Code build", "(9.8.7,", "(9.8.6,", "(9.8.7 in",
+             "(9.8.6 in", "9.8.6"),
+            ("loader", "the loader's character check", "120,000-character", "100,000-character",
+             "120,000-character", "100,000-character", "100,000"),
+        )
+        for key, label, land_old, land_new, md_old, md_new, shown in figure_drifts:
+            for rel, kwarg, page, old, new in (("README.md", "landing", _LANDING, land_old, land_new),
+                                               ("INSTRUCTION-BUDGET.md", "budget_md", _BUDGET_MD,
+                                                md_old, md_new)):
+                if page.count(old) != 1:
+                    failures.append("budget figure fixture {}: its anchor {!r} must appear exactly "
+                                    "once in the {} fixture".format(key, old, rel))
+                    continue
+                figfix = tmp / ("figure-{}-{}".format(key, rel.split(".")[0].lower()))
+                _write_fixture(figfix, **{kwarg: page.replace(old, new, 1)})
+                code, out = run_out(figfix)
+                if code != 1 or "{}: the page states {} as {};".format(rel, label, shown) not in out:
+                    failures.append("budget figure {} drifted on {} expected exit 1 with its "
+                                    "drift diagnostic".format(key, rel))
+        figure_rewords = (
+            ("target", "README.md", "landing", _LANDING, "characters in total.", "characters overall."),
+            ("target", "INSTRUCTION-BUDGET.md", "budget_md", _BUDGET_MD,
+             "as this project's target", "as our target"),
+            ("build", "README.md", "landing", _LANDING, "build the gate\nmodels (", "build ("),
+            ("build", "INSTRUCTION-BUDGET.md", "budget_md", _BUDGET_MD, "build the gate\nmodels (",
+             "build ("),
+            ("loader", "README.md", "landing", _LANDING, "-character check", "-char check"),
+            ("loader", "INSTRUCTION-BUDGET.md", "budget_md", _BUDGET_MD, "-character check",
+             "-char check"),
+        )
+        for key, rel, kwarg, page, old, new in figure_rewords:
+            if page.count(old) != 1:
+                failures.append("budget wording fixture {}: its anchor {!r} must appear exactly once "
+                                "in the {} fixture".format(key, old, rel))
+                continue
+            wordfix = tmp / ("wording-{}-{}".format(key, rel.split(".")[0].lower()))
+            _write_fixture(wordfix, **{kwarg: page.replace(old, new, 1)})
+            code, out = run_out(wordfix)
+            if code != 1 or "{}: the wording that states".format(rel) not in out:
+                failures.append("budget wording {} reworded on {} expected exit 1 with the "
+                                "not-found diagnostic".format(key, rel))
+        buildmoved = tmp / "buildmoved"
+        _write_fixture(buildmoved, budget_toml=_BUDGET_TOML.replace('"9.8.7"', '"9.8.8"'))
+        code, out = run_out(buildmoved)
+        if (code != 1
+                or "README.md: the page states the pinned Claude Code build as 9.8.7;" not in out
+                or "INSTRUCTION-BUDGET.md: the page states the pinned Claude Code build as 9.8.7;"
+                not in out):
+            failures.append("a budget source whose claude-code-version moved under unchanged pages "
+                            "expected exit 1 with a build finding on both pages")
+        for tag, toml in (("nobuild", "ratchet = 132775\n"),
+                          ("intbuild", "ratchet = 132775\nclaude-code-version = 987\n")):
+            buildbad = tmp / tag
+            _write_fixture(buildbad, budget_toml=toml)
+            code, err = run_err(buildbad)
+            if code != 2 or "claude-code-version must be a non-empty string" not in err:
+                failures.append("a budget source with a missing or non-string claude-code-version "
+                                "({}) expected exit 2 with its diagnostic".format(tag))
+        # The pages state the committed ratchet only: the earlier "measured PACK" claim, which
+        # this gate cannot bind, restored on either page -> the missing-note finding.
+        for rel, kwarg, page in (("README.md", "landing", _LANDING),
+                                 ("INSTRUCTION-BUDGET.md", "budget_md", _BUDGET_MD)):
+            old = ("may exceed that figure: the budget gate allows it a PACK of up to the committed "
+                   "ratchet,")
+            new = "itself exceeds that figure: its measured PACK stands at the committed ratchet,"
+            if page.count(old) != 1:
+                failures.append("measured-claim fixture: its anchor must appear exactly once in the "
+                                "{} fixture".format(rel))
+                continue
+            measfix = tmp / ("measured-" + rel.split(".")[0].lower())
+            _write_fixture(measfix, **{kwarg: page.replace(old, new, 1)})
+            code, out = run_out(measfix)
+            if (code != 1 or "{}: the instruction-budget note".format(rel) not in out
+                    or "was not found" not in out):
+                failures.append("a budget note claiming a measured PACK on {} expected exit 1 with "
+                                "the missing-note diagnostic".format(rel))
     finally:
         if unreadable_std is not None:
             os.chmod(unreadable_std, 0o755)  # restore even on an unexpected early exit
@@ -1954,9 +2115,12 @@ def self_test_main():
           "UTF-16 unit, or the unit's explanatory suffix to a rewording, an extension past the "
           "sentence end, or text glued after the period (on each public surface), names an "
           "antecedent other than 120,000 before "
-          "that figure or an aside other than \", not 150,000\", or outlives a ratchet at or "
-          "under "
-          "120,000 each report a finding (exit 1); a true explanatory count sentence outside its "
+          "that figure or an aside other than \", not 150,000\", claims a measured PACK, or "
+          "outlives a ratchet at or under "
+          "120,000, and a session target, pinned build, or loader character check that differs "
+          "from its authoritative value or whose wording is absent (each on each page, the "
+          "build also moved in the budget source) "
+          "each report a finding (exit 1); a true explanatory count sentence outside its "
           "designated line, a keycap ten, hundred points, or die face symbol on the proof line "
           "(the disclosed residual: no Unicode numeric value, not read), a nested declared "
           "prefix pair resolved by the longest prefix (order "
@@ -1976,8 +2140,8 @@ def self_test_main():
           "asserted by their diagnostics), an all-wrong-platform gates or hooks manifest, a "
           "claude-code hook default outside the blocking/warning split, a missing shipped-path "
           "declaration, a missing or empty release manifest, an HTML page that does not decode as "
-          "UTF-8 or holds a NUL byte, a listed detector file that is missing or unreadable, and a missing "
-          "instruction-budget source "
+          "UTF-8 or holds a NUL byte, a listed detector file that is missing or unreadable, a missing "
+          "instruction-budget source, and a missing or non-string claude-code-version in it "
           "all fail closed (exit 2)" + note)
     return 0
 
