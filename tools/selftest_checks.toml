@@ -2483,6 +2483,7 @@ expected-check-ids = [
   "env/child-pinned",
   # ---------- a measurement over stub hooks ----------
   "measure/each-case-n-samples",
+  "report/exit-zero-all-valid",
   "measure/timed-out-never-a-time",
   "measure/timeout-kills-child",
   "measure/inside-timeout-is-a-time",

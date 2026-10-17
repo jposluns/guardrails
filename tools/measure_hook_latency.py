@@ -49,13 +49,14 @@ XDG_CONFIG_HOME, XDG_STATE_HOME, XDG_CACHE_HOME, XDG_DATA_HOME and TMPDIR point 
 normal end of a run (timed-out samples included), on an error, and on SIGINT, SIGTERM and SIGHUP. For the
 measurement's duration this tool handles those three signals and restores the previous handlers afterwards
 (a signal ignored when the run starts, as under nohup, stays ignored): the handler kills the process group of
-the hook child or interpreter version probe then running and stops the run (a fixture git call in progress is
-killed by subprocess.run as the interruption passes through it), the root is removed, and the tool exits 128
-plus the signal number. A signal that arrives while the root is being made or removed, or while a child is
-being launched, is held until that step ends. A root that cannot be removed is an error (exit 2); when an error or a signal
-stopped the run first, that cause is the one reported and the root left behind is reported with it.
-Residual: SIGKILL or a power loss leaves the root, and a hook child running at that moment, behind. Each hook
-child gets PATH (inherited), LC_ALL=C.UTF-8,
+the hook child or interpreter version probe then running and stops the run (of a fixture git call in progress,
+only the direct git child is killed, by subprocess.run as the interruption passes through it), the root is
+removed, and the tool exits 128 plus the signal number. A signal that arrives while the root is being made or
+removed, or while a child is being launched, is held until that step ends. A root that cannot be removed is an
+error (exit 2); when an error or a signal stopped the run first, that cause is the one reported and the root
+left behind is reported with it. Residual: SIGKILL or a power loss leaves the root, and a hook child running at
+that moment, behind; and the helpers a fixture git push starts are not the direct git child, so they can
+outlive an interrupt. Each hook child gets PATH (inherited), LC_ALL=C.UTF-8,
 those directories, CLAUDE_PLUGIN_ROOT and CLAUDE_PROJECT_DIR, and nothing else: every other ambient variable,
 each GIT_* and PYTHON* one included, is dropped. This tool's own git calls (the fixture build, the git
 version) get the same plus GIT_CONFIG_GLOBAL=os.devnull and GIT_CONFIG_NOSYSTEM=1. Those two are NOT given
@@ -78,13 +79,15 @@ SAMPLES. A completed sample is valid when its outcome is a hook decision: exit 0
 (allow), exit 0 with a permissionDecision of allow, deny or ask (or the older top-level decision approve or
 block, read as allow or deny), or exit 0 with a systemMessage and no decision (warn). The startup case's one
 valid outcome is the dispatcher's rejection of its payload: exit 2, nothing on stdout, and "payload is not a
-JSON object" on stderr. Every other outcome is a failed sample: a nonzero exit (the platform reads no
-decision from one), a death by signal, a launch failure, or stdout that names no decision. A failed sample
-contributes no time: it is counted in the row's failed column and in its outcomes, never in min, median or
-max, and a row with no valid and no timed-out sample reads NO VALID SAMPLE in place of all three figures, in
-the table and in --json. A timed-out sample is TIMED OUT, never a time: it is known only to exceed
---case-timeout, so it sorts after every valid sample, and a statistic whose position lands on it reads TIMED
-OUT.
+JSON object" on stderr. Every other outcome is a failed sample: a nonzero exit (the handlers deny on exit 0,
+so a nonzero exit from a handler is an error path, not a decision), a death by signal, a launch failure, or
+stdout that names no decision. A failed sample contributes no time: it is counted in the row's failed column
+and in its outcomes, never in min, median or max, and a row with no valid and no timed-out sample reads NO
+VALID SAMPLE in place of all three figures, in the table and in --json. A run in which any row holds a failed
+sample (a NO VALID SAMPLE row always does) cannot be evaluated: once the report is written it exits 3 (see
+Exit). A timed-out sample is TIMED OUT, never a time: it is known only to exceed --case-timeout, so it sorts
+after every valid sample, and a statistic whose position lands on it reads TIMED OUT. A timed-out sample is
+not a failed sample, so timed-out samples alone never change the exit.
 
   measure_hook_latency.py [--runs N] [--files N] [--commits N] [--case-timeout SECONDS] [--hook ID]...
                           [--json PATH]
@@ -94,13 +97,16 @@ OUT.
                                           interpreter exit (tools/_selftest_exit_report.py), as
                                           tools/check_selftest_execution.py runs it
 
-Exit: 0 the measurement ran (whatever the times, timed-out and failed samples included); 2 cannot measure (a
-bad argument, an unreadable or malformed hooks.json, a hook id it needs that hooks.json lacks, a hook that no
-case runs or a case that no hook matches, a dispatcher that names no command budget, git or the hook
-interpreter missing, a hook interpreter whose version probe fails, a fixture that cannot be built or removed,
-signal handlers that cannot be installed, a --json PATH that exists or cannot be written, a host that is not
-POSIX); 128 plus the signal number (130, 143 or 129) when SIGINT, SIGTERM or SIGHUP stopped the run, after
-the fixture root is removed. The self-test exits 0 pass, 1 a failed check.
+Exit: 0 the measurement ran and every row holds only valid and timed-out samples (whatever the times; timed-out
+samples alone never change the exit); 3 cannot evaluate: the measurement ran and its report was written, but
+at least one row holds a failed sample or reads NO VALID SAMPLE, and one stderr line gives how many rows and
+names each as case/hook id; 2 cannot measure (a harness Python older than 3.14, a bad argument, an unreadable
+or malformed hooks.json, a hook id it needs that hooks.json lacks, a hook that no case runs or a case that no
+hook matches, a dispatcher that names no command budget, git or the hook interpreter missing, a hook
+interpreter whose version probe fails, a fixture that cannot be built or removed, signal handlers that cannot
+be installed, a --json PATH that exists or cannot be written (exit 2 then, whatever the rows hold), a host that
+is not POSIX); 128 plus the signal number (130, 143 or 129) when SIGINT, SIGTERM or SIGHUP stopped the run,
+after the fixture root is removed. The self-test exits 0 pass, 1 a failed check.
 """
 import sys
 
@@ -882,8 +888,16 @@ def _cause(exc):
     return "; ".join([str(exc)] + [str(note) for note in getattr(exc, "__notes__", ())])
 
 
+def _unevaluated(rows):
+    """Each row, as case/hook id, that holds a failed sample or reads NO VALID SAMPLE: a run with one cannot be
+    evaluated (exit 3). A timed-out sample is not a failed one, so it never puts a row here."""
+    return ["{}/{}".format(row["case"], row["hook_id"]) for row in rows
+            if row["failed_samples"] or row["min"] == NO_VALID_SAMPLE]
+
+
 def run_cli(argv, hooks_json, plugin_root, write_sizes=WRITE_SIZES, out=None, err=None):
-    """The measurement command line: print the report, write --json, and return the exit code."""
+    """The measurement command line: print the report, write --json, and return the exit code, 3 (cannot
+    evaluate) after the report when a row holds a failed sample (see _unevaluated)."""
     out = sys.stdout if out is None else out
     err = sys.stderr if err is None else err
     try:
@@ -923,6 +937,11 @@ def run_cli(argv, hooks_json, plugin_root, write_sizes=WRITE_SIZES, out=None, er
             print("error: cannot write --json {}: {}".format(target, exc), file=err)
             return 2
         print("figures written to {}".format(target), file=out)
+    unevaluated = _unevaluated(result["rows"])
+    if unevaluated:
+        print("cannot evaluate: {} row(s) hold a failed sample or read {} (case/hook id): {}".format(
+            len(unevaluated), NO_VALID_SAMPLE, ", ".join(unevaluated)), file=err)
+        return 3
     return 0
 
 
@@ -1379,6 +1398,29 @@ def _samples_verdict(result, error, runs):
     return not wrong, wrong
 
 
+def _stub_cli_rows(base, name, argv, variant="fail"):
+    """run_cli over a stub plugin of its own, with --json: (the exit code, stdout, stderr, the JSON rows less
+    the startup case's), the rows one item naming the error when the JSON cannot be read."""
+    hooks_json, plugin = _stub_plugin(base, name, variant=variant)
+    figures = Path(base, name + "-figures.json")
+    out, err = io.StringIO(), io.StringIO()
+    code = _try_cli(argv + ["--json", str(figures)], hooks_json, plugin, write_sizes=SELF_TEST_WRITE_SIZES,
+                    out=out, err=err)
+    try:
+        rows = [row for row in json.loads(figures.read_text(encoding="utf-8"))["rows"] if row["case"] != "startup"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        rows = [{"error": str(exc)}]
+    return code, out.getvalue(), err.getvalue(), rows
+
+
+def _unevaluated_named(err_text, rows):
+    """True when err_text holds exactly one cannot-evaluate line, and it gives the count of rows and names each
+    of them as case/hook id, in report order, and no other row."""
+    want = "cannot evaluate: {} row(s) hold a failed sample or read {} (case/hook id): {}".format(
+        len(rows), NO_VALID_SAMPLE, ", ".join("{}/{}".format(row.get("case"), row.get("hook_id")) for row in rows))
+    return [line for line in err_text.splitlines() if line.startswith("cannot evaluate")] == [want]
+
+
 def _group_gone(group, seconds):
     """True once no process is left in the process group, probed with signal 0 (which delivers nothing) for
     up to seconds."""
@@ -1539,12 +1581,20 @@ def self_test(report_path=None):
             result, error = _try_measure(fast_json, fast_root, runs=2, files=3, commits=3, case_timeout=30.0,
                                          write_sizes=SELF_TEST_WRITE_SIZES)
         check("measure/each-case-n-samples", *_samples_verdict(result, error, 2))
+        # the same stubs through the command line: every row valid, so the run exits 0 with no cannot-evaluate
+        # line, and every case was measured
+        err = io.StringIO()
+        code = _try_cli(["--runs", "1", "--files", "1", "--commits", "1", "--case-timeout", "30"], fast_json,
+                        fast_root, write_sizes=SELF_TEST_WRITE_SIZES, out=io.StringIO(), err=err)
+        check("report/exit-zero-all-valid", code == 0 and "cannot evaluate" not in err.getvalue()
+              and err.getvalue().count("measuring ") == len(SELF_TEST_CASES), (code, err.getvalue()[-400:]))
 
         # 6. the timeout: the slow stub's branch_root is TIMED OUT, never a time, and is killed, while its
-        # protected_line naps inside the timeout and keeps a time; the exit stays 0 (never a gate). With
-        # only those two hooks selected, branch_root is also the startup hook: five branch_root rows (startup,
-        # whose payload the stub rejects at once as the dispatcher does, and the four Bash cases, each TIMED
-        # OUT), four protected_line rows, the Write and other cases skipped.
+        # protected_line naps inside the timeout and keeps a time; the exit stays 0 with no cannot-evaluate
+        # line, since a timed-out sample is not a failed one (and timing is never a gate). With only those two
+        # hooks selected, branch_root is also the startup hook: five branch_root rows (startup, whose payload
+        # the stub rejects at once as the dispatcher does, and the four Bash cases, each TIMED OUT), four
+        # protected_line rows, the Write and other cases skipped.
         slow_json, slow_root = _stub_plugin(base, "slow", variant="slow")
         figures = Path(base, "figures.json")
         out, err = io.StringIO(), io.StringIO()
@@ -1568,8 +1618,8 @@ def self_test(report_path=None):
         check("measure/inside-timeout-is-a-time", len(nap) == 4 and all(
             len(row["samples"]) == 1 and isinstance(row["samples"][0], float)
             and 0.2 <= row["samples"][0] < SLOW_TIMEOUT and row["max"] == row["samples"][0] for row in nap), nap)
-        check("report/exit-zero-with-timeouts", code == 0 and err.getvalue().count("measuring ") == 5,
-              (code, err.getvalue()[-300:]))
+        check("report/exit-zero-with-timeouts", code == 0 and err.getvalue().count("measuring ") == 5
+              and "cannot evaluate" not in err.getvalue(), (code, err.getvalue()[-300:]))
         conditions = written.get("conditions", {})
         check("report/json-conditions", all(key in conditions for key in (
             "load_average_start", "load_average_end", "cpu_count", "harness_python", "hook_interpreters",
@@ -1591,39 +1641,35 @@ def self_test(report_path=None):
         check("report/json-existing-refused", again == 2 and made_again == []
               and (figures.read_bytes() if figures.exists() else None) == before, (again, err.getvalue()[:300]))
 
-        # 7. failed samples carry no time. With the failing stub, git_discard exits 1 and protected_line dies
-        # by SIGKILL in every Bash case (each such row NO VALID SAMPLE with two failed samples), and
-        # branch_root fails one launch of two (each of its rows timed from its one valid sample only);
-        # git_discard is also the startup hook. A launch that fails is a failed sample with no time.
-        fail_json, fail_root = _stub_plugin(base, "fail", variant="fail")
-        fail_figures = Path(base, "fail-figures.json")
-        out = io.StringIO()
-        code = _try_cli(["--runs", "2", "--files", "1", "--commits", "1", "--case-timeout", "30", "--hook",
-                         "git_discard", "--hook", "branch_root", "--hook", "protected_line", "--json",
-                         str(fail_figures)], fail_json, fail_root, write_sizes=SELF_TEST_WRITE_SIZES, out=out,
-                        err=io.StringIO())
-        try:
-            fail_rows = [row for row in json.loads(fail_figures.read_text(encoding="utf-8"))["rows"]
-                         if row["case"] != "startup"]
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            fail_rows = [{"error": str(exc)}]
+        # 7. failed samples carry no time, and a run with one exits 3 (cannot evaluate) once its report is
+        # written, naming each such row on one stderr line. With the failing stub, git_discard exits 1 and
+        # protected_line dies by SIGKILL in every Bash case (each such row NO VALID SAMPLE with two failed
+        # samples); git_discard is also the startup hook. In a run of its own, branch_root fails one launch of
+        # two (each of its rows timed from its one valid sample only, so no row of that run reads NO VALID
+        # SAMPLE); it is that run's startup hook. A launch that fails is a failed sample with no time.
+        code, text, err_text, fail_rows = _stub_cli_rows(base, "fail", [
+            "--runs", "2", "--files", "1", "--commits", "1", "--case-timeout", "30", "--hook", "git_discard",
+            "--hook", "protected_line"])
+        mixed_code, _text, mixed_err, mixed_rows = _stub_cli_rows(base, "mixed", [
+            "--runs", "2", "--files", "1", "--commits", "1", "--case-timeout", "30", "--hook", "branch_root"])
         dead = [row for row in fail_rows if row.get("hook_id") in ("git_discard", "protected_line")]
-        mixed = [row for row in fail_rows if row.get("hook_id") == "branch_root"]
+        mixed = [row for row in mixed_rows if row.get("hook_id") == "branch_root"]
         unlaunched = _sample([str(Path(base, "no-such-dir", "no-such-hook"))], b"{}", {"PATH": os.defpath}, base,
                              5)
         died = {"git_discard": {"exit 1": 2}, "protected_line": {"killed by SIGKILL": 2}}
-        check("measure/failed-sample-no-time", code == 0 and len(dead) == 8 and all(
-            row["samples"] == [] and row["failed_samples"] == 2
-            and (row["min"], row["median"], row["max"]) == (NO_VALID_SAMPLE,) * 3
-            and row["outcomes"] == died[row["hook_id"]] for row in dead)
-            and unlaunched.seconds is None and _outcome(unlaunched)[1]
-            and _outcome(unlaunched)[0].startswith("launch failed"), (code, dead, unlaunched))
-        check("measure/mixed-row-valid-only", len(mixed) == 4 and all(
-            len(row["samples"]) == 1 and isinstance(row["samples"][0], float)
-            and MIXED_NAP <= row["samples"][0] < 30 and row["failed_samples"] == 1
-            and row["min"] == row["median"] == row["max"] == row["samples"][0]
-            and row["outcomes"] == {"exit 1": 1, "exit 0 allow": 1} for row in mixed), mixed)
-        text = out.getvalue()
+        check("measure/failed-sample-no-time", code == 3 and len(dead) == 8 and _unevaluated_named(err_text, dead)
+              and all(row["samples"] == [] and row["failed_samples"] == 2
+                      and (row["min"], row["median"], row["max"]) == (NO_VALID_SAMPLE,) * 3
+                      and row["outcomes"] == died[row["hook_id"]] for row in dead)
+              and unlaunched.seconds is None and _outcome(unlaunched)[1]
+              and _outcome(unlaunched)[0].startswith("launch failed"), (code, err_text[-600:], dead, unlaunched))
+        check("measure/mixed-row-valid-only", mixed_code == 3 and len(mixed) == 4
+              and _unevaluated_named(mixed_err, mixed) and all(
+                  len(row["samples"]) == 1 and isinstance(row["samples"][0], float)
+                  and MIXED_NAP <= row["samples"][0] < 30 and row["failed_samples"] == 1
+                  and row["min"] == row["median"] == row["max"] == row["samples"][0]
+                  and row["outcomes"] == {"exit 1": 1, "exit 0 allow": 1} for row in mixed),
+              (mixed_code, mixed_err[-600:], mixed))
         lines = [line for line in text.partition("\ncase ")[2].splitlines()[1:]
                  if not line.startswith("startup ") and (" git_discard " in line or " protected_line " in line)]
         check("report/no-valid-sample-shown", len(lines) == 8 and all(
@@ -1741,7 +1787,8 @@ def self_test(report_path=None):
           "samples, the Bash command at its budget and the Write sizes exact, the real hooks.json resolved and "
           "fully measured, malformed, missing and unmeasured hook ids refused by name, the git fixture shape, "
           "the pinned child environment, every case with its runs, TIMED OUT never a time, failed samples "
-          "never timed, a failed version probe refused, the JSON conditions, and the fixture root removed at "
+          "never timed and a run with one exiting 3 while an all-valid or timed-out run exits 0, a failed "
+          "version probe refused, the JSON conditions, and the fixture root removed at "
           "the normal end, on a timeout, on an error and on SIGINT, SIGTERM and SIGHUP)".format(len(results)))
     return 0
 
