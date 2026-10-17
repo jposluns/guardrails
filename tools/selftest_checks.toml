@@ -2120,6 +2120,79 @@ expected-check-ids = [
 ]
 
 [[suite]]
+# The canonical child-status probe's vectors (opf/tools/_child_status.py), replayed by the coverage gate:
+# the execution gate imports its report module from beside the runner, so a runner under opf/tools/
+# cannot be registered, and this row shares the coverage gate's runner with the next one.
+id = "child-status-selftest"
+runner = "tools/check_child_status_coverage.py"
+args = ["--self-test", "--probe"]
+expected-check-ids = [
+  "repro/ignored-reads-failed-child-as-zero",
+  "repro/default-reads-failed-child",
+  "live/default-passes",
+  "live/ignored-refuses-by-name",
+  "layer/handler-seen-by-disposition",
+  "layer/lost-status-seen-by-probe",
+]
+
+[[suite]]
+# The child-status coverage gate's static, behaviour, guard-removed and live vectors.
+id = "child-status-coverage-selftest"
+runner = "tools/check_child_status_coverage.py"
+args = ["--self-test"]
+expected-check-ids = [
+  "copies/real-copies-identical",
+  "copies/drift-is-finding",
+  "copies/missing-copy-is-finding",
+  "copies/hook-drift-is-finding",
+  "entries/real-entries-pass",
+  "entries/cli-line-shape",
+  "entries/cli-extra-statement",
+  "entries/hook-block-shape",
+  "entries/hook-block-missing",
+  "launchers/real-launchers-pass",
+  "launchers/runner-first-gate",
+  "launchers/opf-runner-first-gate",
+  "launchers/workflow-first-step",
+  "launchers/workflow-no-setup",
+  "launchers/shell-target-unguarded",
+  "completeness/unclassified-hook-mode",
+  "completeness/unlisted-residual-is-finding",
+  "completeness/stale-residual-is-finding",
+  "completeness/gone-residual-is-finding",
+  "completeness/dynamic-load-cannot-evaluate",
+  "completeness/switch-flips",
+  "completeness/scan-sees-every-api",
+  "completeness/scan-follows-local-imports",
+  "completeness/scan-clean-module",
+  "mutant/every-mutant-caught",
+  "mutant/every-vector-discriminates",
+  "behaviour/opf-cli-refuses",
+  "behaviour/launcher-cli-refuses",
+  "behaviour/coverage-gate-refuses",
+  "control/opf-cli-default-runs",
+  "control/launcher-cli-default-runs",
+  "control/coverage-gate-default-runs",
+  "behaviour/pretool-refuses",
+  "behaviour/plugin-pretool-refuses",
+  "control/pretool-default-runs",
+  "control/fail-open-default-runs",
+  "behaviour/fail-open-restores",
+  "behaviour/python-reader-loses-refusal",
+  "behaviour/runner-first-gate-fails",
+  "control/runner-default-passes",
+  "behaviour/opf-runner-first-gate-fails",
+  "control/opf-runner-default-passes",
+  "revert/launcher-guard-removed-red",
+  "revert/opf-guard-removed-red",
+  "revert/hook-guard-removed-red",
+  "revert/probe-guard-removed-red",
+  "revert/coverage-guard-removed-red",
+  "revert/runner-probe-removed-red",
+  "live/real-tree-passes",
+]
+
+[[suite]]
 id = "entry-guard-selftest"
 runner = "tools/check_entry_guard.py"
 expected-check-ids = [
