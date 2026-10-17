@@ -218,8 +218,9 @@ def confirmed_root(root):
 def verify_lines(lines, root=None, prefix="MR-"):
     """Return a list of violation strings for the raw register lines (empty = clean). prefix is the
     register's id family (MR- for the mistakes register, AT- for an attestations register). The
-    landed-row commit read runs git under git_authority_env(), and a landed check_ref whose entry
-    inspection fails with anything but ENOENT raises CannotEvaluate through entry_state (an
+    landed-row commit read runs git under git_authority_env(), and a launch error or timeout of
+    that read raises CannotEvaluate (never read as a missing commit); a landed check_ref whose
+    entry inspection fails with anything but ENOENT raises CannotEvaluate through entry_state (an
     uninspectable check_ref is never read as absent or present)."""
     problems, prev_line, ids_born, last_status = [], None, {}, {}
     for n, line in enumerate(lines, 1):
@@ -268,10 +269,19 @@ def verify_lines(lines, root=None, prefix="MR-"):
                 problems.append("line {}: missing field {}".format(n, key))
         if status == "landed" and root is not None:
             commit, check_ref, check_ok = row.get("commit"), row.get("check_ref"), False
-            if not isinstance(commit, str) or subprocess.run(
-                    ["git", "-C", str(root), "cat-file", "-e", str(commit) + "^{commit}"],
-                    capture_output=True, timeout=10,
-                    env=git_authority_env()).returncode != 0:
+            commit_ok = False
+            if isinstance(commit, str):
+                # an authority read like the others: a git that cannot be launched or that
+                # times out leaves the question open (cannot-evaluate), never a missing commit
+                try:
+                    probe = subprocess.run(
+                        ["git", "-C", str(root), "cat-file", "-e", commit + "^{commit}"],
+                        capture_output=True, timeout=10, env=git_authority_env())
+                except (OSError, subprocess.SubprocessError) as exc:
+                    raise CannotEvaluate("cannot read whether the landed row on line {} cites an "
+                                         "existing commit ({})".format(n, exc))
+                commit_ok = probe.returncode == 0
+            if not commit_ok:
                 problems.append("line {}: landed row cites a commit that does not exist".format(n))
             # check_ref is a REPO-RELATIVE path (schema); an absolute value would discard root and let
             # any host file satisfy the check, so reject it and confirm containment under root (grdinp).
@@ -300,7 +310,10 @@ def verify_append_only(root, path, lines, allow_missing_anchor=False):
     back to comparing a possibly-tampered HEAD against itself, and a broken git never routes a tracked
     register into the anchor leg. allow_missing_anchor is set only by the --update-anchor bootstrap
     that establishes the first anchor (it covers any unanchored untracked register, not only an empty
-    one, because a second append must still land before the first anchor is set). Every git read
+    one, because a second append must still land before the first anchor is set) and by the
+    appender's --bootstrap, which appends a register's first row and then establishes the anchor
+    the same way; an ordinary append passes False, as this gate does without --update-anchor.
+    Every git read
     here runs under git_authority_env(), so a caller-supplied git environment never redirects the
     tracked decision or the authority reads, and anchor PRESENCE goes through the shared
     entry_state (ENOENT-only absence)."""
@@ -1066,6 +1079,55 @@ def self_test():
         if verify_lines(landed_eio, root=repo, prefix="MR-"):
             failures.append("the landed rows should verify clean once the inspection "
                             "succeeds")
+        # the landed row's commit read is an authority read: a git that cannot be launched or
+        # that times out is cannot-evaluate (exit 2 through the live leg, no traceback), never
+        # a missing commit and never an exception of its own class
+        catfile_live = tmp / "catfile-live"
+        catfile_live.mkdir()
+        subprocess.run(["git", "init", "-q", str(catfile_live)], check=True,
+                       capture_output=True, timeout=30)
+        (catfile_live / "durable-check.py").write_text("# durable check\n", encoding="utf-8")
+        (catfile_live / ".aiqt").mkdir()
+        (catfile_live / ".aiqt" / "orchestration.local.json").write_text(json.dumps(
+            {"version": 1, "mistakes_register": "mistakes.jsonl"}), encoding="utf-8")
+        catfile_reg = catfile_live / "mistakes.jsonl"
+        catfile_reg.write_text("\n".join(landed_eio) + "\n", encoding="utf-8")
+        update_anchor(catfile_reg, landed_eio)
+        real_subprocess_run = subprocess.run
+        for cf_tag, cf_exc in (
+                ("timeout", subprocess.TimeoutExpired(["git", "cat-file"], 10)),
+                ("launch-error", OSError(2, "injected launch failure"))):
+            def failing_catfile(argv, *rargs, **rkw):
+                if "cat-file" in argv:
+                    raise cf_exc
+                return real_subprocess_run(argv, *rargs, **rkw)
+
+            subprocess.run = failing_catfile
+            try:
+                try:
+                    verify_lines(landed_eio, root=repo, prefix="MR-")
+                    cf_got = "no exception"
+                except CannotEvaluate as exc:
+                    cf_got = "CannotEvaluate: {}".format(exc)
+                except Exception as exc:  # the pre-fix escape: the raw launch exception
+                    cf_got = "{}: {}".format(type(exc).__name__, exc)
+                cf_out = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(cf_out):
+                        cf_rc = run(catfile_live)
+                except Exception as exc:
+                    cf_rc = "{}: {}".format(type(exc).__name__, exc)
+            finally:
+                subprocess.run = real_subprocess_run
+            if not cf_got.startswith("CannotEvaluate: ") \
+                    or "cites an existing commit" not in cf_got:
+                failures.append("landed-commit-read-{}-cannot-evaluate: verify_lines should "
+                                "raise CannotEvaluate naming the commit read, got "
+                                "{}".format(cf_tag, cf_got))
+            if cf_rc != 2 or "cites an existing commit" not in cf_out.getvalue():
+                failures.append("landed-commit-read-{}-live-exit-2: the live leg should exit 2 "
+                                "naming the commit read, got {}: {}".format(
+                                    cf_tag, cf_rc, cf_out.getvalue().strip()))
         # P1: a tracked register cannot be checked against itself when origin/HEAD is absent -> exit 2.
         (repo / ".aiqt").mkdir()
         tracked = repo / "mistakes.jsonl"
@@ -1536,9 +1598,10 @@ def self_test():
           "symlink (registry presence is ENOENT-only: selected and refused, never NOT "
           "APPLICABLE and never the lower-priority registry file), a declared register value "
           "that is not a non-empty string, and a "
-          "git launch failure or timeout on each of the three authority reads (ls-files, "
-          "merge-base, git show) plus an undecidable ls-files exit are cannot-evaluate (exit "
-          "2); the anchor write refuses a symlink anchor entry, dangling or live, tracked and "
+          "git launch failure or timeout on each of the four authority reads (ls-files, "
+          "merge-base, git show, and the landed row's cat-file commit read, the last through "
+          "verify_lines and the live leg alike) plus an undecidable ls-files exit are "
+          "cannot-evaluate (exit 2); the anchor write refuses a symlink anchor entry, dangling or live, tracked and "
           "untracked registers alike, with the link's target neither created nor rewritten and "
           "the link entry left in place, and a green advance (a clean tracked register with a "
           "computable merge-base included) lands the verified tip by atomic replace of an "

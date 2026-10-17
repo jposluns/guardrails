@@ -11921,16 +11921,17 @@ def _main_isolated(report_path=None):
             shutil.copy(str(repo_root() / "tools" / tool_name), str(fixture_tools / tool_name))
         regtool = str(fixture_tools / "orch_register.py")
 
-        def mr_append(rid, check_ref):
+        def mr_append(rid, check_ref, *extra):
             subprocess.run([sys.executable, "-I", "-B", regtool, "append",
                             "--register", str(mr_reg),
                             "--id", rid, "--mistake", "premature wind-down claim",
                             "--evidence", "resume-audit finding", "--rule", "cntdef",
                             "--guardrail", "stop-guard hardening", "--klass", "systemic-lapse",
-                            "--check-ref", check_ref],
+                            "--check-ref", check_ref, *extra],
                            check=True, capture_output=True, timeout=30)
 
-        mr_append("MR-1", "seed.txt")
+        # the register's first row: --bootstrap establishes the anchor the later append needs
+        mr_append("MR-1", "seed.txt", "--bootstrap")
         check("lapse/klass-recorded",
               '"class": "systemic-lapse"' in mr_reg.read_text(encoding="utf-8"), True)
         proj = subprocess.run([sys.executable, "-I", "-B", regtool, "project",

@@ -3,11 +3,19 @@
 
   orch_register.py append --register PATH --id MR-N --mistake T --evidence R --rule CID \
                           --guardrail T [--status proposed] [--commit SHA --check-ref PATH]
-                          [--prefix MR] [--klass T] [--ref R]
+                          [--prefix MR] [--klass T] [--ref R] [--bootstrap]
       Append one chained row (seq and prev computed from the file; a wrong --id fails). --prefix
       parameterizes the id family (MR for the mistakes register, AT for an attestation register,
       GD-127 C.2) and must agree with the registry declaration; --klass writes the optional class
       field (for example systemic-lapse); --ref writes the blocker ref an attestation row covers.
+      An ordinary append requires the register's append-only authority exactly as the register
+      gate without --update-anchor does: an untracked register with no anchor is refused with
+      exit 2 naming the anchor. --bootstrap is the explicit first-row operation for such a
+      register: it appends the register's FIRST row (a register that already holds a line is
+      refused with exit 2, its anchor being check_mistakes_register.py --update-anchor's to
+      establish), validated under the gate's --update-anchor allowance, and then establishes the
+      anchor that --update-anchor would (update_anchor on the register as committed), so after
+      either operation the ordinary gate passes on the result.
       The appender validates in the register gate's own context: the validation root is the
       nearest enclosing git repository of this appender's own installed location, never the
       repository that merely contains the register and never a root derived from where this
@@ -19,9 +27,8 @@
       text as the append would leave it
       (the existing decoded lines plus the new row; validation runs on the decoded UTF-8 text with
       the gate's own line splitting, not on raw bytes) is run through the register gate's own
-      parser, check_mistakes_register.verify_lines and verify_append_only (with the --update-anchor
-      bootstrap's allowance for an untracked register that has no anchor yet; the allowance covers
-      any unanchored untracked register, not only an empty one), so an append the gate would reject
+      parser, check_mistakes_register.verify_lines and verify_append_only (the missing-anchor
+      allowance only under --bootstrap, for a first row), so an append the gate would reject
       is refused at write time instead of reaching CI. A violation (an illegal transition, an
       unknown status, a wrong-family id, a landed row without an existing --commit and --check-ref)
       exits 1; a context or authority the appender cannot evaluate (an unreadable register or
@@ -42,8 +49,10 @@
       path no registry declaration names, conflicting declarations resolving to one path, a git
       failure deciding whether the register is tracked, no computable merge-base for a tracked
       register, a malformed or unusable anchor entry, a dangling symlink and an anchor lstat
-      failure that is not ENOENT included, a register directory that cannot be created, a lock
-      that cannot be acquired) exits 2; each
+      failure that is not ENOENT included, an untracked register with no anchor on an ordinary
+      append, a landed row's commit read that git cannot launch or that times out, a register
+      directory that cannot be created, a lock that cannot be acquired, a commit step that
+      fails) exits 2; each
       refusal names its reasons on stderr and leaves every row other appenders wrote
       byte-identical (a refusal taken under the acquired lock after the exclusive first-row
       creation removes the file and the directory components this call observed as its own
@@ -57,23 +66,37 @@
       the created file leaves that empty file in place, because removal without the lock could
       race a cooperating appender; anything else is left in place and the refusal says so).
       Cooperating appenders are serialized by an exclusive flock held across the read, the
-      validation and the write of an existing register; the first row of an absent register
+      validation and the commit of an existing register (an appender that took the lock on a
+      file another appender's commit has since replaced at the path starts over on the file
+      the path names, at most LOCK_WAITS times); the first row of an absent register
       is validated BEFORE its exclusive creation, then created exclusively
       (O_EXCL) and then re-checked under the acquired lock (the path still names the created
-      file and its size is still zero), so an appender that lands between the creation and the
+      file and it is still empty), so an appender that lands between the creation and the
       lock forces a refusal, never an interleaved row (the serialization there is the
       exclusive creation plus those under-lock re-checks, not a second validation; the
-      re-checks catch the cooperating register-row interleavings their identity and size
-      comparisons detect, and other validation inputs, the anchor included, are not
-      revalidated under the lock). The
-      write goes through the same
-      descriptor the validation read (opened with O_NOFOLLOW, written only while its device and
-      inode still match the path and the on-disk size still equals the validated text); a failed
-      or short write is truncated back to the validated size, so no partial row remains, with one
-      disclosed RESIDUAL: when that truncation itself fails, the partial bytes remain and the
-      refusal names the un-truncated state and directs to the register gate. A writer that does
-      not take the lock (a hand edit, any other tool) is outside that serialization: the size
-      re-check catches one that lands between the validation and the write, any other is caught
+      re-checks catch the register-row interleavings their identity, link-count, size and
+      byte comparisons detect, and other validation inputs, the anchor included, are not
+      revalidated under the lock). The commit is ALL OR NOTHING: the register is opened once
+      with O_NOFOLLOW and never written; the validated bytes plus the new row are written in
+      one write to a temporary file created exclusively in the register's own directory
+      under the lock (and locked itself, so the lock carries over to the file the rename puts
+      at the path), given the register's permission bits and fsynced, and only after the
+      under-lock re-check (the path still names the validated file's device and inode, the
+      file has no other hard link, and it still holds exactly the validated bytes) is the
+      temporary renamed over the register, still under the lock, after which the directory is
+      fsynced. Any failure before the rename (the temporary's creation, its lock, a failed or
+      short write, its permission bits, its fsync, the re-check, the rename itself) leaves the
+      register's bytes unchanged, since nothing was written to it, and removes the temporary
+      while its name still names this call's own file (a removal failure is named with the
+      temporary's path). OUTSIDE THE GUARANTEE: a crash after the rename and before the
+      directory sync completes (the rename may then not be durable), and a directory-sync or
+      --bootstrap anchor-write failure after the rename, which exits 2 saying the row is in
+      the register; a crash before the rename can leave the temporary at its name beside an
+      unchanged register; and the replacing file carries the register's permission bits but
+      not its owner, group, ACLs or extended attributes. A writer that does not take the lock
+      (a hand edit, any other tool) is outside that serialization: the re-check catches one
+      that lands between the validation and the re-check, one landing between the re-check
+      and the rename (two system calls) is overwritten by the rename, and any other is caught
       later by the mistakes-register gate, not here. A second RESIDUAL: the hard-link conflict
       check on the registry declarations is point-in-time; a hard link created after that
       check is not caught by this appender and is left to the register gate. A third
@@ -108,12 +131,14 @@
       is evidence, never backlog: project the mistakes register, not the attestations file.
   orch_register.py --self-test
       Synthetic fixtures for the write-time validation: each refusal vector leaves the register
-      and its anchor byte-identical (the disclosed failed-rollback residual vector excepted,
-      which asserts exactly the seed plus the injected partial bytes; the first-row cleanup
-      and left-in-place vectors assert their named outcomes instead), every clean append is
+      and its anchor byte-identical (the first-row cleanup and left-in-place vectors assert
+      their named outcomes instead), a failure injected at each commit step leaves the
+      register's bytes unchanged and no temporary file, every clean append is
       re-read and its landed last row and a clean verify_lines asserted, the serialization
       lock, the first-row creation re-checks (size and file identity) and the write binding
-      are probed in place, and the production root resolution runs in subprocess vectors,
+      are probed in place, an ordinary append to an untracked register with no anchor is
+      refused while --bootstrap lands the first row and leaves a register the ordinary gate
+      passes, and the production root resolution runs in subprocess vectors,
       unpatched for the appender installed inside a repository and, for the appender
       installed outside any, through a test-only search ceiling at the fixture's temporary
       directory (the walk is unchanged and still climbs to the filesystem root, but a .git
@@ -141,16 +166,20 @@ import fcntl
 import hashlib
 import json
 import os
+import secrets
 import stat
 import subprocess
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_mistakes_register import (  # noqa: E402
-    REGISTRY_FILES, CannotEvaluate, confirmed_root, entry_state, gate_root,
+    REGISTRY_FILES, CannotEvaluate, confirmed_root, entry_state, gate_root, update_anchor,
     verify_append_only, verify_lines)
 
 ZERO = "0" * 64
+# how many times an append starts over because a cooperating appender replaced the register
+# while this one waited for its lock, before it refuses
+LOCK_WAITS = 16
 
 
 def _lines(path):
@@ -250,16 +279,122 @@ def _declared_family(root, path):
                          "the declared mistakes_register and attestations surfaces only)")
 
 
-def _rolled_back(fd, size):
-    """Truncate the register back to its validated size after a failed or short write, under the
-    still-held lock, so no partial row remains; returns the sentence for the refusal message."""
+def _fd_bytes(fd):
+    """Every byte of the file open on FD, read with pread from offset zero (the descriptor's own
+    offset is left alone)."""
+    out = bytearray()
+    while True:
+        chunk = os.pread(fd, 1 << 16, len(out))
+        if not chunk:
+            return bytes(out)
+        out += chunk
+
+
+def _commit_failure(fd, path, raw, tmp_fd, tmp_path, content):
+    """Commit CONTENT (the validated bytes RAW plus the new row) by replacing the register with
+    the temporary file TMP_PATH, open on TMP_FD and created exclusively in the register's own
+    directory under the register lock held on FD. The steps, in order: lock the temporary (so
+    the file the rename puts at the path is already locked and the serialization carries over
+    to it), write CONTENT in one write (a short write is a failure, never resumed), give the
+    temporary the register's permission bits, fsync it, then re-check under the lock that the
+    path still names the validated file (device and inode), that the file has no other hard
+    link (the rename would leave such a name at the old content) and that it still holds
+    exactly RAW (its size, then its bytes, so an in-place rewrite of equal length is caught
+    too), and only then rename the temporary over the register. Returns None once the rename
+    has landed, else the refusal clause for the step that failed: every failure before the
+    rename leaves the register's bytes as they were, since nothing is ever written to it, and
+    the caller removes the temporary."""
     try:
-        os.ftruncate(fd, size)
+        fcntl.flock(tmp_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
-        return ("the register could NOT be truncated back to its validated {} bytes ({}); run "
-                "tools/check_mistakes_register.py before trusting this file".format(size, exc))
-    return ("the register was truncated back to its validated {} bytes, so no partial row "
-            "remains".format(size))
+        return "the temporary file could not be locked ({})".format(exc)
+    try:
+        written = os.write(tmp_fd, content)
+    except OSError as exc:
+        return "the write to the temporary file failed ({})".format(exc)
+    if written != len(content):
+        return "short write to the temporary file ({} of {} bytes)".format(written, len(content))
+    try:
+        st_fd = os.fstat(fd)
+        os.fchmod(tmp_fd, stat.S_IMODE(st_fd.st_mode))
+    except OSError as exc:
+        return ("the temporary file could not be given the register's permission bits "
+                "({})".format(exc))
+    try:
+        os.fsync(tmp_fd)
+    except OSError as exc:
+        return "the temporary file could not be synced to disk ({})".format(exc)
+    try:
+        st_fd = os.fstat(fd)
+        st_path = os.lstat(str(path))
+    except FileNotFoundError:
+        st_path = None
+    except OSError as exc:
+        return "the register cannot be re-checked under the lock ({})".format(exc)
+    if st_path is None or (st_fd.st_dev, st_fd.st_ino) != (st_path.st_dev, st_path.st_ino):
+        return ("the register at this path is no longer the file that was validated (replaced "
+                "between the validation and the commit)")
+    if st_fd.st_nlink != 1:
+        return ("the register has {} hard links; the commit replaces it by rename, which would "
+                "leave every other name at the old content".format(st_fd.st_nlink))
+    if st_fd.st_size != len(raw):
+        return ("the register on disk is {} byte(s) but the validated text is {} byte(s) (a "
+                "writer changed the file after the validation; for a first row, after its "
+                "exclusive creation)".format(st_fd.st_size, len(raw)))
+    try:
+        same = _fd_bytes(fd) == bytes(raw)
+    except OSError as exc:
+        return "the register cannot be re-read under the lock ({})".format(exc)
+    if not same:
+        return ("the register's bytes changed after the validation (same size, different "
+                "content: a writer rewrote it in place)")
+    try:
+        os.replace(tmp_path, str(path))
+    except OSError as exc:
+        return "the temporary file could not be renamed over the register ({})".format(exc)
+    return None
+
+
+def _temp_removed(tmp_fd, tmp_path):
+    """Remove the commit's temporary file after a failure before the rename, only while its name
+    still names this call's own temporary (device and inode); returns the clause naming the
+    outcome, a removal failure by the temporary's path."""
+    try:
+        st_fd = os.fstat(tmp_fd)
+        st_path = os.lstat(tmp_path)
+        if (st_fd.st_dev, st_fd.st_ino) != (st_path.st_dev, st_path.st_ino):
+            return ("the entry now at the temporary file's name {} is not this call's temporary "
+                    "and was left in place".format(tmp_path))
+        os.unlink(tmp_path)
+    except FileNotFoundError:
+        return "the temporary file {} was no longer at its name".format(tmp_path)
+    except OSError as exc:
+        return ("the temporary file {} could not be removed ({}) and must be removed by "
+                "hand".format(tmp_path, exc))
+    return "the temporary file {} was removed".format(tmp_path)
+
+
+def _dir_synced(directory):
+    """fsync DIRECTORY after the rename so the rename itself reaches the disk; returns None, or
+    the failure for the message (the rename has already landed either way)."""
+    try:
+        dir_fd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as exc:
+        return "the register's directory could not be opened to sync the rename ({})".format(exc)
+    note = None
+    try:
+        try:
+            os.fsync(dir_fd)
+        except OSError as exc:
+            note = "the register's directory could not be synced ({})".format(exc)
+    finally:
+        try:
+            os.close(dir_fd)
+        except OSError as exc:
+            note = ((note + "; ") if note else "") + (
+                "the descriptor on the register's directory could not be closed "
+                "({})".format(exc))
+    return note
 
 
 def _swept_closed(fd, where, close_failures):
@@ -687,7 +822,7 @@ def _creation_cleanup(fd, path, made_dirs):
     return note + _made_dirs_note(made_dirs)
 
 
-def cmd_append(a):
+def cmd_append(a, _waits=0):
     path = Path(a.register)
     try:
         root = _gate_root()
@@ -721,11 +856,14 @@ def cmd_append(a):
               file=sys.stderr)
         return 1
     fd = -1
+    tmp_fd = -1
     created = False
     made_dirs = []
     try:
         try:
-            fd = os.open(str(path), os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW)
+            # read-write though the commit never writes through it, so a register this caller
+            # may not write is refused here rather than replaced by the commit's rename
+            fd = os.open(str(path), os.O_RDWR | os.O_NOFOLLOW)
         except FileNotFoundError:
             fd = -1
         except OSError as exc:
@@ -739,13 +877,34 @@ def cmd_append(a):
             return 2
         if fd >= 0:
             # Serialize cooperating appenders: the exclusive lock is held from before the read
-            # until the append lands (or the refusal returns), so two appends through this tool
-            # cannot interleave between the read, the validation and the write.
+            # until the commit lands (or the refusal returns), so two appends through this tool
+            # cannot interleave between the read, the validation and the commit.
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX)
             except OSError as exc:
                 print("append: refused, cannot lock the register ({}); nothing written".format(
                     exc), file=sys.stderr)
+                return 2
+            # A cooperating appender that committed while this call waited for the lock put a
+            # new file at the path (its commit is a rename), so the lock just acquired is on
+            # the replaced file: start over on the file the path names now (this descriptor
+            # stays open, and its stale lock held, until this call returns).
+            try:
+                st_locked = os.fstat(fd)
+                st_named = os.lstat(str(path))
+            except FileNotFoundError:
+                st_named = None
+            except OSError as exc:
+                print("append: refused, the register cannot be re-checked after taking its lock "
+                      "({}); nothing written".format(exc), file=sys.stderr)
+                return 2
+            if st_named is None or (st_locked.st_dev, st_locked.st_ino) != \
+                    (st_named.st_dev, st_named.st_ino):
+                if _waits < LOCK_WAITS:
+                    return cmd_append(a, _waits + 1)
+                print("append: refused, the register was replaced {} times while this call "
+                      "waited for its lock; nothing written".format(_waits + 1),
+                      file=sys.stderr)
                 return 2
             raw = bytearray()
             try:
@@ -768,6 +927,12 @@ def cmd_append(a):
             raw = bytearray()
             text = ""
         lines = text.splitlines()
+        if a.bootstrap and lines:
+            print("append: refused, --bootstrap appends only a register's first row and this "
+                  "register already holds {} line(s); establish its anchor with "
+                  "tools/check_mistakes_register.py --update-anchor, then append without "
+                  "--bootstrap; nothing written".format(len(lines)), file=sys.stderr)
+            return 2
         prev = ZERO if not lines else hashlib.sha256(lines[-1].encode("utf-8")).hexdigest()
         seq = len(lines) + 1
         want_id = "{}-{}".format(a.prefix, sum(
@@ -792,7 +957,9 @@ def cmd_append(a):
         # row, the same decoded-text parse the register gate runs, so a register missing its
         # final newline, which would fuse the new row onto its last line, is refused too) with
         # the gate's own functions, in the gate's own context: the declared id family and the
-        # containing repository root resolved above.
+        # containing repository root resolved above. An ordinary append requires the anchor
+        # exactly as the gate without --update-anchor does; only --bootstrap, a first row,
+        # takes the --update-anchor allowance for an untracked register with no anchor.
         after = (text + line + "\n").splitlines()
         try:
             problems = verify_lines(after, root=root, prefix=family + "-")
@@ -801,10 +968,14 @@ def cmd_append(a):
                   "written".format(exc), file=sys.stderr)
             return 2
         try:
-            problems += verify_append_only(root, path, after, allow_missing_anchor=True)
+            problems += verify_append_only(root, path, after,
+                                           allow_missing_anchor=a.bootstrap)
         except CannotEvaluate as exc:
+            hint = ("" if a.bootstrap or lines else "; if this is the first row of an untracked "
+                    "register with no anchor yet, append it with --bootstrap, which establishes "
+                    "the anchor")
             print("append: refused, cannot evaluate the register's append-only history ({}); "
-                  "nothing written".format(exc), file=sys.stderr)
+                  "nothing written{}".format(exc, hint), file=sys.stderr)
             return 2
         if problems:
             print("append: refused, the register with this row fails the register gate "
@@ -812,7 +983,7 @@ def cmd_append(a):
             for p in problems:
                 print("  " + p, file=sys.stderr)
             return 1
-        data = (line + "\n").encode("utf-8")
+        content = bytes(raw) + (line + "\n").encode("utf-8")
         if fd < 0:
             # First row: the register was absent at the read, so create it exclusively; a file
             # that appeared since is never appended to blindly (O_EXCL refuses it, symlinks
@@ -832,8 +1003,7 @@ def cmd_append(a):
                       "nothing written".format(exc), file=sys.stderr)
                 return 2
             try:
-                fd = os.open(str(path),
-                             os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL, 0o644)
+                fd = os.open(str(path), os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o644)
             except OSError as exc:
                 dirs_note = _made_dirs_note(made_dirs)
                 print("append: refused, the register could not be created exclusively ({}); a "
@@ -851,59 +1021,63 @@ def cmd_append(a):
                       "path); run tools/check_mistakes_register.py before trusting this "
                       "file".format(exc), file=sys.stderr)
                 return 2
-        # Bind the write to the file the validation read (or, for a first row, to the file this
-        # call just created, re-checked UNDER the acquired lock): if the path no longer names
-        # that file, refuse rather than write through either name.
-        st_fd = os.fstat(fd)
-        try:
-            st_path = os.lstat(str(path))
-        except OSError:
-            st_path = None
-        if st_path is None or (st_fd.st_dev, st_fd.st_ino) != \
-                (st_path.st_dev, st_path.st_ino):
-            msg = ("append: refused, the register at this path is no longer the file that "
-                   "was validated (replaced between validation and write); nothing written "
-                   "to either file")
-            if created:
-                msg += "; " + _creation_cleanup(fd, path, made_dirs)
-            print(msg, file=sys.stderr)
-            return 2
-        # The on-disk size must still be the validated length (for a first row: still zero).
-        # This is the serialization re-check for a freshly created register, where the lock is
-        # necessarily taken only after the creation: a cooperating appender that landed between
-        # the creation and this lock forces a refusal here, never an interleaved row. For an
-        # existing register it narrows the non-cooperating-writer window to after this check.
-        # Only the cooperating register-row interleavings the identity and size comparisons
-        # detect are caught here; other validation inputs (the anchor included) are not
+        # The commit is all or nothing: the validated bytes plus the new row go to a temporary
+        # file created exclusively in the register's own directory under the lock, which is
+        # synced and then renamed over the register, still under the lock, only after the
+        # re-check that the path still names the validated file (or, for a first row, the file
+        # this call just created) with exactly the validated bytes (_commit_failure). The
+        # register itself is never written, so any failure before the rename leaves its bytes
+        # as they were; the temporary is then removed. For a freshly created register the
+        # re-check is also the serialization check, since its lock is necessarily taken after
+        # the creation: an appender that landed in between forces a refusal, never an
+        # interleaved row. Only the interleavings the identity, link-count, size and byte
+        # comparisons detect are caught; other validation inputs (the anchor included) are not
         # revalidated under the lock.
-        size = st_fd.st_size
-        if size != len(raw):
-            msg = ("append: refused, the register on disk is {} byte(s) but the validated text "
-                   "is {} byte(s) (a writer changed the file between the validation and the "
-                   "write; for a first row, between its exclusive creation and the lock); "
-                   "nothing further written".format(size, len(raw)))
-            if created:
-                msg += "; " + _creation_cleanup(fd, path, made_dirs)
-            print(msg, file=sys.stderr)
-            return 2
+        tmp_path = "{}.tmp.{}.{}".format(path, os.getpid(), secrets.token_hex(4))
         try:
-            written = os.write(fd, data)
+            tmp_fd = os.open(tmp_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600)
         except OSError as exc:
-            msg = "append: the write failed ({}); {}".format(exc, _rolled_back(fd, size))
+            msg = ("append: refused, the temporary file for the commit could not be created "
+                   "exclusively in the register's directory ({}); nothing was written to the "
+                   "register".format(exc))
             if created:
                 msg += "; " + _creation_cleanup(fd, path, made_dirs)
             print(msg, file=sys.stderr)
             return 2
-        if written != len(data):
-            msg = "append: short write ({} of {} bytes); {}".format(
-                written, len(data), _rolled_back(fd, size))
+        failure = _commit_failure(fd, path, raw, tmp_fd, tmp_path, content)
+        if failure is not None:
+            msg = "append: refused, {}; nothing was written to the register; {}".format(
+                failure, _temp_removed(tmp_fd, tmp_path))
             if created:
                 msg += "; " + _creation_cleanup(fd, path, made_dirs)
             print(msg, file=sys.stderr)
             return 2
-        print("appended {} seq {}".format(a.id, seq))
+        # The rename has landed: the row is in the register. What follows cannot undo it, so
+        # a failure here exits 2 saying the row is in place.
+        notes = []
+        sync_note = _dir_synced(path.parent)
+        if sync_note is not None:
+            notes.append(sync_note + ", so the rename may not survive a crash")
+        if a.bootstrap:
+            try:
+                update_anchor(path, after)
+            except CannotEvaluate as exc:
+                notes.append("the anchor could not be established ({}); run "
+                             "tools/check_mistakes_register.py --update-anchor to verify the "
+                             "register and establish it".format(exc))
+        if notes:
+            print("append: {} seq {} was appended and is in the register, but {}".format(
+                a.id, seq, "; ".join(notes)), file=sys.stderr)
+            return 2
+        if a.bootstrap:
+            print("appended {} seq {}; anchor established at seq {}".format(a.id, seq, seq))
+        else:
+            print("appended {} seq {}".format(a.id, seq))
         return 0
     finally:
+        if tmp_fd >= 0:
+            os.close(tmp_fd)
         if fd >= 0:
             os.close(fd)
 
@@ -947,7 +1121,7 @@ def self_test():
     failures = []
     # The appender resolves the register gate's own root (production: _gate_root(), the
     # nearest .git entry above the appender's own installed location, git-confirmed by
-    # _root_validated and with NO cwd fallback);
+    # confirmed_root and with NO cwd fallback);
     # each fixture stands in its own repository, so the resolution is routed at the fixture
     # root under test and restored in the finally.
     gate_root = {"root": None}
@@ -957,7 +1131,8 @@ def self_test():
     def append(reg, rid, status="proposed", **extra):
         fields = {"register": str(reg), "id": rid, "mistake": "m", "evidence": "e",
                   "rule": "mstreg", "guardrail": "g", "status": status, "commit": None,
-                  "check_ref": None, "prefix": "MR", "klass": None, "ref": None}
+                  "check_ref": None, "prefix": "MR", "klass": None, "ref": None,
+                  "bootstrap": False}
         fields.update(extra)
         err = io.StringIO()
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
@@ -1019,6 +1194,17 @@ def self_test():
                 name, want_rc, reason, rc, err.strip()))
         if snapshot(reg) != before:
             failures.append("{}: a refused append changed the register or its anchor".format(name))
+        if temps_beside(reg):
+            failures.append("{}: a refused append left a temporary file: {}".format(
+                name, temps_beside(reg)))
+
+    def temps_beside(reg):
+        # the commit's temporary files (<register>.tmp.<pid>.<hex>) in the register's directory
+        try:
+            names = os.listdir(str(Path(str(reg)).parent))
+        except FileNotFoundError:
+            return []
+        return sorted(n for n in names if n.startswith(Path(str(reg)).name + ".tmp."))
 
     def vector_cleanup(name, step):
         # a red vector's own cleanup can fail under a mutant; record that failure and let
@@ -1049,10 +1235,11 @@ def self_test():
         def declare(**surfaces):
             registry.write_text(json.dumps({"version": 1, **surfaces}), encoding="utf-8")
 
-        # an untracked register with no anchor yet: the gate's bootstrap allowance applies
+        # an untracked register with no anchor yet: its first row is the explicit --bootstrap,
+        # which establishes the anchor every later ordinary append requires
         declare(mistakes_register="reg.jsonl")
         reg = repo / "reg.jsonl"
-        accepted("first-proposal", reg, "MR-1")
+        accepted("first-proposal", reg, "MR-1", bootstrap=True)
         accepted("legal-accept", reg, "MR-1", "accepted")
         accepted("second-proposal", reg, "MR-2")
         accepted("legal-decline", reg, "MR-2", "declined")
@@ -1068,13 +1255,86 @@ def self_test():
                  check_ref="check.py")
         if len(reg.read_text(encoding="utf-8").splitlines()) != 5:
             failures.append("the clean appends should leave exactly five rows")
+        # an ORDINARY append requires the anchor exactly as the gate without --update-anchor
+        # does: on an untracked register with no anchor it is refused with exit 2 naming the
+        # anchor, as a first row (the register stays absent) and on a register that already
+        # holds rows but was never anchored; --bootstrap appends only a first row, so on the
+        # latter it is refused too, naming the gate's --update-anchor
+        declare(mistakes_register="noanchor.jsonl")
+        noanchor = repo / "noanchor.jsonl"
+        refused("ordinary-first-row-without-anchor-refused", noanchor, 2, "has no anchor",
+                "MR-1")
+        if entry_state(noanchor) is not None:
+            failures.append("ordinary-first-row-without-anchor-refused: the refusal created "
+                            "the register")
+        noanchor.write_text(_lines(reg)[0] + "\n", encoding="utf-8")
+        refused("ordinary-append-without-anchor-refused", noanchor, 2, "has no anchor",
+                "MR-1", "accepted")
+        refused("bootstrap-on-existing-rows-refused", noanchor, 2, "--update-anchor", "MR-1",
+                "accepted", bootstrap=True)
+        # --bootstrap lands the first row AND establishes the anchor --update-anchor would
+        # write, so the ORDINARY gate (no --update-anchor) passes on the result, and passes
+        # again after a following ordinary append
+        from check_mistakes_register import run as gate_run
+        declare(mistakes_register="boot.jsonl")
+        boot = repo / "boot.jsonl"
+        accepted("bootstrap-first-row-lands", boot, "MR-1", bootstrap=True)
+        boot_lines = _lines(boot)
+        want_anchor = {"seq": 1, "digest": hashlib.sha256(
+            boot_lines[0].encode("utf-8")).hexdigest()} if boot_lines else None
+        try:
+            got_anchor = json.loads(Path(str(boot) + ".anchor").read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            got_anchor = "unreadable ({})".format(exc)
+        if got_anchor != want_anchor:
+            failures.append("bootstrap-establishes-anchor: want the anchor --update-anchor "
+                            "would write, {!r}, got {!r}".format(want_anchor, got_anchor))
+
+        def ordinary_gate():
+            gate_out = io.StringIO()
+            with contextlib.redirect_stdout(gate_out):
+                gate_rc = gate_run(repo)
+            return gate_rc, gate_out.getvalue().strip()
+
+        boot_gate = ordinary_gate()
+        if boot_gate[0] != 0:
+            failures.append("bootstrap-then-gate-passes: the ordinary gate should pass on the "
+                            "bootstrapped register, got exit {}: {}".format(*boot_gate))
+        accepted("ordinary-after-bootstrap-lands", boot, "MR-1", "accepted")
+        boot_gate = ordinary_gate()
+        if boot_gate[0] != 0:
+            failures.append("ordinary-append-then-gate-passes: the ordinary gate should pass "
+                            "after an ordinary append, got exit {}: {}".format(*boot_gate))
+        # an anchor write that fails AFTER the bootstrap's rename cannot undo the landed row:
+        # exit 2 saying the row is in the register and naming the gate's --update-anchor
+        declare(mistakes_register="bootfail.jsonl")
+        bootfail = repo / "bootfail.jsonl"
+
+        def failing_update_anchor(upath, ulines):
+            raise CannotEvaluate("injected anchor failure")
+
+        saved_update_anchor = globals().get("update_anchor")
+        globals()["update_anchor"] = failing_update_anchor
+        try:
+            rc, err = append(bootfail, "MR-1", bootstrap=True)
+        finally:
+            globals()["update_anchor"] = saved_update_anchor
+        if (rc != 2 or "was appended and is in the register" not in err
+                or "injected anchor failure" not in err or "--update-anchor" not in err
+                or len(_lines(bootfail)) != 1):
+            failures.append("bootstrap-anchor-failure-named: want exit 2 saying the row landed "
+                            "and naming --update-anchor, got exit {}: {}".format(
+                                rc, err.strip()))
         # a failed or short write must not leave a partial row: under RLIMIT_FSIZE the kernel
-        # cuts the append short, and the appender must truncate back to the validated size
+        # cuts the temporary file's write short, so the commit refuses before its rename and
+        # the register keeps its bytes
+        declare(mistakes_register="reg.jsonl")
         limit = resource.getrlimit(resource.RLIMIT_FSIZE)
         handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
         try:
             resource.setrlimit(resource.RLIMIT_FSIZE, (reg.stat().st_size + 20, limit[1]))
-            refused("failed-write-leaves-no-partial-row", reg, 2, "truncated back", "MR-3")
+            refused("failed-write-leaves-no-partial-row", reg, 2,
+                    "nothing was written to the register", "MR-3")
         finally:
             resource.setrlimit(resource.RLIMIT_FSIZE, limit)
             signal.signal(signal.SIGXFSZ, handler)
@@ -1083,7 +1343,7 @@ def self_test():
         # verify_append_only must be refused while the append holds the register
         lockp = repo / "lockprobe.jsonl"
         declare(mistakes_register="lockprobe.jsonl")
-        accepted("lock-seed", lockp, "MR-1")
+        accepted("lock-seed", lockp, "MR-1", bootstrap=True)
         seen = {}
         real_vao = verify_append_only
 
@@ -1114,7 +1374,7 @@ def self_test():
         # and the write is refused, and neither the old nor the new file receives the row
         swap = repo / "swap.jsonl"
         declare(mistakes_register="swap.jsonl")
-        accepted("swap-seed", swap, "MR-1")
+        accepted("swap-seed", swap, "MR-1", bootstrap=True)
         swap_seed = swap.read_text(encoding="utf-8")
 
         def swapping(vroot, vpath, vlines, allow_missing_anchor=False):
@@ -1136,7 +1396,7 @@ def self_test():
             displaced = os.pread(displaced_fd, 1 << 16, 0)
         finally:
             os.close(displaced_fd)
-        if rc != 2 or "replaced between validation and write" not in err:
+        if rc != 2 or "replaced between the validation and the commit" not in err:
             failures.append("replaced-register-refused: want exit 2 naming the replacement, got "
                             "exit {}: {}".format(rc, err.strip()))
         if swap.read_text(encoding="utf-8") != swap_seed:
@@ -1145,7 +1405,8 @@ def self_test():
             failures.append("replaced-register-refused: the displaced file received the row")
         # an attestation register validates under its own id family, which the registry declares
         declare(mistakes_register="reg.jsonl", attestations="attest.jsonl")
-        accepted("attestation-prefix-appends", repo / "attest.jsonl", "AT-1", prefix="AT")
+        accepted("attestation-prefix-appends", repo / "attest.jsonl", "AT-1", prefix="AT",
+                 bootstrap=True)
         # a wrong-family id is refused in both directions, under the declared family
         refused("mr-id-into-attestations-refused", repo / "attest.jsonl", 1,
                 "is not an AT- id", "MR-1", "accepted", prefix="AT")
@@ -1174,7 +1435,7 @@ def self_test():
         # a register whose last line lacks its newline would fuse the new row onto it on disk
         fused = repo / "fused.jsonl"
         declare(mistakes_register="fused.jsonl")
-        accepted("fused-seed", fused, "MR-1")
+        accepted("fused-seed", fused, "MR-1", bootstrap=True)
         fused.write_bytes(fused.read_bytes().rstrip(b"\n"))
         refused("missing-final-newline-refused", fused, 1, "not a JSON object", "MR-1",
                 "accepted")
@@ -1182,7 +1443,7 @@ def self_test():
         # verify_lines alone reads clean) is refused through verify_append_only
         anch = repo / "anchored.jsonl"
         declare(mistakes_register="anchored.jsonl")
-        accepted("anchored-seed", anch, "MR-1")
+        accepted("anchored-seed", anch, "MR-1", bootstrap=True)
         update_anchor(anch, anch.read_text(encoding="utf-8").splitlines())
         old = json.loads(anch.read_text(encoding="utf-8"))
         old["mistake"] = "rewritten"
@@ -1191,7 +1452,7 @@ def self_test():
         # a malformed or unreadable anchor is cannot-evaluate (exit 2), never a bypassed digest
         anchbad = repo / "anchbad.jsonl"
         declare(mistakes_register="anchbad.jsonl")
-        accepted("anchor-cases-seed", anchbad, "MR-1")
+        accepted("anchor-cases-seed", anchbad, "MR-1", bootstrap=True)
         for tag, body, reason in (
                 ("seq-negative", json.dumps({"seq": -1, "digest": "0" * 64}),
                  "the anchor file is malformed"),
@@ -1224,7 +1485,7 @@ def self_test():
         # a symlinked register path is refused: the append binds to one file identity
         target = repo / "target.jsonl"
         declare(mistakes_register="target.jsonl")
-        accepted("symlink-target-seed", target, "MR-1")
+        accepted("symlink-target-seed", target, "MR-1", bootstrap=True)
         link = repo / "link.jsonl"
         link.symlink_to("target.jsonl")
         declare(mistakes_register="link.jsonl")
@@ -1232,7 +1493,7 @@ def self_test():
         # a tracked register with no computable merge-base is cannot-evaluate (exit 2), not a pass
         tracked = repo / "tracked.jsonl"
         declare(mistakes_register="tracked.jsonl")
-        accepted("tracked-seed", tracked, "MR-1")
+        accepted("tracked-seed", tracked, "MR-1", bootstrap=True)
         git(repo, "add", "tracked.jsonl")
         git(repo, "commit", "-q", "-m", "track the register")
         refused("tracked-without-authority-exit-2", tracked, 2, "cannot evaluate", "MR-2")
@@ -1265,7 +1526,8 @@ def self_test():
         os.environ["GIT_INDEX_FILE"] = str(junk_index)
         os.environ["GIT_DIR"] = str(junk_index)
         try:
-            accepted("scrubbed-env-append-lands", repo / "envclean.jsonl", "MR-1")
+            accepted("scrubbed-env-append-lands", repo / "envclean.jsonl", "MR-1",
+                     bootstrap=True)
         finally:
             os.environ.pop("GIT_INDEX_FILE", None)
             os.environ.pop("GIT_DIR", None)
@@ -1277,7 +1539,7 @@ def self_test():
         # an absent register refused on its first row stays absent, directory included
         declare(mistakes_register="sub/new.jsonl")
         refused("refused-first-row-creates-nothing", repo / "sub" / "new.jsonl", 1,
-                "first row for MR-1 must be proposed", "MR-1", "accepted")
+                "first row for MR-1 must be proposed", "MR-1", "accepted", bootstrap=True)
         if entry_state(repo / "sub") is not None:
             failures.append("a refused first row created the register's directory")
         # the validation root is the GATE's root, never the repository that merely contains
@@ -1289,7 +1551,8 @@ def self_test():
         subprocess.run(["git", "init", "-q", str(nested)], check=True, capture_output=True,
                        timeout=30)
         declare(mistakes_register="nestedrepo/nested-reg.jsonl")
-        accepted("nested-repo-validates-in-gate-root", nested / "nested-reg.jsonl", "MR-1")
+        accepted("nested-repo-validates-in-gate-root", nested / "nested-reg.jsonl", "MR-1",
+                 bootstrap=True)
         # PRODUCTION root resolution (no _gate_root patch), exercised in SUBPROCESSES:
         # (a) the appender installed in repository A, the register in nested repository B that
         # A declares: the resolver walks up from the appender's own installed file, so the
@@ -1317,7 +1580,7 @@ def self_test():
         proc = subprocess.run(
             [sys.executable, "-I", "-B", str(inst_a / "tools" / "orch_register.py"), "append",
              "--register", str(nested_b / "reg.jsonl"), "--id", "MR-1", "--mistake", "m",
-             "--evidence", "e", "--rule", "mstreg", "--guardrail", "g"],
+             "--evidence", "e", "--rule", "mstreg", "--guardrail", "g", "--bootstrap"],
             capture_output=True, text=True, timeout=60, cwd=str(tmp))
         if proc.returncode != 0 or len(_lines(nested_b / "reg.jsonl")) != 1:
             failures.append("production-root-nested-repo: the installed appender should "
@@ -1526,7 +1789,7 @@ def self_test():
         proc = subprocess.run(
             [sys.executable, "-I", "-B", str(wt / "tools" / "orch_register.py"),
              "append", "--register", str(wt / "wt-reg.jsonl"), "--id", "MR-1", "--mistake",
-             "m", "--evidence", "e", "--rule", "mstreg", "--guardrail", "g"],
+             "m", "--evidence", "e", "--rule", "mstreg", "--guardrail", "g", "--bootstrap"],
             capture_output=True, text=True, timeout=60, cwd=str(tmp))
         if proc.returncode != 0 or len(_lines(wt / "wt-reg.jsonl")) != 1:
             failures.append("production-root-linked-worktree: a valid worktree gitfile root "
@@ -1544,7 +1807,7 @@ def self_test():
         # even though their resolved paths differ: ambiguous, cannot-evaluate
         hard_a = repo / "hard-a.jsonl"
         declare(mistakes_register="hard-a.jsonl")
-        accepted("hardlink-seed", hard_a, "MR-1")
+        accepted("hardlink-seed", hard_a, "MR-1", bootstrap=True)
         os.link(str(hard_a), str(repo / "hard-b.jsonl"))
         declare(mistakes_register="hard-a.jsonl", attestations="hard-b.jsonl")
         refused("hardlinked-declarations-refused", hard_a, 2,
@@ -1554,7 +1817,7 @@ def self_test():
         # a hard link to the register, landing the append in both aliases)
         declare(mistakes_register="hid-a.jsonl", attestations="hid-b.jsonl")
         hid_a = repo / "hid-a.jsonl"
-        accepted("hidden-link-seed", hid_a, "MR-1")
+        accepted("hidden-link-seed", hid_a, "MR-1", bootstrap=True)
         os.link(str(hid_a), str(repo / "hid-b.jsonl"))
         hid_b_path = str(repo / "hid-b.jsonl")
         real_os_stat = os.stat
@@ -1612,9 +1875,10 @@ def self_test():
             refused("malformed-declaration-{}-refused".format(bad_form), reg, 2,
                     "the registry's mistakes_register declaration is not a non-empty string",
                     "MR-4")
-        # FIRST-ROW SERIALIZATION (both reviews, MAJOR 1): an appender that lands between the
-        # exclusive creation and the creator's lock forces the creator to refuse under its
-        # lock; exactly the interleaved row remains, and the chain stays clean
+        # FIRST-ROW SERIALIZATION: a cooperating appender that commits between the exclusive
+        # creation and the creator's lock (its commit renames a new file over the created
+        # one) forces the creator to refuse under its lock; exactly the interleaved row
+        # remains, and the chain stays clean
         declare(mistakes_register="race.jsonl")
         race_reg = repo / "race.jsonl"
         race = {"fired": False, "inner": None}
@@ -1623,26 +1887,52 @@ def self_test():
         def interleaving(lock_fd, op):
             if not race["fired"]:
                 race["fired"] = True
-                race["inner"] = append(race_reg, "MR-1")
+                race["inner"] = append(race_reg, "MR-1", bootstrap=True)
             return real_flock(lock_fd, op)
 
         fcntl.flock = interleaving
         try:
-            rc, err = append(race_reg, "MR-1")
+            rc, err = append(race_reg, "MR-1", bootstrap=True)
         finally:
             fcntl.flock = real_flock
         if race["inner"] is None or race["inner"][0] != 0:
             failures.append("first-row-race: the interleaved appender should land its row, "
                             "got {!r}".format(race["inner"]))
-        if rc != 2 or "between its exclusive creation and the lock" not in err \
-                or "left in place" not in err:
+        if rc != 2 or "no longer the file that was validated" not in err \
+                or "left in place" not in err or temps_beside(race_reg):
             failures.append("first-row-race: the creator should refuse (exit 2) naming the "
-                            "window and keep the row, got exit {}: {}".format(rc, err.strip()))
+                            "replaced file and keep the row, got exit {}: {}".format(
+                                rc, err.strip()))
         race_lines = _lines(race_reg)
         if len(race_lines) != 1 or verify_lines(race_lines, root=gate_root["root"],
                                                 prefix="MR-"):
             failures.append("first-row-race: exactly the interleaved row should remain, with "
                             "a clean verify_lines")
+        # a writer that does not take the lock and writes INTO the created file before the
+        # creator's lock is caught by the size re-check: the creator refuses, its row never
+        # lands, and the writer's bytes are left in place, named
+        declare(mistakes_register="race2.jsonl")
+        race2_reg = repo / "race2.jsonl"
+        race2 = {"fired": False}
+
+        def writing_into_created(lock_fd, op):
+            if not race2["fired"]:
+                race2["fired"] = True
+                with open(str(race2_reg), "ab") as fh:
+                    fh.write(b"interloper\n")
+            return real_flock(lock_fd, op)
+
+        fcntl.flock = writing_into_created
+        try:
+            rc, err = append(race2_reg, "MR-1", bootstrap=True)
+        finally:
+            fcntl.flock = real_flock
+        if (rc != 2 or "after its exclusive creation" not in err
+                or "it is no longer empty" not in err or temps_beside(race2_reg)
+                or race2_reg.read_bytes() != b"interloper\n"):
+            failures.append("first-row-inplace-writer: the creator should refuse (exit 2) "
+                            "naming the size re-check and leave the writer's bytes, got exit "
+                            "{}: {}".format(rc, err.strip()))
         # a file that APPEARS between the validation and the exclusive creation is refused
         # (O_CREAT with O_EXCL) and the appeared file's bytes stay intact
         declare(mistakes_register="appeared.jsonl")
@@ -1655,7 +1945,7 @@ def self_test():
 
         globals()["verify_append_only"] = planting
         try:
-            rc, err = append(appeared, "MR-1")
+            rc, err = append(appeared, "MR-1", bootstrap=True)
         finally:
             globals()["verify_append_only"] = real_vao
         if rc != 2 or "could not be created exclusively" not in err:
@@ -1667,7 +1957,7 @@ def self_test():
         # re-created (the vanished-path leg of the write binding)
         vanish = repo / "vanish.jsonl"
         declare(mistakes_register="vanish.jsonl")
-        accepted("vanish-seed", vanish, "MR-1")
+        accepted("vanish-seed", vanish, "MR-1", bootstrap=True)
 
         def vanishing(vroot, vpath, vlines, allow_missing_anchor=False):
             out = real_vao(vroot, vpath, vlines, allow_missing_anchor=allow_missing_anchor)
@@ -1704,60 +1994,253 @@ def self_test():
                     "cannot be read from its open descriptor", "MR-4")
         finally:
             os.read = real_os_read
-        # an OSError DURING the write rolls back to the validated size exactly like a short
-        # write (the failed-write branch, distinct from the RLIMIT short-write leg above)
+        # ALL OR NOTHING: a failure injected at each commit step (the temporary's creation, its
+        # lock, a failed write, a short write, its permission bits, its fsync, the under-lock
+        # re-check, the rename) leaves the register's bytes exactly as they were (for a
+        # re-check vector: exactly as the interfering writer left them, with no row of this
+        # call) and no temporary file beside it. Every injection also fails any truncation,
+        # so an append written into the register itself could not repair it: each vector is
+        # red on an in-place append, which lands the row or leaves partial bytes.
         real_os_write = os.write
-        write_fail = {"fired": False}
+        real_c_open = os.open
+        real_c_ftruncate = os.ftruncate
+        real_c_fchmod = os.fchmod
+        real_c_fsync = os.fsync
+        real_c_replace = os.replace
+        real_c_unlink = os.unlink
+        declare(mistakes_register="commit.jsonl")
+        commit_reg = repo / "commit.jsonl"
+        accepted("commit-seed", commit_reg, "MR-1", bootstrap=True)
+        commit_seed = commit_reg.read_bytes()
+        commit_anchor = snapshot(commit_reg)[1]
+        commit_tmp = str(commit_reg) + ".tmp."
+        commit_link = repo / "commit-link.jsonl"
 
-        def failing_write(write_fd, payload):
-            if not write_fail["fired"] and isinstance(payload, bytes) \
-                    and payload.startswith(b'{"'):
-                write_fail["fired"] = True
-                real_os_write(write_fd, payload[:7])
-                raise OSError(5, "injected write failure")
-            return real_os_write(write_fd, payload)
-
-        os.write = failing_write
-        try:
-            refused("oserror-write-rolls-back", reg, 2, "truncated back", "MR-4")
-        finally:
-            os.write = real_os_write
-        # the disclosed rollback RESIDUAL: when the truncation itself fails, the refusal
-        # names the un-truncated state and the partial bytes remain for the register gate
-        declare(mistakes_register="rollfail.jsonl")
-        rollfail = repo / "rollfail.jsonl"
-        accepted("rollfail-seed", rollfail, "MR-1")
-        rollfail_seed = rollfail.read_bytes()
-        real_ftruncate = os.ftruncate
-        write_fail2 = {"fired": False, "partial": b""}
-
-        def failing_write2(write_fd, payload):
-            if not write_fail2["fired"] and isinstance(payload, bytes) \
-                    and payload.startswith(b'{"'):
-                write_fail2["fired"] = True
-                write_fail2["partial"] = bytes(payload[:7])
-                real_os_write(write_fd, payload[:7])
-                raise OSError(5, "injected write failure")
-            return real_os_write(write_fd, payload)
-
-        def failing_truncate(trunc_fd, length):
+        def refusing_truncate(trunc_fd, length):
             raise OSError(5, "injected truncate failure")
 
-        os.write = failing_write2
-        os.ftruncate = failing_truncate
+        def step_open(p, flags, *oargs, **okw):
+            if os.fspath(p).startswith(commit_tmp) and flags & os.O_EXCL:
+                raise OSError(28, "injected no space")
+            return real_c_open(p, flags, *oargs, **okw)
+
+        def step_flock(lock_fd, op):
+            if op & fcntl.LOCK_NB:
+                raise OSError(errno.EWOULDBLOCK, "injected lock contention")
+            return real_flock(lock_fd, op)
+
+        def step_write(write_fd, payload):
+            if isinstance(payload, (bytes, bytearray)) and payload.startswith(b'{"'):
+                real_os_write(write_fd, payload[:7])
+                raise OSError(5, "injected write failure")
+            return real_os_write(write_fd, payload)
+
+        def step_short_write(write_fd, payload):
+            if isinstance(payload, (bytes, bytearray)) and payload.startswith(b'{"'):
+                return real_os_write(write_fd, payload[:7])
+            return real_os_write(write_fd, payload)
+
+        def step_fchmod(chmod_fd, mode):
+            raise OSError(1, "injected chmod failure")
+
+        def step_fsync(sync_fd):
+            raise OSError(5, "injected fsync failure")
+
+        def step_replace(src, dst, *rargs, **rkw):
+            if os.fspath(src).startswith(commit_tmp):
+                raise OSError(16, "injected rename failure")
+            return real_c_replace(src, dst, *rargs, **rkw)
+
+        def fsync_after(action):
+            # a writer that does not take the lock lands while the temporary is synced,
+            # after the validation and before the re-check
+            fired = {"done": False}
+
+            def fsync_then(sync_fd):
+                if not fired["done"]:
+                    fired["done"] = True
+                    action()
+                return real_c_fsync(sync_fd)
+            return fsync_then
+
+        def replace_with_seed_copy():
+            decoy = repo / "commit-decoy.jsonl"
+            decoy.write_bytes(commit_seed)
+            real_c_replace(str(decoy), str(commit_reg))
+
+        def append_in_place():
+            with open(str(commit_reg), "ab") as fh:
+                fh.write(b"interloper\n")
+
+        rewritten = commit_seed.replace(b'"mistake": "m"', b'"mistake": "n"', 1)
+
+        def rewrite_in_place():
+            with open(str(commit_reg), "r+b") as fh:
+                fh.write(rewritten)
+
+        def link_register():
+            os.link(str(commit_reg), str(commit_link))
+
+        for tag, patches, reason, want in (
+                ("temp-create", [(os, "open", step_open)],
+                 "the temporary file for the commit could not be created exclusively", None),
+                ("temp-lock", [(fcntl, "flock", step_flock)],
+                 "the temporary file could not be locked", None),
+                ("write", [(os, "write", step_write)],
+                 "the write to the temporary file failed", None),
+                ("short-write", [(os, "write", step_short_write)],
+                 "short write to the temporary file", None),
+                ("permission-bits", [(os, "fchmod", step_fchmod)],
+                 "the register's permission bits", None),
+                ("fsync", [(os, "fsync", step_fsync)], "could not be synced to disk", None),
+                ("rename", [(os, "replace", step_replace)],
+                 "could not be renamed over the register", None),
+                ("recheck-identity", [(os, "fsync", fsync_after(replace_with_seed_copy))],
+                 "no longer the file that was validated", None),
+                ("recheck-size", [(os, "fsync", fsync_after(append_in_place))],
+                 "a writer changed the file after the validation",
+                 commit_seed + b"interloper\n"),
+                ("recheck-bytes", [(os, "fsync", fsync_after(rewrite_in_place))],
+                 "a writer rewrote it in place", rewritten),
+                ("recheck-hard-link", [(os, "fsync", fsync_after(link_register))],
+                 "hard links", None)):
+            name = "commit-step-" + tag
+            commit_reg.write_bytes(commit_seed)
+            saved = [(obj, attr, getattr(obj, attr)) for obj, attr, _fn in patches]
+            for obj, attr, fn in patches:
+                setattr(obj, attr, fn)
+            os.ftruncate = refusing_truncate
+            try:
+                rc, err = append(commit_reg, "MR-1", "accepted")
+            finally:
+                os.ftruncate = real_c_ftruncate
+                for obj, attr, old in saved:
+                    setattr(obj, attr, old)
+            got_bytes = commit_reg.read_bytes() if entry_state(commit_reg) is not None else None
+            want_bytes = commit_seed if want is None else want
+            if rc != 2 or reason not in err:
+                failures.append("{}: want exit 2 naming {!r}, got exit {}: {}".format(
+                    name, reason, rc, err.strip()))
+            if got_bytes != want_bytes:
+                failures.append("{}: the register's bytes changed, want {!r}, got {!r}".format(
+                    name, want_bytes, got_bytes))
+            if tag != "temp-create" and "the temporary file {}".format(commit_tmp) not in err:
+                failures.append("{}: the refusal should name the removed temporary, got: "
+                                "{}".format(name, err.strip()))
+            if temps_beside(commit_reg):
+                failures.append("{}: a temporary file was left: {}".format(
+                    name, temps_beside(commit_reg)))
+            if snapshot(commit_reg)[1] != commit_anchor:
+                failures.append("{}: the refusal changed the anchor".format(name))
+            if entry_state(commit_link) is not None:
+                vector_cleanup(name, commit_link.unlink)
+        commit_reg.write_bytes(commit_seed)
+        # a temporary that cannot be removed is NAMED, with its path, in the refusal, and the
+        # register still keeps its bytes
+        def refusing_tmp_unlink(p, *uargs, **ukw):
+            if os.fspath(p).startswith(commit_tmp):
+                raise OSError(1, "injected unlink failure")
+            return real_c_unlink(p, *uargs, **ukw)
+
+        os.fsync = step_fsync
+        os.unlink = refusing_tmp_unlink
         try:
-            rc, err = append(rollfail, "MR-1", "accepted")
+            rc, err = append(commit_reg, "MR-1", "accepted")
         finally:
-            os.write = real_os_write
-            os.ftruncate = real_ftruncate
-        if rc != 2 or "could NOT be truncated back" not in err:
-            failures.append("failed-rollback-residual: the refusal must name the failed "
-                            "truncation, got exit {}: {}".format(rc, err.strip()))
-        left = rollfail.read_bytes()
-        if not write_fail2["partial"] or left != rollfail_seed + write_fail2["partial"]:
-            failures.append("failed-rollback-residual: exactly the seed plus the injected "
-                            "partial bytes should remain (a disclosed residual, repaired by "
-                            "hand), got {!r}".format(left))
+            os.fsync = real_c_fsync
+            os.unlink = real_c_unlink
+        left_tmps = temps_beside(commit_reg)
+        if (rc != 2 or "injected unlink failure" not in err or "removed by hand" not in err
+                or len(left_tmps) != 1 or str(repo / left_tmps[0]) not in err
+                or commit_reg.read_bytes() != commit_seed):
+            failures.append("commit-temp-removal-failure-named: want exit 2 naming the "
+                            "temporary left behind by its path, got exit {} with {}: "
+                            "{}".format(rc, left_tmps, err.strip()))
+        vector_cleanup("commit-temp-removal-failure-named", lambda: [
+            os.unlink(str(repo / n)) for n in temps_beside(commit_reg)])
+        # a directory sync that fails AFTER the rename cannot undo the landed row: exit 2
+        # saying the row is in the register and naming the sync
+        def failing_dir_fsync(sync_fd):
+            if stat.S_ISDIR(os.fstat(sync_fd).st_mode):
+                raise OSError(5, "injected directory sync failure")
+            return real_c_fsync(sync_fd)
+
+        os.fsync = failing_dir_fsync
+        try:
+            rc, err = append(commit_reg, "MR-1", "accepted")
+        finally:
+            os.fsync = real_c_fsync
+        if (rc != 2 or "was appended and is in the register" not in err
+                or "injected directory sync failure" not in err
+                or len(_lines(commit_reg)) != 2 or temps_beside(commit_reg)):
+            failures.append("commit-dir-sync-failure-named: want exit 2 saying the row is in "
+                            "the register and naming the sync, got exit {}: {}".format(
+                                rc, err.strip()))
+        # the replacing file carries the register's permission bits
+        commit_reg.write_bytes(commit_seed)
+        os.chmod(str(commit_reg), 0o640)
+        accepted("commit-keeps-permission-bits", commit_reg, "MR-1", "accepted")
+        if stat.S_IMODE(os.lstat(str(commit_reg)).st_mode) != 0o640:
+            failures.append("commit-keeps-permission-bits: want mode 0o640 after the commit, "
+                            "got {:o}".format(stat.S_IMODE(os.lstat(str(commit_reg)).st_mode)))
+        # a cooperating appender that commits (by rename) while this one waits for the lock
+        # leaves this one holding the lock on the replaced file: it starts over on the file
+        # the path names now, so both rows land, in order, with a clean chain
+        commit_reg.write_bytes(commit_seed)
+        accepted("lock-wait-seed", commit_reg, "MR-2")
+        wait = {"fired": False, "inner": None}
+
+        def committing_while_waiting(lock_fd, op):
+            if not wait["fired"]:
+                wait["fired"] = True
+                wait["inner"] = append(commit_reg, "MR-1", "accepted")
+            return real_flock(lock_fd, op)
+
+        fcntl.flock = committing_while_waiting
+        try:
+            rc, err = append(commit_reg, "MR-2", "accepted")
+        finally:
+            fcntl.flock = real_flock
+        wait_lines = _lines(commit_reg)
+        wait_ids = [(json.loads(l).get("id"), json.loads(l).get("status"))
+                    for l in wait_lines]
+        if (wait["inner"] is None or wait["inner"][0] != 0 or rc != 0
+                or wait_ids != [("MR-1", "proposed"), ("MR-2", "proposed"),
+                                ("MR-1", "accepted"), ("MR-2", "accepted")]
+                or verify_lines(wait_lines, root=gate_root["root"], prefix="MR-")):
+            failures.append("lock-wait-starts-over: both rows should land in order with a "
+                            "clean chain, got inner {!r}, outer exit {}: {} rows {}".format(
+                                wait["inner"], rc, err.strip(), wait_ids))
+        # a landed row's commit read that git cannot launch, or that times out, is
+        # cannot-evaluate: exit 2 naming the read, never a traceback, nothing written
+        real_c_run = subprocess.run
+        for cf_tag, cf_exc in (
+                ("timeout", subprocess.TimeoutExpired(["git", "cat-file"], 10)),
+                ("launch-error", OSError(2, "injected launch failure"))):
+            def failing_catfile(argv, *rargs, **rkw):
+                if "cat-file" in argv:
+                    raise cf_exc
+                return real_c_run(argv, *rargs, **rkw)
+
+            commit_reg.write_bytes(commit_seed)
+            accepted("landed-commit-read-{}-seed".format(cf_tag), commit_reg, "MR-1",
+                     "accepted")
+            before = snapshot(commit_reg)
+            subprocess.run = failing_catfile
+            try:
+                try:
+                    rc, err = append(commit_reg, "MR-1", "landed", commit=head,
+                                     check_ref="check.py")
+                except Exception as exc:  # the escape this vector pins: a raw exception
+                    rc, err = "raised", "{}: {}".format(type(exc).__name__, exc)
+            finally:
+                subprocess.run = real_c_run
+            if rc != 2 or "cites an existing commit" not in err:
+                failures.append("landed-commit-read-{}-exit-2: want exit 2 naming the commit "
+                                "read, got exit {}: {}".format(cf_tag, rc, err.strip()))
+            if snapshot(commit_reg) != before or temps_beside(commit_reg):
+                failures.append("landed-commit-read-{}-exit-2: the refusal changed the "
+                                "register".format(cf_tag))
         # FIRST-ROW CLEANUP (under the acquired lock): a write failure on the very first row,
         # in nested directory components this call itself created, removes the created file
         # AND those components, and the refusal names the removal
@@ -1774,7 +2257,7 @@ def self_test():
 
         os.write = failing_write3
         try:
-            rc, err = append(first_reg, "MR-1")
+            rc, err = append(first_reg, "MR-1", bootstrap=True)
         finally:
             os.write = real_os_write
         if rc != 2 or ("the created register and the directory components this call made "
@@ -1797,7 +2280,7 @@ def self_test():
 
         os.open = refusing_open
         try:
-            rc, err = append(excl_reg, "MR-1")
+            rc, err = append(excl_reg, "MR-1", bootstrap=True)
         finally:
             os.open = real_os_open
         if rc != 2 or "could not be created exclusively" not in err or (
@@ -1824,7 +2307,7 @@ def self_test():
 
         fcntl.flock = displacing
         try:
-            rc, err = append(ident_reg, "MR-1")
+            rc, err = append(ident_reg, "MR-1", bootstrap=True)
         finally:
             fcntl.flock = real_flock
         if rc != 2 or "no longer the file that was validated" not in err:
@@ -1848,7 +2331,7 @@ def self_test():
 
         fcntl.flock = displacing2
         try:
-            rc, err = append(ident2_reg, "MR-1")
+            rc, err = append(ident2_reg, "MR-1", bootstrap=True)
         finally:
             fcntl.flock = real_flock
         if rc != 2 or "no longer the file that was validated" not in err \
@@ -1880,7 +2363,7 @@ def self_test():
 
             fcntl.flock = removing
             try:
-                rc, err = append(gone_reg, "MR-1")
+                rc, err = append(gone_reg, "MR-1", bootstrap=True)
             finally:
                 fcntl.flock = real_flock
             if (rc != 2 or "no longer the file that was validated" not in err
@@ -1906,7 +2389,7 @@ def self_test():
 
         fcntl.flock = refusing_flock
         try:
-            rc, err = append(lockfail_reg, "MR-1")
+            rc, err = append(lockfail_reg, "MR-1", bootstrap=True)
         finally:
             fcntl.flock = real_flock
         if rc != 2 or "cannot lock the register" not in err or "left in place" not in err:
@@ -1925,7 +2408,7 @@ def self_test():
         os.mkdir = failing_mkdir
         try:
             refused("mkdir-failure-exit-2", repo / "mkfail" / "reg.jsonl", 2,
-                    "directory could not be created", "MR-1")
+                    "directory could not be created", "MR-1", bootstrap=True)
         finally:
             os.mkdir = real_os_mkdir
         if entry_state(repo / "mkfail") is not None:
@@ -1944,7 +2427,7 @@ def self_test():
 
         os.mkdir = partial_mkdir
         try:
-            rc, err = append(repo / "mk4" / "deep" / "part.jsonl", "MR-1")
+            rc, err = append(repo / "mk4" / "deep" / "part.jsonl", "MR-1", bootstrap=True)
         finally:
             os.mkdir = real_os_mkdir
         if rc != 2 or "directory could not be created" not in err \
@@ -1975,7 +2458,8 @@ def self_test():
         os.lstat = pre_eio_lstat
         os.mkdir = never_mkdir
         try:
-            rc, err = append(repo / "mk5" / "deep" / "pre.jsonl", "MR-1")
+            rc, err = append(repo / "mk5" / "deep" / "pre.jsonl", "MR-1",
+                             bootstrap=True)
         finally:
             os.lstat = real_walk_lstat
             os.mkdir = real_os_mkdir
@@ -3391,7 +3875,7 @@ def self_test():
         # missing-anchor allowance and never an append past an uninspectable authority
         declare(mistakes_register="anchio.jsonl")
         anchio = repo / "anchio.jsonl"
-        accepted("anchor-inspect-seed", anchio, "MR-1")
+        accepted("anchor-inspect-seed", anchio, "MR-1", bootstrap=True)
         update_anchor(anchio, anchio.read_text(encoding="utf-8").splitlines())
         anchio_anchor = str(anchio) + ".anchor"
         real_os_lstat = os.lstat
@@ -3452,11 +3936,26 @@ def self_test():
           "validation and write, a first "
           "row interleaved between the exclusive creation and the lock (the interleaved row "
           "survives, the creator refuses) or displaced from its path in that window (the "
-          "identity re-check refuses, the displacing file receives no row), a lock that "
+          "identity re-check refuses, the displacing file receives no row) or written into "
+          "there by a writer outside the lock (the size re-check refuses, the writer's bytes "
+          "stay), a lock that "
           "cannot be acquired (the created empty file is left in place and named), a file "
-          "that appeared before the exclusive creation, and a failed or short write (rolled "
-          "back to the validated size, a failed rollback disclosed with exactly the seed plus "
-          "the injected partial bytes remaining) are refused as cannot-evaluate (exit 2); a "
+          "that appeared before the exclusive creation, an ordinary append to an untracked "
+          "register with no anchor (as a first row and on unanchored rows; --bootstrap on "
+          "a register that already holds rows is refused too), a landed row's commit read "
+          "that times out or cannot be launched (no traceback), and a failure at each "
+          "commit step (the temporary's exclusive creation, its lock, a failed write with "
+          "truncation also failing, a short write, its permission bits, its fsync, the "
+          "under-lock re-check of identity, size, bytes and hard links, the rename, and the "
+          "kernel's own file-size limit) are refused as cannot-evaluate (exit 2), each "
+          "leaving the register's bytes unchanged and no temporary file (a temporary that "
+          "cannot be removed is named by its path); --bootstrap lands a first row and "
+          "establishes the anchor --update-anchor would write, after which the ordinary "
+          "gate passes, before and after a following ordinary append, and a directory sync "
+          "or anchor write failing after the rename exits 2 saying the row is in the "
+          "register; the replacing file keeps the register's permission bits, and an "
+          "appender that took its lock on a file another appender's commit replaced starts "
+          "over and lands after it; a "
           "refusal under the acquired lock after the first-row creation removes the created "
           "file and the directory components the call observed as its own and names the "
           "removal (each component created and identity-read relative to an open descriptor "
@@ -3519,16 +4018,16 @@ def self_test():
           "its reason and left in place, and a created file found absent at the register "
           "path at the cleanup, unlinked or renamed away, is said to be no longer at that "
           "path, never gone); every "
-          "refusal leaves the rows other appenders wrote byte-identical (the disclosed "
-          "failed-rollback residual excepted); the register validates in the gate root's own "
+          "refusal leaves the rows other appenders wrote byte-identical; the register "
+          "validates in the gate root's own "
           "context (a nested-repository register validates under the declaring outer root, "
           "in-process and in the production-root subprocess vector); an existing register's "
-          "exclusive lock is held across the read, the validation and the write (probed in "
+          "exclusive lock is held across the read, the validation and the commit (probed in "
           "place), while the first row of an absent register is validated before its "
           "exclusive creation and the created file is re-checked under the acquired lock, "
           "identity and size still zero, the serialization there being the exclusive "
           "creation plus those under-lock re-checks, not a second validation (they catch "
-          "the cooperating register-row interleavings their identity and size "
+          "the register-row interleavings their identity, link-count, size and byte "
           "comparisons detect; other validation inputs, the anchor included, are not "
           "revalidated under the lock); and every "
           "clean append is re-read with its last row and "
@@ -3548,6 +4047,10 @@ def main():
                       ("--prefix", False), ("--klass", False), ("--ref", False)):
         p1.add_argument(name, required=req, dest=name.lstrip("-").replace("-", "_"),
                         default={"--status": "proposed", "--prefix": "MR"}.get(name))
+    p1.add_argument("--bootstrap", action="store_true",
+                    help="append the first row of an untracked register that has no anchor yet "
+                         "and establish its anchor, as check_mistakes_register.py "
+                         "--update-anchor would")
     p2 = sub.add_parser("project")
     p2.add_argument("--register", required=True)
     a = ap.parse_args()
