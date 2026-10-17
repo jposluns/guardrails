@@ -3137,6 +3137,17 @@ def _self_test_cases(fx):
     check("bare/missing-cc-clause-refused",
           any("_marker_ignorable" in problem
               for problem in _patched("_marker_ignorable", without_cc, _static_config_problems)), True)
+    # A checks manifest that does not load is the harness's refusal (None, the refusal printed), never
+    # an escaped parse error: one per class the handler must catch, a syntax error
+    # (tomllib.TOMLDecodeError, a ValueError), an array nested ten times past the default recursion
+    # limit (RecursionError), and an allocation failure (_ExhaustedManifestPath).
+    for check_id, text in (
+            ("harness/manifest-not-toml-refused", "suite = \n"),
+            ("harness/manifest-nested-too-deep-refused", "suite = " + "[" * 10000 + "]" * 10000 + "\n")):
+        manifest = fx.base / "selftest-checks-{}.toml".format(check_id.rpartition("/")[2])
+        manifest.write_text(text, encoding="utf-8")
+        check(check_id, _manifest_refusal(manifest), (None, True))
+    check("harness/manifest-out-of-memory-refused", _manifest_refusal(_ExhaustedManifestPath()), (None, True))
 
 
 # The 8a61dfb9 forms of the two scanners, kept only so the runtime checks can show the old forms exceed
@@ -3215,7 +3226,7 @@ def _expected_check_ids():
     try:
         with open(CHECKS_MANIFEST, "rb") as handle:
             data = tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (OSError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         print("SELF-TEST HARNESS ERROR: cannot read {}: {}".format(CHECKS_MANIFEST, exc), file=sys.stderr)
         return None
     for row in data.get("suite", []):
@@ -3228,6 +3239,33 @@ def _expected_check_ids():
     print("SELF-TEST HARNESS ERROR: missing or malformed suite {!r} in {}".format(SUITE_ID, CHECKS_MANIFEST),
           file=sys.stderr)
     return None
+
+
+MANIFEST_PARSE_REFUSAL = "SELF-TEST HARNESS ERROR: cannot read"
+
+
+class _ExhaustedManifestPath:
+    """A checks manifest path that fails as an exhausted allocation does when opened. No manifest text
+    can raise MemoryError without exhausting memory, and the parse call is left bound to tomllib, so
+    the handler's MemoryError arm is driven from the open inside the same try as the parse."""
+
+    def __fspath__(self):
+        raise MemoryError("injected allocation failure")
+
+
+def _manifest_refusal(path):
+    """(result, refusal printed) of _expected_check_ids on the checks manifest at path, its stderr
+    captured; or the class of a parse failure that escaped the handler, so a missing arm fails its
+    check by name."""
+    import contextlib
+    import io
+    printed = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(printed):
+            got = _patched("CHECKS_MANIFEST", path, _expected_check_ids)
+    except (ValueError, RecursionError, MemoryError) as exc:
+        return "escaped " + type(exc).__name__
+    return got, MANIFEST_PARSE_REFUSAL in printed.getvalue()
 
 
 def self_test(report_path=None):

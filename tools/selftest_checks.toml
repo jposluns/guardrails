@@ -2807,4 +2807,7 @@ expected-check-ids = [
   "bare/broken-quote-pairs-refused",
   "bare/ignorable-range-deletion-refused",
   "bare/missing-cc-clause-refused",
+  "harness/manifest-not-toml-refused",
+  "harness/manifest-nested-too-deep-refused",
+  "harness/manifest-out-of-memory-refused",
 ]
