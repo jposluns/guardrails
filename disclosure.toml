@@ -5,7 +5,7 @@
 # The generator fails closed (exit 2) on a row missing any of these, on an unknown key, on a bad href,
 # on a duplicate id, or on an en/em dash, so a claim can never ship without its paired limitation and
 # its pointer. Rows LINK to the values on /evidence and /mappings; they never restate a value, so there
-# is no second copy to drift. All wording below is DRAFT, owed to the Architect's review (D7).
+# is no second copy to drift. All wording below is DRAFT, owed to the maintainer's review (D7).
 #
 # The [[code]] and [[noncode]] tables at the end declare, by path prefix, every file the 1.0.5
 # release manifest ships (a prefix ending in / declares a tree; one without declares exactly that
