@@ -1497,17 +1497,22 @@ def _backquote_body(text, i, in_double):
 
 
 def _backquote_bodies(text, _depth=0):
-    """(offset, body) for each top-level backquote substitution bash runs in text, in offset order, where
-    offset is the index of its opening backquote: the union of two quote-aware scans (_backquote_scan). Both
-    hold none in a single-quoted or ANSI-C $'...' span, a backslash-escaped backquote or a word-start '#'
-    comment, and both read one in a double-quoted span, as bash runs a backquote substitution inside double
-    quotes. They differ on a $(...) or ${...} inside double quotes: the first scan reads it as more of the
-    double-quoted span, so a quote inside it can end or open a span early and miss a later substitution bash
-    runs; the second reads it as the lexer does (_skip_quoting: a fresh context whose own quotes nest) and
-    scans its inner text in turn, up to _SUBSTITUTION_DEPTH deep. A substitution either scan finds is read:
-    every one the first scan alone read stays read, a later one its early span end missed is read too, and
-    where the first scan pairs a quote bash does not, its extra read is an over-read in the safe direction.
-    A substitution nested in a body is found when that body is read in turn."""
+    """(offset, body) for each top-level backquote substitution this reading finds in text, in offset order,
+    where offset is the index of its opening backquote: the union of two quote-aware scans (_backquote_scan).
+    Both hold none in a single-quoted or ANSI-C $'...' span, a backslash-escaped backquote or a word-start
+    '#' comment, and both read one in a double-quoted span, as bash runs a backquote substitution inside
+    double quotes. They differ on a $(...) or ${...} inside double quotes: the first scan reads it as more of
+    the double-quoted span, so a quote inside it can end or open a span early and miss a later substitution
+    bash runs; the second reads it as the lexer does (_skip_quoting: a fresh context whose own quotes nest)
+    and scans its inner text in turn, up to _SUBSTITUTION_DEPTH deep, until it meets one _skip_quoting cannot
+    close, after which it reads the rest of the text by the first scan's rules. A substitution either scan
+    finds is read: every one the first scan alone read stays read, a later one its early span end missed is
+    read too, and where the first scan pairs a quote bash does not, its extra read is an over-read in the safe
+    direction. A substitution nested in a body is found when that body is read in turn. This reading does not
+    find every substitution bash runs: where both scans take a '#' for a word-start comment that bash reads
+    as part of a word, as after a $((...)) arithmetic expansion (echo $(())# then a backquote substitution)
+    or inside an unquoted ${...} (echo ${x:- #} then one), neither reads a backquote substitution after it
+    on that line, and bash runs it."""
     found = {}
     for item in _backquote_scan(text, False, _depth) + _backquote_scan(text, True, _depth):
         found.setdefault(item, None)
@@ -1518,8 +1523,12 @@ def _backquote_scan(text, nest, depth):
     """One scan of _backquote_bodies: (offset, body) for each backquote substitution it finds in text, in
     order. With nest set, a $(...) or ${...} inside double quotes that _skip_quoting can close is a context
     of its own: below _SUBSTITUTION_DEPTH its inner text is read by _backquote_bodies (offsets shifted into
-    text), and the scan resumes past it, still inside the double quotes. One it cannot close is read as more
-    of the double-quoted span, as without nest."""
+    text), and the scan resumes past it, still inside the double quotes. At the first one it cannot close,
+    nest is cleared, so that one and the rest of the text are read as without nest: _skip_quoting has then
+    read to the end of the text, and a retry at each later opener would read to the end again, quadratic in
+    the text's length over a long run of them. So a scan reads each character of its text a bounded number
+    of times (itself, one _skip_quoting that closed, at most one that did not), and _backquote_bodies, at
+    most _SUBSTITUTION_DEPTH levels deep, stays linear in the text's length."""
     out = []
     i = 0
     n = len(text)
@@ -1550,6 +1559,9 @@ def _backquote_scan(text, nest, depth):
                                    for offset, body in _backquote_bodies(text[i + 2:end - 1], depth + 1))
                     i = end
                     continue
+                # _skip_quoting read to the end of the text without closing this one, and would again for
+                # each later opener (quadratic over a run of them), so the rest of this scan does not nest.
+                nest = False
             i += 1
             continue
         if c == "'":

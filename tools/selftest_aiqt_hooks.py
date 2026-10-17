@@ -91,10 +91,17 @@ It also covers the shared command reading the lexer-reading guards use (cs-* cas
 the compound-subject table (one or two shapes per guard, each one the guard denies bare; for git_stash_ref,
 the one it notes), wrapped in a compound command (if, else, elif, for, for NAME do, while, until, select,
 case, a brace group, '!', time -p, time --) and in a backquote substitution (also one after a double-quoted
-$(...) or ${...} holding a quote, which the lexer nests), must decide at least as strictly as the bare
-shape; a reserved word as a plain argument, a git command inside a quoted string, a
-single-quoted backquote and a backquote in a quoted heredoc body must each keep the decision every guard
-gave it before the shared reading existed. The table does not cover gate_weakening's verification-sink deny
+$(...) or ${...} holding a quote, which the lexer nests, and one between two single quotes inside a
+double-quoted ${...}, which bash runs), must decide at least as strictly as the bare shape. These rows are
+outcome checks of each guard's decision, not checks of the backquote scan: another path decides some
+wrapped shapes for some guards, so a row can pass with the scan changed. The cs-read cases check the
+shared reading itself, and each half of the backquote scan has one that fails without it. A reserved word
+as a plain argument, a git command inside a quoted string, a single-quoted backquote and a backquote in a
+quoted heredoc body must each keep the decision every guard gave it before the shared reading existed. The
+cs-cost cases bound the backquote scan's cost: gate_weakening, bash_absolute_paths and diff_source_pretool
+must each decide a command whose double-quoted backquote body is a long run of unterminated $( openers
+(a 42,044-byte command, and one with a 64 KiB body) within 1 s of CPU, and gate_weakening must deny both
+for their --no-verify. The table does not cover gate_weakening's verification-sink deny
 tier, which still reads the command's own records, or the two orchestration guards (orch_truncation_guard,
 orch_untracked_wait_loop), whose shared reading tools/selftest_orch_hooks.py checks. The wx-* cases pin each
 wrapped example that the git_discard, gate_weakening, diff_source_pretool and bash_absolute_paths texts name
@@ -2391,7 +2398,13 @@ def _test_git_stash_ref(failures):
 # backquote substitution. A wrapped shape must decide at least as strictly as the bare one (deny > allow-note >
 # allow). The bare shapes need no repository: every payload carries no cwd. Not in the table: gate_weakening's
 # verification-sink deny tier, which reads the command's own records, and the two orchestration guards, whose
-# shared reading tools/selftest_orch_hooks.py checks.
+# shared reading tools/selftest_orch_hooks.py checks. Every row is an outcome check of one guard's decision,
+# not a check of the backquote scan (_backquote_bodies). The dq-* wrappers put the substitution where one half
+# of that scan misses it, yet another path also decides some of those shapes: the protected_line and
+# git_discard rows under them pass with either half removed, the bash_absolute_paths rows under
+# dq-subst-quote and dq-param-quote pass without the nested half, and 16 of the 24 dq-subst-quote and
+# dq-param-quote rows passed before the scan read nested quotes. The cs-read cases in _test_compound_subject
+# check the scan itself.
 _CS_SHAPES = (
     ("commit_identity", 'git commit -m x --author="Claude <c@x>"', "deny"),
     ("commit_msg_subst", 'git commit -m "a$(id)"', "deny"),
@@ -2423,6 +2436,7 @@ _CS_WRAPPERS = (
     ("time-dashdash", "time -- {}"),
     ("dq-subst-quote", 'x="$(echo "\'")" `{}`'),
     ("dq-param-quote", 'y="${{z:-"\'"}}" `{}`'),
+    ("dq-param-squote", 'echo "${{x:-\'}}" `{}` "\'}}"'),
 )
 _CS_RANK = {"allow": 0, "allow-note": 1, "deny": 2}
 # Controls: a reserved word as a plain argument, a git command inside a quoted string, a single-quoted
@@ -2484,16 +2498,46 @@ def _test_compound_subject(failures):
             # escapes included (_skip_quoting); the shared reading still reads both substitutions in it.
             ("echo \"`echo \\`git diff\\``\"", [["git", "diff"], ["echo", "`git", "diff`"],
                                                 ["echo", "`echo \\`git diff\\``"]]),
-            # A quote inside a double-quoted $(...) nests, as the lexer reads it, so it never hides a later
-            # backquote substitution; a backquote substitution inside that $(...) is read as well.
+            # A quote inside a double-quoted $(...) nests, as the lexer reads it, so it does not hide a later
+            # backquote substitution: this case fails without the nested half of the backquote scan.
             ('x="$(echo "\'")" `git diff`', [["git", "diff"], ["x=$(echo \"'\")", "`git", "diff`"]]),
+            # An outcome check of the reading, not of either half: each half alone reads both substitutions
+            # here, and the case also checks the lexer's raw word for the double-quoted $(...).
             ('echo "$(echo "`git log`")" `git diff`', [["git", "log"], ["git", "diff"],
                                                        ["echo", '$(echo "`git log`")', "`git", "diff`"]]),
+            # Bash pairs the two single quotes inside the double-quoted ${...} to find its end, then expands
+            # them as literal text and runs the backquote substitution between them. The nested half pairs
+            # them as the lexer does and misses it, so this case fails without the plain half.
+            ('echo "${x:-\'}" `git diff` "\'}"', [["git", "diff"], ["echo", '${x:-\'}" `git diff` "\'}']]),
             ("echo '`git diff`' \\`git log\\`", [["echo", "`git diff`", "`git", "log`"]]),
             ("cat <<'EOF'\n`git diff`\nEOF\n", [["cat"], []])):
         got = [seg.argv for seg in aiqt_hooks._command_flow(aiqt_hooks._lex_command(command))]
         if got != want:
             failures.append("(cs-read) {!r}: expected {!r}, got {!r}".format(command, want, got))
+
+
+def _test_backquote_scan_cost(failures):
+    """(cs-cost) The backquote scan stays linear on unterminated input. Each command below lexes as a whole
+    (the lexer skips a backquote body inside double quotes in one piece); its backquote body, a double-quoted
+    run of $( openers none of which closes, is lexed as a partial line, and that unfinished segment's raw
+    text, which runs to the end of the body, is scanned for backquote substitutions. A scan that retried each
+    opener to the end of the text took about 15 s of CPU in gate_weakening and bash_absolute_paths and 31 s in
+    diff_source_pretool on the 42,044-byte command, over the hooks' 10 s timeout. Each guard must decide each
+    command within 1 s of CPU; where the bound was set each took under 0.1 s, so the bound leaves a margin
+    above ten times for a slower machine. gate_weakening must still deny both for their --no-verify. No
+    submitted Bash command is executed."""
+    for body in ('echo "' + "$( " * 14000, ('echo "' + "$( " * 21843).ljust(65536)):
+        command = 'git commit --no-verify -m x; echo "`' + body + '`"'
+        for name in ("gate_weakening", "bash_absolute_paths", "diff_source_pretool"):
+            start = time.process_time()
+            got = _decision(getattr(aiqt_hooks, name), command)
+            spent = time.process_time() - start
+            if spent >= 1.0:
+                failures.append("(cs-cost-{}) a {}-byte command with a {}-byte unterminated backquote body: "
+                                "{:.2f} s of CPU, over the 1 s bound".format(name, len(command), len(body), spent))
+            if name == "gate_weakening" and got != "deny":
+                failures.append("(cs-cost-{}) a {}-byte command with a {}-byte unterminated backquote body: "
+                                "expected deny, got {}".format(name, len(command), len(body), got))
 
 
 # The wrapped examples the guard texts in .aiqt/core/hooks/manifest.toml name, each with the exact decision
@@ -14477,6 +14521,7 @@ def _main_isolated(monitor):
 
         _test_git_stash_ref(failures)
         _test_compound_subject(failures)
+        _test_backquote_scan_cost(failures)
         _test_wrapped_examples(failures, tmp)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
