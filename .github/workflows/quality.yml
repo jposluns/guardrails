@@ -715,6 +715,7 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_entry_guard.py
       - name: Verifier delivery self-test (execution-reconciled)
+        shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite verifier-delivery-selftest
 
   git-fixture-env-core:
