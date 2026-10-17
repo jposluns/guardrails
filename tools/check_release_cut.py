@@ -104,7 +104,7 @@ def document(raw, label):
     require(isinstance(raw, bytes), label + ": expected bytes")
     try:
         return tomllib.loads(raw.decode("utf-8"))
-    except (ValueError, RecursionError) as exc:
+    except (ValueError, RecursionError, MemoryError) as exc:
         raise CannotEvaluate(label + ": invalid UTF-8/TOML: " + str(exc)) from exc
 
 
@@ -1848,6 +1848,9 @@ _CLOSE_SWEEP_DISPOSITIONS = (
     ("tools/check_release_cut.py", "working_blob", "TRY", "parent", "directory", 1,
      _CS_P1.format("parent, directory = directory, child runs before the close of parent, so the finally closes "
                    "child, never parent")),
+    ("tools/_adapter_compose.py", "_target_dir_fd", "TRY", "parent", "directory", 1,
+     _CS_P1.format("parent, directory = directory, child runs before the close of parent, so the finally (guarded "
+                   "by handed, which a successful hand-over sets) closes child, never parent")),
     ("tools/pin.py", "do_recover", "TRY", "fd", "root_fd", 4,
      _CS_P1.format("each fd, root_fd = root_fd, None runs before os.close(fd), so the handler's `if root_fd is "
                    "not None` guard never reaches the closed number")),

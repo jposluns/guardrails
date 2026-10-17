@@ -66,6 +66,7 @@ else
 fi
 echo
 run_gate "leaks"     python3 -I -B tools/check_leaks.py
+run_gate "leaks-selftest" python3 -I -B tools/check_leaks.py --self-test
 run_gate "msg-leaks-selftest" python3 -I -B tools/check_msg_leaks.py --self-test  # real scan needs CI event context
 run_gate "portability-selftest" python3 -I -B tools/check_portability.py --self-test
 run_gate "portability" python3 -I -B tools/check_portability.py
@@ -110,6 +111,7 @@ run_gate "opf-record-selftest" python3 -I -B opf/tools/check_opf_record.py --sel
 run_gate "opf-adopt-selftest" python3 -I -B opf/tools/_opf_adopt.py --self-test
 run_gate "opf-adopt-apply-selftest" python3 -I -B opf/tools/_opf_adopt_apply.py --self-test
 run_gate "opf-adopt-hook-selftest" python3 -I -B opf/tools/_opf_adopt_hook.py --self-test
+run_gate "opf-import-batch-selftest" python3 -I -B opf/tools/_opf_import_batch.py --self-test
 run_gate "opf-pack-manifest-selftest" python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
 run_gate "opf-adopt-observe-selftest" python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
 run_gate "opf-adopt-discover-selftest" python3 -I -B opf/tools/_opf_adopt_discover.py --self-test
@@ -158,6 +160,7 @@ run_gate "rules-selftest"  python3 -I -B tools/gen_rules.py --self-test
 run_gate "artifact-checksums-selftest" python3 -I -B tools/check_artifact_checksums.py --self-test
 run_gate "artifact-checksums"          python3 -I -B tools/check_artifact_checksums.py
 run_gate "rules-drift"     python3 -I -B tools/gen_rules.py --check
+run_gate "agents-selftest" python3 -I -B tools/gen_agents.py --self-test
 run_gate "agents-drift"    python3 -I -B tools/gen_agents.py --check
 run_gate "first-pin-demo-selftest" python3 -I -B tools/gen_first_pin_demo.py --self-test
 run_gate "first-pin-demo-drift"    python3 -I -B tools/gen_first_pin_demo.py --check
@@ -195,7 +198,10 @@ run_gate "hooks-preview" python3 -I -B tools/check_hooks_preview.py
 run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execution.py --self-test
 run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
-run_gate "git-fixture-env-selftest" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
+run_gate "git-fixture-env-core" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core
+run_gate "git-fixture-env-config-combined" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined
+run_gate "git-fixture-env-config-malformed" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed
+run_gate "git-fixture-env-config-system" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system
 run_gate "instruction-budget-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite instruction-budget-selftest
 run_gate "brief-capability-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite brief-capability-selftest
 run_gate "entry-guard-selftest" python3 -I -B tools/check_selftest_execution.py --suite entry-guard-selftest
@@ -221,6 +227,15 @@ run_gate "launcher-isolation-selftest" python3 -I -B tools/check_python_launcher
 run_gate "launcher-isolation" python3 -I -B tools/check_python_launcher_isolation.py
 run_gate "python-floor-selftest" python3 -I -B tools/check_selftest_execution.py --suite python-floor-selftest
 run_gate "python-floor" python3 -I -B tools/check_python_floor.py
+# The host-patch pin: the CI host-patch jobs run their suites on the release .aiqt/python-host.toml
+# names, and the live leg FAILS this run when this interpreter is another patch release (a run there does
+# not predict those required CI legs); when the host interpreter changes, update that file and both
+# host-job pins in .github/workflows/quality.yml together.
+run_gate "python-host-pin-selftest" python3 -I -B tools/check_python_host_pin.py --self-test
+run_gate "python-host-pin" python3 -I -B tools/check_python_host_pin.py
+# The jobs-leg-only member mirrors the registry job's CI step, which judges the host-patch jobs from
+# outside them (roster symmetry; ci-parity reconciles it).
+run_gate "python-host-pin-jobs" python3 -I -B tools/check_python_host_pin.py --jobs-only
 run_gate "renderers-selftest"    python3 -I -B tools/gen_renderers.py --self-test
 run_gate "renderers-drift"       python3 -I -B tools/gen_renderers.py --check
 run_gate "manifest-gen-selftest" python3 -I -B tools/gen_manifest.py --self-test
@@ -234,8 +249,17 @@ run_gate "placement"      python3 -I -B tools/check_rule_placement.py
 run_gate "applies-selftest" python3 -I -B tools/check_applies.py --self-test
 run_gate "applies"         python3 -I -B tools/check_applies.py
 run_gate "mappings"       python3 -I -B tools/check_mappings.py
+# Repository-only assertion lives outside the shipped tooling: it pins the corpus below and the whole permitted
+# gate invocation in both runners (--config .aiqt/cited-standards.toml and nothing else, so an appended --root
+# is a finding), and validates pack.toml with its owning validator (opf/tools/check_opf_prompt_pack.py).
+run_gate "cited-standards-repo-contract-selftest" python3 -I -B .github/check_cited_standards_contract.py --self-test
+run_gate "cited-standards-repo-contract" python3 -I -B .github/check_cited_standards_contract.py
 run_gate "cited-standards-selftest" python3 -I -B tools/check_cited_standards.py --self-test
-run_gate "cited-standards"          python3 -I -B tools/check_cited_standards.py
+# This repository only: the reviewed corpus adds the OPF prompt-pack members to the rule corpus. The config and
+# the two .github contract scripts are not shipped, so in a tree without them this gate, the newtab-repo-contract
+# gate and the cited-standards-repo-contract gate lines all exit 2 (cannot evaluate) and this runner then ends
+# RESULT: FAIL.
+run_gate "cited-standards"          python3 -I -B tools/check_cited_standards.py --config .aiqt/cited-standards.toml
 run_gate "conformance-selftest" python3 -I -B tools/conformance.py --self-test
 run_gate "conformance"    python3 -I -B tools/conformance.py --root .
 run_gate "commonmark-headings-selftest" python3 -I -B opf/tools/selftest_commonmark_headings.py
