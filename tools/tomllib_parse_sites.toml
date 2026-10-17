@@ -476,10 +476,18 @@ class = "EXEMPT"
 reason = "test-code"
 
 [[site]]
+path = "opf/tools/_opf_record.py"
+function = "_self_test_units"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
 path = "opf/tools/_opf_schema.py"
 function = "self_test"
 form = "call"
-count = 11
+count = 15
 class = "EXEMPT"
 reason = "test-code"
 
