@@ -1182,8 +1182,10 @@ def self_test_isolated():
     non-repository directory -> the remote and prior fields OMITTED with a note while tracked reads
     "untracked"; and the prior's `held` ids, the active worklog (both generations) and every archive bucket
     file included, omitted alone with a note when an archive entry is not a bucket file, when a bucket file
-    or the active worklog.toml does not parse or holds a row table that is not an array, and when the
-    active worklog.toml cannot be read. Judged ONLY on
+    or the active worklog.toml does not parse or holds a row table that is not an array, when the active
+    worklog.toml or the archive/ listing cannot be read, when the HEAD manifest's worklog generation is
+    unreadable, and, at generation 2, when the worklog/ listing cannot be read or holds a file that is not
+    a worklog entry. Judged ONLY on
     gather's RETURNED structure (never by grepping git's stdout for verdicts).
     Returns 0 clean, 1 on a failed check, 2 on a harness error. When git is not on PATH at all it SKIPs
     clean, like the POSIX-signal watchdogs, since every path depends on git."""
@@ -1450,30 +1452,63 @@ def self_test_isolated():
 
         # 10. Every other read of `held` that fails omits it alone, with a note naming the file, and the rest
         # of the prior stands: an unparseable bucket file of each kind, a row table that is not an array in
-        # each, and an unparseable, non-array or unreadable active worklog.toml (its blob removed from the
-        # object store, so git show fails). Each case is the case-7 store with that one file changed; the
-        # unchanged store is the control, so a source skipped instead of omitted leaves a partial `held`.
-        def held_case(label, relpath=None, text=None):
+        # each, an unparseable, non-array or unreadable active worklog.toml (its blob removed from the
+        # object store, so git show fails), an archive/ that cannot be listed (its tree removed), a worklog
+        # generation the HEAD manifest does not declare readably, and, at generation 2, a worklog/ that
+        # cannot be listed or that holds a file that is not a worklog entry. Each case is the case-7 store
+        # (at generation 2, with worklog/ entries for WL-3 and WL-4 in place of worklog.toml) with that one
+        # source changed; the unchanged store is the control, so a source skipped or read as empty instead of
+        # omitted leaves a partial `held`.
+        gen2_files = tuple((rel, body) for rel, body in held_files if rel != _WORKLOG_NAME) + (
+            ("worklog/WL-3.toml", 'id = "WL-3"\n'), ("worklog/WL-4.toml", 'id = "WL-4"\n'))
+
+        def held_case(label, relpath=None, text=None, worklog=None):
             repo = base / ("held-" + label)
             repo.mkdir()
             _git_setup(repo, home, "init")
             _write_store(repo)
-            for rel, body in held_files:
-                _write(repo, machine_rel + "/" + rel, text if rel == relpath and text is not None else body)
+            if worklog is not None:
+                manifest = repo / machine_rel / _MANIFEST_NAME
+                manifest.write_text(manifest.read_text(encoding="utf-8").replace(
+                    'layout = "inline"\n', 'layout = "inline"\nworklog = {}\n'.format(worklog)), encoding="utf-8")
+            if worklog == 2:
+                (repo / machine_rel / _WORKLOG_NAME).unlink()
+            for rel, body in gen2_files if worklog == 2 else held_files:
+                _write(repo, machine_rel + "/" + rel, body)
+            if relpath is not None and text is not None:
+                _write(repo, machine_rel + "/" + relpath, text)
             _git_setup(repo, home, "add", "-A")
             _git_setup(repo, home, "commit", "-m", "store with one held source changed")
             if relpath is not None and text is None:
                 oid = _run_git(git, str(repo), ["rev-parse", "HEAD:{}/{}".format(machine_rel, relpath)])
                 if not oid.completed or oid.rc != 0:
-                    raise OSError("could not resolve the HEAD blob of {}".format(relpath))
+                    raise OSError("could not resolve the HEAD object of {}".format(relpath))
                 name = oid.out.decode("ascii").strip()
                 os.unlink(str(repo / ".git" / "objects" / name[:2] / name[2:]))
-            return gather(_Res(repo, machine_rel))
+            if worklog != 2:
+                return gather(_Res(repo, machine_rel))
+            with patch.object(_opf_store, "SUPPORTED_WORKLOG", 2):
+                return gather(_Res(repo, machine_rel))
 
+        held_all = {"BI": [[1, 1], [7, 7], [9, 9]], "DN": [[1, 1]], "WL": [[1, 4], [6, 6]]}
         obs, notes = held_case("control")
-        check("prior-held-case-control", (obs.get("prior") or {}).get("held") == {
-            "BI": [[1, 1], [7, 7], [9, 9]], "DN": [[1, 1]], "WL": [[1, 4], [6, 6]]})
+        check("prior-held-case-control", (obs.get("prior") or {}).get("held") == held_all)
+        obs, notes = held_case("control-generation-2", worklog=2)
+        check("prior-held-case-control-generation-2", (obs.get("prior") or {}).get("held") == held_all)
         bucket = "archive/2026/"
+        unlisted = "prior: could not list HEAD:{}/".format(machine_rel)
+        for label, relpath, text, worklog, needle in (
+                ("unlistable-archive", "archive", None, None, unlisted + "archive (git ls-tree rc"),
+                ("unreadable-worklog-generation", None, None, 3,
+                 "prior: the HEAD manifest's worklog generation is unreadable"),
+                ("unlistable-worklog-directory", "worklog", None, 2, unlisted + "worklog (git ls-tree rc"),
+                ("non-entry-in-worklog-directory", "worklog/notes.txt", "x\n", 2,
+                 "prior: HEAD worklog/ holds 'notes.txt', not a worklog entry")):
+            obs, notes = held_case(label, relpath, text, worklog)
+            prior = obs.get("prior")
+            check("prior-held-omitted-" + label, isinstance(prior, dict) and "held" not in prior
+                  and prior.get("records", {}).get("BI-1") == ("backlog_item", "open")
+                  and any(needle in n and _HELD_OMITTED in n for n in notes))
         for label, relpath, text, needle in (
                 ("unparseable-bucket-archive", bucket + "archive.toml", "not toml [\n",
                  "prior: archive/2026/archive.toml at HEAD is not valid TOML"),
