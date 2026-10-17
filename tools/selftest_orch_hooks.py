@@ -9307,6 +9307,24 @@ def _main_isolated(report_path=None):
               _verdict(bg("find . -maxdepth 0 -exec sh -c 'python3 build.py | tail' \\;")), "deny")
         check("trunc/shell-find-exec-plain-allows-note",
               _verdict(bg("find . -maxdepth 0 -exec sh -c 'python3 build.py' \\;")), "warn")
+        # The floor: a shell string the reading cannot read (an opaque eval or -c string, a shell reading a pipe)
+        # makes only its own segment uncertain, so a producer piped into a truncating sink elsewhere in the
+        # command still denies, as it does with no shell-string reading.
+        check("trunc/floor-eval-unread-tail-denies",
+              _verdict(bg('eval "$(ssh-agent -s)"; python3 build.py | tail')), "deny")
+        check("trunc/floor-shell-c-opaque-tail-denies",
+              _verdict(bg('bash -c "$CMD"; python3 build.py | tail')), "deny")
+        check("trunc/floor-pipe-shell-tail-denies", _verdict(bg("echo x | sh; python3 build.py | tail")), "deny")
+        # Cost: 64 KiB of xargs or find followed by tens of thousands of shell-option words is read in time linear
+        # in its length (every shell word of a segment shares one option walk), under the 1 s per-guard CPU bound
+        # of the shell-string cost rows in tools/selftest_aiqt_hooks.py.
+        import time as _cost_time
+        for cid, prefix in (("trunc/cost-xargs-sh-o-under-bound", "printf x | xargs "),
+                            ("trunc/cost-find-sh-o-under-bound", "find . -exec ")):
+            cost_cmd = prefix + "sh -o " * (((64 << 10) - len(prefix) - 30) // 6) + "; git commit --no-verify -m y"
+            cost_start = _cost_time.process_time()
+            bg(cost_cmd)
+            check(cid, _cost_time.process_time() - cost_start < 1.0, True)
         check("trunc/tilde-allows-note", _verdict(bg("cat ~/notes.txt")), "warn")
         check("trunc/foreground-plain-allows", _verdict(bg("python3 build.py", rib=False)), "allow")
         check("trunc/foreground-pipe-allows", _verdict(bg("python3 build.py | tail -5", rib=False)), "allow")
@@ -10755,6 +10773,27 @@ def _main_isolated(report_path=None):
               "allow")
         check("wl/handler-allow-nested",
               _verdict(wl("while outer; do while inner; do gh api x; sleep 1; done; done &")), "allow")
+        # The floor: a shell string the reading cannot read before the poll loop makes only its own segment
+        # uncertain, so the detached poll loop still denies, as it does with no shell-string reading.
+        check("wl/floor-eval-unread-loop-denies",
+              _verdict(wl('eval "$(ssh-agent -s)"; while true; do gh pr checks 42; sleep 30; done &')), "deny")
+        check("wl/floor-shell-c-opaque-loop-denies",
+              _verdict(wl('bash -c "$X"; while true; do gh pr checks 42; sleep 30; done &')), "deny")
+        # A string whose placed segments add a bare '&' makes the shared reading indeterminate; the flat lex still
+        # classifies the loop as the canonical shape, so the poll loop denies as it does with no reading.
+        check("wl/floor-placed-detach-loop-denies",
+              _verdict(wl("bash -c 'true &'; while true; do gh pr checks 42; sleep 30; done &")), "deny")
+        # A poll loop inside a shell -c string is read through the shared reading and denies.
+        check("wl/shell-c-inner-loop-denies",
+              _verdict(wl("bash -c 'while true; do gh pr checks 42; sleep 30; done &'")), "deny")
+        # Cost: 64 KiB of xargs or find followed by shell-option words stays under the 1 s per-guard CPU bound.
+        import time as _wl_cost_time
+        for cid, prefix in (("wl/cost-xargs-sh-o-under-bound", "printf x | xargs "),
+                            ("wl/cost-find-sh-o-under-bound", "find . -exec ")):
+            cost_cmd = prefix + "sh -o " * (((64 << 10) - len(prefix) - 30) // 6) + "; git commit --no-verify -m y"
+            cost_start = _wl_cost_time.process_time()
+            wl(cost_cmd)
+            check(cid, _wl_cost_time.process_time() - cost_start < 1.0, True)
         # fail-open: non-Bash tool, non-str command, absent registry -> silent allow even on a match command.
         check("wl/failopen-nonbash", _verdict(aiqt_hooks.orch_untracked_wait_loop(
             w.payload("PreToolUse", "Write", {"command": BASE}))), "allow")
