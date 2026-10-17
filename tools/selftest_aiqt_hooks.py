@@ -8598,7 +8598,9 @@ def _main_isolated(monitor):
         # body line that begins with the delimiter but is not exactly it. Bash 5.3 ends a body inside a command
         # substitution at such a line when a ')' follows on it and reads the rest of that line as commands, so
         # its ')' closes the substitution here as there (bash 5.3.9 prints hello, RAN and the last string for
-        # the third, whose later 'EOF' line a body read to an exact delimiter line would reach instead).
+        # the third, whose later 'EOF' line a body read to an exact delimiter line would reach instead). These
+        # three are REGRESSION GUARDS: they pass on code that reads no body at all, and fail only where a
+        # change to the body reading reads one of these bodies.
         texpect("(tok-dq-heredoc-unquoted) an unquoted here-document's body is read as text, as before",
                 _readings_or_error("echo \"$(cat <<EOF\n# it's\nEOF\n)\"; echo RAN"),
                 "ValueError: a reading of an uncertain '#' does not lex: unterminated single quote")
@@ -8611,7 +8613,11 @@ def _main_isolated(monitor):
         # Each guard that reads the lexer decides both shapes as main does (eight allow, where each denied or
         # noted through the fallback before the skip read the body; commit_msg_subst denies the substitution
         # in a commit argument and protected_line the unproven commit), and still judges a later line: each
-        # shape followed by a line its row's guard denies (or notes) decides that way.
+        # shape followed by a line its row's guard denies (or notes) decides that way. The hd-guard rows of
+        # commit_msg_subst and protected_line and all sixteen hd-later rows are REGRESSION GUARDS: they pass on
+        # code that reads no body at all (where each such command takes the fallback), and fail only where a
+        # change to the body reading flips those two guards or hides a later line; the other sixteen hd-guard
+        # rows fail on that code.
         for _hdn, _hdc in (("apostrophe", _hd_m1), ("five-headings", _hd_h5)):
             for _hdg, _hdwant in ((aiqt_hooks.gate_weakening, "allow"), (aiqt_hooks.diff_source_pretool, "allow"),
                                   (aiqt_hooks.git_explicit_binding, "allow"), (aiqt_hooks.commit_identity, "allow"),
@@ -8631,14 +8637,79 @@ def _main_isolated(monitor):
                     (aiqt_hooks.git_stash_ref, "git stash pop", "allow-note")):
                 texpect("(hd-later-{}) {} on a line after the here-document shape".format(_hdn, _hdg.__name__),
                         _decision(_hdg, _hdc + "\n" + _hdlater), _hdwant)
+        # The skip reads a body only in that commit message form: the first substitution the lex skips whole,
+        # holding cat and the here-document and nothing else. A command before or after the here-document inside
+        # its substitution, or another double-quoted '$(' or a backquote substitution anywhere in the command,
+        # makes the lex read the text as before (the HERE-DOCUMENTS paragraph of _skip_quoting): the guards read
+        # no command inside a double-quoted or backquote substitution, so a body read there would turn the
+        # failed lex, whose fallback reads the whole text, into a lex beside a command no guard reads (an
+        # unquoted '$(...)' is lexed as its own segments, which the guards read). Bash 5.3.9 runs the
+        # commit in every shape below (with git replaced by a function that prints a marker); before this rule
+        # each lexed with the body read, and gate_weakening and commit_msg_subst allowed it where main denies.
+        _hd_nv = "git commit --no-verify -m x"
+        _hd_unq = "cat <<B\n$(" + _hd_nv + ")\nB\n"
+        _hd_then = (
+            ("later-line", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n" + _hd_nv + "\n)\""),
+            ("later-unquoted-body", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n" + _hd_unq + ")\""),
+            ("two-substs-later-line", "echo \"$(cat <<'EOF'\n# Don't\nEOF\necho $(true) $(" + _hd_unq + ")\n)\""),
+            ("two-substs-one-word", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n)$(" + _hd_unq + ")\""),
+            ("two-substs-two-words", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n)\" \"$(" + _hd_unq + ")\""),
+            ("later-subst", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n)\" \"$(" + _hd_nv + ")\""),
+            ("later-segment-subst", "git commit -m \"$(cat <<'EOF'\n# Don't\nEOF\n)\"; echo \"$(" + _hd_nv + ")\""),
+            ("later-backquote", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n)\" `" + _hd_nv + "`"),
+            ("earlier-subst", "echo \"$(" + _hd_nv + ")\" \"$(cat <<'EOF'\n# Don't\nEOF\n)\""),
+            ("earlier-command", "echo \"$(" + _hd_nv + "; cat <<'EOF'\n# Don't\nEOF\n)\""),
+            ("command-reads-body", "echo \"$(git commit --no-verify -F - <<'EOF'\n# Don't\nEOF\n)\""),
+        )
+        for _hdn, _hdc in _hd_then:
+            texpect("(tok-dq-heredoc-then-{}) a body beside another command is read as before".format(_hdn),
+                    _readings_or_error(_hdc),
+                    "ValueError: a reading of an uncertain '#' does not lex: unterminated single quote")
+            texpect("(hd-then-{}) gate_weakening and commit_msg_subst deny as main does".format(_hdn),
+                    (_decision(aiqt_hooks.gate_weakening, _hdc), _decision(aiqt_hooks.commit_msg_subst, _hdc)),
+                    ("deny", "deny"))
+        # No guard decides a reviewed shape less strictly than main (e47da1de) does: the shapes above, the two
+        # commit message shapes, a body that a nested substitution's line holds (bash 5.3.9 reads its 'git
+        # commit' line as body text), two here-documents on one operator line, and a top-level assignment
+        # whose here-document bash ends at 'EOF)' (main and this code allow it alike). Main's decisions were
+        # recorded by running main's module on each command, per guard in _hd_floor_guards order. The eleven
+        # rows of _hd_then fail on the code before this rule; the last five rows pass there too and are
+        # REGRESSION GUARDS. Not a row: the ')"' line shape (tok-dq-heredoc-close-line), where gate_weakening
+        # and commit_msg_subst allow and main denies, by design: bash 5.3.9 reads that line as body text and
+        # runs nothing on it.
+        _hd_floor_guards = (aiqt_hooks.gate_weakening, aiqt_hooks.diff_source_pretool, aiqt_hooks.git_explicit_binding,
+                            aiqt_hooks.commit_identity, aiqt_hooks.bash_absolute_paths, aiqt_hooks.branch_root,
+                            aiqt_hooks.git_discard, aiqt_hooks.git_stash_ref, aiqt_hooks.commit_msg_subst,
+                            aiqt_hooks.protected_line)
+        _hd_main_then = ("deny",) + ("allow",) * 7 + ("deny", "deny")
+        _hd_floor = [(_hdn, _hdc, _hd_main_then) for _hdn, _hdc in _hd_then] + [
+            ("apostrophe", _hd_m1, ("allow",) * 8 + ("deny", "deny")),
+            ("five-headings", _hd_h5, ("allow",) * 8 + ("deny", "deny")),
+            ("nested-line-body", "echo \"$(echo $(cat <<'EOF') $(true\n" + _hd_nv + "\nEOF\n))\"",
+             ("allow",) * 9 + ("deny",)),
+            ("two-on-operator-line", "echo \"$(cat <<'EOF'; echo $(cat <<B\n# Don't\nEOF\n$(" + _hd_nv + ")\nB\n))\"",
+             _hd_main_then),
+            ("top-level-assignment", "x=$(cat <<'EOF'\nEOF); " + _hd_nv + "\nEOF\n)", ("allow",) * 10),
+        ]
+        _hd_rank = {"allow": 0, "allow-note": 1, "deny": 2}  # deny > note > allow; anything else fails
+        for _hdn, _hdc, _hdmain in _hd_floor:
+            for _hdg, _hdm in zip(_hd_floor_guards, _hdmain):
+                _hdgot = _decision(_hdg, _hdc)
+                if _hd_rank.get(_hdgot, -1) < _hd_rank[_hdm]:
+                    failures.append("(hd-main-floor-{}) {}: main decides {}, got {}".format(
+                        _hdn, _hdg.__name__, _hdm, _hdgot))
         # COST. The lexer's cost per lex is linear in the command's length (the comment above _nest_track), so
         # each guard below decides these inputs in well under its hook timeout: a 256 KiB line of blank-led '#'
         # inside a double-quoted substitution, where the substitution skip searched to the end of the line from
         # every '#', and a 128 KiB run of open parentheses and backquote substitutions, where the nesting stack
-        # was searched or copied for every word, skip and backquote. Each must take under 1 s of CPU. On the
-        # development host these took at most 0.08 s and 0.14 s, a margin of more than seven times; the code
-        # before the linear skip and the counted nesting stack took more than 1 s on each (the commit message
-        # carries the figures).
+        # was searched or copied for every word, skip and backquote. Each must take under 1 s of CPU. Measured
+        # on one host, this code took at most 0.07 s on the first input and 0.16 s on the second (in
+        # bash_absolute_paths), a margin of about six times, and the code before the linear skip and the counted
+        # nesting stack took 14.4 s, 30.4 s and 15.2 s on the first and 9.3 s and 18.4 s on the second in
+        # gate_weakening, bash_absolute_paths and protected_line. protected_line took 0.09 s on the second
+        # input there too, so that row is a REGRESSION GUARD that does not tell the two apart; the other five
+        # rows fail on that code. The orch self-test checks the cost of the poll-loop classifier, the raw word
+        # scan and the foreground detach scan on the same inputs.
         _cost_inputs = (("long-comment-line", 'echo "$(echo ' + "# " * (128 * 1024) + '\n)"\ngit status'),
                         ("deep-nesting", "(" * 56000 + " `a`" * (56000 // 3)))
         for _cost_name, _cost_cmd in _cost_inputs:

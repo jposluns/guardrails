@@ -57,6 +57,7 @@ import subprocess
 import tempfile
 import shutil
 import threading
+import time
 import datetime
 import hashlib
 from pathlib import Path
@@ -10789,6 +10790,32 @@ def _main_isolated(report_path=None):
               aiqt_hooks._orch_raw_unquoted_words('for x in "$(echo a # (b)\n)"'), ["for", "x", "in"])
         check("wl/raw-words-dq-subst-hash-comment",
               aiqt_hooks._orch_raw_unquoted_words("for x in \"$(echo a # it's\n)\" y"), ["for", "x", "in", "y"])
+        # COST. The poll-loop classifier and the raw word scan read a '#' inside a double-quoted substitution
+        # through the lexer's substitution skip, and the foreground detach scan keeps a comment-rule nesting
+        # stack of its own; each takes time linear in the command's length (COST in the comment above
+        # _nest_track in aiqt_hooks.py), so each must decide these inputs in under 1 s of CPU: a 256 KiB line
+        # of blank-led '#' inside a double-quoted substitution, and a 128 KiB run of open parentheses and
+        # backquote substitutions (the hook self-test's lex-cost inputs). Measured on one host, the code before
+        # the linear skip and the counted nesting stack took 15.2 s and 9.2 s in the classifier, 14.9 s in the
+        # word scan and 13.8 s in the foreground scan, and this code at most 0.08 s on any of them. The word
+        # scan on the nesting input (0.02 s) and the foreground scan on the comment line (under 0.01 s) stayed
+        # under the bound on both, so neither is checked.
+        _cost_long = 'echo "$(echo ' + "# " * (128 * 1024) + '\n)"\ngit status'
+        _cost_deep = "(" * 56000 + " `a`" * (56000 // 3)
+
+        def _cost_cpu(fn, command):
+            """'under 1 s' when fn(command) takes under 1 s of CPU, else the time it took."""
+            t0 = time.process_time()
+            fn(command)
+            cpu = time.process_time() - t0
+            return "under 1 s" if cpu < 1.0 else "{:.2f} s of CPU on {} characters".format(cpu, len(command))
+
+        check("wl/cost-long-comment-line", _cost_cpu(clf, _cost_long), "under 1 s")
+        check("wl/cost-deep-nesting", _cost_cpu(clf, _cost_deep), "under 1 s")
+        check("wl/raw-words-cost-long-comment-line", _cost_cpu(aiqt_hooks._orch_raw_unquoted_words, _cost_long),
+              "under 1 s")
+        check("trunc/fg-scan-cost-deep-nesting", _cost_cpu(aiqt_hooks._orch_foreground_detach_kind, _cost_deep),
+              "under 1 s")
         # run_in_background true with an inner trailing `done &` is still 'match' (predicate ignores rib).
         check("wl/deny-rib-true-inner-detach", clf(BASE), "match")
         # NEGATIVE fixtures (this control): every one is 'none'.

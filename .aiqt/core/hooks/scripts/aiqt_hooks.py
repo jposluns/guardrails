@@ -483,24 +483,27 @@ _Segment = collections.namedtuple(
 # under both readings, so it is not enumerated (a '# heading' line in an unquoted here-document's body). No
 # '#' inside a backquote substitution is read there: the skip ends it at its first unescaped backquote, as
 # bash does, whatever a comment inside it reads. The body of a here-document with a quoted delimiter inside
-# such a '$(...)' is text to bash, with no comment rule, quote or parenthesis in it, so the lexer's skip jumps
-# past it and reads no '#' there (bash prints the body for x="$(cat <<'EOF'<newline># Don't merge
-# yet<newline>EOF<newline>)", a common commit message form); where the skip cannot read a body plainly (an
-# unquoted delimiter, a body that does not end, a body line that begins with its delimiter but is not
-# exactly it, and the other cases the HERE-DOCUMENTS paragraph of _skip_quoting lists) it reads the text as
-# above, so such a body's '#' and quotes take the comment rule and its readings or the fallback. The poll-loop
-# word scan, which reads one segment of one reading with no reading map of its own, reads such an uncertain
-# '#' as word text and, where that does not scan, as a comment (_orch_raw_unquoted_words), and reads no
-# here-document body as text.
+# such a '$(...)' is text to bash, with no comment rule, quote or parenthesis in it (bash prints the body for
+# x="$(cat <<'EOF'<newline># Don't merge yet<newline>EOF<newline>)", a common commit message form), so in
+# that form, the first substitution the lex skips whole, holding cat and that here-document and nothing
+# else, the lexer's skip jumps past the body and reads no '#' there. Elsewhere (an unquoted delimiter, a body
+# that does not end, a body line that begins with its delimiter but is not exactly it, a command before or
+# after the here-document inside the substitution, another '$(' substitution the lex skips whole or a
+# backquote substitution anywhere in the command, and the other cases the HERE-DOCUMENTS paragraph of
+# _skip_quoting lists) it reads the text as above, so such a body's '#' and quotes take the comment rule and
+# its readings or the fallback. The poll-loop word scan, which reads one segment of one reading with no
+# reading map of its own, reads such an uncertain '#' as word text and, where that does not scan, as a
+# comment (_orch_raw_unquoted_words), and reads no here-document body as text.
 #
 # COST. One lex takes time linear in the length of the command. The substitution skip
 # searches for the end of a '#''s line and for the next character it reads after that '#' once per stretch
-# of text, however many '#' a line holds, and reads each here-document body it jumps past once
-# (_skip_quoting); the nesting stack counts its entries, so testing it for a word, a skip or a backquote takes
-# the same time however deep it is, and closing a backquote pops only what it removes (_NestStack,
-# _nest_track). So one _lex_readings call takes at most thirty-one passes, each linear, and a caller that
-# lexes a command more than once pays that for each call; the foreground detach scan keeps a nesting stack of
-# the same kind and is linear too.
+# of text, however many '#' a line holds, and searches for at most one here-document body per pass
+# (_skip_quoting); a lex that read such a body and then meets another command substitution starts again
+# with no body read, so it makes at most two passes (_lex_reading); the nesting stack counts its entries,
+# so testing it for a word, a skip or a backquote takes the same time however deep it is, and closing a
+# backquote pops only what it removes (_NestStack, _nest_track). So one _lex_readings call takes at most
+# thirty-one lexes of at most two linear passes each, and a caller that lexes a command more than once pays
+# that for each call; the foreground detach scan keeps a nesting stack of the same kind and is linear too.
 #
 # OTHER SCANNERS. The raw-text readings beside the lexer read a comment their own way, and none of them
 # proves a command safe on its own: _join_continuations reads a '#' at any word start (after a blank, newline
@@ -691,6 +694,36 @@ def _hash_doubt_reason(rule, doubt):
 # expansion. Where the rest of an uncertain '#''s line holds none of them, its comment reading and its
 # word-text reading end the skip at the same index, so neither reading has to be enumerated.
 _SKIP_QUOTING_READS_RE = re.compile(r"[\\'\"`$(){}]")
+# The text of the commit message form's substitution before its '<<' (_subst_heredoc_close), and the
+# blanks and blank lines between the delimiter line and the ')' that closes it.
+_SUBST_HEREDOC_LEAD_RE = re.compile(r"[ \t]*cat[ \t]+")
+_SUBST_HEREDOC_CLOSE_RE = re.compile(r"[ \t\n]*\)")
+
+
+class _SubstHeredocRetry(Exception):
+    """Raised inside one lex when a command substitution follows a quoted here-document body the lex has read
+    (_SubstHeredocs.substitution); _lex_reading lexes the command again reading no body. Not a ValueError, so
+    no parse-error handler on the way out reads it as a failed lex."""
+
+
+class _SubstHeredocs:
+    """What one lex shares across its substitution skips for reading a quoted here-document's body (the
+    HERE-DOCUMENTS paragraph of _skip_quoting): on is False once a skip meets a '<<' it does not read,
+    substitutions counts the command substitutions the lex reads as opaque text (each '$(' a skip opens or
+    meets, and each backquote, quoted or not) outside a body it read, and read is True once it has read a
+    body."""
+
+    def __init__(self):
+        self.on = True
+        self.substitutions = 0
+        self.read = False
+
+    def substitution(self):
+        """Count one command substitution. One met after a body was read could hold a command the guards do
+        not read inside a substitution, so the lex starts again reading no body (_SubstHeredocRetry)."""
+        if self.read:
+            raise _SubstHeredocRetry()
+        self.substitutions += 1
 
 
 def _skip_quoting(command, i, n, nest=None, hash_reading=None, heredoc=None):
@@ -702,17 +735,26 @@ def _skip_quoting(command, i, n, nest=None, hash_reading=None, heredoc=None):
     context so the caller fails closed rather than mis-pairing a later quote.
 
     HERE-DOCUMENTS. With heredoc None (the raw push splitter, the poll-loop word scan) a '<<' inside a '$(...)'
-    opens nothing here and its body is read like any other text. The lexer passes heredoc, a one-element list
-    shared by every skip of one lex: while heredoc[0] is True, a '<<' directly inside a '$(...)' (not a
-    '$((...))' or a '(' group inside one) whose delimiter is quoted and holds no '$' or backquote opens a
-    here-document, and at the newline that ends the operator's line the skip jumps past the bodies
-    (_subst_heredoc_end), which bash reads as text, so no comment rule, quote or parenthesis applies there
-    (bash prints the body for x="$(cat <<'EOF'<newline># Don't merge yet<newline>EOF<newline>)"). The skip
-    reads a body only where its end is plain; at the first here-document it does not read (an unquoted or
-    unparseable delimiter, an operator line that ends inside a nested construct or after the substitution
-    closes, a body _subst_heredoc_end does not end) it sets heredoc[0] False and reads the rest of the lex
-    as the skip reads it with heredoc None. So each body the skip reads covers text it then jumps past, at
-    most one body search a lex makes is abandoned, and the skip stays linear.
+    opens nothing here and its body is read like any other text. The lexer passes heredoc, a _SubstHeredocs
+    shared by every skip of one lex, and the skip reads a body as text in the commit message form only
+    (_subst_heredoc_close): the '<<' sits directly inside the first command substitution the lex skips whole
+    (no '$(' in a skip and no backquote before it in the lex; an unquoted '$(...)' the lexer reads as its own
+    segments, which the guards read), and that substitution's text before it is cat and blanks; its
+    delimiter is quoted, holds no '$' or backquote and has only blanks after it on its line; the body ends at
+    a line that is exactly the delimiter (_subst_heredoc_end); and only blanks and blank lines follow that
+    line before the ')' that closes the substitution. Bash reads that body as text, with no comment rule,
+    quote or parenthesis in it (bash prints the body for
+    x="$(cat <<'EOF'<newline># Don't merge yet<newline>EOF<newline>)"), so the skip jumps to that ')'. At any
+    other '<<' directly inside a '$(...)' while heredoc.on is True (an unquoted or unparseable delimiter, a
+    command before or after the here-document inside the substitution, a body that does not end, a
+    here-document in a later or nested substitution) it sets heredoc.on False and reads the rest of the lex
+    as the skip reads it with heredoc None; a '<<' inside a '$((...))' or a '(' group is read as text, as
+    with heredoc None. The guards read no command inside a double-quoted substitution or a backquote one, and
+    on a lex that fails (as a lex that reads no body fails on an apostrophe in one) their raw fallbacks read
+    the whole text, so a body read must not turn that fallback into a lex beside a command they cannot read:
+    a '$(' or backquote the lex meets after it read a body raises _SubstHeredocRetry, and _lex_reading lexes
+    the command again with no body read. So a lex makes at most one body search and, when it starts again,
+    two linear passes.
 
     An unquoted '#' inside a '$(...)' command substitution or a '${...}' expansion this skips follows the
     comment rule (see the comment above _nest_track), since a comment there runs to the end of its line,
@@ -730,6 +772,7 @@ def _skip_quoting(command, i, n, nest=None, hash_reading=None, heredoc=None):
     comment inside it reads, so both readings skip the same text. nest is the caller's nesting stack, read
     only for whether a backquote substitution is open on it."""
     c = command[i]
+    opened = i
     if c == "'":
         stack = ["sq"]
         i += 1
@@ -749,14 +792,12 @@ def _skip_quoting(command, i, n, nest=None, hash_reading=None, heredoc=None):
         i += 2
     else:
         raise ValueError("not a quoting opener")
+    if heredoc is not None and stack[0] in ("bq", "paren", "subst"):
+        heredoc.substitution()
     # What _hash_reading_choice reads: whether a backquote substitution is open (a copy of nest, as before,
     # would cost each skip time in the stack's depth).
     hash_nest = ("`",) if nest and "`" in nest else ("(",)
     prev = "paren" if stack[0] in ("paren", "subst") else "word"  # the comment rule's class before index i
-    # The here-documents (delimiter, strip_tabs) opened on the current line of a '$(...)', and the index of
-    # the newline that ends that line and the stack depth they were opened at (see HERE-DOCUMENTS above).
-    bodies = []
-    bodies_at = None
     # eol is the end of the line of the last '#' the comment rule below read, and reads_at the first index
     # after that '#' where _SKIP_QUOTING_READS_RE matches before eol (eol itself when none does). The skip
     # only moves forward, so a later '#' on the same line reuses both and each search covers text no earlier
@@ -800,10 +841,14 @@ def _skip_quoting(command, i, n, nest=None, hash_reading=None, heredoc=None):
                 prev = "word"
                 continue
             if c == "`":
+                if heredoc is not None:
+                    heredoc.substitution()
                 stack.append("bq")
                 i += 1
                 continue
             if c == "$" and i + 1 < n and command[i + 1] == "(":
+                if heredoc is not None:
+                    heredoc.substitution()
                 stack.append("paren" if command[i + 2:i + 3] == "(" else "subst")
                 i += 2
                 prev = "paren"
@@ -838,10 +883,14 @@ def _skip_quoting(command, i, n, nest=None, hash_reading=None, heredoc=None):
             i += 1
             continue
         if c == "`":
+            if heredoc is not None:
+                heredoc.substitution()
             stack.append("bq")
             i += 1
             continue
         if c == "$" and i + 1 < n and command[i + 1] == "(":
+            if heredoc is not None:
+                heredoc.substitution()
             stack.append("paren" if command[i + 2:i + 3] == "(" else "subst")
             i += 2
             prev = "paren"
@@ -851,31 +900,15 @@ def _skip_quoting(command, i, n, nest=None, hash_reading=None, heredoc=None):
             i += 2
             prev = "word"
             continue
-        if top == "subst" and heredoc and heredoc[0]:
-            if c == "<" and command.startswith("<<", i):
-                here_string = command.startswith("<<<", i)
-                if not here_string:
-                    parsed = _parse_heredoc_delim(command, i + 2, n)
-                    # A later operator on the same line reuses its end, searched once per line.
-                    line_end = bodies_at[0] if bodies and i < bodies_at[0] else command.find("\n", i)
-                    spec = command[i:parsed[3]] if parsed else ""
-                    if (parsed is None or not parsed[0] or line_end < 0 or "$" in spec or "`" in spec
-                            or (bodies and bodies_at != (line_end, len(stack)))):
-                        heredoc[0] = False
-                    else:
-                        bodies.append((parsed[1], parsed[2]))
-                        bodies_at = (line_end, len(stack))
-                i += 3 if here_string else 2
-                prev = "break"
+        if c == "<" and top == "subst" and heredoc is not None and heredoc.on and command.startswith("<<", i):
+            # The commit message form's here-document (HERE-DOCUMENTS above): jump past its body to the ')'.
+            close = (_subst_heredoc_close(command, opened, i, n)
+                     if len(stack) == 1 and heredoc.substitutions == 1 else None)
+            if close is not None:
+                heredoc.read = True
+                i = close
                 continue
-            if c == "\n" and bodies:
-                end = _subst_heredoc_end(command, i + 1, n, bodies) if bodies_at == (i, len(stack)) else None
-                del bodies[:]
-                if end is not None:
-                    i = end
-                    prev = "break"
-                    continue
-                heredoc[0] = False
+            heredoc.on = False
         prev = "paren" if c in "()" else "break" if c in " \t\n;&|<>" else "word"
         if top in ("paren", "subst"):
             if c == "(":
@@ -889,8 +922,6 @@ def _skip_quoting(command, i, n, nest=None, hash_reading=None, heredoc=None):
         elif c == "}":
             stack.pop()
         i += 1
-    if bodies:
-        heredoc[0] = False  # the substitution closed before the line its here-documents' bodies follow
     return i
 
 
@@ -926,7 +957,8 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
     carried a substitution), as is a word read inside an open '${...}'. A substitution or expansion inside a
     double-quoted string (a locale one included) is skipped whole by _skip_quoting, which applies the same
     rule to a '#' inside it with nest and hash_reading, and reads a quoted here-document's body inside it as
-    text with heredoc (the lexer's shared flag; None reads none, see _skip_quoting)."""
+    text with heredoc (the lexer's shared _SubstHeredocs; None reads none, see _skip_quoting), on which an
+    unquoted backquote the word holds is counted as a command substitution too."""
     chars = []
     opaque = bool(glued) or (nest is not None and "${" in nest)
     started = False
@@ -1085,6 +1117,8 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
             # an UNQUOTED '/' ends the tilde-prefix cleanly: the leading '~' stays an expansion, and anything
             # after this '/' (an opaque '$VAR', a quote) no longer blocks it. 'cd ~/$VAR' remains an ALLOW.
             tilde_prefix_open = False
+        if c == "`" and heredoc is not None:
+            heredoc.substitution()
         if nest is not None:
             _nest_track(nest, c, dollar_before)
         after_dollar = c == "$"
@@ -1346,6 +1380,28 @@ def _subst_heredoc_end(command, i, n, heredocs):
                     return None
                 break
     return i
+
+
+def _subst_heredoc_close(command, opened, at, n):
+    """The index of the ')' that closes the '$(...)' opened at index opened (its '$') when the '<<' at index
+    at, directly inside it, opens the commit message form's here-document (the HERE-DOCUMENTS paragraph of
+    _skip_quoting): the substitution's text before the '<<' is cat and blanks; the delimiter is quoted, holds
+    no '$' or backquote and has only blanks after it on its line; the body ends at a line that is exactly the
+    delimiter (_subst_heredoc_end); and only blanks and blank lines follow that line before the ')'. None
+    otherwise, a here-string '<<<' included."""
+    if command.startswith("<<<", at) or not _SUBST_HEREDOC_LEAD_RE.fullmatch(command, opened + 2, at):
+        return None
+    parsed = _parse_heredoc_delim(command, at + 2, n)
+    if parsed is None or not parsed[0]:
+        return None
+    _quoted, delim, strip_tabs, spec_end = parsed
+    spec = command[at:spec_end]
+    line_end = command.find("\n", spec_end)
+    if line_end < 0 or "$" in spec or "`" in spec or command[spec_end:line_end].strip(" \t"):
+        return None
+    end = _subst_heredoc_end(command, line_end + 1, n, ((delim, strip_tabs),))
+    close = _SUBST_HEREDOC_CLOSE_RE.match(command, end) if end is not None else None
+    return close.end() - 1 if close else None
 
 
 # The characters after which bash starts a new word: blanks, newline and the shell metacharacters.
@@ -1685,10 +1741,10 @@ def _lex_readings(command, partial=False, locale=False):
     (_read_word). The readings are enumerated
     depth first, the comment reading of a '#' before its word-text reading, and stop at
     _HASH_READING_LIMIT uncertain '#' characters per reading, so at most sixteen readings and thirty-one
-    lexes per call. That bounds how many lexes a call makes, not how long they take: each lex takes time
-    linear in the length of the command (COST in the comment above _nest_track), so a call takes at most
-    thirty-one linear passes, and a caller that calls this, or _lex_command, more than once makes up to that
-    many lexes each time.
+    lexes per call. That bounds how many lexes a call makes, not how long they take: each lex makes at most
+    two passes, each taking time linear in the length of the command (COST in the comment above
+    _nest_track), so a call takes at most sixty-two linear passes, and a caller that calls this, or
+    _lex_command, more than once makes up to that many lexes each time.
     Raises _UncertainHashError beyond that bound, at a '#' in or right after a backquote substitution,
     and when a reading fails to lex for another reason after an uncertain '#' was read (a ValueError the
     plain lex raises before any uncertain '#' propagates unchanged); in partial mode a reading that fails for
@@ -1724,7 +1780,19 @@ def _lex_reading(command, partial, hash_reading, locale=False):
     each uncertain '#' read as hash_reading maps its index (True a comment to the end of its line, False word
     text). An uncertain '#' that hash_reading does not map, or any uncertain '#' when hash_reading is None,
     raises _UncertainHashError carrying its index; in partial mode it does so too, unless hash_reading is
-    None, where the segments recovered before it are returned as for any other unparseable construct."""
+    None, where the segments recovered before it are returned as for any other unparseable construct. A lex
+    that reads a quoted here-document's body inside a command substitution and then meets another command
+    substitution starts again with no body read (the HERE-DOCUMENTS paragraph of _skip_quoting), so it makes
+    at most two passes."""
+    try:
+        return _lex_pass(command, partial, hash_reading, locale, _SubstHeredocs())
+    except _SubstHeredocRetry:
+        return _lex_pass(command, partial, hash_reading, locale, None)
+
+
+def _lex_pass(command, partial, hash_reading, locale, subst_heredocs):
+    """One pass of _lex_reading, reading a quoted here-document's body inside a command substitution through
+    subst_heredocs (a _SubstHeredocs shared by the pass's substitution skips), or no body when it is None."""
     n = len(command)
     segments = []
     argv = []
@@ -1735,8 +1803,6 @@ def _lex_reading(command, partial, hash_reading, locale=False):
     seg_start = [0]
     pending_heredocs = []  # queued (delim, strip_tabs) for QUOTED heredocs whose bodies to skip (finding 17)
     nest = _NestStack()  # the nesting stack of the '#' comment rule (see the comment above _nest_track)
-    subst_heredocs = [True]  # False once a substitution skip meets a here-document it does not read
-    # (the HERE-DOCUMENTS paragraph of _skip_quoting)
 
     def end_segment(sep, op_start, next_start):
         segments.append(_Segment(list(argv), sep, list(redirects),
