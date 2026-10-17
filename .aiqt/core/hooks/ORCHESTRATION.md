@@ -222,7 +222,8 @@ in a non-blocking note, never swallowed. The citation read check (the `citation-
 PreToolUse Bash hook in its warning-only bake) reads both generations of the session's ledger, merged
 over the state directory of each distinct toplevel among the session cwd's, the command's `git -C`
 toplevel and each cited file's (at most 8 state directories; one past that bound or the deadline is named
-in its guard-events row and, when a cited range is judged, in its note), when a
+in its guard-events row and, when a cited range is judged, in its note, at most 10 in each and the rest
+counted), when a
 `git commit` message or a `gh pr create` or `gh pr edit` body cites a path with a line or line range,
 notes each cited range no row covers at its current content, and appends one `guard-events.jsonl` row of
 kind `citint` per checked command (decision `warn` or `allow`, with each citation's class), the evidence a

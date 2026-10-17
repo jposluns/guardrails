@@ -4866,6 +4866,126 @@ def _citecheck_cross_cases(tmp):
     inside = (True, "allow", [("f.py:2", "covered")], False, False)
     cut_off = {site: (False, "warn", [("f.py:2", "unjudged")], True, site == "ledger-dir") for site, *_rest in sites}
     check("citeledger/ledger-read-deadline", timed, {site: [inside, cut, cut] for site, cut in cut_off.items()})
+    # The toplevels not read are named, at most _CITECHK_TOPS_SHOWN of them (lowered to two here), and the
+    # rest counted, in the note and in the row: with one state directory read (b's), citations of h.py in
+    # one, two and three other repositories leave one under, at and one over that many toplevels not read.
+    saved_list = (aiqt_hooks._CITECHK_MAX_LEDGERS, getattr(aiqt_hooks, "_CITECHK_TOPS_SHOWN", 10))
+    named = ["{} (past the 1 state directories read per call)".format(repo.top) for repo in others[:3]]
+    listed = []
+    try:
+        aiqt_hooks._CITECHK_MAX_LEDGERS, aiqt_hooks._CITECHK_TOPS_SHOWN = 1, 2
+        for count in (1, 2, 3):
+            verdict, note, rows = _citecheck_run(b.root, "git commit -m '{}'".format(" ".join(cited[:count])),
+                                                 "cross-bound")
+            listed.append((verdict, [(r["detail"]["ledgers_read"], r["detail"]["ledgers_not_read"],
+                                      r["detail"].get("ledgers_not_read_more")) for r in rows],
+                           "not read under {} toplevel(s)".format(count) in note,
+                           [entry in note for entry in named[:count]], "; and 1 more." in note))
+    finally:
+        aiqt_hooks._CITECHK_MAX_LEDGERS, aiqt_hooks._CITECHK_TOPS_SHOWN = saved_list
+    check("citeledger/ledgers-not-read-shown-bound", listed,
+          [("warn", [(1, named[:1], 0)], True, [True], False),
+           ("warn", [(1, named[:2], 0)], True, [True, True], False),
+           ("warn", [(1, named[:2], 1)], True, [True, True, False], True)])
+    # The registry that locates a toplevel's state directory is read only for a toplevel reached before the
+    # bound and the deadline. From a cwd in b, citations of h.py in bound - 1 and bound other repositories
+    # read the registry of each, then of each but the last (the one past the bound); through git -C a, with
+    # the stand-in clock moved just inside, at or just past the deadline as b's ledger read returns, a's
+    # registry is read inside it and, at and past it, not read, a's toplevel named as not read.
+    saved_registry, located = aiqt_hooks._orch_registry, []
+
+    def registry(root, *args, **kwargs):
+        located.append(root)
+        return saved_registry(root, *args, **kwargs)
+    unlocated = {"bound": [], "deadline": []}
+    try:
+        aiqt_hooks._orch_registry = registry
+        for count in (bound - 1, bound):
+            del located[:]
+            _citecheck_run(b.root, "git commit -m '{}'".format(" ".join(cited[:count])), "cross-bound")
+            unlocated["bound"].append([repo.top in located for repo in others[:count]])
+        for offset in (-0.001, 0.0, 0.001):
+            del located[:]
+            clock = _CiteClock(1000.0, 1000.0 + aiqt_hooks._CITECHK_BUDGET + offset, False)
+            saved_time, saved_ledger = aiqt_hooks.time, aiqt_hooks._citechk_ledger
+
+            def stand_in(*args, saved_ledger=saved_ledger, clock=clock, **kwargs):
+                try:
+                    return saved_ledger(*args, **kwargs)
+                finally:
+                    clock.advance()
+            try:
+                aiqt_hooks.time, aiqt_hooks._citechk_ledger = clock, stand_in
+                verdict, _note, rows = _citecheck_run(b.root, git_c.format("f.py:2"), "cross")
+            finally:
+                aiqt_hooks.time, aiqt_hooks._citechk_ledger = saved_time, saved_ledger
+            unlocated["deadline"].append((a.top in located, verdict,
+                                          [r["detail"]["ledgers_not_read"] for r in rows]))
+    finally:
+        aiqt_hooks._orch_registry = saved_registry
+    check("citeledger/ledger-registry-not-read-skipped", unlocated,
+          {"bound": [[True] * (bound - 1), [True] * (bound - 1) + [False]],
+           "deadline": [(True, "allow", [[]]), (False, "warn", [["{} ({})".format(a.top, late)]]),
+                        (False, "warn", [["{} ({})".format(a.top, late)]])]})
+
+
+def _citecheck_suffix_cases(tmp):
+    """A relative cited path that names no file under the command's repository is matched by its suffix only
+    to a recorded path under that repository's resolved toplevel, whichever ledger read holds the row, so a
+    read of a file in another repository never covers it. Repository a holds f.py, sub/x.py and
+    pkg/sub/y.py, b holds g.py and lib/sub/y.py, and a's f.py and sub/x.py are read with the cwd in a. From
+    a cwd in a, git -C b citing f.py:1 (no slash, so no citation once no recorded path matches) is dropped,
+    not covered, and citing sub/x.py:2 is no such file; from a cwd in b, sub/x.py:2 is no such file alone
+    and beside an absolute citation of a's f.py:1, which is covered and adds a's ledger. A recorded path
+    under a directory whose name only begins with b's (b's toplevel without its closing slash) does not
+    match either. The control: from a cwd in b, git -C a citing sub/y.py:2, with a's pkg/sub/y.py read in
+    full with the cwd in a and b's lib/sub/y.py read at its first line only with the cwd in b (both
+    ledgers read, and both recorded paths end with the cited one), is covered by a's read alone, and so is
+    the same citation from a cwd in a."""
+    a = _CiteRepo(tmp / "citecheck-suffix-a", {"f.py": b"f1\n", "sub/x.py": b"x1\nx2\n",
+                                                "pkg/sub/y.py": b"y1\ny2\n"})
+    b = _CiteRepo(tmp / "citecheck-suffix-b", {"g.py": b"g1\n", "lib/sub/y.py": b"Y1\nY2\n"})
+    twin = tmp / "citecheck-suffix-b-twin"
+    (twin / "sub").mkdir(parents=True)
+    (twin / "sub" / "q.py").write_bytes(b"q1\n")
+
+    def read(repo, path, lines, session):
+        path = os.path.realpath(str(path))
+        content = Path(path).read_text(encoding="utf-8").splitlines()[:lines]
+        repo.call("Read", {"file_path": path}, {"type": "text", "file": {
+            "filePath": path, "content": "\n".join(content), "startLine": 1, "numLines": lines}}, session)
+
+    def seen(repo, command, session):
+        """The verdict, each citation's class, each row's count of tokens dropped as no citation, and the
+        note."""
+        verdict, note, rows = _citecheck_run(repo.root, command, session)
+        return (verdict, [(c["cite"], c["class"]) for r in rows for c in r["detail"]["citations"]],
+                [r["detail"]["dropped_not_citation"] for r in rows], note)
+    read(a, a.root / "f.py", 1, "suffix")
+    read(a, a.root / "sub" / "x.py", 2, "suffix")
+    nofile = "sub/x.py:2 (no such file under {}".format(b.top)
+    git_c_b = "git -C {} commit -m 'see {{}}'".format(b.root)
+    flat, shaped = seen(a, git_c_b.format("f.py:1"), "suffix"), seen(a, git_c_b.format("sub/x.py:2"), "suffix")
+    check("citeledger/suffix-other-repo-git-C", (flat[:3] + (flat[3] == "",), shaped[:3] + (nofile in shaped[3],)),
+          (("allow", [], [1], True), ("warn", [("sub/x.py:2", "nofile")], [0], True)))
+    f_py = os.path.join(a.top, "f.py")
+    alone = seen(b, "git commit -m 'see sub/x.py:2'", "suffix")
+    mixed = seen(b, "git commit -m 'see sub/x.py:2 and {}:1'".format(f_py), "suffix")
+    check("citeledger/suffix-other-repo-absolute",
+          (alone[:2] + (nofile in alone[3],), mixed[:2] + (nofile in mixed[3],)),
+          (("warn", [("sub/x.py:2", "nofile")], True),
+           ("warn", [("sub/x.py:2", "nofile"), (f_py + ":1", "covered")], True)))
+    read(b, twin / "sub" / "q.py", 1, "suffix-twin")
+    prefix = seen(b, "git commit -m 'see sub/q.py:1'", "suffix-twin")
+    check("citeledger/suffix-sibling-prefix",
+          prefix[:2] + ("sub/q.py:1 (no such file under {}".format(b.top) in prefix[3],),
+          ("warn", [("sub/q.py:1", "nofile")], True))
+    read(a, a.root / "pkg" / "sub" / "y.py", 2, "suffix-control")
+    read(b, b.root / "lib" / "sub" / "y.py", 1, "suffix-control")
+    through = seen(b, "git -C {} commit -m 'see sub/y.py:2'".format(a.root), "suffix-control")
+    own = seen(a, "git commit -m 'see sub/y.py:2'", "suffix-control")
+    check("citeledger/suffix-own-repo-covered", (through[:2] + (through[3] == "",), own[:2] + (own[3] == "",)),
+          (("allow", [("sub/y.py:2", "covered")], True), ("allow", [("sub/y.py:2", "covered")], True)))
 
 
 class _CiteCutPattern:
@@ -16355,6 +16475,7 @@ def _main_isolated(report_path=None):
             _citecheck_deadline_cases(tmp)
             _citecheck_path_cases(tmp)
             _citecheck_cross_cases(tmp)
+            _citecheck_suffix_cases(tmp)
             _citeledger_walk_cases(tmp)
             _citecheck_step_cases(tmp)
             _cite_roadmap_cases(tmp)
