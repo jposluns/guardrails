@@ -1259,9 +1259,11 @@ def _lex_command(command, partial=False, heredocs=None, spans=None, locale=False
     walk, which runs only on a command that holds a backslash-newline, reads a substitution still open at
     that quote as one it does not follow and so reads the command both ways. The citation check also lexes
     the command with nested True and reads it both ways wherever the two lexings differ (_citechk_shape) or
-    only one of them lexes, with or without a backslash-newline, so a quote form the nested reading refuses
-    (an ANSI-C $'...' with an escaped quote in a substitution) still lets the command's message and body
-    files be read."""
+    only one of them lexes, with or without a backslash-newline, so a quote form the nested lexing cannot
+    pair (an ANSI-C $'...' with an escaped quote in a substitution, where its quotes do not pair as
+    _skip_quoting reads them) still lets the message and body files of the lexing that lexes be read; a
+    backslash-newline that splits a here-document delimiter overrides this, and the command is then scanned
+    as one that does not lex (_citechk_commands)."""
     n = len(command)
     segments = []
     argv = []
@@ -15261,7 +15263,7 @@ def citation_read_recorder(data):
 # most _CITECHK_MAX_CITES citations, the match of a relative cited path against the paths the ledger
 # records and of the range against the rows of its file (ledgers within their bound); the parse of a diff
 # probe's output (what git printed in the time it was given); the lexing of the command and the parse of
-# its here-documents, once in each of its two readings (_citechk_commands), so twice, at whatever size the
+# its here-documents, once in each of its two lexings (_citechk_commands), so twice, at whatever size the
 # payload gives them, with the join of a body file or
 # git -C path to the directory it is relative to; for a command that lexes and holds a backslash-newline,
 # the search of the here-document operators and double-quoted strings that lexing read for a here-document
@@ -15281,9 +15283,12 @@ def citation_read_recorder(data):
 # here-document whose operator the lexer reads (quoted or not), or of one that bash reads as unquoted inside
 # a command substitution in a double-quoted string; the expansion of each here-document with an unquoted
 # delimiter in such a command is named as not read. Where the walk through such a string meets what it does
-# not follow as bash does (_citechk_substituted_ops), the command is read both ways: lexed, with every
-# message and body file read, and scanned as written, with those expansions named; so is a command whose two
-# lexings differ, or of which only one lexes (_citechk_commands). A command is found after
+# not follow as bash does (_citechk_substituted_ops), the command is read both ways, and so is a command
+# whose two lexings differ, or of which only one lexes (_citechk_commands), unless a backslash-newline splits
+# a here-document delimiter in it, when it is scanned as one that does not lex. Read both ways, a command is
+# lexed, with every message and body file that a lexing that lexed names read (a lexing that did not lex is
+# not evaluated, so a file only it names is neither read nor named), and scanned as written, with those
+# expansions named. A command is found after
 # the reserved words that begin its segment, so one in a brace group, after '!', 'if' or 'then', or after
 # time -- or coproc is read.
 # Each text is scanned once, in the order the command's options name it, and a cited or body-file path
@@ -15818,7 +15823,7 @@ def _citechk_commands(command, cwd, deadline):
     ends at its next unescaped double quote (nested=False), and as bash reads a command substitution or
     backquote in one, whose own quotes nest (nested=True). A command that neither lexes is scanned as
     written ("raw"). A command in which a backslash-newline splits a here-document delimiter where bash
-    reads one (_citechk_split_delim, from the places the first reading that lexes shows) is scanned as one
+    reads one (_citechk_split_delim, from the places the first lexing that lexes shows) is scanned as one
     that does not lex: at an operator the lexer reads, quoted or not, the lexer reads a delimiter that no
     line can match and runs that body to the end of the command, later commands included, and in a command
     substitution in a
@@ -15830,11 +15835,14 @@ def _citechk_commands(command, cwd, deadline):
     item that the raw scan gives, all with parse "both"; a citation both readings find is judged in each,
     so it can be listed twice. A command is read both ways too where only one of its two lexings lexes, or
     where their words, redirects or here-documents differ (_citechk_shape; a double quote inside a
-    substitution in a double-quoted string, for example, which the first reading takes as the string's end,
+    substitution in a double-quoted string, for example, which the first lexing takes as the string's end,
     so a later -F file can fall inside one -m value): the commands of each lexing that lexes are read, the
     first's then each of the second's that differs from all of the first's, every message and body file of
-    each read, and the raw scan's item after them. This holds with or without a backslash-newline in the
-    command, which is what the walk alone needs before it runs. A command is found after any reserved words
+    each read, and the raw scan's item after them; a lexing that does not lex is not evaluated. This holds
+    with or without a backslash-newline in the command, which is what the walk alone needs before it runs,
+    except where a backslash-newline splits a here-document delimiter: that command is scanned as one that
+    does not lex, as above, before the lexings are compared, so even the files of a lexing that lexes are
+    neither read nor named. A command is found after any reserved words
     that begin its segment (_CITECHK_LEADING), so one
     inside a brace group, after '!', 'if' or 'then', or after time -- or coproc is read; a redirection of
     the group as a whole (after its '}') is not the command's own. A message or body file resolves against
@@ -15844,7 +15852,7 @@ def _citechk_commands(command, cwd, deadline):
     duplicates fd 0 onto itself leaves it), and otherwise, where that last redirection is a file, a
     descriptor or none of the command's own (a pipe, or a redirection of its group, for example), named as
     unseen. A here-document is read only by the command it redirects."""
-    readings = []  # (segments, heredocs, spans) of each reading that lexes, the walk's (nested=False) first
+    readings = []  # (segments, heredocs, spans) of each lexing that lexes, the walk's (nested=False) first
     for nested in (False, True):
         heredocs, spans = [], []
         try:

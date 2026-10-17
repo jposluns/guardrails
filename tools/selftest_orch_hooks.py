@@ -5774,13 +5774,17 @@ def _citecheck_step_cases(tmp):
     # (the command was scanned only as written, msg.txt unread); and an ANSI-C quote with an escaped quote in
     # a substitution, which the nested lexing refuses, so its note says that a lexing that did not lex is
     # not evaluated. A substitution with no quote inside, which both lexings read alike, leaves the command
-    # lexed.
+    # lexed. A backslash-newline that splits a here-document delimiter overrides all of this: with the same
+    # ANSI-C quote and a split quoted delimiter, the command is scanned as one that does not lex (parse raw,
+    # its text as written), and the -F file of the lexing that lexes is neither read nor named.
     differ, lexings = {}, aiqt_hooks._CITECHK_LEXINGS_DIFFER
     unlexed = ("as lexed (each message and body file that a lexing of it that lexed names read; a lexing that did "
                "not lex is not evaluated, so a file only it names is neither read nor named)")
     for name, command in (("dquote-in-subst", "git commit -m \"$(echo '\"')\" -F msg.txt -m \"$(echo '\"')\""),
                           ("squote-in-subst", "git commit -F msg.txt -m \"$(echo \"it's\")\""),
                           ("ansi-c-in-subst", "git commit -F msg.txt -m \"$(echo $'x\\' y')\""),
+                          ("ansi-c-split-delim", "git commit -F msg.txt -m \"$(echo $'x\\' y')\" <<'E\\\nOF'\n"
+                                                 "see tools/a.py:1\nEOF\n"),
                           ("alike", "git commit -F msg.txt -m \"$(echo x)\"")):
         differ[name] = read_split(command, "lexings-" + name, unlexed if name == "ansi-c-in-subst" else None)
     check("citeledger/check-lexings-differ", differ,
@@ -5792,6 +5796,7 @@ def _citecheck_step_cases(tmp):
                                         ("both", lexings, [], ["command text"], [])], False, lexings),
            "ansi-c-in-subst": ("warn", [("both", lexings, ["tools/a.py:1"], ["-F msg.txt", "-m value"], []),
                                         ("both", lexings, [], ["command text"], [])], False, lexings, True),
+           "ansi-c-split-delim": ("warn", [("raw", None, ["tools/a.py:1"], ["command text"], [])], False, None),
            "alike": ("warn", [("lexed", None, ["tools/a.py:1"], ["-F msg.txt", "-m value"], [])], False, None)})
     # A command after the reserved words that begin its segment is read: in a brace group, after '!', 'if'
     # or 'then', after 'do', after 'time -p', after a '--' that follows time or its -p, and after coproc,
