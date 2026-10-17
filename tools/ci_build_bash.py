@@ -2,8 +2,9 @@
 """Pinned bash build for CI (ci-build-bash): fetch GNU bash 5.3 and its official patches 001 to 009, verify every
 file against its pin, apply the patches in order, build bash, install it under the runner's temporary directory and
 add that directory's bin to GITHUB_PATH. The hooks behaviour self-test parses its heredoc cases with the bash it
-finds on PATH and fails (never skips) below bash 5.3, so the job that runs it builds this one first, whatever bash
-the runner image ships.
+finds on PATH and fails (never skips) below bash 5.3, so each CI job that runs it builds this one first, whatever
+bash the runner image ships: the generated surfaces job, and the three git-fixture-env config lanes, which rerun
+that self-test as a roster member.
 
   ci_build_bash.py [--self-test]
                                 offline vectors over small fixture files in a temporary directory
@@ -37,8 +38,10 @@ Not checked: the GNU signature of the archive and the patches (the pinned digest
 upstream file is a refusal, never a silent update); the compiler, make and patch that the runner image supplies,
 which run as trusted tools; and which bash a later step runs. The hooks self-test looks bash up on its PATH, and
 the runner adds each GITHUB_PATH line to the front of PATH for the later steps of the same job; that is GitHub's
-documented behaviour, which this script does not observe. The self-test drives the whole pipeline over fixture
-files with sh, patch and make; it never fetches, and a fetch attempted while it runs fails it.
+documented behaviour, which this script does not observe. In a config lane the execution gate and the lane pass
+that PATH on to the rerun hooks self-test with only the lane's git wrapper directories in front. The self-test
+drives the whole pipeline over fixture files with sh, patch and make; it never fetches, and a fetch attempted while
+it runs fails it.
 """
 import sys
 
@@ -540,6 +543,14 @@ def self_test(report_path=None):
             # self-test never runs itself again. A bare run with RUNNER_TEMP and GITHUB_PATH set, as on a CI
             # runner, runs the self-test and never fetches, writes GITHUB_PATH or creates anything under
             # RUNNER_TEMP, so a test lane that starts this suite's runner bare never starts the build.
+            # Against an entry that builds on a bare run (as this script did before --build existed), four vectors
+            # fail: main/bare-runs-self-test, whose bare run reaches the build and the stubbed urlopen;
+            # main/build-without-env-exits-2, since --build was then a usage error, and also through the reached
+            # list it shares with the bare run and the work directory that run leaves under RUNNER_TEMP;
+            # main/unknown-argument-exits-2, through that shared reached list alone; and network/never-reached.
+            # Resetting reached before the unknown-argument calls would let both of those last two pass against
+            # that entry, so it is not reset. main/self-test-forms-run-self-test passes either way: it is a
+            # regression guard for the self-test forms.
             from unittest.mock import patch
             entered = []
 

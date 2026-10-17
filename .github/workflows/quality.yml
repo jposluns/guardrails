@@ -651,11 +651,12 @@ jobs:
         run: python3 -I -B tools/gen_hooks.py --check
 
       # The hooks behaviour self-test parses its heredoc cases with the bash on PATH and fails below bash 5.3,
-      # which the runner image need not ship. This job, and no other, builds GNU bash 5.3 with patches 001 to
-      # 009 from pinned digests and adds its bin directory to GITHUB_PATH, which GitHub documents as putting it
-      # first on PATH for every later step of this job. Its self-test runs first, offline; a refused or failed
-      # build fails the job. The build runs only on the explicit --build; run with no argument the script runs
-      # its offline self-test.
+      # which the runner image need not ship. This job builds GNU bash 5.3 with patches 001 to 009 from pinned
+      # digests and adds its bin directory to GITHUB_PATH, which GitHub documents as putting it first on PATH for
+      # every later step of this job. Its self-test runs first, offline; a refused or failed build fails the job.
+      # The build runs only on the explicit --build; run with no argument the script runs its offline self-test.
+      # The three git-fixture-env config lanes rerun the hooks behaviour self-test as a roster member, so each
+      # of those jobs runs this same build step before its lane; no other job builds bash.
       - name: Pinned bash 5.3 build self-test
         shell: bash
         run: python3 -I -B tools/ci_build_bash.py --self-test
@@ -759,6 +760,13 @@ jobs:
         with:
           python-version: '3.14'
 
+      # The lane reruns the hooks behaviour self-test, which fails below bash 5.3, as a roster member. This is
+      # the generated surfaces job's pinned bash build step, unchanged (see the comment there): it adds the
+      # built bash to GITHUB_PATH, first on PATH for the lane step, and a refused or failed build fails the job.
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env combined config-injection lane (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined
@@ -776,6 +784,13 @@ jobs:
         with:
           python-version: '3.14'
 
+      # The lane reruns the hooks behaviour self-test, which fails below bash 5.3, as a roster member. This is
+      # the generated surfaces job's pinned bash build step, unchanged (see the comment there): it adds the
+      # built bash to GITHUB_PATH, first on PATH for the lane step, and a refused or failed build fails the job.
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env malformed-config lane (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed
@@ -792,6 +807,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
+
+      # The lane reruns the hooks behaviour self-test, which fails below bash 5.3, as a roster member. This is
+      # the generated surfaces job's pinned bash build step, unchanged (see the comment there): it adds the
+      # built bash to GITHUB_PATH, first on PATH for the lane step, and a refused or failed build fails the job.
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env system-config lane (execution-reconciled)
         shell: bash
