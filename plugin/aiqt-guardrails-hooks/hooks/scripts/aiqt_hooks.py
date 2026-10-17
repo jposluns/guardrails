@@ -300,7 +300,7 @@ DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
     "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_git_discard_fallback",
-    "_protected_line_fallback", "_raw_push_guard", "_wrtscp_deny")
+    "_hash_doubt_opaque_deny", "_protected_line_fallback", "_raw_push_guard", "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -412,14 +412,264 @@ _Segment = collections.namedtuple(
     "_Segment", ("argv", "sep_after", "redirects", "raw", "opaque_shell", "argv_opaque",
                  "argv_leading_tilde"))
 
+# THE '#' COMMENT RULE, shared by the scanners that decide where a comment starts in what the guards read as
+# commands (the shared lexer and its word reader, the substitution skip _skip_quoting, the redirect-target
+# check, the commit-proof raw audit, the poll-loop word scan and both rules of the foreground detach scan;
+# the raw-text readings that only add matches beside the lexer read a comment their own way, see OTHER
+# SCANNERS below). Bash reads an unquoted '#' as a comment only at the start of a word,
+# and where a word starts depends on grammar these scanners do not parse. Bash 5.3 reads 'x=$(true)#' and
+# 'a=(1 2)#' as word text but '(true)#' and '((1))#' as a comment; a '#' after a blank as text inside an
+# ordinary '${x:- #}' but as a comment inside the '${ cmd; }' and '${| cmd; }' forms; and a '#' after a
+# blank or '|' as text inside a '[[ =~ ]]' regex group or an extglob group, but as a comment inside a
+# subshell or a command substitution. So a '#' opens a comment ONLY in a CERTAIN context: at the start of
+# the input, or right after an unquoted blank (space or tab), a newline, or one of ; & | < > (a
+# backslash-newline in between changes nothing, as bash removes it first), while NOTHING is open on the
+# scanner's nesting stack: no parenthesis of any kind, no '${' parameter expansion and no backquote
+# substitution. A '#' right after any other word character, a closing quote or an escaped character is
+# word text, as it is to bash in every context (ticket#123, ${#x}, ${x#y}). Every other unquoted '#' is
+# UNCERTAIN: one right after a '(', a ')' or a backquote (whatever kind it is, which also covers a case
+# pattern's ')' and a function name's '()'), and one at a word start while the nesting stack is not empty.
+# An ESCAPED backquote is a plain character to bash outside a backquote substitution (bash prints `# for
+# echo \`#), so the shared word reader (_read_word) reads it as word text that opens nothing, and a '#'
+# right after it as word text; inside a backquote substitution it opens a nested one, and a '#' right after
+# it stays uncertain. The foreground detach scan still reads a '#' right after any backquote as uncertain.
+#
+# BOTH READINGS. Bash reads an uncertain '#' outside any backquote substitution in one of two ways: as a
+# comment to the end of its line (a subshell, a command substitution, a case pattern, a function name, the
+# '${ cmd; }' forms) or as word text (an assignment's '$(...)' or '(...)', an ordinary '${...}', a regex or
+# extglob group). So the lexer judges such a command under both readings of each uncertain '#'
+# (_lex_readings), each reading a normal lex, while the command holds at most _HASH_READING_LIMIT of them
+# (four, so at most sixteen readings and thirty-one lexes per _lex_readings call); _lex_command hands its
+# caller the segments of every reading in turn, and the poll-loop classifier and the gate-weakening deny
+# tier, whose answers are not monotone in the segments they read, judge each reading on its own and keep the
+# strictest. The base commit fc11d9bc read every such '#' as a comment (or, right after a backquote inside a
+# word, as word text), which is one of the readings, so a guard that judges every segment it is given also
+# sees the reading fc11d9bc took. That is an argument, not a proof: the self-test's base tables check, for
+# each guard row behind a set of such prefixes, that the guard decides at least as strictly as fc11d9bc did.
+# The cost: a guard can now see a shape in the reading bash does not take, which makes it stricter for some
+# commands; the multi-line 'msg=$(<newline># note<newline>...)' form, a command substitution with a comment
+# line, is a common case that takes this path. A '#' inside an open backquote substitution, or right after a
+# backquote that may open one, is read by bash as a comment that ends at the closing backquote (bash prints
+# RAN for echo `#'`; echo RAN # '), which neither reading models, so it is not enumerated.
+#
+# FALLBACK. Beyond the bound, at a '#' in or right after a backquote substitution, or where a reading itself
+# fails to lex, _lex_command raises _UncertainHashError, a ValueError, and each caller takes a fallback
+# that runs its raw probes on the command text and on that text with every backslash-newline removed first
+# (bash removes it before anything else) and then every quote character and backslash (_hash_doubt_scan).
+# That removal is not a decoder: it reads g$'i't as g$it, where bash runs git, as it does for g$'\x69't and
+# g$"i"t. So the fallback does not match by removal a command whose text holds an ANSI-C $'...' or locale
+# $"..." quote, or a quote character or backslash next to a letter (_hash_doubt_opaque): each guard that
+# reads the fallback treats such a command as cannot-evaluate and takes its fail-closed decision, the one
+# it gives a command whose text names its subject (a deny, or the note where the guard only notes). The
+# self-test's base tables record, for each guard row behind such prefixes and in both placements, the
+# decision fc11d9bc made for the plain, quoted and continued spellings, and the decisions fc11d9bc and main
+# made for ANSI-C and locale spellings of the command word and of the subcommand, and require each guard to
+# decide at least as strictly; outside those rows the property is not proven. The poll-loop word scan returns
+# no words for an uncertain '#' it meets outside a double-quoted string (one inside a substitution such a
+# string holds it reads under its readings, see below), and the foreground detach scan treats one like an
+# unbalanced quote, its fail-safe deny.
+#
+# INSIDE A DOUBLE-QUOTED STRING. The word reader skips a '$(...)', '${...}' or backquote substitution inside a
+# double-quoted string (a locale $"..." one included, under both locale readings) whole, with _skip_quoting,
+# whose own quotes nest. A comment there runs to the end of its line past any quote or ')' on it, so it moves
+# where the skip, and so the word and the command after it, ends (bash prints a and RAN for
+# echo "$(echo a # it's<newline>)"; echo RAN # ')", where reading that '#' as word text pairs the apostrophe
+# with the last quote and swallows echo RAN into the word). The skip applies the same rule: word text right
+# after a word character, a closing quote or an escaped character; cannot-evaluate right after a backquote;
+# otherwise uncertain, since the substitution or expansion is open, and judged under both readings with the
+# lexer's other uncertain '#' characters (the same bound). An uncertain '#' whose rest of line holds nothing
+# the skip reads (no quote, backslash, backquote, '$', parenthesis or brace) ends the skip at the same index
+# under both readings, so it is not enumerated (a '# heading' line in a here-document inside "$(...)"). No '#'
+# inside a backquote substitution is read there: the skip ends it at its first unescaped backquote, as bash
+# does, whatever a comment inside it reads. The poll-loop word scan, which reads one segment of one reading
+# with no reading map of its own, reads such an uncertain '#' as word text and, where that does not scan, as
+# a comment (_orch_raw_unquoted_words).
+#
+# OTHER SCANNERS. The raw-text readings beside the lexer read a comment their own way, and none of them
+# proves a command safe on its own: _join_continuations reads a '#' at any word start (after a blank, newline
+# or metacharacter, a '(' or a group's ')' included, but not after a substitution's ')') as a comment, only to
+# keep the backslash-newline at its end, and its joined text is read beside the raw text (the de-quoted copy,
+# the discard scope scans, the continuation cause) or places the raw push splitter's splits, a backstop layer
+# whose segments keep comment text; _lex_uncertain_causes reports any '#' outside
+# the quotes of its blunt quoting model, and any '$(' or backquote even inside double quotes, so such a '#'
+# makes the lex uncertain whatever bash reads (a '#' inside a double-quoted '${...}' that holds no
+# substitution is no 'comment' cause, though a command the shared lexer cannot judge is a 'lexer' cause);
+# and the raw push splitter
+# (_raw_push_segments) keeps a word-start comment's text in its segment and, inside a substitution it skips
+# with _skip_quoting and no reading, meets an uncertain '#' as an unreadable construct, so the rest of the
+# command joins the current segment unsplit (a whole-text read, the over-denial direction).
 
-def _skip_quoting(command, i, n):
+
+def _nest_track(nest, c, after_dollar):
+    """Record one UNQUOTED, unescaped character on a comment-rule nesting stack (a list). A '(' opens a
+    parenthesis and a ')' closes the innermost one when it is on top; a ')' with no parenthesis on top (an
+    unmatched one, or one met while a '${' or backquote is innermost) pops nothing. A '{' directly after a '$' opens a '${'
+    parameter expansion and a '}' closes it when it is on top (bash ends a '${...}' at its first unquoted
+    '}'). A backquote closes the innermost open backquote substitution, with anything still open inside it,
+    or else opens one. Any other character leaves the stack unchanged. The stack only has to tell whether
+    ANYTHING is open: a case pattern's ')' inside an open parenthesis pops that parenthesis, which can hide
+    only a subshell or substitution parenthesis (inside which bash reads a word-start '#' as a comment too),
+    never an open '${' or backquote."""
+    if c == "(":
+        nest.append("(")
+    elif c in ")}":
+        if nest and nest[-1] == ("(" if c == ")" else "${"):
+            nest.pop()
+    elif c == "{" and after_dollar:
+        nest.append("${")
+    elif c == "`":
+        if "`" in nest:
+            del nest[len(nest) - 1 - nest[::-1].index("`"):]
+        else:
+            nest.append("`")
+
+
+def _hash_comment_reading(nest, prev):
+    """The comment rule (see the comment above _nest_track) for one unquoted, unescaped '#'. prev classifies
+    what comes before it, a backslash-newline aside: "break" for the start of the input or an unquoted blank,
+    newline or one of ; & | < >, "paren" for an unquoted '(' or ')', "backquote" for a backquote (escaped or
+    not), and "word" for anything else (a word character, a closing quote or an escaped character). Returns
+    True when the '#' opens a comment (a "break" with nothing open on the nesting stack), False when it is
+    word text (after a "word"), and None when the reading depends on context (cannot-evaluate)."""
+    if prev == "word":
+        return False
+    if prev == "break" and not nest:
+        return True
+    return None
+
+
+class _UncertainHashError(ValueError):
+    """The cannot-evaluate signal for an unquoted '#' whose comment reading depends on context (the comment
+    rule above _nest_track). It is a ValueError, so every caller's existing fallback applies; a caller that
+    must tell it apart from the other constructs the lexer does not model catches this subclass first. at
+    is the index of that '#' (None when the readings were abandoned rather than one '#' met), and backquote
+    is True when the '#' sits in or right after a backquote substitution, which the readings do not model."""
+
+    def __init__(self, message, at=None, backquote=False):
+        super().__init__(message)
+        self.at = at
+        self.backquote = backquote
+
+
+# The most uncertain '#' characters the lexer judges under both readings (2 ** 4 = 16 readings at most).
+_HASH_READING_LIMIT = 4
+
+
+def _hash_reading_choice(hash_reading, at, nest):
+    """The reading of the uncertain '#' at index at: True to read it as a comment to the end of its line,
+    False to read it as word text, as the caller's hash_reading maps it. Raises _UncertainHashError when the
+    reading is not given (the caller then enumerates both, _lex_readings) or when a backquote substitution
+    is open, whose comment bash ends at the closing backquote (the comment above _nest_track)."""
+    if "`" in nest:
+        raise _UncertainHashError("cannot evaluate a '#' inside a backquote substitution", at, True)
+    if hash_reading is None or at not in hash_reading:
+        raise _UncertainHashError("cannot evaluate a '#' whose comment reading depends on context", at)
+    return hash_reading[at]
+
+
+def _hash_doubt_text(command):
+    """command with every backslash-newline removed first, as bash removes it before anything else (so
+    gi<backslash-newline>t reads as git), and then every quote character and backslash removed: a rough
+    quote removal (see _hash_doubt_scan)."""
+    return command.replace("\\\n", "").replace("'", "").replace('"', "").replace("\\", "")
+
+
+def _hash_doubt_scan(command):
+    """The text a fallback's raw probes read when _UncertainHashError stops the lexer (the comment above
+    _nest_track): command as written, a newline, then _hash_doubt_text(command). A probe matching either
+    part matches, so a guard subject named in the raw text, or spelled with a backslash-newline or quote
+    that touches no letter (git <backslash-newline>reset), keeps the guard's strict decision; a probe spanning
+    the two parts only over-matches, the fallback's safe direction. A caller reads a command for which
+    _hash_doubt_opaque holds as cannot-evaluate before any probe runs on this text."""
+    return command + "\n" + _hash_doubt_text(command)
+
+
+def _hash_doubt_names(command, pattern):
+    """True when pattern matches _hash_doubt_scan(command), the command as written or with its
+    backslash-newlines and then its quote characters and backslashes removed."""
+    return bool(pattern.search(_hash_doubt_scan(command)))
+
+
+# An ANSI-C $' or locale $" quote, or a quote character or backslash with a letter right before or after it
+# (_hash_doubt_opaque).
+_HASH_DOUBT_OPAQUE_RE = re.compile(r"\$['\"]|[^\W\d_]['\"\\]|['\"\\][^\W\d_]")
+
+
+def _hash_doubt_opaque(command):
+    """True when command's text holds quoting that _hash_doubt_text does not undo the way bash does: an
+    ANSI-C $'...' or locale $"..." quote anywhere (removal reads g$'i't as g$it, and bash runs git for
+    g$'\\x69't and g$"i"t), or a quote character or backslash with a letter right before or after it (g'it',
+    gi\\t, 'git', gi<backslash-newline>t). The check reads the raw text and decodes nothing, so it also
+    holds for such characters inside quoted text. A guard whose fallback reads _hash_doubt_scan takes its
+    fail-closed decision on such a command instead of matching its probes there: the decision it gives a
+    command whose text names its subject behind a '#' the lexer could not judge under both readings."""
+    return bool(_HASH_DOUBT_OPAQUE_RE.search(command))
+
+
+def _hash_doubt_opaque_reason(rule, subject):
+    """The reason a guard gives for its fail-closed decision on a command the fallback cannot evaluate
+    (_hash_doubt_opaque): rule names the rule, subject the shape the guard cannot rule out past the '#'."""
+    return ("AIQT rule {}: this command carries a '#' whose comment reading depends on context (right after "
+            "a '(', ')' or backquote, or at the start of a word inside an open parenthesis, ${{...}} or "
+            "backquote substitution) that the shared lexer could not judge under both readings (more than "
+            "four such '#', one inside or right after a backquote substitution, or a reading that does not "
+            "lex), and its text holds quoting this guard's fallback does not decode (an ANSI-C $'...' or "
+            "locale $\"...\" quote, or a quote character or backslash next to a letter), so it cannot rule out "
+            "{} past that '#' (check-fails-closed-on-unreadable). Put a blank before such a '#' outside any "
+            "grouping or substitution, or drop it.".format(rule, subject))
+
+
+def _hash_doubt_opaque_deny(rule, subject, advice=""):
+    """The deny a guard returns on a command the fallback cannot evaluate (_hash_doubt_opaque), with
+    _hash_doubt_opaque_reason(rule, subject) and then advice, if given; the banner names the rule's id."""
+    reason = _hash_doubt_opaque_reason(rule, subject)
+    return _deny(reason + " " + advice if advice else reason,
+                 "AIQT guardrail: denied a command behind a '#' this guard could not read, in quoting its "
+                 "fallback does not decode (rule {}, fail-closed).".format(rule.split(" ", 1)[0]))
+
+
+def _hash_doubt_reason(rule, doubt):
+    """The deny reason for a guard that keeps its strict decision on a '#' whose comment reading depends on
+    context and that the shared lexer could not judge under both readings: rule names the rule, doubt says
+    what the guard cannot rule out after that '#'."""
+    return ("AIQT rule {}: this command carries a '#' whose comment reading depends on context (right after "
+            "a '(', ')' or backquote, or at the start of a word inside an open parenthesis, ${{...}} or "
+            "backquote substitution) that the shared lexer could not judge under both readings (more than "
+            "four such '#', one inside or right after a backquote substitution, or a reading that does not "
+            "lex), so it cannot tell whether the text after it is a comment or a command, and {}; it is "
+            "denied rather than allowed unread (check-fails-closed-on-unreadable). Put a blank before such a "
+            "'#' outside any grouping or substitution, or drop it.".format(rule, doubt))
+
+
+# A character the substitution skip (_skip_quoting) reads inside a command substitution or a '${...}'
+# expansion. Where the rest of an uncertain '#''s line holds none of them, its comment reading and its
+# word-text reading end the skip at the same index, so neither reading has to be enumerated.
+_SKIP_QUOTING_READS_RE = re.compile(r"[\\'\"`$(){}]")
+
+
+def _skip_quoting(command, i, n, nest=None, hash_reading=None):
     """Skip the quote or substitution opened at command[i]: a single or double quote, a backquote, or a
     $( command substitution or ${ parameter expansion. Return the index just past the whole construct.
     A substitution nested in a double-quoted string opens a FRESH quoting context whose own quotes nest, so
     an inner quote never closes an outer string and a << quoted at any depth stays data, never a heredoc
     opener. Iterative (an explicit context stack), linear, stdlib-only. Raises ValueError on an unterminated
-    context so the caller fails closed rather than mis-pairing a later quote."""
+    context so the caller fails closed rather than mis-pairing a later quote.
+
+    An unquoted '#' inside a '$(...)' command substitution or a '${...}' expansion this skips follows the
+    comment rule (see the comment above _nest_track), since a comment there runs to the end of its line,
+    past any quote or closing parenthesis on it, and so moves where the skip ends: right after a word
+    character, a closing quote or an escaped character it is word text; right after a backquote (or after an
+    escaped one while a backquote substitution is open on nest, or nest is None) it is cannot-evaluate and
+    raises _UncertainHashError; anywhere else it is uncertain, since the substitution or expansion it sits
+    in is open. An uncertain '#' whose rest of line holds a character this skip reads
+    (_SKIP_QUOTING_READS_RE) is read as hash_reading maps its index (the caller's reading of each uncertain
+    '#', see _lex_readings): True a comment to the end of its line, whose text then opens nothing, False
+    word text; one it does not map raises _UncertainHashError carrying its index, which a caller with no
+    reading (the raw push splitter) meets as any other ValueError. One whose rest of line holds no such
+    character ends the skip at the same index under both readings, so it is read as word text. No '#'
+    inside a backquote substitution is read: bash ends one at its first unescaped backquote whatever a
+    comment inside it reads, so both readings skip the same text. nest is the caller's nesting stack, read
+    only for whether a backquote substitution is open on it."""
     c = command[i]
     if c == "'":
         stack = ["sq"]
@@ -438,6 +688,8 @@ def _skip_quoting(command, i, n):
         i += 2
     else:
         raise ValueError("not a quoting opener")
+    hash_nest = list(nest or ()) + ["("]  # what _hash_reading_choice reads: is a backquote substitution open
+    prev = "paren" if stack == ["paren"] else "word"  # the comment rule's class of what precedes index i
     while stack:
         if i >= n:
             raise ValueError("unterminated quote or substitution")
@@ -449,25 +701,31 @@ def _skip_quoting(command, i, n):
                 raise ValueError("unterminated single quote")
             i = j + 1
             stack.pop()
+            prev = "word"
             continue
         if top == "bq":
+            # No '#' is read here: bash ends the substitution at its first unescaped backquote whatever a
+            # comment inside it reads, so both readings of such a '#' skip the same text.
             if c == chr(92) and i + 1 < n:
                 i += 2
             elif c == "`":
                 i += 1
                 stack.pop()
+                prev = "backquote"
             else:
                 i += 1
             continue
         if c == chr(92):
             if i + 1 >= n:
                 raise ValueError("unterminated escape")
+            prev = "backquote" if command[i + 1] == "`" and (nest is None or "`" in nest) else "word"
             i += 2
             continue
         if top == "dq":
             if c == '"':
                 i += 1
                 stack.pop()
+                prev = "word"
                 continue
             if c == "`":
                 stack.append("bq")
@@ -476,13 +734,25 @@ def _skip_quoting(command, i, n):
             if c == "$" and i + 1 < n and command[i + 1] == "(":
                 stack.append("paren")
                 i += 2
+                prev = "paren"
                 continue
             if c == "$" and i + 1 < n and command[i + 1] == "{":
                 stack.append("brace")
                 i += 2
+                prev = "word"
                 continue
             i += 1
             continue
+        if c == "#" and prev != "word":
+            # The comment rule inside a command substitution or '${...}' expansion (see the docstring).
+            if prev == "backquote":
+                raise _UncertainHashError("cannot evaluate a '#' right after a backquote", i, True)
+            eol = command.find("\n", i)
+            eol = n if eol < 0 else eol
+            if (_SKIP_QUOTING_READS_RE.search(command, i + 1, eol)
+                    and _hash_reading_choice(hash_reading, i, hash_nest)):
+                i = eol  # a comment to the end of its line: its quotes and parentheses open nothing
+                continue
         if c == "'":
             stack.append("sq")
             i += 1
@@ -498,11 +768,14 @@ def _skip_quoting(command, i, n):
         if c == "$" and i + 1 < n and command[i + 1] == "(":
             stack.append("paren")
             i += 2
+            prev = "paren"
             continue
         if c == "$" and i + 1 < n and command[i + 1] == "{":
             stack.append("brace")
             i += 2
+            prev = "word"
             continue
+        prev = "paren" if c in "()" else "break" if c in " \t\n;&|<>" else "word"
         if top == "paren":
             if c == "(":
                 stack.append("paren")
@@ -518,7 +791,7 @@ def _skip_quoting(command, i, n):
     return i
 
 
-def _read_word(command, i, n, locale=False):
+def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=False):
     """Read exactly ONE shell word starting at index i (which must be at a word character, never a space,
     newline, or metacharacter). Returns (text, opaque, started, all_digits, leading_tilde, new_i): text is
     the quote/escape decoded word, opaque is True if it carried an unquoted
@@ -534,12 +807,29 @@ def _read_word(command, i, n, locale=False):
     unterminated escape. With locale True, an unquoted bash locale quote $"..." is read as the double-quoted
     string bash reads when no message catalogue translates it (the '$' dropped, so Cl$""aude is Claude);
     otherwise its '$' stays an ordinary opaque character, as every other caller reads it and as the
-    commit-identity check reads it too, alongside the locale reading."""
+    commit-identity check reads it too, alongside the locale reading.
+
+    The comment rule (see the comment above _nest_track) applies to every unquoted '#' the word reaches: a
+    '#' before the word has begun (after a backslash-newline that begins it) ends the read with nothing
+    started, so the caller, which knows what came before, decides it, unless hash_reading (the caller's
+    reading of each uncertain '#', see _lex_readings) maps its index to False, word text, when the word
+    begins with it; a '#' inside the word is word text, except right after an unescaped backquote, or an
+    escaped one while a backquote substitution is open on nest (or nest is None), where its reading depends
+    on context and this raises _UncertainHashError, a ValueError; an escaped backquote with no backquote
+    substitution open is plain word text, as it is to bash. nest,
+    when given, is the caller's nesting stack: the word's unquoted '${', '}' and backquotes are recorded on
+    it. glued is True when the word is read directly after a ')' ('x=$(true)~/a'): it may continue a word
+    that the ')' did not end, so its '~' is not a leading tilde and it is opaque (part of a word that
+    carried a substitution), as is a word read inside an open '${...}'. A substitution or expansion inside a
+    double-quoted string (a locale one included) is skipped whole by _skip_quoting, which applies the same
+    rule to a '#' inside it with nest and hash_reading."""
     chars = []
-    opaque = False
+    opaque = bool(glued) or (nest is not None and "${" in nest)
     started = False
     all_digits = True
     leading_tilde = False
+    after_dollar = False  # the previous character was an unquoted, unescaped '$' (a following '{' opens '${')
+    after_backquote = False  # the previous character was an unquoted backquote that may open a substitution
     # tilde_prefix_open: True while we are still INSIDE the tilde-prefix (from a leading unquoted '~' up to
     # the first UNQUOTED '/', or end of word). Bash expands the leading '~' ONLY when the WHOLE tilde-prefix
     # is unquoted and unescaped; any quoted or escaped character in that span disables expansion and the word
@@ -557,16 +847,23 @@ def _read_word(command, i, n, locale=False):
             # (a synthetic empty argv element that mis-set the subcommand and defeated the sibling guards).
             i += 2
             continue
-        if c == "#" and not started:
-            # A '#' still at a WORD BOUNDARY (the word has not begun) starts a comment, even when the
-            # boundary was EXPOSED by a preceding continuation join ('git diff \<newline># > out.txt'):
-            # break so the caller re-applies its end-of-line comment handling rather than reading '#' as a
-            # literal word (which would tokenize a commented-out redirect/pipe and earn a false proof).
-            # A mid-word '#' (started is True, e.g. ticket#123 or a continuation-joined di\<newline>ff#x)
-            # is left literal below.
+        if c == "#" and not started and (hash_reading is None or hash_reading.get(i) is not False):
+            # A '#' still at a WORD BOUNDARY (the word has not begun), a boundary EXPOSED by a preceding
+            # continuation join ('git diff \<newline># > out.txt'): break so the caller applies the comment
+            # rule there (it knows what preceded the continuation) rather than reading '#' as a literal word
+            # (which would tokenize a commented-out redirect/pipe and earn a false proof). An uncertain '#'
+            # the caller's reading takes as word text is read on as this word's first character.
             break
-        was_started = started  # whether the word had begun BEFORE this char (a leading tilde needs it False)
+        if c == "#" and after_backquote:
+            # Right after a backquote the '#' may begin the text of a backquote substitution, a comment to
+            # bash that ends at the closing backquote, or follow a closing one as word text: neither reading
+            # models that comment, so it is cannot-evaluate whatever the reading (the comment rule).
+            raise _UncertainHashError("cannot evaluate a '#' right after a backquote", i, True)
+        # Any other mid-word '#' (ticket#123, a continuation-joined di\<newline>ff#x) is left literal below.
+        was_started = started or glued  # whether the word had begun BEFORE this char (a leading tilde needs False)
         started = True
+        dollar_before, after_dollar = after_dollar, False  # only an ordinary '$' (below) sets it again
+        after_backquote = c == "`"  # the escape branch below sets it for an escaped backquote
         if locale and c == "$" and i + 1 < n and command[i + 1] == '"':
             # bash locale quoting $"...": the text is looked up in the current locale's message catalogue
             # and, when no translation applies, the '$' is dropped and the rest is a double-quoted string, read
@@ -613,8 +910,10 @@ def _read_word(command, i, n, locale=False):
                     i += 1
                     continue
                 if d == "`" or (d == "$" and i + 1 < n and command[i + 1] in "({"):
+                    # A substitution or expansion opens a fresh context: skip it whole, applying the comment
+                    # rule to a '#' inside it under this reading (_skip_quoting).
                     _sub_start = i
-                    i = _skip_quoting(command, i, n)
+                    i = _skip_quoting(command, i, n, nest, hash_reading)
                     opaque = True
                     chars.append(command[_sub_start:i])
                     continue
@@ -659,6 +958,10 @@ def _read_word(command, i, n, locale=False):
             if i + 1 >= n:
                 raise ValueError("unterminated escape")
             chars.append(command[i + 1])
+            # An escaped backquote is plain word text that opens nothing while no backquote substitution is
+            # open (bash prints `# for echo \`#); inside one it opens a nested one, so a '#' right after it
+            # stays cannot-evaluate there (and wherever the caller keeps no nesting stack).
+            after_backquote = command[i + 1] == "`" and (nest is None or "`" in nest)
             all_digits = False
             i += 2
             continue
@@ -678,6 +981,9 @@ def _read_word(command, i, n, locale=False):
             # an UNQUOTED '/' ends the tilde-prefix cleanly: the leading '~' stays an expansion, and anything
             # after this '/' (an opaque '$VAR', a quote) no longer blocks it. 'cd ~/$VAR' remains an ALLOW.
             tilde_prefix_open = False
+        if nest is not None:
+            _nest_track(nest, c, dollar_before)
+        after_dollar = c == "$"
         if not c.isdigit():
             all_digits = False
         chars.append(c)
@@ -1202,6 +1508,15 @@ def _lex_command(command, partial=False, locale=False):
     guard never depends on it: _raw_push_guard rescans the raw text on every protected_line
     call. Linear, non-recursive, stdlib-only.
 
+    An unquoted '#' opens a comment only in a certain context (the comment rule above _nest_track). A command
+    holding an uncertain '#' is lexed under both readings of each one (_lex_readings), and the segments of
+    every reading are returned one reading after another, each reading's last segment ending with no
+    separator as a newline-ended one does, so a caller that judges every segment it is given decides at least
+    as strictly as on the strictest single reading. Where the readings cannot be judged (more than
+    _HASH_READING_LIMIT uncertain '#', one in or right after a backquote substitution, or a reading that does
+    not lex) it raises _UncertainHashError, a ValueError, and the caller takes its fallback over
+    _hash_doubt_scan.
+
     When partial is True the raise-on-error contract is replaced by a best-effort one: instead of raising,
     the lexer returns (segments, complete, in_progress), where segments are the segments recovered before the
     first unparseable construct, complete is False when such a construct truncated the scan (True when the
@@ -1212,9 +1527,72 @@ def _lex_command(command, partial=False, locale=False):
     inspect a resolvable PREFIX (an earlier relative cd/redirect) even when a LATER segment is unparseable,
     rather than discarding every parsed segment on the first heredoc/here-string/process-substitution. The
     default partial=False keeps the list-returning, raise-on-error contract every other caller relies on.
+    Under the readings each reading is lexed partially, the recovered segments of every reading are returned
+    in turn, complete is True only when every reading parsed whole, and in_progress is the last reading's
+    flag, so a segment an earlier reading was still inside stays in the list and is read like a complete
+    one; where the readings cannot be judged, the segments recovered before the first uncertain '#' are
+    returned with complete False.
 
-    locale is passed to _read_word for every word: True reads a bash locale quote $"..." as a double-quoted
-    string, and the default False keeps the reading every other caller relies on."""
+    locale is passed to _read_word for every word, under every reading: True reads a bash locale quote
+    $"..." as a double-quoted string, and the default False keeps the reading every other caller relies on."""
+    try:
+        readings = _lex_readings(command, partial, locale)
+    except _UncertainHashError:
+        if partial:
+            return _lex_reading(command, True, None, locale)
+        raise
+    if partial:
+        return ([seg for segs, _complete, _open in readings for seg in segs],
+                all(done for _segs, done, _open in readings), readings[-1][2])
+    return [seg for segs in readings for seg in segs]
+
+
+def _lex_readings(command, partial=False, locale=False):
+    """The lex of command under every reading of its uncertain '#' characters (the comment above
+    _nest_track): a list with one _lex_reading result per reading, a single entry for a command with none.
+    Each reading maps the index of each uncertain '#' the lex meets (one inside a substitution or expansion
+    that a double-quoted string holds included, _skip_quoting) to True (a comment to the end of its line) or
+    False (word text), and each is a normal lex of the whole command, with locale passed to every word read
+    (_read_word). The readings are enumerated
+    depth first, the comment reading of a '#' before its word-text reading, and stop at
+    _HASH_READING_LIMIT uncertain '#' characters per reading, so at most sixteen readings and thirty-one
+    lexes per call (a caller that calls this, or _lex_command, more than once pays that bound each time).
+    Raises _UncertainHashError beyond that bound, at a '#' in or right after a backquote substitution,
+    and when a reading fails to lex for another reason after an uncertain '#' was read (a ValueError the
+    plain lex raises before any uncertain '#' propagates unchanged); in partial mode a reading that fails for
+    another reason returns its recovered segments, as a partial lex does."""
+    readings = []
+    pending = [{}]
+    while pending:
+        reading = pending.pop()
+        try:
+            readings.append(_lex_reading(command, partial, reading, locale))
+        except _UncertainHashError as exc:
+            if exc.backquote or exc.at is None or exc.at in reading or len(reading) >= _HASH_READING_LIMIT:
+                raise
+            # A stack: the comment reading, pushed last, is lexed first.
+            pending.append(_hash_reading_with(reading, exc.at, False))
+            pending.append(_hash_reading_with(reading, exc.at, True))
+        except ValueError as exc:
+            if not reading:
+                raise
+            raise _UncertainHashError("a reading of an uncertain '#' does not lex: {}".format(exc)) from exc
+    return readings
+
+
+def _hash_reading_with(reading, at, comment):
+    """A copy of the reading map with the '#' at index at read as a comment (comment True) or word text."""
+    out = dict(reading)
+    out[at] = comment
+    return out
+
+
+def _lex_reading(command, partial, hash_reading, locale=False):
+    """One lex of command (see _lex_command for the segments it returns, the partial contract and locale) with
+    each uncertain '#' read as hash_reading maps its index (True a comment to the end of its line, False word
+    text). An uncertain '#' that hash_reading does not map, or any uncertain '#' when hash_reading is None,
+    raises _UncertainHashError carrying its index; in partial mode it does so too, unless hash_reading is
+    None, where the segments recovered before it are returned as for any other unparseable construct."""
     n = len(command)
     segments = []
     argv = []
@@ -1224,6 +1602,7 @@ def _lex_command(command, partial=False, locale=False):
     opaque = [False]
     seg_start = [0]
     pending_heredocs = []  # queued (delim, strip_tabs) for QUOTED heredocs whose bodies to skip (finding 17)
+    nest = []  # the nesting stack of the '#' comment rule (see the comment above _nest_track)
 
     def end_segment(sep, op_start, next_start):
         segments.append(_Segment(list(argv), sep, list(redirects),
@@ -1240,11 +1619,18 @@ def _lex_command(command, partial=False, locale=False):
         k = at + oplen
         while k < n and command[k] in " \t":  # inline whitespace before the target (never a newline)
             k += 1
-        # A redirect target that begins with an unquoted '#' is a comment where a filename must be (bash
-        # treats '#' at a word start as a comment, so the redirect has no target): cannot-evaluate, ASK.
-        if k >= n or command[k] == "\n" or command[k] in _METACHARS or command[k] == "#":
+        # A redirect target that begins with an unquoted '#' follows the operator or a blank, so under the
+        # comment rule it is either a certain comment where a filename must be (the redirect has no target)
+        # or, inside an open parenthesis, ${...} or backquote substitution, a '#' whose reading depends on
+        # context. Read as a comment it leaves the redirect with no target (cannot-evaluate, ASK); read as
+        # word text it begins the target.
+        hash_target = (k < n and command[k] == "#" and _hash_comment_reading(nest, "break") is None
+                       and _hash_reading_choice(hash_reading, k, nest) is False)
+        if (k >= n or command[k] == "\n" or command[k] in _METACHARS
+                or (command[k] == "#" and not hash_target)):
             raise ValueError("malformed redirect: no target")
-        target, t_opaque, started, _digits, t_ltilde, k2 = _read_word(command, k, n, locale)
+        target, t_opaque, started, _digits, t_ltilde, k2 = _read_word(command, k, n, nest,
+                                                                      hash_reading=hash_reading, locale=locale)
         if not started:
             raise ValueError("malformed redirect target")
         redirects.append(_classify_redirect(op, src_fd, target, t_opaque, t_ltilde))
@@ -1254,12 +1640,16 @@ def _lex_command(command, partial=False, locale=False):
         if "\x00" in command:
             raise ValueError("NUL in command")
         i = 0
+        glued_at = -1  # the index just past a ')': a word read there may continue the word before the ')'
+        before = "break"  # what precedes index i, a backslash-newline aside, for _hash_comment_reading
         while i < n:
             c = command[i]
             if c in " \t":
+                before = "break"
                 i += 1
                 continue
             if c == "\n":
+                before = "break"
                 end_segment("", i, i + 1)
                 i += 1
                 if pending_heredocs:
@@ -1270,16 +1660,31 @@ def _lex_command(command, partial=False, locale=False):
                     seg_start[0] = i
                 continue
             if c == "#":
-                # An unquoted '#' at a WORD BOUNDARY starts a comment to end of line (bash): the rest of
-                # the line is ignored, so a redirect or pipe that is actually commented out (git diff # >
-                # /tmp/x) never earns a proof. A mid-word '#' (--rev=abc#1, ticket#123) is read literally
-                # inside _read_word and never reaches this word-start position.
-                nl = command.find("\n", i)
-                i = n if nl == -1 else nl
-                continue
+                # An unquoted '#' at a WORD BOUNDARY. In a certain context (after a blank, a newline, one of
+                # ; & | < > or at the start, with nothing open on the nesting stack) it starts a comment to
+                # end of line (bash): the rest of the line is ignored, so a redirect or pipe that is actually
+                # commented out (git diff # > /tmp/x) never earns a proof. Anywhere else here (right after a
+                # '(' or ')', as in 'x=$(true)#; cmd', or inside an open parenthesis, '${...}' or backquote
+                # substitution) its reading depends on context: this reading's hash_reading decides it (a
+                # comment, or word text read by the word reader below), else cannot-evaluate. A mid-word '#'
+                # (--rev=abc#1, ticket#123) is read inside _read_word and never reaches this position.
+                comment = _hash_comment_reading(nest, before)
+                if comment is None:
+                    comment = _hash_reading_choice(hash_reading, i, nest)
+                if comment:
+                    nl = command.find("\n", i)
+                    i = n if nl == -1 else nl
+                    continue
             if c in _METACHARS:
                 op, kind, oplen = _match_operator(command, i, n)
                 if kind == "sep":
+                    if op in ("(", ")"):
+                        _nest_track(nest, op, False)
+                        before = "paren"
+                        if op == ")":
+                            glued_at = i + 1
+                    else:
+                        before = "break"
                     end_segment(op, i, i + oplen)
                     i += oplen
                     continue
@@ -1298,7 +1703,15 @@ def _lex_command(command, partial=False, locale=False):
                     raise ValueError("unsupported shell construct: {}".format(op))
                 i = consume_redirect(op, oplen, i, None)
                 continue
-            text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n, locale)
+            text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n, nest,
+                                                                                 i == glued_at, hash_reading,
+                                                                                 locale)
+            if j == i:
+                # Unreachable while this loop decides every '#' before it calls the word reader, which then
+                # consumes at least one character (a '#' this reading takes as word text included); kept so a
+                # later change that lets the two disagree fails closed (cannot-evaluate) instead of looping
+                # forever inside a hook.
+                raise ValueError("lexer made no progress")
             # An IO_NUMBER: an entirely-unquoted-digit word IMMEDIATELY adjacent to a '<'/'>' redirect
             # operator is that redirect's source fd, consumed as fd syntax, never left in argv. '2>file' ->
             # fd 2; but '2 > file' (spaced), "'2'>file"/'\2>file' (quoted/escaped), and 'x2>file' keep it.
@@ -1320,7 +1733,7 @@ def _lex_command(command, partial=False, locale=False):
                     opaque[0] = True
             i = j
         end_segment("", n, n)
-    except ValueError:
+    except ValueError as exc:
         # partial mode recovers the COMPLETE segments lexed before the unparseable construct AND the
         # positions of the IN-PROGRESS segment that were fully parsed BEFORE it (an earlier relative
         # cd/redirect in the SAME, still-open segment - e.g. the 'out.txt' of 'cat > out.txt <<EOF' - is
@@ -1328,8 +1741,9 @@ def _lex_command(command, partial=False, locale=False):
         # construct stays uninspected, a disclosed residual. The in_progress flag tells a caller that the
         # last recovered segment is that still-open one, so a caller that must judge only complete segments
         # drops exactly it and never a segment the scan had already closed. The default contract re-raises
-        # for every other caller.
-        if partial:
+        # for every other caller, and so does a partial lex that enumerates readings at an uncertain '#' it
+        # has no reading for (_lex_readings).
+        if partial and (hash_reading is None or not isinstance(exc, _UncertainHashError)):
             in_progress = bool(argv or redirects)
             if in_progress:
                 segments.append(_Segment(list(argv), "", list(redirects),
@@ -2246,7 +2660,12 @@ def diff_source_pretool(data):
     quotes, a compound, an extra option, a dynamic redirect, a non-pager pipe) is a console-readability
     CONVENTION, not a hazard, so it ALLOWS with an informational note rather than prompting. Across a compound
     or multiple producers, a CONFIRMED console dump anywhere still DENIES (deny outranks the allow-note), so a
-    multi-command form is never admitted on one safe segment when another is a confirmed dump."""
+    multi-command form is never admitted on one safe segment when another is a confirmed dump. A command
+    carrying a '#' whose comment reading depends on context (the shared lexer's comment rule) is judged on
+    the segments of both readings of each such '#'; one the lexer cannot judge that way (_UncertainHashError)
+    DENIES an apparent producer its text names (_hash_doubt_names) as a possible dump rather than taking the
+    unparseable-command note (_diff_source_fallback), and DENIES as well when its text holds quoting that
+    fallback does not decode (_hash_doubt_opaque), where a producer cannot be ruled out."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: diff_source_pretool wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -2263,6 +2682,20 @@ def diff_source_pretool(data):
             "AIQT guardrail: denied a Bash call with no readable command (rule cnsdif, fail-closed).")
     try:
         segments = _lex_command(command)
+    except _UncertainHashError:
+        # The fallback would only note an apparent producer; one behind a '#' whose comment reading the
+        # lexer could not judge under both readings is treated as the confirmed console dump it may be, and
+        # so is a command whose quoting the fallback does not decode.
+        if _hash_doubt_opaque(command):
+            return _hash_doubt_opaque_deny("cnsdif (no-console-diff-dumps)", "a git diff-producer that dumps a "
+                                           "patch to the console")
+        if _hash_doubt_names(command, _RAW_DIFF_PRODUCER_RE):
+            return _deny(
+                _hash_doubt_reason("cnsdif (no-console-diff-dumps)", "the git diff-producer its text names "
+                                   "may dump a patch to the console"),
+                "AIQT guardrail: denied an apparent git diff-producer behind a '#' this guard could not read "
+                "(rule cnsdif, fail-closed).")
+        return _diff_source_fallback(command)
     except ValueError:
         return _diff_source_fallback(command)
     possibles = [(index, seg) for index, seg in enumerate(segments) if _is_possible_producer(seg)]
@@ -3017,7 +3450,9 @@ def _commit_identity_fallback(command, error):
 
 def commit_identity(data):
     """cmtidn (integ/commit-identity), PreToolUse/Bash: deny a git command that records an AI as
-    author, committer, or co-author. No escape hatch: the rule is absolute."""
+    author, committer, or co-author. No escape hatch: the rule is absolute. Behind a '#' whose comment
+    reading the shared lexer cannot judge under both readings, the raw scan also reads _hash_doubt_scan, and
+    a command whose quoting that scan does not decode (_hash_doubt_opaque) denies."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: commit_identity wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -3034,6 +3469,16 @@ def commit_identity(data):
             "AIQT guardrail: denied a Bash call with no readable command (rule cmtidn, fail-closed).")
     try:
         hit = find_ai_authorship(command)
+    except _UncertainHashError as exc:
+        # A '#' the lexer could not judge under both readings, in the command itself under each locale
+        # reading: the raw scan also reads the text with its backslash-newlines, quote characters and
+        # backslashes removed (_hash_doubt_scan), and a command whose quoting that removal does not decode
+        # denies, since an AI identity cannot be ruled out there.
+        if _hash_doubt_opaque(command):
+            return _hash_doubt_opaque_deny("cmtidn (commit-identity)", "a git command recording an AI "
+                                           "identity (a co-author trailer, an --author value, a git identity "
+                                           "variable or a user.name or user.email value)")
+        return _commit_identity_fallback(_hash_doubt_scan(command), str(exc))
     except ValueError as exc:
         return _commit_identity_fallback(command, str(exc))
     if hit is None:
@@ -3154,6 +3599,9 @@ def absolute_paths(data):
 # judged, to avoid over-firing). A relative or unresolvable such position ASKS; an absolute position, and
 # a command carrying neither, allow. It never denies: the human confirming is the opt-out.
 _CD_BUILTINS = frozenset(("cd", "pushd"))
+# A cd or pushd word, or a '<', in a command's text: bash_absolute_paths' note test when a '#' whose comment
+# reading the lexer cannot judge under both readings stops it (read over _hash_doubt_scan).
+_ABSPTH_DOUBT_RE = re.compile(r"(?:^|[\s;&|()`])(?:cd|pushd)(?=$|[\s;&|()`])|<")
 # ROUND-2 FINDING 10: redirect operators that TRUNCATE (zero) their file target on open. A truncating
 # redirect to a relative/opaque target can destroy the WRONG file if the ambient cwd differs, so abspth
 # denies it. The append forms ('>>', '&>>') and the read/read-write forms ('<', '<>', '<&') do NOT truncate
@@ -3251,7 +3699,16 @@ def bash_absolute_paths(data):
     (round-2 finding 10): a DESTRUCTIVE TRUNCATING redirect ('>', '>|', '&>', or a '>&' to a file) to a
     RELATIVE or OPAQUE target DENIES-and-educates - truncation ZEROES its target, so aiming it at a
     cwd-dependent relative/unverified path can destroy the WRONG file, the exact data-loss the absolute-paths
-    rule prevents. It never asks, and it does not judge an arbitrary command operand."""
+    rule prevents. It never asks, and it does not judge an arbitrary command operand. A command carrying a
+    '#' whose comment reading depends on context (the shared lexer's comment rule) is judged on the segments
+    of both readings of each such '#'. Where the lexer cannot judge it that way (_UncertainHashError), a
+    '>' anywhere in its text (_hash_doubt_scan) DENIES, since a truncating redirect may sit past that '#',
+    and otherwise a cd or pushd word or a '<' in that text ALLOWS WITH THE NOTE, since a relative cd or
+    redirect may sit there, as does text holding quoting that scan does not decode (_hash_doubt_opaque), where
+    a cd cannot be ruled out. A redirect operator is never quoted, so the '>' test reads the text as written.
+    The guard lexes the command twice (the full lex that finds the fallback, then the partial lex below), so
+    a command holding uncertain '#' characters can cost it twice the thirty-one lexes of one _lex_readings
+    call."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: bash_absolute_paths wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -3274,6 +3731,41 @@ def bash_absolute_paths(data):
     # cd/redirect in the parseable PREFIX still ASKS. Only a cd/redirect position WITHIN or AFTER the
     # unparseable construct is left to the human's own permission flow (a disclosed residual), rather than
     # over-asking on every such command. This is the conservative-floor boundary, not a proof of safety.
+    # A '#' whose comment reading the lexer cannot judge under both readings is the exception: the lexer
+    # reads nothing past it, so a command whose text carries a '>' (a truncating redirect, the deny tier, may
+    # follow it) denies, and one whose text names cd or pushd or carries a '<' notes, as does one whose
+    # quoting the fallback text does not decode (a cd may be spelled in it). This full lex and the partial
+    # lex below each cost up to thirty-one lexes on a command with uncertain '#' characters.
+    try:
+        _lex_command(command)
+    except _UncertainHashError:
+        scan = _hash_doubt_scan(command)
+        if ">" in scan:
+            return _deny(
+                _hash_doubt_reason("abspth (absolute-paths)", "its text carries a '>', so a truncating "
+                                   "redirect to a relative or unverified target, which can destroy the wrong "
+                                   "file, cannot be ruled out"),
+                "AIQT guardrail: denied a possible truncating redirect behind a '#' this guard could not read "
+                "(rule abspth, fail-closed).")
+        if _hash_doubt_opaque(command):
+            return _allow_note(
+                "AIQT guardrail (rule abspth, absolute-paths): this command carries a '#' whose comment reading "
+                "depends on context that the shared lexer could not judge under both readings, and its text "
+                "holds quoting this guard's fallback does not decode (an ANSI-C $'...' or locale $\"...\" "
+                "quote, or a quote character or backslash next to a letter), so a relative cd, which resolves "
+                "against a working directory that can silently differ between calls, cannot be ruled out past "
+                "that '#'. This is a convention nudge, not a hazard, so it is allowed; prefer absolute paths, "
+                "or put a blank before such a '#' outside any grouping or substitution.")
+        if _ABSPTH_DOUBT_RE.search(scan):
+            return _allow_note(
+                "AIQT guardrail (rule abspth, absolute-paths): this command carries a '#' whose comment reading "
+                "depends on context that the shared lexer could not judge under both readings, and its text "
+                "names cd or pushd or carries a '<', so a relative cd or redirect target, which resolves "
+                "against a working directory that can silently differ between calls, may sit past that '#'. "
+                "This is a convention nudge, not a hazard, so it is allowed; prefer absolute paths, or put a "
+                "blank before such a '#' outside any grouping or substitution.")
+    except ValueError:
+        pass
     segments = _lex_command(command, partial=True)[0]
     reasons = []       # relative/opaque cd or NON-destructive redirect: an allow-note convention nudge
     deny_reasons = []  # a DESTRUCTIVE truncating redirect to a relative/opaque target: fail-closed deny
@@ -3876,7 +4368,10 @@ def git_explicit_binding(data):
     ('git add -A/./:/', 'git commit -a/--all') FOLLOWED BY a PUBLISH ('git push') in the SAME command
     DENIES-and-educates - the breadth selector sweeps in unrelated modified/untracked content and the push
     then publishes it irreversibly, so it is not waved through. A plain 'git commit -m' and a scoped
-    'git add <path>' are not breadth and are unaffected. It never asks."""
+    'git add <path>' are not breadth and are unaffected. It never asks. Behind a '#' whose comment reading
+    the shared lexer cannot judge under both readings, the raw fallback reads _hash_doubt_scan, and a command
+    whose quoting that scan does not decode (_hash_doubt_opaque) DENIES, since the breadth-and-publish pair
+    cannot be ruled out there."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: git_explicit_binding wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -3894,6 +4389,15 @@ def git_explicit_binding(data):
             "it is allowed; prefer an explicit '-C' target and enumerated scope.")
     try:
         segments = _segments(command)
+    except _UncertainHashError:
+        # A '#' the lexer could not judge under both readings: the raw scan also reads the text with its
+        # backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan), and a command
+        # whose quoting that removal does not decode takes the fallback's deny.
+        if _hash_doubt_opaque(command):
+            return _hash_doubt_opaque_deny("expbnd (explicit-binding-over-ambient-context)", "a whole-tree "
+                                           "breadth stage (git add -A, git commit -a) followed by a git push "
+                                           "that publishes whatever the tree holds")
+        return _expbnd_fallback(_hash_doubt_scan(command))
     except ValueError:
         return _expbnd_fallback(command)
 
@@ -3956,6 +4460,11 @@ def _stash_pop_apply_bare(sub, args):
     return not any(not a.startswith("-") for a in pre) and not post
 
 
+# git and then stash anywhere in a command's text: git_stash_ref's subject test when a '#' whose comment
+# reading the lexer cannot judge under both readings stops it (_hash_doubt_names).
+_STASH_WORD_RE = re.compile(r"(?is)\bgit\b.*?\bstash\b")
+
+
 def git_stash_ref(data):
     """expbnd (integ/explicit-binding-over-ambient-context), PreToolUse/Bash. A bare stash pop/apply
     ALLOWS with one informational note; a positional operand silently allows. NO-ASK posture.
@@ -3980,8 +4489,12 @@ def git_stash_ref(data):
     git upgrade. No git calls or filesystem probes: every recognized bare pop/apply warns regardless
     of stack state, with no escalation for a dangerous stack. Bash PreToolUse only; no prior-turn
     shell-state resolution. Other stash verbs, including bare stash (push), are outside this guard;
-    drop/clear/export belong to git_discard. Unparseable text silently allows. An absent/unreadable
-    command gets the sibling's convention note.
+    drop/clear/export belong to git_discard. A command carrying a '#' whose comment reading depends on
+    context (the shared lexer's comment rule) is judged on the segments of both readings of each such '#'.
+    Unparseable text silently allows, except a command whose '#' the lexer cannot judge that way and whose
+    text (_hash_doubt_scan) names git and stash, or holds quoting that text does not decode
+    (_hash_doubt_opaque), which gets the note, since the lexer read nothing past that '#'. An
+    absent/unreadable command gets the sibling's convention note.
     This note can co-occur with git_discard's raw/pristine fallback note on a wrapped or compound
     pop/apply, and with git_explicit_binding's note on a relocated form (e.g. `cd /x && git stash
     pop`); such sibling notes are consistent, never conflicting.
@@ -4004,6 +4517,27 @@ def git_stash_ref(data):
             "it is allowed; prefer an explicit '-C' target and enumerated scope.")
     try:
         segments = _segments(command)
+    except _UncertainHashError:
+        # Unlike other unparseable text, which silently allows, a stash verb behind a '#' whose comment
+        # reading the lexer could not judge under both readings keeps the note it would earn, and so does a
+        # command whose quoting the fallback text does not decode, where a stash verb cannot be ruled out.
+        if _hash_doubt_opaque(command):
+            return _allow_note(
+                "AIQT expbnd (explicit-binding-over-ambient-context): this command carries a '#' whose comment "
+                "reading depends on context, so the shared lexer could not check it, and its text holds quoting "
+                "this guard's fallback does not decode (an ANSI-C $'...' or locale $\"...\" quote, or a quote "
+                "character or backslash next to a letter), so a bare git stash pop/apply cannot be ruled out; "
+                "one acts on the top of the stash stack, ambient shared state that may not be the entry you "
+                "mean. Run 'git stash list', then name the entry explicitly, for example "
+                "\"git stash apply 'stash@{2}'\".")
+        if _hash_doubt_names(command, _STASH_WORD_RE):
+            return _allow_note(
+                "AIQT expbnd (explicit-binding-over-ambient-context): this command names git stash and carries "
+                "a '#' whose comment reading depends on context, so the shared lexer could not check it; a bare "
+                "git stash pop/apply acts on the top of the stash stack, ambient shared state that may not be "
+                "the entry you mean. Run 'git stash list', then name the entry explicitly, for example "
+                "\"git stash apply 'stash@{2}'\".")
+        return _allow()
     except ValueError:
         return _allow()
 
@@ -6684,7 +7218,15 @@ def git_discard(data):
     historically this ASKED): a flagged sub the classifier cannot resolve to a known verb cannot be proven
     non-destructive and cannot be snapshotted, so it never wins the catch-all allow. The status probe (git
     status --porcelain,
-    config-forced to report untracked) is read-only and offline.
+    config-forced to report untracked) is read-only and offline. A command carrying a '#' whose comment
+    reading depends on context (the shared lexer's comment rule) is judged on the segments of both readings
+    of each such '#'; one the lexer cannot judge that way is unparseable, and its raw scan also runs on the
+    text with backslash-newlines and then quote characters and backslashes removed (_hash_doubt_scan), so a
+    continued spelling (git <backslash-newline>reset --hard) behind such a '#' is still flagged and DENIED;
+    one whose text holds quoting that removal does not decode (_hash_doubt_opaque: g$'i't, g'it' re'set'
+    --hard) is DENIED without the scan, since a work-losing git verb cannot be ruled out there. No such
+    command reaches a recovery snapshot: its '(', ')', backquote or '${' is outside the closed allowlist
+    grammar and its raw text is never pristine, so it either allows at the true boundary or denies.
 
     SIDE-EFFECTING (EN-6 recovery layer): this handler is NO LONGER pure-decision. Before returning its
     decision for a snapshottable in-scope verb (checkout/switch/restore/reset/rm/clean) whose worktree it can
@@ -6724,6 +7266,23 @@ def git_discard(data):
         return _allow()  # boundary: unreadable/malformed command container
     try:
         segments = _segments(command)
+    except _UncertainHashError:
+        # The same raw scan, also run on the text with its backslash-newlines and then its quote characters
+        # and backslashes removed: the lexer saw nothing past a '#' whose comment reading it could not judge
+        # under both readings, so a continued spelling it would have decoded is still flagged, and a command
+        # whose quoting that removal does not decode (g$'i't reset) denies without the scan.
+        if _hash_doubt_opaque(command):
+            return _hash_doubt_opaque_deny("prsunc (preserve-uncommitted-work)", "a git work-losing verb "
+                                           "(checkout, switch, restore, reset, clean, stash, rm or branch)",
+                                           _DISCARD_ALTS)
+        if _raw_has_lossy_git(_hash_doubt_scan(command)):
+            return _deny(
+                _hash_doubt_reason("prsunc (preserve-uncommitted-work)", "its text names git together with a "
+                                   "work-losing verb keyword, so this guard cannot establish what it would run "
+                                   "or where") + " " + _DISCARD_ALTS,
+                "AIQT guardrail: denied a command naming a git work-losing verb behind a '#' this guard could "
+                "not read (rule prsunc, fail-closed).")
+        return _git_discard_fallback(command)
     except ValueError:
         # Conservative raw scan, not a silent allow (D-423-NARROW): an unparseable command the raw scan
         # flags is denied outright; only a command the scan clears is allowed at the true boundary.
@@ -7464,7 +8023,12 @@ def _commit_raw_literal(raw):
             i += 1
             continue
         if c == "#" and boundary:
-            # A comment runs to the end of this segment's raw slice.
+            # A comment runs to the end of this segment's raw slice. Within the slice this is the comment
+            # rule's certain context (above _nest_track): the '#' follows the start or a blank, and nothing
+            # opened in the slice can be open, because this audit rejects every '$', backquote and
+            # parenthesis below before it reaches the '#'. Something opened in an earlier segment can still
+            # make that '#' uncertain in the whole command: the lexer then returns the segment once for each
+            # reading of it (_lex_readings), and this audit reads the '#' as a comment in every one of them.
             return "\n" not in raw[i:]
         if c in ("$", chr(96), "<", ">", ";", "|", "&", "(", ")", "\n"):
             return False
@@ -7585,10 +8149,15 @@ def _commit_command_syntax(command):
         return _CommitSyntax("unverifiable", (), (), (), "command size budget exhausted")
     try:
         records = tuple(_lex_command(command))
-    except ValueError:
-        # Partial records improve detection only. They can NEVER establish a proof.
+    except ValueError as exc:
+        # Partial records improve detection only. They can NEVER establish a proof. Behind a '#' whose
+        # comment reading the lexer could not judge under both readings, the raw commit probe also reads the
+        # text with its backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan), and
+        # a command whose quoting that removal does not decode (_hash_doubt_opaque) is an apparent commit.
         partial, _complete, _in_progress = _lex_command(command, partial=True)
-        apparent = bool(_RAW_COMMIT_RE.search(command))
+        doubt = isinstance(exc, _UncertainHashError)
+        scan = _hash_doubt_scan(command) if doubt else command
+        apparent = bool(_RAW_COMMIT_RE.search(scan)) or (doubt and _hash_doubt_opaque(command))
         apparent = apparent or not _commit_quote_bytes_known(command)
         apparent = apparent or any(_commit_apparent_segment(seg) for seg in partial)
         status = "unverifiable" if apparent else "outside"
@@ -8389,7 +8958,9 @@ def _raw_push_segments(command):
     conservative where quoting is readable: a quote, backquote or substitution is consumed as ONE
     opaque unit, so its content (separators included) stays inside the surrounding segment; a line
     continuation does not split. On an unterminated or unreadable construct the REST of the command
-    joins the current segment unsplit, degrading toward a whole-text read (over-denial).
+    joins the current segment unsplit, degrading toward a whole-text read (over-denial); a '#' whose
+    comment reading depends on context inside a substitution the split skips is such a construct
+    (_skip_quoting applies the shared lexer's comment rule there, with no reading to judge it by).
     The splits themselves carry NO one-sided guarantee: a separator inside text bash reads
     differently (an unquoted-heredoc body line, a construct the quoting model mis-pairs) can still
     divide a pairing bash would run together, so this segment read stays one layer beside the parsed
@@ -8616,6 +9187,11 @@ def protected_line(data):
     opaque script or unparseable fragmentation; other commit-producing verbs and
     other tools remain outside this boundary. Server protection does not validate
     this pre-execution proof. Push coverage retains its existing separate limits.
+    A '#' whose comment reading depends on context is judged under both readings
+    (the shared lexer's comment rule); where the lexer cannot judge it that way, an
+    apparent commit or push its text names (_hash_doubt_scan) denies, and so does
+    text holding quoting that scan does not decode (_hash_doubt_opaque), which the
+    commit recognizer reads as an apparent commit.
 
     A raw-text backstop (_raw_push_guard) scans the unmodified command on every
     call, before any parsing, and denies a force/delete/mirror push spelling paired with a
@@ -8675,6 +9251,19 @@ def protected_line(data):
     # Only commit-free commands reach the existing push classifier/help shortcut.
     try:
         seg_records = _lex_command(command)
+    except _UncertainHashError:
+        # A '#' whose comment reading the lexer could not judge under both readings: any git push its text
+        # names (_hash_doubt_scan, which also reads a continued spelling) may target the protected line
+        # past that '#', where the push classifier would have read it, so it denies. A command whose quoting
+        # that scan does not decode never reaches here: the commit recognizer above reads it as an apparent
+        # commit (_commit_command_syntax), which denies.
+        if _hash_doubt_names(command, _RAW_PUSH_RE):
+            return _deny(
+                _hash_doubt_reason("prtbrn (protected-branch-integrity)", "its text names a git push, so "
+                                   "this guard cannot prove the push misses the protected line"),
+                "AIQT guardrail: denied an apparent git push behind a '#' this guard could not read "
+                "(rule prtbrn, fail-closed).")
+        return _protected_line_fallback(command)
     except ValueError:
         return _protected_line_fallback(command)
     cwd = data.get("cwd")
@@ -9157,6 +9746,11 @@ def _branch_root_probe(repo, start):
     return ("unknown", "git merge-base returned status {}".format(merge.returncode))
 
 
+# git and then a verb that can create a branch anywhere in a command's text: branch_root's subject test when
+# a '#' whose comment reading the lexer cannot judge under both readings stops it (_hash_doubt_names).
+_BRANCH_CREATE_WORD_RE = re.compile(r"(?is)\bgit\b.*?\b(?:checkout|switch|branch|worktree)\b")
+
+
 def branch_root(data):
     """brnrot PreToolUse/Bash guard over recognized branch-creation forms. NO-ASK posture: branch rooting is
     a hazard class (an orphan/unrooted branch dispatches work onto a retired root), so a confirmed orphan
@@ -9172,7 +9766,12 @@ def branch_root(data):
     main/master) is NOT evidence a plain local branch is orphaned, so a resolvable-start creation ALLOWS.
     ONLY a redirect whose worktree this guard cannot pin at all - a --git-dir/GIT_DIR/-c form, or a
     value-less/empty/relative-with-no-cwd -C/--work-tree that resolves 'opaque' - ALLOWS-WITH-NOTE (the CI
-    branch-root gate remains the backstop) rather than denying. It never asks."""
+    branch-root gate remains the backstop) rather than denying. It never asks. A command carrying a '#'
+    whose comment reading depends on context (the shared lexer's comment rule) is judged on the segments of
+    both readings of each such '#'; one the lexer cannot judge that way whose text (_hash_doubt_scan) names
+    git and a branch-capable verb (checkout, switch, branch, worktree), or holds quoting that text does not
+    decode (_hash_doubt_opaque), DENIES fail-safe, since the lexer reads nothing past that '#'; any other
+    unparseable command takes the partial-recovery path below."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block(
             "aiqt_hooks: branch_root wired to unexpected event {!r}; failing closed"
@@ -9191,7 +9790,21 @@ def branch_root(data):
             "AIQT guardrail: denied a Bash call with no readable command (rule brnrot, fail-closed).")
     try:
         segments = _segments(command)
-    except ValueError:
+    except ValueError as exc:
+        # The lexer saw nothing past a '#' whose comment reading it could not judge under both readings, so
+        # a branch-creating git verb its text names cannot be proven rooted: it denies rather than take the
+        # allow below, and so does a command whose quoting the fallback text does not decode.
+        if isinstance(exc, _UncertainHashError) and _hash_doubt_opaque(command):
+            return _hash_doubt_opaque_deny("brnrot (branch-rooted-on-live-main)", "a git verb that creates a "
+                                           "branch (checkout, switch, branch, worktree) whose root this guard "
+                                           "cannot check")
+        if isinstance(exc, _UncertainHashError) and _hash_doubt_names(command, _BRANCH_CREATE_WORD_RE):
+            return _deny(
+                _hash_doubt_reason("brnrot (branch-rooted-on-live-main)", "its text names a git verb that "
+                                   "can create a branch, so this guard cannot check where that branch is "
+                                   "rooted"),
+                "AIQT guardrail: denied a branch-capable git command behind a '#' this guard could not read "
+                "(rule brnrot, fail-closed).")
         # An unsupported LATER construct (a heredoc, a process substitution) must not discard a
         # proven-complete creation already recovered in the prefix: partial-lex and judge the recovered
         # segments, so a canonical orphan creation still DENIES (DENY outranks the parse error). A command
@@ -9399,6 +10012,10 @@ _RAW_TRUNCATE_RE = re.compile(r"\|\s*(?:head|tail)\b")
 # checker's output may reach the sink through it, so the fallback notes it as it notes a raw '| head'.
 _RAW_FLOW_RE = re.compile(r"<<<|<\(|>\(")
 _RAW_SINK_WORD_RE = re.compile(r"\b(?:head|tail|cut)\b")
+# A pipe and then, in the same stage (after any wrapper), a sink word the gatdis deny tier lists
+# (_truncating_sink_kind): gate_weakening's deny test when a '#' whose comment reading the lexer cannot judge
+# under both readings stops it (read over _hash_doubt_scan).
+_GATE_DOUBT_SINK_RE = re.compile(r"\|&?[^|;&\n]*\b(?:head|tail|grep|egrep|fgrep|rg)\b")
 _RAW_COMMIT_MSG_GIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
 _RAW_COMMIT_MSG_MARKER_RE = re.compile(r"`|\$\(")
 
@@ -10101,7 +10718,12 @@ def gate_weakening(data):
     awk, sort or grep stage, a sink spelling off the list or cut, a checker-shaped or verify-option command
     followed by a pipe and later a stage that may pass on only part of its input). On a parse error
     the partially lexed complete segments are judged for the deny tier first (DENY outranks the parse error);
-    otherwise the raw fallback stands. Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
+    otherwise the raw fallback stands. A '#' whose comment reading depends on context (the shared lexer's
+    comment rule) is judged under both readings: the deny tier on each reading alone, everything else on the
+    segments of all readings in turn. Where the lexer cannot judge it that way, text holding quoting
+    _hash_doubt_scan does not decode (_hash_doubt_opaque) DENIES, a pipe into a listed sink word anywhere in
+    its text (_hash_doubt_scan) DENIES, and the raw fallback reads that text otherwise.
+    Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
     xargs body; R2 an alias or shell function; R3 a gate whose name and options carry no checker part
     (tools/doctor.py, sha256sum -c, a build); R4 a plain '| grep PATTERN' filter or '| wc', which are not
     counted as truncating sinks."""
@@ -10120,8 +10742,11 @@ def gate_weakening(data):
             "so the gate-weakening check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule gatdis, fail-closed).")
     try:
-        records = _lex_command(command)
-    except ValueError:
+        # Each reading of an uncertain '#' (the shared lexer's comment rule) is kept apart for the deny tier
+        # below, whose canonical shape needs every earlier segment benign; every other check reads the
+        # segments of all readings in turn, as _lex_command returns them.
+        readings = _lex_readings(command)
+    except ValueError as exc:
         # DENY outranks the parse error (the branch_root precedent): the COMPLETE segments recovered before
         # the unparseable construct are judged first for a verification run piped into a truncating sink;
         # otherwise the raw fallback stands. Only the in-progress segment the lexer was inside is dropped,
@@ -10134,7 +10759,28 @@ def gate_weakening(data):
         if hit is not None:
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
-        return _gate_weakening_fallback(command)
+        if not isinstance(exc, _UncertainHashError):
+            return _gate_weakening_fallback(command)
+        # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
+        # text does not decode may hide a hook bypass or a sink there, so it denies.
+        if _hash_doubt_opaque(command):
+            return _hash_doubt_opaque_deny("gatdis (gate-discipline)", "a git hook bypass (a --no-verify "
+                                           "spelling, or -n on commit or am) or a verification run piped into "
+                                           "a truncating sink", _GATE_ALTS)
+        # Behind a '#' the lexer could not judge under both readings, a pipe into a sink the deny tier
+        # lists (head, tail, grep, egrep, fgrep, rg) may carry a verification run's output past that '#',
+        # so it denies; the raw fallback also reads the text with its backslash-newlines, quote characters
+        # and backslashes removed (_hash_doubt_scan).
+        scan = _hash_doubt_scan(command)
+        if _GATE_DOUBT_SINK_RE.search(scan):
+            return _deny(
+                _hash_doubt_reason("gatdis (gate-discipline)", "its text pipes into a stage that can truncate "
+                                   "or swallow a check's output (head, tail, grep, egrep, fgrep or rg), so a "
+                                   "verification run cut short there cannot be ruled out") + " " + _GATE_ALTS,
+                "AIQT guardrail: denied a possible verification run piped into a truncating sink behind a '#' "
+                "this guard could not read (rule gatdis, fail-closed).")
+        return _gate_weakening_fallback(scan)
+    records = [seg for reading in readings for seg in reading]
     segments = [(seg.argv, seg.sep_after) for seg in records]
     pending_note = None  # the first heuristic gate-weakening allow-note; a certain --no-verify deny wins first
     for index, (tokens, sep_after) in enumerate(segments):
@@ -10183,8 +10829,10 @@ def gate_weakening(data):
                     "is not discarded; if it is only a benign output glance, this is allowed."
                     .format(_command_word(tokens), _command_word(nxt)))
     # The deny tier is held until the loop ends, so a --no-verify deny anywhere in the command returns first
-    # with its own message; a verification-sink deny then outranks (and suppresses) the broad-tier note.
-    hit = _verification_sink(records)
+    # with its own message; a verification-sink deny then outranks (and suppresses) the broad-tier note. It
+    # judges each reading of an uncertain '#' on its own and denies on the first reading that holds the shape.
+    hit = next((found for found in (_verification_sink(reading) for reading in readings) if found is not None),
+               None)
     if hit is not None:
         reason, banner = _verification_sink_message(hit)
         return _deny(reason, banner)
@@ -10300,7 +10948,10 @@ def commit_msg_subst(data):
     """sectvl (security/tool-argument-validation), PreToolUse/Bash. DENY-and-educate when a token after a
     recognized git commit subcommand is double-quoted or unquoted and carries a shell-executed backtick or
     $( command substitution (a command-injection hazard the shell runs before git sees the argument). Hooks
-    never ask; the caller self-corrects by re-issuing single-quoted, escaped, or via git commit -F <file>."""
+    never ask; the caller self-corrects by re-issuing single-quoted, escaped, or via git commit -F <file>.
+    Behind a '#' whose comment reading the shared lexer cannot judge under both readings, the raw fallback
+    reads _hash_doubt_scan, and a command whose quoting that scan does not decode (_hash_doubt_opaque)
+    DENIES."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: commit_msg_subst wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -10320,6 +10971,15 @@ def commit_msg_subst(data):
             "(rule sectvl, fail-safe).")
     try:
         segments = _lex_command(command)
+    except _UncertainHashError:
+        # A '#' the lexer could not judge under both readings: the raw scan also reads the text with its
+        # backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan), and a command
+        # whose quoting that removal does not decode takes the fallback's deny.
+        if _hash_doubt_opaque(command):
+            return _hash_doubt_opaque_deny("sectvl (tool-argument-validation)", "a backtick or $( command "
+                                           "substitution in a git commit argument, which the shell runs before "
+                                           "git sees the argument")
+        return _commit_msg_subst_fallback(_hash_doubt_scan(command))
     except ValueError:
         return _commit_msg_subst_fallback(command)
     for seg in segments:
@@ -12982,83 +13642,138 @@ _ORCH_SHELL_KEYWORDS = frozenset((
 # Bash's own word-start rule for a `#` comment: a `#` opens a comment only at the start of a word, and bash
 # delimits words with its blanks (space, tab) and newline and with its metacharacters (; & | ( ) < >). Other
 # characters that Python's str.isspace() accepts (carriage return, vertical tab, form feed, no-break space,
-# the 0x1c-0x1f separators, NEL, and the Unicode spaces) are ordinary word characters to bash.
+# the 0x1c-0x1f separators, NEL, and the Unicode spaces) are ordinary word characters to bash. Whether a `#`
+# right after a `(` or `)` begins a word depends on the kind of parenthesis, so the shared comment rule
+# (above _nest_track) reads such a `#` as uncertain, never as a comment.
 _ORCH_BASH_WORD_BREAKS = frozenset(" \t\n;&|()<>")
 
 
 def _orch_foreground_scan(command, bash_word_starts):
     """One quote- and escape-tracking pass over a foreground command: "detach" when it meets an executable,
     unquoted, unescaped bare `&` control operator, "unbalanced" when it ends still inside a single or double
-    quote, None otherwise. bash_word_starts selects where a `#` opens a comment: False keeps the historical
-    rule (after any str.isspace() character), True uses bash's rule (_ORCH_BASH_WORD_BREAKS). The guard runs
-    BOTH and denies when either reports, so the bash rule can only ADD denies to the historical one."""
+    quote or meets a `#` whose comment reading depends on context, None otherwise. bash_word_starts selects
+    which characters put a `#` at a word start: False keeps the historical rule (after any str.isspace()
+    character), True uses bash's rule (a blank, a newline or one of ; & | < >). Under BOTH rules the shared
+    comment rule decides the rest (_hash_comment_reading, over a nesting stack this scan keeps): a
+    word-start `#` opens a comment only while no parenthesis, ${...} or backquote substitution is open; a
+    `#` after any other character is text; a backslash-newline changes nothing, since bash removes it
+    first, so a `#` after `cmd \\<newline>` is at a word start; and a `#` right after a `(`, a `)` or a
+    backquote, or at a word start while something is open, is uncertain and ends the scan as "unbalanced",
+    the same fail-safe deny as an open quote. Inside a double-quoted string the scan also keeps a stack of
+    the `$(...)` and backquote substitutions opened there: a `#` that is not right after a word character
+    while one is open (outside a single-quoted span in it) is a comment to bash, which can hide the string's
+    closing quote, so it is uncertain too. The guard runs BOTH and denies when either reports, so the bash
+    rule can only ADD denies to the historical one."""
     in_single = in_double = escaped = False
     prev_dup = False  # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
-    word_start = True  # the next unquoted char begins a word (start of string, or after a word break)
+    prev = "break"  # the comment rule's class of the previous character (_hash_comment_reading)
+    after_dollar = False  # the previous char was an unquoted, unescaped `$` (a following `{` opens ${...})
+    nest = []
+    dq_nest = []  # the substitutions opened inside the current double-quoted string: "(" or a backquote
+    dq_prev = "word"  # the comment rule's class of the previous character inside those substitutions
+    dq_single = False  # inside a single-quoted span within such a substitution
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
         if escaped:
-            escaped, prev_dup, word_start = False, False, False
+            escaped, prev_dup = False, False
+            if ch != "\n":  # a backslash-newline is removed before bash reads the line: the classes stay
+                prev = dq_prev = "backquote" if ch == "`" else "word"
+            after_dollar = after_dollar and ch == "\n"  # a backslash-newline joins `$` to what follows it
             i += 1
             continue
         if in_single:
             if ch == "'":
                 in_single = False
-            prev_dup, word_start = False, False
+            prev_dup, prev = False, "word"
             i += 1
             continue
         if in_double:
             if ch == "\\":
                 escaped = True
             elif ch == '"':
-                in_double = False
-            prev_dup, word_start = False, False
+                in_double, dq_single = False, False
+                del dq_nest[:]
+            elif dq_single:
+                dq_single = ch != "'"
+            elif dq_nest and ch == "#" and dq_prev != "word":
+                # A comment to bash inside the substitution, running to the end of the line and past any
+                # quote on it, which this scan would read as the string's closing quote.
+                return "unbalanced"
+            elif dq_nest and ch == "'":
+                dq_single = True
+            else:
+                if ch == "(" and (dq_nest or after_dollar):
+                    dq_nest.append("(")
+                elif ch == ")" and dq_nest and dq_nest[-1] == "(":
+                    dq_nest.pop()
+                elif ch == "`":
+                    _nest_track(dq_nest, ch, False)
+                dq_prev = ("paren" if ch in "()" else "backquote" if ch == "`"
+                           else "break" if ch.isspace() or ch in ";&|<>" else "word")
+            prev_dup, prev, after_dollar = False, "word", ch == "$"
             i += 1
             continue
-        if ch == "#" and word_start:  # an unquoted, word-start comment: the rest of THIS line is not code
-            # A `#` comment runs only to the end of ITS line, not to the end of a multi-line command. Skip
-            # to the next newline and resume the scan, so a real bare `&` on a LATER line is not smuggled
-            # past by a comment on an earlier one. Breaking the whole scan here silently allowed exactly that
-            # (L-GS1: `echo hi  # note\nsleep 100 &`); this fails closed on the comment-obscured detach.
-            nl = command.find("\n", i)
-            if nl == -1:
-                break  # no later line: the comment runs to the end of the string, nothing more to scan
-            i = nl  # resume at the newline; the whitespace branch consumes it and begins a new line/word
-            continue
+        if ch == "#":
+            reading = _hash_comment_reading(nest, prev)
+            if reading is None:
+                # The scan cannot tell whether the text after this `#` is code, so, like a quote it cannot
+                # close, it fails toward the DENY rather than allow a possibly-real detach after it.
+                return "unbalanced"
+            if reading:  # a certain comment: the rest of THIS line is not code
+                # A `#` comment runs only to the end of ITS line, not to the end of a multi-line command.
+                # Skip to the next newline and resume the scan, so a real bare `&` on a LATER line is not
+                # smuggled past by a comment on an earlier one. Breaking the whole scan here silently
+                # allowed exactly that (L-GS1: `echo hi  # note\nsleep 100 &`); this fails closed on the
+                # comment-obscured detach.
+                nl = command.find("\n", i)
+                if nl == -1:
+                    break  # no later line: the comment runs to the end of the string, nothing more to scan
+                i = nl  # resume at the newline; the whitespace branch consumes it and begins a new line/word
+                continue
         if ch.isspace():
-            prev_dup, word_start = False, (ch in _ORCH_BASH_WORD_BREAKS) if bash_word_starts else True
+            prev_dup, after_dollar = False, False
+            prev = "break" if ch in _ORCH_BASH_WORD_BREAKS or not bash_word_starts else "word"
             i += 1
             continue
         if ch == "\\":
-            escaped, prev_dup, word_start = True, False, False
+            escaped, prev_dup = True, False
             i += 1
             continue
         if ch == "'":
-            in_single, prev_dup, word_start = True, False, False
+            in_single, prev_dup, prev, after_dollar = True, False, "word", False
             i += 1
             continue
         if ch == '"':
-            in_double, prev_dup, word_start = True, False, False
+            in_double, prev_dup, prev, after_dollar = True, False, "word", False
             i += 1
             continue
         if ch == "&":
+            after_dollar = False
+            prev = "break" if bash_word_starts else "word"
             nxt = command[i + 1] if i + 1 < n else ""
             if nxt == "&":  # `&&` logical AND: not a detach
-                prev_dup, word_start = False, bash_word_starts
+                prev_dup = False
                 i += 2
                 continue
             if nxt == ">":  # `&>` / `&>>` redirect: not a detach
-                prev_dup, word_start = False, bash_word_starts
+                prev_dup = False
                 i += 1
                 continue
             if prev_dup:  # `>&` / `<&` / `|&` descriptor-dup or pipe-stderr: not a detach
-                prev_dup, word_start = False, bash_word_starts
+                prev_dup = False
                 i += 1
                 continue
             return "detach"  # an executable bare `&` control operator: a foreground detach
+        _nest_track(nest, ch, after_dollar)
+        if ch in "()":
+            prev = "paren"
+        elif ch == "`":
+            prev = "backquote"
+        else:
+            prev = "break" if ch in _ORCH_BASH_WORD_BREAKS and bash_word_starts else "word"
         prev_dup = ch in (">", "<", "|")
-        word_start = bash_word_starts and ch in _ORCH_BASH_WORD_BREAKS
+        after_dollar = ch == "$"
         i += 1
     # A scan that ended still inside an unbalanced quote could not prove a later `&` was quoted; it fails
     # toward the DENY (with its own reason) rather than silently allowing a possibly-real detach.
@@ -13066,12 +13781,16 @@ def _orch_foreground_scan(command, bash_word_starts):
 
 
 def _orch_foreground_detach_kind(command):
-    """"detach" when either scan rule meets a bare `&`, else "unbalanced" when either ends inside a quote,
-    else None. The historical rule and bash's `#` word-start rule are both run so that the bash rule only
-    ADDS denies: a `#` after a character bash does not treat as a word break (a carriage return, a
-    no-break space, a 0x1c separator, any other non-blank str.isspace() character) is not a comment to
-    bash, so an `&` after it is scanned; a `#` after a metacharacter (`;#`) IS a comment to bash, so a
-    quote in that comment no longer shifts the scan past a real `&` on the next line."""
+    """"detach" when either scan rule meets a bare `&`, else "unbalanced" when either ends inside a quote
+    or meets a `#` whose comment reading depends on context, else None. The historical rule and bash's `#`
+    word-start rule are both run so that the bash rule only ADDS denies: a `#` after a character bash does
+    not treat as a word break (a carriage return, a no-break space, a 0x1c separator, any other non-blank
+    str.isspace() character) is not a comment to bash, so an `&` after it is scanned; a `#` after a
+    metacharacter (`;#`) IS a comment to bash, so a quote in that comment no longer shifts the scan past a
+    real `&` on the next line. A `#` right after a `(`, `)` or backquote (`x=$(true)#`, `(true)#`), or at a
+    word start inside an open parenthesis, ${...} or backquote substitution, or inside a "$(...)" or
+    backquote substitution in a double-quoted string, is uncertain under both rules, and a backslash-newline
+    before a `#` changes nothing under either."""
     kinds = (_orch_foreground_scan(command, False), _orch_foreground_scan(command, True))
     if "detach" in kinds:
         return "detach"
@@ -13090,8 +13809,15 @@ def _orch_foreground_detach(command):
     word-start `#` comment so a commented-out `&` does not prompt, but only to the END OF THAT LINE: a
     comment never suppresses a later line, so a real bare `&` on a subsequent line of a multi-line command
     is still caught rather than smuggled past. Where a `#` starts a comment is read under two rules, the
-    historical one (after any str.isspace() character) and bash's (after a space, tab, newline, or
-    metacharacter), and either rule's detach denies (_orch_foreground_detach_kind).
+    historical one (after any str.isspace() character) and bash's (after a space, tab, newline, or one of
+    ; & | < >), and either rule's detach denies (_orch_foreground_detach_kind). Under both rules the shared
+    comment rule applies (above _nest_track): a word-start `#` is a comment only while no parenthesis,
+    ${...} parameter expansion or backquote substitution is open, and a `#` whose reading depends on context
+    (right after a `(`, `)` or backquote, as in `x=$(true)#`, or at a word start while one of those is
+    open, as in `echo ${x:- #}`, or one inside a double-quoted "$(...)" or backquote substitution that is not
+    right after a word character, as in echo "$(echo a # ") denies like an unbalanced quote (below) rather
+    than skipping the text after it. A backslash-newline changes nothing about where a word starts: after
+    `echo a \\<newline>` a `#` with nothing open is a comment, as bash reads it.
 
     A SCAN THAT ENDS INSIDE A QUOTE FAILS TOWARD DENY: a scan that ends still inside an unbalanced single
     or double quote cannot prove that a later `&` is quoted rather than an operator (an unbalanced quote,
@@ -13129,9 +13855,10 @@ def _orch_foreground_detach(command):
     quote, above all an apostrophe or double quote in a here-document body (quoted delimiter or not,
     including the double-quoted commit-message form), which flips the scan's quote state so that a LATER
     real bare `&` (between two here-documents, or before a second stray quote that rebalances the scan)
-    reads as quoted text and is allowed; and (6) COMMENT SHIFT: after a `#` that follows a blank inside an unquoted ${...} parameter expansion,
-    which bash reads as expansion text but the scan reads as a comment start, so a real bare `&` later on
-    that line is skipped (echo ${x:- #} & job, echo ${line%% #*} & job)."""
+    reads as quoted text and is allowed; and (6) COMMENT SHIFT: after a `#` that bash reads as quoted text
+    but the scan reads as a comment, where a double-quoted string nested inside a double-quoted "$(...)"
+    ends the scan's double quote early, so a `#` inside the nested string reads as a word-start comment
+    and a real bare `&` later on that line is skipped (echo "$(echo "a" "b # ")" & job # ")."""
     return _orch_foreground_detach_kind(command) is not None
 
 
@@ -13842,14 +14569,17 @@ def orch_truncation_guard(data):
         if detach_kind == "unbalanced":
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this foreground command ends with a single or "
-                "double quote still open as this guard's scan reads it, so the scan cannot prove that a "
-                "later '&' is quoted text rather than a bare detach; it is denied rather than allowed "
-                "unread (check-fails-closed-on-unreadable). The open quote may be a real unbalanced quote, "
-                "or one the scan misreads: an apostrophe or double quote in a here-document body (scanned "
-                "as code even under a quoted delimiter) or an ANSI-C $'...' quote. Balance the quoting, or "
-                "write the text to a file and pass the file.",
-                "AIQT guardrail: denied a foreground command whose quoting this guard could not read to the "
-                "end (rule trkasy, fail-closed).")
+                "double quote still open as this guard's scan reads it, or carries a '#' whose comment "
+                "reading depends on context (right after a '(', ')' or backquote, or at the start of a "
+                "word inside an open parenthesis, ${...} or backquote substitution), so the scan cannot "
+                "prove that a later '&' is quoted or commented text rather than a bare detach; it is denied "
+                "rather than allowed unread (check-fails-closed-on-unreadable). The open quote may be a "
+                "real unbalanced quote, or one the scan misreads: an apostrophe or double quote in a "
+                "here-document body (scanned as code even under a quoted delimiter) or an ANSI-C $'...' "
+                "quote. Balance the quoting, put a blank before such a '#' outside any grouping or "
+                "substitution, or write the text to a file and pass the file.",
+                "AIQT guardrail: denied a foreground command whose quoting or comments this guard could not "
+                "read to the end (rule trkasy, fail-closed).")
         if detach_kind == "detach":
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this foreground command detaches a child with a "
@@ -13877,9 +14607,27 @@ def orch_truncation_guard(data):
     # output is captured only through a truncating filter is not observable completion"). This is a proven
     # hazard, not a merely-unprovable capture, so it DENIES-and-educates (use full durable capture, or keep
     # it foreground) rather than allow-note. Detected lexically: any head/tail stage fed by an upstream `|`
-    # producer. A parse error falls through to the unprovable allow-note below (nothing proven).
+    # producer. A '#' whose comment reading depends on context (the comment rule above _nest_track) is
+    # judged on the segments of both readings, so a '| head' that either reading reaches denies. A parse
+    # error falls through to the unprovable allow-note below (nothing proven), except at such a '#' the
+    # lexer cannot judge under both readings: that '#' is exactly where one reading ends the line and the
+    # other reads on into a possible '| head', so it denies.
     try:
         _segs = _segments(command)
+    except _UncertainHashError:
+        return _deny(
+            "AIQT rules trkasy/vrfdlv (track-launched-work / verifier-delivery-completeness): this "
+            "background dispatch carries a '#' whose comment reading depends on context (right after a '(', "
+            "')' or backquote, or at the start of a word inside an open parenthesis, ${...} or backquote "
+            "substitution) that the shared lexer could not judge under both readings (more than four such "
+            "'#', one inside or right after a backquote substitution, or a reading that does not lex), so "
+            "this guard cannot tell whether the text after it is a comment or pipes the "
+            "producer into a truncating sink (head/tail) that would discard its output and exit status; it is "
+            "denied rather than allowed unread (check-fails-closed-on-unreadable). Put a blank before such a "
+            "'#' outside any grouping or substitution, or drop it, and capture the producer's full output to "
+            "a real file.",
+            "AIQT guardrail: denied a background dispatch carrying a '#' whose comment reading this guard "
+            "could not decide (rules trkasy/vrfdlv, fail-closed).")
     except ValueError:
         _segs = None
     if _segs:
@@ -13949,43 +14697,73 @@ def _orch_raw_unquoted_words(raw):
     the shared _read_word reader (which decides quoting from raw positions and raises on an unbalanced
     quote). A word is reported ONLY when its raw slice equals its decoded text, i.e. it carried NO quote or
     escape anywhere: argv_opaque does not flag plain quoting, so this raw-slice comparison is the sole sound
-    signal that a token was written bare. A '#' at a word boundary begins a comment (the rest is not command
-    text); a redirect operator and its one following target word are skipped so a target is not counted as a
-    word. Returns [] on any scan error, which the caller treats as 'no reserved word here', the safe
-    direction (the whole command already lexed cleanly before this is reached, so a valid segment does not
-    error)."""
+    signal that a token was written bare. A '#' at a word boundary is read with the shared comment rule
+    (above _nest_track) over a nesting stack this scan keeps for its own slice: it begins a comment (the
+    rest is not command text) when nothing is open there, and otherwise its reading depends on context, a
+    scan error, as is a '#' right after a backquote inside a word that may open a substitution (_read_word).
+    On a segment of a command with no uncertain '#' this scan reads each '#' as the lexer did. On a segment
+    of one reading of an uncertain '#' (_lex_readings) it reads a '#' at a word start with nothing open in
+    its own slice as a comment even where that reading took it as word text, so its words can differ from
+    that reading's; the poll-loop classifier judges every reading and keeps the strictest answer. A redirect
+    operator and its one following target word are skipped so a target is not counted as a word. Returns []
+    on any scan error, which the caller treats as 'no reserved word here', the safe direction (the whole
+    command already lexed before this is reached, so a valid segment does not error). A '#' inside a
+    substitution or expansion that a double-quoted word holds, whose reading depends on context
+    (_skip_quoting), is no scan error: the scan reads it as word text first and as a comment where that
+    does not scan, up to _HASH_READING_LIMIT such '#', and returns the words of the first reading that
+    scans, so a loop word beside such a double-quoted word is still counted (the lexer has already judged
+    that '#' under both readings, and the classifier reads the segments of each)."""
+    pending = [{}]
+    while pending:
+        reading = pending.pop()
+        try:
+            return _orch_raw_unquoted_scan(raw, reading)
+        except _UncertainHashError as exc:
+            if exc.backquote or exc.at is None or exc.at in reading or len(reading) >= _HASH_READING_LIMIT:
+                return []
+            pending.append(_hash_reading_with(reading, exc.at, True))
+            pending.append(_hash_reading_with(reading, exc.at, False))  # popped first: word text
+        except ValueError:
+            continue  # this reading does not scan; a later one may
+    return []
+
+
+def _orch_raw_unquoted_scan(raw, reading):
+    """One scan of _orch_raw_unquoted_words, with each '#' inside a substitution a double-quoted word holds
+    read as reading maps its index (_skip_quoting); raises ValueError (an _UncertainHashError at such a '#'
+    reading does not map) where the scan cannot read the segment."""
     words = []
     n = len(raw)
     i = 0
-    try:
-        while i < n:
-            c = raw[i]
-            if c in " \t":
+    nest = []
+    while i < n:
+        c = raw[i]
+        if c in " \t":
+            i += 1
+            continue
+        if c == "#":
+            if not _hash_comment_reading(nest, "break"):
+                raise _UncertainHashError("cannot evaluate a '#' whose comment reading depends on context")
+            break                       # word-boundary comment: the rest is not command text
+        if c in _METACHARS:
+            # within a segment the only metacharacter is a redirect operator ('<'/'>', or '&>' the
+            # lexer left in raw); skip the operator and one following target word so neither pollutes
+            # the word list. A separator metacharacter never appears here (it would end the segment).
+            _op, _kind, oplen = _match_operator(raw, i, n)
+            i += oplen
+            while i < n and raw[i] in " \t":
                 i += 1
-                continue
-            if c == "#":
-                break                       # word-boundary comment: the rest is not command text
-            if c in _METACHARS:
-                # within a segment the only metacharacter is a redirect operator ('<'/'>', or '&>' the
-                # lexer left in raw); skip the operator and one following target word so neither pollutes
-                # the word list. A separator metacharacter never appears here (it would end the segment).
-                _op, _kind, oplen = _match_operator(raw, i, n)
-                i += oplen
-                while i < n and raw[i] in " \t":
-                    i += 1
-                if i < n and raw[i] not in _METACHARS and raw[i] != "#":
-                    _t, _o, started, _d, _lt, i = _read_word(raw, i, n)
-                    if not started:
-                        break
-                continue
-            text, _o, started, _d, _lt, j = _read_word(raw, i, n)
-            if not started:
-                break
-            if raw[i:j] == text:            # no quote or escape anywhere in the word: written bare
-                words.append(text)
-            i = j
-    except ValueError:
-        return []
+            if i < n and raw[i] not in _METACHARS and raw[i] != "#":
+                _t, _o, started, _d, _lt, i = _read_word(raw, i, n, nest, hash_reading=reading)
+                if not started:
+                    break
+            continue
+        text, _o, started, _d, _lt, j = _read_word(raw, i, n, nest, hash_reading=reading)
+        if not started:
+            break
+        if raw[i:j] == text:            # no quote or escape anywhere in the word: written bare
+            words.append(text)
+        i = j
     return words
 
 
@@ -14074,11 +14852,42 @@ def _orch_bg_poll_loop(command):
 
     The conservative posture is deliberate for a BLOCK guard: a false 'match' strands a session, whereas a
     'none'/'indeterminate' emits nothing and defers to orch_truncation_guard's generic bare-`&`
-    DENY-and-educate on the same event. Residuals are disclosed in the manifest."""
+    DENY-and-educate on the same event. Residuals are disclosed in the manifest.
+
+    A '#' whose comment reading depends on context (the shared lexer's comment rule) is judged under both
+    readings: each reading is classified on its own (_orch_poll_reading), since adding a reading's segments
+    to another's can turn a 'match' into 'indeterminate', and the strictest answer is kept ('match', then
+    'indeterminate', then 'none'). Where the lexer cannot judge it that way, the command's text
+    (_hash_doubt_scan) is read for the canonical shape's words: a loop header, 'done', an '&', 'sleep' and
+    a probe all present give 'match' (an over-match on such a command, which the truncation guard denies
+    anyway), else 'indeterminate'. The classifier reads the loop words, the '&' and the sleep only where they
+    are written bare, so no quoting hides them from the text; the --watch and actions/runs probes it reads
+    from decoded tokens, so text holding quoting that scan does not decode (_hash_doubt_opaque) counts as
+    carrying a probe."""
     try:
-        segments = _lex_command(command)
+        readings = _lex_readings(command)
+    except _UncertainHashError:
+        scan = _hash_doubt_scan(command)
+        bare = all(word.search(scan) for word in _ORCH_POLL_DOUBT_RES)
+        probe = _hash_doubt_opaque(command) or _ORCH_POLL_DOUBT_PROBE_RE.search(scan)
+        return "match" if bare and probe else "indeterminate"
     except ValueError:
         return "indeterminate"              # heredoc/process-sub/unbalanced-quote/NUL/malformed-redirect
+    kinds = [_orch_poll_reading(segments) for segments in readings]
+    return next((kind for kind in ("match", "indeterminate") if kind in kinds), "none")
+
+
+# The canonical poll shape's words, each searched in a command's text when a '#' whose comment reading the
+# lexer cannot judge under both readings stops it (_orch_bg_poll_loop): a loop header, the 'done'
+# terminator, an '&' and a sleep, then the probe.
+_ORCH_POLL_DOUBT_RES = (
+    re.compile(r"\b(?:for|while|until)\b"), re.compile(r"\bdone\b"), re.compile(r"&"),
+    re.compile(r"\bsleep\b"))
+_ORCH_POLL_DOUBT_PROBE_RE = re.compile(r"\b(?:gh|curl)\b|--watch|actions/runs")
+
+
+def _orch_poll_reading(segments):
+    """_orch_bg_poll_loop's classification of one lex's segments (one reading of the command)."""
     if any(seg.sep_after in ("(", ")") for seg in segments):
         return "indeterminate"              # subshell or C-style for (( )) grouping: cannot attribute
     bare_amps = [i for i, seg in enumerate(segments) if seg.sep_after == "&"]
