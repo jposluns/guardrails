@@ -965,15 +965,16 @@ def _config_poison_fixture(base):
 # whole-roster run above was measured over the then 101 members, before those four existed. The
 # 2026-10-14 merge from main added a fifth (.github/check_cited_standards_contract.py
 # --self-test). The 2026-10-15 merge from main added a sixth (opf/tools/_opf_import_batch.py
-# --self-test). The 2026-10-16 merges added a seventh and an eighth: the merge of the host-patch
-# CI legs added tools/check_python_host_pin.py --self-test, and the merge of the leak, reference
-# facts and launcher-isolation input fixes added tools/check_leaks.py --self-test. The merged
-# roster is 109 members, 107 of them in the malformed lane (counted by running
-# _registered_selftests() on the merged tree, 2026-10-16; config/member-roster-figures asserts
+# --self-test). The 2026-10-16 merge of main into the change adding tools/gen_agents.py --self-test
+# made that a seventh. The 2026-10-16 merges of the host-patch CI legs and of the leak, reference
+# facts and launcher-isolation input fixes added an eighth and a ninth:
+# tools/check_python_host_pin.py --self-test and tools/check_leaks.py --self-test. The merged
+# roster is 110 members, 108 of them in the malformed lane (counted by running
+# _registered_selftests() on the merged tree, 2026-10-17; config/member-roster-figures asserts
 # these counts and the two derived counts below against _registered_selftests(), so a later
 # roster change turns this comment red instead of stale).
 # NOT MEASURED, though these bounds govern those reruns all the same: the system lane; the
-# malformed lane's configuration for the 97 of its 107 members outside those ten; and the
+# malformed lane's configuration for the 98 of its 108 members outside those ten; and the
 # fsmonitor pass's own configuration (fsmonitor set in both config files, ignore and attributes
 # files removed, its four members run one at a time).
 # The opf.py --self-test times above and below and its 3600 s entry were sized before the
@@ -986,14 +987,14 @@ def _config_poison_fixture(base):
 # bound) are not fed to the formula; the factor's headroom is meant to allow for them, but a run
 # that reached a bound has no known length, so no bound here is shown to cover it (below).
 # Roster coverage: the account of the whole-roster run gives a time or an upper bound for 89 of
-# the 109 members (every member registered when it was taken; the eight added by the 2026-10-13,
+# the 110 members (every member registered when it was taken; the nine added by the 2026-10-13,
 # 2026-10-14, 2026-10-15 and 2026-10-16 merges are outside it).
 # Five took over 180 s and carry the entries below. The other 84 took 180 s or less: nine named
 # here (the six shorter opf/tools self-tests, check_python_floor.py, check_release_cut.py
 # --self-test --red-on-revert and check_selftest_execution.py --suite orch-behaviour-selftest),
 # the slowest 142.55 s; and 75 REPORTED by that account as each 62.42 s or less, with no
-# per-member time and no names given. The remaining 20 roster members have no recorded time (the
-# 12 the account does not name, plus the eight added by those merges, named above), so their
+# per-member time and no names given. The remaining 21 roster members have no recorded time (the
+# 12 the account does not name, plus the nine added by those merges, named above), so their
 # default bound is NOT sized from a measurement.
 # For every member, reaching its bound is cannot-evaluate, never a pass.
 # The factor is 40 / 24 * 4. 40 / 24 covers load5 40 under the model that wall time grows in
