@@ -889,7 +889,7 @@ jobs:
       # roster member. This is the generated surfaces job's pinned bash build step, unchanged (see the comment
       # there), placed as in the '3.14' jobs: the core lane, whose '3.14' job has no build step, runs before
       # it, and the config lanes after it. It follows the Python host pin step, which the host-pin gate holds
-      # right after the Python setup step.
+      # right after the Python setup step. The host-pin gate also holds this step once, in this place.
       - name: Pinned bash 5.3 build (CI only)
         shell: bash
         run: python3 -I -B tools/ci_build_bash.py --build
