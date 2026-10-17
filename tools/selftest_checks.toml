@@ -2495,6 +2495,9 @@ expected-check-ids = [
   "measure/failed-sample-no-time",
   "measure/mixed-row-valid-only",
   "report/no-valid-sample-shown",
+  "report/json-write-failure-exit-two",
+  "measure/failed-startup-sample-exit-three",
+  "report/control-ids-escaped",
   "measure/version-probe-failure-refused",
   # ---------- the fixture root and interrupts ----------
   "measure/fixture-root-removed",

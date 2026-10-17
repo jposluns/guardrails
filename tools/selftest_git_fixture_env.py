@@ -972,9 +972,9 @@ def _config_poison_fixture(base):
 # --self-test). The 2026-10-15 merge from main added a sixth (opf/tools/_opf_import_batch.py
 # --self-test). The merged roster was then 107 members, 105 of them in the malformed lane
 # (counted by running _registered_selftests() on the merged tree, 2026-10-15). The 2026-10-16
-# merge of main into the change adding tools/gen_agents.py --self-test made that a seventh, and
-# the hook-latency harness added an eighth (tools/check_selftest_execution.py --suite
-# hook-latency-selftest; the bare runner that step expands to is a CONFIG_EXCLUSIONS["all"]
+# merge of main into the change adding tools/gen_agents.py --self-test made that self-test a
+# seventh addition, and the hook-latency harness added an eighth (tools/check_selftest_execution.py
+# --suite hook-latency-selftest; the bare runner that step expands to is a CONFIG_EXCLUSIONS["all"]
 # entry). The merged roster is 109 members, 107 of them in the malformed lane (counted by
 # running _registered_selftests() on the merged tree, 2026-10-17; config/member-roster-figures
 # asserts these counts and the two derived counts below against _registered_selftests(), so a

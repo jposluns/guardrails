@@ -100,13 +100,15 @@ not a failed sample, so timed-out samples alone never change the exit.
 Exit: 0 the measurement ran and every row holds only valid and timed-out samples (whatever the times; timed-out
 samples alone never change the exit); 3 cannot evaluate: the measurement ran and its report was written, but
 at least one row holds a failed sample or reads NO VALID SAMPLE, and one stderr line gives how many rows and
-names each as case/hook id; 2 cannot measure (a harness Python older than 3.14, a bad argument, an unreadable
-or malformed hooks.json, a hook id it needs that hooks.json lacks, a hook that no case runs or a case that no
-hook matches, a dispatcher that names no command budget, git or the hook interpreter missing, a hook
-interpreter whose version probe fails, a fixture that cannot be built or removed, signal handlers that cannot
-be installed, a --json PATH that exists or cannot be written (exit 2 then, whatever the rows hold), a host that
-is not POSIX); 128 plus the signal number (130, 143 or 129) when SIGINT, SIGTERM or SIGHUP stopped the run,
-after the fixture root is removed. The self-test exits 0 pass, 1 a failed check.
+names each as case/hook id (in an id, a backslash and every character str.isprintable() rejects, such as a
+newline or a carriage return, are written as Python's repr writes them, so the line stays one line); 2 cannot
+measure (a harness Python older than 3.14, a bad argument, an unreadable or malformed hooks.json, a hook id it
+needs that hooks.json lacks, a hook that no case runs or a case that no hook matches, a dispatcher that names
+no command budget, git or the hook interpreter missing, a hook interpreter whose version probe fails, a fixture
+that cannot be built or removed, signal handlers that cannot be installed, a --json PATH that exists or cannot
+be written (exit 2 then, whatever the rows hold), a host that is not POSIX); 128 plus the signal number (130,
+143 or 129) when SIGINT, SIGTERM or SIGHUP stopped the run, after the fixture root is removed. The self-test
+exits 0 pass, 1 a failed check.
 """
 import sys
 
@@ -122,6 +124,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import builtins
 import collections
 import contextlib
 import datetime
@@ -888,10 +891,18 @@ def _cause(exc):
     return "; ".join([str(exc)] + [str(note) for note in getattr(exc, "__notes__", ())])
 
 
+def _one_line(text):
+    """text as part of a one-line diagnostic: a backslash and every character str.isprintable() rejects (each
+    Unicode Other or Separator character but the space, a newline and a carriage return among them) written as
+    Python's repr writes it."""
+    return "".join(char if char.isprintable() and char != "\\" else repr(char)[1:-1] for char in text)
+
+
 def _unevaluated(rows):
-    """Each row, as case/hook id, that holds a failed sample or reads NO VALID SAMPLE: a run with one cannot be
-    evaluated (exit 3). A timed-out sample is not a failed one, so it never puts a row here."""
-    return ["{}/{}".format(row["case"], row["hook_id"]) for row in rows
+    """Each row, as case/hook id (each written by _one_line), that holds a failed sample or reads NO VALID
+    SAMPLE: a run with one cannot be evaluated (exit 3). A timed-out sample is not a failed one, so it never
+    puts a row here."""
+    return ["{}/{}".format(_one_line(row["case"]), _one_line(row["hook_id"])) for row in rows
             if row["failed_samples"] or row["min"] == NO_VALID_SAMPLE]
 
 
@@ -948,13 +959,14 @@ def run_cli(argv, hooks_json, plugin_root, write_sizes=WRITE_SIZES, out=None, er
 # --- self-test -------------------------------------------------------------------------------------------
 # The harness's own checks on stub hooks and tiny inputs, each id registered under hook-latency-selftest in
 # tools/selftest_checks.toml. The stubs reject a payload that is not a JSON object as the dispatcher does
-# (the rejection on stderr, exit 2), and otherwise read their payload and exit 0, except: stub_slow.py sleeps
+# (the rejection on stderr, exit 2), except stub_lax.py, which exits 0 with nothing on stdout (an allow, so its
+# startup sample is a failed one). Otherwise they read their payload and exit 0, except: stub_slow.py sleeps
 # 30 s as branch_root (the timeout case and the interrupt checks; it first writes its process group id and
 # working directory to held-branch_root in the plugin directory) and 0.2 s as protected_line (a sample inside
-# the timeout); stub_fail.py exits 1 as git_discard, kills itself with SIGKILL as protected_line, and as
-# branch_root exits 1 on its first, third, ... launch and naps MIXED_NAP before exiting 0 on the others (a
-# row mixing failed and valid samples). Two real dispatcher launches confirm the premises of two cases (the
-# startup payload is rejected, the Write line scans clean); neither runs git.
+# the timeout); stub_fail.py kills itself with SIGKILL as protected_line, as branch_root exits 1 on its first,
+# third, ... launch and naps MIXED_NAP before exiting 0 on the others (a row mixing failed and valid samples),
+# and exits 1 as any other hook id (git_discard and CONTROL_ID among them). Two real dispatcher launches confirm
+# the premises of two cases (the startup payload is rejected, the Write line scans clean); neither runs git.
 
 STUB_SOURCE = '''"""A stub dispatcher for the hook-latency self-test (see the self-test comment in the harness)."""
 import json
@@ -973,6 +985,8 @@ try:
 except ValueError:
     payload = None
 if not isinstance(payload, dict):
+    if name == "stub_lax.py":
+        sys.exit(0)
     sys.stderr.write("stub: unreadable hook payload (payload is not a JSON object); failing closed\\n")
     sys.exit(2)
 if name == "stub_slow.py" and mode == "branch_root":
@@ -983,7 +997,7 @@ if name == "stub_slow.py" and mode == "branch_root":
     time.sleep(30)
 if name == "stub_slow.py" and mode == "protected_line":
     time.sleep(0.2)
-if name == "stub_fail.py" and mode == "git_discard":
+if name == "stub_fail.py" and mode not in ("branch_root", "protected_line"):
     sys.exit(1)
 if name == "stub_fail.py" and mode == "protected_line":
     os.kill(os.getpid(), signal.SIGKILL)
@@ -1005,9 +1019,13 @@ if mode == "env_dump":
 STUB_HOOKS = (("Bash", "git_discard"), ("Bash", "branch_root"), ("Bash", "protected_line"),
               ("Write", "secrets_shift_left"), ("AskUserQuestion", "orch_ask_guard"),
               ("ScheduleWakeup|CronCreate", "orch_yield_tool"))
+# A hook id holding a newline and a carriage return: load_hooks takes any non-empty string as a hook id, and
+# the one cannot-evaluate line must stay one line when it names this one.
+CONTROL_ID = "line\nbreak\rhook"
 # Each variant's script and the hook ids that run it; every other hook runs stub_fast.py.
 STUB_VARIANTS = {"fast": ("stub_fast.py", ()), "slow": ("stub_slow.py", ("branch_root", "protected_line")),
-                 "fail": ("stub_fail.py", ("git_discard", "branch_root", "protected_line"))}
+                 "fail": ("stub_fail.py", ("git_discard", "branch_root", "protected_line")),
+                 "lax": ("stub_lax.py", ("git_discard",)), "control": ("stub_fail.py", (CONTROL_ID,))}
 MIXED_NAP = 0.25                     # stub_fail.py's nap as branch_root on a valid sample (in STUB_SOURCE)
 SELF_TEST_WRITE_SIZES = (1024, 2048, 4096)
 SELF_TEST_CASES = ["startup", "bash-512b", "write-1kib", "write-2kib", "write-4kib", "ask-user-question",
@@ -1040,7 +1058,7 @@ def _stub_plugin(base, name, variant="fast", drop=None, extra=()):
     plugin = Path(base, name)
     scripts = plugin / "hooks" / "scripts"
     scripts.mkdir(parents=True)
-    for script in ("stub_fast.py", "stub_slow.py", "stub_fail.py"):
+    for script in ("stub_fast.py", "stub_slow.py", "stub_fail.py", "stub_lax.py"):
         (scripts / script).write_text(STUB_SOURCE, encoding="utf-8")
     special, special_ids = STUB_VARIANTS[variant]
     entries = []
@@ -1398,16 +1416,18 @@ def _samples_verdict(result, error, runs):
     return not wrong, wrong
 
 
-def _stub_cli_rows(base, name, argv, variant="fail"):
-    """run_cli over a stub plugin of its own, with --json: (the exit code, stdout, stderr, the JSON rows less
-    the startup case's), the rows one item naming the error when the JSON cannot be read."""
-    hooks_json, plugin = _stub_plugin(base, name, variant=variant)
+def _stub_cli_rows(base, name, argv, variant="fail", extra=(), startup=False):
+    """run_cli over a stub plugin of its own (with the extra hooks), with --json: (the exit code, stdout,
+    stderr, the JSON rows less the startup case's unless startup), the rows one item naming the error when the
+    JSON cannot be read."""
+    hooks_json, plugin = _stub_plugin(base, name, variant=variant, extra=extra)
     figures = Path(base, name + "-figures.json")
     out, err = io.StringIO(), io.StringIO()
     code = _try_cli(argv + ["--json", str(figures)], hooks_json, plugin, write_sizes=SELF_TEST_WRITE_SIZES,
                     out=out, err=err)
     try:
-        rows = [row for row in json.loads(figures.read_text(encoding="utf-8"))["rows"] if row["case"] != "startup"]
+        rows = [row for row in json.loads(figures.read_text(encoding="utf-8"))["rows"]
+                if startup or row["case"] != "startup"]
     except (OSError, ValueError, KeyError, TypeError) as exc:
         rows = [{"error": str(exc)}]
     return code, out.getvalue(), err.getvalue(), rows
@@ -1675,6 +1695,59 @@ def self_test(report_path=None):
         check("report/no-valid-sample-shown", len(lines) == 8 and all(
             line.count(NO_VALID_SAMPLE) == 3 and re.search(r"\b2 +2 +" + NO_VALID_SAMPLE, line)
             and not re.search(r"[0-9]\.[0-9]{3}", line) for line in lines), text[-1500:])
+        # a --json file that cannot be written is exit 2 with its diagnostic, never 3, even once rows holding
+        # failed samples (git_discard's four Bash rows) are measured and reported: an OSError is injected at
+        # the open of that --json path alone, and every other open passes through
+        unwritable = Path(base, "unwritable-figures.json")
+        real_open = builtins.open
+
+        def unwritable_json(file, *args, **kwargs):
+            if isinstance(file, (str, os.PathLike)) and os.fspath(file) == str(unwritable):
+                raise OSError("injected --json write failure")
+            return real_open(file, *args, **kwargs)
+        with _patched(builtins, "open", unwritable_json):
+            lost_code, lost_text, lost_err, _rows = _stub_cli_rows(base, "unwritable", [
+                "--runs", "1", "--files", "1", "--commits", "1", "--case-timeout", "30", "--hook", "git_discard"])
+        lines = [line for line in lost_text.partition("\ncase ")[2].splitlines()[1:]
+                 if " git_discard " in line and not line.startswith("startup ")]
+        check("report/json-write-failure-exit-two", lost_code == 2 and "cannot evaluate" not in lost_err
+              and [line for line in lost_err.splitlines() if line.startswith("error:")]
+              == ["error: cannot write --json {}: injected --json write failure".format(unwritable)]
+              and len(lines) == 4 and all(line.count(NO_VALID_SAMPLE) == 3 for line in lines)
+              and "figures written" not in lost_text and not os.path.lexists(unwritable),
+              (lost_code, lost_err[-600:], lines))
+        # the startup case's row is held to the exit like any other: with stub_lax.py as git_discard (the
+        # startup hook), the startup sample is an allow, so a failed one, while every other row is valid, and
+        # the run exits 3 naming that row alone
+        lax_code, _text, lax_err, lax_rows = _stub_cli_rows(base, "lax", [
+            "--runs", "1", "--files", "1", "--commits", "1", "--case-timeout", "30"], variant="lax", startup=True)
+        first = [row for row in lax_rows if row.get("case") == "startup"]
+        rest = [row for row in lax_rows if row.get("case") != "startup"]
+        bash = sum(1 for matcher, _hook_id in STUB_HOOKS if matcher == "Bash")
+        check("measure/failed-startup-sample-exit-three", lax_code == 3 and _unevaluated_named(lax_err, first)
+              and [(row.get("hook_id"), row.get("failed_samples"), row.get("min"), row.get("outcomes"))
+                   for row in first] == [("git_discard", 1, NO_VALID_SAMPLE, {"exit 0 allow": 1})]
+              and len(rest) == 4 * bash + len(SELF_TEST_WRITE_SIZES) + 2 and all(
+                  row["failed_samples"] == 0 and len(row["samples"]) == 1 and isinstance(row["samples"][0], float)
+                  and row["outcomes"] == {"exit 0 allow": 1} for row in rest),
+              (lax_code, lax_err[-600:], first, len(rest)))
+        # a hook id holding a newline and a carriage return (CONTROL_ID, failing in the four Bash cases) is
+        # escaped where the cannot-evaluate line names it, so the line stays one line and is stderr's last;
+        # then the escape itself on a backslash, a tab, an escape character, a line separator and a printable
+        # non-ASCII letter (kept)
+        control_code, _text, control_err, control_rows = _stub_cli_rows(base, "control", [
+            "--runs", "1", "--files", "1", "--commits", "1", "--case-timeout", "30", "--hook", CONTROL_ID],
+            variant="control", extra=(("Bash", CONTROL_ID),))
+        named = [row for row in control_rows if row.get("hook_id") == CONTROL_ID]
+        want = "cannot evaluate: 4 row(s) hold a failed sample or read {} (case/hook id): {}\n".format(
+            NO_VALID_SAMPLE, ", ".join(case + "/line\\nbreak\\rhook"
+                                       for case in ("bash-512b", "git-discard", "branch-root", "protected-line")))
+        escapes = (("git_discard", "git_discard"), ("back\\slash", "back\\\\slash"), ("tab\there", "tab\\there"),
+                   ("\x1b[0m", "\\x1b[0m"), ("a\u2028b", "a\\u2028b"), ("caf\u00e9", "caf\u00e9"))
+        wrong = [(text, _one_line(text)) for text, escaped in escapes if _one_line(text) != escaped]
+        check("report/control-ids-escaped", control_code == 3 and len(named) == 4 and control_err.endswith(want)
+              and control_err.count("cannot evaluate") == 1 and "\r" not in control_err and wrong == [],
+              (control_code, control_err[-600:], wrong))
 
         # 8. an interpreter version probe that fails ends the run with exit 2, not a report naming no version
         real_sample = _sample
@@ -1787,9 +1860,11 @@ def self_test(report_path=None):
           "samples, the Bash command at its budget and the Write sizes exact, the real hooks.json resolved and "
           "fully measured, malformed, missing and unmeasured hook ids refused by name, the git fixture shape, "
           "the pinned child environment, every case with its runs, TIMED OUT never a time, failed samples "
-          "never timed and a run with one exiting 3 while an all-valid or timed-out run exits 0, a failed "
-          "version probe refused, the JSON conditions, and the fixture root removed at "
-          "the normal end, on a timeout, on an error and on SIGINT, SIGTERM and SIGHUP)".format(len(results)))
+          "never timed and a run with one (in the startup row too) exiting 3 while an all-valid or timed-out "
+          "run exits 0, a --json write failure exiting 2 whatever the rows hold, control characters in a named "
+          "hook id escaped onto one line, a failed version probe refused, the JSON conditions, and the fixture "
+          "root removed at the normal end, on a timeout, on an error and on SIGINT, SIGTERM and SIGHUP)"
+          .format(len(results)))
     return 0
 
 
