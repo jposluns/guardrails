@@ -58,7 +58,7 @@ reason = "Repository-local corpus config for tools/check_cited_standards.py, pas
 
 [[exclusion]]
 path = ".aiqt/merge-train.toml"
-reason = "Repository-local merge-train opt-in (D10); tracked, not shipped. It names this repository's maintainer identity and generator commands, and its presence on a base branch is what enables tools/merge_train.py, so shipping it would switch the tool on in every adopter under the wrong identity. Adopters commit their own, like .aiqt/newtab.toml."
+reason = "Repository-local merge-train opt-in; tracked, not shipped. It names this repository's maintainer identity and generator commands, and its presence on a base branch is what enables tools/merge_train.py, so shipping it would switch the tool on in every adopter under the wrong identity. Adopters commit their own, like .aiqt/newtab.toml."
 
 # --- concern-1: manifest-self and the managed block ----------------------------------------------------
 

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "79a171e9993f548e717541afbddee5ede2588dbf2aded3fa99b519ee31f278a7"
+tree-sha256 = "2571f67a4dda5b4b8fe7fded5f88b5a3dcac6296b9962ea881f4d89b0dbf8089"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -66,8 +66,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 316899
-sha256 = "fe4dbb80c067f5824c41d28ef7581c750937f82fa07b35c2e6ecf5e7ab04e543"
+bytes = 316865
+sha256 = "193a8cb8776b228134ee8c0472b8cde5351f24bc63e3f4e784ccf141652f0d55"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -111,8 +111,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 18079
-sha256 = "808d2a3d264bb20e3f886927d2a372b895627da8280296b9161ef8a6403d6b5f"
+bytes = 18073
+sha256 = "52e2719f5706eab80a7d4e8fa1dd56d8b633aa5f6370c68028b0c0749b27ee62"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
