@@ -966,6 +966,14 @@ class = "EXEMPT"
 reason = "test-code"
 
 [[site]]
+path = "tools/gen_agents.py"
+function = "self_test_main"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
 path = "tools/gen_crosswalk.py"
 function = "self_test"
 form = "alias"

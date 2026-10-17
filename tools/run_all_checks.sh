@@ -110,6 +110,7 @@ run_gate "opf-record-selftest" python3 -I -B opf/tools/check_opf_record.py --sel
 run_gate "opf-adopt-selftest" python3 -I -B opf/tools/_opf_adopt.py --self-test
 run_gate "opf-adopt-apply-selftest" python3 -I -B opf/tools/_opf_adopt_apply.py --self-test
 run_gate "opf-adopt-hook-selftest" python3 -I -B opf/tools/_opf_adopt_hook.py --self-test
+run_gate "opf-import-batch-selftest" python3 -I -B opf/tools/_opf_import_batch.py --self-test
 run_gate "opf-pack-manifest-selftest" python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
 run_gate "opf-adopt-observe-selftest" python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
 run_gate "opf-adopt-discover-selftest" python3 -I -B opf/tools/_opf_adopt_discover.py --self-test
@@ -158,6 +159,7 @@ run_gate "rules-selftest"  python3 -I -B tools/gen_rules.py --self-test
 run_gate "artifact-checksums-selftest" python3 -I -B tools/check_artifact_checksums.py --self-test
 run_gate "artifact-checksums"          python3 -I -B tools/check_artifact_checksums.py
 run_gate "rules-drift"     python3 -I -B tools/gen_rules.py --check
+run_gate "agents-selftest" python3 -I -B tools/gen_agents.py --self-test
 run_gate "agents-drift"    python3 -I -B tools/gen_agents.py --check
 run_gate "first-pin-demo-selftest" python3 -I -B tools/gen_first_pin_demo.py --self-test
 run_gate "first-pin-demo-drift"    python3 -I -B tools/gen_first_pin_demo.py --check
