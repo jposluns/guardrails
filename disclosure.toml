@@ -5,7 +5,7 @@
 # The generator fails closed (exit 2) on a row missing any of these, on an unknown key, on a bad href,
 # on a duplicate id, or on an en/em dash, so a claim can never ship without its paired limitation and
 # its pointer. Rows LINK to the values on /evidence and /mappings; they never restate a value, so there
-# is no second copy to drift. All wording below is DRAFT, owed to the Architect's review (D7).
+# is no second copy to drift. All wording below is DRAFT, owed to the maintainer's review (D7).
 
 title = "AIQT disclosure: what we claim, and what we do not"
 note = "For each thing AIQT does, the claim and its limitation stand side by side, each pointing to the evidence. Where a fact is not yet published, the matrix points to where it will appear rather than implying it."

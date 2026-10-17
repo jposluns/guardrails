@@ -22,8 +22,9 @@ Design of record (see the GA-2 SYNTHESIS, sections 4 and 6, divergence D0): this
 repo's PARAMETERIZED validation functions, re-orchestrated under --root. It never calls the
 repo-anchored main()s (gen_rules.main / gen_agents.main / check_mappings.main are all anchored to
 repo_root() with no --root override), because those reconcile the repo the tool physically sits in,
-not an arbitrary --root. It reuses: gen_rules.load_corpus / gen_rules.derive, gen_agents.render /
-sort_key, check_rule_placement.check_name / check_drift, and _standards.load_manifests plus the
+not an arbitrary --root. It reuses: gen_rules.load_corpus / gen_rules.derive, gen_agents.sort_key /
+ordered_bodies, _adapter_compose.load_registry / compose (the AGENTS.md and adapter layouts),
+check_rule_placement.check_name / check_drift, and _standards.load_manifests plus the
 mapping-validation loop.
 
 The allowed set of `map-*` frontmatter keys and the standards ids are the ADOPTER's, not this repo's:
@@ -57,8 +58,9 @@ from pathlib import Path
 # tools/ next to the modules it reuses.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_rules            # noqa: E402  load_corpus, derive, MAP_KEYS, SEQ_KEYS
-import gen_agents           # noqa: E402  render, sort_key, body_of
-import gen_adapters         # noqa: E402  ADAPTERS, render (GEMINI.md / copilot-instructions.md)
+import gen_agents           # noqa: E402  sort_key, ordered_bodies, AGENTS_REL, HEADER
+import _adapter_compose as adapter_compose  # noqa: E402  load_registry, compose, registry_text
+import gen_adapters         # noqa: E402  ADAPTERS, TARGETS (GEMINI.md / copilot-instructions.md)
 import gen_cursor           # noqa: E402  render_rule, cursor_rel, OUT_PARTS (Cursor .mdc tree)
 import gen_hooks            # noqa: E402  build_desired, PLUGIN_ROOT_PARTS, HOOKS_SUBTREE_PARTS (hooks plugin)
 import gen_skill            # noqa: E402  build_outputs, RESERVED_PARTS (the generated chat-skill surface)
@@ -198,16 +200,20 @@ def _claude_drift(root, corpus):
 
 
 def _agents_drift(root, corpus):
-    """Mirror gen_agents.main()'s reconciliation, re-rooted at root. Absent AGENTS.md -> NOT APPLICABLE
-    (the adopter did not install the Codex surface)."""
+    """Mirror gen_agents.main()'s composition (_adapter_compose), re-rooted at root, comparing raw bytes.
+    Absent AGENTS.md -> NOT APPLICABLE (the adopter did not install the Codex surface). An absent block
+    registry reads as every target legacy (an install that predates the registry renders exactly that);
+    a malformed or unreadable registry or block source, or an AGENTS.md that is not valid UTF-8 ->
+    MALFORMED."""
     out = root / "AGENTS.md"
     if not out.exists():
         return (NA, "no AGENTS.md surface installed")
     try:
-        pairs = [(src, fm) for src, fm, _ in corpus]
-        pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
-        content = gen_agents.render(pairs)
-        current = out.read_text(encoding="utf-8")
+        registry = adapter_compose.load_registry(root, absent_is_legacy=True)
+        content = adapter_compose.compose(gen_agents.AGENTS_REL, gen_agents.HEADER,
+                                          gen_agents.ordered_bodies(corpus), registry).data
+        current = out.read_bytes()
+        current.decode("utf-8")  # an undecodable AGENTS.md is MALFORMED, as before the raw-byte compare
     except (ValueError, OSError) as exc:
         return (MALFORMED, "cannot render/read AGENTS.md: {}".format(exc))
     if current != content:
@@ -217,25 +223,28 @@ def _agents_drift(root, corpus):
 
 def _adapter_drift(root, corpus, adapter):
     """Mirror gen_adapters for one adapter (GEMINI.md / .github/copilot-instructions.md), re-rooted at
-    root. Absent file -> NOT APPLICABLE (the adopter did not install that assistant's surface)."""
+    root, comparing raw bytes. Absent file -> NOT APPLICABLE (the adopter did not install that assistant's
+    surface). An absent block registry reads as every target legacy; a malformed or unreadable registry or
+    block source, or a file that is not valid UTF-8 -> MALFORMED."""
     out = root.joinpath(*adapter["parts"])
     label = adapter["label"]
     parts = "/".join(adapter["parts"])
     # Probe by READING, not Path.exists(): on Python 3.12 exists() returns False on EACCES (an unreadable
     # .github/ parent for the nested copilot surface) rather than raising, which would mask a present-but-
-    # unreadable surface as a false NOT APPLICABLE. read_text distinguishes FileNotFoundError (the adopter
+    # unreadable surface as a false NOT APPLICABLE. read_bytes distinguishes FileNotFoundError (the adopter
     # did not install this surface -> NA) from any other OSError (present but unreadable -> MALFORMED,
     # fail closed), independent of the Python version.
     try:
-        current = out.read_text(encoding="utf-8")
+        current = out.read_bytes()
+        current.decode("utf-8")  # an undecodable adapter is MALFORMED, as before the raw-byte compare
     except FileNotFoundError:
         return (label, NA, "no {} surface installed".format(parts))
     except (ValueError, OSError) as exc:
         return (label, MALFORMED, "cannot read {}: {}".format(parts, exc))
     try:
-        pairs = [(src, fm) for src, fm, _ in corpus]
-        pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
-        content = gen_adapters.render(pairs, adapter["header"])
+        registry = adapter_compose.load_registry(root, absent_is_legacy=True)
+        content = adapter_compose.compose(parts, adapter["header"], gen_agents.ordered_bodies(corpus),
+                                          registry).data
     except (ValueError, OSError) as exc:
         return (label, MALFORMED, "cannot render {}: {}".format(parts, exc))
     if current != content:
@@ -332,8 +341,9 @@ def _skill_drift(root, corpus):
 def check_c2(root, cache):
     """Each generated surface the adopter HAS matches regeneration from their .aiqt/core/rules/.
 
-    Reuses load_corpus output (C1) + gen_agents.render/sort_key; re-orchestrates the drift comparison
-    under --root rather than calling the repo-anchored gen_*.main(). No corpus -> NOT APPLICABLE."""
+    Reuses load_corpus output (C1) + gen_agents.ordered_bodies and _adapter_compose; re-orchestrates the
+    drift comparison under --root rather than calling the repo-anchored gen_*.main(). No corpus -> NOT
+    APPLICABLE."""
     if cache.get("corpus_error"):
         return Result("C2", "no-drift", SKIPPED, "corpus did not load (see C1)")
     # Gate on the core dir EXISTING, not on a non-empty corpus. An absent .aiqt/core/rules/ is a thin
@@ -894,6 +904,23 @@ def _add_skill_surface(base):
         path.write_bytes(content)
 
 
+def _write_adapters(base, corpus, adapters=True, registry_text=None):
+    """Write the block registry (all targets legacy unless registry_text is given), then AGENTS.md and,
+    when adapters, GEMINI.md and .github/copilot-instructions.md, each composed by _adapter_compose from
+    the corpus. Any block source the registry names must already exist under base."""
+    reg = base.joinpath(*adapter_compose.REGISTRY_REL.split("/"))
+    reg.parent.mkdir(parents=True, exist_ok=True)
+    reg.write_text(registry_text if registry_text is not None else adapter_compose.registry_text(),
+                   encoding="utf-8")
+    registry = adapter_compose.load_registry(base)
+    bodies = gen_agents.ordered_bodies(corpus)
+    targets = [(gen_agents.AGENTS_REL, gen_agents.HEADER)] + (gen_adapters.TARGETS if adapters else [])
+    for rel, header in targets:
+        out = base.joinpath(*rel.split("/"))
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(adapter_compose.compose(rel, header, bodies, registry).data)
+
+
 def _build_conformant(base):
     """Write a full, self-consistent install under base using the tool's own generators, so the
     conformant tree is correct BY CONSTRUCTION. Returns the loaded corpus."""
@@ -912,13 +939,7 @@ def _build_conformant(base):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(s.read_text(encoding="utf-8"), encoding="utf-8")
 
-    pairs = [(s, fm) for s, fm, _ in corpus]
-    pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
-    (base / "AGENTS.md").write_text(gen_agents.render(pairs), encoding="utf-8")
-    for adapter in gen_adapters.ADAPTERS:
-        out = base.joinpath(*adapter["parts"])
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(gen_adapters.render(pairs, adapter["header"]), encoding="utf-8")
+    _write_adapters(base, corpus)
     cursor = base.joinpath(*gen_cursor.OUT_PARTS)
     for s_, _fm, rel in corpus:
         target = cursor / gen_cursor.cursor_rel(rel)
@@ -949,9 +970,7 @@ def _build_mapped_tree(base, rule_text):
         target = claude / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(s.read_text(encoding="utf-8"), encoding="utf-8")
-    pairs = [(s, fm) for s, fm, _ in corpus]
-    pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
-    (base / "AGENTS.md").write_text(gen_agents.render(pairs), encoding="utf-8")
+    _write_adapters(base, corpus, adapters=False)
 
 
 def _build_bare_key(base):
@@ -1096,6 +1115,74 @@ def self_test_main():
             code, out = run_capture(adrift)
             if code != 1 or status_of(out, "C2") != FAIL:
                 failures.append("adapter-drift ({}) expected exit 1 + C2 FAIL:\n{}".format(rel, out))
+
+        # 2b'. The adapter block registry. A composed AGENTS.md (one OPF block before the rules) built by
+        #      _adapter_compose is C2 PASS; the same tree with an appended local edit, or with AGENTS.md or
+        #      GEMINI.md converted to CRLF line endings (compared as raw bytes, not decoded text), is C2
+        #      FAIL; with its declared block source missing, a block target of the wrong TOML type (an array
+        #      or a table), a symlinked registry, or an AGENTS.md or GEMINI.md that is not valid UTF-8, it is
+        #      C2 MALFORMED (exit 2). An absent registry reads as every target legacy (an install that
+        #      predates the registry): the composed AGENTS.md is then C2 FAIL, never a pass; the legacy
+        #      adapters alone, and an AGENTS.md that is exactly the legacy rendering, are C2 PASS.
+        block = ("OPF-SELFTEST", "AGENTS.md", "before-rules", 1, "opf/blocks/selftest.md", None)
+        composed_reg = adapter_compose.registry_text([("AGENTS.md", "composed")], [block])
+
+        def reg_path(b):
+            return b.joinpath(*adapter_compose.REGISTRY_REL.split("/"))
+
+        def legacy_agents(b, corpus):
+            (b / "AGENTS.md").write_bytes(adapter_compose.compose(
+                "AGENTS.md", gen_agents.HEADER, gen_agents.ordered_bodies(corpus),
+                adapter_compose.LEGACY_REGISTRY).data)
+            reg_path(b).unlink()
+
+        def symlinked_registry(b, _corpus):
+            reg_path(b).rename(b / "registry-elsewhere.toml")
+            os.symlink(b / "registry-elsewhere.toml", reg_path(b))
+
+        def retyped_target(new):
+            def mutate(b, _corpus):
+                reg_path(b).write_text(composed_reg.replace('target = "AGENTS.md"', new, 1), encoding="utf-8")
+            return mutate
+
+        for label, mutate, want_code, want in (
+                ("composed", None, 0, PASS),
+                ("composed-local-edit", lambda b, _c: (b / "AGENTS.md").write_bytes(
+                    (b / "AGENTS.md").read_bytes() + b"\nlocal edit\n"), 1, FAIL),
+                ("composed-crlf", lambda b, _c: (b / "AGENTS.md").write_bytes(
+                    (b / "AGENTS.md").read_bytes().replace(b"\n", b"\r\n")), 1, FAIL),
+                ("adapter-crlf", lambda b, _c: (b / "GEMINI.md").write_bytes(
+                    (b / "GEMINI.md").read_bytes().replace(b"\n", b"\r\n")), 1, FAIL),
+                ("composed-invalid-utf8", lambda b, _c: (b / "AGENTS.md").write_bytes(
+                    (b / "AGENTS.md").read_bytes() + b"\xff"), 2, MALFORMED),
+                ("adapter-invalid-utf8", lambda b, _c: (b / "GEMINI.md").write_bytes(
+                    (b / "GEMINI.md").read_bytes() + b"\xff"), 2, MALFORMED),
+                ("composed-source-missing", lambda b, _c: (b / "opf" / "blocks" / "selftest.md").unlink(), 2,
+                 MALFORMED),
+                ("registry-block-target-array", retyped_target('target = ["AGENTS.md"]'), 2, MALFORMED),
+                ("registry-block-target-table", retyped_target("target = { p = 1 }"), 2, MALFORMED),
+                ("registry-symlink", symlinked_registry, 2, MALFORMED),
+                # An absent registry is every target legacy: the composed AGENTS.md no longer matches.
+                ("registry-missing", lambda b, _c: reg_path(b).unlink(), 1, FAIL),
+                # No AGENTS.md (its surface NOT APPLICABLE): the legacy adapters alone are judged and pass.
+                ("registry-missing-adapters-only", lambda b, _c: ((b / "AGENTS.md").unlink(), reg_path(b).unlink()),
+                 0, PASS),
+                # An install that predates the registry: AGENTS.md is exactly the legacy rendering.
+                ("registry-missing-legacy-install", legacy_agents, 0, PASS)):
+            ctree = tmp / ("adapter-registry-" + label)
+            ctree.mkdir()
+            corpus = _build_conformant(ctree)
+            (ctree / "opf" / "blocks").mkdir(parents=True)
+            (ctree / "opf" / "blocks" / "selftest.md").write_text("Self-test block line.\n", encoding="utf-8")
+            _write_adapters(ctree, corpus, registry_text=composed_reg)
+            if b"<!-- OPF-SELFTEST:BEGIN (generated sha256=" not in (ctree / "AGENTS.md").read_bytes():
+                failures.append("adapter-registry ({}): fixture AGENTS.md carries no OPF block".format(label))
+            if mutate is not None:
+                mutate(ctree, corpus)
+            code, out = run_capture(ctree)
+            if code != want_code or status_of(out, "C2") != want:
+                failures.append("adapter-registry ({}) expected exit {} + C2 {}, got exit {}:\n{}".format(
+                    label, want_code, want, code, out))
 
         # 2c. An orphaned .mdc inside the reserved Cursor subtree (no source rule) -> C2 FAIL.
         corphan = tmp / "cursor-orphan"
@@ -1415,7 +1502,11 @@ def self_test_main():
     print("SELF-TEST PASS: conformant passes; drift (.claude/rules, AGENTS.md, the .cursor/rules Cursor tree, the GEMINI.md/copilot "
           "adapters, and the chat-skill surface in both its SKILL.md text and its binary download zip), "
           "empty-core orphans, fabricated mapping ids, a bare (fit-less) map key, and an id "
-          "asserted both tight and broad fail; the hooks plugin surface (C5) verifies when present, "
+          "asserted both tight and broad fail; a composed AGENTS.md passes, a local edit or a CRLF "
+          "conversion fails, a missing block source, a wrong-typed registry field, a symlinked registry or "
+          "an adapter that is not UTF-8 is MALFORMED, and an absent registry reads as every target legacy "
+          "(a composed AGENTS.md then fails, a legacy install passes); the hooks plugin "
+          "surface (C5) verifies when present, "
           "degrades to NOT APPLICABLE when the opt-in plugin is absent, and fails on drift, a hooks "
           "orphan, or an orphaned surface with no source; absent input (corpus, "
           ".claude/rules) degrades to NOT APPLICABLE; malformed manifests, unreadable input dirs "

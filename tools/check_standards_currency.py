@@ -51,7 +51,7 @@ except Exception:  # pragma: no cover - gen_rules is a sibling; this only guards
 
 # Per-status policy, in days of age since `retrieved`. warn=None means "warn immediately" (a
 # point-in-time or draft capture is inherently a review-me state); otherwise warn once age exceeds the
-# warn count. FAIL once age exceeds the fail count. Confirmed defaults (CW-3 Q1, Architect-set):
+# warn count. FAIL once age exceeds the fail count. Confirmed defaults (CW-3 Q1, maintainer-set):
 #   stable   warn > 365, fail > 730   (slow-moving published standards; a year's notice, two-year backstop)
 #   snapshot warn now,   fail > 365   (a pinned content version is always "review me"; fail once a year old)
 #   beta     warn now,   fail > 180   (a draft is volatile; do not let it linger past six months)
