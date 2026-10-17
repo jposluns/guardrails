@@ -86,7 +86,7 @@ from _opf_store import (  # noqa: E402
 from _opf_schema import (  # noqa: E402
     validate_record, validate_counters, check_unique_ids, check_ids_within_counters, check_monotonic,
     validate_transition, parse_status, BASELINE_SPECS, ACTOR_KINDS, LINK_RELS, _valid_id_shape,
-    SUPPORTED_SCHEMA, _valid_timestamp,
+    SUPPORTED_SCHEMA, _valid_timestamp, IMPORTED_NAMESPACES,
 )
 # U3 supplies the ledger validators, the frozen/rotation/partition guards, and the across-time append-only.
 from _opf_release import (  # noqa: E402
@@ -190,6 +190,30 @@ _REQUIRED_SET = frozenset(REQUIRED_CHECKS)
 # Checks a homes-2 store also requires (spec 4.2), inserted after C-ARCHIVE-ENUM. A legacy (homes 1) store's
 # roster, and so its report, is exactly REQUIRED_CHECKS.
 HOMES2_CHECKS = ("C-EVIDENCE-ENUM",)
+# The imported-content checks (C-IMPORTED-*, spec 8.2): the content grading of the imported-series
+# leaves, deferred until the spec 1.3.0 activation lands them, so EMPTY today. While it is empty the
+# activation tripwire in _check_containment routes any store whose imported series is ACTIVE to
+# CANNOT-EVALUATE (the leaves would be registered as managed while nothing reads their content), and
+# the self-test asserts imported_content_checks_landed below: once SUPPORTED_SPEC_VERSION reaches
+# IMPORTED_SPEC_VERSION this roster must be non-empty, NEW ids in the exact imported-check grammar
+# (_IMPORTED_ID_RE below), disjoint from REQUIRED_CHECKS and HOMES2_CHECKS, and inside
+# required_checks(h) for EVERY homes generation h from 1 through SUPPORTED_HOMES (activating the
+# imported series and activating homes 2 are separate gates; today an active series is graded
+# against required_checks(1)), so raising that
+# constant alone, or with a placeholder roster, cannot ship. At activation these ids join the
+# required roster of every generation the way HOMES2_CHECKS joins the homes-2 roster: the wiring
+# must place the imported ids inside required_checks(h) for EVERY supported generation while
+# they stay disjoint from REQUIRED_CHECKS and HOMES2_CHECKS themselves, so any OTHER wiring (even a
+# legitimate-looking alternative such as an imported-keyed roster) reads red, which fails
+# closed: a red on a legitimate alternative, never a green on a wiring nothing grades.
+IMPORTED_CONTENT_CHECKS = ()
+# The exact imported-check id grammar, matched in full: the C-IMPORTED- prefix, then one or more
+# runs of upper-case ASCII letters joined by single hyphens. The class is the one every id in
+# REQUIRED_CHECKS and HOMES2_CHECKS uses after its C-, and it admits the four imported-series checks
+# spec 8.3 names (C-IMPORTED-SCHEMA, C-IMPORTED-IDS, C-IMPORTED-PROVENANCE, C-IMPORTED-SEGREGATION).
+# An id carrying whitespace, a lower-case or mixed-case prefix, or any other character is refused;
+# it is never stripped or case-folded into a match.
+_IMPORTED_ID_RE = re.compile(r"^C-IMPORTED-[A-Z]+(?:-[A-Z]+)*\Z")
 
 
 def required_checks(homes):
@@ -198,6 +222,52 @@ def required_checks(homes):
         return REQUIRED_CHECKS
     at = REQUIRED_CHECKS.index("C-ARCHIVE-ENUM") + 1
     return REQUIRED_CHECKS[:at] + HOMES2_CHECKS + REQUIRED_CHECKS[at:]
+
+
+def imported_content_checks_landed():
+    """The tooling-side imported-series activation gate, asserted by the self-test at the SHIPPED
+    constants and exercised there under controlled versions, rosters, and wirings. True while the
+    imported series is unsupported, judged through _opf_store.imported_series_supported, the
+    SAME support comparison the imported_series_declared gate reads (one shared helper, so the
+    gate and this predicate cannot disagree about support): the
+    content checks stay deferred, and the runtime tripwire in _check_containment covers an ACTIVE
+    imported series while this content-check roster stays empty (a populated roster disarms it).
+    Once support reaches the threshold, True ONLY when
+    IMPORTED_CONTENT_CHECKS is a non-empty roster of NEW ids, each a full match of the exact
+    imported-check grammar _IMPORTED_ID_RE (the C-IMPORTED- prefix, then upper-case ASCII letter
+    runs joined by single hyphens; an id carrying whitespace, a lower-case or mixed-case prefix, or
+    any other character is refused, never stripped or case-folded into a match), disjoint from
+    REQUIRED_CHECKS and HOMES2_CHECKS (a placeholder reusing an existing id such as C-CONTAINMENT
+    implements no imported-content grading, so reuse never stands in), and inside
+    required_checks(h) for EVERY homes generation h from 1 through SUPPORTED_HOMES. Activating the
+    imported series (SUPPORTED_SPEC_VERSION) and activating homes 2 (SUPPORTED_HOMES) are SEPARATE
+    gates: today an active series is graded against required_checks(1), so ids wired only into the
+    homes-2 roster would bind no generation an active store is actually graded against. Raising
+    the support constant without landing the checks, or landing a placeholder roster, therefore
+    fails the suite through this predicate, and the runtime tripwire never stands alone. This
+    predicate grades ROSTER STRUCTURE only -- the ids exist, match the grammar, are NEW, and are
+    wired into every generation -- never what a registered check reads: a wired check that grades
+    nothing is for review and for the report reconciliation (an id that never runs reads
+    CANNOT-EVALUATE), not for this gate. Once the imported series is supported, the
+    EVERY-generation bound assumes SUPPORTED_HOMES >= 1: below one supported generation the
+    predicate refuses outright (fail closed) instead of reading the empty generation range
+    vacuously True. While the series is unsupported the deferral answers first, whatever
+    SUPPORTED_HOMES holds."""
+    if not _opf_store.imported_series_supported():
+        return True
+    ids = set(IMPORTED_CONTENT_CHECKS)
+    if not ids:
+        return False
+    if not all(isinstance(cid, str) and _IMPORTED_ID_RE.fullmatch(cid) for cid in ids):
+        return False
+    if ids & (set(REQUIRED_CHECKS) | set(HOMES2_CHECKS)):
+        return False
+    # Below one supported generation the all() below is vacuously True: refuse instead.
+    if _opf_store.SUPPORTED_HOMES < 1:
+        return False
+    return all(ids <= set(required_checks(h))
+               for h in range(1, _opf_store.SUPPORTED_HOMES + 1))
+
 
 # --- source-integrity vs deliverable-drift partition (PR-C, the render --write source gate) ---------
 # The three DELIVERABLE_DRIFT_CHECKS grade the GENERATED public deliverables (the declared views, the root
@@ -2128,7 +2198,7 @@ ContainmentClassification = collections.namedtuple(
      "worklog_errors"))
 
 
-def classify_containment(manifest_data, machine_rel):
+def classify_containment(manifest_data, machine_rel, imported=False):
     """Pure, side-effect-free derivation of the C-CONTAINMENT managed-set classification from the manifest
     and the machine-store relpath (spec 14.2). It does NO I/O and holds no `rep`: a malformed [unmanaged]
     entry is collected into `malformed` (the checker re-emits it as a CANNOT-EVALUATE) and a colliding
@@ -2136,8 +2206,14 @@ def classify_containment(manifest_data, machine_rel):
     declaration covers NOTHING). This is the SINGLE authority `_check_containment` derives its
     adoption-content managed set from, so a second consumer cannot diverge from it by construction (F10-1).
     `enabled_types` and `layout` are derived internally from `manifest_data` by the SAME pure helpers the
-    caller uses (D2), so the classification cannot drift from the manifest the caller validated. Returns a
-    ContainmentClassification."""
+    caller uses (D2), so the classification cannot drift from the manifest the caller validated.
+    `imported` is the EXPLICIT imported-series activation flag (spec 8.2/4.2): the caller derives it
+    through _opf_store.imported_series_declared, which requires BOTH the declared spec_version AND
+    this tooling's own support (SUPPORTED_SPEC_VERSION at or above IMPORTED_SPEC_VERSION), so it is
+    False for every store this tooling validates today, the accepted 2.0.0 / homes = 2 reservation
+    included. When True, the imported managed leaves join the managed set; the default False keeps
+    every current store's grading unchanged, so the registration ships inert until activation
+    raises SUPPORTED_SPEC_VERSION to 1.3.0. Returns a ContainmentClassification."""
     mrel = machine_rel
     dp = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
     layout = dp.get("layout") if isinstance(dp, dict) else None
@@ -2190,6 +2266,14 @@ def classify_containment(manifest_data, machine_rel):
     # managed leaf IF PRESENT even without a declaration, mirroring C-COUNTERS' optional_namespaces
     # (accepted-if-present, never required). Ledger importer types (none today) are excluded.
     importer_index_types = frozenset(IMPORTER_TYPES) - _LEDGER_TYPES
+    # The imported-series managed leaves (spec 8.2/4.2): part of the managed set ONLY under the
+    # explicit `imported` activation flag (never true today: imported_series_declared also requires
+    # SUPPORTED_SPEC_VERSION to reach IMPORTED_SPEC_VERSION, so even the reserved 2.0.0 / homes = 2
+    # declaration C-MANIFEST accepts stays inactive until activation raises it), and
+    # admitted ONLY directly in the machine store. The names derive from the enabled-type roster in
+    # _opf_store, so the leaf set cannot drift from the imported id/counter namespace set; the
+    # importer-only legacy_fragment contributes no leaf.
+    imported_leaves = _opf_store.imported_leaf_names(enabled_types) if imported else frozenset()
     archive_root = _rel(mrel, ARCHIVE_DIRNAME)
     # imports is store-scope (`.working/imports`), a SIBLING of the machine subdir (disjoint from mrel), read
     # from IMPORTS_REL, the legacy control root _opf_store reserves (spec 14.1). The walk starts at
@@ -2214,6 +2298,12 @@ def classify_containment(manifest_data, machine_rel):
                 return _opf_worklog.parse_worklog_filename(r.split("/", 1)[1]) is not None
             if "/" not in r:
                 if r in ledger_names:
+                    return True
+                if r in imported_leaves:
+                    # An imported-series leaf (worklog.imported.toml or <type>.imported.index.toml)
+                    # is managed only HERE, directly in the machine store; a deeper path of the same
+                    # name stays a stray, and while `imported` is False the set is empty, so a 1.2.0
+                    # store grades these names exactly as before (spec 8.2/4.2).
                     return True
                 if r.endswith(INDEX_SUFFIX):
                     t = r[:-len(INDEX_SUFFIX)]
@@ -2303,7 +2393,7 @@ def _legacy_import_staging(machine_rel):
     return _rel(machine_rel, _LEGACY_IMPORTS_DIRNAME), review
 
 
-def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
+def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, imported=False):
     """C-CONTAINMENT: recursively walk `.working/`, matching every regular file against the managed set
     (the ledgers, the enabled non-ledger type indexes, per-record bodies, the archive tree, declared
     store-scope view targets, and files under a valid declared [unmanaged] path). A path in neither set is
@@ -2314,8 +2404,22 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
     (view targets, the collision-filtered valid_unmanaged, and the malformed / colliding declarations) is
     derived by the pure `classify_containment`, the SINGLE authority for adoption content (F10-1).
     enabled_types / layout are derived inside that helper from the manifest (D2), so they are no longer
-    passed in."""
-    cls = classify_containment(manifest_data, machine_rel)
+    passed in. `imported` is the explicit imported-series activation flag classify_containment
+    documents; the walk itself needs no imported awareness (the imported leaves are plain managed
+    leaves directly in the machine store, spec 8.2/4.2). While IMPORTED_CONTENT_CHECKS is empty, an
+    ACTIVE imported series is routed to CANNOT-EVALUATE (the activation tripwire below):
+    registration without content grading never certifies."""
+    cls = classify_containment(manifest_data, machine_rel, imported=imported)
+    # The activation tripwire (spec 8.2/4.2): an ACTIVE imported series while every imported-content
+    # check (C-IMPORTED-*) is still deferred must never certify, or the imported leaves would be
+    # registered as managed while nothing reads their content (the PRC-F1 N-1 blind spot, reopened
+    # at activation). A CANNOT-EVALUATE, not a finding: the store is not known bad, the tooling is
+    # known incomplete. The spec 1.3.0 activation lands the checks, populates
+    # IMPORTED_CONTENT_CHECKS, and so disarms this.
+    if imported and not IMPORTED_CONTENT_CHECKS:
+        rep.cant("C-CONTAINMENT: the imported series is active but every imported-content check "
+                 "(C-IMPORTED-*) is still deferred; the imported leaves would be certified "
+                 "unread, so the store cannot be evaluated (spec 8.2/4.2)")
     # Re-emit the classifier's collected messages in the ORIGINAL order (all malformed CANNOT-EVALUATEs, then
     # all colliding findings), exactly as the inline classification emitted them before the extraction.
     for msg in cls.malformed + cls.worklog_errors:
@@ -3090,7 +3194,14 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- C-CONTAINMENT: whole-tree path / unmanaged-path containment (spec 14.2/11) -------------------
     rep.ran("C-CONTAINMENT")
-    _check_containment(root_fd, machine_rel, manifest_data, import_status, rep)
+    # The explicit imported-series activation flag (spec 8.2/4.2), derived through
+    # _opf_store.imported_series_declared: the declared spec_version AND this tooling's own
+    # support. False for every store this tooling validates: the helper itself answers False until
+    # activation raises SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION, which
+    # C-MANIFEST alone does not guarantee (it accepts the reserved 2.0.0 / homes = 2 declaration
+    # today, spec 4.2).
+    _check_containment(root_fd, machine_rel, manifest_data, import_status, rep,
+                       imported=_opf_store.imported_series_declared(manifest_data))
 
     # --- C-VIEW-DRIFT: byte-level drift of every declared deterministic view (spec 5.8/10) ------------
     rep.ran("C-VIEW-DRIFT")
@@ -3275,6 +3386,7 @@ def self_test():
     import tempfile
     import shutil
     import copy
+    import itertools
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from _opf_release import compute_span_digest
@@ -4082,6 +4194,466 @@ def self_test():
               rlfr.status != VALID
               and any("legacy_fragment" in m and "schema-deferred" in m
                       for m in rlfr.by_check.get("C-RECORDS", [])))
+        # OPF-IMPORTED-SERIES IS-2: the imported-series managed leaves (spec 8.2/4.2), behind the
+        # explicit `imported` activation flag. ACTIVE (imported=True, the spec_version >= 1.3.0 store):
+        # worklog.imported.toml and each enabled non-ledger type <type>.imported.index.toml are managed
+        # leaves DIRECTLY in the machine store; the importer-only legacy_fragment contributes none (its
+        # LF namespace is outside the imported series), and a deeper path of a leaf name stays a stray.
+        # The pure legs drive classify_containment directly; the full-doctor legs below cover the
+        # INACTIVE grading (the 1.2.0 store and the accepted 2.0.0 / homes = 2 reservation) and,
+        # with SUPPORTED_SPEC_VERSION patched to IMPORTED_SPEC_VERSION inside the vector, the
+        # ACTIVATED grading end to end through the driver's own derived flag.
+        _is2_m = base_manifest()
+        _is2_m["types"]["legacy_fragment"] = {"namespace": "LF"}
+        _is2_on = classify_containment(_is2_m, ".working/toml", imported=True)
+        check("containment-imported-leaf-managed-when-active",
+              _is2_on.managed_file(".working/toml/worklog.imported.toml")
+              and _is2_on.managed_file(".working/toml/backlog_item.imported.index.toml"))
+        check("containment-lf-imported-leaf-never-managed",
+              not _is2_on.managed_file(".working/toml/legacy_fragment.imported.index.toml")
+              and _is2_on.managed_file(".working/toml/legacy_fragment.index.toml"))
+        check("containment-imported-leaf-deep-stray",
+              not _is2_on.managed_file(".working/toml/a/worklog.imported.toml")
+              and not _is2_on.managed_file(".working/toml/archive/backlog_item.imported.index.toml"))
+        # One over-refusal guard (activation must not disturb the clean series: its leaves stay
+        # managed) and one over-admission guard (activation must not admit an imported name beyond
+        # the exact enabled-type roster: the reserved-excluded transaction gets no leaf).
+        check("containment-active-clean-leaves-unchanged",
+              _is2_on.managed_file(".working/toml/worklog.toml")
+              and _is2_on.managed_file(".working/toml/backlog_item.index.toml")
+              and not _is2_on.managed_file(".working/toml/transaction.imported.index.toml"))
+        # INACTIVE (the explicit flag False, every 1.2.0 store): the same names stay unregistered
+        # strays, pure and full-doctor alike, so an old imported leaf cannot register itself before
+        # activation (red here if the flag or its default ever admits them early).
+        _is2_off = classify_containment(_is2_m, ".working/toml")
+        check("containment-imported-leaf-unmanaged-when-inactive",
+              not _is2_off.managed_file(".working/toml/worklog.imported.toml")
+              and not _is2_off.managed_file(".working/toml/backlog_item.imported.index.toml"))
+        _is2_store = clean_machine()
+        _is2_store["worklog.imported.toml"] = {"schema": 1, "entry": []}
+        _is2_store["backlog_item.imported.index.toml"] = idx([])
+        _is2_run = run(_is2_store)
+        check("containment-imported-leaf-stray-when-inactive",
+              _is2_run is not None and _is2_run.status == INVALID
+              and any("C-CONTAINMENT" in f and "worklog.imported.toml" in f and "unregistered" in f
+                      for f in _is2_run.findings)
+              and any("backlog_item.imported.index.toml" in f and "unregistered" in f
+                      for f in _is2_run.findings))
+        # The accepted 2.0.0 / homes = 2 reservation (spec 4.2) is the ONE store C-MANIFEST
+        # validates today with a spec_version above IMPORTED_SPEC_VERSION, so it is exactly where a
+        # declaration-only gate would activate early: the imported leaves must stay unregistered
+        # strays there too (red if imported_series_declared ever reads the declaration alone), and
+        # the clean pair itself stays VALID (the planted leaves, never the declaration, cause the
+        # findings; the planted bytes are not even TOML, so a VALID verdict would certify files
+        # nothing read).
+        _is2_h2 = clean_machine()
+        _is2_h2["manifest.toml"]["opf"]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
+        _is2_h2["manifest.toml"]["opf"]["homes"] = 2
+        _is2_h2_clean = run(copy.deepcopy(_is2_h2))
+        check("containment-homes2-pair-clean-valid",
+              _is2_h2_clean is not None and _is2_h2_clean.status == VALID)
+        _is2_h2["worklog.imported.toml"] = "deliberately invalid TOML ["
+        _is2_h2["backlog_item.imported.index.toml"] = "garbage = ["
+        _is2_h2_run = run(_is2_h2)
+        check("containment-imported-leaf-stray-on-homes2-pair",
+              _is2_h2_run is not None and _is2_h2_run.status == INVALID
+              and any("C-CONTAINMENT" in f and "worklog.imported.toml" in f and "unregistered" in f
+                      for f in _is2_h2_run.findings)
+              and any("backlog_item.imported.index.toml" in f and "unregistered" in f
+                      for f in _is2_h2_run.findings))
+        # The leaf roster agrees with the imported id/counter namespace set: over the full section-8.1
+        # roster (every module enabled, legacy_fragment declared), the types granted a leaf are exactly
+        # those whose normative namespace is in _opf_schema.IMPORTED_NAMESPACES, the worklog ledger as
+        # worklog.imported.toml and every other as its <type>.imported.index.toml (spec 8.2: both
+        # rosters derive from the one section-8.1 taxonomy and cannot drift).
+        _is2_roster = _authoritative_types(set(KNOWN_MODULES), {"legacy_fragment": {"namespace": "LF"}})
+        check("imported-leaf-roster-agrees-with-namespaces",
+              _opf_store.imported_leaf_names(_is2_roster)
+              == frozenset({(_opf_store.IMPORTED_WORKLOG_NAME if t in _LEDGER_TYPES
+                             else t + _opf_store.IMPORTED_INDEX_SUFFIX)
+                            for t, ns in _is2_roster.items() if ns in IMPORTED_NAMESPACES}))
+        # ACTIVATED full-doctor fixtures: SUPPORTED_SPEC_VERSION is patched to
+        # IMPORTED_SPEC_VERSION inside the vector (the spec 1.3.0 activation, the same per-vector
+        # patch idiom check_opf_homes uses for SUPPORTED_HOMES), so a spec_version 1.3.0 store
+        # validates and the driver-derived flag is True end to end.
+        _is2_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
+        try:
+            _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
+            # The clean activated store with both imported leaves present REGISTERS them: no
+            # unregistered-stray finding (red when EITHER flag-forwarding step, the driver to
+            # _check_containment or _check_containment to classify_containment, is removed, because
+            # the leaves then grade as unregistered strays), and the activation tripwire routes the
+            # run to CANNOT-EVALUATE with the deferred C-IMPORTED-* roster as the ONLY cant, never
+            # VALID, because nothing reads the leaves' content yet (red if an activated store ever
+            # certifies while the imported-content checks are deferred).
+            _is2_act = clean_machine()
+            _is2_act["manifest.toml"]["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
+            _is2_act["worklog.imported.toml"] = {"schema": 1, "entry": []}
+            _is2_act["backlog_item.imported.index.toml"] = idx([])
+            _is2_act_run = run(copy.deepcopy(_is2_act))
+            check("containment-imported-leaf-registered-when-activated",
+                  _is2_act_run is not None and not _is2_act_run.findings
+                  and _is2_act_run.status == CANNOT_EVALUATE
+                  and len(_is2_act_run.cannot_evaluate) == 1
+                  and "C-IMPORTED" in _is2_act_run.cannot_evaluate[0])
+            # The leaf roster the classification derives is the ENABLED types, never the full
+            # section-8.1 roster: a disabled module type (release is not enabled here) gets no leaf,
+            # so its imported index stays an unregistered stray even while activated (red if the
+            # imported_leaf_names call is ever fed the full roster instead of enabled_types). The
+            # activation-tripwire cant dominates the finding, so the status is asserted as
+            # not-VALID, and the discriminating assertion is the unregistered finding itself.
+            _is2_act["release.imported.index.toml"] = idx([])
+            _is2_dis_run = run(_is2_act)
+            check("containment-disabled-type-imported-leaf-stray-when-activated",
+                  _is2_dis_run is not None and _is2_dis_run.status != VALID
+                  and any("C-CONTAINMENT" in f and "release.imported.index.toml" in f
+                          and "unregistered" in f for f in _is2_dis_run.findings))
+            # Writer/doctor single authority (F10-1): plan_write_scope passes the SAME derived flag
+            # to the SAME classify_containment, so on an activated manifest whose [unmanaged]
+            # declaration names an imported leaf BOTH refuse the collision, naming the same finding
+            # (red when the write guard falls back to the default flag: it would then plan writes
+            # over a declaration the doctor flags as colliding).
+            import _opf_write_guard
+            _is2_wg_m = base_manifest()
+            _is2_wg_m["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
+            _is2_wg_m["unmanaged"] = dict(paths=[".working/toml/worklog.imported.toml"])
+            _is2_wg_cls = classify_containment(
+                _is2_wg_m, ".working/toml",
+                imported=_opf_store.imported_series_declared(_is2_wg_m))
+            try:
+                _opf_write_guard.plan_write_scope(".working/toml", _is2_wg_m,
+                                                  (".working/toml/manifest.toml",), "upgrade")
+                _is2_wg_refused = None
+            except _opf_write_guard.WriteGuardError as exc:
+                _is2_wg_refused = str(exc)
+            check("containment-writer-doctor-agree-on-imported-collision",
+                  bool(_is2_wg_cls.colliding) and _is2_wg_refused is not None
+                  and all(msg in _is2_wg_refused for msg in _is2_wg_cls.colliding))
+            # The SAME agreement in the doctor's own idiom, not a direct classify call: the FULL
+            # doctor run over the colliding declaration emits the C-CONTAINMENT collision
+            # finding, and plan_write_scope refuses the SAME manifest naming that collision
+            # verbatim (red when the write guard falls back to the default flag while the
+            # doctor-derived flag is True: the writer would then plan writes over a
+            # declaration the doctor flags as colliding).
+            _is2_agx = clean_machine()
+            _is2_agx["manifest.toml"]["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
+            _is2_agx["manifest.toml"]["unmanaged"] = dict(
+                paths=[".working/toml/worklog.imported.toml"])
+            _is2_agx_run = run(copy.deepcopy(_is2_agx))
+            try:
+                _opf_write_guard.plan_write_scope(".working/toml", _is2_agx["manifest.toml"],
+                                                  (".working/toml/manifest.toml",), "upgrade")
+                _is2_agx_refused = None
+            except _opf_write_guard.WriteGuardError as exc:
+                _is2_agx_refused = str(exc)
+            _is2_agx_coll = [f for f in (_is2_agx_run.findings if _is2_agx_run is not None else ())
+                             if "collides" in f]
+            check("containment-writer-doctor-agree-on-doctor-run-when-activated",
+                  _is2_agx_run is not None and _is2_agx_run.status != VALID
+                  and any("worklog.imported.toml" in f for f in _is2_agx_coll)
+                  and _is2_agx_refused is not None
+                  and all(f in _is2_agx_refused for f in _is2_agx_coll))
+            # The activation tripwire end to end, the garbage-leaf probe fail-closed: both
+            # imported leaves hold bytes that are not even TOML, and with every imported-content
+            # check deferred nothing reads them, so a VALID verdict would certify files nothing
+            # read. The tripwire routes the ACTIVE store to CANNOT-EVALUATE naming the deferred
+            # checks (red if an activated store with unread imported leaves ever certifies).
+            _is2_p1 = clean_machine()
+            _is2_p1["manifest.toml"]["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
+            _is2_p1["worklog.imported.toml"] = "deliberately invalid TOML ["
+            _is2_p1["backlog_item.imported.index.toml"] = "garbage = ["
+            _is2_p1_run = run(_is2_p1)
+            check("containment-activated-garbage-leaf-never-certified",
+                  _is2_p1_run is not None and _is2_p1_run.status == CANNOT_EVALUATE
+                  and any("C-IMPORTED" in m and "unread" in m
+                          for m in _is2_p1_run.cannot_evaluate))
+        finally:
+            _opf_store.SUPPORTED_SPEC_VERSION = _is2_prev_ssv
+        # The writer/doctor agreement in the OTHER direction, at the SHIPPED support (the derived
+        # flag False): an [unmanaged] declaration of an imported-leaf NAME is a legitimate
+        # declaration while the series is inactive (the name is not a managed leaf), so the FULL
+        # doctor run certifies the store with the declared file covered, and plan_write_scope
+        # plans the SAME manifest without refusing (red when the write guard forces or defaults
+        # the flag ACTIVE: it would then refuse a declaration the doctor certifies, the
+        # over-refusal divergence; fail-closed, but a divergence all the same).
+        _is2_agi = clean_machine()
+        _is2_agi["manifest.toml"]["unmanaged"] = dict(paths=[".working/toml/worklog.imported.toml"])
+        _is2_agi["worklog.imported.toml"] = "unmanaged legacy bytes, never read ["
+        _is2_agi_run = run(copy.deepcopy(_is2_agi))
+        try:
+            _is2_agi_scope = _opf_write_guard.plan_write_scope(
+                ".working/toml", _is2_agi["manifest.toml"],
+                (".working/toml/manifest.toml",), "upgrade")
+        except _opf_write_guard.WriteGuardError:
+            _is2_agi_scope = None
+        check("containment-writer-doctor-agree-inactive-unmanaged-imported-name",
+              _is2_agi_run is not None and _is2_agi_run.status == VALID
+              and not any("worklog.imported.toml" in f for f in _is2_agi_run.findings)
+              and _is2_agi_scope is not None
+              and ".working/toml/manifest.toml" in _is2_agi_scope["store"])
+        # The tooling-side tripwire at the SHIPPED constants (red on a bare activation): once
+        # SUPPORTED_SPEC_VERSION reaches IMPORTED_SPEC_VERSION the imported-content checks must
+        # exist, be NEW ids in the exact id grammar (never a placeholder reusing an id from
+        # REQUIRED_CHECKS or HOMES2_CHECKS), and sit inside required_checks(h) for EVERY homes
+        # generation h from 1 through SUPPORTED_HOMES. Activating the imported series and
+        # activating homes 2 are SEPARATE gates: today an active series is graded against
+        # required_checks(1), so membership in the homes-2 roster alone binds nothing. The
+        # assertion calls the module predicate imported_content_checks_landed itself, so this
+        # shipped-constants call and the controlled vectors below exercise the SAME code, and
+        # the runtime tripwire above never stands alone.
+        check("imported-content-checks-required-once-supported",
+              imported_content_checks_landed())
+        # The SAME predicate under controlled versions, rosters, and wirings (every patched name
+        # restored in finally; no store fixture runs inside this block). The empty, out-of-roster,
+        # reused-id, grammar and spelling, collision, battery, homes-2-only, omission, and
+        # no-generation vectors assert the False side at a raised support, and each arm is
+        # discriminated ON ITS OWN: deleting the non-empty, membership, grammar, disjointness, or
+        # generation-floor condition from the predicate, one at a time, reds a committed vector
+        # in an ordinary suite run. The generated batteries below also pin the grammar,
+        # collision, and membership tests against narrowing to some sorted ranks or tuple
+        # positions; their comment states the exact coverage and the set-order residual.
+        _icc_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
+        _icc_prev_homes = _opf_store.SUPPORTED_HOMES
+        _icc_prev_roster = IMPORTED_CONTENT_CHECKS
+        _icc_prev_rc = required_checks
+        _icc_prev_req = REQUIRED_CHECKS
+        _icc_prev_h2 = HOMES2_CHECKS
+        _icc_g = globals()
+        try:
+            # Unsupported tooling defers, whatever the roster holds (the deferral arm) and
+            # whatever SUPPORTED_HOMES holds: with no supported generation the deferral still
+            # answers first, so this vector reds a predicate that tests the generation floor
+            # before the deferral.
+            _opf_store.SUPPORTED_SPEC_VERSION = "1.2.0"
+            _icc_unsup_empty = imported_content_checks_landed()
+            _icc_g["IMPORTED_CONTENT_CHECKS"] = ("C-IMPORTED-PLACEHOLDER",)
+            _icc_unsup_placeholder = imported_content_checks_landed()
+            _opf_store.SUPPORTED_HOMES = 0
+            _icc_unsup_nohomes = imported_content_checks_landed()
+            _opf_store.SUPPORTED_HOMES = _icc_prev_homes
+            check("imported-content-gate-defers-while-unsupported",
+                  _icc_unsup_empty and _icc_unsup_placeholder and _icc_unsup_nohomes)
+            # Supported tooling, empty roster: red (the non-empty arm).
+            _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
+            _icc_g["IMPORTED_CONTENT_CHECKS"] = ()
+            check("imported-content-gate-empty-roster-red-once-supported",
+                  not imported_content_checks_landed())
+            # Supported, a NEW id nothing wires into any required roster: red (the membership
+            # arm; this is the vector a deleted membership condition reds).
+            _icc_g["IMPORTED_CONTENT_CHECKS"] = ("C-IMPORTED-PLACEHOLDER",)
+            check("imported-content-gate-out-of-roster-red-once-supported",
+                  not imported_content_checks_landed())
+            # Supported, a placeholder reusing an EXISTING required id: red (the disjointness
+            # and prefix arms TOGETHER; C-CONTAINMENT sits inside every required roster, so the
+            # membership arm alone would pass it, and each of the two arms is discriminated on
+            # its own by the three vectors below).
+            _icc_g["IMPORTED_CONTENT_CHECKS"] = ("C-CONTAINMENT",)
+            check("imported-content-gate-reused-id-red-once-supported",
+                  not imported_content_checks_landed())
+            # ONLY the grammar arm refuses a FRESH id outside the exact grammar wired into every
+            # required roster (a NEW id, so disjointness passes; wired, so membership passes): an
+            # unprefixed id, a lower-case or a mixed-case prefix, a leading space, surrounding
+            # spaces, a leading tab, and then ids that keep the exact prefix, so a prefix test
+            # accepts them: a trailing space, a trailing tab, a trailing line feed (a $-anchored
+            # match accepts it), an embedded space, a lower-case letter, a digit, a non-ASCII
+            # upper-case letter, the bare prefix, and a trailing hyphen. The rows stay red when
+            # the test folds case (cid.upper()) or strips whitespace (cid.strip()).
+            _icc_spelled = ("C-NEWCONTENT", "c-imported-A", "C-Imported-A", " C-IMPORTED-A",
+                            " C-IMPORTED-A ", "\tC-IMPORTED-A", "C-IMPORTED-A ", "C-IMPORTED-A\t",
+                            "C-IMPORTED-A\n", "C-IMPORTED-A B", "C-IMPORTED-a", "C-IMPORTED-A2",
+                            "C-IMPORTED-\u00c9", "C-IMPORTED-", "C-IMPORTED-A-")
+            # Canonical controls in the SAME wiring read True: the four imported-series checks
+            # spec 8.3 names and a two-run id, so no red above comes from the wiring, and the
+            # grammar admits the ids it is derived from.
+            _icc_canonical = ("C-IMPORTED-SCHEMA", "C-IMPORTED-IDS", "C-IMPORTED-PROVENANCE",
+                              "C-IMPORTED-SEGREGATION", "C-IMPORTED-A-B")
+            _icc_g["required_checks"] = (
+                lambda homes, _rc=_icc_prev_rc, _w=_icc_spelled + _icc_canonical: _rc(homes) + _w)
+            _icc_unpref_one = []
+            for _icc_cid in _icc_spelled:
+                _icc_g["IMPORTED_CONTENT_CHECKS"] = (_icc_cid,)
+                _icc_unpref_one.append(imported_content_checks_landed())
+            check("imported-content-gate-unprefixed-new-id-red-once-supported",
+                  _icc_unpref_one == [False] * 15)
+            _icc_canonical_one = []
+            for _icc_cid in _icc_canonical:
+                _icc_g["IMPORTED_CONTENT_CHECKS"] = (_icc_cid,)
+                _icc_canonical_one.append(imported_content_checks_landed())
+            check("imported-content-gate-canonical-id-green-once-supported",
+                  _icc_canonical_one == [True] * 5)
+            # Generated batteries for the multi-id arms (a one-id roster cannot tell all() from
+            # any(), a subset from an overlap, or any-collides from all-collide). _icc_battery
+            # takes literal rows of (sorted rank, offender, ids) and a stage step that wires the
+            # offender in as the arm under test needs, then evaluates every row in every tuple
+            # order of its ids (_icc_orders, built here from itertools.permutations and never
+            # shared with the predicate: two orders of two ids, six of three, 24 of four). It
+            # reads True only when every evaluation gives the wanted verdict, every roster is a
+            # reordering of its row ids with the offender at the written rank, the written
+            # (roster size, rank) placements are exactly the ones stated, and the stated number
+            # of distinct (offender, roster) cases was evaluated.
+            # Membership and collision batteries: three id sets, C-IMPORTED-A and -B, -A to -C,
+            # and -A to -D, with the offender in turn each id of its set, 118 cases each. Every
+            # roster is evaluated once with each of its ids as the sole offender, so a test
+            # narrowed to ids picked from the roster alone (tuple positions, sorted ranks, the
+            # set iteration order) that leaves out an id of a two-, three- or four-id roster
+            # misses the offender in at least one case and reads True there, under every hash
+            # seed; the membership battery also reds an overlap, the collision batteries a test
+            # refusing only an all-colliding roster. Residual: a narrowing that leaves out only
+            # ids from the fifth on escapes, because no roster here holds five or more ids.
+            # Grammar battery: whether an id matches the grammar belongs to the id, not to the
+            # wiring, so the offender cannot rotate within one set; the rows instead place it at
+            # every sorted rank of a two-, a three- and a four-id roster, 11 sets, 130 cases. An
+            # unprefixed id sorts first (C-AFRESHCONTENT, C-BASECONTENT) or last (C-NEWCONTENT,
+            # C-PLAINCONTENT, C-ZBAD) among C-IMPORTED- ids, and an id that keeps the prefix but
+            # breaks the grammar can sort between two canonical ids (C-IMPORTED-L with a trailing
+            # space sorts after C-IMPORTED-L and before C-IMPORTED-M). Red under any(), and under
+            # a test of any fixed sorted ranks or tuple positions that leaves out a rank or a
+            # position of a two-, three- or four-id roster. Ranks 0 and 2 are the endpoints of a
+            # three-id roster only: a test of those two ranks passes the four-id roster
+            # C-IMPORTED-A, -B, -C and C-ZBAD and the middle-rank rows, so it is red here, and so
+            # is a test of the minimum and maximum alone (equivalent to a full prefix test, but not
+            # to the grammar). Residuals: a narrowing that misses only ranks or positions from the
+            # fifth on escapes, because no roster here holds five or more ids; and a test
+            # narrowed to the first id in SET iteration order escapes under any hash seed that
+            # iterates the offender of every set first in every order, so it is not red under
+            # every seed.
+            _icc_orders = {n: tuple(itertools.permutations(range(n))) for n in (2, 3, 4)}
+            _icc_pair = ("C-IMPORTED-A", "C-IMPORTED-B")
+            _icc_trio = ("C-IMPORTED-A", "C-IMPORTED-B", "C-IMPORTED-C")
+            _icc_quad = ("C-IMPORTED-A", "C-IMPORTED-B", "C-IMPORTED-C", "C-IMPORTED-D")
+            _icc_rotated = ((0, "C-IMPORTED-A", _icc_pair), (1, "C-IMPORTED-B", _icc_pair),
+                            (0, "C-IMPORTED-A", _icc_trio), (1, "C-IMPORTED-B", _icc_trio),
+                            (2, "C-IMPORTED-C", _icc_trio),
+                            (0, "C-IMPORTED-A", _icc_quad), (1, "C-IMPORTED-B", _icc_quad),
+                            (2, "C-IMPORTED-C", _icc_quad), (3, "C-IMPORTED-D", _icc_quad))
+            _icc_rotated_placed = ((2, 0), (2, 1), (3, 0), (3, 1), (3, 2),
+                                   (4, 0), (4, 1), (4, 2), (4, 3))
+            _icc_grammar_rows = (
+                (0, "C-AFRESHCONTENT", ("C-AFRESHCONTENT", "C-IMPORTED-A")),
+                (1, "C-ZBAD", ("C-IMPORTED-A", "C-ZBAD")),
+                (0, "C-AFRESHCONTENT", ("C-AFRESHCONTENT", "C-IMPORTED-A", "C-IMPORTED-B")),
+                (0, "C-BASECONTENT", ("C-BASECONTENT", "C-IMPORTED-D", "C-IMPORTED-E")),
+                (1, "C-IMPORTED-L ", ("C-IMPORTED-L", "C-IMPORTED-L ", "C-IMPORTED-M")),
+                (2, "C-NEWCONTENT", ("C-IMPORTED-F", "C-IMPORTED-G", "C-NEWCONTENT")),
+                (2, "C-PLAINCONTENT", ("C-IMPORTED-H", "C-IMPORTED-K", "C-PLAINCONTENT")),
+                (0, "C-AFRESHCONTENT",
+                 ("C-AFRESHCONTENT", "C-IMPORTED-A", "C-IMPORTED-B", "C-IMPORTED-C")),
+                (1, "C-IMPORTED-A ",
+                 ("C-IMPORTED-A", "C-IMPORTED-A ", "C-IMPORTED-B", "C-IMPORTED-C")),
+                (2, "C-IMPORTED-B ",
+                 ("C-IMPORTED-A", "C-IMPORTED-B", "C-IMPORTED-B ", "C-IMPORTED-C")),
+                (3, "C-ZBAD", ("C-IMPORTED-A", "C-IMPORTED-B", "C-IMPORTED-C", "C-ZBAD")))
+            _icc_grammar_placed = ((2, 0), (2, 1), (3, 0), (3, 0), (3, 1), (3, 2), (3, 2),
+                                   (4, 0), (4, 1), (4, 2), (4, 3))
+
+            def _icc_battery(rows, ranks, stage, count, want):
+                verdicts, cases = [], set()
+                placed = sorted((len(ids), rank) for rank, _, ids in rows) == sorted(ranks)
+                for rank, offender, ids in rows:
+                    stage(offender)
+                    for order in _icc_orders[len(ids)]:
+                        roster = tuple(ids[i] for i in order)
+                        _icc_g["IMPORTED_CONTENT_CHECKS"] = roster
+                        verdicts.append(imported_content_checks_landed())
+                        cases.add((offender, roster))
+                        placed = (placed and sorted(roster) == sorted(ids)
+                                  and sorted(roster).index(offender) == rank)
+                return (placed and len(verdicts) == count and len(cases) == count
+                        and verdicts == [want] * count)
+
+            def _icc_unwire(offender):
+                wired = tuple(cid for cid in _icc_quad if cid != offender)
+                _icc_g["required_checks"] = (
+                    lambda homes, _rc=_icc_prev_rc, _w=wired: _rc(homes) + _w)
+
+            def _icc_collide_required(offender):
+                _icc_g["REQUIRED_CHECKS"] = _icc_prev_req + (offender,)
+
+            def _icc_collide_homes2(offender):
+                _icc_g["HOMES2_CHECKS"] = _icc_prev_h2 + (offender,)
+
+            # ONLY the disjointness arm refuses: the offender ALSO sits in REQUIRED_CHECKS, then in
+            # HOMES2_CHECKS, while EVERY id is wired into every required roster, so membership
+            # passes. Each patched roster is staged back after its battery and restored again in
+            # finally.
+            _icc_g["required_checks"] = (
+                lambda homes, _rc=_icc_prev_rc, _w=_icc_quad: _rc(homes) + _w)
+            check("imported-content-gate-required-collision-red-once-supported",
+                  _icc_battery(_icc_rotated, _icc_rotated_placed, _icc_collide_required, 118, False))
+            _icc_g["REQUIRED_CHECKS"] = _icc_prev_req
+            check("imported-content-gate-homes2-collision-red-once-supported",
+                  _icc_battery(_icc_rotated, _icc_rotated_placed, _icc_collide_homes2, 118, False))
+            _icc_g["HOMES2_CHECKS"] = _icc_prev_h2
+            # ONLY the grammar arm refuses: each set holds one fresh offender outside the
+            # grammar, and every id is wired into every required roster.
+            _icc_g["required_checks"] = (
+                lambda homes, _rc=_icc_prev_rc, _w=tuple(sorted(
+                    {cid for _, _, ids in _icc_grammar_rows for cid in ids})): _rc(homes) + _w)
+            check("imported-content-gate-multi-id-unprefixed-red-once-supported",
+                  _icc_battery(_icc_grammar_rows, _icc_grammar_placed, lambda offender: None,
+                               130, False))
+            # ONLY the membership arm refuses: the offender is the one id left unwired.
+            check("imported-content-gate-multi-id-partly-wired-red-once-supported",
+                  _icc_battery(_icc_rotated, _icc_rotated_placed, _icc_unwire, 118, False))
+            # Green control over the same 118 cases: every id wired and nothing colliding reads
+            # True, so no red above comes from the roster size or the order.
+            _icc_g["required_checks"] = (
+                lambda homes, _rc=_icc_prev_rc, _w=_icc_quad: _rc(homes) + _w)
+            check("imported-content-gate-multi-id-wired-green-once-supported",
+                  _icc_battery(_icc_rotated, _icc_rotated_placed, lambda offender: None, 118, True))
+            # Supported, the legitimate activation wiring: a NEW id joined into
+            # required_checks(h) for every generation reads True, and the SAME id wired ONLY
+            # into the homes-2 roster stays red while generation 1 is supported, because an
+            # active series is graded against required_checks(1) today.
+            _icc_g["IMPORTED_CONTENT_CHECKS"] = ("C-IMPORTED-CONTENT",)
+            _icc_g["required_checks"] = (
+                lambda homes, _rc=_icc_prev_rc: _rc(homes) + ("C-IMPORTED-CONTENT",))
+            check("imported-content-gate-legitimate-roster-green-once-supported",
+                  imported_content_checks_landed())
+            _icc_g["required_checks"] = (
+                lambda homes, _rc=_icc_prev_rc:
+                _rc(homes) + (("C-IMPORTED-CONTENT",) if homes >= 2 else ()))
+            check("imported-content-gate-homes2-only-wiring-red-once-supported",
+                  not imported_content_checks_landed())
+            # The bound is EVERY supported generation, never the top or the bottom generation
+            # alone: with SUPPORTED_HOMES raised to 2, the homes-2-only wiring stays red
+            # (generation 1 is still unwired), a generation-1-only wiring stays red (generation
+            # 2 is unwired), omitting EACH supported generation in turn while wiring the others
+            # stays red, and only the every-generation wiring reads True (red when the checked
+            # range collapses, e.g. to (1,)).
+            _opf_store.SUPPORTED_HOMES = 2
+            check("imported-content-gate-homes2-only-wiring-red-at-homes-2",
+                  not imported_content_checks_landed())
+            _icc_g["required_checks"] = (
+                lambda homes, _rc=_icc_prev_rc:
+                _rc(homes) + (("C-IMPORTED-CONTENT",) if homes < 2 else ()))
+            check("imported-content-gate-generation1-only-wiring-red-at-homes-2",
+                  not imported_content_checks_landed())
+            _icc_omissions = []
+            for _icc_skip in range(1, _opf_store.SUPPORTED_HOMES + 1):
+                _icc_g["required_checks"] = (
+                    lambda homes, _rc=_icc_prev_rc, _skip=_icc_skip:
+                    _rc(homes) if homes == _skip else _rc(homes) + ("C-IMPORTED-CONTENT",))
+                _icc_omissions.append(imported_content_checks_landed())
+            check("imported-content-gate-each-generation-omission-red-at-homes-2",
+                  _icc_omissions == [False] * _opf_store.SUPPORTED_HOMES)
+            _icc_g["required_checks"] = (
+                lambda homes, _rc=_icc_prev_rc: _rc(homes) + ("C-IMPORTED-CONTENT",))
+            check("imported-content-gate-every-generation-green-at-homes-2",
+                  imported_content_checks_landed())
+            # With the series still supported, below one supported generation the EVERY-generation
+            # range is empty: the predicate refuses outright rather than reading the vacuous all()
+            # True (fail closed).
+            _opf_store.SUPPORTED_HOMES = 0
+            check("imported-content-gate-no-supported-generation-red",
+                  not imported_content_checks_landed())
+        finally:
+            _opf_store.SUPPORTED_SPEC_VERSION = _icc_prev_ssv
+            _opf_store.SUPPORTED_HOMES = _icc_prev_homes
+            _icc_g["IMPORTED_CONTENT_CHECKS"] = _icc_prev_roster
+            _icc_g["required_checks"] = _icc_prev_rc
+            _icc_g["REQUIRED_CHECKS"] = _icc_prev_req
+            _icc_g["HOMES2_CHECKS"] = _icc_prev_h2
         # F2 (per-record): worklog/<WL-n>.toml is never a per-record body -> INVALID; a garbage body control
         # is still caught.
         wlr = copy.deepcopy(pr_machine)
