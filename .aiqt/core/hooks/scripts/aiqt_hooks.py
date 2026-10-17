@@ -953,7 +953,7 @@ def _segments(command, locale=False):
     """Compatibility projection over _lex_command: a list of (argv, sep_after) tuples, argv being the
     quote-decoded words with shell REDIRECTION removed (so a leading/interspersed/trailing redirect no
     longer pollutes the token stream) and sep_after the ending operator or "". Raises ValueError on a
-    parse error or unsupported construct so callers fall back conservatively. Its one consumer is the
+    parse error or unsupported construct so callers fall back conservatively. Its one guard consumer is the
     commit-identity reader (_cmtidn_line_ai); every other guard reads the _Segment records of _lex_command
     through the shared command reading (_command_flow, _command_lines). locale is passed to _lex_command;
     the commit-identity reader reads each line with it set and unset."""

@@ -11037,6 +11037,24 @@ def _main_isolated(monitor):
         ciexpect("(ci-wr-c44) a command that only the literal reading can parse, with a run line left unread, that "
                  "names no AI identity allows",
                  'echo {$"x"}>/dev/null; git submodule foreach "echo \'x"; git commit -m x', "allow")
+        # A backquote substitution is lexed under each reading with that reading's locale argument, and its
+        # segments are judged with the line's own (_cmtidn_line_ai), through the wrapper-aware finder as well as
+        # the shared reading: an AI --author value that $"" splits inside a word denies in a substitution
+        # (ci-wr179), and so does an AI --author value on a git commit behind a wrapper word in one (ci-wr180).
+        # ci-wr179 allows when the substitution is lexed with the literal '$' reading alone, and both allow when
+        # the substitution segments are not judged. Controls: the same forms naming a human allow (ci-wr-c54,
+        # ci-wr-c55).
+        ciexpect("(ci-wr179) an AI --author value that $\"\" splits, in a backquote substitution, denies",
+                 'echo `git commit --author=Cl$""aude -m x`', "deny")
+        ciexpect("(ci-wr-c54) a --author value that $\"\" splits into a human name, in a backquote substitution, "
+                 "allows",
+                 'echo `git commit --author=Ma$""intainer -m x`', "allow")
+        ciexpect("(ci-wr180) an AI --author value on a git commit behind a wrapper word, in a backquote "
+                 "substitution, denies",
+                 "echo `sudo git commit --author=Claude -m x`", "deny")
+        ciexpect("(ci-wr-c55) a human --author value on a git commit behind a wrapper word, in a backquote "
+                 "substitution, allows",
+                 "echo `sudo git commit --author=Maintainer -m x`", "allow")
         # ci-wr116 is denied by the reader itself: find_ai_authorship returns the --author hit of the segment after
         # the unparseable line rather than leaving the command to the fallback, whose scan for an AI identity
         # anywhere would deny it as well.
