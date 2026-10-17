@@ -5569,15 +5569,16 @@ def _citecheck_step_cases(tmp):
     expansion, both_ways = "The git commit message expanded <<", "This command was read both ways"
     body, plain = "OF\nsee tools/${F}.py:1\nEOF\n", "OF\nsee $F\nEOF\n"
 
-    def read_split(command, session):
+    def read_split(command, session, phrase=None):
         """One check of command: the verdict, each row's parse, reason, citations, sources and sources not
-        read, whether the note names an expansion, and the reason the note gives for reading it both ways."""
+        read, whether the note names an expansion, and the reason the note gives for reading it both ways;
+        with phrase, also whether the note holds it."""
         verdict, note, rows = _citecheck_run(steps.root, command, session)
         why = note.partition("because a double-quoted string in it holds ")[2].partition(", which this check")[0]
         return (verdict, [(r["detail"]["parse"], r["detail"]["parse_why"],
                            [c["cite"] for c in r["detail"]["citations"]], r["detail"]["sources"],
                            r["detail"]["sources_unread"]) for r in rows],
-                expansion in note, why if both_ways in note else None)
+                expansion in note, why if both_ways in note else None) + ((phrase in note,) if phrase else ())
     for name, command in (("mid", "git commit -F - <<E\\\nOF\nsee tools/a.py:1\nEOF\n"),
                           ("mid-dollar", "git commit -F - <<E\\\nOF\nsee $(printf tools/a.py):1\nEOF\n"),
                           ("lead", "git commit -F - <<\\\nEOF\nsee tools/a.py:1\nEOF\n"),
@@ -5771,14 +5772,17 @@ def _citecheck_step_cases(tmp):
     # string's end and so takes the -F msg.txt between two such strings into one -m value; a single quote
     # inside double quotes in a substitution, which leaves the walk's lexing with a quote that does not close
     # (the command was scanned only as written, msg.txt unread); and an ANSI-C quote with an escaped quote in
-    # a substitution, which the nested lexing refuses. A substitution with no quote inside, which both
-    # lexings read alike, leaves the command lexed.
+    # a substitution, which the nested lexing refuses, so its note says that a lexing that did not lex is
+    # not evaluated. A substitution with no quote inside, which both lexings read alike, leaves the command
+    # lexed.
     differ, lexings = {}, aiqt_hooks._CITECHK_LEXINGS_DIFFER
+    unlexed = ("as lexed (each message and body file that a lexing of it that lexed names read; a lexing that did "
+               "not lex is not evaluated, so a file only it names is neither read nor named)")
     for name, command in (("dquote-in-subst", "git commit -m \"$(echo '\"')\" -F msg.txt -m \"$(echo '\"')\""),
                           ("squote-in-subst", "git commit -F msg.txt -m \"$(echo \"it's\")\""),
                           ("ansi-c-in-subst", "git commit -F msg.txt -m \"$(echo $'x\\' y')\""),
                           ("alike", "git commit -F msg.txt -m \"$(echo x)\"")):
-        differ[name] = read_split(command, "lexings-" + name)
+        differ[name] = read_split(command, "lexings-" + name, unlexed if name == "ansi-c-in-subst" else None)
     check("citeledger/check-lexings-differ", differ,
           {"dquote-in-subst": ("warn", [("both", lexings, [], ["-m value"], []),
                                         ("both", lexings, ["tools/a.py:1"], ["-m value", "-F msg.txt", "-m value"],
@@ -5787,7 +5791,7 @@ def _citecheck_step_cases(tmp):
            "squote-in-subst": ("warn", [("both", lexings, ["tools/a.py:1"], ["-F msg.txt", "-m value"], []),
                                         ("both", lexings, [], ["command text"], [])], False, lexings),
            "ansi-c-in-subst": ("warn", [("both", lexings, ["tools/a.py:1"], ["-F msg.txt", "-m value"], []),
-                                        ("both", lexings, [], ["command text"], [])], False, lexings),
+                                        ("both", lexings, [], ["command text"], [])], False, lexings, True),
            "alike": ("warn", [("lexed", None, ["tools/a.py:1"], ["-F msg.txt", "-m value"], [])], False, None)})
     # A command after the reserved words that begin its segment is read: in a brace group, after '!', 'if'
     # or 'then', after 'do', after 'time -p', after a '--' that follows time or its -p, and after coproc,

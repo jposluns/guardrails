@@ -15261,7 +15261,8 @@ def citation_read_recorder(data):
 # most _CITECHK_MAX_CITES citations, the match of a relative cited path against the paths the ledger
 # records and of the range against the rows of its file (ledgers within their bound); the parse of a diff
 # probe's output (what git printed in the time it was given); the lexing of the command and the parse of
-# its here-documents, once each, at whatever size the payload gives them, with the join of a body file or
+# its here-documents, once in each of its two readings (_citechk_commands), so twice, at whatever size the
+# payload gives them, with the join of a body file or
 # git -C path to the directory it is relative to; for a command that lexes and holds a backslash-newline,
 # the search of the here-document operators and double-quoted strings that lexing read for a here-document
 # delimiter one splits (each visited once, and the command not lexed again); for a command that does not lex,
@@ -15281,7 +15282,8 @@ def citation_read_recorder(data):
 # a command substitution in a double-quoted string; the expansion of each here-document with an unquoted
 # delimiter in such a command is named as not read. Where the walk through such a string meets what it does
 # not follow as bash does (_citechk_substituted_ops), the command is read both ways: lexed, with every
-# message and body file read, and scanned as written, with those expansions named. A command is found after
+# message and body file read, and scanned as written, with those expansions named; so is a command whose two
+# lexings differ, or of which only one lexes (_citechk_commands). A command is found after
 # the reserved words that begin its segment, so one in a brace group, after '!', 'if' or 'then', or after
 # time -- or coproc is read.
 # Each text is scanned once, in the order the command's options name it, and a cited or body-file path
@@ -16534,9 +16536,10 @@ def _citechk_run(data):
             parts.append("The {} {} was not read: {}.".format(_CITECHK_LABELS[item["cmd"]], label, reason))
     both = next((item["why"] for item in commands if item.get("why")), None)  # one Bash command, one reason
     if both is not None:
-        parts.append("This command was read both ways, as lexed (each message and body file read) and as written "
-                     "(its text scanned, with the expansion of each here-document with an unquoted delimiter "
-                     "named), because a double-quoted string in it holds {}, which this check does not follow "
+        parts.append("This command was read both ways, as lexed (each message and body file that a lexing of it "
+                     "that lexed names read; a lexing that did not lex is not evaluated, so a file only it names "
+                     "is neither read nor named) and as written (its text scanned, with the expansion of each "
+                     "here-document with an unquoted delimiter named), because a double-quoted string in it holds {}, which this check does not follow "
                      "as bash does; a citation both readings find is judged in each.".format(both))
     if ledger_faulty and status == "no-session":
         parts.append("The payload carries no session id, so this session's citation ledger cannot be found and "
