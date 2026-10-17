@@ -991,10 +991,12 @@ def _build_bare_key(base):
 
 
 _HOOKS_SCRIPT = """#!/usr/bin/env python3
-# self-test hooks dispatcher stub
+# self-test hooks dispatcher stub (gen_hooks.check_deadline requires the two deadline lines)
+HOOK_TIMEOUT_SECONDS = {timeout}
+PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - 2.0
 def stub_handler(data):
     return (0, None, None)
-"""
+""".format(timeout=gen_hooks.TIMEOUT)
 
 _HOOKS_MANIFEST = """[plugin]
 name = "aiqt-guardrails-hooks"
