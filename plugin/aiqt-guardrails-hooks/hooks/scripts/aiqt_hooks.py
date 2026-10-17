@@ -518,7 +518,7 @@ def _skip_quoting(command, i, n):
     return i
 
 
-def _read_word(command, i, n):
+def _read_word(command, i, n, locale=False):
     """Read exactly ONE shell word starting at index i (which must be at a word character, never a space,
     newline, or metacharacter). Returns (text, opaque, started, all_digits, leading_tilde, new_i): text is
     the quote/escape decoded word, opaque is True if it carried an unquoted
@@ -531,7 +531,10 @@ def _read_word(command, i, n):
     after the tilde stay relative), while a quote or expansion AFTER the prefix-closing '/' (e.g. ~/$VAR) does
     not block it. Stops at an
     unquoted space, tab, newline, or metacharacter. Raises ValueError on an unbalanced quote or an
-    unterminated escape."""
+    unterminated escape. With locale True, an unquoted bash locale quote $"..." is read as the double-quoted
+    string bash reads when no message catalogue translates it (the '$' dropped, so Cl$""aude is Claude);
+    otherwise its '$' stays an ordinary opaque character, as every other caller reads it and as the
+    commit-identity check reads it too, alongside the locale reading."""
     chars = []
     opaque = False
     started = False
@@ -564,6 +567,14 @@ def _read_word(command, i, n):
             break
         was_started = started  # whether the word had begun BEFORE this char (a leading tilde needs it False)
         started = True
+        if locale and c == "$" and i + 1 < n and command[i + 1] == '"':
+            # bash locale quoting $"...": the text is looked up in the current locale's message catalogue
+            # and, when no translation applies, the '$' is dropped and the rest is a double-quoted string, read
+            # by the branch below. The word stays opaque, as its '$' made it before, since a catalogue can
+            # replace the text at run time.
+            opaque = True
+            i += 1
+            c = '"'
         if c == "'":  # single quote: everything literal, no escapes, until the next "'"
             if tilde_prefix_open:  # a quote inside the tilde-prefix disables bash expansion: stays relative
                 leading_tilde = False
@@ -1180,7 +1191,7 @@ def _lex_uncertain(command):
     return bool(_lex_uncertain_causes(command))
 
 
-def _lex_command(command, partial=False):
+def _lex_command(command, partial=False, locale=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
     '{fd}>' redirect, or a malformed redirect), so the caller falls back conservatively rather than acting on
@@ -1200,7 +1211,10 @@ def _lex_command(command, partial=False):
     in_progress False: every recovered segment is then complete. This lets the Bash abspth floor still
     inspect a resolvable PREFIX (an earlier relative cd/redirect) even when a LATER segment is unparseable,
     rather than discarding every parsed segment on the first heredoc/here-string/process-substitution. The
-    default partial=False keeps the list-returning, raise-on-error contract every other caller relies on."""
+    default partial=False keeps the list-returning, raise-on-error contract every other caller relies on.
+
+    locale is passed to _read_word for every word: True reads a bash locale quote $"..." as a double-quoted
+    string, and the default False keeps the reading every other caller relies on."""
     n = len(command)
     segments = []
     argv = []
@@ -1230,7 +1244,7 @@ def _lex_command(command, partial=False):
         # treats '#' at a word start as a comment, so the redirect has no target): cannot-evaluate, ASK.
         if k >= n or command[k] == "\n" or command[k] in _METACHARS or command[k] == "#":
             raise ValueError("malformed redirect: no target")
-        target, t_opaque, started, _digits, t_ltilde, k2 = _read_word(command, k, n)
+        target, t_opaque, started, _digits, t_ltilde, k2 = _read_word(command, k, n, locale)
         if not started:
             raise ValueError("malformed redirect target")
         redirects.append(_classify_redirect(op, src_fd, target, t_opaque, t_ltilde))
@@ -1284,7 +1298,7 @@ def _lex_command(command, partial=False):
                     raise ValueError("unsupported shell construct: {}".format(op))
                 i = consume_redirect(op, oplen, i, None)
                 continue
-            text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n)
+            text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n, locale)
             # An IO_NUMBER: an entirely-unquoted-digit word IMMEDIATELY adjacent to a '<'/'>' redirect
             # operator is that redirect's source fd, consumed as fd syntax, never left in argv. '2>file' ->
             # fd 2; but '2 > file' (spaced), "'2'>file"/'\2>file' (quoted/escaped), and 'x2>file' keep it.
@@ -1328,14 +1342,16 @@ def _lex_command(command, partial=False):
     return segments
 
 
-def _segments(command):
+def _segments(command, locale=False):
     """Compatibility projection over _lex_command: a list of (argv, sep_after) tuples, argv being the
     quote-decoded words with shell REDIRECTION removed (so a leading/interspersed/trailing redirect no
     longer pollutes the token stream) and sep_after the ending operator or "". Raises ValueError on a
     parse error or unsupported construct so callers fall back conservatively. Existing consumers
     (protected_line, gate_weakening, git_explicit_binding, git_discard, find_ai_authorship) read
-    redirect-free argv automatically; diff_source_pretool uses the richer _Segment records directly."""
-    return [(seg.argv, seg.sep_after) for seg in _lex_command(command)]
+    redirect-free argv automatically; diff_source_pretool uses the richer _Segment records directly.
+    locale is passed to _lex_command; only the commit-identity reader (_cmtidn_line_ai) sets it, and it reads
+    each line with it set and unset."""
+    return [(seg.argv, seg.sep_after) for seg in _lex_command(command, locale=locale)]
 
 
 # A leading inline shell env-var assignment (FOO=bar or the APPEND form FOO+=bar) that PREFIXES a command,
@@ -1345,11 +1361,12 @@ def _segments(command):
 # APPEND '+=' form (OLDPWD+=..) is a real bash assignment prefix too, so it is recognized here; missing it
 # left the append-assignment mistaken for the command word, so the following cd was never examined. The
 # any-segment identity-assignment scan still inspects these same tokens for an AI name
-# (GIT_AUTHOR_NAME=Claude ...). Best-effort, per the manifest residue: the 'env VAR=x git ...' command form
-# and the 'command git ...' builtin remain out of scope. This matches the DECODED token, so an
-# assignment-SHAPED token whose NAME was quoted or escaped ("OLDPWD"=.. -> decoded OLDPWD=..) also matches;
-# bash would treat that as a command, not an assignment, so recognizing it is a deliberate conservative
-# over-fire (disclosed in the manifest residue), never an under-block.
+# (GIT_AUTHOR_NAME=Claude ...). Best-effort, per the manifest residue: for the checks that resolve the
+# command word here, the 'env VAR=x git ...' command form and the 'command git ...' builtin remain out of
+# scope; the commit-identity check reads both through its own finder (_cmtidn_git_commands). This matches
+# the DECODED token, so an assignment-SHAPED token whose NAME was quoted or escaped ("OLDPWD"=.. -> decoded
+# OLDPWD=..) also matches; bash would treat that as a command, not an assignment, so recognizing it is a
+# deliberate conservative over-fire (disclosed in the manifest residue), never an under-block.
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 
 
@@ -2277,8 +2294,17 @@ def diff_source_pretool(data):
 
 # --- cmtidn: AI identity in a git authoring command --------------------------------------------------
 # Quote-aware and token-based. The commit-MESSAGE contexts (a Co-Authored-By trailer, an --author value)
-# are judged only on a segment whose command word is git and whose subcommand is a commit-creating verb,
-# so a read-side use of the same tokens (git log --author=Claude) never trips. Separately, an identity
+# are judged only on a segment that runs a git command whose subcommand is a commit-creating verb (the git
+# command is found behind leading reserved words, a function or coprocess name, VAR=value words and wrapper
+# words, _cmtidn_git_commands), so a read-side use of the same tokens (git log --author=Claude) does not trip,
+# bare or wrapped, and a git word after the subcommand of a read-side git command taken to be the one the
+# segment runs (a held candidate whose subcommand is a git command name) is that command's operand (env git
+# log --grep git commit --author=Claude). A command that git itself runs from its operands (git submodule
+# foreach CMD, git submodule--helper foreach CMD, git bisect run CMD, git rebase --exec CMD) is read as a
+# command line of its own (_cmtidn_run_lines). The read-side forms that still trip are the disclosed over-denies at
+# _CMTIDN_GIT_WRAPPERS: a wrapped git word right after a wrapper option, which the finder cannot tell from that
+# option's value (sudo -E git log --grep git commit --author=Claude), and a wrapped git command whose
+# subcommand is not a git command name (an alias). Separately, an identity
 # ASSIGNMENT (a git-identity env var, or a user.name/user.email config value) is a violation on ANY
 # segment, to harden the common 'set the identity then commit' form. Because the tokens are quote-aware,
 # a trailer hiding inside a quoted -m message (e.g. -m "fix; Co-authored-by: Claude", which the old
@@ -2288,42 +2314,222 @@ AI_IDENTITY_RE = re.compile(
     r"(?i)\b(claude|anthropic|openai|chatgpt|codex|copilot|gemini|gpt-?[0-9o][a-z0-9.-]*)\b"
     r"|@anthropic\.com|@openai\.com")
 COMMIT_VERBS = ("commit", "merge", "cherry-pick", "am", "rebase", "revert", "commit-tree")
-# A Co-Authored-By trailer inside a single token; its value runs to the token end (the token IS the
-# quoted message, so no shell quote can appear within it).
-CO_AUTHOR_RE = re.compile(r"(?i)co[- ]?authored[- ]?by\s*:?\s*([^\n]{1,160})")
+# A Co-Authored-By trailer inside a single token; its value is up to 160 characters, to the end of its line (the
+# token IS the quoted message, so no shell quote can appear within it). The regex matches the trailer name alone
+# and reads the value in a lookahead, so a scan of its matches (_co_author_ai) resumes right after each name and
+# reaches every trailer name in the token, one inside an earlier trailer's value included: a second trailer on the
+# same line, which a regex that consumed the value passed over when its search resumed after that value (a first
+# value of 140 characters ends inside a later 'Co-authored-by: Claude' and names no AI). The only 'c' in a trailer
+# name is its first letter, so two names cannot overlap, and each place a trailer can start is read with the value
+# that the regex consuming the value found there. Each whitespace run is taken whole (\s*+), as in the fallback's
+# co-author context (_RAW_IDENTITY_CONTEXTS): giving a run back one character at a time cost time quadratic in its
+# length when the token ends after it (a message of a trailer name and a long run of newlines). Taking a run whole
+# changes a match only where nothing but whitespace and at most one ':' follows the trailer name to the end of the
+# token: the value found there names no AI identity and no later match can start, so the reader finds the same AI
+# identities. The whitespace runs after a name end before the next name starts, so a token costs time linear in
+# its length.
+CO_AUTHOR_RE = re.compile(r"(?i)co[- ]?authored[- ]?by(?=\s*+:?\s*+([^\n]{1,160}))")
 # Identity-assignment tokens (any segment): a git-identity env var, or a user.name/user.email config
 # value in the '-c user.name=VALUE' inline shape.
 GIT_ENV_RE = re.compile(r"(?is)^GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)=(.*)$")
 USER_CONF_EQ_RE = re.compile(r"(?is)^user\.(?:name|email)=(.*)$")
-# Fallback-only raw-string contexts, used when the shared tokenizer cannot parse the command (see
-# _commit_identity_fallback). A value runs to whitespace or a shell separator/quote.
+# Fallback-only raw-string contexts, used when the shared tokenizer cannot parse the command, when a command
+# line that git runs from its operands is left unread, because the tokenizer cannot parse it or it is past the
+# run-line bounds, and when the command is too long to read and holds no word that can record an identity (see
+# _commit_identity_fallback). A value runs to whitespace or a shell separator/quote. The --author context
+# matches every prefix that git reads as --author (--au, --aut, --auth, --autho, --author; no other git commit
+# option starts with 'au'), with '=' or whitespace before the value, so the fallback is no weaker on that option
+# than the token reader. Like CO_AUTHOR_RE, the co-author context matches the trailer name alone and reads its
+# value, up to 160 characters, in a lookahead, so the scan reaches every trailer name, one inside an earlier
+# trailer's value included, each with the value that the context consuming the value found there. It takes each
+# whitespace run whole (\s*+), since it also judges a command too long to read, of any length: giving a run back
+# one character at a time cost time quadratic in its length when a quote or the end of the command follows it (a
+# run of newlines, which no value can start with). Taking a run whole changes a match only there, and the value
+# that giving part of the run back would find holds only whitespace or a ':', which names no AI identity, and
+# covers no place the context can start, so the context finds the same AI identities. The user.name context takes
+# each whitespace run whole too, since it judges a command the tokenizer cannot parse at any length up to the read
+# limit: splitting a run between two whitespace quantifiers at each space in it cost time quadratic in the run's
+# length when no value can start after it (a run of spaces before a quote that does not close). Its name is
+# followed by a whitespace run, '=' and a whitespace run, or else by a whitespace run that holds a space (the
+# lookahead). No value starts with whitespace, so either way a value starts after the whole run, where it started
+# when the run was split, and when no value starts after the '=', the '=' itself is the value, as it was when a
+# space before it was taken for the separator: the context finds the same values. The identity variable and
+# user.name contexts judge a command too long to read only when it holds none of their names
+# (_cmtidn_identity_word), so there they find no place to start.
 _VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s\"';|&]+)"
 _RAW_IDENTITY_CONTEXTS = (
-    (re.compile(r"(?i)co[- ]?authored[- ]?by\s*:?\s*([^\n\"']{1,160})"), "co-author trailer"),
-    (re.compile(r"(?i)--author[= ]\s*" + _VALUE), "--author value"),
+    (re.compile(r"(?i)co[- ]?authored[- ]?by(?=\s*+:?\s*+([^\n\"']{1,160}))"), "co-author trailer"),
+    (re.compile(r"(?i)--au(?:t(?:h(?:o(?:r)?)?)?)?[=\s]\s*" + _VALUE), "--author value"),
     (re.compile(r"(?i)\bGIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)\s*=\s*" + _VALUE), "git identity variable"),
-    (re.compile(r"(?i)\buser\.(?:name|email)\s*[= ]\s*" + _VALUE), "user.name/user.email value"),
+    (re.compile(r"(?i)\buser\.(?:name|email)(?:\s*+=\s*+|(?=[^\S ]*+ )\s*+)" + _VALUE),
+     "user.name/user.email value"),
 )
 
 
-def _commit_message_and_author_ai(tokens):
+# The options of git commit as git 2.55 lists them (git commit -h, git commit --git-completion-helper-all), so
+# the commit-message reader reads a value-taking option's value word as that value and never as an --author
+# option ('git commit -m --author=X' records the message '--author=X' and no author). Each short letter and
+# long name maps to the kind of value the option takes: 'author' is judged; 'message' (-m) and 'trailer' are
+# message text, which a co-author trailer can live in, so it is scanned for one; 'file' (-F) is the name of the
+# file git reads the message from; 'value' (a commit, a template, a date, a mode or a number) is passed over;
+# None takes no value from the next word (a flag, or -S, -u, --gpg-sign and --untracked-files, whose optional
+# value can only share their own word). A next-word value of any value-taking option that has the form
+# --author=VALUE is still judged as an --author value, and so is the word after a next-word value that is
+# --author or a prefix git reads as --author, a safe-direction over-deny that the maintainer chose to keep,
+# since git takes that word as the option's value and records no author from it
+# (_commit_message_and_author_ai). 'verify' and 'post-rewrite' are the positive spellings git also accepts for
+# --no-verify and --no-post-rewrite. Every long name is listed, since git reads a prefix that only one long name
+# starts with as that option (_cmtidn_option).
+_CMTIDN_COMMIT_SHORT = {"m": "message", "F": "file", "C": "value", "c": "value", "t": "value", "U": "value",
+                        "S": None, "u": None}
+_CMTIDN_COMMIT_LONG = {
+    "author": "author", "message": "message", "trailer": "trailer", "file": "file", "reedit-message": "value",
+    "reuse-message": "value", "fixup": "value", "squash": "value", "date": "value", "cleanup": "value",
+    "template": "value", "pathspec-from-file": "value", "unified": "value", "inter-hunk-context": "value",
+    "quiet": None, "verbose": None, "reset-author": None, "signoff": None, "edit": None, "status": None,
+    "gpg-sign": None, "all": None, "include": None, "interactive": None, "patch": None, "only": None,
+    "verify": None, "dry-run": None, "short": None, "branch": None, "ahead-behind": None, "porcelain": None,
+    "long": None, "null": None, "amend": None, "post-rewrite": None, "untracked-files": None,
+    "pathspec-file-nul": None, "allow-empty": None, "allow-empty-message": None}
+
+
+def _cmtidn_option(tok, short, long):
+    """(kind, value) for the word tok read as an option of a git verb, as git's option parser reads it, where
+    short and long map each short letter and each long name of the verb to the kind of value it takes (None:
+    no value from the next word). A short option cluster ('-am') is read letter by letter up to its first
+    letter in short, whose value is the rest of the word, or the next word when nothing follows that letter
+    ('-am MSG' and '-amMSG' both give -m the value MSG). A long option ('--auth', '--auth=X') is the option of
+    that exact name, else the one option whose name starts with it, as git reads an abbreviation (a prefix two
+    names share is ambiguous, and git refuses it); a '--no-' option takes no value. kind is None when the word
+    takes no value from the next word, and value is None when the value is the next word."""
+    if tok.startswith("--"):
+        name, eq, value = tok[2:].partition("=")
+        if name.startswith("no-"):
+            return None, None
+        if name in long:
+            kind = long[name]
+        else:
+            kinds = [k for opt, k in long.items() if opt.startswith(name)]
+            kind = kinds[0] if len(kinds) == 1 else None
+        return kind, (value if eq else None)
+    if tok.startswith("-"):
+        for k in range(1, len(tok)):
+            if tok[k] in short:
+                return short[tok[k]], (tok[k + 1:] or None)
+    return None, None
+
+
+# The longest name that AI_IDENTITY_RE matches between word boundaries ('anthropic'): a match that a co-author
+# value holds and the shorter value of an earlier trailer that it overlaps does not starts at most this many
+# characters less one before the shorter value's end (_ai_value_match). Each name ends with a word character, so
+# a name match that ends at or before that end lies in the shorter value, whose end is a word boundary after the
+# name's last character, and the match that the shorter value lacks ends past it. The gpt alternative has no
+# length bound, but each of its fixed parts (gpt, an optional '-' and a digit or 'o', at most 5 characters) ends
+# with a word character too, so a gpt match whose fixed part ends at or before that end gives the shorter value a
+# match of its own, which stops at the first character of the tail that is not a word character, or at the
+# shorter value's end after a word character, each a word boundary. Each address alternative holds a name
+# alternative between two characters that are not word characters (@anthropic.com holds anthropic), so it
+# matches only where that name matches too. The self-test (ci-wr-ai-margin) computes the names, every fixed part
+# and the addresses from AI_IDENTITY_RE's own parse, and fails when a name or a fixed part is longer than this
+# constant or can begin or end with a character that is not a word character, when an earlier value that ends
+# exactly at the end of one names no AI identity, or when a scan with this constant one smaller finds the same
+# values on strings whose AI name the end of an earlier value cuts.
+_AI_NAME_LONGEST = 9
+_WORD_CHAR_RE = re.compile(r"\w")
+
+
+def _ai_value_match(regex, text):
+    """The first match of regex in text whose value (group 1) names an AI identity, as AI_IDENTITY_RE.search
+    finds one in the value read alone, else None: the match that the plain scan, which searches each value
+    whole, finds, with each character of text searched a bounded number of times. regex is CO_AUTHOR_RE or a
+    context of _RAW_IDENTITY_CONTEXTS, whose values start in order and end in order. The other contexts consume
+    their values, so no two overlap and each is searched whole. The co-author regexes read each value, of up to
+    160 characters, in a lookahead, so in a word of repeated trailer names each character lies in up to 14
+    values. Once a value is found to name no AI identity, a later value that it overlaps and that ends where it
+    ends can hold a match only at its first character, and one that ends past it only there or in a match that
+    ends past that end, which starts at most _AI_NAME_LONGEST - 1 characters before it; so such a value is
+    searched only from there, with the text before that place read for its word boundary. The value read alone
+    starts a word at its first character where the text has a word character before it (a trailer name with no
+    ':' or space after it), so there that character is matched on the value itself. Each character is so
+    searched at most twice (where a later value ends past an earlier one that it overlaps, the earlier one ends
+    160 characters after its start, and the starts are at least 12 characters apart), and the match at a
+    value's first character reads at most 14 characters, except that a gpt name there reads its tail of letters,
+    digits, hyphens and dots to the end of the run or of the value, as the plain scan does."""
+    reached = 0  # the end of the last value searched
+    for m in regex.finditer(text):
+        start, end = m.span(1)
+        if start >= reached:  # no value searched before overlaps this one, which is searched whole
+            if AI_IDENTITY_RE.search(m.group(1)):
+                return m
+            reached = end
+            continue
+        first = start
+        if _WORD_CHAR_RE.match(text, start - 1):
+            if AI_IDENTITY_RE.match(m.group(1)):
+                return m
+            first = start + 1
+        if end > reached:
+            if AI_IDENTITY_RE.search(text, max(first, reached - _AI_NAME_LONGEST + 1), end):
+                return m
+            reached = end
+    return None
+
+
+def _co_author_ai(tok, judged):
+    """A hit label for the first Co-Authored-By trailer in the word tok whose value names an AI identity, else
+    None. Every trailer name in the word is read, one inside an earlier trailer's value included
+    (CO_AUTHOR_RE), so a word costs time linear in its length, though a word of repeated trailer names reads up
+    to about 13 times as many characters as it holds for the values (each name is at least 12 characters long
+    and has its own value of up to 160); the AI identity search of those values reads each character a bounded
+    number of times (_ai_value_match). judged maps each word already judged for the command to its result, so a
+    word that a run line repeats from the line it is built from, or that both readings of a line hold, is
+    scanned once."""
+    if tok in judged:
+        return judged[tok]
+    m = _ai_value_match(CO_AUTHOR_RE, tok)
+    hit = None if m is None else "co-author trailer {!r}".format(m.group(1).strip()[:80])
+    judged[tok] = hit
+    return hit
+
+
+def _commit_message_and_author_ai(tokens, judged):
     """A hit label if this git commit segment names an AI identity in an --author value or in a
-    Co-Authored-By trailer (scanned as a substring of any token, so the trailer that lives inside the
-    single quoted -m message token is caught), else None. The bare message body is deliberately NOT
-    matched against the identity set: a legitimate message that merely mentions an AI product name
-    (e.g. -m 'fix claude adapter') is not a recorded AI identity, and denying it would be a false
-    positive; only a trailer or an --author value records identity."""
+    Co-Authored-By trailer (scanned as a substring of a token, so the trailer that lives inside the
+    single quoted -m message token is caught), else None. Each word is read as a git commit option
+    (_cmtidn_option), so a value-taking option's value is read as that value before anything else, whether it
+    shares the option's word (--author=X, -mMSG) or is the next word (--author X, -am MSG): an --author value is
+    judged, a message value is scanned for a trailer, and a next-word value is never read as an option. One
+    exception keeps an earlier deny: a next-word value of ANY value-taking option (any spelling _cmtidn_option
+    reads as one) that has the form --author=VALUE is judged as an --author value, and so is the word after a
+    next-word value that is --author or a prefix git reads as --author, though git takes the value word as that
+    option's value and records no author from it (git commit -m --author=X, git commit -C --author=X, git commit
+    -m --author X), a safe-direction over-deny that the maintainer chose to keep. The bare message body is
+    deliberately NOT matched against the identity set: a legitimate message that merely mentions an AI product
+    name (e.g. -m 'fix claude adapter') is not a recorded AI identity, and denying it would be a false positive;
+    only a trailer or an --author value records identity. judged holds the trailer results of the words already
+    judged for the command (_co_author_ai)."""
     n = len(tokens)
-    for i, tok in enumerate(tokens):
-        m = CO_AUTHOR_RE.search(tok)
-        if m and AI_IDENTITY_RE.search(m.group(1)):
-            return "co-author trailer {!r}".format(m.group(1).strip()[:80])
-        if tok.startswith("--author="):
-            value = tok[len("--author="):]
-            if AI_IDENTITY_RE.search(value):
-                return "--author value {!r}".format(value.strip()[:80])
-        elif tok == "--author" and i + 1 < n and AI_IDENTITY_RE.search(tokens[i + 1]):
-            return "--author value {!r}".format(tokens[i + 1].strip()[:80])
+    i = 0
+    while i < n:
+        tok = tokens[i]
+        hit = _co_author_ai(tok, judged)
+        if hit is not None:
+            return hit
+        kind, value = _cmtidn_option(tok, _CMTIDN_COMMIT_SHORT, _CMTIDN_COMMIT_LONG)
+        if kind is not None and value is None and i + 1 < n:
+            i += 1
+            value = tokens[i]  # the option's value word, never read as an option
+            hit = _co_author_ai(value, judged) if kind in ("message", "trailer") else None
+            if hit is not None:
+                return hit
+            if value.startswith("--author="):
+                kind, value = "author", value[len("--author="):]  # the over-deny kept above
+            elif (i + 1 < n and _cmtidn_option(value, {}, _CMTIDN_COMMIT_LONG) == ("author", None)
+                  and AI_IDENTITY_RE.search(tokens[i + 1])):
+                return "--author value {!r}".format(tokens[i + 1].strip()[:80])  # the over-deny kept above
+        if kind == "author" and value is not None and AI_IDENTITY_RE.search(value):
+            return "--author value {!r}".format(value.strip()[:80])
+        i += 1
     return None
 
 
@@ -2345,37 +2551,467 @@ def _identity_assignment_ai(tokens):
     return None
 
 
+# The wrapper words that run the command after them (their own options and operands first) for the
+# commit-identity check: when one is a segment's command word, a later word that is git starts a candidate
+# git command the check reads (_cmtidn_git_commands). One bounded rule rather than an option grammar per
+# wrapper, so a wrapper option or operand that is not git is passed over whatever its arity (sudo -u ci,
+# timeout -s KILL 60, nice -n 10, xargs -I{}), and a wrapper option value spelled git (sudo -u git git commit)
+# starts a candidate that does not hide the git command after it. A candidate whose git word does not stand
+# right after a word that may be an option taking it as a value (a word that starts with '-' other than '-',
+# '--' or an option carrying '=') is held: it may be the git command the segment runs, or a git-named operand
+# of a program off this list that the wrapper runs (sudo flock /var/lock/git env git commit, sudo chroot
+# /srv/git /usr/bin/env git commit). Once a held candidate has a subcommand that is a git command name
+# (_CMTIDN_GIT_SUBCOMMANDS), it is taken to be the git command the segment runs, and a later git word is
+# that command's operand and starts no candidate (env git log --grep git commit); a held candidate whose
+# subcommand is not a git command name (env, /usr/bin/env, an alias) leaves later git words read. The cost
+# is a safe-direction over-deny when a wrapped command that is not git carries git, a commit verb and an AI
+# --author or trailer as its own operands ('xargs echo git commit --author=...'), when a read-side git word
+# stands right after a wrapper option, so the finder cannot tell it from that option's value and keeps
+# reading later git words ('sudo -E git log --grep git commit --author=...'), and when a wrapped read-side
+# git command's subcommand is an alias ('env git lg --grep git commit --author=...'); the remaining gap is a
+# git-named operand of a program off the list followed by a word spelled as a git command name. 'command -v
+# NAME' and 'command -V NAME' only look a name up, so a command word 'command' whose options carry v or V runs
+# no git command. A wrapper off this list (builtin, doas, ionice, ...) is not read. The list and the reserved
+# words below are this check's own (the _CMTIDN_ prefix), so one shared wrapper-aware finder can later replace
+# them.
+_CMTIDN_GIT_WRAPPERS = frozenset((
+    "env", "timeout", "command", "exec", "nohup", "xargs", "sudo", "nice", "setsid", "stdbuf", "time"))
+# The shell reserved words that can stand before a segment's command word ('! git ...', 'if git ...',
+# 'then git ...', '{ git ...; }'); the same words the gate-discipline check passes over (_GATE_RESERVED).
+_CMTIDN_RESERVED = frozenset(("{", "}", "!", "if", "then", "else", "elif", "fi", "for", "while", "until",
+                              "do", "done", "case", "esac", "select", "function", "in", "[[", "]]", "coproc"))
+# The reserved words that open a compound command. 'function NAME' and 'coproc NAME' followed by one of them
+# define a function or start a named coprocess whose body is that compound command, so NAME is a name and the
+# body's command word comes after it (function f { git commit ...; }, coproc C while git commit ...; do :;
+# done). 'coproc NAME' followed by any other word is a simple command whose command word is NAME (coproc C
+# env git ... runs C). A '(' or '((' body ends the segment in the lexer, so that body is judged as a segment
+# of its own.
+_CMTIDN_COMPOUND_OPENERS = frozenset(("{", "if", "while", "until", "for", "case", "select", "[["))
+# The git command names, so a held candidate whose subcommand is one is taken to be the git command the segment
+# runs (_CMTIDN_GIT_WRAPPERS): the git 2.55 built-ins (git --list-cmds=builtins) and the commands of its command
+# list (git --list-cmds=list-mainporcelain and the other command categories, the guides left out), less the
+# internal helpers whose name carries '--' and the separate programs gitk, gitweb and scalar. A git command
+# missing from it only leaves later git words read, a safe-direction over-deny.
+_CMTIDN_GIT_SUBCOMMANDS = frozenset((
+    "add", "am", "annotate", "apply", "archimport", "archive", "backfill", "bisect", "blame", "branch",
+    "bugreport", "bundle", "cat-file", "check-attr", "check-ignore", "check-mailmap", "check-ref-format",
+    "checkout", "checkout-index", "cherry", "cherry-pick", "citool", "clean", "clone", "column", "commit",
+    "commit-graph", "commit-tree", "config", "count-objects", "credential", "credential-cache", "credential-store",
+    "cvsexportcommit", "cvsimport", "cvsserver", "daemon", "describe", "diagnose", "diff", "diff-files",
+    "diff-index", "diff-pairs", "diff-tree", "difftool", "fast-export", "fast-import", "fetch", "fetch-pack",
+    "filter-branch", "fmt-merge-msg", "for-each-ref", "for-each-repo", "format-patch", "format-rev", "fsck",
+    "fsck-objects", "gc", "get-tar-commit-id", "grep", "gui", "hash-object", "help", "history", "hook",
+    "http-backend", "http-fetch", "http-push", "imap-send", "index-pack", "init", "init-db", "instaweb",
+    "interpret-trailers", "last-modified", "log", "ls-files", "ls-remote", "ls-tree", "mailinfo", "mailsplit",
+    "maintenance", "merge", "merge-base", "merge-file", "merge-index", "merge-one-file", "merge-ours",
+    "merge-recursive", "merge-recursive-ours", "merge-recursive-theirs", "merge-subtree", "merge-tree",
+    "mergetool", "mktag", "mktree", "multi-pack-index", "mv", "name-rev", "notes", "p4", "pack-objects",
+    "pack-redundant", "pack-refs", "patch-id", "pickaxe", "prune", "prune-packed", "pull", "push", "quiltimport",
+    "range-diff", "read-tree", "rebase", "receive-pack", "reflog", "refs", "remote", "remote-ext", "remote-fd",
+    "repack", "replace", "replay", "repo", "request-pull", "rerere", "reset", "restore", "rev-list", "rev-parse",
+    "revert", "rm", "send-email", "send-pack", "sh-i18n", "sh-setup", "shell", "shortlog", "show", "show-branch",
+    "show-index", "show-ref", "sparse-checkout", "stage", "stash", "status", "stripspace", "submodule", "svn",
+    "switch", "symbolic-ref", "tag", "unpack-file", "unpack-objects", "update-index", "update-ref",
+    "update-server-info", "upload-archive", "upload-pack", "url-parse", "var", "verify-commit", "verify-pack",
+    "verify-tag", "version", "whatchanged", "worktree", "write-tree"))
+
+
+def _cmtidn_git_commands(tokens):
+    """Yield the index of each word that one segment's git commands may read as their subcommand, in ONE pass
+    over the tokens: no suffix is sliced or re-scanned per git word, so a long wrapped segment costs time
+    linear in its length. Leading reserved words (_CMTIDN_RESERVED) and VAR=value words are passed over to the
+    command word, and so is the NAME after 'function' or 'coproc' when a compound opener follows it
+    (_CMTIDN_COMPOUND_OPENERS). When the command word is git (a path to git included), that one git command
+    is read and the index of its subcommand is yielded. When it is a wrapper (_CMTIDN_GIT_WRAPPERS), the finder
+    yields CANDIDATES: a later word that is git and not a VAR=value word starts a candidate git command, a
+    git-named option value or operand included, until a held candidate (its git word does not stand right
+    after a word that may be an option taking it as a value) has a subcommand that is a git command name
+    (_CMTIDN_GIT_SUBCOMMANDS), so it is taken to be the command the segment runs; a later git word is that
+    command's operand. A held candidate whose subcommand is not a git command name may be a git-named operand
+    of a program off the wrapper list (sudo flock /var/lock/git env git commit), so later git words are still
+    read (the subcommand word itself, when it is git, starts one: sudo flock git git commit runs git commit).
+    The command that a git command runs from its operands is read by find_ai_authorship (_cmtidn_run_lines),
+    not here. A 'command' whose options carry v or V (command -v git, command -V git) is a lookup and runs
+    none; otherwise the segment runs no git command. A git command's subcommand is its first word that is not
+    a git global option, an arg-consuming global option (_GIT_ARG_OPTS: -C DIR, -c NAME=VALUE) passing over
+    its value too, as _git_subcommand_rest reads it. Every
+    candidate still reading its global options sees the same next word, so the pass keeps three flags (the
+    candidates expect an option or their subcommand here, they expect an option value here, one of them is
+    held), and a word that is the subcommand of two candidates is yielded once. Purely lexical: a git word the
+    shell builds at run time is not seen (the residue lists them)."""
+    n = len(tokens)
+    i = 0
+    while i < n and tokens[i] in _CMTIDN_RESERVED:
+        named = tokens[i] in ("function", "coproc")
+        i += 1
+        if named and i + 1 < n and tokens[i + 1] in _CMTIDN_COMPOUND_OPENERS:
+            i += 1  # the NAME of a function definition or a named coprocess, before its compound body
+    while i < n and _ENV_ASSIGN_RE.match(tokens[i]):
+        i += 1
+    if i >= n:
+        return
+    word = tokens[i].rsplit("/", 1)[-1]
+    wrapped = word in _CMTIDN_GIT_WRAPPERS
+    if word != "git" and not wrapped:
+        return
+    i += 1
+    if word == "command":
+        while i < n and tokens[i].startswith("-") and tokens[i] != "--":
+            if "v" in tokens[i] or "V" in tokens[i]:
+                return  # command -v / -V NAME looks NAME up and runs nothing
+            i += 1
+    reading = not wrapped  # the candidates expect a global option or their subcommand at this word
+    value = False          # the candidates expect the value of an arg-consuming global option at this word
+    held = not wrapped     # one of the candidates is held (its git word follows no option that may take it)
+    ended = False          # a held candidate has a git command name as its subcommand, the command run
+    last = tokens[i - 1]
+    while i < n:
+        tok = tokens[i]
+        starts = (wrapped and not ended and tok.rsplit("/", 1)[-1] == "git"
+                  and not _ENV_ASSIGN_RE.match(tok))
+        next_reading = value  # an option value is passed over and its candidates read on
+        next_held = held and value
+        next_value = False
+        if reading:
+            if not tok.startswith("-"):
+                yield i
+                ended = ended or (held and (not wrapped or tok in _CMTIDN_GIT_SUBCOMMANDS))
+            elif tok in _GIT_ARG_OPTS:
+                next_value, next_held = True, held
+            else:
+                next_reading, next_held = True, held
+        if starts:
+            next_reading = True
+            if not last.startswith("-") or last in ("-", "--") or "=" in last:
+                next_held = True  # no option before this git word can take it as its value
+        reading, value, held = next_reading, next_value, next_held
+        if ended and not (reading or value):
+            return  # the git command the segment runs has its subcommand
+        last = tok
+        i += 1
+
+
+# The options of git rebase as git 2.55 lists them (git rebase -h, git rebase --git-completion-helper-all), read
+# like _CMTIDN_COMMIT_SHORT and _CMTIDN_COMMIT_LONG so that the value of --exec or -x, in any spelling git
+# accepts (-x CMD, -xCMD, -ix CMD, --exec=CMD, --ex CMD), is found and the value of another option is not
+# read as one. 'verify', 'stat' and 'ff' are the positive spellings of --no-verify, --no-stat and --no-ff.
+_CMTIDN_REBASE_SHORT = {"x": "exec", "C": "value", "s": "value", "X": "value", "S": None, "r": None}
+_CMTIDN_REBASE_LONG = {
+    "exec": "exec", "onto": "value", "trailer": "value", "whitespace": "value", "empty": "value",
+    "strategy": "value", "strategy-option": "value", "keep-base": None, "verify": None, "quiet": None,
+    "verbose": None, "stat": None, "signoff": None, "committer-date-is-author-date": None,
+    "reset-author-date": None, "ignore-date": None, "ignore-whitespace": None, "force-rebase": None, "ff": None,
+    "continue": None, "skip": None, "abort": None, "quit": None, "edit-todo": None, "show-current-patch": None,
+    "apply": None, "merge": None, "interactive": None, "preserve-merges": None, "rerere-autoupdate": None,
+    "keep-empty": None, "autosquash": None, "update-refs": None, "gpg-sign": None, "autostash": None,
+    "allow-empty-message": None, "rebase-merges": None, "fork-point": None, "root": None,
+    "reschedule-failed-exec": None, "reapply-cherry-picks": None}
+# How deep the command lines that git runs from its operands may nest (a foreach that runs a foreach) and how
+# many characters of such lines one command may make the check read, as a multiple of its own length plus a
+# floor, kept for each reading of the lines and for the lines that only a mix of the readings builds
+# (_cmtidn_line_ai), so a command built to nest or repeat them costs time linear in its length. A line past
+# either bound is left unread, and so is a line, at any depth, that the shared tokenizer cannot parse (an
+# unbalanced quote in a foreach operand or an exec value): every other segment of the command and every other
+# run line within the bounds is still judged, so such a line cannot hide an AI identity that the reader can
+# read. Only when none of them sets one does find_ai_authorship raise ValueError with _CMTIDN_RUN_BOUNDS, so
+# the handler judges the command with its conservative fallback, which then denies an AI identity anywhere in
+# the command once its quotes and backslashes are removed (_commit_identity_fallback).
+_CMTIDN_RUN_DEPTH = 8
+_CMTIDN_RUN_SCALE = 8
+_CMTIDN_RUN_FLOOR = 4096
+_CMTIDN_RUN_BOUNDS = ("git runs a command line that could not be parsed, or command lines nested or repeated past "
+                      "the commit-identity bounds")
+# The longest command, in characters, that find_ai_authorship reads. A hook that runs past its timeout (10
+# seconds, tools/gen_hooks.py TIMEOUT) is stopped before it can deny, and the platform contract this file
+# records (the module docstring) does not say that a stopped hook refuses the call, so the reading of a long
+# command has to end well inside the timeout. The costliest commands measured, repeated wrapped git bisect run
+# words nested up to three deep and ending in a locale quote, which spend all three run-line bounds, took up to
+# about 7.3 microseconds of CPU time per character to read (1.9 s at 256 KiB, 7.1 s at 1 MiB), so a command of
+# this length costs up to about 1 s, a tenth of the timeout; that margin is for a host several times slower than
+# the one measured and for the other PreToolUse hooks the platform runs on the same command at the same time.
+# That bound holds only while each regex the reader runs on a word, and each one the fallback runs on a command of
+# this length that the tokenizer cannot parse, costs time linear in the length it scans: CO_AUTHOR_RE and the
+# user.name context of _RAW_IDENTITY_CONTEXTS take each whitespace run whole, since giving a run back one character
+# at a time cost time quadratic in its length (about 53 s and 130 s of CPU time at this length, for a commit message
+# of a trailer name and a run of newlines and for user.name and a run of spaces before a quote that does not close,
+# against about 0.01 s with each run taken whole). CO_AUTHOR_RE also gives each trailer name in a word its own
+# value of up to 160 characters, so a word of repeated trailer names costs several times one pass over it, though
+# the AI identity search reads only the part of each value past the end of the one before it, less
+# _AI_NAME_LONGEST - 1 characters (_ai_value_match), and each distinct word is scanned once for the command
+# (_co_author_ai): a commit message of repeated trailer names in git rebase -x lines nested seven deep, the
+# innermost ending in a locale quote, took up to about 0.15 s at this length, against 0.41 s with each value
+# searched whole (the highest of three single runs on one host). A longer command raises ValueError with
+# _CMTIDN_TOO_LONG before any reading starts, and the handler's fallback denies it when it names an AI anywhere
+# and holds a word that can record an identity, or when a raw-string context finds an AI identity in it, in time
+# that grows with its length: on the measuring host a command of about 40 to 48 MiB or longer can outlast the
+# timeout, and on a slower host a shorter one can (_commit_identity_fallback).
+_CMTIDN_READ_LIMIT = 128 << 10
+_CMTIDN_TOO_LONG = "the command is longer than the commit-identity check reads within the hook timeout"
+# An AI name as AI_IDENTITY_RE spells it but with no word boundary, so that a name the reader would find in a
+# command too long to read is found by the fallback as well. Each word the reader judges, a word of a run line
+# included, holds the command's characters in order less only quotes, backslashes, the newline of a
+# backslash-newline and the '$' before a quote (a run line adds quotes and backslashes that its own reading drops
+# again), so once every quote, backslash, '$' and newline is dropped from the command (_CMTIDN_UNREAD_CHARS_RE),
+# the letters of any name the reader matches stand together, though the characters around them may no longer
+# leave a word boundary.
+_AI_NAME_ANYWHERE_RE = re.compile(AI_IDENTITY_RE.pattern.replace(r"\b", ""))
+_CMTIDN_UNREAD_CHARS_RE = re.compile(r"[\\\"'$\n]")
+# The words that can record an identity, which a command too long to read must also hold before its AI name
+# denies it (_cmtidn_identity_word): the reader judges an --author value or a trailer only on a segment whose
+# git command it finds by a word that is git or a path ending in /git, and a run line only under such a git
+# command, and it judges an identity assignment only in a word that starts with a GIT_AUTHOR_ or GIT_COMMITTER_
+# variable name, or with user.name or user.email. Each such word holds its letters in the command with only the
+# characters of _CMTIDN_UNREAD_CHARS_RE between them, so the variable and config names are sought in the command
+# once those characters are dropped, as the AI name is. git is sought as a whole word: its letters with only
+# those characters between them (g$'i't), and no letter, digit or underscore directly before or after it in the
+# command as written, so a dropped character counts as a word boundary too. A word of the command starts after
+# a space, a tab, a newline or an operator, and git in a path follows a '/', so a git at the start of a line,
+# whose newline the dropping removes (EOF, a newline, then git commit ...), is still found. A command that runs
+# git under another name (a variable, a function, an alias) is outside the reader too.
+_CMTIDN_GIT_WORD_RE = re.compile(r"(?<!\w)g[\\\"'$\n]*i[\\\"'$\n]*t(?!\w)")
+_CMTIDN_IDENTITY_NAME_RE = re.compile(r"(?i)GIT_(?:AUTHOR|COMMITTER)_|user\.(?:name|email)")
+
+
+def _cmtidn_run_lines(tokens, k, stop):
+    """Yield each command line that the git command whose subcommand is the word at index k runs from its own
+    operands, spelled as the shell reads it, so find_ai_authorship reads it as a command of its own. git
+    submodule foreach CMD runs its first operand as shell text followed by the other operands as its arguments
+    (foreach 'git commit ...' and foreach git commit ... both run git commit); the options of submodule
+    (--quiet, --cached) and of foreach (--quiet, --recursive) take no value, so the first word after them that
+    does not start with '-' is that first operand. git submodule foreach hands its operands to git
+    submodule--helper foreach after a '--', and git runs the helper's operands the same way, after an optional
+    '--', so the helper's foreach is read the same way. git bisect run CMD runs its operands as the words of one
+    command. git rebase runs the value of each --exec or -x as a shell command line (_cmtidn_option reads the
+    rebase options up to '--'). stop is the index of the next rebase subcommand that the segment's git commands
+    read (len(tokens) when there is none), where this rebase's read of its options stops: that subcommand word
+    takes no value, so from the word after it both reads see the same option boundaries and find the same
+    lines, which the next rebase yields. Each word of a segment is so read for one rebase only, and a segment
+    of many wrapped rebase commands costs time linear in its length. Only these forms are read: the residue
+    lists the commands git runs from elsewhere (an interactive rebase's edited todo list, an alias, a configured
+    editor)."""
+    n = len(tokens)
+    verb = tokens[k]
+    j = k + 1
+    if verb in ("submodule", "submodule--helper"):
+        while j < n and tokens[j].startswith("-"):
+            j += 1
+        if j < n and tokens[j] == "foreach":
+            j += 1
+            while j < n and tokens[j].startswith("-"):
+                j += 1
+            if j < n:
+                yield tokens[j] + "".join(" " + shlex.quote(word) for word in tokens[j + 1:])
+    elif verb == "bisect":
+        if j + 1 < n and tokens[j] == "run":
+            yield " ".join(shlex.quote(word) for word in tokens[j + 1:])
+    elif verb == "rebase":
+        while j < stop and tokens[j] != "--":
+            kind, value = _cmtidn_option(tokens[j], _CMTIDN_REBASE_SHORT, _CMTIDN_REBASE_LONG)
+            if kind is not None and value is None and j + 1 < n:
+                j += 1
+                value = tokens[j]  # the option's value word, never read as an option
+            if kind == "exec" and value is not None:
+                yield value
+            j += 1
+
+
 def find_ai_authorship(command):
     """Return '<context> <value>' when a segment sets an AI identity for a recorded change, else None:
     an identity-assignment (env var / git config) on ANY segment, or a commit-message context (co-author
-    trailer, --author value) on a git commit segment. Raises ValueError on a shell parse error (via
-    _segments), which the handler turns into the conservative fallback."""
-    for tokens, _sep in _segments(command):
-        hit = _identity_assignment_ai(tokens)
-        if hit is not None:
-            return hit
-        if _command_word(tokens) == "git" and _git_subcommand(tokens) in COMMIT_VERBS:
-            hit = _commit_message_and_author_ai(tokens)
+    trailer, --author value) on a segment that runs a git commit-family command, found by
+    _cmtidn_git_commands behind leading reserved words, a function or coprocess name, VAR=value words and
+    wrapper words (env, sudo, ...), and the same on each command line that a git command runs from its
+    operands (_cmtidn_run_lines). The command and each run line are judged under two readings, and an AI
+    identity that either finds is returned: bash locale quoting read as double-quoted text (_segments with
+    locale True), so a name that $"" splits inside a word (Cl$""aude) is read joined, as bash joins it, and the
+    literal '$' reading every other guard uses (locale False), so a name followed directly by a locale quote
+    (Claude$"bot", which the first reading joins into Claudebot) still denies as it did before locale quoting
+    was read: a change toward allow is held until the maintainer decides it. The run lines that each reading
+    alone builds are read within a length bound of that reading's own, and those that only a mix of the two
+    builds within a third, so the lines one reading builds cannot spend the bound of the other: every line that
+    one reading alone reads is still read, and no command that one reading alone denies is allowed. Raises
+    ValueError on a shell parse error in the command itself (via _segments; under one reading only, after the
+    other reading has found nothing and left no run line unread), ValueError(_CMTIDN_RUN_BOUNDS) when a run
+    line was left unread, because it could not be parsed or was past the bounds (_CMTIDN_RUN_DEPTH), and
+    nothing read sets an AI identity, and ValueError(_CMTIDN_TOO_LONG) at once, before any reading, when the
+    command is longer than _CMTIDN_READ_LIMIT characters; the handler turns each into the conservative
+    fallback."""
+    if len(command) > _CMTIDN_READ_LIMIT:
+        raise ValueError(_CMTIDN_TOO_LONG)
+    bound = _CMTIDN_RUN_SCALE * len(command) + _CMTIDN_RUN_FLOOR
+    unread = [False]
+    try:
+        hit = _cmtidn_line_ai(command, 0, {True: [bound], False: [bound], None: [bound]}, unread, [True, False],
+                              {})
+    except ValueError:
+        if not unread[0]:
+            raise
+        hit = None  # one reading cannot parse the command, and the other left a run line unread
+    if hit is None and unread[0]:
+        raise ValueError(_CMTIDN_RUN_BOUNDS)
+    return hit
+
+
+def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
+    """find_ai_authorship over one command line at a run-line nesting depth. The line is judged under both
+    readings, the locale reading and the literal '$' reading (the locale flag of _segments True and False),
+    once when they agree, which they do on a line holding no $". paths lists the readings whose own reading of
+    the command and of every run line down to this one builds this line, and is empty when only a mix of the
+    two does. budgets maps each reading, and None for such a mix, to a one-item list of the characters of run
+    lines still to be read within that bound, shared by every nested line of the command: each run line that a
+    reading of this line builds is charged to the bound of each reading in paths that reads this line so, or to
+    the None bound when there is none, and is read while one of those bounds is not spent, so every line that
+    one reading alone reads is read, within that reading's bound, as that reading alone reads it. unread is a
+    one-item list set to True when a run line is left unread: one past a bound, or one (depth above 0) that the
+    shared tokenizer cannot parse under a reading. Such a line is not read, but the other segments of the
+    command and of every line being read still are, and so are the other run lines within the bounds; once the
+    bounds that a reading charges are spent it builds no further run line, and each rebase reads its options
+    only up to the next rebase subcommand (_cmtidn_run_lines), so the cost stays linear. judged maps each word
+    already scanned for a co-author trailer, on this line or another line of the command, to its result
+    (_co_author_ai). A parse error in the command itself (depth 0) raises: at once when neither reading parses
+    it, and otherwise after the other reading has found nothing."""
+    readings = []  # (the readings that read the line so, its segments)
+    error = None
+    for locale in (True, False):
+        if not locale and '$"' not in command:
+            for same, _read in readings:
+                same.append(locale)  # the readings differ only at a $" (_read_word): one serves for both
+            break
+        try:
+            segments = _segments(command, locale=locale)
+        except ValueError as exc:
+            error = error or exc
+            continue
+        for same, read in readings:
+            if read == segments:
+                same.append(locale)
+                break
+        else:
+            readings.append(([locale], segments))
+    if error is not None and depth > 0:
+        unread[0] = True  # a run line that a reading cannot parse is left unread, like one past the bounds
+    elif error is not None and not readings:
+        raise error
+    for same, segments in readings:
+        keys = [reading for reading in paths if reading in same] or [None]
+        for tokens, _sep in segments:
+            hit = _identity_assignment_ai(tokens)
             if hit is not None:
                 return hit
+            subs = list(_cmtidn_git_commands(tokens))
+            if any(tokens[k] in COMMIT_VERBS for k in subs):
+                hit = _commit_message_and_author_ai(tokens, judged)
+                if hit is not None:
+                    return hit
+            rebases = [k for k in subs if tokens[k] == "rebase"]
+            stops = dict(zip(rebases, rebases[1:]))
+            for k in subs:
+                if all(budgets[key][0] < 0 for key in keys):
+                    break  # the length bound is spent: no further run line is built
+                for line in _cmtidn_run_lines(tokens, k, stops.get(k, len(tokens))):
+                    for key in keys:
+                        budgets[key][0] -= len(line)
+                    spent = [budgets[key][0] < 0 for key in keys]
+                    if depth >= _CMTIDN_RUN_DEPTH or any(spent):
+                        unread[0] = True  # left to the conservative fallback unless something read sets an identity
+                        if depth >= _CMTIDN_RUN_DEPTH or all(spent):
+                            break
+                    hit = _cmtidn_line_ai(line, depth + 1, budgets, unread, [key for key in keys if key is not None],
+                                          judged)
+                    if hit is not None:
+                        return hit
+    if error is not None and depth == 0:
+        raise error
     return None
 
 
-def _commit_identity_fallback(command):
-    """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): scan the RAW
-    string for an AI identity in a Co-Authored-By trailer, an --author value, a git-identity env var, or
-    a user.name/user.email value; deny on a hit. Never silent-allow a plausibly-violating command on a
-    parse failure."""
+def _cmtidn_identity_word(command):
+    """A word of command that can record an identity, as a match object: its first git word
+    (_CMTIDN_GIT_WORD_RE), else its first GIT_AUTHOR_, GIT_COMMITTER_, user.name or user.email name once the
+    characters of _CMTIDN_UNREAD_CHARS_RE are dropped (_CMTIDN_IDENTITY_NAME_RE); None when it holds neither."""
+    return (_CMTIDN_GIT_WORD_RE.search(command)
+            or _CMTIDN_IDENTITY_NAME_RE.search(_CMTIDN_UNREAD_CHARS_RE.sub("", command)))
+
+
+def _commit_identity_fallback(command, error):
+    """FAIL-SAFE conservative scan when find_ai_authorship could not read the command in full, error being the
+    text of the ValueError it raised: the shared tokenizer cannot parse the command (an unbalanced quote or an
+    unsupported construct), a command line that git runs from its operands was left unread, because the
+    tokenizer cannot parse it or it is past the run-line bounds, and nothing read set an AI identity
+    (_CMTIDN_RUN_BOUNDS), or the command is longer than the check reads within the hook timeout
+    (_CMTIDN_TOO_LONG). Unless a check below decides first, it scans the RAW string of the whole command for an
+    AI identity in a Co-Authored-By trailer, an --author value (any prefix git reads as --author), a
+    git-identity env var, or a user.name/user.email value (_RAW_IDENTITY_CONTEXTS), and denies on a hit.
+    A command too long to read is first denied when an AI name appears ANYWHERE in it once every quote,
+    backslash, '$' and newline is removed, with no word boundary needed around the name (_AI_NAME_ANYWHERE_RE),
+    and it also holds a word that can record an identity (_cmtidn_identity_word), so a command that the reader
+    would deny is denied; the cost is a disclosed over-deny of such a command whose text merely names an AI
+    product or holds a name inside a longer word (Claudette) and that holds git as a word or an identity
+    variable or config name, a heredoc body included. One that names no AI anywhere is allowed at once, since no
+    raw-string context can find an AI identity in it either. One that names an AI but holds none of those words
+    is judged by the raw-string contexts, as a command the tokenizer cannot parse is, so an AI --author value or
+    co-author trailer in it denies when git runs under another name (gi?, "$G"); a heredoc that writes a file
+    naming an AI product, with no trailer, --author value or identity assignment in it, is allowed. This
+    judgement has no length bound, so its cost grows with the command's length. The costliest shapes measured
+    are commands made of repeated co-author trailer names, since the co-author context reads each name with its
+    own value of up to 160 characters, though the AI identity search reads only the part of each value past the
+    end of the one before it, less _AI_NAME_LONGEST - 1 characters (_ai_value_match): the highest of three
+    single runs on one host took about 0.26 s of CPU time at 1,048,576 characters, 4.0 s at 16,777,216 and 6.3 s
+    at 25,165,824 (with each value searched whole, 0.59 s, 8.7 s and 14.0 s on the same host), and 7.3 s at
+    33,554,432, 8.9 s at 41,943,040 and 10.3 s at 50,331,648, so on the measuring host a command of about 40 to
+    48 MiB or longer can outlast the 10-second hook timeout, and on a slower host a shorter one can. The platform
+    contract this file records (the module docstring) does not say that a hook stopped at its timeout refuses the
+    call, so such a command may run with no deny from this check.
+    With a run line left unread it first denies when an AI identity appears ANYWHERE in the
+    command once every backslash-newline, backslash and quote is removed, since quoting or escaping in the
+    unread line can split or build an option name or value that no raw-string context sees (--"auth"=...,
+    --author=C"laude ...", a backslash-newline before the value), or once the '$' before each double quote is
+    removed as well, since bash drops the '$' of a locale quote $"..." (--author=Cl$""aude ...); the cost is a
+    disclosed over-deny of such a command whose text merely names an AI product, and the second form also joins
+    the text around a '$' that bash keeps (one inside double quotes, or one escaped), the same safe direction.
+    Never silent-allow a plausibly-violating command the check could not read in full."""
+    if error == _CMTIDN_TOO_LONG:
+        match = _AI_NAME_ANYWHERE_RE.search(_CMTIDN_UNREAD_CHARS_RE.sub("", command))
+        if match is None:
+            return _allow()  # no AI name, so no raw-string context below can find one either
+        word = _cmtidn_identity_word(command)
+        if word is not None:
+            reason = ("AIQT rule cmtidn (commit-identity): the command is {} characters long, more than the {} "
+                      "that the check reads within the hook timeout, and it names an AI identity ({!r}) once its "
+                      "quotes, backslashes, '$' signs and newlines are removed, and holds a word that can record one "
+                      "({!r}); failing closed, since the unread command can set an AI --author, trailer or "
+                      "identity. Remove it and commit as the maintainer; a long command that only mentions an AI "
+                      "product can be split into shorter commands."
+                      .format(len(command), _CMTIDN_READ_LIMIT, match.group(0), word.group(0)))
+            return _deny(reason,
+                         "AIQT guardrail: denied a command too long for the commit-identity check to read that "
+                         "names an AI identity (rule cmtidn, fail-safe).")
+        # no word that can record an identity: the raw-string contexts below judge the command
+    if error == _CMTIDN_RUN_BOUNDS:
+        text = command.replace("\\\n", "").replace("\\", "")
+        match = (AI_IDENTITY_RE.search(text.replace('"', "").replace("'", ""))
+                 or AI_IDENTITY_RE.search(text.replace('$"', "").replace('"', "").replace("'", "")))
+        if match:
+            reason = ("AIQT rule cmtidn (commit-identity): git runs a command line that could not be parsed, or "
+                      "command lines nested or repeated past the check's bounds, so a line was left unread, and "
+                      "the command names an AI identity ({!r}) once its quotes and backslashes are removed; "
+                      "failing closed, since quoting or escaping in the unread line can build an AI --author or "
+                      "trailer. Remove it and commit as the maintainer.".format(match.group(0)))
+            return _deny(reason,
+                         "AIQT guardrail: denied a git command with a run line left unread (unparseable or past "
+                         "the commit-identity bounds) that names an AI identity (rule cmtidn, fail-safe).")
     for regex, label in _RAW_IDENTITY_CONTEXTS:
-        for match in regex.finditer(command):
-            if AI_IDENTITY_RE.search(match.group(1)):
-                hit = "{} {!r}".format(label, match.group(1).strip()[:80])
-                reason = ("AIQT rule cmtidn (commit-identity): the command could not be parsed by the "
-                          "shell lexer (likely unbalanced quotes) and it appears to set an AI identity "
-                          "({}); failing closed. Remove it and commit as the maintainer.".format(hit))
-                return _deny(reason,
-                             "AIQT guardrail: denied an unparseable git command that appears to record "
-                             "an AI commit identity (rule cmtidn, fail-safe).")
+        match = _ai_value_match(regex, command)
+        if match is not None:
+            hit = "{} {!r}".format(label, match.group(1).strip()[:80])
+            reason = ("AIQT rule cmtidn (commit-identity): the command could not be read in full (a shell "
+                      "parse error such as unbalanced quotes, a command line that git runs that could not be "
+                      "parsed or was nested or repeated past the check's bounds, or a command longer than the "
+                      "check reads within the hook timeout) and it appears to set an AI identity ({}); failing "
+                      "closed. Remove it and commit as the maintainer.".format(hit))
+            return _deny(reason,
+                         "AIQT guardrail: denied a git command the check could not read in full that "
+                         "appears to record an AI commit identity (rule cmtidn, fail-safe).")
     return _allow()
 
 
@@ -2398,8 +3034,8 @@ def commit_identity(data):
             "AIQT guardrail: denied a Bash call with no readable command (rule cmtidn, fail-closed).")
     try:
         hit = find_ai_authorship(command)
-    except ValueError:
-        return _commit_identity_fallback(command)
+    except ValueError as exc:
+        return _commit_identity_fallback(command, str(exc))
     if hit is None:
         return _allow()
     reason = ("AIQT rule cmtidn (commit-identity): a recorded change carries the human maintainer's "
