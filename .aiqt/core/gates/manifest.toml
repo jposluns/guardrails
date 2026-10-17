@@ -654,7 +654,12 @@ inventories; deleting a whole bundle, inventory and payload together, requires i
 history to detect. Journals are deliberately outside doctor coverage, except that on homes 2 doctor
 lists the id reservation home of each kind there and reads each reservation file's bytes, for the
 reserved numbers alone (a legacy store lists and reads none); that read awaits the homes-2 revision of
-spec 4.2. Writer activation and
+spec 4.2. On homes 2 C-NO-DELETION does not report a reserved number missing where the prior commit
+(HEAD) held no record with that id, so a deletion already committed in HEAD is visible only to a doctor
+run before that commit: a published record whose number a reservation records and whose deletion is
+committed is then graded as an orphaned reservation's number and not reported missing, unlike homes 1,
+where the counters high-water keeps that deletion a C-NO-DELETION finding. The homes-2 revision of spec
+4.2 must settle this before homes 2 is activated. Writer activation and
 inventory publication remain inactive; homes 2 has no homes migration and no legacy journal
 transport (spec 4.2). The existing runtime suites must still validate integration before activation.
 """

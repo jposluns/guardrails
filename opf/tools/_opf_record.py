@@ -124,7 +124,11 @@ spec 4.2) and does not report a reserved number missing where the prior commit h
 id, so a reservation's [claims] number grades as issued and that next run records. A reservation keeps
 only its run's new high-water per key, so where an orphaned run claimed several numbers under one key,
 its lower numbers are still reported missing and the next run is held at the post-publication gate
-(conservative). A legacy
+(conservative). A deletion already committed in HEAD is visible only to a doctor run before that commit:
+a published record whose number a reservation records and whose deletion is committed is then graded as
+an orphaned reservation's number and not reported missing, unlike homes 1, where the counters high-water
+keeps that deletion a C-NO-DELETION finding. The homes-2 revision of spec 4.2 must settle this before
+homes 2 is activated. A legacy
 .aiqt/record/journal found on a homes-2 store is refused and never recovered: homes 2 has no homes
 migration to carry it (spec 4.2).
 

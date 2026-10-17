@@ -1181,7 +1181,9 @@ def self_test_isolated():
     _record_digest over the same committed content); an unborn HEAD -> the honest empty prior; a
     non-repository directory -> the remote and prior fields OMITTED with a note while tracked reads
     "untracked"; and the prior's `held` ids, the active worklog (both generations) and every archive bucket
-    file included, omitted alone with a note when an archive entry is not a bucket file. Judged ONLY on
+    file included, omitted alone with a note when an archive entry is not a bucket file, when a bucket file
+    or the active worklog.toml does not parse or holds a row table that is not an array, and when the
+    active worklog.toml cannot be read. Judged ONLY on
     gather's RETURNED structure (never by grepping git's stdout for verdicts).
     Returns 0 clean, 1 on a failed check, 2 on a harness error. When git is not on PATH at all it SKIPs
     clean, like the POSIX-signal watchdogs, since every path depends on git."""
@@ -1394,19 +1396,20 @@ def self_test_isolated():
 
         # 7. `held`: every id HEAD held, as merged intervals: the type-index ids, the active worklog, and
         # each archive bucket's archive.toml moved ids and worklog spans, worklog entries and index rows.
+        held_files = (
+            (_WORKLOG_NAME, 'schema = 1\n\n[[entry]]\nid = "WL-3"\n\n[[entry]]\nid = "WL-4"\n'),
+            ("archive/2026/archive.toml",
+             'schema = 1\n\n[[moved]]\nid = "BI-7"\ntype = "backlog_item"\n'
+             'destination = "archive/2026/backlog_item.index.toml"\n\n'
+             '[[worklog_moved]]\nspan = ["WL-1", "WL-2"]\ndestination = "archive/2026/worklog.toml"\n'),
+            ("archive/2026/backlog_item.index.toml", 'schema = 1\n\n[[record]]\nid = "BI-9"\n'),
+            ("archive/2026/worklog.toml", 'schema = 1\n\n[[entry]]\nid = "WL-6"\n'))
         held_repo = base / "held"
         held_repo.mkdir()
         _git_setup(held_repo, home, "init")
         _write_store(held_repo)
-        _write(held_repo, machine_rel + "/" + _WORKLOG_NAME,
-               'schema = 1\n\n[[entry]]\nid = "WL-3"\n\n[[entry]]\nid = "WL-4"\n')
-        _write(held_repo, machine_rel + "/archive/2026/archive.toml",
-               'schema = 1\n\n[[moved]]\nid = "BI-7"\ntype = "backlog_item"\n'
-               'destination = "archive/2026/backlog_item.index.toml"\n\n'
-               '[[worklog_moved]]\nspan = ["WL-1", "WL-2"]\ndestination = "archive/2026/worklog.toml"\n')
-        _write(held_repo, machine_rel + "/archive/2026/backlog_item.index.toml",
-               'schema = 1\n\n[[record]]\nid = "BI-9"\n')
-        _write(held_repo, machine_rel + "/archive/2026/worklog.toml", 'schema = 1\n\n[[entry]]\nid = "WL-6"\n')
+        for relpath, text in held_files:
+            _write(held_repo, machine_rel + "/" + relpath, text)
         _git_setup(held_repo, home, "add", "-A")
         _git_setup(held_repo, home, "commit", "-m", "store with an archive")
         obs, notes = gather(_Res(held_repo, machine_rel))
@@ -1444,6 +1447,59 @@ def self_test_isolated():
         with patch.object(_opf_store, "SUPPORTED_WORKLOG", 2):
             obs, notes = gather(_Res(gen2_repo, machine_rel))
         check("prior-held-worklog-generation-2", (obs.get("prior") or {}).get("held", {}).get("WL") == [[1, 2]])
+
+        # 10. Every other read of `held` that fails omits it alone, with a note naming the file, and the rest
+        # of the prior stands: an unparseable bucket file of each kind, a row table that is not an array in
+        # each, and an unparseable, non-array or unreadable active worklog.toml (its blob removed from the
+        # object store, so git show fails). Each case is the case-7 store with that one file changed; the
+        # unchanged store is the control, so a source skipped instead of omitted leaves a partial `held`.
+        def held_case(label, relpath=None, text=None):
+            repo = base / ("held-" + label)
+            repo.mkdir()
+            _git_setup(repo, home, "init")
+            _write_store(repo)
+            for rel, body in held_files:
+                _write(repo, machine_rel + "/" + rel, text if rel == relpath and text is not None else body)
+            _git_setup(repo, home, "add", "-A")
+            _git_setup(repo, home, "commit", "-m", "store with one held source changed")
+            if relpath is not None and text is None:
+                oid = _run_git(git, str(repo), ["rev-parse", "HEAD:{}/{}".format(machine_rel, relpath)])
+                if not oid.completed or oid.rc != 0:
+                    raise OSError("could not resolve the HEAD blob of {}".format(relpath))
+                name = oid.out.decode("ascii").strip()
+                os.unlink(str(repo / ".git" / "objects" / name[:2] / name[2:]))
+            return gather(_Res(repo, machine_rel))
+
+        obs, notes = held_case("control")
+        check("prior-held-case-control", (obs.get("prior") or {}).get("held") == {
+            "BI": [[1, 1], [7, 7], [9, 9]], "DN": [[1, 1]], "WL": [[1, 4], [6, 6]]})
+        bucket = "archive/2026/"
+        for label, relpath, text, needle in (
+                ("unparseable-bucket-archive", bucket + "archive.toml", "not toml [\n",
+                 "prior: archive/2026/archive.toml at HEAD is not valid TOML"),
+                ("unparseable-bucket-worklog", bucket + "worklog.toml", "not toml [\n",
+                 "prior: archive/2026/worklog.toml at HEAD is not valid TOML"),
+                ("unparseable-bucket-index", bucket + "backlog_item.index.toml", "not toml [\n",
+                 "prior: archive/2026/backlog_item.index.toml at HEAD is not valid TOML"),
+                ("non-array-moved", bucket + "archive.toml", 'schema = 1\nmoved = "BI-7"\n',
+                 "prior: HEAD archive/2026/archive.toml [[moved]] is not an array"),
+                ("non-array-worklog-moved", bucket + "archive.toml", 'schema = 1\nworklog_moved = 1\n',
+                 "prior: HEAD archive/2026/archive.toml [[worklog_moved]] is not an array"),
+                ("non-array-bucket-entry", bucket + "worklog.toml", 'schema = 1\nentry = "WL-6"\n',
+                 "prior: HEAD archive/2026/worklog.toml [[entry]] is not an array"),
+                ("non-array-bucket-record", bucket + "backlog_item.index.toml", 'schema = 1\n\n[record]\nid = "BI-9"\n',
+                 "prior: HEAD archive/2026/backlog_item.index.toml [[record]] is not an array"),
+                ("unparseable-active-worklog", _WORKLOG_NAME, "not toml [\n",
+                 "prior: worklog.toml at HEAD is not valid TOML"),
+                ("non-array-active-entry", _WORKLOG_NAME, 'schema = 1\nentry = "WL-3"\n',
+                 "prior: HEAD worklog.toml [[entry]] is not an array"),
+                ("unreadable-active-worklog", _WORKLOG_NAME, None,
+                 "prior: worklog.toml is absent or unreadable at HEAD")):
+            obs, notes = held_case(label, relpath, text)
+            prior = obs.get("prior")
+            check("prior-held-omitted-" + label, isinstance(prior, dict) and "held" not in prior
+                  and prior.get("records", {}).get("BI-1") == ("backlog_item", "open")
+                  and any(needle in n and _HELD_OMITTED in n for n in notes))
     except OSError as exc:
         print("opf observe self-test: harness error: could not build a git fixture ({}); fail-closed".format(
             exc), file=sys.stderr)
@@ -1458,7 +1514,7 @@ def self_test_isolated():
     print("opf observe self-test: PASS (tracked/untracked; 0/1/multiple remotes; prior from a committed "
           "HEAD with an engine-matching immutable-body digest; unborn HEAD -> empty prior; a non-repo dir "
           "omits remote and prior with a note; the ids HEAD held, worklog and archive included, and an "
-          "unreadable archive omitting them alone)")
+          "unreadable or malformed archive or worklog omitting them alone)")
     return 0
 
 

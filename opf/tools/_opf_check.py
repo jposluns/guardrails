@@ -1862,8 +1862,11 @@ def _reserved_numbers(root_fd, rep):
     one: its file name binds a run id of its own kind, and its bytes equal the exact canonical payload
     (_opf_journal.reservation_payload) that its name and content declare. A staging leftover of a
     reservation publication (a run that died before its exclusive link) carries no reservation and is
-    skipped unread. A (series key, number) has one owner across every kind's home, so a second
-    reservation claiming it is a conflict naming both files. An underivable or unlistable home, an entry
+    skipped unread. Owner uniqueness holds for the number each reservation records (its run's high-water
+    per key): that (series key, number) has one owner across every kind's home, so a second reservation
+    recording it is a conflict naming both files. A residual: a run that claimed several numbers under one
+    key records only the highest, so another run recording one of the lower numbers overlaps it unseen
+    (this doctor cannot read a number no reservation records). An underivable or unlistable home, an entry
     that is not a reservation, an unreadable, absent-at-read, malformed or non-canonical reservation, and
     a conflict are each a CANNOT-EVALUATE under C-NO-DELETION naming it, and the result is then
     ({}, False), so the caller grades as though nothing were reserved, never a wider pass. A [claims]
@@ -5602,20 +5605,20 @@ def self_test():
         check("homes2-reservation-staging-leftover-skipped", r is not None and r.status == VALID)
 
         # A reserved number has one owner across every kind's home: a second canonical reservation claiming
-        # the same number under the same series key is CANNOT-EVALUATE naming both files.
-        def h2_conflict(dup, needle):
-            r = h2(*h2_gap(published, orphan, dup))
-            names = [WORKING_DIRNAME + "/" + p for p in (orphan[0], dup[0])]
+        # the same number under the same series key is CANNOT-EVALUATE naming both files (dup and first, the
+        # orphan's reservation unless another is given; the store keeps the published and orphan ones).
+        def h2_conflict(dup, needle, first=orphan):
+            r = h2(*h2_gap(published, orphan, first, dup))
+            names = [WORKING_DIRNAME + "/" + p for p in (first[0], dup[0])]
             return h2_cant(r, needle) and any(needle in m and all(n in m for n in names) for m in r.cannot_evaluate)
 
         check("homes2-reservation-conflict-same-kind",
               h2_conflict(h2_reservation("record", 3, {"BI": 3}), "both claim 3 under the series key BI"))
         check("homes2-reservation-conflict-cross-kind",
               h2_conflict(h2_reservation("ingest", 3, {"WL": 5}), "both claim 5 under the series key WL"))
-        r = h2(*h2_gap(published, orphan, h2_reservation("import", 3, {"imported:BI": 3}),
-                      h2_reservation("import", 4, {"imported:BI": 3})))
-        check("homes2-reservation-conflict-imported-key",
-              h2_cant(r, "both claim 3 under the series key imported:BI"))
+        imported = h2_reservation("import", 3, {"imported:BI": 3})
+        check("homes2-reservation-conflict-imported-key", h2_conflict(
+            h2_reservation("import", 4, {"imported:BI": 3}), "both claim 3 under the series key imported:BI", imported))
 
         # A reservation read failure names C-NO-DELETION, so the C-CONTIGUITY pointer is accurate: an
         # unreadable regular file, and one listed but absent at read.
