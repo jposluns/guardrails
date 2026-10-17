@@ -107,7 +107,12 @@ for their --no-verify. The cs-bound cases check the shared reading's work bound:
 body completes within a bound of 9 or 8 characters and raises ValueError within one of 7, the reading of a
 52,513-byte command whose backquote substitutions nest 14 deep, each read as two bodies, passes the bound, and
 each guard in the table must decide that command within 1 s of CPU without raising, gate_weakening denying it
-for its --no-verify; the same holds for that shape around a commit-free git push. The table does not cover
+for its --no-verify; the same holds for that shape around a commit-free git push. The cs-bound-text cases
+check that each fallback text that says a command could not be parsed also names a substitution reading past
+the work bound, on that shape around a command each fallback flags (diff_source_pretool, commit_identity, on
+the command itself and on a git rebase -x run line, git_discard, gate_weakening's three raw probes and
+commit_msg_subst), and that bash_absolute_paths and branch_root still judge the command's own segments past
+the bound. The table does not cover
 gate_weakening's verification-sink deny
 tier, which still reads the command's own records, or the two orchestration guards (orch_truncation_guard,
 orch_untracked_wait_loop), whose shared reading tools/selftest_orch_hooks.py checks. The wx-* cases pin each
@@ -2605,6 +2610,92 @@ def _test_substitution_work_bound(failures):
             if got not in _CS_RANK or (want == "deny" and got != "deny"):
                 failures.append("(cs-bound-{}) the {}-byte command nested around {}: expected {}, got {}"
                                 .format(name, len(command), marker, want, got))
+
+
+def _cs_bound_nest(marker):
+    """The command _test_substitution_work_bound builds around marker: 1,500 words after it, nested 14 levels
+    deep, each level x="$(echo "'")" "'" then a backquote substitution holding the next level and a
+    single-quoted escaped double quote, so its substitution reading passes the work bound."""
+    command = marker + " " + "y " * 1500
+    for _level in range(14):
+        command = 'x="$(echo "\'")" "\'" `' + command.replace("\\", "\\\\").replace("`", "\\`") + " '\\\"'`"
+    return command
+
+
+# (guard, the command, decision, fragments its reason, or its note for an allow-note, must carry, and
+# fragments its banner must carry): each fallback text that says the command could not be parsed also names
+# a substitution reading past its work bound. The last two keep their decision and their reading of the
+# command's own segments past the bound, and name neither cause.
+_CS_BOUND_TEXT = (
+    ("diff_source_pretool", _cs_bound_nest("git diff HEAD"), "allow-note",
+     ("could not parse this command, or reading its backquote substitutions passed the work bound",), ()),
+    ("commit_identity", _cs_bound_nest("git commit --author=Claude -m x"), "deny",
+     ("a shell parse error such as unbalanced quotes, a reading of its backquote substitutions that passed "
+      "the work bound,",), ()),
+    ("commit_identity", "git rebase -x " + shlex.quote(_cs_bound_nest("git commit --author=Claude -m x")),
+     "deny", ("could not be parsed, or whose backquote substitutions passed the work bound when read,",),
+     ("unparseable, past the substitution work bound, or past the commit-identity bounds",)),
+    ("git_discard", _cs_bound_nest("git reset --hard"), "deny",
+     ("could not be parsed by the shell lexer (an unbalanced quote or an unsupported construct), or reading "
+      "its backquote substitutions passed the work bound,",),
+     ("that it could not parse or read within the substitution work bound",)),
+    ("gate_weakening", _cs_bound_nest("git commit --no-verify -m x"), "deny",
+     ("could not be parsed by the shell lexer (likely unbalanced quotes), or reading its backquote "
+      "substitutions passed the work bound,", "--no-verify spelling"),
+     ("could not parse or read within the substitution work bound",)),
+    ("gate_weakening", _cs_bound_nest("git commit -n -m x"), "deny",
+     ("could not be parsed by the shell lexer (likely unbalanced quotes), or reading its backquote "
+      "substitutions passed the work bound,", "short -n"),
+     ("could not parse or read within the substitution work bound",)),
+    ("gate_weakening", _cs_bound_nest("pytest || true"), "allow-note",
+     ("could not be parsed by the shell lexer (likely unbalanced quotes), or reading its backquote "
+      "substitutions passed the work bound,", "swallow or truncate"), ()),
+    ("commit_msg_subst", _cs_bound_nest("git commit -m x"), "deny",
+     ("could not be parsed by the shell lexer, or reading its backquote substitutions passed the work bound,",),
+     ("could not parse or read within the substitution work bound",)),
+    ("bash_absolute_paths", "cd rel; " + _cs_bound_nest("echo"), "allow-note",
+     ("a relative cd destination 'rel'",), ()),
+    ("branch_root", "git switch --orphan z; " + _cs_bound_nest("echo"), "deny",
+     ("cannot classify with confidence (an --orphan",), ()),
+)
+
+
+def _test_substitution_bound_text(failures):
+    """(cs-bound-text) What each guard says when its substitution reading passes the work bound
+    (_substitution_work), on the nested shape of _test_substitution_work_bound (_cs_bound_nest), which bash
+    parses: each row of _CS_BOUND_TEXT must get its decision, and its reason (its note, for an allow-note) and
+    banner must carry each fragment named. The command's own reading, or for the git rebase -x row the run
+    line's, must first raise ValueError with _SUBSTITUTION_WORK_SPENT, so each row reaches the bound and not a
+    parse error. No submitted Bash command is executed."""
+    for name, command, want, reason_parts, banner_parts in _CS_BOUND_TEXT:
+        label = "(cs-bound-text-{}) the {}-byte command".format(name, len(command))
+        read = command
+        if command.startswith("git rebase -x "):
+            read = shlex.split(command)[3]  # the run line commit_identity reads as a command of its own
+        try:
+            aiqt_hooks._substitution_lines(aiqt_hooks._lex_command(read))
+            raised = "a complete reading"
+        except ValueError as exc:
+            raised = str(exc)
+        if raised != aiqt_hooks._SUBSTITUTION_WORK_SPENT:
+            failures.append("{}: its substitution reading: expected ValueError({!r}), got {}"
+                            .format(label, aiqt_hooks._SUBSTITUTION_WORK_SPENT, raised))
+        code, out, _stderr = getattr(aiqt_hooks, name)(
+            {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}})
+        got = _reduce_result(code, out)
+        if got != want:
+            failures.append("{}: expected {}, got {}".format(label, want, got))
+            continue
+        specific = out.get("hookSpecificOutput") or {}
+        reason = specific.get("permissionDecisionReason", "") if want == "deny" else out.get("systemMessage", "")
+        banner = out.get("systemMessage", "") if want == "deny" else ""
+        for part in reason_parts:
+            if part not in reason:
+                failures.append("{}: its {} lacks {!r}: {!r}".format(
+                    label, "reason" if want == "deny" else "note", part, reason))
+        for part in banner_parts:
+            if part not in banner:
+                failures.append("{}: its banner lacks {!r}: {!r}".format(label, part, banner))
 
 
 # The wrapped examples the guard texts in .aiqt/core/hooks/manifest.toml name, each with the exact decision
@@ -14590,6 +14681,7 @@ def _main_isolated(monitor):
         _test_compound_subject(failures)
         _test_backquote_scan_cost(failures)
         _test_substitution_work_bound(failures)
+        _test_substitution_bound_text(failures)
         _test_wrapped_examples(failures, tmp)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)

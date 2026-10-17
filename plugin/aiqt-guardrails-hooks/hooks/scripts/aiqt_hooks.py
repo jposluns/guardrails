@@ -1415,7 +1415,8 @@ def _command_word(tokens):
 # The reading of one command line's substitutions has a work bound (_substitution_work): past it, the reading
 # raises ValueError as the lexer does on a command it cannot parse, and each guard decides as it does for such
 # a command (its fallback, or for bash_absolute_paths and branch_root, the command's own segments with no
-# substitution read).
+# substitution read). Each fallback message or note that says the command could not be parsed names both
+# causes: the command could not be parsed, or reading its substitutions passed the work bound.
 # Words after which bash reads a command in the same simple-command position: the conditional and loop
 # keywords whose next word starts a command list, brace grouping, the '!' pipeline negation and the 'time'
 # pipeline prefix (with its -p option, and one '--' after 'time' or 'time -p').
@@ -2542,14 +2543,17 @@ def _diff_proof_pager(segments):
 
 def _diff_source_fallback(command):
     """FAIL-SAFE conservative check when _lex_command cannot parse the command (an unbalanced quote or an
-    unsupported construct such as a heredoc or process substitution): an apparent git diff-producer (the
+    unsupported construct such as a heredoc or process substitution), or when the reading of its backquote
+    substitutions passes its work bound (_substitution_work): an apparent git diff-producer (the
     broad raw probe) ASKS, everything else ALLOWS. An unparseable command can never earn an ALLOW from a
     summary or redirect regex - the old raw-summary/redirect escapes are removed - so a plausibly-dumping
-    unparseable command is surfaced for confirmation rather than proven either way."""
+    unparseable command is surfaced for confirmation rather than proven either way. The note names both
+    causes."""
     if _RAW_DIFF_PRODUCER_RE.search(command):
         return _allow_note(
             "AIQT guardrail (rule cnsdif, no-console-diff-dumps): the shared tokenizer could not parse this "
-            "command and it appears to invoke a git diff-producer. This is a console-readability convention, "
+            "command, or reading its backquote substitutions passed the work bound, and it appears to invoke "
+            "a git diff-producer. This is a console-readability convention, "
             "not a hazard, so the command is allowed. If it renders a diff to the console, prefer a summary "
             "form (--stat, --name-only), a redirect to a real file (> file), or a pager (| less) to keep the "
             "review surface readable.")
@@ -3041,7 +3045,8 @@ _CMTIDN_REBASE_LONG = {
 # floor, kept for each reading of the lines and for the lines that only a mix of the readings builds
 # (_cmtidn_line_ai), so a command built to nest or repeat them costs time linear in its length. A line past
 # either bound is left unread, and so is a line, at any depth, that the shared tokenizer cannot parse (an
-# unbalanced quote in a foreach operand or an exec value): every other segment of the command and every other
+# unbalanced quote in a foreach operand or an exec value) or whose backquote substitution reading passes its
+# work bound (_substitution_work): every other segment of the command and every other
 # run line within the bounds is still judged, so such a line cannot hide an AI identity that the reader can
 # read. Only when none of them sets one does find_ai_authorship raise ValueError with _CMTIDN_RUN_BOUNDS, so
 # the handler judges the command with its conservative fallback, which then denies an AI identity anywhere in
@@ -3163,8 +3168,10 @@ def find_ai_authorship(command):
     builds within a third, so the lines one reading builds cannot spend the bound of the other: every line that
     one reading alone reads is still read, and no command that one reading alone denies is allowed. Raises
     ValueError on a shell parse error in the command itself (via _segments; under one reading only, after the
-    other reading has found nothing and left no run line unread), ValueError(_CMTIDN_RUN_BOUNDS) when a run
-    line was left unread, because it could not be parsed or was past the bounds (_CMTIDN_RUN_DEPTH), and
+    other reading has found nothing and left no run line unread) and ValueError(_SUBSTITUTION_WORK_SPENT) when
+    the reading of its backquote substitutions passes its work bound, the same way,
+    ValueError(_CMTIDN_RUN_BOUNDS) when a run line was left unread, because it could not be parsed, the
+    reading of its backquote substitutions passed the work bound, or it was past the bounds (_CMTIDN_RUN_DEPTH), and
     nothing read sets an AI identity, and ValueError(_CMTIDN_TOO_LONG) at once, before any reading, when the
     command is longer than _CMTIDN_READ_LIMIT characters; the handler turns each into the conservative
     fallback."""
@@ -3278,8 +3285,10 @@ def _cmtidn_identity_word(command):
 def _commit_identity_fallback(command, error):
     """FAIL-SAFE conservative scan when find_ai_authorship could not read the command in full, error being the
     text of the ValueError it raised: the shared tokenizer cannot parse the command (an unbalanced quote or an
-    unsupported construct), a command line that git runs from its operands was left unread, because the
-    tokenizer cannot parse it or it is past the run-line bounds, and nothing read set an AI identity
+    unsupported construct) or the reading of its backquote substitutions passes its work bound
+    (_SUBSTITUTION_WORK_SPENT), a command line that git runs from its operands was left unread, because the
+    tokenizer cannot parse it, the reading of its backquote substitutions passes the work bound, or it is past
+    the run-line bounds, and nothing read set an AI identity
     (_CMTIDN_RUN_BOUNDS), or the command is longer than the check reads within the hook timeout
     (_CMTIDN_TOO_LONG). Unless a check below decides first, it scans the RAW string of the whole command for an
     AI identity in a Co-Authored-By trailer, an --author value (any prefix git reads as --author), a
@@ -3335,20 +3344,23 @@ def _commit_identity_fallback(command, error):
                  or AI_IDENTITY_RE.search(text.replace('$"', "").replace('"', "").replace("'", "")))
         if match:
             reason = ("AIQT rule cmtidn (commit-identity): git runs a command line that could not be parsed, or "
-                      "command lines nested or repeated past the check's bounds, so a line was left unread, and "
+                      "whose backquote substitutions passed the work bound when read, or command lines nested or "
+                      "repeated past the check's bounds, so a line was left unread, and "
                       "the command names an AI identity ({!r}) once its quotes and backslashes are removed; "
                       "failing closed, since quoting or escaping in the unread line can build an AI --author or "
                       "trailer. Remove it and commit as the maintainer.".format(match.group(0)))
             return _deny(reason,
-                         "AIQT guardrail: denied a git command with a run line left unread (unparseable or past "
-                         "the commit-identity bounds) that names an AI identity (rule cmtidn, fail-safe).")
+                         "AIQT guardrail: denied a git command with a run line left unread (unparseable, past the "
+                         "substitution work bound, or past the commit-identity bounds) that names an AI identity "
+                         "(rule cmtidn, fail-safe).")
     for regex, label in _RAW_IDENTITY_CONTEXTS:
         match = _ai_value_match(regex, command)
         if match is not None:
             hit = "{} {!r}".format(label, match.group(1).strip()[:80])
             reason = ("AIQT rule cmtidn (commit-identity): the command could not be read in full (a shell "
-                      "parse error such as unbalanced quotes, a command line that git runs that could not be "
-                      "parsed or was nested or repeated past the check's bounds, or a command longer than the "
+                      "parse error such as unbalanced quotes, a reading of its backquote substitutions that passed "
+                      "the work bound, a command line that git runs that could not be parsed or read within that "
+                      "bound or was nested or repeated past the check's bounds, or a command longer than the "
                       "check reads within the hook timeout) and it appears to set an AI identity ({}); failing "
                       "closed. Remove it and commit as the maintainer.".format(hit))
             return _deny(reason,
@@ -4210,7 +4222,8 @@ def _expbnd_breadth_publish_deny(verb):
 
 
 def _expbnd_fallback(command):
-    """Conservative ASK fallback for visible in-scope pairs in an unparseable shell command."""
+    """Conservative ASK fallback for visible in-scope pairs in a shell command that the tokenizer cannot
+    parse or whose backquote substitution reading passes its work bound (_substitution_work)."""
     if (_RAW_EXPBND_CD_RE.search(command) and
             (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command))):
         return _expbnd_target_ask("mutation")
@@ -5187,8 +5200,9 @@ def _worktree_within_repo(wt_dir, repo_probe):
 
 def _git_discard_fallback(command):
     """D-423-NARROW fail-closed fallback when the shared tokenizer cannot parse the command (an unbalanced
-    quote or an unsupported construct): the closed allowlist grammar cannot be applied to a command that
-    cannot be segmented, so the ONLY allow is the true boundary - the raw scan, run on the FULL raw
+    quote or an unsupported construct) or the reading of its backquote substitutions passes its work bound
+    (_substitution_work), and the deny names both causes: the closed allowlist grammar cannot be applied
+    to a command that cannot be segmented, so the ONLY allow is the true boundary - the raw scan, run on the FULL raw
     command (ROUND 8: heredoc bodies are no longer stripped on this path; stripping removed text, so
     it could only hide a real discard and widen acceptance, and the round-7 stripper did exactly that
     on nested heredoc data), finds no git plus work-losing verb keyword. EVERYTHING that raw scan
@@ -5208,13 +5222,15 @@ def _git_discard_fallback(command):
         return _allow()  # no git + work-losing verb in the raw text or its de-quoted copy: the true boundary
     return _deny(
         "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell lexer "
-        "(an unbalanced quote or an unsupported construct) and its raw text names git together with a "
+        "(an unbalanced quote or an unsupported construct), or reading its backquote substitutions passed "
+        "the work bound, and its raw text names git together with a "
         "work-losing verb keyword, so this guard cannot establish what it would run or where; under the "
-        "closed allowlist grammar every such unparseable flagged command is denied, read-only ones "
+        "closed allowlist grammar every such flagged command is denied, read-only ones "
         "included (the raw scan cannot tell them apart), and no recovery snapshot is attempted (no sound "
         "snapshot basis exists for an unreadable command). Re-issue it as a plain, parseable 'git <verb>' "
         "command from the target repository, or commit or stash your work first. {}".format(_DISCARD_ALTS),
-        "AIQT guardrail: denied an unparseable command naming a git work-losing verb (rule prsunc); "
+        "AIQT guardrail: denied a command naming a git work-losing verb that it could not parse or read "
+        "within the substitution work bound (rule prsunc); "
         "re-issue it as a plain, parseable git command, or commit or stash first.")
 
 
@@ -8946,7 +8962,8 @@ def _protected_line_fallback(command, wrapped=False):
     actual reasons the reading is uncertain (_lex_uncertain_causes), plus 'wrapped' when the
     caller lexed no segment whose command word is git. The pairing is read across the WHOLE
     text, so a force spelling in one command and a push word in another pair here (a disclosed
-    over-denial, reached only on an uncertain, unparseable or wrapper-hidden command).
+    over-denial, reached only on an uncertain, unparseable or wrapper-hidden command, or one whose
+    backquote substitution reading passes its work bound, _substitution_work).
     Hidden commits are checked independently of other Git segments by the commit recognizer.
     """
     syntax = _commit_command_syntax(command)
@@ -10424,7 +10441,9 @@ def _gate_flow_note(records, command):
 
 
 def _gate_weakening_fallback(command):
-    """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): an apparent
+    """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an
+    unsupported construct) or the reading of its backquote substitutions passes its work bound
+    (_substitution_work), each message naming both causes: an apparent
     git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
     a short -n cluster ASKS (the raw string cannot bind the cluster to its subcommand, so it cannot
     prove the -n is the bypass rather than an unrelated flag); a checker keyword next to a raw swallow
@@ -10434,19 +10453,22 @@ def _gate_weakening_fallback(command):
     if _RAW_NOVERIFY_VERB_RE.search(command) and _RAW_NOVERIFY_RE.search(command):
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
-            "(likely unbalanced quotes) and it appears to bypass verification hooks with a --no-verify "
-            "spelling; failing closed. {}".format(_GATE_ALTS),
-            "AIQT guardrail: denied an unparseable command that appears to bypass git verification "
-            "hooks (rule gatdis, fail-safe).")
+            "(likely unbalanced quotes), or reading its backquote substitutions passed the work bound, and it "
+            "appears to bypass verification hooks with a --no-verify spelling; failing closed. {}"
+            .format(_GATE_ALTS),
+            "AIQT guardrail: denied a command it could not parse or read within the substitution work bound "
+            "that appears to bypass git verification hooks (rule gatdis, fail-safe).")
     if _RAW_SHORT_NOVERIFY_VERB_RE.search(command) and _RAW_SHORT_N_RE.search(command):
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
-            "(likely unbalanced quotes) and it appears to run git commit or git am with a short -n, "
+            "(likely unbalanced quotes), or reading its backquote substitutions passed the work bound, and it "
+            "appears to run git commit or git am with a short -n, "
             "which on those verbs bypasses the verification hooks; it is denied fail-safe. Never weaken a "
             "gate to obtain a pass; re-issue it as a parseable command with no -n so the hooks run. {}"
             .format(_GATE_ALTS),
-            "AIQT guardrail: denied an unparseable git commit/am that appears to carry -n (--no-verify) "
-            "(rule gatdis, fail-safe); run the hooks, do not bypass them.")
+            "AIQT guardrail: denied a git commit/am it could not parse or read within the substitution work "
+            "bound that appears to carry -n (--no-verify) (rule gatdis, fail-safe); run the hooks, do not "
+            "bypass them.")
     if _RAW_CHECKER_RE.search(command) and (
             _RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
             or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command))):
@@ -10456,7 +10478,8 @@ def _gate_weakening_fallback(command):
         # run piped into a truncating sink that the partially lexed prefix proves (the gatdis deny tier).
         return _allow_note(
             "AIQT guardrail (rule gatdis, gate-discipline): the command could not be parsed by the shell "
-            "lexer (likely unbalanced quotes) and it appears to swallow or truncate a checker's failure "
+            "lexer (likely unbalanced quotes), or reading its backquote substitutions passed the work bound, "
+            "and it appears to swallow or truncate a checker's failure "
             "signal ('|| true', '|| :', '| head', '| tail', or a head/tail/cut fed by a process substitution or "
             "here-string). If it gates this work, run the checker bare and "
             "let its exit status stand (redirect output to a file if you need to page it), rather than "
@@ -10488,10 +10511,11 @@ def gate_weakening(data):
     pipeline after an earlier command in the same line that is not known-benign (_gate_benign_prefix) or joined
     to one by '||' (_gate_conditional_run), a sed,
     awk, sort or grep stage, a sink spelling off the list or cut, a checker-shaped or verify-option command
-    followed by a pipe and later a stage that may pass on only part of its input). On a parse error
+    followed by a pipe and later a stage that may pass on only part of its input). On a parse error, or a
+    backquote substitution reading past its work bound (_substitution_work),
     the partially lexed complete segments are judged for the deny tier first (DENY outranks the parse error);
-    otherwise the raw fallback stands. Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
-    xargs body; R2 an alias or shell function; R3 a gate whose name and options carry no checker part
+    otherwise the raw fallback stands, its messages naming both causes. Disclosed residuals: R1 a check
+    inside an sh -c/bash -c, eval or xargs body; R2 an alias or shell function; R3 a gate whose name and options carry no checker part
     (tools/doctor.py, sha256sum -c, a build); R4 a plain '| grep PATTERN' filter or '| wc', which are not
     counted as truncating sinks."""
     if data.get("hook_event_name") != PRETOOL:
@@ -10676,20 +10700,24 @@ def _commit_msg_subst_hit(seg):
 
 
 def _commit_msg_subst_fallback(command):
-    """Conservative raw fallback for an unparseable command: an apparent git commit + substitution marker is
+    """Conservative raw fallback for a command the lexer cannot parse, or whose backquote substitution reading
+    passes its work bound (_substitution_work): an apparent git commit + substitution marker is
     a HAZARD-class (command-injection) case this guard cannot parse, so it DENIES-and-educates (hooks never
-    ask; a possibly-executing substitution in a commit argument is blocked with the safe re-issue named).
-    Anything else ALLOWS at the true boundary. The probes intentionally over-match."""
+    ask; a possibly-executing substitution in a commit argument is blocked with the safe re-issue named), and
+    the deny names both causes. Anything else ALLOWS at the true boundary. The probes intentionally
+    over-match."""
     if (_RAW_COMMIT_MSG_GIT_RE.search(command)
             and _RAW_COMMIT_MSG_MARKER_RE.search(command)):
         return _deny(
             "AIQT rule sectvl (tool-argument-validation): the command could not be parsed by the shell "
-            "lexer and appears to carry a backtick or $( command substitution in a git commit argument, "
+            "lexer, or reading its backquote substitutions passed the work bound, and it appears to carry a "
+            "backtick or $( command substitution in a git commit argument, "
             "which the shell may execute BEFORE git processes the argument; it is denied fail-safe. Re-issue "
             "with single quotes, escape the marker as \\` or \\$(, or write the message to a file and use "
             "git commit -F <file>.",
-            "AIQT guardrail: denied an unparseable git commit argument that appears to carry an executable "
-            "command substitution (rule sectvl); re-issue single-quoted, escaped, or via -F <file>.")
+            "AIQT guardrail: denied a git commit argument it could not parse or read within the substitution "
+            "work bound that appears to carry an executable command substitution (rule sectvl); re-issue "
+            "single-quoted, escaped, or via -F <file>.")
     return _allow()
 
 
