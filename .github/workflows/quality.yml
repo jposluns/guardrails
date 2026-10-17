@@ -532,6 +532,9 @@ jobs:
         shell: bash
         run: python3 -I -B tools/gen_rules.py --check
 
+      - name: Agents self-test
+        shell: bash
+        run: python3 -I -B tools/gen_agents.py --self-test
       - name: Agents drift
         shell: bash
         run: python3 -I -B tools/gen_agents.py --check
@@ -811,6 +814,7 @@ jobs:
         run: python3 -I -B tools/check_mistakes_register.py
 
       - name: Mistakes-register append self-test
+        shell: bash
         run: python3 -I -B tools/orch_register.py --self-test
 
       - name: AEI enumerator self-test
