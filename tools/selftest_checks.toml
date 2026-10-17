@@ -335,6 +335,8 @@ expected-check-ids = [
   "wl/raw-words-param-expansion-hash-uncertain",
   "wl/raw-words-backquote-hash-uncertain",
   "wl/raw-words-spaced-comment-dropped",
+  "wl/backquote-hash-ansi-c-probe-match",
+  "wl/raw-words-escaped-backquote-hash-word",
   "wl/deny-rib-true-inner-detach",
   "wl/allow-none-foreground",
   "wl/allow-none-bounded-watch",

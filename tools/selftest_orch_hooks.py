@@ -2988,7 +2988,8 @@ def _main_isolated(report_path=None):
         # bare `&` on the next line (bash 5.3.9 starts a background job there). Inside a double-quoted
         # "$(...)" or backquote substitution a `#` after a blank is a comment to bash that runs past the
         # string's closing quote (bash starts a background job in both), so the scan denies it as
-        # unbalanced; a `#` inside a single-quoted span there, or inside a "${...}", stays text.
+        # unbalanced; a `#` inside a single-quoted span there, or inside a "${...}", stays text (that last
+        # check is a CONTROL: it allows at fc11d9bc and at dfac8602 as well).
         check("trunc/fg-continuation-hash-comment-detach-denies",
               [_verdict(bg("echo a \\\n# it's\nsleep 5 & # '", rib=False)),
                aiqt_hooks._orch_foreground_detach_kind("echo a \\\n# it's\nsleep 5 & # '")],
@@ -4241,7 +4242,11 @@ def _main_isolated(report_path=None):
         # at the closing backquote); there the classifier reads the command's text and finds every word of
         # the canonical shape, so it is a 'match' too, which is what bash runs. The raw word scan reads its
         # own segment by the same rule and returns no words for such a `#`; a blank-led `#` with nothing open
-        # stays a comment.
+        # stays a comment (a CONTROL: fc11d9bc and dfac8602 return the same words). Where that text holds
+        # quoting it does not decode, the classifier counts the probe as present, the one conjunct it reads
+        # from decoded tokens (fc11d9bc decoded --w$'a'tch to --watch and matched; e2fe8d72 read
+        # 'indeterminate'). An escaped backquote is plain word text to bash outside a backquote substitution
+        # (bash 5.3.9 prints `# for echo \`#), so the raw word scan reads past the '#' after it.
         check("wl/param-expansion-hash-match",
               clf("while true; do gh pr checks 42; sleep 30; echo ${x:- #}; done &"), "match")
         check("wl/backquote-hash-match",
@@ -4254,6 +4259,10 @@ def _main_isolated(report_path=None):
               aiqt_hooks._orch_raw_unquoted_words("echo `true # c` done"), [])
         check("wl/raw-words-spaced-comment-dropped",
               aiqt_hooks._orch_raw_unquoted_words("echo x # done"), ["echo", "x"])
+        check("wl/backquote-hash-ansi-c-probe-match",
+              clf("echo `#`\nwhile true; do sleep 30; x --w$'a'tch; done &"), "match")
+        check("wl/raw-words-escaped-backquote-hash-word",
+              aiqt_hooks._orch_raw_unquoted_words("echo \\`# done"), ["echo", "done"])
         # run_in_background true with an inner trailing `done &` is still 'match' (predicate ignores rib).
         check("wl/deny-rib-true-inner-detach", clf(BASE), "match")
         # NEGATIVE fixtures (this control): every one is 'none'.

@@ -7457,32 +7457,66 @@ def _main_isolated(monitor):
                 aiqt_hooks._hash_doubt_text("gi\\\nt g'it' \\\"x"), "git git x")
         texpect("(tok-17r6) the fallback scan holds the raw text, a newline, then the decoded text",
                 aiqt_hooks._hash_doubt_scan("g'it' diff"), "g'it' diff\ngit diff")
+        # That removal is no decoder: it reads g$'i't as g$it, and bash 5.3.9 runs git for g$'i't, g$''it,
+        # gi$'t', g$'\x69't and g$"i"t. So each fallback reads a command as cannot-evaluate, and takes its
+        # fail-closed decision, where its text holds an ANSI-C or locale quote anywhere, or a quote character
+        # or backslash with a letter right before or after it (_hash_doubt_opaque). The boundary: a letter
+        # beside the quote is inside, a digit or underscore beside it is outside, and a continuation between
+        # blanks is outside (the removal reads it as bash does).
+        for _ocmd, _owant in (("g$'i't", True), ('g$"i"t', True), ("x $'\\n'", True), ('x $"1"', True),
+                              ("g'it'", True), ("'git'", True), ('g"i"t', True), ("gi\\t", True),
+                              ("gi\\\nt", True), ("a'", True), ("'a", True), ("é'", True),
+                              ("1'", False), ("'1", False), ("_'", False), ("'_", False),
+                              ("git \\\nreset --hard", False), ("x=`true #`; echo hi", False),
+                              ("'-'-no-verify", False), ("$x '' $y", False)):
+            texpect("(tok-17r7) _hash_doubt_opaque({!r})".format(_ocmd), aiqt_hooks._hash_doubt_opaque(_ocmd),
+                    _owant)
         # The lexer vectors: bash 5.3.9 runs the RAN or RUN command in each (bash -c printed RUN for a and b,
         # RAN for c to i), and before the comment rule the lexer read each one without an error while the
         # command sat inside a misread quote or comment. Each '#' here is right after a ')' (a case pattern,
         # a subshell, a function name's '()', a regex group) or at a word start inside an open ${...} (the
         # ordinary form, a command substitution inside it, and the ${ cmd; } and ${| cmd; } forms), and one
         # of its two readings is the one bash takes: each vector has a reading that reaches the command bash
-        # ran.
+        # ran. Each vector's two readings are checked in full, the comment reading first and then the word-text
+        # reading (a, b: the comment reading reaches the printf RUN bash ran; c to h: the comment reading
+        # reaches the echo RAN bash ran, and the word-text reading swallows it into a quoted word; i: the
+        # word-text reading, the regex group bash reads, reaches the echo RAN).
         _hash_vectors = (
-            ("a", 'case x in x)# "\n :;; esac; printf RUN & # "\nwait'),
-            ("b", 'echo ${x:-$(true # "\n)} & printf RUN # "\nwait'),
-            ("c", "case a in a)# it's\n echo RAN;; esac # '"),
-            ("d", "echo case; (true)# it's\n echo RAN # '"),
-            ("e", "echo ${x:-$(echo a # it's\n)}; echo RAN # '"),
-            ("f", "${ true; # it's\n}; echo RAN # '"),
-            ("g", "${| true; # it's\n}; echo RAN # '"),
-            ("h", "f()# it's\n{ echo RAN; }\nf # '"),
-            ("i", "[[ x =~ (a)#b ]] || echo RAN"),
+            ("a", 'case x in x)# "\n :;; esac; printf RUN & # "\nwait',
+             [[["case", "x", "in", "x"], [], [":"], [], ["esac"], ["printf", "RUN"], [], ["wait"]],
+              [["case", "x", "in", "x"], ["#", "\n :;; esac; printf RUN & # "], ["wait"]]]),
+            ("b", 'echo ${x:-$(true # "\n)} & printf RUN # "\nwait',
+             [[["echo", "${x:-$"], ["true"], [], ["}"], ["printf", "RUN"], ["wait"]],
+              [["echo", "${x:-$"], ["true", "#", "\n)} & printf RUN # "], ["wait"]]]),
+            ("c", "case a in a)# it's\n echo RAN;; esac # '",
+             [[["case", "a", "in", "a"], [], ["echo", "RAN"], [], ["esac"]],
+              [["case", "a", "in", "a"], ["#", "its\n echo RAN;; esac # "]]]),
+            ("d", "echo case; (true)# it's\n echo RAN # '",
+             [[["echo", "case"], [], ["true"], [], ["echo", "RAN"]],
+              [["echo", "case"], [], ["true"], ["#", "its\n echo RAN # "]]]),
+            ("e", "echo ${x:-$(echo a # it's\n)}; echo RAN # '",
+             [[["echo", "${x:-$"], ["echo", "a"], [], ["}"], ["echo", "RAN"]],
+              [["echo", "${x:-$"], ["echo", "a", "#", "its\n)}; echo RAN # "]]]),
+            ("f", "${ true; # it's\n}; echo RAN # '",
+             [[["${", "true"], [], ["}"], ["echo", "RAN"]],
+              [["${", "true"], ["#", "its\n}; echo RAN # "]]]),
+            ("g", "${| true; # it's\n}; echo RAN # '",
+             [[["${"], ["true"], [], ["}"], ["echo", "RAN"]],
+              [["${"], ["true"], ["#", "its\n}; echo RAN # "]]]),
+            ("h", "f()# it's\n{ echo RAN; }\nf # '",
+             [[["f"], [], [], ["{", "echo", "RAN"], ["}"], ["f"]],
+              [["f"], [], ["#", "its\n{ echo RAN; }\nf # "]]]),
+            ("i", "[[ x =~ (a)#b ]] || echo RAN",
+             [[["[[", "x", "=~"], ["a"], []],
+              [["[[", "x", "=~"], ["a"], ["#b", "]]"], ["echo", "RAN"]]]),
         )
-        for _vname, _vcmd in _hash_vectors:
-            _vread = _readings_or_error(_vcmd)
-            texpect("(tok-17s-{}) lexer vector {!r} has two readings, one reaching the command bash ran".format(
+        for _vname, _vcmd, _vwant in _hash_vectors:
+            texpect("(tok-17s-{}) lexer vector {!r}: its comment reading, then its word-text reading".format(
                         _vname, _vcmd),
-                    (len(_vread), any("RUN" in seg or "RAN" in seg for r in _vread for seg in r)), (2, True))
+                    _readings_or_error(_vcmd), _vwant)
         # The word reader leaves a '#' that begins a word to its caller and records the '${' it reads on the
         # caller's nesting stack, so the lexer sees vectors f and g inside an open ${...}.
-        for _vname, _vcmd in _hash_vectors[5:7]:
+        for _vname, _vcmd, _vwant in _hash_vectors[5:7]:
             _wnest = []
             _wread = aiqt_hooks._read_word(_vcmd, 0, len(_vcmd), _wnest)
             texpect("(tok-17t-{}) the word reader records the open '${{' of vector {}".format(_vname, _vname),
@@ -7513,6 +7547,17 @@ def _main_isolated(monitor):
         texpect("(tok-17x) '#' right after a backquote is cannot-evaluate",
                 _argv_or_error("echo `#'`; echo RAN # '"),
                 "ValueError: cannot evaluate a '#' right after a backquote")
+        # An ESCAPED backquote opens nothing outside a backquote substitution: bash 5.3.9 prints `# for
+        # echo \`# and runs the next line, so the lexer reads the '#' after it as word text. Inside a backquote
+        # substitution an escaped backquote opens a nested one, so a '#' right after it stays cannot-evaluate
+        # (a control: the lexer raised there before this change too).
+        texpect("(tok-17x2) a '#' right after an escaped backquote is word text",
+                _argv_or_error("echo \\`#\ngit x"), [["echo", "`#"], ["git", "x"]])
+        texpect("(tok-17x3) a '#' right after an escaped backquote and before a blank is word text",
+                _argv_or_error("echo \\`# a; git x"), [["echo", "`#", "a"], ["git", "x"]])
+        texpect("(tok-17x4) control: a '#' right after an escaped backquote inside a backquote substitution is "
+                "cannot-evaluate",
+                _argv_or_error("x=`echo \\`#\\``"), "ValueError: cannot evaluate a '#' right after a backquote")
         texpect("(tok-17y) '#' after a blank inside any open parenthesis is lexed under both readings",
                 _readings_or_error("[[ x =~ (a #b) ]] || echo RAN"),
                 [[["[[", "x", "=~"], ["a"]], [["[[", "x", "=~"], ["a", "#b"], ["]]"], ["echo", "RAN"]]])
@@ -7525,7 +7570,10 @@ def _main_isolated(monitor):
         # gi<backslash-newline>t (the word-text reading reaches the shape for the first five; the backquote
         # prefix takes the guard's fallback, which reads the text with its backslash-newlines and then its
         # quote characters and backslashes removed), while the same prefix with a blank before the '#' and
-        # nothing open comments the shape out, as bash does.
+        # nothing open comments the shape out, as bash does (the hash-control rows are controls). protected_line
+        # is not a row here: behind a 'git status; ' lead every one of its rows denied before this check
+        # existed too, and with no lead its blank-led control denies as well, so neither form tells a change
+        # apart; the base tables below cover it with no lead.
         _hash_rows = [
             (aiqt_hooks.gate_weakening, "", "git commit --no-verify -m x", "deny", "allow"),
             (aiqt_hooks.diff_source_pretool, "", "git diff", "deny", "allow-note"),
@@ -7536,7 +7584,6 @@ def _main_isolated(monitor):
             (aiqt_hooks.git_stash_ref, "", "git stash pop", "allow-note", "allow"),
             (aiqt_hooks.branch_root, "", "git checkout --orphan x", "deny", "allow"),
             (aiqt_hooks.bash_absolute_paths, "", "echo hi > out.txt", "deny", "allow"),
-            (aiqt_hooks.protected_line, "git status; ", "git push --force origin main", "deny", "allow"),
             (aiqt_hooks.git_discard, "", "g'it' re'set' --hard", "deny", "allow"),
         ]
         _hash_prefixes = ("x=$(true)#; ", "x=$((1))#; ", "a=(1 2)#; ", "x=$(true)\\\n#; ",
@@ -7574,8 +7621,8 @@ def _main_isolated(monitor):
         # row's guard was called on each command with the payload _decision builds (no cwd), each result
         # reduced as _reduce_result does: D deny, N allow-note, A allow. Each string holds one prefix's six
         # results in the order plain-after, plain-before, quoted-after, quoted-before, continued-after,
-        # continued-before. At the parent commit of this change the same check failed on 203 of these 504
-        # commands (protected_line, gate_weakening, commit_msg_subst and git_explicit_binding on 28 each,
+        # continued-before. At dfac8602, before the lexer judged both readings, the same check failed on 203 of
+        # these 504 commands (protected_line, gate_weakening, commit_msg_subst and git_explicit_binding on 28 each,
         # bash_absolute_paths on 42, diff_source_pretool, git_stash_ref and git_discard on 14 each,
         # branch_root on 7), where a guard's fallback allowed a shape the base commit denied or noted.
         _hash_base_prefixes = ("x=$(true)#", "x=$((1))#", "a=(1 2)#", "x=$(true)\\\n#", "echo ${x:- #}",
@@ -7623,23 +7670,151 @@ def _main_isolated(monitor):
                             _hg.__name__, _hcmd, _hwant, _hgot))
         texpect("(hash-base-count) the base table holds every row, prefix, spelling and placement",
                 _hash_base_count, 12 * 7 * 3 * 2)
+        # THE QUOTE TABLE: ANSI-C and locale spellings, which the fallback's text removal does not decode
+        # (g$'i't reads as g$it there; bash 5.3.9 runs git for g$'i't, g$''it, gi$'t', g$'\x69't and g$"i"t).
+        # Each entry names a guard row of the base table, a word of its shape and a spelling of that word, and
+        # holds two strings, the decisions of fc11d9bc and then of main at 3295772c (whose hook module is
+        # byte-identical to fc11d9bc's), produced as the base table was. Each string holds one pair per prefix
+        # below, the shape after the prefix's line and then '<shape>; <prefix>'. The prefixes: a '#' right
+        # after the backquote that opens a substitution, a '#' after a blank inside one, an escaped backquote
+        # before a '#' (plain text to bash, so the lexer reads the command and the row decides as main's lexer
+        # does), and five uncertain '#', one beyond the bound. Each command must decide at least as strictly
+        # as the stricter of the two. An A in main's string marks a spelling main allows: its lexer reads
+        # g$'\x69't as gx69t and g$"i"t as g$it, not git (main's git_discard allows g$'\x69't reset --hard with
+        # no '#' at all), and the escaped-backquote pair of those rows, which the lexer now reads, decides here
+        # as main's does. At e2fe8d72, before the fallback read such quoting as cannot-evaluate and before the
+        # lexer read an escaped backquote as text, 220 of these 440 commands, in 30 of the 55 entries, decided
+        # less strictly than fc11d9bc or main (diff_source_pretool on 40, gate_weakening, commit_msg_subst,
+        # git_explicit_binding, git_stash_ref and git_discard on 32 each, branch_root on 16, bash_absolute_paths
+        # on 4); of the other 25 entries, 15 are spellings fc11d9bc and main allow and 10 already denied there.
+        _hash_quote_prefixes = ("echo `#`", "x=`true #`", "echo \\`#", "x=$(true)#a; (y)#; (z)#; (w)#; (v)#")
+        _qid = 'git commit -m x --author="Claude <noreply@anthropic.com>"'
+        _hash_quote_table = (
+            (aiqt_hooks.gate_weakening, "git commit --no-verify -m x", "git", "g$'i't", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.gate_weakening, "git commit --no-verify -m x", "git", "g$''it", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.gate_weakening, "git commit --no-verify -m x", "git", "gi$'t'", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.gate_weakening, "git commit --no-verify -m x", "git", "g$'\\x69't", "AA AA AA AA",
+             "AA AA AA AA"),
+            (aiqt_hooks.gate_weakening, "git commit --no-verify -m x", "git", 'g$"i"t', "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.gate_weakening, "git commit --no-verify -m x", "commit", "com$'m'it", "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.diff_source_pretool, "git diff", "git", "g$'i't", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.diff_source_pretool, "git diff", "git", "g$''it", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.diff_source_pretool, "git diff", "git", "gi$'t'", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.diff_source_pretool, "git diff", "git", "g$'\\x69't", "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.diff_source_pretool, "git diff", "git", 'g$"i"t', "NN NN NN NN", "NN NN NN NN"),
+            (aiqt_hooks.diff_source_pretool, "git diff", "diff", "di$'f'f", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.commit_msg_subst, 'git commit -m "a$(id)"', "git", "g$'i't", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.commit_msg_subst, 'git commit -m "a$(id)"', "git", "g$''it", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.commit_msg_subst, 'git commit -m "a$(id)"', "git", "gi$'t'", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.commit_msg_subst, 'git commit -m "a$(id)"', "git", "g$'\\x69't", "AA AA AA AA",
+             "AA AA AA AA"),
+            (aiqt_hooks.commit_msg_subst, 'git commit -m "a$(id)"', "git", 'g$"i"t', "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.commit_msg_subst, 'git commit -m "a$(id)"', "commit", "com$'m'it", "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.commit_identity, _qid, "git", "g$'i't", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.commit_identity, _qid, "git", "g$''it", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.commit_identity, _qid, "git", "gi$'t'", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.commit_identity, _qid, "git", "g$'\\x69't", "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.commit_identity, _qid, "git", 'g$"i"t', "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.commit_identity, _qid, "commit", "com$'m'it", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.git_explicit_binding, "git add -A && git push", "git", "g$'i't", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.git_explicit_binding, "git add -A && git push", "git", "g$''it", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.git_explicit_binding, "git add -A && git push", "git", "gi$'t'", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.git_explicit_binding, "git add -A && git push", "git", "g$'\\x69't", "AA AA AA AA",
+             "AA AA AA AA"),
+            (aiqt_hooks.git_explicit_binding, "git add -A && git push", "git", 'g$"i"t', "AA AA AA AA",
+             "AA AA AA AA"),
+            (aiqt_hooks.git_explicit_binding, "git add -A && git push", "push", "pu$'s'h", "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.git_stash_ref, "git stash pop", "git", "g$'i't", "NN NN NN NN", "NN NN NN NN"),
+            (aiqt_hooks.git_stash_ref, "git stash pop", "git", "g$''it", "NN NN NN NN", "NN NN NN NN"),
+            (aiqt_hooks.git_stash_ref, "git stash pop", "git", "gi$'t'", "NN NN NN NN", "NN NN NN NN"),
+            (aiqt_hooks.git_stash_ref, "git stash pop", "git", "g$'\\x69't", "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.git_stash_ref, "git stash pop", "git", 'g$"i"t', "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.git_stash_ref, "git stash pop", "stash", "st$'a'sh", "NN NN NN NN", "NN NN NN NN"),
+            (aiqt_hooks.branch_root, "git checkout --orphan x", "git", "g$'i't", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.branch_root, "git checkout --orphan x", "git", "g$''it", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.branch_root, "git checkout --orphan x", "git", "gi$'t'", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.branch_root, "git checkout --orphan x", "git", "g$'\\x69't", "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.branch_root, "git checkout --orphan x", "git", 'g$"i"t', "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.branch_root, "git checkout --orphan x", "checkout", "che$'c'kout", "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.bash_absolute_paths, "cd foo", "cd", "c$'d'", "NN NN NN NN", "NN NN NN NN"),
+            (aiqt_hooks.protected_line, "git push --force origin main", "git", "g$'i't", "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.protected_line, "git push --force origin main", "git", "g$''it", "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.protected_line, "git push --force origin main", "git", "gi$'t'", "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.protected_line, "git push --force origin main", "git", "g$'\\x69't", "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.protected_line, "git push --force origin main", "git", 'g$"i"t', "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.protected_line, "git push --force origin main", "push", "pu$'s'h", "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.git_discard, "git reset --hard", "git", "g$'i't", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.git_discard, "git reset --hard", "git", "g$''it", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.git_discard, "git reset --hard", "git", "gi$'t'", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.git_discard, "git reset --hard", "git", "g$'\\x69't", "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.git_discard, "git reset --hard", "git", 'g$"i"t', "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.git_discard, "git reset --hard", "reset", "re$'s'et", "DD DD DD DD", "DD DD DD DD"),
+        )
+        _hash_quote_count = 0
+        for _hg, _hshape, _hword, _hspelled, _hbase, _hmain in _hash_quote_table:
+            _hbody = _hash_spell(_hshape, _hword, _hspelled)
+            _hcmds = [_hcmd for _hp in _hash_quote_prefixes for _hcmd in (_hp + "\n" + _hbody, _hbody + "; " + _hp)]
+            for _hcmd, _hcb, _hcm in zip(_hcmds, _hbase.replace(" ", ""), _hmain.replace(" ", ""), strict=True):
+                _hash_quote_count += 1
+                _hwant = max(_hash_base_codes[_hcb], _hash_base_codes[_hcm], key=_hash_rank.get)
+                _hgot = _decision(_hg, _hcmd)
+                if _hash_rank.get(_hgot, -1) < _hash_rank[_hwant]:
+                    failures.append("(hash-quote) {} on {!r}: fc11d9bc decided {}, main {}, got {}".format(
+                        _hg.__name__, _hcmd, _hash_base_codes[_hcb], _hash_base_codes[_hcm], _hgot))
+        texpect("(hash-quote-count) the quote table holds every row, prefix and placement",
+                _hash_quote_count, 55 * 4 * 2)
         # The fallback path (a '#' the lexer cannot judge under both readings, here one inside a backquote
         # substitution): a guard subject its text names keeps the strict decision, and a command naming none
-        # takes the guard's ordinary unparseable-command path.
-        texpect("(hash-fallback-diff-none) a fallback command naming no diff producer allows",
+        # takes the guard's ordinary unparseable-command path (the three '-none' checks are controls: they pass
+        # at fc11d9bc and at dfac8602 as well).
+        texpect("(hash-fallback-diff-none) control: a fallback command naming no diff producer allows",
                 _decision(aiqt_hooks.diff_source_pretool, "x=`true #`; echo hi"), "allow")
         texpect("(hash-fallback-gate-sink) a fallback command piping into a listed sink denies",
                 _decision(aiqt_hooks.gate_weakening, "x=`true #`\npytest | head"), "deny")
         texpect("(hash-fallback-gate-sink-wrapped) the sink is found after a wrapper in its stage",
                 _decision(aiqt_hooks.gate_weakening, "x=`true #`\npytest | nice head"), "deny")
-        texpect("(hash-fallback-gate-none) a fallback command with no sink or bypass allows",
+        texpect("(hash-fallback-gate-none) control: a fallback command with no sink or bypass allows",
                 _decision(aiqt_hooks.gate_weakening, "x=`true #`; echo hi"), "allow")
         texpect("(hash-fallback-push) a fallback command naming a plain git push denies",
                 _decision(aiqt_hooks.protected_line, "x=`true #`\ng'it' push origin feature"), "deny")
-        texpect("(hash-fallback-abspth-none) a fallback command with no cd, '<' or '>' allows",
+        texpect("(hash-fallback-abspth-none) control: a fallback command with no cd, '<' or '>' allows",
                 _decision(aiqt_hooks.bash_absolute_paths, "x=`true #`; echo hi"), "allow")
         texpect("(hash-fallback-abspth-pushd) a fallback command naming a continued pushd notes",
                 _decision(aiqt_hooks.bash_absolute_paths, "x=`true #`\npush\\\nd foo"), "allow-note")
+        # An AI identity spelled in ANSI-C quoting: fc11d9bc decoded it and denied; the fallback's text
+        # removal reads Cl$aude, so the guard reads the command as cannot-evaluate and denies.
+        texpect("(hash-fallback-identity-ansi-c) an AI identity in ANSI-C quoting behind the fallback denies",
+                _decision(aiqt_hooks.commit_identity, "echo `#`\ngit commit -m x --author=Cl$'a'ude"), "deny")
+        # The cost of failing closed: behind the fallback, ANY quote character next to a letter is read as
+        # cannot-evaluate, so a command that only echoes a quoted word is denied by every guard whose fallback
+        # denies its subject, and noted by the two that only note; fc11d9bc allowed every one. The same
+        # command with no quote is the control (allowed by each, as at fc11d9bc).
+        _hash_cost = "x=`true #`; echo 'hi'"
+        texpect("(hash-fallback-opaque-cost) a fallback command with a quoted word takes each guard's fail-closed "
+                "decision",
+                [_decision(_hg, _hash_cost) for _hg in (
+                    aiqt_hooks.gate_weakening, aiqt_hooks.diff_source_pretool, aiqt_hooks.commit_msg_subst,
+                    aiqt_hooks.commit_identity, aiqt_hooks.git_explicit_binding, aiqt_hooks.git_stash_ref,
+                    aiqt_hooks.branch_root, aiqt_hooks.bash_absolute_paths, aiqt_hooks.protected_line,
+                    aiqt_hooks.git_discard)],
+                ["deny", "deny", "deny", "deny", "deny", "allow-note", "deny", "allow-note", "deny", "deny"])
+        texpect("(hash-fallback-opaque-cost-control) control: the same command with no quote allows",
+                [_decision(_hg, "x=`true #`; echo hi") for _hg in (
+                    aiqt_hooks.gate_weakening, aiqt_hooks.diff_source_pretool, aiqt_hooks.commit_msg_subst,
+                    aiqt_hooks.commit_identity, aiqt_hooks.git_explicit_binding, aiqt_hooks.git_stash_ref,
+                    aiqt_hooks.branch_root, aiqt_hooks.bash_absolute_paths, aiqt_hooks.protected_line,
+                    aiqt_hooks.git_discard)],
+                ["allow"] * 10)
         # The common multi-line substitution with a comment line takes the both-readings path, and a guard
         # reads the command after it as the base commit did.
         texpect("(hash-readings-msg) the multi-line substitution with a comment line has two readings",
