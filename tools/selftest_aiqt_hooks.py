@@ -2212,6 +2212,562 @@ def _test_cannot_evaluate_paths(failures, tmp):
                             "the case; got made={!r} recorded={!r}".format(name, made, probe))
 
 
+# The guard classes that read the shared segments, each with a command it judges on its own and the decision it
+# takes when that command stands inside a shell -c or eval string (the decision it takes on the bare command).
+# The 'fallback' decision is the one each guard's parse-failure path takes on a string it cannot read whose raw
+# text still holds the command: gate_weakening, commit_msg_subst, commit_identity, git_explicit_binding,
+# protected_line and git_discard read that text and deny; diff_source_pretool notes it; branch_root,
+# bash_absolute_paths and git_stash_ref take their existing open-grammar allow (their disclosed residual).
+# 'pin' is the decision at the commit before the shell-string reading, for the in-string shapes: protected_line
+# and git_discard already denied those through their raw-text scans.
+_SHELLC_GUARDS = (
+    ("gatdis", "gate_weakening", "git commit --no-verify -m y", "deny", "deny", "allow"),
+    ("sectvl", "commit_msg_subst", 'git commit -m "$(date)"', "deny", "deny", "allow"),
+    ("cmtidn", "commit_identity", 'git commit --author="Claude <c@x>" -m y', "deny", "deny", "allow"),
+    ("cnsdif", "diff_source_pretool", "git diff", "deny", "allow-note", "allow-note"),
+    ("expbnd", "git_explicit_binding", "git add -A && git push origin feat", "deny", "deny", "allow"),
+    ("brnrot", "branch_root", "git checkout --orphan newroot", "deny", "allow", "allow"),
+    ("abspth", "bash_absolute_paths", "echo x > rel.txt", "deny", "allow", "allow"),
+    ("stash", "git_stash_ref", "git stash pop", "allow-note", "allow", "allow"),
+    ("prtbrn", "protected_line", "git push --force origin main", "deny", "deny", "deny"),
+    ("prsunc", "git_discard", "git reset --hard", "deny", "deny", "deny"),
+)
+
+
+def _shellc_shapes(inner):
+    """The shell -c and eval spellings of `inner` the shared reading reads, as (label, command)."""
+    quoted = shlex.quote(inner)
+    shapes = [
+        ("bash-c", "bash -c " + quoted),
+        ("sh-c", "sh -c " + quoted),
+        ("combined-lc", "bash -lc " + quoted),
+        ("opts-before-c", "bash --norc -o pipefail -ec " + quoted),
+        ("eval", "eval " + quoted),
+        ("nested-eval-bash-c", "eval " + shlex.quote("bash -c " + quoted)),
+        ("oplist", "bash -c " + shlex.quote("echo a; " + inner)),
+        ("wrapped", "env A=1 timeout 5 sh -c " + quoted),
+    ]
+    if "'" not in inner and '"' not in inner and "&" not in inner and ">" not in inner:
+        shapes.append(("eval-words", "eval -- " + inner))  # eval joins its words into the command line
+    return tuple(shapes)
+
+
+def _test_shell_strings(failures, hooks, cwd, pin=False):
+    """A command inside a shell -c or eval string is read by every guard that reads the shared segments, as if
+    written in place (_lex_command, _expand_shell_strings); a string the reading cannot read takes each guard's
+    parse-failure path. With pin True the table is judged against the 'pin' column (used to show the new deny
+    vectors fail with the reading removed). Returns the labels judged, in order."""
+    labels = []
+
+    def judge(label, handler, command, want):
+        labels.append(label)
+        got = _decision(handler, command, cwd=cwd)
+        if got != want:
+            failures.append("{}: expected {}, got {} for {!r}".format(label, want, got, command))
+
+    for cls, name, inner, read, fallback, at_pin in _SHELLC_GUARDS:
+        handler = getattr(hooks, name)
+        if name != "git_discard":  # its bare decision depends on the probed tree, tested above in this suite
+            judge("(shellc-{}-bare) the bare command".format(cls), handler, inner, read)
+        for shape, command in _shellc_shapes(inner):
+            judge("(shellc-{}-{}) a command inside the string is read".format(cls, shape), handler, command,
+                  at_pin if pin else read)
+        # A string the reading cannot read: an opaque word (an expansion) holding the command's text, and a
+        # string that does not lex; each takes the guard's parse-failure path, never a reading as safe.
+        judge("(shellc-{}-opaque) an opaque string takes the fallback".format(cls), handler,
+              'bash -c "$PRE"' + shlex.quote(inner), at_pin if pin else fallback)
+        judge("(shellc-{}-nolex) a string that does not lex takes the fallback".format(cls), handler,
+              "bash -c " + shlex.quote(inner + ' "'), at_pin if pin else fallback)
+        # A string built entirely at run time names nothing the fallback can read: the disclosed residual.
+        judge("(shellc-{}-var) a string held in a variable is the disclosed residual".format(cls), handler,
+              'bash -c "$CMD"', "allow")
+        # Controls: a string holding no hazard, and a plain argument mentioning --no-verify, stay allowed.
+        for ctl in ("bash -c 'echo hi'", "eval 'true'", "sh -c 'git status'", "echo --no-verify"):
+            judge("(shellc-{}-ctl) {!r} stays allowed".format(cls, ctl), handler, ctl, "allow")
+        # A -c after the script operand is the script's argument, not the shell's option: nothing is read, so
+        # the command decides exactly as the same script run with no shell word before it.
+        script = "./run.sh -c " + shlex.quote(inner)
+        judge("(shellc-{}-script-arg) a -c after the script operand reads no string".format(cls), handler,
+              "bash " + script, _decision(handler, script, cwd=cwd))
+    # The plain argument the guard's own spelling would deny stays allowed for a non-shell program.
+    judge("(shellc-gatdis-arg) a plain argument naming the bypass is not run", hooks.gate_weakening,
+          "echo " + shlex.quote("git commit --no-verify -m y"), "allow")
+    # The uncertainty of a string's own reading reaches the command: a comment inside the string makes the
+    # protected-line reading uncertain exactly as it does written in place (pl-uncertain-cost), so a feature
+    # force-push beside a benign git segment takes the raw fallback.
+    judge("(shellc-uncertain-reaches) a '#' inside a -c string makes the command uncertain",
+          hooks.protected_line, "git status; bash -c 'git push --force origin feature # x'",
+          "allow" if pin else "deny")
+    judge("(shellc-uncertain-ctl) the same push written in place denies on the same uncertain path",
+          hooks.protected_line, "git status; git push --force origin feature # x", "deny")
+    return labels
+
+
+def _test_shell_string_reading(failures, hooks):
+    """The shared reading's own contract: the segments a -c or eval string adds, the depth bound at each end
+    (a string at depth 3 and at depth 4 read, one at depth 5 uncertain), the option grammar, and the
+    uncertainty marks: a string the reading cannot read never raises, it marks only the segment holding it
+    (shell_uncertain), which stays as the flat lex reads it."""
+    def argvs(command):
+        try:
+            segments = hooks._lex_command(command)
+        except ValueError as exc:
+            return type(exc).__name__
+        if any(seg.shell_uncertain for seg in segments):
+            return "uncertain:" + repr([seg.argv for seg in segments if seg.shell_uncertain])
+        return [seg.argv for seg in segments]
+
+    def nest(levels, inner="git status"):
+        text = inner
+        for _ in range(levels):
+            text = "bash -c " + shlex.quote(text)
+        return text
+
+    bound = hooks._SHELL_STRING_DEPTH
+    for label, command, want in (
+            ("(shellr-place) the string's segments follow the shell segment, which ends with ';'",
+             "bash -c 'git status; git log' | cat",
+             [["bash", "-c", "git status; git log"], ["git", "status"], ["git", "log"], ["cat"]]),
+            ("(shellr-eval) eval joins its words", "eval git commit -m 'a b'",
+             [["eval", "git", "commit", "-m", "a b"], ["git", "commit", "-m", "a", "b"]]),
+            ("(shellr-c-after-opts) -c after other options and before its value-taking options",
+             "zsh -o pipefail -c -x 'git status' name arg",
+             [["zsh", "-o", "pipefail", "-c", "-x", "git status", "name", "arg"], ["git", "status"]]),
+            ("(shellr-script-arg) a -c after the script operand is the script's argument",
+             "bash run.sh -c 'git status'", [["bash", "run.sh", "-c", "git status"]]),
+            ("(shellr-no-c) a shell with no -c reads no string", "sh 'git status'", [["sh", "git status"]]),
+            ("(shellr-depth-inside) a string at depth {} is read".format(bound - 1), nest(bound - 1), None),
+            ("(shellr-depth-at) a string at depth {} is read".format(bound), nest(bound), None),
+            ("(shellr-depth-past) a string at depth {} marks the segment holding it".format(bound + 1),
+             nest(bound + 1), "uncertain:" + repr([["bash", "-c", "git status"]])),
+            ("(shellr-opaque) an opaque string marks its segment", 'sh -c "$CMD"',
+             "uncertain:" + repr([["sh", "-c", "$CMD"]])),
+            ("(shellr-opaque-opt) an opaque word before -c marks its segment", 'bash $OPTS -c x',
+             "uncertain:" + repr([["bash", "$OPTS", "-c", "x"]])),
+            ("(shellr-nolex) a string that does not lex marks its segment", "bash -c 'echo \"'",
+             "uncertain:" + repr([["bash", "-c", 'echo "']])),
+            ("(shellr-only-that-segment) only the unreadable segment is marked", 'eval "$X"; git status',
+             "uncertain:" + repr([["eval", "$X"]])),
+            ("(shellr-pipe-stdin) a shell reading a pipe marks the shell segment", "echo 'git status' | sudo bash",
+             "uncertain:" + repr([["sudo", "bash"]])),
+            ("(shellr-pipe-script-file) a shell with a script operand reads its script from the file",
+             "printf 'git status' | bash script.sh", [["printf", "git status"], ["bash", "script.sh"]]),
+            ("(shellr-pipe-xargs) a shell under xargs reads no script from the pipe", "printf 'a.sh' | xargs sh",
+             [["printf", "a.sh"], ["xargs", "sh"]]),
+            ("(shellr-heredoc-second) the second here-document on a line has its own owner",
+             "cat <<'A'; bash <<'B'\nhi\nA\ngit status\nB", "uncertain:" + repr([["bash"]]))):
+        got = argvs(command)
+        if want is None:
+            ok = isinstance(got, list) and got[-1] == ["git", "status"]
+        else:
+            ok = got == want
+        if not ok:
+            failures.append("{}: got {!r} for {!r}".format(label, got, command))
+    # A string's own uncertainty no longer reaches the whole command's causes: it marks the segment holding the
+    # string, whose segments are still placed.
+    for label, command, causes, marked in (
+            ("(shellr-causes-at) a string at the bound reports nothing", nest(bound), (), False),
+            ("(shellr-causes-past) a string past the bound adds no cause but marks its segment", nest(bound + 1),
+             (), True),
+            ("(shellr-causes-inner) a string's own cause marks its segment", "bash -c 'git status # c'", (), True),
+            ("(shellr-causes-quoted) a quoted '#' inside the string is no cause", "bash -c 'echo \"a # b\"'", (),
+             False)):
+        got = hooks._lex_uncertain_causes(command)
+        got_marked = any(seg.shell_uncertain for seg in hooks._lex_command(command))
+        if got != causes or got_marked != marked:
+            failures.append("{}: expected causes {!r} marked {}, got {!r} {} for {!r}"
+                            .format(label, causes, marked, got, got_marked, command))
+    inner = [seg.argv for seg in hooks._lex_command("bash -c 'git status # c'")]
+    if inner != [["bash", "-c", "git status # c"], ["git", "status"]]:
+        failures.append("(shellr-causes-placed) a marked string's segments are still placed; got {!r}".format(inner))
+    partial, complete, _in_progress = hooks._lex_command('bash -c "$CMD"; cd rel', partial=True)
+    if ([seg.argv for seg in partial] != [["bash", "-c", "$CMD"], ["cd", "rel"]] or not complete
+            or not partial[0].shell_uncertain or partial[1].shell_uncertain):
+        failures.append("(shellr-partial) partial mode keeps an unread string's segment, marked, and the later "
+                        "ones; got {!r} {!r}".format([seg.argv for seg in partial], complete))
+    # The uncertain-segment posture reads exactly the marked segments' text.
+    text = hooks._shell_uncertain_text(hooks._lex_command('eval "$X"; git status; echo hi | sh'))
+    if text != 'eval "$X"\n echo hi | sh':  # each raw slice as lexed, its leading blank kept
+        failures.append("(shellr-uncertain-text) the posture reads only the uncertain segments; got {!r}".format(text))
+    # Placement stays linear: a string whose lexed segments times the shell's redirects pass _SHELL_PLACE_BUDGET
+    # marks the shell segment uncertain instead of copying the redirects onto every placed segment. 'a;' repeated
+    # N times lexes to N + 1 segments (a trailing empty one), so with 100 redirects N = budget/100 - 2 is just
+    # inside the bound, N = budget/100 - 1 is exactly at it (placed: the bound is inclusive), and N = budget/100
+    # is just past it (marked, nothing placed).
+    def placement(segment_count, redirect_count):
+        command = "bash -c " + shlex.quote("a;" * segment_count) + " >x" * redirect_count
+        segments = hooks._lex_command(command)
+        return len(segments) > 1, bool(segments[0].shell_uncertain)
+    budget = hooks._SHELL_PLACE_BUDGET
+    got = [placement(budget // 100 + delta, 100) for delta in (-2, -1, 0)]
+    if got != [(True, False), (True, False), (False, True)]:
+        failures.append("(shellr-place-budget) just inside and exactly at the budget the string is placed, just "
+                        "past it the segment is marked and nothing is placed; got {!r}".format(got))
+
+
+# The cost bound of the shared reading: every guard that reads the segments judges a 64 KiB command of nested
+# shell -c strings in under this many seconds of CPU time (the hook timeout is 10 s, tools/gen_hooks.py).
+_SHELLC_COST_SECONDS = 1.0
+_SHELLC_COST_GUARDS = ("gate_weakening", "commit_msg_subst", "protected_line", "git_discard", "branch_root",
+                       "commit_identity", "diff_source_pretool", "git_explicit_binding", "bash_absolute_paths",
+                       "git_stash_ref")
+
+
+def _shellc_cost_commands(hooks, size=64 << 10):
+    """64 KiB commands of nested shell -c strings: one chain down to the depth bound, one a level past it (every
+    guard's parse-failure path), and many short nested strings side by side; each holds thousands of git words
+    and no verb after them, the shape that once made the raw fallback probes quadratic."""
+    unit = "git log -1; "
+
+    def nest(text, levels):
+        for _ in range(levels):
+            text = "bash -c " + shlex.quote(text)
+        return text
+
+    commands = []
+    for levels in (hooks._SHELL_STRING_DEPTH, hooks._SHELL_STRING_DEPTH + 1):
+        overhead = len(nest(unit, levels)) - len(unit)  # the quoting the levels add, whatever the unit count
+        commands.append(("chain-{}".format(levels), nest(unit * ((size - overhead) // len(unit)), levels)))
+    piece = "bash -c " + shlex.quote("sh -c " + shlex.quote("eval " + shlex.quote("git log -1"))) + "; "
+    commands.append(("wide", piece * (size // len(piece))))
+    return commands
+
+
+def _test_shell_string_cost(failures, hooks, cwd):
+    """Each guard that reads the shared segments judges each _shellc_cost_commands command in under
+    _SHELLC_COST_SECONDS of CPU time. Returns {(command label, guard): seconds}."""
+    spent = {}
+    for label, command in _shellc_cost_commands(hooks):
+        if not (60 << 10) <= len(command) <= (64 << 10):
+            failures.append("(shellc-cost-size) the {} command is {} characters, not about 64 KiB"
+                            .format(label, len(command)))
+        for name in _SHELLC_COST_GUARDS:
+            start = time.process_time()
+            _decision(getattr(hooks, name), command, cwd=cwd)
+            spent[(label, name)] = time.process_time() - start
+            if spent[(label, name)] >= _SHELLC_COST_SECONDS:
+                failures.append("(shellc-cost-{}-{}) {} took {:.2f} s of CPU time on the {} command of {} "
+                                "characters, over the {} s bound".format(label, name, name, spent[(label, name)],
+                                                                         label, len(command), _SHELLC_COST_SECONDS))
+    return spent
+
+
+# Each guard that reads the shared segments, its handler, a hazard body it judges on its own, and the decision
+# it takes when that body runs through one of the remaining ways a shell runs a command string. 'read' is the
+# decision when the body is READ as a command line: find -exec/-execdir/-ok with a shell -c string, or a trap
+# action (the guard's bare-body decision). 'refuse' is the decision when a shell reads the body from standard
+# input (a pipe or a here-document) and the reading cannot have its text, so the command is uncertain and the
+# guard reads that shell's segment under its uncertain-segment posture. 'interp' is the decision when the body
+# runs inside an execution form of an interpreter's inline code (os.system, system, execSync: deny where the
+# guard reads interpreter execution forms and the text names a spelling it denies, else its posture). A row
+# whose decision the flat lex already takes (git_discard, whose closed grammar already denies these shapes;
+# protected_line's force-push, whose raw backstop already reads them; and every 'allow' or 'allow-note' entry of
+# brnrot, abspth, stash and cnsdif) is a control against a regression, not a new deny.
+_SHELL_RUNNER_GUARDS = (
+    ("gatdis", "gate_weakening", "git commit --no-verify -m y", "deny", "deny", "deny"),
+    ("sectvl", "commit_msg_subst", 'git commit -m "$(date)"', "deny", "deny", "deny"),
+    ("cmtidn", "commit_identity", 'git commit --author="Claude <c@x>" -m y', "deny", "deny", "deny"),
+    ("cnsdif", "diff_source_pretool", "git diff", "deny", "allow-note", "allow-note"),
+    ("expbnd", "git_explicit_binding", "git add -A && git push origin feat", "deny", "deny", "deny"),
+    ("brnrot", "branch_root", "git checkout --orphan newroot", "deny", "allow", "allow"),
+    ("abspth", "bash_absolute_paths", "echo x > rel.txt", "deny", "allow", "allow"),
+    ("stash", "git_stash_ref", "git stash pop", "allow-note", "allow", "allow"),
+    ("prtbrn", "protected_line", "git push --force origin main", "deny", "deny", "deny"),
+    ("prsunc", "git_discard", "git reset --hard", "deny", "deny", "deny"),
+)
+
+
+def _shell_runner_shapes(inner):
+    """The READ, REFUSE and INTERP spellings of `inner`, each as (category, label, command). READ: a find
+    -exec/-execdir/-ok shell -c string, and a trap action. REFUSE: a shell reading its script from a here-
+    document (bash and dash -s) or a pipe (echo/printf into bash/sh/bash -s). INTERP: the body inside
+    python3 -c, perl -e and node -e inline code."""
+    q = shlex.quote(inner)
+    pyq = shlex.quote("import os; os.system(" + repr(inner) + ")")
+    return (
+        ("read", "find-exec", "find . -maxdepth 0 -exec sh -c " + q + " \\;"),
+        ("read", "find-execdir", "find . -maxdepth 0 -execdir bash -c " + q + " sh {} +"),
+        ("read", "find-ok", "find . -maxdepth 0 -ok sh -c " + q + " \\;"),
+        ("read", "trap", "trap " + q + " EXIT"),
+        ("refuse", "heredoc", "bash <<'RUNX'\n" + inner + "\nRUNX"),
+        ("refuse", "heredoc-dash-s", "dash -s <<'RUNX'\n" + inner + "\nRUNX"),
+        ("refuse", "echo-pipe", "echo " + q + " | bash"),
+        ("refuse", "printf-pipe", "printf '%s' " + q + " | sh"),
+        ("refuse", "printf-nl-s", "printf '%s\\n' " + q + " | bash -s"),
+        ("interp", "python3-c", "python3 -c " + pyq),
+        ("interp", "perl-e", "perl -e " + shlex.quote("system(" + repr(inner) + ")")),
+        ("interp", "node-e", "node -e " + shlex.quote("require('child_process').execSync(" + repr(inner) + ")")),
+    )
+
+
+def _test_shell_runners(failures, hooks, cwd):
+    """The remaining ways a shell runs a command string are read by every guard that reads the shared segments,
+    or refused where the reading cannot have the text. For each guard: find -exec/-execdir/-ok and trap are READ
+    (the body is placed as a command line); a shell reading its script from a pipe or a here-document is REFUSED
+    (uncertain, so each guard takes its parse-failure path); and an interpreter's inline -c/-e code denies where
+    the guard's raw text names a spelling it denies, else keeps its posture. A control with a harmless body
+    ('git status') stays allowed for every form, so no form over-fires."""
+    def judge(label, handler, command, want):
+        got = _decision(handler, command, cwd=cwd)
+        if got != want:
+            failures.append("{}: expected {}, got {} for {!r}".format(label, want, got, command))
+
+    for cls, name, inner, read, refuse, interp in _SHELL_RUNNER_GUARDS:
+        handler = getattr(hooks, name)
+        wants = {"read": read, "refuse": refuse, "interp": interp}
+        for cat, shape, command in _shell_runner_shapes(inner):
+            judge("(runner-{}-{}) the {} body is {}".format(cls, shape, cat, wants[cat]), handler, command,
+                  wants[cat])
+        # Controls: the same runners with a harmless body stay allowed, so no form over-fires.
+        for cat, shape, command in _shell_runner_shapes("git status"):
+            judge("(runner-{}-{}-ctl) a harmless body stays allowed".format(cls, shape), handler, command,
+                  "allow")
+    # The reading's own placement: a find -exec shell -c string and a trap action become command-line segments;
+    # a shell reading a pipe or a here-document marks only its own segment uncertain; an interpreter's inline code
+    # is left unread.
+    def argvs(command):
+        try:
+            segments = hooks._lex_command(command)
+        except ValueError as exc:
+            return type(exc).__name__
+        if any(seg.shell_uncertain for seg in segments):
+            return "uncertain:" + repr([seg.argv for seg in segments if seg.shell_uncertain])
+        return [seg.argv for seg in segments]
+    for label, command, want in (
+            ("(runner-place-find) a find -exec sh -c string is placed as a command line",
+             "find . -maxdepth 0 -exec sh -c 'git status' \\;",
+             [["find", ".", "-maxdepth", "0", "-exec", "sh", "-c", "git status", ";"], ["git", "status"]]),
+            ("(runner-place-trap) a trap action is placed as a command line", "trap 'git status' EXIT",
+             [["trap", "git status", "EXIT"], ["git", "status"]]),
+            ("(runner-refuse-heredoc) a here-document fed to a shell marks the shell segment",
+             "bash <<'X'\ngit status\nX", "uncertain:" + repr([["bash"]])),
+            ("(runner-refuse-pipe) a pipe into a shell marks the shell segment", "echo 'git status' | bash",
+             "uncertain:" + repr([["bash"]])),
+            ("(runner-interp-unread) an interpreter's inline code is not placed as a command line",
+             "python3 -c 'import os'", [["python3", "-c", "import os"]])):
+        got = argvs(command)
+        if got != want:
+            failures.append("{}: got {!r} for {!r}".format(label, got, command))
+    # A bare shell with no -c, no pipe and no here-document is not a stdin-script case (an interactive shell, or
+    # one sourcing a script FILE, the disclosed residual): it is not refused.
+    if argvs("bash script.sh") != [["bash", "script.sh"]]:
+        failures.append("(runner-file-residual) a shell running a script file is not refused; got {!r}"
+                        .format(argvs("bash script.sh")))
+    # The interpreter execution-form reading: only the arguments of an execution form in -c/-e code are read, a -m
+    # module's or script's own -c is not, an opaque (run-time-built) operand is skipped, and printed text is not
+    # read.
+    for label, command, want in (
+            ("(runner-interp-text-c) python3 -c code's execution form is read", "python3 -c 'os.system(1)'", "1"),
+            ("(runner-interp-text-e) perl -e code's execution form is read", "perl -e 'system(1)'", "1"),
+            ("(runner-interp-text-m) a module's own -c is not read", "python3 -m pytest -c cfg.ini", ""),
+            ("(runner-interp-text-opaque) an opaque -c operand is skipped", 'python3 -c "$CODE"', ""),
+            ("(runner-interp-text-print) printed text is not read", "python3 -c 'print(\"os.system(1)\")'", ""),
+            ("(runner-interp-text-perl-bare) a bare perl system call is read to its statement end",
+             "perl -e 'system \"a b\"; print 1'", '"a b"')):
+        got = hooks._interp_exec_text(hooks._lex_command(command))
+        if got != want:
+            failures.append("{}: expected {!r}, got {!r} for {!r}".format(label, want, got, command))
+    # Cost: the find wrapper scan reads each shell word's -c string in bounded time, and an interpreter's inline
+    # code is scanned by the guard's linear raw probes (_ChainRe), so a 64 KiB find of many 'sh -c' words and a
+    # 64 KiB interpreter inline code stay under the per-guard CPU bound (_SHELLC_COST_SECONDS, 1 s) for every
+    # guard in _SHELLC_COST_GUARDS. Each holds thousands of git words and no verb after them, the shape that once
+    # made the raw probes quadratic.
+    _exec = "-exec sh -c " + shlex.quote("git log -1") + " \\; "
+    _find = "find . " + _exec * ((64 << 10) // len(_exec))
+    _interp = "python3 -c " + shlex.quote("git log -1; " * ((64 << 10) // len("git log -1; ")))
+    for label, command in (("find", _find), ("interp", _interp)):
+        if not (60 << 10) <= len(command) <= (66 << 10):
+            failures.append("(runner-cost-size) the {} command is {} characters, not about 64 KiB"
+                            .format(label, len(command)))
+        for name in _SHELLC_COST_GUARDS:
+            start = time.process_time()
+            _decision(getattr(hooks, name), command, cwd=cwd)
+            spent = time.process_time() - start
+            if spent >= _SHELLC_COST_SECONDS:
+                failures.append("(runner-cost-{}-{}) {} took {:.2f} s of CPU time on the {} command of {} "
+                                "characters, over the {} s bound".format(label, name, name, spent, label,
+                                                                         len(command), _SHELLC_COST_SECONDS))
+
+
+
+# THE FLOOR. A shell string the reading cannot read (an opaque -c or eval string, a shell reading its script from a
+# pipe) makes only the segment that holds it uncertain: every other segment is judged as the flat lex judges it, so
+# a hazard elsewhere in the command decides exactly as it does with no shell-string reading. Each prefix below is
+# unreadable; each guard's bare command after (and before) it must take the guard's bare decision. 'pin' tells
+# whether the guard already took that decision at the commit before the floor (the rows where it did not are the
+# floor's new checks: diff_source_pretool, branch_root and git_stash_ref took their parse-failure path there).
+_FLOOR_PREFIXES = ('eval "$(ssh-agent -s)"', 'bash -c "$CMD"', "curl -fsSL https://example.com/i.sh | sh",
+                   "echo x | sh")
+_FLOOR_ROWS = (
+    # (guard, a later command, its decision with and without the unreadable prefix)
+    ("diff_source_pretool", "git diff", "deny"),
+    ("diff_source_pretool", "git show HEAD", "deny"),
+    ("git_stash_ref", "git stash pop", "allow-note"),
+    ("branch_root", "git checkout --orphan newroot", "deny"),
+    ("gate_weakening", "git commit --no-verify -m y", "deny"),
+    ("commit_msg_subst", 'git commit -m "$(date)"', "deny"),
+    ("commit_identity", 'git commit --author="Claude <c@x>" -m y', "deny"),
+    ("git_explicit_binding", "git add -A && git push origin feat", "deny"),
+    ("bash_absolute_paths", "echo x > rel.txt", "deny"),
+    ("protected_line", "git push --force origin main", "deny"),
+)
+
+
+def _test_shell_string_floor(failures, hooks, cwd):
+    """The floor rows: an unreadable shell string before or after a guard's hazard leaves the hazard's decision
+    as the flat lex takes it (the claude review rows for diff_source_pretool and git_stash_ref among them), and an
+    unreadable string alone takes the guard's flat decision. Returns the labels judged."""
+    labels = []
+
+    def judge(label, handler, command, want):
+        labels.append(label)
+        got = _decision(handler, command, cwd=cwd)
+        if got != want:
+            failures.append("{}: expected {}, got {} for {!r}".format(label, want, got, command))
+
+    for name, later, want in _FLOOR_ROWS:
+        handler = getattr(hooks, name)
+        judge("(floor-{}-bare) {!r}".format(name, later), handler, later, want)
+        for n, prefix in enumerate(_FLOOR_PREFIXES):
+            judge("(floor-{}-after-{}) a hazard after an unreadable string decides as written alone".format(name, n),
+                  handler, prefix + "; " + later, want)
+            judge("(floor-{}-before-{}) a hazard before an unreadable string decides as written alone"
+                  .format(name, n), handler, later + "; " + prefix, want)
+    # A git command read from a shell string does not count as a git segment the flat lex lexed, so protected_line's
+    # broad raw fallback still denies a wrapped force push to a feature branch, as it does with no shell-string
+    # reading (the commit before this floor allowed these, a regression below the flat reading).
+    for command in ("bash -c 'git push --force origin feature'", "eval 'git push --force origin feature'",
+                    "trap 'git push --force origin feature' EXIT",
+                    "find . -exec sh -c 'git push --force origin feature' \\;",
+                    "find . -maxdepth 0 -exec sh -c 'git add -A && git push origin feat' \\;"):
+        judge("(floor-protected_line-wrapped) a wrapped push still takes the broad fallback", hooks.protected_line,
+              command, "deny")
+    # The unreadable segment alone is judged as the flat lex judges it, under the guard's posture: a common
+    # 'eval "$(ssh-agent -s)"' allows for every guard.
+    for name in _SHELLC_COST_GUARDS:
+        judge("(floor-{}-alone) an unreadable string with no hazard allows".format(name), getattr(hooks, name),
+              'eval "$(ssh-agent -s)"', "allow")
+    return labels
+
+
+# No new false denies. A shell with a script-file operand reads its script from that file, so data piped or
+# here-documented into it is data; interpreter code is read only in its execution forms, so a spelling in printed or
+# quoted text is never denied. Each row allows, as it does with no shell-string reading.
+_HARMLESS_ROWS = (
+    ("gate_weakening", "printf 'git commit --no-verify -m y' | bash script.sh"),
+    ("gate_weakening", "bash script.sh <<'EOF'\ngit commit --no-verify -m y\nEOF"),
+    ("gate_weakening", "sh ./x.sh <<'EOF'\ngit commit --no-verify -m y\nEOF"),
+    ("gate_weakening", "printf 'git commit --no-verify -m y' | bash -- run.sh arg"),
+    ("gate_weakening", "printf 'a.sh\\n' | xargs sh"),
+    ("gate_weakening", "python3 -c 'print(\"git commit --no-verify\")'"),
+    ("gate_weakening", "python3 -c \"print('git commit --no-verify is forbidden here')\""),
+    ("gate_weakening", "python3 -c \"x = 'git commit --no-verify -m y'\""),
+    ("gate_weakening", "python3 -c 'print(\"os.system(git commit --no-verify)\")'"),
+    ("gate_weakening", "perl -e 'print \"git commit --no-verify\\n\"'"),
+    ("gate_weakening", "ruby -e 'puts \"git commit --no-verify\"'"),
+    ("gate_weakening", "node -e 'console.log(`git commit --no-verify`)'"),
+    ("commit_identity", "python3 -c 'print(\"Co-Authored-By: Claude <c@x>\")'"),
+    ("commit_identity", "printf 'git commit --author=Claude -m y' | bash script.sh"),
+    ("commit_msg_subst", "python3 -c 'print(\"git commit -m $(date)\")'"),
+    ("git_explicit_binding", "python3 -c 'print(\"git add -A && git push origin feat\")'"),
+    ("diff_source_pretool", "printf 'git status' | bash script.sh"),
+    ("protected_line", "printf 'y\\n' | bash install.sh"),
+)
+
+
+def _test_shell_string_harmless(failures, hooks, cwd):
+    """The no-new-false-deny rows (_HARMLESS_ROWS): each allows."""
+    for name, command in _HARMLESS_ROWS:
+        got = _decision(getattr(hooks, name), command, cwd=cwd)
+        if got != "allow":
+            failures.append("(harmless-{}) expected allow, got {} for {!r}".format(name, got, command))
+
+
+# The gaps: every here-document on a line has its owner, the standard-input reading peels the wrappers the -c reading
+# peels, and the interpreter options are read in their clustered and separated spellings.
+_GAP_DENY_ROWS = (
+    "cat <<'A'; bash <<'B'\nhello\nA\ngit commit --no-verify -m y\nB",
+    "true <<'A' && bash <<'B'\nx\nA\ngit commit --no-verify -m y\nB",
+    "cat <<'A' <<'B'; bash <<'C'\na\nA\nb\nB\ngit commit --no-verify -m y\nC",
+    "echo 'git commit --no-verify -m y' | sudo bash",
+    "echo 'git commit --no-verify -m y' | command bash",
+    "echo 'git commit --no-verify -m y' | exec bash",
+    "echo 'git commit --no-verify -m y' | env A=1 bash -s",
+    "echo 'git commit --no-verify -m y' | nohup sh",
+    "sudo bash <<'B'\ngit commit --no-verify -m y\nB",
+    "python3 -Ic \"import os; os.system('git commit --no-verify -m y')\"",
+    "python3 -I -c \"import os; os.system('git commit --no-verify -m y')\"",
+    "python3 -IBc \"import os; os.system('git commit --no-verify -m y')\"",
+    "python3 -W ignore -c \"import os; os.system('git commit --no-verify -m y')\"",
+    "python3 -X dev -c \"import subprocess; subprocess.run(['git', 'commit', '--no-verify', '-m', 'y'])\"",
+    "sudo python3 -c \"import os; os.system('git commit --no-verify -m y')\"",
+    "perl -we 'system(\"git commit --no-verify -m y\")'",
+    "perl -E 'system(\"git commit --no-verify -m y\")'",
+    "perl -e 1 -e 'system \"git commit --no-verify -m y\"'",
+    "perl -e 'print `git commit --no-verify -m y`'",
+    "perl -e 'qx{git commit --no-verify -m y}'",
+    "ruby -we 'system(\"git commit --no-verify -m y\")'",
+    "ruby -e '%x(git commit --no-verify -m y)'",
+    "node --eval \"require('child_process').execSync('git commit --no-verify -m y')\"",
+    "node --eval=\"require('child_process').execSync('git commit --no-verify -m y')\"",
+    "node -p \"require('child_process').execSync('git commit --no-verify -m y')\"",
+    "node -pe \"require('child_process').execSync('git commit --no-verify -m y')\"",
+)
+_GAP_ALLOW_ROWS = (
+    "cat <<'A'; cat <<'B'\ngit commit --no-verify -m y\nA\nhello\nB",
+    "echo 'git status' | sudo bash",
+    "python3 -Ic \"import os; os.system('git status')\"",
+)
+
+
+def _test_shell_string_gaps(failures, hooks, cwd):
+    """The gap rows: each _GAP_DENY_ROWS command denies under gate_weakening, each _GAP_ALLOW_ROWS control
+    allows."""
+    for command in _GAP_DENY_ROWS:
+        got = _decision(hooks.gate_weakening, command, cwd=cwd)
+        if got != "deny":
+            failures.append("(gap-deny) expected deny, got {} for {!r}".format(got, command))
+    for command in _GAP_ALLOW_ROWS:
+        got = _decision(hooks.gate_weakening, command, cwd=cwd)
+        if got != "allow":
+            failures.append("(gap-allow) expected allow, got {} for {!r}".format(got, command))
+
+
+def _shell_scan_cost_commands(size=64 << 10):
+    """64 KiB commands of the shapes that once made the wrapper scan quadratic: xargs or find followed by tens of
+    thousands of shell, eval or interpreter words, each followed by a hazard."""
+    def fill(prefix, unit, suffix):
+        return prefix + unit * ((size - len(prefix) - len(suffix)) // len(unit)) + suffix
+
+    tail = "; git commit --no-verify -m y"
+    return (("xargs-sh-o", fill("printf x | xargs ", "sh -o ", tail)),
+            ("find-sh-o", fill("find . -exec ", "sh -o ", tail)),
+            ("xargs-eval", fill("printf x | xargs ", "eval ", tail)),
+            ("sudo-bash-o", fill("echo x | sudo ", "bash -o ", tail)),
+            ("xargs-python-I", fill("xargs ", "python3 -I ", tail)),
+            ("find-perl-e", fill("find . -exec ", "perl -e x ", tail)))
+
+
+def _test_shell_scan_cost(failures, hooks, cwd):
+    """Each guard that reads the shared segments in this suite (_SHELLC_COST_GUARDS) judges each
+    _shell_scan_cost_commands command in under _SHELLC_COST_SECONDS of CPU time (the orchestration guards are
+    measured in tools/selftest_orch_hooks.py). Returns {(command label, guard): seconds}."""
+    spent = {}
+    for label, command in _shell_scan_cost_commands():
+        if not (60 << 10) <= len(command) <= (64 << 10):
+            failures.append("(scan-cost-size) the {} command is {} characters, not about 64 KiB"
+                            .format(label, len(command)))
+        for name in _SHELLC_COST_GUARDS:
+            start = time.process_time()
+            _decision(getattr(hooks, name), command, cwd=cwd)
+            spent[(label, name)] = time.process_time() - start
+            if spent[(label, name)] >= _SHELLC_COST_SECONDS:
+                failures.append("(scan-cost-{}-{}) {} took {:.2f} s of CPU time on the {} command of {} "
+                                "characters, over the {} s bound".format(label, name, name, spent[(label, name)],
+                                                                         label, len(command), _SHELLC_COST_SECONDS))
+    return spent
+
+
 def _test_git_stash_ref(failures):
     """Direct, warn-distinct checks; no submitted Bash command is executed."""
     handler = aiqt_hooks.git_stash_ref
@@ -14224,6 +14780,19 @@ def _main_isolated(monitor):
         _test_stream_failure_exits(failures)
         _test_stop_field_claim_check(failures, tmp)
         _test_cannot_evaluate_paths(failures, tmp)
+        try:
+            _shellc_repo = str(_init_repo(tmp / "shellc-repo"))
+        except (OSError, subprocess.SubprocessError) as exc:
+            print("SELF-TEST ERROR: could not build the shell-string fixture repo: {}".format(exc), file=sys.stderr)
+            return 2
+        _test_shell_strings(failures, aiqt_hooks, _shellc_repo)
+        _test_shell_string_reading(failures, aiqt_hooks)
+        _test_shell_string_cost(failures, aiqt_hooks, _shellc_repo)
+        _test_shell_runners(failures, aiqt_hooks, _shellc_repo)
+        _test_shell_string_floor(failures, aiqt_hooks, _shellc_repo)
+        _test_shell_string_harmless(failures, aiqt_hooks, _shellc_repo)
+        _test_shell_string_gaps(failures, aiqt_hooks, _shellc_repo)
+        _test_shell_scan_cost(failures, aiqt_hooks, _shellc_repo)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
