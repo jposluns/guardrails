@@ -106,16 +106,23 @@ must each decide a command whose double-quoted backquote body is a long run of u
 for their --no-verify. The cs-bound cases check the shared reading's work bound: a reading of one 8-character
 body completes within a bound of 9 or 8 characters and raises ValueError within one of 7, the reading of a
 52,513-byte command whose backquote substitutions nest 14 deep, each read as two bodies, passes the bound, and
-each guard in the table must decide that command within 1 s of CPU without raising, gate_weakening denying it
-for its --no-verify; the same holds for that shape around a commit-free git push. The cs-bound-text cases
+each guard in the table must decide that command within 1 s of CPU without raising, with the decision it gave
+that shape nested 4 and 6 deep before the bound existed or a stricter one (gate_weakening denying it for its
+--no-verify); the same holds for that shape around a commit-free git push. The cs-bound-own cases check that
+past the bound each guard still judges the command's own segments: a trigger beside that shape around echo,
+nested 6 deep, must get the decision the guard gave it before the bound existed (diff_source_pretool,
+git_stash_ref, protected_line, git_explicit_binding, gate_weakening, commit_msg_subst, commit_identity and
+git_discard). They do not cover a trigger that only a substitution body past the bound holds, which the
+fallback's raw scan alone judges. The cs-bound-text cases
 check that each fallback text that says a command could not be parsed also names a substitution reading past
 the work bound, on that shape around a command each fallback flags (diff_source_pretool, commit_identity, on
-the command itself and on a git rebase -x run line, git_discard, gate_weakening's three raw probes and
-commit_msg_subst), and that bash_absolute_paths and branch_root still judge the command's own segments past
-the bound. The table does not cover
-gate_weakening's verification-sink deny
-tier, which still reads the command's own records, or the two orchestration guards (orch_truncation_guard,
-orch_untracked_wait_loop), whose shared reading tools/selftest_orch_hooks.py checks. The wx-* cases pin each
+the command itself and on a git rebase -x run line, git_discard, gate_weakening's three raw probes,
+commit_msg_subst, and protected_line, whose cause list names the bound and no unbalanced quote), and that
+bash_absolute_paths and branch_root still judge the command's own segments past the bound. The table does not
+cover gate_weakening's verification-sink deny
+tier, which reads the command's own records, or the two orchestration guards (orch_truncation_guard,
+orch_untracked_wait_loop), whose shared reading, and reading of the command's own line past the bound,
+tools/selftest_orch_hooks.py checks. The wx-* cases pin each
 wrapped example that the git_discard, gate_weakening, diff_source_pretool and bash_absolute_paths texts name
 to the decision the text states (allow, allow with a note, or deny). They check reason text only where a
 bash_absolute_paths case names a target, and they wrap the diff_source_pretool shapes only in the wrappers
@@ -2570,7 +2577,7 @@ def _test_substitution_work_bound(failures):
     quote, where the two backquote scans read the substitution as two different bodies, so the reading doubles
     at each level. Fourteen levels around git commit --no-verify -m x and 1,500 words make a 52,513-byte
     command, which bash parses: its reading must raise that ValueError, and each guard in the compound-subject
-    table must decide it within 1 s of CPU without raising (each decides as for a command that does not lex),
+    table must decide it within 1 s of CPU without raising, with the decision _CS_BOUND_DECISIONS names,
     gate_weakening denying it for its --no-verify. With no bound gate_weakening took about 25 s of CPU on it.
     The same holds for the shape around git push origin feature, a commit-free command that protected_line
     reads past its commit check. No submitted Bash command is executed."""
@@ -2584,10 +2591,8 @@ def _test_substitution_work_bound(failures):
         if got != want:
             failures.append("(cs-bound-end) x=`git diff` read within a bound of {} characters: expected {}, got {}"
                             .format(size, want or "a complete reading", got or "a complete reading"))
-    for marker in ("git commit --no-verify -m x", "git push origin feature"):
-        command = marker + " " + "y " * 1500
-        for _level in range(14):
-            command = 'x="$(echo "\'")" "\'" `' + command.replace("\\", "\\\\").replace("`", "\\`") + " '\\\"'`"
+    for marker, wants in _CS_BOUND_DECISIONS:
+        command = _cs_bound_nest(marker)
         try:
             aiqt_hooks._substitution_lines(aiqt_hooks._lex_command(command))
             got = "a complete reading"
@@ -2596,36 +2601,102 @@ def _test_substitution_work_bound(failures):
         if got != aiqt_hooks._SUBSTITUTION_WORK_SPENT:
             failures.append("(cs-bound-read) the {}-byte command nested around {}: expected ValueError({!r}), got {}"
                             .format(len(command), marker, aiqt_hooks._SUBSTITUTION_WORK_SPENT, got))
-        for name in _CS_GUARDS:
+        for name, want in zip(_CS_GUARDS, wants):
             start = time.process_time()
             try:
                 got = _decision(getattr(aiqt_hooks, name), command)
             except Exception as exc:  # a guard that lets the reading's ValueError out fails here, not the suite
                 got = "{}: {}".format(type(exc).__name__, exc)
             spent = time.process_time() - start
-            want = "deny" if name == "gate_weakening" and "--no-verify" in marker else "a decision"
             if spent >= 1.0:
                 failures.append("(cs-bound-{}) the {}-byte command nested around {}: {:.2f} s of CPU, over the 1 s "
                                 "bound".format(name, len(command), marker, spent))
-            if got not in _CS_RANK or (want == "deny" and got != "deny"):
+            if got != want:
                 failures.append("(cs-bound-{}) the {}-byte command nested around {}: expected {}, got {}"
                                 .format(name, len(command), marker, want, got))
 
 
-def _cs_bound_nest(marker):
-    """The command _test_substitution_work_bound builds around marker: 1,500 words after it, nested 14 levels
-    deep, each level x="$(echo "'")" "'" then a backquote substitution holding the next level and a
-    single-quoted escaped double quote, so its substitution reading passes the work bound."""
+def _cs_bound_nest(marker, depth=14):
+    """The command _test_substitution_work_bound builds around marker: 1,500 words after it, nested depth
+    levels deep (14 unless given), each level x="$(echo "'")" "'" then a backquote substitution holding the
+    next level and a single-quoted escaped double quote, so from 4 levels its substitution reading passes the
+    work bound."""
     command = marker + " " + "y " * 1500
-    for _level in range(14):
+    for _level in range(depth):
         command = 'x="$(echo "\'")" "\'" `' + command.replace("\\", "\\\\").replace("`", "\\`") + " '\\\"'`"
     return command
 
 
-# (guard, the command, decision, fragments its reason, or its note for an allow-note, must carry, and
-# fragments its banner must carry): each fallback text that says the command could not be parsed also names
-# a substitution reading past its work bound. The last two keep their decision and their reading of the
-# command's own segments past the bound, and name neither cause.
+# (marker, the decision of each guard in _CS_GUARDS order) for the command _cs_bound_nest builds around the
+# marker. Each is the decision the guard gave that shape nested 4 and 6 levels deep before the reading had a
+# work bound, when it read every substitution well within the hooks' timeout, or a stricter one:
+# commit_msg_subst now denies the --no-verify shape, whose raw text holds git commit and a backquote, through its
+# fallback, where it read the substitutions and allowed it.
+_CS_BOUND_DECISIONS = (
+    ("git commit --no-verify -m x",
+     ("allow", "deny", "allow", "deny", "allow", "deny", "allow", "allow", "allow", "allow")),
+    ("git push origin feature", ("allow",) * 10),
+)
+
+
+# (guard, command, decision): a trigger in the command's own segments beside the nested shape around echo,
+# nested 6 levels deep (a 3,338-byte command), whose substitution reading passes the work bound. Each decision
+# is the one the guard gave the command before the reading had a bound, which read every substitution in under
+# 0.25 s of CPU where it was measured. Past the bound each guard judges the command's own segments and returns
+# the stricter of that decision and its fallback's. Every row but the git diff --stat row and the unquoted
+# git add -A row, where the fallback's decision is the stricter or the same, fails where the fallback alone
+# decides.
+_CS_BOUND_TAIL = _cs_bound_nest("echo", 6)
+_CS_BOUND_OWN = (
+    ("diff_source_pretool", "git diff; " + _CS_BOUND_TAIL, "deny"),
+    ("diff_source_pretool", _CS_BOUND_TAIL + "; git diff", "deny"),
+    ("diff_source_pretool", "git diff --stat --cached x; " + _CS_BOUND_TAIL, "allow-note"),
+    ("git_explicit_binding", "git add -A && git push origin feature; " + _CS_BOUND_TAIL, "deny"),
+    ("git_stash_ref", "git stash pop; " + _CS_BOUND_TAIL, "allow-note"),
+    ("git_stash_ref", _CS_BOUND_TAIL + "; git stash pop", "allow-note"),
+    ("protected_line", "git push origin :; " + _CS_BOUND_TAIL, "deny"),
+    ("protected_line", "git push origin :HEAD; " + _CS_BOUND_TAIL, "deny"),
+    ("git_explicit_binding", 'git add "-A" && git push origin feature; ' + _CS_BOUND_TAIL, "deny"),
+    ("git_explicit_binding", '"cd" /x && git commit -m x; ' + _CS_BOUND_TAIL, "allow-note"),
+    ("gate_weakening", 'git commit --no-"verify" -m x; ' + _CS_BOUND_TAIL, "deny"),
+    ("gate_weakening", "pytest || true; " + _CS_BOUND_TAIL, "allow-note"),
+    ("commit_msg_subst", 'git com""mit -m "a$(id)"; ' + _CS_BOUND_TAIL, "deny"),
+    ("commit_identity", 'git commit --author=Cl""aude -m x; ' + _CS_BOUND_TAIL, "deny"),
+    ("commit_identity", 'GIT_AUTHOR_NAME=Cl""aude git commit -m x; ' + _CS_BOUND_TAIL, "deny"),
+    ("git_discard", "echo git'x' re\\\nset; " + _CS_BOUND_TAIL, "deny"),
+)
+
+
+def _test_substitution_bound_own(failures):
+    """(cs-bound-own) Past the substitution reading's work bound each guard still judges the command's own
+    segments: for each row of _CS_BOUND_OWN the command's reading must raise ValueError with
+    _SUBSTITUTION_WORK_SPENT, so the row reaches the bound, and the guard must give the row's decision within
+    1 s of CPU. No submitted Bash command is executed."""
+    for name, command, want in _CS_BOUND_OWN:
+        label = "(cs-bound-own-{}) {!r}".format(name, command[:48])
+        try:
+            aiqt_hooks._substitution_lines(aiqt_hooks._lex_command(command))
+            raised = "a complete reading"
+        except ValueError as exc:
+            raised = str(exc)
+        if raised != aiqt_hooks._SUBSTITUTION_WORK_SPENT:
+            failures.append("{}: its substitution reading: expected ValueError({!r}), got {}"
+                            .format(label, aiqt_hooks._SUBSTITUTION_WORK_SPENT, raised))
+        start = time.process_time()
+        got = _decision(getattr(aiqt_hooks, name), command)
+        spent = time.process_time() - start
+        if got != want:
+            failures.append("{}: expected {}, got {}".format(label, want, got))
+        if spent >= 1.0:
+            failures.append("{}: {:.2f} s of CPU, over the 1 s bound".format(label, spent))
+
+
+# (guard, the command, decision, fragments its reason, or its note for an allow-note, must carry, fragments
+# its banner must carry, and optionally fragments neither may carry): each fallback text that says the command
+# could not be parsed also names a substitution reading past its work bound. protected_line's fallback names
+# the bound among the causes of its uncertain reading, and not an unbalanced quote, which the lexer that read
+# the command would refuse. The last two keep their decision and their reading of the command's own segments
+# past the bound, and name neither cause.
 _CS_BOUND_TEXT = (
     ("diff_source_pretool", _cs_bound_nest("git diff HEAD"), "allow-note",
      ("could not parse this command, or reading its backquote substitutions passed the work bound",), ()),
@@ -2653,6 +2724,11 @@ _CS_BOUND_TEXT = (
     ("commit_msg_subst", _cs_bound_nest("git commit -m x"), "deny",
      ("could not be parsed by the shell lexer, or reading its backquote substitutions passed the work bound,",),
      ("could not parse or read within the substitution work bound",)),
+    ("protected_line", _cs_bound_nest("git push --force origin feature"), "deny",
+     ("cannot read this command's shell structure with certainty (backquote substitutions whose reading "
+      "passed the work bound;",),
+     ("cannot read with certainty (backquote substitutions whose reading passed the work bound;",),
+     ("an unbalanced quote or a trailing backslash",)),
     ("bash_absolute_paths", "cd rel; " + _cs_bound_nest("echo"), "allow-note",
      ("a relative cd destination 'rel'",), ()),
     ("branch_root", "git switch --orphan z; " + _cs_bound_nest("echo"), "deny",
@@ -2663,11 +2739,12 @@ _CS_BOUND_TEXT = (
 def _test_substitution_bound_text(failures):
     """(cs-bound-text) What each guard says when its substitution reading passes the work bound
     (_substitution_work), on the nested shape of _test_substitution_work_bound (_cs_bound_nest), which bash
-    parses: each row of _CS_BOUND_TEXT must get its decision, and its reason (its note, for an allow-note) and
-    banner must carry each fragment named. The command's own reading, or for the git rebase -x row the run
-    line's, must first raise ValueError with _SUBSTITUTION_WORK_SPENT, so each row reaches the bound and not a
-    parse error. No submitted Bash command is executed."""
-    for name, command, want, reason_parts, banner_parts in _CS_BOUND_TEXT:
+    parses: each row of _CS_BOUND_TEXT must get its decision, its reason (its note, for an allow-note) and
+    banner must carry each fragment named, and neither may carry a fragment the row names as absent. The
+    command's own reading, or for the git rebase -x row the run line's, must first raise ValueError with
+    _SUBSTITUTION_WORK_SPENT, so each row reaches the bound and not a parse error. No submitted Bash command
+    is executed."""
+    for name, command, want, reason_parts, banner_parts, *absent in _CS_BOUND_TEXT:
         label = "(cs-bound-text-{}) the {}-byte command".format(name, len(command))
         read = command
         if command.startswith("git rebase -x "):
@@ -2696,6 +2773,10 @@ def _test_substitution_bound_text(failures):
         for part in banner_parts:
             if part not in banner:
                 failures.append("{}: its banner lacks {!r}: {!r}".format(label, part, banner))
+        for part in (absent[0] if absent else ()):
+            if part in reason or part in banner:
+                failures.append("{}: its text names {!r}, which is not a cause here: {!r}".format(
+                    label, part, reason))
 
 
 # The wrapped examples the guard texts in .aiqt/core/hooks/manifest.toml name, each with the exact decision
@@ -14681,6 +14762,7 @@ def _main_isolated(monitor):
         _test_compound_subject(failures)
         _test_backquote_scan_cost(failures)
         _test_substitution_work_bound(failures)
+        _test_substitution_bound_own(failures)
         _test_substitution_bound_text(failures)
         _test_wrapped_examples(failures, tmp)
         _test_note_literal_sites(failures, tmp)

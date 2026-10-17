@@ -10788,17 +10788,29 @@ def _main_isolated(report_path=None):
         # after 1,500 words, nested 13 more levels deep, each level x="$(echo "'")" "'" then a backquote
         # substitution holding the next level and a single-quoted escaped double quote, which the two backquote
         # scans read as two different bodies, so the reading doubles at each level and passes its bound. The
-        # classifier then answers 'indeterminate', as for a command that does not lex, where with no bound it
-        # read BASE 14 deep and answered 'match' after about 12 s of CPU; each guard decides the command within
-        # 1 s of CPU.
+        # classifier then reads no substitution and answers 'indeterminate', where with no bound it read BASE 14
+        # deep and answered 'match' after about 12 s of CPU: the wait-loop guard allows NESTED and the
+        # truncation guard notes it in the background. Past the bound each guard still judges the command's own
+        # line, as it did with no bound: BASE after the same nesting around echo (OWN_LOOP) is a 'match' that the
+        # wait-loop guard denies, and a background dispatch piping pytest into head before that nesting
+        # (OWN_SINK) is denied by the truncation guard. Each guard decides each command within 1 s of CPU.
         NESTED = "echo " + "y " * 1500 + "`" + BASE + "`"
+        ECHO_NEST = "echo " + "y " * 1500
         for _level in range(13):
             NESTED = 'x="$(echo "\'")" "\'" `' + NESTED.replace("\\", "\\\\").replace("`", "\\`") + " '\\\"'`"
-        check("wl/bound-indeterminate", clf(NESTED), "indeterminate")
-        for cid, decide in (("wl/bound-cost", wl), ("trunc/bound-cost", tg)):
-            started = aiqt_hooks.time.process_time()
-            decide(NESTED, rib=True)
-            check(cid, aiqt_hooks.time.process_time() - started < 1.0, True)
+        for _level in range(14):
+            ECHO_NEST = 'x="$(echo "\'")" "\'" `' + ECHO_NEST.replace("\\", "\\\\").replace("`", "\\`") + " '\\\"'`"
+        OWN_LOOP = ECHO_NEST + "; " + BASE
+        OWN_SINK = "pytest | head -5; " + ECHO_NEST
+        check("wl/bound-indeterminate", (clf(NESTED), clf(OWN_LOOP)), ("indeterminate", "match"))
+        for cid, decide, own, wants in (("wl/bound-cost", wl, OWN_LOOP, ("allow", "deny")),
+                                        ("trunc/bound-cost", tg, OWN_SINK, ("warn", "deny"))):
+            got = []
+            for cmd in (NESTED, own):
+                started = aiqt_hooks.time.process_time()
+                verdict = _verdict(decide(cmd, rib=True))
+                got.append((aiqt_hooks.time.process_time() - started < 1.0, verdict))
+            check(cid, tuple(got), tuple((True, want) for want in wants))
         # handler ALLOW: a foreground poll loop (no detach) and a bounded watch acquire no deny here.
         check("wl/handler-allow-foreground",
               _verdict(wl("while true; do gh pr checks 42; sleep 30; done")), "allow")
