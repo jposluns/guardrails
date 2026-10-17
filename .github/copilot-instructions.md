@@ -40,7 +40,10 @@ covered, or that the set is exhausted, is made only by enumerating that set from
 showing the enumeration, never from an impression of having covered it. The authoritative index is the
 source that defines the set's membership, such as a registry, a manifest, a directory listing, or a backlog;
 a count or a work-list the assistant holds in its own context is not that index, and is reconciled against it
-before it can support a claim about the whole set.
+before it can support a claim about the whole set. Retiring, splitting, or merging a record that names more
+than one item is such a claim over the items the record names: each named item is shown either in a
+successor record or as closed on its own evidence, because a check over record ids or item counts alone
+passes when the record's id leaves the index and items it named leave with it.
 
 A claim that licenses less work, that nothing remains, or that an item may stop, defer, wind down, or close,
 clears a higher evidence bar than a claim that licenses more, because an unfounded stop conceals work that is
