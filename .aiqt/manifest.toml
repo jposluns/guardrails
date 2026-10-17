@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "dc6c3a27ee3f992024468af3394622c569b2343aa8ebc10e05ce03e9695570af"
+tree-sha256 = "f3565d098042906cef729414fb73022d381ba9efddceb4a64494b50f3868980b"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -66,8 +66,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 318739
-sha256 = "2163e10ecd823b5ae07de65ae10f064b1236efe5954348077fe270ab26365207"
+bytes = 318743
+sha256 = "c80cc93eac3561a626165690b9bbb3a61a41eea8475bf433081220470ad83e64"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -811,8 +811,8 @@ sha256 = "7854ba7c7fa8221a2b408deaf73505b492ff2d39f67d5addac1b20ed98ac2ba6"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 589552
-sha256 = "56a427113d3e84c7cee09244a29c682ceea187d0386f1372729735993177b430"
+bytes = 589556
+sha256 = "0dcd961a6b53631a33bf2b57dff11568f0a72ebcfddde31b4211ef60b6e6d9a5"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2346,8 +2346,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 345230
-sha256 = "53e42dbaa2ad79e2bb2768580947d6c7167a18b80c3c464d4cf37afcf549a165"
+bytes = 345234
+sha256 = "788b8e19b56a79fadadb54cd03dd616bd47767a85dfb069018ca7e29e32f2975"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3146,8 +3146,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 400051
-sha256 = "06c93fa14d2829b3e59fc68cd1b0854f3f547fd05e987c69732ae853299c4d56"
+bytes = 400055
+sha256 = "ab28578500fcc9c169be2aa4ee2d387408f49fe422a2fdc1285dd927baa7188e"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3711,8 +3711,8 @@ sha256 = "26b2e951fe7c452e19c919e04bbc2cf3854eefd085fe3f10399678b84b4d5b9a"
 
 [[sources]]
 path = "tools/orch_register.py"
-bytes = 242891
-sha256 = "d7d5cf3ecaf8ae03973980920a372798f7643f91da3df54983735e65c80638a0"
+bytes = 245203
+sha256 = "32231cb6f5aff57fccaf8d06abb0c053353035bcf22f4d71777fb7ded347f1d4"
 
 [[sources]]
 path = "tools/pin.py"

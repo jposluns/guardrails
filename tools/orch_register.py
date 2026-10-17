@@ -145,7 +145,7 @@
       and its anchor byte-identical (the first-row cleanup and left-in-place vectors assert
       their named outcomes instead), a failure injected at each commit step leaves the
       register's bytes unchanged and no temporary file, a file or symlink swapped in at the
-      temporary's name before the rename is refused by that name and left in place with the
+      temporary's name before the name check is refused by that name and left in place with the
       register byte-identical, every clean append is
       re-read and its landed last row and a clean verify_lines asserted, the serialization
       lock, the first-row creation re-checks (size and file identity) and the write binding
@@ -2047,6 +2047,8 @@ def self_test():
         real_c_fsync = os.fsync
         real_c_replace = os.replace
         real_c_unlink = os.unlink
+        real_c_fstat = os.fstat
+        real_c_lstat = os.lstat
         declare(mistakes_register="commit.jsonl")
         commit_reg = repo / "commit.jsonl"
         accepted("commit-seed", commit_reg, "MR-1", bootstrap=True)
@@ -2120,6 +2122,34 @@ def self_test():
         def link_register():
             os.link(str(commit_reg), str(commit_link))
 
+        def fstat_fails_after_fsync():
+            # the temporary's identity is read through its descriptor once it is synced: fail
+            # that one read (the descriptor fsync just synced), so the cleanup can still remove it
+            seen = {"fd": None, "done": False}
+
+            def recording_fsync(sync_fd):
+                seen["fd"] = sync_fd
+                return real_c_fsync(sync_fd)
+
+            def failing_fstat(st_fd, *fargs, **fkw):
+                if st_fd == seen["fd"] and not seen["done"]:
+                    seen["done"] = True
+                    raise OSError(5, "injected descriptor fstat failure")
+                return real_c_fstat(st_fd, *fargs, **fkw)
+            return [(os, "fsync", recording_fsync), (os, "fstat", failing_fstat)]
+
+        def lstat_fails_at_temp():
+            # the name check's lstat of the temporary fails with an error other than a missing
+            # name, once, so the cleanup can still remove it
+            fired = {"done": False}
+
+            def failing_lstat(p, *largs, **lkw):
+                if os.fspath(p).startswith(commit_tmp) and not fired["done"]:
+                    fired["done"] = True
+                    raise OSError(5, "injected temporary lstat failure")
+                return real_c_lstat(p, *largs, **lkw)
+            return [(os, "lstat", failing_lstat)]
+
         for tag, patches, reason, want in (
                 ("temp-create", [(os, "open", step_open)],
                  "the temporary file for the commit could not be created exclusively", None),
@@ -2132,6 +2162,12 @@ def self_test():
                 ("permission-bits", [(os, "fchmod", step_fchmod)],
                  "the register's permission bits", None),
                 ("fsync", [(os, "fsync", step_fsync)], "could not be synced to disk", None),
+                ("temp-fstat", fstat_fails_after_fsync(),
+                 "the temporary file cannot be inspected through its descriptor ([Errno 5] "
+                 "injected descriptor fstat failure)", None),
+                ("temp-lstat", lstat_fails_at_temp(),
+                 "cannot be re-checked before the rename ([Errno 5] injected temporary lstat "
+                 "failure)", None),
                 ("rename", [(os, "replace", step_replace)],
                  "could not be renamed over the register", None),
                 ("recheck-identity", [(os, "fsync", fsync_after(replace_with_seed_copy))],
@@ -2189,22 +2225,30 @@ def self_test():
             os.symlink(str(swap_target), str(swap_side))
             real_c_replace(str(swap_side), at)
 
+        def swap_at_temp(swap, seen):
+            # the swap records the temporary's path it observed, so the refusal clause must
+            # name that path
+            seen.append(str(repo / temps_beside(commit_reg)[0]))
+            swap(seen[0])
+
         for swap_tag, swap, reason, left_named in (
-                ("file", swap_in_file, "is no longer this call's temporary",
+                ("file", swap_in_file, "{} is no longer this call's temporary",
                  "is not this call's temporary and was left in place"),
-                ("symlink", swap_in_symlink, "is no longer this call's temporary",
+                ("symlink", swap_in_symlink, "{} is no longer this call's temporary",
                  "is not this call's temporary and was left in place"),
-                ("vanished", real_c_unlink, "is no longer at its name", None)):
+                ("vanished", real_c_unlink, "{} is no longer at its name", None)):
             name = "commit-temp-swapped-" + swap_tag
             commit_reg.write_bytes(commit_seed)
             before = snapshot(commit_reg)
+            seen_tmp = []
             os.fsync = fsync_after(
-                lambda swap=swap: swap(str(repo / temps_beside(commit_reg)[0])))
+                lambda swap=swap, seen=seen_tmp: swap_at_temp(swap, seen))
             try:
                 rc, err = append(commit_reg, "MR-1", "accepted")
             finally:
                 os.fsync = real_c_fsync
             left = temps_beside(commit_reg)
+            reason = reason.format(seen_tmp[0] if seen_tmp else commit_tmp + "<not observed>")
             if rc != 2 or reason not in err:
                 failures.append("{}: want exit 2 naming {!r}, got exit {}: {}".format(
                     name, reason, rc, err.strip()))
@@ -2226,11 +2270,12 @@ def self_test():
         # an entry at the name with the temporary's device and inode is the temporary itself,
         # a regular file, so no filesystem state fails only the regular-file test; an injected
         # lstat result pins that test
-        real_c_lstat = os.lstat
+        not_regular_seen = []
 
         def not_regular_lstat(p, *largs, **lkw):
             st = real_c_lstat(p, *largs, **lkw)
             if os.fspath(p).startswith(commit_tmp):
+                not_regular_seen.append(os.fspath(p))
                 return os.stat_result((stat.S_IFLNK | 0o777,) + tuple(st)[1:])
             return st
 
@@ -2241,7 +2286,8 @@ def self_test():
             rc, err = append(commit_reg, "MR-1", "accepted")
         finally:
             os.lstat = real_c_lstat
-        if (rc != 2 or "is no longer this call's temporary" not in err
+        if (rc != 2 or not not_regular_seen
+                or "{} is no longer this call's temporary".format(not_regular_seen[0]) not in err
                 or snapshot(commit_reg) != before or temps_beside(commit_reg)):
             failures.append("commit-temp-name-not-regular: want exit 2 naming the temporary, "
                             "the register unchanged and no temporary left, got exit {} with {}: "
