@@ -49,6 +49,22 @@ refreshed (git freshens an existing object instead of rewriting it when the priv
 writes a byte-identical one through the shared object store), which resets that object's prune
 clock and changes no content.
 
+Every git launch the tool itself makes runs ONE git program, resolved before the run's first git
+launch the way every configured command head is resolved (see _git_program and _resolve_program):
+the first match on the sanitized PATH, refused by name when its realpath or its launch directory
+lies inside the repository's toplevel, its git directories or any worktree around it (read from
+the filesystem before the first launch, and checked again against the worktree list git
+reports), and launched by that absolute path, never by a bare name a child would resolve in its
+own working directory; every git launch reads that path's realpath again and refuses the git
+when it changed or when it lies inside the launch's working directory (the private base
+repository and each private checkout included). A run whose git is refused before discovery or
+against the worktree list exits 2 before it takes the lock. A program the tool launches (gh, or a
+configured command) that runs git itself resolves it on the sanitized PATH it receives, outside
+this rule. Disclosed residual: before git's first launch the confinement reads the repository
+layout from the filesystem, so a git inside a layout that read does not model (a core.worktree
+setting, for one) runs for the three discovery reads before the check against the worktree list
+git reports refuses it.
+
 The tool NEVER mutates the author's working tree, index, HEAD or any local branch: that capability
 was removed, not guarded. Per open PR, in PR-number order, every
 merge, conflict resolution, regeneration, check and commit happens in a PRIVATE scratch checkout
@@ -187,6 +203,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sysconfig
 import tempfile
 import time
 import tomllib
@@ -349,9 +366,10 @@ def _clean_env(extra=None):
     head in the child working directory, which for the regenerate and check commands is the
     merged scratch checkout, content the PR itself supplies. The
     rebuilt PATH is the FIRST layer only: _run_external resolves every program head against it
-    to an absolute executable realpath and refuses, by name, an empty sanitized PATH, an
-    unresolvable head and a resolved realpath inside the checkout or a repository
-    worktree, then launches the resolved absolute path."""
+    and refuses, by name, an empty sanitized PATH, an unresolvable head and a head whose
+    realpath or launch directory lies inside the checkout or a repository directory, then
+    launches the resolved absolute launch path with its checked realpath as the file exec-ed;
+    git itself is resolved the same way, once (see _resolve_program and _git_program)."""
     env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
     env["GIT_TERMINAL_PROMPT"] = "0"
     env.update(extra or dict())
@@ -465,8 +483,10 @@ def _end_child(proc, group):
             stream.close()
 
 
-def _run_child(argv, cwd=None, env=None, timeout=None, push=False):
-    """The single child-process funnel under _git and _run_external: every child starts in its OWN
+def _run_child(argv, cwd=None, env=None, timeout=None, push=False, executable=None):
+    """The single child-process funnel under _git and _run_external: executable, when given, is
+    the file the child execs while argv[0] stays the launch path (both from _resolve_program,
+    the funnels' only source of either). Every child starts in its OWN
     session (start_new_session=True), so a timeout and ANY unwind while the child runs (the
     _Signalled conversion of SIGTERM, SIGHUP or SIGQUIT included) terminate the child through
     _end_child, with signals blocked around that cleanup. Every signal in UNWIND_SIGNALS (SIGINT
@@ -497,7 +517,8 @@ def _run_child(argv, cwd=None, env=None, timeout=None, push=False):
     try:
         proc = subprocess.Popen(list(argv), cwd=cwd, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                                start_new_session=True, preexec_fn=_child_mask)
+                                start_new_session=True, preexec_fn=_child_mask,
+                                executable=executable)
     except BaseException:
         signal.pthread_sigmask(signal.SIG_SETMASK, mask)
         raise
@@ -612,18 +633,24 @@ def _forbidden(args):
 
 
 def _git(cwd, *args, extra_env=None, timeout=GIT_TIMEOUT, ok=(0,), push=False):
-    """The single pinned git funnel: auto-maintenance pinned off in option position, scrubbed GIT_*,
-    a timeout. Returns (returncode, stdout bytes, stderr text); raises Refuse("git-failed") on a
-    timeout and on an exit code outside ok when ok is not None. The audit records every attempted
-    argv, a refused one included."""
+    """The single pinned git funnel: the ONE git program _git_program resolved (launched by its
+    absolute launch path, never a bare name a child resolves; refused, as git-failed, when its
+    launch path no longer resolves to the realpath it was checked at, or when it lies inside
+    this launch's working directory), auto-maintenance pinned off in option position, scrubbed
+    GIT_*, a timeout. Returns (returncode, stdout bytes, stderr text); raises Refuse("git-failed")
+    on a refused git, a timeout and an exit code outside ok when ok is not None. The audit
+    records every attempted argv, a refused one included."""
     GIT_AUDIT.append(list(args))
     if _forbidden(args):
         raise _AuditRefused("forbidden git operation refused by the argv audit: %r" % (args,))
-    argv = ["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"]
+    launch, real, refusal = _git_program((cwd,))
+    if launch is None:
+        raise Refuse("git-failed", refusal)
+    argv = [launch, "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"]
     argv += list(args)
     try:
         proc = _run_child(argv, cwd=str(cwd), env=_clean_env(extra_env), timeout=timeout,
-                          push=push)
+                          push=push, executable=real)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise Refuse("git-failed", "git %s: %s" % (" ".join(args[:2]), exc))
     if ok is not None and proc.returncode not in ok:
@@ -674,7 +701,9 @@ def _git_author(cwd, *args, extra_env=None, timeout=GIT_TIMEOUT, ok=(0,)):
     position. Author-side footprint of a call made here, stated
     exactly: no ref, no object content, no reflog, no FETCH_HEAD, no hook, no configured command
     and no object mtime change (the one disclosed mtime refresh comes from the scratch's object
-    writes through the shared store, never from these reads; see _scratch_checkout)."""
+    writes through the shared store, never from these reads; see _scratch_checkout). The git
+    run here is _git's pinned program (see _git_program), so a git that a PATH entry such as
+    /proc/self/cwd names in the author's worktree never runs here."""
     env = dict(GIT_NO_LAZY_FETCH="1")
     env.update(extra_env or dict())
     return _git(cwd, *(_AUTHOR_GIT_CONFIG + args), extra_env=env, timeout=timeout, ok=ok)
@@ -684,66 +713,201 @@ def _git_author_text(cwd, *args, **kw):
     return _git_author(cwd, *args, **kw)[1].decode("utf-8", "replace").strip()
 
 
+def _inside(path, base):
+    """Whether the realpath path is the realpath base or lies below it (a base of "/" holds every
+    path, which a plain base + os.sep prefix test would miss)."""
+    return path == base or path.startswith(base.rstrip(os.sep) + os.sep)
+
+
+def _confinement_refusal(head, launch, real, confine):
+    """The refusal naming head when the realpath it execs, or the directory its launch path
+    names, lies inside any directory in confine (each compared by realpath), else None; a
+    confined directory whose realpath cannot be read refuses too (fail closed). The launch
+    directory counts as well as the file: a program can read its own location from argv[0] (a
+    venv interpreter reads the pyvenv.cfg beside it, and site then runs the .pth files in that
+    venv's site-packages, even under -I), so a launch path inside a confined directory runs
+    content from there even when the file it execs lies outside."""
+    for base in confine:
+        try:
+            base_real = os.path.realpath(str(base))
+        except OSError as exc:
+            return ("program %r cannot be confined, so the launch is refused: the realpath of "
+                    "%r cannot be read (%s)" % (head, str(base), exc))
+        for what, path in (("realpath", real), ("launch directory", os.path.dirname(launch))):
+            if _inside(path, base_real):
+                return ("program %r resolves to repository or checkout content, which never "
+                        "runs as a configured program head or as git, so the launch is "
+                        "refused: its %s %r lies inside %r" % (head, what, path, base_real))
+    return None
+
+
+def _launch_refusal(head, launch, real, confine):
+    """The refusal naming head, else None, checked at EVERY launch of a resolved program: the
+    realpath of its launch path is read AGAIN and must still be the realpath that was checked
+    (so the file argv[0] names is the very file exec-ed, and a launch path re-pointed at
+    another program since the check is refused, never launched beside the checked file), and
+    neither that realpath nor the launch directory may lie inside a directory in confine (see
+    _confinement_refusal)."""
+    again = os.path.realpath(launch)
+    if again != real:
+        return ("program %r is refused: its launch path %r now resolves to %r, not to the "
+                "realpath %r it was checked at" % (head, launch, again, real))
+    return _confinement_refusal(head, launch, real, confine)
+
+
 def _resolve_program(head, env, confine):
-    """The absolute executable REALPATH _run_external launches for a command head, or (None,
-    reason) refusing the launch by name: an absolute head is
-    taken as given; a bare head is resolved through shutil.which against the SANITIZED PATH of
-    env (see _clean_env; an empty sanitized PATH and an unresolvable head are refused, never
-    handed to the child's own PATH walk); any other head (a relative path) is refused outright.
-    The candidate's os.path.realpath must be an executable regular file lying OUTSIDE every
-    directory in confine (the child working directory, plus the repository worktrees at the
-    config-command call sites), each compared by realpath, so a /proc/self/cwd PATH entry, a
-    symlink alias and every other absolute alias of checkout content are refused before
-    anything runs. The child is then launched with that resolved ABSOLUTE path as argv[0]: it
-    never repeats the PATH walk, so a PATH entry that resolves differently after the child's
-    chdir (cwd-relative content through /proc/self/cwd) can name nothing there. Resolution
-    happens in THIS process at launch time; a file swapped between this check and the exec is
-    the accepted time-of-check residual of any path-based rule."""
+    """(launch path, realpath, None) for a program head, or (None, None, reason) refusing the
+    launch by name. The CANDIDATE is an absolute head exactly as given or, for a bare head, the
+    first match shutil.which finds on the SANITIZED PATH of env (see _clean_env; an empty
+    sanitized PATH and an unresolvable head are refused, never handed to the child's own PATH
+    walk); any other head (a relative path) is refused outright. The candidate's realpath must
+    be an executable regular file, and neither it nor the candidate's directory, by realpath,
+    may lie inside a directory in confine (see _confinement_refusal), so a /proc/self/cwd PATH
+    entry, a symlink alias and every other absolute alias of confined content are refused
+    before anything runs. The LAUNCH path is the candidate with its directory resolved and its
+    final name kept, and its realpath is read again and must be the checked realpath (see
+    _launch_refusal); the funnels start the child with it as argv[0] and with the checked
+    realpath as the file to exec (subprocess executable=). The program therefore keeps the
+    identity its candidate path gives it (a venv's bin/python3 still finds its pyvenv.cfg; a
+    tool that dispatches on argv[0] still sees its own name), while the child repeats no PATH
+    walk and resolves no cwd-relative alias: /proc/self/cwd names the CHILD's working directory
+    once the child has changed into it, so launching the unresolved candidate would run content
+    from there, and no later PATH entry can substitute another program. Resolution happens in
+    THIS process at launch time; a file swapped between this check and the exec is the accepted
+    time-of-check residual of any path-based rule."""
     if os.path.isabs(head):
         candidate = head
     elif "/" in head or "\\" in head:
-        return None, ("program %r is a relative path, neither a bare name nor an absolute "
-                      "path, so it is refused unresolved (fail closed)" % head)
+        return None, None, ("program %r is a relative path, neither a bare name nor an absolute "
+                            "path, so it is refused unresolved (fail closed)" % head)
     else:
         path_value = env.get("PATH", "")
         if not path_value:
-            return None, ("program %r cannot be resolved: the sanitized PATH is empty (every "
-                          "caller PATH entry was empty, dot or otherwise relative)" % head)
+            return None, None, ("program %r cannot be resolved: the sanitized PATH is empty "
+                                "(every caller PATH entry was empty, dot or otherwise relative)"
+                                % head)
         candidate = shutil.which(head, path=path_value)
         if candidate is None:
-            return None, ("program %r cannot be resolved to an executable on the sanitized "
-                          "PATH" % head)
+            return None, None, ("program %r cannot be resolved to an executable on the "
+                                "sanitized PATH" % head)
     real = os.path.realpath(candidate)
     if not os.path.isfile(real) or not os.access(real, os.X_OK):
-        return None, ("program %r resolves to %r, which is not an executable regular file, "
-                      "so the launch is refused" % (head, real))
-    for base in confine:
-        base_real = os.path.realpath(str(base))
-        if real == base_real or real.startswith(base_real + os.sep):
-            return None, ("program %r resolves to checkout or worktree content, which never "
-                          "runs as a configured program head, so the launch is refused: "
-                          "realpath %r lies inside %r" % (head, real, base_real))
-    return real, None
+        return None, None, ("program %r resolves to %r, which is not an executable regular "
+                            "file, so the launch is refused" % (head, real))
+    launch = os.path.join(os.path.realpath(os.path.dirname(candidate)),
+                          os.path.basename(candidate))
+    refusal = _launch_refusal(head, launch, real, confine)
+    if refusal is not None:
+        return None, None, refusal
+    return launch, real, None
+
+
+# The git program every git launch runs, [launch path, realpath] once resolved (see _git_program).
+_GIT_PROGRAM = []
+
+
+def _git_program(confine):
+    """(launch path, realpath, None) of the ONE git every git launch runs, or (None, None,
+    reason). It is resolved ONCE, at the first call, through _resolve_program with confine as
+    the confined directories (the same sanitized PATH walk, realpath and launch-directory
+    containment, and refusal by name every configured command head gets), then reused
+    unchanged: no git child repeats a PATH walk or resolves a cwd-relative alias, so a git that
+    a PATH entry such as /proc/self/cwd names in a child's working directory never runs. Every
+    call reads the pinned launch path's realpath again (it must still be the pinned realpath)
+    and re-checks both pinned paths against its own confine (see _launch_refusal): _git passes
+    each launch's working directory (the author's worktrees, the private base repository and
+    every private checkout among them), and run_train passes every repository directory it
+    learns. run_train resolves a fresh pin for its run before the run's first git launch and
+    restores the caller's on exit; outside a run (the self-test fixtures) the first git launch
+    resolves it. Outside these funnels, the self-test's locale probe (_native_probe) and its
+    fake gh run git by name."""
+    if not _GIT_PROGRAM:
+        launch, real, refusal = _resolve_program("git", _clean_env(), confine)
+        if launch is None:
+            return None, None, refusal
+        _GIT_PROGRAM[:] = [launch, real]
+    launch, real = _GIT_PROGRAM
+    refusal = _launch_refusal("git", launch, real, confine)
+    if refusal is not None:
+        return None, None, refusal
+    return launch, real, None
+
+
+def _first_line(path):
+    """The first line of a small text file, stripped, or "" when it cannot be read or decoded."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.readline().strip()
+    except (OSError, ValueError):
+        return ""
+
+
+def _repository_dirs_on_disk(repo):
+    """The repository directories around repo, read from the filesystem WITHOUT launching git
+    (run_train resolves git before its first launch, so git cannot be asked yet): from repo's
+    realpath up to the first directory holding a .git entry, that worktree; its git directory
+    (the .git directory, or the one a "gitdir:" file names); the common directory its commondir
+    file names (else the git directory) and, when that is named .git, its parent, the main
+    worktree; and every linked worktree the common directory records (worktrees/<id>/gitdir
+    names <worktree>/.git). An over-approximation used only to confine git's resolution: an
+    absent, unreadable or malformed record adds nothing. run_train re-checks the pinned git
+    against the worktrees git itself lists before any later launch, so a git inside a layout
+    this walk does not model (a core.worktree setting, for one) is refused only after the
+    three discovery reads (rev-parse --show-toplevel, rev-parse --git-common-dir and worktree
+    list) have run it."""
+    try:
+        here = os.path.realpath(str(repo))
+    except OSError:
+        return []
+    while not os.path.lexists(os.path.join(here, ".git")):
+        if os.path.dirname(here) == here:
+            return []
+        here = os.path.dirname(here)
+    found = [here]
+    git_dir = os.path.join(here, ".git")
+    if not os.path.isdir(git_dir):
+        line = _first_line(git_dir)
+        if not line.startswith("gitdir:"):
+            return found
+        git_dir = os.path.join(here, line[len("gitdir:"):].strip())
+    common = os.path.normpath(os.path.join(
+        git_dir, _first_line(os.path.join(git_dir, "commondir")) or "."))
+    found += [git_dir, common]
+    if os.path.basename(common) == ".git":
+        found.append(os.path.dirname(common))
+    records = os.path.join(common, "worktrees")
+    try:
+        names = sorted(os.listdir(records))
+    except OSError:
+        names = []
+    for name in names:
+        line = _first_line(os.path.join(records, name, "gitdir"))
+        if line:
+            found.append(os.path.dirname(os.path.join(records, name, line)))
+    return found
 
 
 def _run_external(argv, cwd, timeout, extra_env=None, confine=()):
     """Launch a non-git program named by the trusted config, or the gh CLI: an argv list, no shell, a
     timeout. Returns (returncode, or None on a refusal, a timeout or a launch error, stdout
-    text, stderr text). Before anything runs, the program HEAD is resolved to an absolute
-    executable realpath (shutil.which against the sanitized PATH, or the given absolute path)
-    and refused, by name, when the sanitized PATH is empty, when the head cannot be resolved,
-    or when the resolved realpath lies inside the child working directory or a directory in
-    confine (the repository worktrees at the config-command call sites); the child is launched
-    with the resolved absolute path, never the bare name (the tree-based head refusals in
-    guard_config_fail_closed stay in place as the first layer).
-    See _resolve_program."""
+    text, stderr text). Before anything runs, the program HEAD is resolved (shutil.which
+    against the sanitized PATH, or the given absolute path) and refused, by name, when the
+    sanitized PATH is empty, when the head cannot be resolved, when its launch path does not
+    resolve to the realpath checked, or when its realpath or its launch directory lies inside
+    the child working directory or a directory in confine (at the config-command and gh call
+    sites, every repository directory of the run: the toplevel, the common git directory,
+    every worktree git lists and the private base repository); the child is launched with the
+    resolved absolute launch path as argv[0] and the checked realpath as the file it execs,
+    never the bare name (the tree-based head refusals in guard_config_fail_closed stay in place
+    as the first layer). See _resolve_program."""
     env = _clean_env(extra_env)
     dirs = [str(cwd)] + [str(entry) for entry in confine if entry]
-    resolved, refusal = _resolve_program(argv[0], env, dirs)
-    if resolved is None:
+    launch, real, refusal = _resolve_program(argv[0], env, dirs)
+    if launch is None:
         return None, "", refusal
     try:
-        proc = _run_child([resolved] + list(argv[1:]), cwd=str(cwd), env=env, timeout=timeout)
+        proc = _run_child([launch] + list(argv[1:]), cwd=str(cwd), env=env, timeout=timeout,
+                          executable=real)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, "", str(exc)
     return (proc.returncode, proc.stdout.decode("utf-8", "replace"),
@@ -847,20 +1011,21 @@ def guard_config_fail_closed(data, tree=None, head_tree=None):
             # guard; what the guard adds over that trust is that a head is never a path, that
             # with the base tip tree given (load_config always gives it; the guarantee needs
             # the tree) a head never names a base tip tree ENTRY, regular file or symlink,
-            # compared case-insensitively, and that _run_external resolves every head to an
-            # absolute executable realpath BEFORE the launch (shutil.which against the
-            # sanitized PATH _clean_env rebuilt with every cwd-relative entry removed) and
-            # refuses, by name, an empty sanitized PATH, an unresolvable head and a resolved
-            # realpath inside the private checkout or ANY repository directory of the run
-            # (the toplevel, the common git directory, every worktree git lists, each PR's
-            # and not only the one being processed, and the private base repository), then
-            # launches the resolved absolute path, never the bare name (a /proc/self/cwd PATH
-            # entry and every other absolute alias of that content fail the realpath
-            # containment, and the child repeats no PATH walk), so checkout and worktree
-            # content (tools/gen.py, ./python3, tools/python3, a committed python3 or a
-            # committed symlink, content a PR adds that any PATH entry would resolve in the
-            # scratch checkout, and a program in another PR's worktree) never runs as a
-            # configured program head.
+            # compared case-insensitively, and that _run_external resolves every head BEFORE
+            # the launch (shutil.which against the sanitized PATH _clean_env rebuilt with
+            # every cwd-relative entry removed) and refuses, by name, an empty sanitized PATH,
+            # an unresolvable head, a head whose launch path no longer resolves to the
+            # realpath checked, and a head whose realpath or launch directory lies inside
+            # the private checkout or ANY repository directory of the run (the toplevel, the
+            # common git directory, every worktree git lists, each PR's and not only the one
+            # being processed, and the private base repository), then launches the resolved
+            # absolute launch path with its checked realpath as the file exec-ed, never the
+            # bare name (a /proc/self/cwd PATH entry and every other absolute alias of that
+            # content fail the containment, and the child repeats no PATH walk), so checkout
+            # and worktree content (tools/gen.py, ./python3, tools/python3, a committed
+            # python3 or a committed symlink, content a PR adds that any PATH entry would
+            # resolve in the scratch checkout, a program in another PR's worktree, and a venv
+            # there) never runs as a configured program head.
             head = command[0]
             if "/" in head or "\\" in head:
                 # A PATH-form head (absolute, ./-prefixed or
@@ -1862,8 +2027,26 @@ def _base_fetch(root, run_dir, remote, base):
 
 
 def run_train(root, apply=False, only=None):
-    """The whole run under the global lock. Returns (exit code, reports, fatal message or None)."""
+    """The whole run under the global lock. Returns (exit code, reports, fatal message or None).
+    The run resolves its own git (see _git_program) before its first git launch and restores
+    the caller's pin on exit."""
+    saved_git = list(_GIT_PROGRAM)
+    del _GIT_PROGRAM[:]
+    try:
+        return _run_train(root, apply, only)
+    finally:
+        _GIT_PROGRAM[:] = saved_git
+
+
+def _run_train(root, apply, only):
     reports = []
+    # git is resolved BEFORE its first launch, confined to root and every repository
+    # directory the filesystem records around it (git cannot be asked yet; see
+    # _repository_dirs_on_disk), and checked again against every worktree git itself lists
+    # before any later launch.
+    refusal = _git_program([root] + _repository_dirs_on_disk(root))[2]
+    if refusal is not None:
+        return 2, reports, "git refused before any git launch: %s" % refusal
     try:
         top = _git_author_text(root, "rev-parse", "--show-toplevel")
         common = _git_author_text(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -1875,6 +2058,10 @@ def run_train(root, apply=False, only=None):
         trees = _worktrees(top)
     except Refuse as exc:
         return 2, reports, "%s: %s" % (exc.status, exc.reason)
+    repo_dirs = [top, common] + [t["path"] for t in trees]
+    refusal = _git_program(repo_dirs)[2]
+    if refusal is not None:
+        return 2, reports, "git refused after discovery: %s" % refusal
     with open(os.path.join(common, LOCK_NAME), "a+") as lock:
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1895,8 +2082,7 @@ def run_train(root, apply=False, only=None):
             for signum in sorted(UNWIND_SIGNALS - {signal.SIGINT}):
                 if signal.getsignal(signum) != signal.SIG_IGN:
                     previous[signum] = signal.signal(signum, _to_exception)
-            return _run_locked(Path(top), [top, common] + [t["path"] for t in trees], trees,
-                               apply, only or set(), reports)
+            return _run_locked(Path(top), repo_dirs, trees, apply, only or set(), reports)
         finally:
             for signum, handler in previous.items():
                 signal.signal(signum, handler)
@@ -2991,7 +3177,8 @@ def case_pathenv(tmp):
     plain.chmod(0o644)
     started = []
 
-    def _start_recording_child(argv, cwd=None, env=None, timeout=None, push=False):
+    def _start_recording_child(argv, cwd=None, env=None, timeout=None, push=False,
+                               executable=None):
         started.append(list(argv))
         return subprocess.CompletedProcess(list(argv), 0, b"", b"")
 
@@ -3005,16 +3192,16 @@ def case_pathenv(tmp):
     finally:
         globals()["_run_child"] = saved_child
     check("config/non-executable-head-refused", (refused, started), ([(None, True)] * 2, []))
-    # The accepted boundary (a compatibility check, never red-on-revert evidence): a head
-    # resolved OUTSIDE the confined directories launches as the resolved ABSOLUTE realpath
-    # (the symlink followed), never the bare name, observed through a recording child.
+    # A head resolved OUTSIDE the confined directories launches by an absolute path, never the
+    # bare name, observed through a recording child that also records the file exec-ed.
     outside = Path(tmp) / "outside-bin"
     outside.mkdir()
     os.symlink(sys.executable, outside / "python3")
     launched = []
 
-    def _argv_recording_child(argv, cwd=None, env=None, timeout=None, push=False):
-        launched.append(list(argv))
+    def _argv_recording_child(argv, cwd=None, env=None, timeout=None, push=False,
+                              executable=None):
+        launched.append((list(argv), executable))
         return subprocess.CompletedProcess(list(argv), 0, b"", b"")
 
     saved_child = globals()["_run_child"]
@@ -3026,8 +3213,40 @@ def case_pathenv(tmp):
         globals()["_run_child"] = saved_child
         _restore_env(saved_path)
     check("config/resolved-head-launched-absolute",
-          (code, [a[0] for a in launched], launched[0][1:] if launched else None),
-          (0, [os.path.realpath(sys.executable)], ["--version"]))
+          (code, [os.path.isabs(argv[0]) for argv, _exe in launched],
+           launched[0][0][1:] if launched else None),
+          (0, [True], ["--version"]))
+    # The launch keeps the CANDIDATE's identity: argv[0] is the PATH match with its directory
+    # resolved and its own name kept (here a symlink to the interpreter), and the file the
+    # child execs is the checked realpath. Red while the realpath itself was argv[0].
+    check("config/resolved-head-launched-as-candidate",
+          [(argv[0], exe) for argv, exe in launched],
+          [(os.path.join(os.path.realpath(str(outside)), "python3"),
+            os.path.realpath(sys.executable))])
+    # Observed end to end: a venv interpreter found on PATH keeps its venv, because argv[0]
+    # names the venv's bin/python3 and the interpreter finds the pyvenv.cfg beside it (the
+    # child reports sys.prefix as the venv). Red while the realpath was launched: the child
+    # then reported the base installation.
+    venv = Path(tmp) / "outside-venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text(
+        "home = %s\n" % os.path.dirname(os.path.realpath(sys.executable)), encoding="utf-8")
+    os.symlink(sys.executable, venv / "bin" / "python3")
+    saved_path = _put_env(dict(PATH=str(venv / "bin")))
+    try:
+        code, out, _err = _run_external(
+            ["python3", "-I", "-B", "-c",
+             "import sys; print(sys.prefix != sys.base_prefix); print(sys.prefix)"],
+            unit_dir, 30)
+    finally:
+        _restore_env(saved_path)
+    check("config/venv-interpreter-keeps-identity", (code, out.splitlines()),
+          (0, ["True", os.path.realpath(str(venv))]))
+    # A confined directory of "/" holds every path (a plain base + os.sep prefix test would
+    # match nothing below it), so every head is refused by name.
+    code, _out, err = _run_external([sys.executable, "--version"], unit_dir, 5, confine=("/",))
+    check("config/root-directory-confine-refuses-every-head",
+          (code, "lies inside '/'" in err), (None, True))
     # End to end, each red at the pin with the impostor's
     # sentinel written: an absolute PATH entry naming a checkout directory (the PR worktree,
     # which carries the committed impostor), a /proc/self/cwd entry (an absolute alias of
@@ -3070,6 +3289,31 @@ def case_pathenv(tmp):
               (rc, _result(reports, 1), sentinel.exists(),
                "never runs as a configured program head" in reason),
               (1, "regenerate-failed", False, True))
+    # The launch DIRECTORY is confined as well as the file exec-ed: a venv inside the PR
+    # worktree whose bin/python3 is a symlink to an interpreter OUTSIDE it would, launched
+    # under its own name, read that venv's pyvenv.cfg and run the .pth files in its
+    # site-packages (worktree content, even under -I; the .pth here records that it ran), so
+    # the head is refused by name.
+    sentinel = Path(tmp) / "checkout-venv-pth-ran"
+    fx = _fixture(tmp, "checkout-venv-impostor")
+    fixtures.append(fx)
+    venv_in = Path(_stale_pr(fx)) / "venv"
+    (venv_in / "bin").mkdir(parents=True)
+    (venv_in / "pyvenv.cfg").write_text(
+        "home = %s\n" % os.path.dirname(os.path.realpath(sys.executable)), encoding="utf-8")
+    os.symlink(sys.executable, venv_in / "bin" / "python3")
+    purelib = Path(sysconfig.get_path("purelib", scheme="venv",
+                                      vars=dict(base=str(venv_in), platbase=str(venv_in))))
+    purelib.mkdir(parents=True)
+    (purelib / "probe.pth").write_text("import os; open(%r, 'w').close()\n" % str(sentinel),
+                                       encoding="utf-8")
+    os.remove(fx.bin / "python3")
+    fx.path = str(venv_in / "bin") + os.pathsep + fx.path
+    rc, reports, _fatal = fx.run()
+    check("config/checkout-venv-directory-head-refused",
+          (rc, _result(reports, 1), sentinel.exists(),
+           "launch directory" in _reason(reports, 1)),
+          (1, "regenerate-failed", False, True))
     # Every repository directory of the run is confined, never only the toplevel and the
     # worktree of the PR being processed: with a PATH entry naming ANOTHER PR's worktree,
     # whose python3 records that it ran, processing PR 1 refuses the configured head by name.
@@ -3129,6 +3373,162 @@ def case_pathenv(tmp):
           (rc, _result(reports, 1), sentinel.exists(), "lies inside" in _reason(reports, 1)),
           (1, "regenerate-failed", False, True))
     check("config/path-entries-invariants", _invariants(*fixtures), [])
+
+
+def case_gitpin(tmp):
+    # git itself is resolved ONCE through _resolve_program (see _git_program) and launched by
+    # that absolute launch path with its checked realpath as the file it execs: no git child
+    # repeats a PATH walk, so a git that a PATH entry names in a child's working directory
+    # never runs, and a git that resolves into a repository directory is refused by name
+    # before the run's first git launch. Each decoy records into its sentinel that it ran and
+    # then hands its argv to the real git, so a run through it would otherwise look normal.
+    # Every vector here (the invariants aside) is red at the pin, where _git launched the bare
+    # name git and nothing resolved or checked git itself.
+    real_git = shutil.which("git")
+    fixtures = []
+
+    def decoy(directory, sentinel):
+        path = Path(directory) / "git"
+        path.write_text("#!/bin/sh\n: > '%s'\nexec '%s' \"$@\"\n" % (sentinel, real_git),
+                        encoding="utf-8")
+        path.chmod(0o755)
+
+    empty = Path(tmp) / "gitpin-empty-cwd"
+    empty.mkdir()
+    fx = _fixture(tmp, "gitpin-author-decoy")
+    fixtures.append(fx)
+    wt = _stale_pr(fx)
+    sentinel = Path(tmp) / "gitpin-author-decoy-ran"
+    decoy(wt, sentinel)
+    decoy(fx.main, sentinel)
+    # The author-side funnel itself: with /proc/self/cwd first on PATH and a decoy git in the
+    # author's worktree, the branch-name read runs the pinned git, never the decoy the child's
+    # working directory holds.
+    saved_path = _put_env(dict(PATH="/proc/self/cwd" + os.pathsep
+                               + os.environ.get("PATH", os.defpath)))
+    try:
+        code = _git_author(wt, "check-ref-format", "--branch", "feat/x", ok=None)[0]
+    finally:
+        _restore_env(saved_path)
+    check("git/author-funnel-proc-self-cwd-decoy-never-runs", (code, sentinel.exists()),
+          (0, False))
+    # A whole dry run with that PATH, started from an empty directory: the run resolves git
+    # there (/proc/self/cwd holds none) to a program outside the repository, and every launch,
+    # in the author's worktrees included, runs that absolute path, so no decoy runs.
+    fx.path = "/proc/self/cwd" + os.pathsep + fx.path
+    cwd_before = os.getcwd()
+    try:
+        os.chdir(str(empty))
+        rc, reports, _fatal = fx.run()
+    finally:
+        os.chdir(cwd_before)
+    check("git/proc-self-cwd-decoy-in-author-worktree-never-runs",
+          (rc, _result(reports, 1), sentinel.exists()), (0, "would-merge", False))
+    # Started from INSIDE the author's main worktree, the same PATH resolves git to the decoy
+    # there; its realpath lies inside the repository, so the run refuses git by name before
+    # its first git launch.
+    try:
+        os.chdir(str(fx.main))
+        rc, reports, fatal = fx.run()
+    finally:
+        os.chdir(cwd_before)
+    check("git/proc-self-cwd-resolving-into-author-worktree-refused",
+          (rc, reports, sentinel.exists(), "lies inside" in (fatal or "")),
+          (2, [], False, True))
+    # A PATH entry naming ANOTHER PR's worktree that holds a decoy git: the filesystem walk
+    # around the repository (run before any git launch) lists that worktree, so the run
+    # refuses git by name before its first launch.
+    fx2 = _fixture(tmp, "gitpin-sibling-decoy")
+    fixtures.append(fx2)
+    _stale_pr(fx2)
+    sibling = Path(fx2.add_pr(2, "feat/y", dict([("src/d.txt", "delta\n")])))
+    sentinel2 = Path(tmp) / "gitpin-sibling-decoy-ran"
+    decoy(sibling, sentinel2)
+    fx2.path = str(sibling) + os.pathsep + fx2.path
+    rc, reports, fatal = fx2.run()
+    check("git/sibling-worktree-path-entry-git-refused",
+          (rc, reports, sentinel2.exists(),
+           "before any git launch" in (fatal or "") and "lies inside" in (fatal or "")),
+          (2, [], False, True))
+    # The walk is an over-approximation, and the worktree list git itself reports is checked
+    # again before any later launch: with the walk blinded, the same run still refuses git by
+    # name once that list names the other worktree (the decoy has then run for the discovery
+    # reads, the disclosed residual of a layout the walk does not model).
+    real_walk = globals()["_repository_dirs_on_disk"]
+    globals()["_repository_dirs_on_disk"] = lambda _repo: []
+    try:
+        rc, reports, fatal = fx2.run()
+    finally:
+        globals()["_repository_dirs_on_disk"] = real_walk
+    check("git/worktree-list-recheck-refuses-unwalked-git",
+          (rc, reports, "after discovery" in (fatal or "") and "lies inside" in (fatal or "")),
+          (2, [], True))
+    # A run whose working directory no longer exists (with a relative root) refuses git by
+    # name instead of raising: the confinement cannot read that directory's realpath.
+    gone = Path(tmp) / "gitpin-gone-cwd"
+    gone.mkdir()
+    try:
+        os.chdir(str(gone))
+        gone.rmdir()
+        try:
+            rc, reports, fatal = run_train(".")
+        except OSError as exc:
+            rc, reports, fatal = "raised", [], str(exc)
+    finally:
+        os.chdir(cwd_before)
+    check("git/deleted-working-directory-refused",
+          (rc, reports, "cannot be confined" in (fatal or "")), (2, [], True))
+    # Every git launch re-checks the pinned paths against ITS OWN working directory (the
+    # private base repository and each private checkout among them): a launch whose working
+    # directory holds the pinned git refuses it by name as git-failed, while a launch from
+    # elsewhere runs it. Red while only the run's repository directories confined git.
+    holder = Path(tmp) / "gitpin-holder"
+    (holder / "bin").mkdir(parents=True)
+    os.symlink(real_git, holder / "bin" / "git")
+    saved_pin = list(_GIT_PROGRAM)
+    del _GIT_PROGRAM[:]
+    saved_path = _put_env(dict(PATH=str(holder / "bin")))
+    try:
+        outside_code = _git(empty, "version", ok=None)[0]
+        try:
+            inside = (_git(holder, "version", ok=None)[0], "")
+        except Refuse as exc:
+            inside = (exc.status, exc.reason)
+    finally:
+        _restore_env(saved_path)
+        _GIT_PROGRAM[:] = saved_pin
+    check("git/launch-directory-holding-pinned-git-refused",
+          (outside_code, inside[0], "lies inside" in inside[1]), (0, "git-failed", True))
+    # The realpath is read again at EVERY git launch: with the pin taken through a launch path
+    # that is a symlink, re-pointing that symlink at a decoy afterwards refuses the next launch
+    # as git-failed, naming the change, and the decoy never runs. Red while each launch only
+    # re-checked the pinned paths for containment: the launch then went ahead with argv[0]
+    # naming the decoy and the pinned file exec-ed beside it.
+    swap_bin = Path(tmp) / "gitpin-swap-bin"
+    swap_bin.mkdir()
+    os.symlink(real_git, swap_bin / "git")
+    swap_decoy = Path(tmp) / "gitpin-swap-decoy"
+    swap_decoy.mkdir()
+    swap_sentinel = Path(tmp) / "gitpin-swap-decoy-ran"
+    decoy(swap_decoy, swap_sentinel)
+    saved_pin = list(_GIT_PROGRAM)
+    del _GIT_PROGRAM[:]
+    saved_path = _put_env(dict(PATH=str(swap_bin)))
+    try:
+        first = _git(empty, "version", ok=None)[0]
+        os.remove(swap_bin / "git")
+        os.symlink(str(swap_decoy / "git"), swap_bin / "git")
+        try:
+            second = (_git(empty, "version", ok=None)[0], "")
+        except Refuse as exc:
+            second = (exc.status, exc.reason)
+    finally:
+        _restore_env(saved_path)
+        _GIT_PROGRAM[:] = saved_pin
+    check("git/pinned-launch-path-realpath-rechecked",
+          (first, second[0], "now resolves to" in second[1], swap_sentinel.exists()),
+          (0, "git-failed", True, False))
+    check("git/pin-invariants", _invariants(*fixtures), [])
 
 
 def case_dry(tmp):
@@ -3341,7 +3741,7 @@ def case_badname(tmp):
     check("refuse/bad-branch-name-invariants", _invariants(fx), [])
 
 
-def case_audit(_tmp):
+def case_audit(tmp):
     # Pure predicate checks over forbidden and allowed argv forms: no tool run, no real git call
     # (the funnel probe at the end records argv through a replaced _run_child and launches
     # nothing). Both predicates must refuse every forbidden form and accept the one lease shape,
@@ -3523,22 +3923,27 @@ def case_audit(_tmp):
           [a for a in probes if _forbidden(a) != _audit_violation(a)], [])
     # The maintenance-pin scan cannot resolve _run_child's head and relies on
     # the _SCAN_ALLOWED_UNPINNED justification in tools/selftest_git_fixture_env.py; this check
-    # goes red if the pin-bearing _git funnel stops handing _run_child the three maintenance
-    # pins in option position. No child is launched: _run_child is replaced by a recorder.
+    # goes red if the pin-bearing _git funnel stops handing _run_child the pinned git's
+    # absolute launch path and the three maintenance pins in option position. No child is
+    # launched: _run_child is replaced by a recorder. The probes here run in the case's own
+    # temp directory, never the caller's working directory: a working directory that holds
+    # the pinned git (an ancestor of the temp tree the fixture git wrapper lives in) refuses
+    # it by name (see _git_program).
     recorded = []
 
-    def _recording_child(argv, cwd=None, env=None, timeout=None, push=False):
+    def _recording_child(argv, cwd=None, env=None, timeout=None, push=False, executable=None):
         recorded.append(list(argv))
         return subprocess.CompletedProcess(list(argv), 0, b"", b"")
 
     saved_child = globals()["_run_child"]
     globals()["_run_child"] = _recording_child
     try:
-        _git(".", "version")
+        _git(tmp, "version")
     finally:
         globals()["_run_child"] = saved_child
     check("audit/pinned-git-funnel-prefix", recorded[0][:7] if recorded else [],
-          ["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"])
+          [(_GIT_PROGRAM or ["(no pinned git)"])[0], "-c", "gc.auto=0", "-c",
+           "gc.autoDetach=false", "-c", "maintenance.auto=false"])
 
     # Every child EITHER funnel launches runs under
     # LC_ALL=C with LANGUAGE unset (see _clean_env), so a git whose message catalogs would
@@ -3550,17 +3955,17 @@ def case_audit(_tmp):
     # _run_external.
     recorded_env = []
 
-    def _env_recording_child(argv, cwd=None, env=None, timeout=None, push=False):
+    def _env_recording_child(argv, cwd=None, env=None, timeout=None, push=False, executable=None):
         recorded_env.append(dict(env or dict()))
         return subprocess.CompletedProcess(list(argv), 0, b"", b"")
 
     saved_locale = _put_env(_NON_C_LOCALE)
     globals()["_run_child"] = _env_recording_child
     try:
-        _git(".", "version")
+        _git(tmp, "version")
         # The probe head must RESOLVE (an absolute executable outside the cwd): _run_external
         # refuses an unresolvable head before reaching the recording child.
-        _run_external([sys.executable, "--version"], ".", 1)
+        _run_external([sys.executable, "--version"], tmp, 1)
     finally:
         globals()["_run_child"] = saved_child
         _restore_env(saved_locale)
@@ -3696,14 +4101,15 @@ def _mergefault_run(tmp, name, fault, apply, clean=False, env=None, leak=None,
     del _FAULT_STDERR[:]
     observed = _merge_env_wrapper(fx, tmp)
 
-    def leaking_child(argv, cwd=None, env=None, timeout=None, push=False):
+    def leaking_child(argv, cwd=None, env=None, timeout=None, push=False, executable=None):
         # leak lands at the _run_child boundary, AFTER _clean_env pinned env; the OBSERVATION
         # happens later still, in the exec-ed child itself (the recording wrapper), so even a
         # leak below this point would be observed.
         if in_merge and leak and not leak_inside:
             env = dict(env or dict())
             env.update(leak)
-        return real_child(argv, cwd=cwd, env=env, timeout=timeout, push=push)
+        return real_child(argv, cwd=cwd, env=env, timeout=timeout, push=push,
+                          executable=executable)
 
     real_popen = subprocess.Popen
 
@@ -6362,7 +6768,7 @@ def case_harness(tmp):
 
 CASES = dict([
     ("config", case_config), ("absent", case_absent), ("frombase", case_frombase),
-    ("pathenv", case_pathenv),
+    ("pathenv", case_pathenv), ("gitpin", case_gitpin),
     ("dry", case_dry), ("happy", case_happy), ("carry", case_carry), ("discover", case_discover),
     ("ambiguous", case_ambiguous_worktree), ("branch", case_branch), ("badname", case_badname),
     ("audit", case_audit), ("conflict", case_conflict), ("mergefault", case_mergefault),
