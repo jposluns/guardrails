@@ -880,9 +880,10 @@ def _held_ids(git, store_root, machine_rel, prefix, manifest, records, notes):
     archive/<bucket>/ at HEAD: the archive.toml moved ids and worklog_moved spans, the bucket worklog
     entries and the type-index rows. An id outside the clean grammar, the roster namespaces or TOML's
     integer range is no clean number a reservation can hold, so it is left out. Returns the table, or None
-    (+ note) when any of these cannot be read or an archive entry is not a bucket file; only `held` is then
-    omitted, so the exemption is cannot-evaluate and the rest of the prior stands. A span is kept as an
-    interval, never expanded (F15)."""
+    (+ note) when any of these cannot be read, is committed as another entry type (a worklog/ or archive/
+    that is a file, a worklog.toml that is a directory) or an archive entry is not a bucket file; only
+    `held` is then omitted, so the exemption is cannot-evaluate and the rest of the prior stands. A source
+    absent at HEAD holds nothing. A span is kept as an interval, never expanded (F15)."""
     import _opf_worklog
     ceiling = (1 << 63) - 1
     spans = []
@@ -914,6 +915,16 @@ def _held_ids(git, store_root, machine_rel, prefix, manifest, records, notes):
     top = _ls_tree(git, store_root, base, notes)
     if top is None:
         return None
+
+    # A source committed as another entry type (a worklog/ or archive/ that is a file, a worklog.toml that
+    # is a directory) is not absent: skipping it would leave `held` partial, so it omits `held` (+ note).
+    def mistyped(name, expected):
+        found = sorted({otype for otype, entry in top if entry == name and otype != expected})
+        if found:
+            notes.append("prior: HEAD {} is a {}, not a {}; {}".format(
+                name, " and a ".join(found), expected, _HELD_OMITTED))
+        return bool(found)
+
     try:
         generation = _opf_worklog.generation(manifest)
     except _opf_worklog.WorklogError as exc:
@@ -921,6 +932,8 @@ def _held_ids(git, store_root, machine_rel, prefix, manifest, records, notes):
             exc, _HELD_OMITTED))
         return None
     if generation == 2:
+        if mistyped(_opf_worklog.DIRECTORY_NAME, "tree"):
+            return None
         if ("tree", _opf_worklog.DIRECTORY_NAME) in top:
             listing = _ls_tree(git, store_root, base + "/" + _opf_worklog.DIRECTORY_NAME, notes)
             if listing is None:
@@ -932,6 +945,8 @@ def _held_ids(git, store_root, machine_rel, prefix, manifest, records, notes):
                         name, _HELD_OMITTED))
                     return None
                 add("WL", ref[0], ref[0])
+    elif mistyped(_WORKLOG_NAME, "blob"):
+        return None
     elif ("blob", _WORKLOG_NAME) in top:
         data = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, _WORKLOG_NAME), _WORKLOG_NAME,
                           notes, _HELD_OMITTED)
@@ -940,6 +955,8 @@ def _held_ids(git, store_root, machine_rel, prefix, manifest, records, notes):
             return None
         for entry in entries:
             add_wl(entry.get("id"))
+    if mistyped(_opf_check.ARCHIVE_DIRNAME, "tree"):
+        return None
     if ("tree", _opf_check.ARCHIVE_DIRNAME) in top:
         listing = _ls_tree(git, store_root, base + "/" + _opf_check.ARCHIVE_DIRNAME, notes, recursive=True)
         if listing is None:
@@ -1184,8 +1201,9 @@ def self_test_isolated():
     file included, omitted alone with a note when an archive entry is not a bucket file, when a bucket file
     or the active worklog.toml does not parse or holds a row table that is not an array, when the active
     worklog.toml or the archive/ listing cannot be read, when the HEAD manifest's worklog generation is
-    unreadable, and, at generation 2, when the worklog/ listing cannot be read or holds a file that is not
-    a worklog entry. Judged ONLY on
+    unreadable, when the archive/, the active worklog.toml or, at generation 2, the worklog/ is committed as
+    another entry type, and, at generation 2, when the worklog/ listing cannot be read or holds a file or a
+    directory that is not a worklog entry. Judged ONLY on
     gather's RETURNED structure (never by grepping git's stdout for verdicts).
     Returns 0 clean, 1 on a failed check, 2 on a harness error. When git is not on PATH at all it SKIPs
     clean, like the POSIX-signal watchdogs, since every path depends on git."""
@@ -1454,15 +1472,17 @@ def self_test_isolated():
         # of the prior stands: an unparseable bucket file of each kind, a row table that is not an array in
         # each, an unparseable, non-array or unreadable active worklog.toml (its blob removed from the
         # object store, so git show fails), an archive/ that cannot be listed (its tree removed), a worklog
-        # generation the HEAD manifest does not declare readably, and, at generation 2, a worklog/ that
-        # cannot be listed or that holds a file that is not a worklog entry. Each case is the case-7 store
+        # generation the HEAD manifest does not declare readably, an archive, a worklog.toml or, at
+        # generation 2, a worklog committed as another entry type (the source removed and the other type
+        # written at its name), and, at generation 2, a worklog/ that cannot be listed or that holds a file,
+        # or a directory named as an entry, that is not a worklog entry. Each case is the case-7 store
         # (at generation 2, with worklog/ entries for WL-3 and WL-4 in place of worklog.toml) with that one
         # source changed; the unchanged store is the control, so a source skipped or read as empty instead of
         # omitted leaves a partial `held`.
         gen2_files = tuple((rel, body) for rel, body in held_files if rel != _WORKLOG_NAME) + (
             ("worklog/WL-3.toml", 'id = "WL-3"\n'), ("worklog/WL-4.toml", 'id = "WL-4"\n'))
 
-        def held_case(label, relpath=None, text=None, worklog=None):
+        def held_case(label, relpath=None, text=None, worklog=None, remove=None):
             repo = base / ("held-" + label)
             repo.mkdir()
             _git_setup(repo, home, "init")
@@ -1475,6 +1495,12 @@ def self_test_isolated():
                 (repo / machine_rel / _WORKLOG_NAME).unlink()
             for rel, body in gen2_files if worklog == 2 else held_files:
                 _write(repo, machine_rel + "/" + rel, body)
+            if remove is not None:
+                gone = repo / machine_rel / remove
+                if gone.is_dir():
+                    _shutil.rmtree(str(gone))
+                else:
+                    gone.unlink()
             if relpath is not None and text is not None:
                 _write(repo, machine_rel + "/" + relpath, text)
             _git_setup(repo, home, "add", "-A")
@@ -1503,8 +1529,22 @@ def self_test_isolated():
                  "prior: the HEAD manifest's worklog generation is unreadable"),
                 ("unlistable-worklog-directory", "worklog", None, 2, unlisted + "worklog (git ls-tree rc"),
                 ("non-entry-in-worklog-directory", "worklog/notes.txt", "x\n", 2,
-                 "prior: HEAD worklog/ holds 'notes.txt', not a worklog entry")):
+                 "prior: HEAD worklog/ holds 'notes.txt', not a worklog entry"),
+                ("entry-directory-in-worklog-directory", "worklog/WL-5.toml/WL-5.toml", 'id = "WL-5"\n', 2,
+                 "prior: HEAD worklog/ holds 'WL-5.toml', not a worklog entry")):
             obs, notes = held_case(label, relpath, text, worklog)
+            prior = obs.get("prior")
+            check("prior-held-omitted-" + label, isinstance(prior, dict) and "held" not in prior
+                  and prior.get("records", {}).get("BI-1") == ("backlog_item", "open")
+                  and any(needle in n and _HELD_OMITTED in n for n in notes))
+        for label, remove, relpath, text, worklog, needle in (
+                ("mistyped-archive", "archive", "archive", "x\n", None,
+                 "prior: HEAD archive is a blob, not a tree"),
+                ("mistyped-active-worklog", _WORKLOG_NAME, _WORKLOG_NAME + "/WL-3.toml", 'id = "WL-3"\n', None,
+                 "prior: HEAD worklog.toml is a tree, not a blob"),
+                ("mistyped-worklog-directory", "worklog", "worklog", "x\n", 2,
+                 "prior: HEAD worklog is a blob, not a tree")):
+            obs, notes = held_case(label, relpath, text, worklog, remove)
             prior = obs.get("prior")
             check("prior-held-omitted-" + label, isinstance(prior, dict) and "held" not in prior
                   and prior.get("records", {}).get("BI-1") == ("backlog_item", "open")
