@@ -1,0 +1,34 @@
+# .aiqt/core/adapter-blocks.toml: the ADAPTER BLOCK REGISTRY, a generated-input registry for
+# tools/gen_agents.py and tools/gen_adapters.py (hand-authored; reviewed). tools/_adapter_compose.py
+# validates it and composes each target from it; a missing or malformed registry, or a field of the
+# wrong type, is exit 2 in the generators. tools/conformance.py reads a malformed registry as MALFORMED
+# and an absent one as every target legacy (an install that predates this registry).
+#
+# Each [[target]] row names one of the three adapter files and its layout:
+#   legacy    the header and the AIQT-ordered rule bodies, exactly as before this registry existed;
+#   composed  the header, then marker-delimited blocks: the before-rules blocks by order, the AIQT-RULES
+#             block (fixed in code, never a row here), then the after-rules blocks by order.
+# A [[block]] row may name only a composed target. Its keys, all required:
+#   id        ^[A-Z][A-Z0-9]*(-[A-Z0-9]+)*$; the prefix "AIQT-" is reserved
+#   owner     "opf" (adopter blocks are refused until the ownership class of the target allows them)
+#   target    one of the [[target]] paths
+#   position  "before-rules" or "after-rules"
+#   order     a positive integer, unique per (target, position)
+#   source    a repo-relative regular file: UTF-8 with no CR, byte-order mark or NUL, ending in exactly
+#             one LF, with no leading or trailing blank line and no marker-like line
+# retired-blocks lists block ids a regeneration may erase from a composed target.
+
+format-version = 1
+retired-blocks = []
+
+[[target]]
+path = "AGENTS.md"
+layout = "legacy"
+
+[[target]]
+path = "GEMINI.md"
+layout = "legacy"
+
+[[target]]
+path = ".github/copilot-instructions.md"
+layout = "legacy"
