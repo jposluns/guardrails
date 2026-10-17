@@ -2987,7 +2987,8 @@ def _repeat(unit, size, tail=""):
 
 
 # The worst input shapes measured for the PreToolUse handlers on the pinned tree before this change (a
-# handler past the hook timeout on several of them), each built to about `size` bytes for a fixture
+# handler past the hook timeout on several of them), except heredoc_near_miss_lines, which was picked on
+# the merged tree (see heredoc_terminator below), each built to about `size` bytes for a fixture
 # directory `base`: (tool_name, tool_input). An *_after shape puts a real hazard after the long prefix,
 # so the handler's deny has to arrive within the bound as well.
 _DEADLINE_SHAPES = {
@@ -3039,7 +3040,8 @@ _DEADLINE_CASES = {
     "git_stash_ref": ("sep_semicolon", "cd_git_fetch_unbal", "nest_parens"),
     # heredoc_terminator allows a command with no << before it reads it, so its shapes are heredoc ones: many
     # closed heredocs, and one body of lines each a near miss of its delimiter, which never closes (a deny),
-    # the slowest of the heredoc shapes measured on the merged tree (2026-10-17: at most 0.59 s of CPU at 1 MB).
+    # picked on the merged tree (2026-10-17: at most 0.59 s of CPU at 1 MB). It is not the slowest shape
+    # measured there: a shape with a 1,000-character delimiter took 0.66 s of CPU at about 1 MB.
     "heredoc_terminator": ("heredocs", "heredoc_near_miss_lines"),
     "orch_ask_guard": ("ask_long",),
     "orch_resume_barrier": ("git_words", "write_content"),

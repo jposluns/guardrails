@@ -659,7 +659,8 @@ jobs:
       # every later step of this job. Its self-test runs first, offline; a refused or failed build fails the job.
       # The build runs only on the explicit --build; run with no argument the script runs its offline self-test.
       # The three git-fixture-env config lanes rerun the hooks behaviour self-test as a roster member, so each
-      # of those jobs runs this same build step before its lane; no other job builds bash.
+      # of those jobs, and the git-fixture-env host-patch job that reruns those lanes, runs this same build step
+      # before its config lanes; no other job builds bash.
       - name: Pinned bash 5.3 build self-test
         shell: bash
         run: python3 -I -B tools/ci_build_bash.py --self-test
@@ -883,6 +884,15 @@ jobs:
       - name: Git-fixture-env core behaviour self-test (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core
+
+      # The three config lanes below rerun the hooks behaviour self-test, which fails below bash 5.3, as a
+      # roster member. This is the generated surfaces job's pinned bash build step, unchanged (see the comment
+      # there), placed as in the '3.14' jobs: the core lane, whose '3.14' job has no build step, runs before
+      # it, and the config lanes after it. It follows the Python host pin step, which the host-pin gate holds
+      # right after the Python setup step.
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env combined config-injection lane (execution-reconciled, host patch)
         shell: bash

@@ -300,7 +300,11 @@ or whether that step runs; and what the suites
 test is theirs: a step whose run: command starts another interpreter, appends to GITHUB_PATH or GITHUB_ENV,
 changes the checked-out tree, uses a local or composite action, or names an executable that itself
 prints or re-interprets text (a script that echoes the flag, or env running its arguments as a
-command under an assignment, among them, out of a text grammar's reach) is not judged here.
+command under an assignment, among them, out of a text grammar's reach) is not judged here. The
+committed git-fixture-env-host-patch job carries one such step, the pinned bash build
+(tools/ci_build_bash.py --build), which appends the bin directory of the bash it builds to GITHUB_PATH
+for the config lanes after it; this gate holds only that step's run: text (the closed safe set, the
+assignment refusal and the committed-line controls of the self-test), never what the build installs.
 tools/check_ci_parity.py is the second holder for those edits: it binds the line shell: bash on
 every step with a run: key (read once a trailing comment and trailing whitespace are removed, two
 spellings this gate refuses on the steps it holds), and its step grammar accepts only name:, uses:,
@@ -3019,19 +3023,22 @@ def _self_test_cases(base):
     check("jobs/host-job-assignment-argument-passes", evaluate(root, HOST)[0], 0)
 
     # Acceptance controls read from the committed .github/workflows/quality.yml (ROOT), not from
-    # module constants: its host-patch jobs carry eight run: lines with seven distinct texts (the gate
-    # line in each job, the gate self-test line, the OPF suite line and the four git-fixture-env suite
-    # lines), and each of them passes the closed grammar and the assignment refusal unchanged. Each
-    # check holds its texts: how many committed lines carry each, and what each refusal returns for it.
+    # module constants: its host-patch jobs carry nine run: lines with eight distinct texts (the gate
+    # line in each job, the gate self-test line, the OPF suite line, the four git-fixture-env suite
+    # lines and the pinned bash build line the git-fixture-env config lanes need), and each of them
+    # passes the closed grammar and the assignment refusal unchanged. Each check holds its texts: how
+    # many committed lines carry each, and what each refusal returns for it.
     committed = _committed_host_runs()
     for check_id, texts, count in (
             ("jobs/host-job-committed-gate-line-grammar-passes", (GATE_RUN,), 2),
             ("jobs/host-job-committed-selftest-line-grammar-passes", (GATE_RUN + " --self-test",), 1),
             ("jobs/host-job-committed-opf-suite-line-grammar-passes", HOST_SUITES[OPF], 1),
-            ("jobs/host-job-committed-gfe-suite-line-grammar-passes", HOST_SUITES[GFE], 1)):
+            ("jobs/host-job-committed-gfe-suite-line-grammar-passes", HOST_SUITES[GFE], 1),
+            ("jobs/host-job-committed-bash-build-line-grammar-passes",
+             ("python3 -I -B tools/ci_build_bash.py --build",), 1)):
         check(check_id, [(committed.count(text), _refused_run_char(text), _leading_assignment(text))
                          for text in texts], [(count, None, None)] * len(texts))
-    check("jobs/host-job-committed-run-lines-counted", (len(committed), len(set(committed))), (8, 7))
+    check("jobs/host-job-committed-run-lines-counted", (len(committed), len(set(committed))), (9, 8))
 
     # The step shape (RUN_KEYS, STEP_SHELL_LINE): the Python host pin step, each suite step and the
     # --jobs-only judge step carry exactly name, run and shell, the shell: written as the exact line
