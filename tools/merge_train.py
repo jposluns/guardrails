@@ -22,7 +22,10 @@ config, then gh and the open PRs once it does). Live runs still read the operato
 system git configuration, unchanged (the threat model below trusts them); a credential helper
 configured there keeps working for every fetch, ls-remote and push. Transport, plainly: the base
 fetch, the PR-branch fetch, the ls-remote observer and the push all run FROM PRIVATE storage the
-run owns (the per-run private base repository, or the per-PR scratch checkout) to the URL that
+run owns (the per-run private base repository, or the per-PR scratch checkout, named with
+--git-dir, a checkout's work tree pointed at an empty directory with --work-tree, and each
+launched from that empty private directory, never from the storage itself; see _git_transport)
+to the URL that
 `git remote get-url <remote>` reports, so the repository's LOCAL transport settings never apply
 to them: a local remote.<remote>.pushurl, a local credential helper, a local
 remote.<remote>.uploadpack, a local core.sshCommand and local http.* settings are all ignored
@@ -58,12 +61,22 @@ reports), and launched by that absolute path, never by a bare name a child would
 own working directory; every git launch reads that path's realpath again and refuses the git
 when it changed or when it lies inside the launch's working directory (the private base
 repository and each private checkout included). A run whose git is refused before discovery or
-against the worktree list exits 2 before it takes the lock. A program the tool launches (gh, or a
-configured command) that runs git itself resolves it on the sanitized PATH it receives, outside
-this rule. Disclosed residual: before git's first launch the confinement reads the repository
-layout from the filesystem, so a git inside a layout that read does not model (a core.worktree
-setting, for one) runs for the three discovery reads before the check against the worktree list
-git reports refuses it.
+against the worktree list exits 2 before it takes the lock. The tool walks the PATH for a bare
+name itself and refuses, as cannot-evaluate, at the first entry it cannot list ahead of a match
+(for git, the run exits 2 before any git launch). Every child receives a narrower PATH than the
+one the tool resolves through (see _child_env): no entry that resolves through /proc or /dev/fd,
+where /proc/self/cwd and /dev/fd name the child's own working directory, and no entry inside
+the child's working directory or a repository directory of the run (the toplevel, the git
+directories, every worktree, the private base repository and each private checkout while it
+exists), so no child resolves a program from PR content through a PATH entry; and every
+transport command (a fetch, a push, an ls-remote, a --shared clone) is launched from an empty
+private directory (see _git_transport), so neither its git nor a program that git starts (ssh,
+a credential or remote helper) resolves one through its working directory either. A program
+the tool launches (gh, or a configured command) that runs git itself resolves it on that
+narrowed PATH, outside the pinned-git rule. Disclosed residual: before git's first launch the
+confinement reads the repository layout from the filesystem, so a git inside a layout that read
+does not model (a core.worktree setting, for one) runs for the three discovery reads before the
+check against the worktree list git reports refuses it.
 
 The tool NEVER mutates the author's working tree, index, HEAD or any local branch: that capability
 was removed, not guarded. Per open PR, in PR-number order, every
@@ -202,6 +215,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sysconfig
 import tempfile
@@ -214,6 +228,7 @@ SCHEMA = "merge-train/1"
 CONFIG_PATH = ".aiqt/merge-train.toml"
 MARKER_NAME = "merge-train.json"
 LOCK_NAME = "merge-train.lock"
+TRANSPORT_DIR = "transport"
 PR_LIST_LIMIT = 200
 GIT_TIMEOUT = 120
 OK_RESULTS = ("current", "pushed", "already-pushed", "would-merge")
@@ -366,10 +381,12 @@ def _clean_env(extra=None):
     head in the child working directory, which for the regenerate and check commands is the
     merged scratch checkout, content the PR itself supplies. The
     rebuilt PATH is the FIRST layer only: _run_external resolves every program head against it
-    and refuses, by name, an empty sanitized PATH, an unresolvable head and a head whose
-    realpath or launch directory lies inside the checkout or a repository directory, then
-    launches the resolved absolute launch path with its checked realpath as the file exec-ed;
-    git itself is resolved the same way, once (see _resolve_program and _git_program)."""
+    and refuses, by name, an empty sanitized PATH, an unresolvable head, a PATH entry it cannot
+    list ahead of a match and a head whose realpath or launch directory lies inside the
+    checkout or a repository directory, then launches the resolved absolute launch path with
+    its checked realpath as the file exec-ed; git itself is resolved the same way, once (see
+    _resolve_program and _git_program). The CHILD receives a narrower PATH still (see
+    _child_env)."""
     env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
     env["GIT_TERMINAL_PROMPT"] = "0"
     env.update(extra or dict())
@@ -378,6 +395,71 @@ def _clean_env(extra=None):
     env["PATH"] = os.pathsep.join(
         entry for entry in env.get("PATH", os.defpath).split(os.pathsep)
         if os.path.isabs(entry))
+    return env
+
+
+# The directories under which a path resolves through per-process state: /proc/self/cwd,
+# /proc/<pid>/cwd and /dev/fd (itself a symlink into /proc/self/fd) name whatever the RESOLVING
+# process has there, so one PATH entry can name a different directory in each child.
+_PROCESS_STATE_ROOTS = ("/proc", "/dev/fd")
+
+# The repository directories of the current run (the toplevel and every directory the
+# filesystem records around it, the git directories, every worktree git lists, the private
+# base repository and each private checkout while it exists), set by run_train for the length
+# of a run and restored on exit (see _child_env).
+_RUN_DIRS = []
+
+
+def _names_process_state(entry):
+    """Whether resolving the absolute PATH entry, component by component with every symlink
+    followed, reaches a directory in _PROCESS_STATE_ROOTS (or follows more than 40 symlinks):
+    such an entry can name a child's own working directory whatever it resolves to in this
+    process. A component readlink cannot read as a link is taken as written: it is no link, it
+    does not exist, or it lies under a directory this user cannot search, through which a child
+    running as this user resolves nothing either."""
+    resolved, parts, hops = os.sep, entry.split(os.sep), 0
+    while parts:
+        part = parts.pop(0)
+        if part in ("", "."):
+            continue
+        resolved = os.path.dirname(resolved) if part == ".." else os.path.join(resolved, part)
+        if any(_inside(resolved, root) for root in _PROCESS_STATE_ROOTS):
+            return True
+        try:
+            target = os.readlink(resolved)
+        except OSError:
+            continue
+        hops += 1
+        if hops > 40:
+            return True
+        resolved = os.sep if os.path.isabs(target) else os.path.dirname(resolved)
+        parts = target.split(os.sep) + parts
+    return False
+
+
+def _child_env(extra=None, cwd=None, confine=()):
+    """The environment a child is LAUNCHED with: _clean_env's, with its PATH narrowed so that
+    neither the child nor a program it starts in turn (ssh or a credential or remote helper git
+    runs, git or any program a configured command or gh runs) can resolve a program from
+    repository or checkout content through a PATH entry. Every entry that resolves through
+    per-process state (see _names_process_state; /proc/self/cwd and /dev/fd name the child's
+    own working directory there) is dropped, and so is every entry whose realpath lies inside
+    the child's working directory, a directory in confine or a repository directory of the run
+    (_RUN_DIRS). When a directory's realpath cannot be read, every entry is dropped. A PATH
+    with no entry left names the null device, never the empty string, which execvp, the shell
+    and subprocess read as the working directory. The tool's own resolution (_resolve_program)
+    walks _clean_env's PATH, which keeps these entries, so a head or git found there is still
+    refused by name."""
+    env = _clean_env(extra)
+    try:
+        bases = [os.path.realpath(str(base)) for base in [cwd] + list(confine) + _RUN_DIRS
+                 if base]
+        kept = [entry for entry in env["PATH"].split(os.pathsep)
+                if entry and not _names_process_state(entry)
+                and not any(_inside(os.path.realpath(entry), base) for base in bases)]
+    except OSError:
+        kept = []
+    env["PATH"] = os.pathsep.join(kept) or os.devnull
     return env
 
 
@@ -632,25 +714,26 @@ def _forbidden(args):
     return False
 
 
-def _git(cwd, *args, extra_env=None, timeout=GIT_TIMEOUT, ok=(0,), push=False):
+def _git(cwd, *args, extra_env=None, timeout=GIT_TIMEOUT, ok=(0,), push=False, confine=()):
     """The single pinned git funnel: the ONE git program _git_program resolved (launched by its
     absolute launch path, never a bare name a child resolves; refused, as git-failed, when its
     launch path no longer resolves to the realpath it was checked at, or when it lies inside
-    this launch's working directory), auto-maintenance pinned off in option position, scrubbed
-    GIT_*, a timeout. Returns (returncode, stdout bytes, stderr text); raises Refuse("git-failed")
-    on a refused git, a timeout and an exit code outside ok when ok is not None. The audit
-    records every attempted argv, a refused one included."""
+    this launch's working directory or a directory in confine), auto-maintenance pinned off in
+    option position, scrubbed GIT_*, the narrowed child PATH (see _child_env), a timeout.
+    Returns (returncode, stdout bytes, stderr text); raises Refuse("git-failed") on a refused
+    git, a timeout and an exit code outside ok when ok is not None. The audit records every
+    attempted argv, a refused one included."""
     GIT_AUDIT.append(list(args))
     if _forbidden(args):
         raise _AuditRefused("forbidden git operation refused by the argv audit: %r" % (args,))
-    launch, real, refusal = _git_program((cwd,))
+    launch, real, refusal = _git_program((cwd,) + tuple(confine))
     if launch is None:
         raise Refuse("git-failed", refusal)
     argv = [launch, "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"]
     argv += list(args)
     try:
-        proc = _run_child(argv, cwd=str(cwd), env=_clean_env(extra_env), timeout=timeout,
-                          push=push, executable=real)
+        proc = _run_child(argv, cwd=str(cwd), env=_child_env(extra_env, cwd, confine),
+                          timeout=timeout, push=push, executable=real)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise Refuse("git-failed", "git %s: %s" % (" ".join(args[:2]), exc))
     if ok is not None and proc.returncode not in ok:
@@ -662,6 +745,25 @@ def _git(cwd, *args, extra_env=None, timeout=GIT_TIMEOUT, ok=(0,), push=False):
 
 def _git_text(cwd, *args, **kw):
     return _git(cwd, *args, **kw)[1].decode("utf-8", "replace").strip()
+
+
+def _git_transport(where, *args, git_dir=None, checkout=None, confine=(), **kw):
+    """A git transport command (a fetch, a push, an ls-remote or a --shared clone) launched FROM
+    where, an empty directory inside the run's private directory that nothing writes, never
+    from the repository or checkout it works on: git_dir, when given, names that repository
+    (--git-dir), and checkout, when given, is its work tree, which git is pointed away from
+    (--work-tree=where). Both are confined for the launch beside where and confine (see _git
+    and _child_env), so neither git nor a program it starts (ssh, a credential helper, a remote
+    helper) can resolve a program from PR content through its working directory or a PATH
+    entry: /proc/self/cwd names the empty directory for them, and the PATH they receive keeps
+    no entry inside that repository, its checkout or a repository directory of the run."""
+    options = []
+    if git_dir is not None:
+        options.append("--git-dir=%s" % git_dir)
+    if checkout is not None:
+        options.append("--work-tree=%s" % where)
+    dirs = tuple(str(path) for path in (git_dir, checkout) if path is not None)
+    return _git(where, *(options + list(args)), confine=dirs + tuple(confine), **kw)
 
 
 # The author-side read hardening (see _git_author). protocol.allow=never is safe here because no
@@ -721,8 +823,13 @@ def _inside(path, base):
 
 def _confinement_refusal(head, launch, real, confine):
     """The refusal naming head when the realpath it execs, or the directory its launch path
-    names, lies inside any directory in confine (each compared by realpath), else None; a
-    confined directory whose realpath cannot be read refuses too (fail closed). The launch
+    names, lies inside any directory in confine (each compared by realpath), else None. A
+    confined directory whose realpath cannot be computed at all refuses too (fail closed):
+    that is a relative directory once os.getcwd fails, as when the working directory was
+    removed. That is the whole fail-closed scope: os.path.realpath raises nothing for a
+    component this process cannot search, it returns the path resolved up to that component
+    with the rest as written, and the confined directory is then compared by that partial
+    result, not refused. The launch
     directory counts as well as the file: a program can read its own location from argv[0] (a
     venv interpreter reads the pyvenv.cfg beside it, and site then runs the .pth files in that
     venv's site-packages, even under -I), so a launch path inside a confined directory runs
@@ -755,21 +862,56 @@ def _launch_refusal(head, launch, real, confine):
     return _confinement_refusal(head, launch, real, confine)
 
 
+def _path_lookup(name, path_value):
+    """(match, None) for the first executable match of the bare name on path_value, (None, None)
+    when no entry holds one, or (None, reason) refusing the lookup as cannot-evaluate. The walk
+    is this tool's own, entry by entry in PATH order. An entry that does not exist or is not a
+    directory holds no program and is passed over. An entry this process cannot list (any other
+    error, EACCES on an unreadable directory among them), and a name an entry lists that cannot
+    be stat-ed (EACCES, a symlink loop), refuse the lookup at that entry, before any later
+    entry is consulted: shutil.which passes such an entry over and takes a later match, so a
+    program the earlier entry may hold would never be evaluated. A match is a name that is not
+    a directory and carries the execute bit for this process, shutil.which's rule."""
+    for entry in path_value.split(os.pathsep):
+        try:
+            os.listdir(entry)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError as exc:
+            return None, ("program %r cannot be evaluated, so the launch is refused: PATH entry "
+                          "%r cannot be listed (%s)" % (name, entry, exc))
+        candidate = os.path.join(entry, name)
+        try:
+            mode = os.stat(candidate).st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError as exc:
+            return None, ("program %r cannot be evaluated, so the launch is refused: %r on the "
+                          "PATH cannot be read (%s)" % (name, candidate, exc))
+        if not stat.S_ISDIR(mode) and os.access(candidate, os.X_OK):
+            return candidate, None
+    return None, None
+
+
 def _resolve_program(head, env, confine):
     """(launch path, realpath, None) for a program head, or (None, None, reason) refusing the
     launch by name. The CANDIDATE is an absolute head exactly as given or, for a bare head, the
-    first match shutil.which finds on the SANITIZED PATH of env (see _clean_env; an empty
-    sanitized PATH and an unresolvable head are refused, never handed to the child's own PATH
-    walk); any other head (a relative path) is refused outright. The candidate's realpath must
+    first match _path_lookup finds on the SANITIZED PATH of env (see _clean_env; an empty
+    sanitized PATH, an entry that cannot be listed ahead of the match and an unresolvable head
+    are refused, never handed to the child's own PATH walk); any other head (a relative path)
+    is refused outright. The candidate's realpath must
     be an executable regular file, and neither it nor the candidate's directory, by realpath,
     may lie inside a directory in confine (see _confinement_refusal), so a /proc/self/cwd PATH
     entry, a symlink alias and every other absolute alias of confined content are refused
     before anything runs. The LAUNCH path is the candidate with its directory resolved and its
     final name kept, and its realpath is read again and must be the checked realpath (see
     _launch_refusal); the funnels start the child with it as argv[0] and with the checked
-    realpath as the file to exec (subprocess executable=). The program therefore keeps the
-    identity its candidate path gives it (a venv's bin/python3 still finds its pyvenv.cfg; a
-    tool that dispatches on argv[0] still sees its own name), while the child repeats no PATH
+    realpath as the file to exec (subprocess executable=). What the launch path as argv[0]
+    carries, stated as observed: the Python interpreter reads its location from argv[0], so a
+    venv's bin/python3 still finds its pyvenv.cfg (config/venv-interpreter-keeps-identity);
+    a #! script does NOT see its candidate name, because the kernel hands its interpreter the
+    file exec-ed, so the script sees the checked realpath as $0
+    (config/script-head-sees-realpath-as-dollar-zero). The child repeats no PATH
     walk and resolves no cwd-relative alias: /proc/self/cwd names the CHILD's working directory
     once the child has changed into it, so launching the unresolved candidate would run content
     from there, and no later PATH entry can substitute another program. Resolution happens in
@@ -786,7 +928,9 @@ def _resolve_program(head, env, confine):
             return None, None, ("program %r cannot be resolved: the sanitized PATH is empty "
                                 "(every caller PATH entry was empty, dot or otherwise relative)"
                                 % head)
-        candidate = shutil.which(head, path=path_value)
+        candidate, refusal = _path_lookup(head, path_value)
+        if refusal is not None:
+            return None, None, refusal
         if candidate is None:
             return None, None, ("program %r cannot be resolved to an executable on the "
                                 "sanitized PATH" % head)
@@ -816,8 +960,10 @@ def _git_program(confine):
     call reads the pinned launch path's realpath again (it must still be the pinned realpath)
     and re-checks both pinned paths against its own confine (see _launch_refusal): _git passes
     each launch's working directory (the author's worktrees, the private base repository and
-    every private checkout among them), and run_train passes every repository directory it
-    learns. run_train resolves a fresh pin for its run before the run's first git launch and
+    every private checkout among them) and, for a transport command run from the empty
+    transport directory, the repository and checkout it works on (see _git_transport), and
+    run_train passes every repository directory it learns. run_train resolves a fresh pin for
+    its run before the run's first git launch and
     restores the caller's on exit; outside a run (the self-test fixtures) the first git launch
     resolves it. Outside these funnels, the self-test's locale probe (_native_probe) and its
     fake gh run git by name."""
@@ -890,21 +1036,22 @@ def _repository_dirs_on_disk(repo):
 def _run_external(argv, cwd, timeout, extra_env=None, confine=()):
     """Launch a non-git program named by the trusted config, or the gh CLI: an argv list, no shell, a
     timeout. Returns (returncode, or None on a refusal, a timeout or a launch error, stdout
-    text, stderr text). Before anything runs, the program HEAD is resolved (shutil.which
-    against the sanitized PATH, or the given absolute path) and refused, by name, when the
-    sanitized PATH is empty, when the head cannot be resolved, when its launch path does not
-    resolve to the realpath checked, or when its realpath or its launch directory lies inside
-    the child working directory or a directory in confine (at the config-command and gh call
-    sites, every repository directory of the run: the toplevel, the common git directory,
-    every worktree git lists and the private base repository); the child is launched with the
-    resolved absolute launch path as argv[0] and the checked realpath as the file it execs,
-    never the bare name (the tree-based head refusals in guard_config_fail_closed stay in place
-    as the first layer). See _resolve_program."""
-    env = _clean_env(extra_env)
+    text, stderr text). Before anything runs, the program HEAD is resolved (this tool's own
+    walk of the sanitized PATH, or the given absolute path) and refused, by name, when the
+    sanitized PATH is empty, when a PATH entry ahead of the match cannot be listed, when the
+    head cannot be resolved, when its launch path does not resolve to the realpath checked, or
+    when its realpath or its launch directory lies inside the child working directory or a
+    directory in confine (at the config-command and gh call sites, every repository directory
+    of the run: the toplevel, the common git directory, every worktree git lists and the
+    private base repository); the child is launched with the resolved absolute launch path as
+    argv[0], the checked realpath as the file it execs and the narrowed child PATH (see
+    _child_env), never the bare name (the tree-based head refusals in guard_config_fail_closed
+    stay in place as the first layer). See _resolve_program."""
     dirs = [str(cwd)] + [str(entry) for entry in confine if entry]
-    launch, real, refusal = _resolve_program(argv[0], env, dirs)
+    launch, real, refusal = _resolve_program(argv[0], _clean_env(extra_env), dirs)
     if launch is None:
         return None, "", refusal
+    env = _child_env(extra_env, cwd, dirs)
     try:
         proc = _run_child([launch] + list(argv[1:]), cwd=str(cwd), env=env, timeout=timeout,
                           executable=real)
@@ -1012,10 +1159,11 @@ def guard_config_fail_closed(data, tree=None, head_tree=None):
             # with the base tip tree given (load_config always gives it; the guarantee needs
             # the tree) a head never names a base tip tree ENTRY, regular file or symlink,
             # compared case-insensitively, and that _run_external resolves every head BEFORE
-            # the launch (shutil.which against the sanitized PATH _clean_env rebuilt with
-            # every cwd-relative entry removed) and refuses, by name, an empty sanitized PATH,
-            # an unresolvable head, a head whose launch path no longer resolves to the
-            # realpath checked, and a head whose realpath or launch directory lies inside
+            # the launch (its own walk of the sanitized PATH _clean_env rebuilt with every
+            # cwd-relative entry removed) and refuses, by name, an empty sanitized PATH, a
+            # PATH entry it cannot list ahead of the match, an unresolvable head, a head whose
+            # launch path no longer resolves to the realpath checked, and a head whose
+            # realpath or launch directory lies inside
             # the private checkout or ANY repository directory of the run (the toplevel, the
             # common git directory, every worktree git lists, each PR's and not only the one
             # being processed, and the private base repository), then launches the resolved
@@ -1431,9 +1579,11 @@ def guard_fresh_checkout(ctx, scratch, new):
     check there is accepted only with exit 0 and no fault on stderr (see guard_child_fault)."""
     fresh_root = tempfile.mkdtemp(prefix="merge-train-fresh-")
     SCRATCHES.append(fresh_root)
+    _RUN_DIRS.append(fresh_root)
     try:
         fresh = os.path.join(fresh_root, "co")
-        _git(scratch, "clone", "--quiet", "--shared", "--no-checkout", str(scratch), fresh)
+        _git_transport(ctx["transport"], "clone", "--quiet", "--shared", "--no-checkout",
+                       str(scratch), fresh, confine=(str(scratch),))
         for key, value in (("core.hooksPath", os.devnull), ("core.fsmonitor", "false")):
             _git(fresh, "config", key, value)
         rc, _out, err = _git(fresh, "checkout", "--quiet", "--detach", new,
@@ -1452,6 +1602,7 @@ def guard_fresh_checkout(ctx, scratch, new):
                              "in a fresh normal checkout of the candidate, %s" % reason)
     finally:
         _cleanup(lambda: shutil.rmtree(fresh_root, ignore_errors=True))
+        _RUN_DIRS.remove(fresh_root)
 
 
 def guard_push_lease(branch, old):
@@ -1588,18 +1739,20 @@ def _remove_marker(git_dir):
 
 
 def _remote_head(ctx):
-    """The remote branch tip through ls-remote, run in the run's PRIVATE base repository and BY
-    URL: the URL is re-read from the author's repository per call (a read of plain config, so a
-    mid-run remote.<remote>.url change is honoured as before), but the ls-remote itself never runs
-    in the author's repository and never by remote name, so no author-local transport setting
+    """The remote branch tip through ls-remote, run on the run's PRIVATE base repository (from the
+    empty transport directory, see _git_transport) and BY URL: the URL is re-read from the
+    author's repository per call (a read of plain config, so a mid-run remote.<remote>.url
+    change is honoured as before), but the ls-remote itself never runs in the author's
+    repository and never by remote name, so no author-local transport setting
     (remote.<remote>.uploadpack, core.sshCommand, http.*) can name a command to execute or apply.
     Returns a SHA, "" when absent, None when unreadable for ANY reason, a timeout included; the
     caller treats None as indeterminate, never as a cue to change anything."""
     try:
         url = _git_author_text(ctx["root"], "remote", "get-url", ctx["remote"])
-        code, out, _err = _git(ctx["base_repo"], "ls-remote", "--", url,
-                               "refs/heads/" + ctx["branch"], ok=None,
-                               timeout=ctx["net_timeout"])
+        code, out, _err = _git_transport(ctx["transport"], "ls-remote", "--", url,
+                                         "refs/heads/" + ctx["branch"],
+                                         git_dir=ctx["base_repo"], ok=None,
+                                         timeout=ctx["net_timeout"])
     except Refuse:
         return None
     if code != 0:
@@ -1647,9 +1800,12 @@ def _scratch_checkout(ctx, scratch_root):
     scratch-setup guard cannot leak the directory): a --shared clone of the repository (the object
     store is reused; nothing of the author's checkout is written), with every conversion and hook
     disabled by the scratch-setup guard. Returns the checkout path. The author's worktree is never
-    written: no merge, checkout, add, commit or reset ever runs there."""
+    written: no merge, checkout, add, commit or reset ever runs there. The clone itself is
+    launched from the empty transport directory, never from the author's worktree (see
+    _git_transport)."""
     scratch = os.path.join(scratch_root, "co")
-    _git(ctx["root"], "clone", "--quiet", "--shared", "--no-checkout", str(ctx["root"]), scratch)
+    _git_transport(ctx["transport"], "clone", "--quiet", "--shared", "--no-checkout",
+                   str(ctx["root"]), scratch, confine=(str(ctx["root"]),))
     # The base tip's objects were fetched into the run's PRIVATE base repository, never into the
     # author's object store, so the scratch attaches that store as a second alternate. Disclosed
     # footprint of writing objects in a checkout whose alternates include the author's store: an
@@ -1719,7 +1875,7 @@ def _run_checks(ctx, scratch):
         _guard("check-exit")(code, command, err)
 
 
-def _push_and_observe(ctx, scratch, old, new):
+def _push_and_observe(ctx, scratch, scratch_git, old, new):
     """Compare-and-set push of new from the private checkout to the PR's own branch (the
     exact-value lease makes the remote refuse unless the branch is still at old, the head this run
     validated), then one observer over the remote. A push whose outcome is unknown (a timeout, a
@@ -1728,16 +1884,19 @@ def _push_and_observe(ctx, scratch, old, new):
     are unchanged, and the push may have landed on the remote; nothing local exists to roll
     back. A push that raised AND left the remote still at the old head is ALSO indeterminate, not
     push-rejected: the remote's receive-pack may still be running (a slow pre-receive hook) and
-    the push can land after this run reports, so the marker is kept for the retry to classify."""
+    the push can land after this run reports, so the marker is kept for the retry to classify.
+    The push names the private checkout's git directory, scratch_git, and is launched from the
+    empty transport directory (see _git_transport)."""
     branch = ctx["branch"]
     indeterminate = False
     try:
         # push=True: a TIMED-OUT push ends the direct child only, because its in-flight
         # receive-pack may still land the push; that outcome is exactly what the marker
         # reconciles on the retry (see _run_child and _end_child).
-        _git(scratch, "push", "--porcelain", "--no-follow-tags",
-             *_guard("push-lease")(branch, old), "--", ctx["remote_url"],
-             "%s:refs/heads/%s" % (new, branch), ok=None, timeout=ctx["net_timeout"], push=True)
+        _git_transport(ctx["transport"], "push", "--porcelain", "--no-follow-tags",
+                       *_guard("push-lease")(branch, old), "--", ctx["remote_url"],
+                       "%s:refs/heads/%s" % (new, branch), git_dir=scratch_git,
+                       checkout=scratch, ok=None, timeout=ctx["net_timeout"], push=True)
     except Refuse as exc:
         _guard("push-indeterminate")(exc)
         indeterminate = True
@@ -1860,15 +2019,19 @@ def _process_pr(ctx, apply):
     ctx["old"] = old
     scratch_root = tempfile.mkdtemp(prefix="merge-train-scratch-")
     SCRATCHES.append(scratch_root)
+    _RUN_DIRS.append(scratch_root)
     try:
         scratch = _scratch_checkout(ctx, scratch_root)
         # The scratch's alternates include the author's store, so this fetch carries the same
         # hardening as the base fetch: the alternate-ref read it spawns in the author's
         # repository inherits GIT_NO_LAZY_FETCH (the -c pairs are scrubbed from that child's
-        # environment and do not reach it; see _ALTERNATE_FETCH_CONFIG).
-        _git(scratch, *_ALTERNATE_FETCH_CONFIG, "fetch", "--no-tags", "--no-recurse-submodules",
-             "--", ctx["remote_url"], "refs/heads/" + ctx["branch"],
-             extra_env=dict(_ALTERNATE_FETCH_ENV), timeout=ctx["net_timeout"])
+        # environment and do not reach it; see _ALTERNATE_FETCH_CONFIG). Like every transport
+        # command it is launched from the empty transport directory (see _git_transport).
+        scratch_git = _git_text(scratch, "rev-parse", "--path-format=absolute", "--git-dir")
+        _git_transport(ctx["transport"], *_ALTERNATE_FETCH_CONFIG, "fetch", "--no-tags",
+                       "--no-recurse-submodules", "--", ctx["remote_url"],
+                       "refs/heads/" + ctx["branch"], git_dir=scratch_git, checkout=scratch,
+                       extra_env=dict(_ALTERNATE_FETCH_ENV), timeout=ctx["net_timeout"])
         if _git_text(scratch, "rev-parse", "FETCH_HEAD^0") != old:
             raise Refuse("pr-head-moved", "the remote head moved during the fetch")
         if _guard("ancestry")(scratch, ctx["base_sha"], old):
@@ -1881,6 +2044,7 @@ def _process_pr(ctx, apply):
         return _merge_commit_push(ctx, scratch, old, ctx["base_sha"], apply)
     finally:
         _cleanup(lambda: shutil.rmtree(scratch_root, ignore_errors=True))
+        _RUN_DIRS.remove(scratch_root)
 
 
 def _merge_commit_push(ctx, scratch, old, base, apply):
@@ -1977,7 +2141,7 @@ def _merge_commit_push(ctx, scratch, old, base, apply):
         return dict(result="would-merge", old_head=old, new_head=None,
                     reason="dry run: would merge %s (rerun with --apply)" % base)
     _write_marker(ctx["git_dir"], dict(pr=ctx["pr"], branch=ctx["branch"], old=old, new=new))
-    return _push_and_observe(ctx, scratch, old, new)
+    return _push_and_observe(ctx, scratch, scratch_git, old, new)
 
 
 def _base_fetch(root, run_dir, remote, base):
@@ -1999,7 +2163,9 @@ def _base_fetch(root, run_dir, remote, base):
     the author's store; the private fetch itself carries _ALTERNATE_FETCH_ENV and
     _ALTERNATE_FETCH_CONFIG; of those, only the environment variable reaches the alternate-ref
     read git spawns IN the author's repository (the -c pairs are scrubbed from that child's
-    environment; see _ALTERNATE_FETCH_CONFIG). Author-side footprint of this whole resolution:
+    environment; see _ALTERNATE_FETCH_CONFIG). The fetch names the base repository with
+    --git-dir and is launched from the run's empty transport directory, run_dir/TRANSPORT_DIR
+    (see _git_transport). Author-side footprint of this whole resolution:
     reads only; no ref, no object
     content, no reflog, no FETCH_HEAD, no hook and no configured command there. Returns
     (base_repo, remote_url, base_sha)."""
@@ -2019,23 +2185,27 @@ def _base_fetch(root, run_dir, remote, base):
         if code == 0:
             _git(base_repo, "update-ref", "refs/merge-train/have-%d" % index,
                  out.decode("utf-8", "replace").strip())
-    _git(base_repo, *_ALTERNATE_FETCH_CONFIG, "fetch", "--no-tags", "--no-recurse-submodules",
-         "--refmap=", "--", remote_url, "+refs/heads/%s:refs/merge-train/base" % base,
-         extra_env=dict(_ALTERNATE_FETCH_ENV), timeout=GIT_TIMEOUT)
+    _git_transport(os.path.join(run_dir, TRANSPORT_DIR), *_ALTERNATE_FETCH_CONFIG, "fetch",
+                   "--no-tags", "--no-recurse-submodules", "--refmap=", "--", remote_url,
+                   "+refs/heads/%s:refs/merge-train/base" % base, git_dir=base_repo,
+                   extra_env=dict(_ALTERNATE_FETCH_ENV), timeout=GIT_TIMEOUT)
     base_sha = _git_text(base_repo, "rev-parse", "--verify", "refs/merge-train/base^0")
     return base_repo, remote_url, base_sha
 
 
 def run_train(root, apply=False, only=None):
     """The whole run under the global lock. Returns (exit code, reports, fatal message or None).
-    The run resolves its own git (see _git_program) before its first git launch and restores
-    the caller's pin on exit."""
-    saved_git = list(_GIT_PROGRAM)
+    The run resolves its own git (see _git_program) before its first git launch, records its
+    repository directories for the PATH its children receive (see _child_env), and restores
+    the caller's pin and directories on exit."""
+    saved_git, saved_dirs = list(_GIT_PROGRAM), list(_RUN_DIRS)
     del _GIT_PROGRAM[:]
+    del _RUN_DIRS[:]
     try:
         return _run_train(root, apply, only)
     finally:
         _GIT_PROGRAM[:] = saved_git
+        _RUN_DIRS[:] = saved_dirs
 
 
 def _run_train(root, apply, only):
@@ -2043,10 +2213,13 @@ def _run_train(root, apply, only):
     # git is resolved BEFORE its first launch, confined to root and every repository
     # directory the filesystem records around it (git cannot be asked yet; see
     # _repository_dirs_on_disk), and checked again against every worktree git itself lists
-    # before any later launch.
-    refusal = _git_program([root] + _repository_dirs_on_disk(root))[2]
+    # before any later launch. Every directory either reading yields is kept out of every
+    # child's PATH (see _child_env).
+    on_disk = [root] + _repository_dirs_on_disk(root)
+    refusal = _git_program(on_disk)[2]
     if refusal is not None:
         return 2, reports, "git refused before any git launch: %s" % refusal
+    _RUN_DIRS[:] = [str(path) for path in on_disk]
     try:
         top = _git_author_text(root, "rev-parse", "--show-toplevel")
         common = _git_author_text(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -2062,6 +2235,7 @@ def _run_train(root, apply, only):
     refusal = _git_program(repo_dirs)[2]
     if refusal is not None:
         return 2, reports, "git refused after discovery: %s" % refusal
+    _RUN_DIRS.extend(repo_dirs)
     with open(os.path.join(common, LOCK_NAME), "a+") as lock:
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -2099,6 +2273,8 @@ def _run_locked(root, repo_dirs, trees, apply, only, reports):
     run_dir = tempfile.mkdtemp(prefix="merge-train-base-")
     SCRATCHES.append(run_dir)
     try:
+        # The empty directory every transport command is launched from (see _git_transport).
+        os.mkdir(os.path.join(run_dir, TRANSPORT_DIR))
         return _run_locked_with_base(root, run_dir, remote, base, repo_dirs, trees, apply, only,
                                      reports)
     finally:
@@ -2114,8 +2290,11 @@ def _run_locked_with_base(root, run_dir, remote, base, repo_dirs, trees, apply, 
     # command) is confined to EVERY repository directory of the run: the toplevel, the common
     # git directory, every worktree git lists (each PR's, not only the one being processed)
     # and the private base repository, beside each launch's own working directory (see
-    # _run_external).
+    # _run_external); from here on, no child's PATH keeps an entry inside the base repository
+    # either (see _child_env).
     confine = tuple(repo_dirs) + (base_repo,)
+    _RUN_DIRS.append(base_repo)
+    transport = os.path.join(run_dir, TRANSPORT_DIR)
     try:
         cfg = load_config(base_repo, base_sha)
         if cfg["remote"] != remote or cfg["base"] != base:
@@ -2168,7 +2347,7 @@ def _run_locked_with_base(root, run_dir, remote, base, repo_dirs, trees, apply, 
             report["worktree"] = wt
             ctx.update(root=root, wt=wt, pr=pr["number"], branch=branch, head_oid=pr["headRefOid"],
                        remote=remote, remote_url=remote_url, base=base, base_sha=base_sha, cfg=cfg,
-                       base_repo=base_repo, confine=confine,
+                       base_repo=base_repo, confine=confine, transport=transport,
                        generated=generated, cmd_timeout=cmd_timeout, net_timeout=net_timeout,
                        git_dir=_git_author_text(wt, "rev-parse", "--path-format=absolute",
                                                 "--git-dir"))
@@ -2717,6 +2896,17 @@ def _has_marker(wt):
     return os.path.exists(os.path.join(_git_dir(wt), MARKER_NAME))
 
 
+def _audited_subcommand(args):
+    """The subcommand word of a recorded git argv, read past git's global options (a transport
+    command carries --git-dir and --work-tree, and the private fetches carry -c pins), else
+    None."""
+    words = list(args)
+    i = 0
+    while i < len(words) and words[i].startswith("-"):
+        i += 2 if words[i] in GIT_GLOBAL_VALUED else 1
+    return words[i] if i < len(words) else None
+
+
 def case_config(_tmp):
     # Pure schema checks: no tool run, no git call and no remote, so the per-case invariants are
     # vacuous here and not asserted.
@@ -3192,8 +3382,10 @@ def case_pathenv(tmp):
     finally:
         globals()["_run_child"] = saved_child
     check("config/non-executable-head-refused", (refused, started), ([(None, True)] * 2, []))
-    # A head resolved OUTSIDE the confined directories launches by an absolute path, never the
-    # bare name, observed through a recording child that also records the file exec-ed.
+    # The accepted boundary (a compatibility check, never red-on-revert evidence: launching the
+    # realpath as argv[0] satisfies it too): a head resolved OUTSIDE the confined directories
+    # launches by an absolute path, never the bare name, observed through a recording child
+    # that also records the file exec-ed.
     outside = Path(tmp) / "outside-bin"
     outside.mkdir()
     os.symlink(sys.executable, outside / "python3")
@@ -3223,6 +3415,72 @@ def case_pathenv(tmp):
           [(argv[0], exe) for argv, exe in launched],
           [(os.path.join(os.path.realpath(str(outside)), "python3"),
             os.path.realpath(sys.executable))])
+    # The tool walks the PATH for a bare head itself (see _path_lookup): an entry that does not
+    # exist, and one naming a plain file, hold no program and are passed over to the later
+    # match, while a name an entry lists that cannot be stat-ed (here a symlink loop named
+    # python3) refuses the head by name as cannot-evaluate before any later entry is
+    # consulted. Red while shutil.which resolved the head: it passed the loop over too and the
+    # later match launched.
+    loop_bin = Path(tmp) / "loop-bin"
+    loop_bin.mkdir()
+    os.symlink("python3", loop_bin / "python3")
+    walked = []
+    for ahead in (str(Path(tmp) / "absent-bin"), str(plain), str(loop_bin)):
+        saved_path = _put_env(dict(PATH=ahead + os.pathsep + str(outside)))
+        try:
+            code, _out, err = _run_external(["python3", "--version"], unit_dir, 30)
+        finally:
+            _restore_env(saved_path)
+        walked.append((code, "cannot be evaluated" in err))
+    check("config/path-walk-entry-boundary", walked, [(0, False), (0, False), (None, True)])
+    # The PATH a child RECEIVES is narrower than the one the tool resolves through (see
+    # _child_env): an entry that resolves through /proc or /dev/fd (/proc/self/cwd names the
+    # child's own working directory once it has changed into it, and so does a symlink to it),
+    # and an entry whose realpath lies inside the child's working directory or a confined
+    # directory, are dropped; an entry outside all of them is kept. Red while the child
+    # received every absolute entry.
+    confined = Path(tmp) / "child-path-confined"
+    (confined / "bin").mkdir(parents=True)
+    (unit_dir / "bin").mkdir()
+    proc_alias = Path(tmp) / "child-path-proc-alias"
+    os.symlink("/proc/self/cwd", proc_alias)
+    received = []
+
+    def _path_recording_child(argv, cwd=None, env=None, timeout=None, push=False,
+                              executable=None):
+        received.append((env or dict()).get("PATH"))
+        return subprocess.CompletedProcess(list(argv), 0, b"", b"")
+
+    saved_child = globals()["_run_child"]
+    saved_path = _put_env(dict(PATH=os.pathsep.join([
+        "/proc/self/cwd", "/dev/fd", str(proc_alias), str(unit_dir / "bin"), str(confined / "bin"),
+        str(outside)])))
+    globals()["_run_child"] = _path_recording_child
+    try:
+        _run_external([sys.executable, "--version"], unit_dir, 5, confine=(str(confined),))
+    finally:
+        globals()["_run_child"] = saved_child
+        _restore_env(saved_path)
+    check("config/child-path-drops-cwd-confined-and-process-entries", received, [str(outside)])
+    # A #! script head does NOT keep its candidate name: the kernel hands its interpreter the
+    # file exec-ed, the checked realpath, so the script sees that realpath as $0 (the scope the
+    # _resolve_program docstring states; the Python interpreter reads argv[0] instead, see
+    # config/venv-interpreter-keeps-identity).
+    script_real = Path(tmp) / "script-real"
+    script_real.mkdir()
+    (script_real / "probe-script").write_text('#!/bin/sh\nprintf "%s\\n" "$0"\n',
+                                              encoding="utf-8")
+    (script_real / "probe-script").chmod(0o755)
+    script_bin = Path(tmp) / "script-bin"
+    script_bin.mkdir()
+    os.symlink(str(script_real / "probe-script"), script_bin / "probe-script")
+    saved_path = _put_env(dict(PATH=str(script_bin)))
+    try:
+        code, out, _err = _run_external(["probe-script"], unit_dir, 30)
+    finally:
+        _restore_env(saved_path)
+    check("config/script-head-sees-realpath-as-dollar-zero", (code, out.splitlines()),
+          (0, [os.path.realpath(str(script_real / "probe-script"))]))
     # Observed end to end: a venv interpreter found on PATH keeps its venv, because argv[0]
     # names the venv's bin/python3 and the interpreter finds the pyvenv.cfg beside it (the
     # child reports sys.prefix as the venv). Red while the realpath was launched: the child
@@ -3382,8 +3640,11 @@ def case_gitpin(tmp):
     # never runs, and a git that resolves into a repository directory is refused by name
     # before the run's first git launch. Each decoy records into its sentinel that it ran and
     # then hands its argv to the real git, so a run through it would otherwise look normal.
-    # Every vector here (the invariants aside) is red at the pin, where _git launched the bare
-    # name git and nothing resolved or checked git itself.
+    # Against the earlier funnel, which launched the bare name git and resolved or checked
+    # nothing, only the first four vectors evaluate, and they are red (a decoy runs, or the
+    # run is not refused); the case then raises at the walk patch, a name that funnel lacks,
+    # so the vectors after them cannot evaluate there, and their red evidence is each one's
+    # own targeted mutation, never that funnel.
     real_git = shutil.which("git")
     fixtures = []
 
@@ -3528,7 +3789,217 @@ def case_gitpin(tmp):
     check("git/pinned-launch-path-realpath-rechecked",
           (first, second[0], "now resolves to" in second[1], swap_sentinel.exists()),
           (0, "git-failed", True, False))
+    # The file each git launch execs is the checked realpath, handed to the child as
+    # executable= beside argv[0]: with the pin taken through a launch path that is a symlink,
+    # the recorded launch names that path as argv[0] and the realpath as the file exec-ed. Red
+    # with executable=real dropped from _git: the file exec-ed is then whatever argv[0] names
+    # at exec time, and the recorder sees None.
+    exec_seen = []
+
+    def _exec_recording_child(argv, cwd=None, env=None, timeout=None, push=False,
+                              executable=None):
+        exec_seen.append((argv[0], executable))
+        return subprocess.CompletedProcess(list(argv), 0, b"", b"")
+
+    saved_pin = list(_GIT_PROGRAM)
+    del _GIT_PROGRAM[:]
+    saved_path = _put_env(dict(PATH=str(holder / "bin")))
+    real_child = globals()["_run_child"]
+    globals()["_run_child"] = _exec_recording_child
+    try:
+        _git(empty, "version")
+    finally:
+        globals()["_run_child"] = real_child
+        _restore_env(saved_path)
+        _GIT_PROGRAM[:] = saved_pin
+    check("git/launch-execs-checked-realpath", exec_seen,
+          [(os.path.join(os.path.realpath(str(holder / "bin")), "git"),
+            os.path.realpath(real_git))])
+    # No git on the sanitized PATH: the run refuses git by name before any git launch and
+    # exits 2. Red when that refusal is removed: the first discovery read then fails, and the
+    # fatal message names that read instead.
+    vacant = Path(tmp) / "gitpin-no-git-bin"
+    vacant.mkdir()
+    fx_none = _fixture(tmp, "gitpin-missing-git")
+    fixtures.append(fx_none)
+    fx_none.path = str(vacant)
+    saved_path = _put_env(dict(PATH=os.environ.get("PATH", os.defpath)))
+    try:
+        rc, reports, fatal = fx_none.run()
+    finally:
+        _restore_env(saved_path)
+    check("git/missing-git-refused-before-any-launch",
+          (rc, reports, "before any git launch" in (fatal or "")
+           and "cannot be resolved" in (fatal or "")), (2, [], True))
+    # Every child of a whole run receives a PATH with no entry inside a repository directory
+    # of the run and none resolving through /proc or /dev/fd (see _child_env). Planted here:
+    # the main worktree's tools directory, the common git directory, another PR's worktree,
+    # /proc/self/cwd, /dev/fd and, once it exists, the private base repository. None of them
+    # holds a program the tool resolves, so the run goes ahead, and no child's PATH may carry
+    # any of them. Red while every child received the caller's absolute entries.
+    fx_paths = _fixture(tmp, "gitpin-child-path")
+    fixtures.append(fx_paths)
+    _stale_pr(fx_paths)
+    other = fx_paths.add_pr(2, "feat/y", dict([("src/d.txt", "delta\n")]))
+    planted = [str(fx_paths.main / "tools"), str(fx_paths.main / ".git"), str(other),
+               "/proc/self/cwd", "/dev/fd"]
+    fx_paths.path = os.pathsep.join(planted + [fx_paths.path])
+    child_paths, in_run = [], []
+    real_base_fetch = globals()["_base_fetch"]
+    real_run_train = globals()["run_train"]
+
+    def _path_seeing_child(argv, cwd=None, env=None, timeout=None, push=False, executable=None):
+        # Only the run's own children: the fixture's reads around the run are not the tool's.
+        if in_run:
+            child_paths.append((env or dict()).get("PATH", "").split(os.pathsep))
+        return real_child(argv, cwd=cwd, env=env, timeout=timeout, push=push,
+                          executable=executable)
+
+    def _flagged_run_train(*args, **kwargs):
+        in_run.append(True)
+        try:
+            return real_run_train(*args, **kwargs)
+        finally:
+            in_run.pop()
+
+    def _base_entry_fetch(root, run_dir, remote, base):
+        fetched = real_base_fetch(root, run_dir, remote, base)
+        planted.append(fetched[0])
+        os.environ["PATH"] = fetched[0] + os.pathsep + os.environ.get("PATH", os.defpath)
+        return fetched
+
+    saved_path = _put_env(dict(PATH=os.environ.get("PATH", os.defpath)))
+    globals()["_run_child"] = _path_seeing_child
+    globals()["_base_fetch"] = _base_entry_fetch
+    globals()["run_train"] = _flagged_run_train
+    try:
+        os.chdir(str(empty))
+        rc, reports, _fatal = fx_paths.run(only=set([1]))
+    finally:
+        os.chdir(cwd_before)
+        globals()["_run_child"] = real_child
+        globals()["_base_fetch"] = real_base_fetch
+        globals()["run_train"] = real_run_train
+        _restore_env(saved_path)
+    check("git/child-path-drops-repository-and-process-entries",
+          (rc, _result(reports, 1), len(planted), len(child_paths) > 0,
+           sorted(set(e for path in child_paths for e in path if e in planted))),
+          (0, "would-merge", 6, True, []))
+    # Every transport command of an --apply run (the base fetch, each ls-remote, both
+    # --shared clones, the PR-branch fetch and the push) is launched from an empty directory,
+    # and every one but the clones names its repository with --git-dir (see _git_transport),
+    # observed at each launch. Red while they ran in the private base repository, the private
+    # checkout and the author's worktree.
+    fx_cwd = _fixture(tmp, "gitpin-transport-cwd")
+    fixtures.append(fx_cwd)
+    _stale_pr(fx_cwd)
+    pins = ["-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"]
+    transports = []
+
+    def _cwd_seeing_child(argv, cwd=None, env=None, timeout=None, push=False, executable=None):
+        sub = _audited_subcommand(argv[7:]) if list(argv[1:7]) == pins else None
+        if sub in ("fetch", "push", "ls-remote", "clone"):
+            transports.append((sub, os.listdir(str(cwd)),
+                               any(word.startswith("--git-dir=") for word in argv)))
+        return real_child(argv, cwd=cwd, env=env, timeout=timeout, push=push,
+                          executable=executable)
+
+    saved_path = _put_env(dict(PATH=os.environ.get("PATH", os.defpath)))
+    globals()["_run_child"] = _cwd_seeing_child
+    try:
+        rc, reports, _fatal = fx_cwd.run(apply=True)
+    finally:
+        globals()["_run_child"] = real_child
+        _restore_env(saved_path)
+    check("git/transport-runs-from-empty-private-directory",
+          (rc, _result(reports, 1), sorted(set(row[0] for row in transports)),
+           [row for row in transports if row[1] != [] or row[2] != (row[0] != "clone")]),
+          (0, "pushed", ["clone", "fetch", "ls-remote", "push"], []))
+    # End to end, an ssh remote with /proc/self/cwd first on PATH and a PR that commits an
+    # executable ssh at its tree root, a decoy that records that it ran. A stand-in ssh outside
+    # every repository directory carries the transport by running the remote command locally.
+    # Red while the push ran from the merged private checkout with /proc/self/cwd on its PATH:
+    # git's own PATH walk for ssh then ran the PR's decoy. Either defence alone (the empty
+    # transport directory, or /proc/self/cwd dropped from every child's PATH) keeps it green;
+    # each has its own vector above.
+    shim_bin = Path(tmp) / "gitpin-ssh-shim"
+    shim_bin.mkdir()
+    shim = shim_bin / "ssh"
+    shim.write_text('#!/bin/sh\nfor last; do :; done\nexec /bin/sh -c "$last"\n',
+                    encoding="utf-8")
+    shim.chmod(0o755)
+    fx_ssh = _fixture(tmp, "gitpin-ssh-decoy")
+    fixtures.append(fx_ssh)
+    wt_ssh = Path(fx_ssh.add_pr(1, "feat/x", dict([("src/b.txt", "bravo\n")])))
+    ssh_sentinel = Path(tmp) / "gitpin-ssh-decoy-ran"
+    (wt_ssh / "ssh").write_text("#!/bin/sh\n: > '%s'\nexec '%s' \"$@\"\n" % (ssh_sentinel, shim),
+                                encoding="utf-8")
+    (wt_ssh / "ssh").chmod(0o755)
+    head = fx_ssh.commit(wt_ssh, "pr commits an ssh at its tree root")
+    _git(wt_ssh, "push", "-q", "origin", "%s:refs/heads/feat/x" % head)
+    fx_ssh.prs[0]["headRefOid"] = head
+    fx_ssh.set_gh()
+    fx_ssh.advance_main(dict([("src/c.txt", "charlie\n")]))
+    _git(fx_ssh.main, "config", "remote.origin.url", "ssh://example.invalid" + str(fx_ssh.remote))
+    fx_ssh.path = "/proc/self/cwd" + os.pathsep + str(shim_bin) + os.pathsep + fx_ssh.path
+    saved_path = _put_env(dict(PATH=os.environ.get("PATH", os.defpath)))
+    try:
+        os.chdir(str(empty))
+        rc, reports, _fatal = fx_ssh.run(apply=True)
+    finally:
+        os.chdir(cwd_before)
+        _restore_env(saved_path)
+    check("git/transport-decoy-ssh-never-runs",
+          (rc, _result(reports, 1), ssh_sentinel.exists()), (0, "pushed", False))
+    fixtures += _unreadable_path_entry(tmp)
     check("git/pin-invariants", _invariants(*fixtures), [])
+
+
+def _unreadable_path_entry(tmp):
+    # The tool walks the PATH for a bare name itself (see _path_lookup) and refuses, as
+    # cannot-evaluate, at the first entry it cannot list, before any later entry is consulted:
+    # here a mode-0 directory ahead of a directory holding the program. Red while shutil.which
+    # resolved the name: it passed the unreadable entry over and took the later match, so the
+    # configured head launched and the whole run went ahead with the later git. A process that
+    # still reads the mode-0 directory (root, CAP_DAC_OVERRIDE; observed with _can_read) cannot
+    # produce the error: both checks are then recorded as NOT RUN through skip(). Returns the
+    # fixtures it ran through the tool.
+    locked = Path(tmp) / "unreadable-path-entry"
+    locked.mkdir()
+    holder = Path(tmp) / "unreadable-path-holder"
+    holder.mkdir()
+    os.symlink(sys.executable, holder / "python3")
+    launch_cwd = Path(tmp) / "unreadable-path-cwd"
+    launch_cwd.mkdir()
+    os.chmod(str(locked), 0)
+    try:
+        if _can_read(str(locked)):
+            for name in ("config/unreadable-path-entry-head-refused",
+                         "git/unreadable-path-entry-refuses-git"):
+                skip(name, "this process reads a mode-0 directory, so the permission error "
+                           "cannot be produced")
+            return []
+        saved_path = _put_env(dict(PATH=str(locked) + os.pathsep + str(holder)))
+        try:
+            code, _out, err = _run_external(["python3", "--version"], launch_cwd, 30)
+        finally:
+            _restore_env(saved_path)
+        check("config/unreadable-path-entry-head-refused", (code, "cannot be evaluated" in err),
+              (None, True))
+        fx = _fixture(tmp, "unreadable-path-git")
+        _stale_pr(fx)
+        fx.path = str(locked) + os.pathsep + fx.path
+        saved_path = _put_env(dict(PATH=os.environ.get("PATH", os.defpath)))
+        try:
+            rc, reports, fatal = fx.run()
+        finally:
+            _restore_env(saved_path)
+        check("git/unreadable-path-entry-refuses-git",
+              (rc, reports, "before any git launch" in (fatal or "")
+               and "cannot be evaluated" in (fatal or "")), (2, [], True))
+        return [fx]
+    finally:
+        os.chmod(str(locked), 0o755)
 
 
 def case_dry(tmp):
@@ -3588,7 +4059,7 @@ def case_happy(tmp):
     check("apply/base-ref-untouched", fx.remote_ref("main"), base)
     check("apply/argv-audit-clean", [a for a in GIT_AUDIT if _forbidden(a) or _audit_violation(a)],
           [])
-    tool_pushes = [a for a in GIT_AUDIT if a[:1] == ["push"] and "--porcelain" in a]
+    tool_pushes = [a for a in GIT_AUDIT if _audited_subcommand(a) == "push" and "--porcelain" in a]
     check("apply/push-leased-to-validated-head",
           (len(tool_pushes), all(("--force-with-lease=refs/heads/feat/x:" + old) in a
                                  for a in tool_pushes)), (1, True))
@@ -3722,8 +4193,8 @@ def case_badname(tmp):
         # by meta/unrelated-assertion-reaches-crash-recording and
         # meta/phrase-collision-assertion-reaches-crash-recording).
         rc, reports = "argv-audit refused: %s" % exc, []
-    worked = [a for a in GIT_AUDIT[audit:] if a[:1] in (
-        ["clone"], ["merge"], ["commit-tree"], ["push"], ["checkout"], ["add"], ["write-tree"])]
+    worked = [a for a in GIT_AUDIT[audit:] if _audited_subcommand(a) in (
+        "clone", "merge", "commit-tree", "push", "checkout", "add", "write-tree")]
     check("refuse/bad-branch-name-plus", (rc, _result(reports, 1)), (1, "bad-branch-name"))
     check("refuse/bad-branch-name-at", _result(reports, 2), "bad-branch-name")
     check("refuse/bad-branch-name-before-any-work",
@@ -4764,7 +5235,7 @@ def case_idem(tmp):
     def kill(*_args):
         raise KeyboardInterrupt("simulated kill after the commit")
 
-    def push_then_kill(ctx, scratch, _old, new):
+    def push_then_kill(ctx, scratch, _scratch_git, _old, new):
         _git(scratch, "push", "-q", "--", ctx["remote_url"],
              "%s:refs/heads/%s" % (new, ctx["branch"]))
         raise KeyboardInterrupt("simulated kill after the push")
@@ -5394,13 +5865,15 @@ def case_lock_held(tmp):
     old = fx.remote_ref("feat/x")
     common = _git_text(fx.main, "rev-parse", "--path-format=absolute", "--git-common-dir")
     before, pushed = _snapshot(wt), fx.pushes()
-    # Both tool fetches are recorded with the _ALTERNATE_FETCH_CONFIG -c prefix, so the filter
-    # matches that recorded shape (a bare ["fetch"] head can never
+    # Both tool fetches are recorded with the _ALTERNATE_FETCH_CONFIG -c pins right before the
+    # subcommand (after the --git-dir and --work-tree a transport command carries), so the
+    # filter matches that recorded shape (a bare ["fetch"] head can never
     # match a recorded tool fetch); the lock-released run below pins the filter non-vacuous.
     prefix = list(_ALTERNATE_FETCH_CONFIG)
 
     def tool_fetches(rows):
-        return [a for a in rows if a[:len(prefix) + 1] == prefix + ["fetch"]]
+        return [a for a in rows if _audited_subcommand(a) == "fetch"
+                and a[a.index("fetch") - len(prefix):a.index("fetch")] == prefix]
 
     with open(os.path.join(common, LOCK_NAME), "a+") as holder:
         fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -5430,8 +5903,8 @@ def case_fetch_failure(tmp):
         rc, reports, fatal = fx.run(apply=True)
     finally:
         _git(fx.main, "config", "remote.origin.url", str(fx.remote))
-    touching = [a for a in GIT_AUDIT[audit:] if a[:1] in (
-        ["merge"], ["commit-tree"], ["push"], ["ls-remote"], ["checkout"], ["add"], ["clone"])]
+    touching = [a for a in GIT_AUDIT[audit:] if _audited_subcommand(a) in (
+        "merge", "commit-tree", "push", "ls-remote", "checkout", "add", "clone")]
     check("run/fetch-failure-exit2", (rc, reports, "fetch failed" in (fatal or "")), (2, [], True))
     check("run/fetch-failure-touches-nothing",
           (touching, _snapshot_diff(before, _snapshot(wt)), fx.remote_ref("feat/x"),
@@ -5925,8 +6398,10 @@ def case_gitread(tmp):
     _git(src, "clone", "--quiet", "--shared", "--no-checkout", str(src), scratch)
     _guard("scratch-setup")(scratch)
     _git(scratch, "checkout", "--quiet", "--detach", head)
-    ctx = dict(cmd_timeout=60, cfg=dict(generated=dict(check=[[sys.executable, "-I", "-B", "-c",
-                                                                "pass"]])))
+    transport = Path(tmp) / "gitread-transport"
+    transport.mkdir()
+    ctx = dict(cmd_timeout=60, transport=str(transport),
+               cfg=dict(generated=dict(check=[[sys.executable, "-I", "-B", "-c", "pass"]])))
 
     def fresh():
         return _guard("fresh-checkout")(ctx, scratch, head)
@@ -6036,10 +6511,11 @@ def case_ancestry(tmp):
 
 def case_rootskip(tmp):
     # As root the permission checks must not be counted as executed and passed. With _can_read
-    # forced true (what root observes), the three permission checks must
+    # forced true (what root observes), the five permission checks must
     # be recorded as NOT RUN, kept out of the executed set, with no failure recorded.
     global _can_read
-    names = ["gitread/fresh-checkout-unreadable-blob-refused",
+    names = ["config/unreadable-path-entry-head-refused", "git/unreadable-path-entry-refuses-git",
+             "gitread/fresh-checkout-unreadable-blob-refused",
              "scratch/unreadable-checkout-fixpoint-refused", "scratch/unreadable-checkout-refused"]
     saved, real = dict(_RECORDER), _can_read
     inner = dict(executed=set(), list=[], failures=[], skipped=[])
@@ -6053,6 +6529,7 @@ def case_rootskip(tmp):
     try:
         _unreadable_checkout(sub)
         case_gitread(sub)
+        _unreadable_path_entry(sub)
     finally:
         _can_read = real
         _RECORDER.update(saved)
