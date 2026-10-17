@@ -384,8 +384,9 @@ def imported_series_declared(manifest_data):
     SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION is the spec 1.3.0 activation; this helper
     needs no edit then, but activation must also land the imported-content checks (C-IMPORTED-*):
     the opf-check activation tripwire refuses to certify an active imported series until that
-    roster carries all four imported-series checks spec 4.2 requires, so raising the constant
-    alone, or with only some of those checks landed, cannot ship."""
+    roster names all four imported-series checks spec 4.2 requires and each is wired into the
+    roster the store is graded against, so raising the constant alone, or with only some of those
+    checks landed, cannot ship."""
     opf = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
     version = opf.get("spec_version") if isinstance(opf, dict) else None
     parsed = _parse(version) if isinstance(version, str) else None

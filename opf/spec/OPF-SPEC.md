@@ -2623,12 +2623,14 @@ The gates in this standard are strong where they are strong and say so where the
   target contract's residual and claim no shipped tooling behaviour. Version-control history over
   the tracked store is the control, and activated 1.3.0 tooling's C-IMPORTED-PROVENANCE still
   re-verifies every preserved original an imported record references. The reference tooling in
-  `opf/tools/` refuses a 1.3.0 declaration at its shipped 1.2.0 ceiling (section 9.2). Once all
-  four section 8.3 imported-series checks have landed in its doctor roster, it grades the imported
-  series wherever containment registers the imported leaves, homes 1 included, where every 1.3.0
-  store is (section 4.2). Its C-IMPORTED-PROVENANCE re-reads each preserved original an imported
-  record cites, against its `source_sha256`, and every file the cited import bundle's inventory
-  lists, against the recorded size and digest.
+  `opf/tools/` refuses a 1.3.0 declaration at its shipped 1.2.0 ceiling (section 9.2). Once it
+  supports the imported series, it grades that series wherever containment registers the imported
+  leaves, homes 1 included, where every 1.3.0 store is (section 4.2), and it holds such a store at
+  cannot-evaluate until all four section 8.3 imported-series checks are named and wired into the
+  doctor roster the store is graded against. A named and wired check that is not implemented reads
+  cannot-evaluate, so no store certifies before all four checks exist. Its C-IMPORTED-PROVENANCE
+  re-reads each preserved original an imported record cites, against its `source_sha256`, and
+  every file the cited import bundle's inventory lists, against the recorded size and digest.
 - Store resolution fails closed on a pointer that does not resolve and on zero or multiple
   manifests at the target; it cannot detect a second store that no pointer names, placed somewhere
   the tooling was never aimed.
