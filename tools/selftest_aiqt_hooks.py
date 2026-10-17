@@ -2479,6 +2479,67 @@ def _raw_sequence_failures(count=20000, seed=20261015):
     return out
 
 
+# Commands for the continuation-join fast path: with no backslash-newline pair (backslashes, newlines and
+# quoting apart from each other) and with pairs at top level, inside quotes, substitutions, an expansion and
+# comments, including pairs the walk keeps.
+_JOIN_FAST_TEXTS = (
+    "", "git status", "a" + chr(92) + "b", "trailing" + chr(92), "echo 'a" + chr(92) + "b'", "one\ntwo",
+    'echo "a' + chr(92) + '"b"', "echo $(x)\n# c " + chr(92) + " x", "a" + chr(92) + "\r\nb",
+    "echo `a" + chr(92) + "`b`", "((true))", "a\n" + chr(92), chr(92) + "n",
+    "a" + chr(92) + "\nb", "a" + chr(92) + "\n", chr(92) + "\n", 'echo "a' + chr(92) + '\nb"',
+    "echo 'a" + chr(92) + "\nb'", "echo $'a" + chr(92) + "\nb'", "echo a # x " + chr(92) + "\necho b",
+    "echo $(a" + chr(92) + "\nb)", "echo `a" + chr(92) + "\nb`", "echo ${a" + chr(92) + "\nb}",
+    "cat <(a" + chr(92) + "\nb)", "a" + chr(92) * 2 + "\nb", "x " + chr(92) + "\n# y " + chr(92) + "\nz",
+    '"$(echo "' + chr(92) + '\n")"')
+_JOIN_FAST_ALPHABET = (chr(92), "\n", "'", '"', "$", "(", ")", "`", "#", "{", "}", " ", "a", "<", ";", "\r")
+
+
+def _join_fast_mismatches(join, texts):
+    """The texts on which join(text) differs from the full walk, or, for a text with no backslash-newline
+    pair, from (text, the identity index): [(text, got, want)], at most three."""
+    out = []
+    for text in texts:
+        want = aiqt_hooks._join_continuations_walk(text)
+        got = join(text)
+        if got != want or (chr(92) + "\n" not in text and got != (text, list(range(len(text) + 1)))):
+            out.append((text, got, want))
+            if len(out) == 3:
+                break
+    return out
+
+
+def _join_fast_failures(count=4000, seed=20261017):
+    """(dl-join-fast) _join_continuations, which skips the walk when a command holds no backslash-newline
+    pair, gives the same (joined, raw_index) as the full walk on _JOIN_FAST_TEXTS and `count` seeded random
+    texts over _JOIN_FAST_ALPHABET; the corpus must hold texts with and without a pair, and pairs the walk
+    removes and keeps. Three wrong fast paths (one skipping the walk on every command, one dropping the final
+    index entry, one deleting every pair with the identity index) must each be caught by the same comparison,
+    so it discriminates."""
+    out = []
+    rng = random.Random(seed)
+    texts = list(_JOIN_FAST_TEXTS)
+    for _ in range(count):
+        texts.append("".join(rng.choice(_JOIN_FAST_ALPHABET) for _ in range(rng.randint(0, 12))))
+    pair = chr(92) + "\n"
+    with_pair = [text for text in texts if pair in text]
+    removed = sum(aiqt_hooks._join_continuations_walk(text)[0] != text for text in with_pair)
+    if not with_pair or len(with_pair) == len(texts) or not 0 < removed < len(with_pair):
+        out.append("(dl-join-fast-corpus) the corpus must hold texts with and without a pair and pairs the walk "
+                   "removes and keeps ({} of {} with a pair, {} changed)".format(len(with_pair), len(texts), removed))
+    for text, got, want in _join_fast_mismatches(aiqt_hooks._join_continuations, texts):
+        out.append("(dl-join-fast) _join_continuations({!r}) gave {!r}, the full walk {!r}".format(text, got, want))
+    walk = aiqt_hooks._join_continuations_walk
+    wrong = (
+        ("always", lambda text: (text, list(range(len(text) + 1)))),
+        ("short-index", lambda text: walk(text) if pair in text else (text, list(range(len(text))))),
+        ("replace", lambda text: (text.replace(pair, ""), list(range(len(text.replace(pair, "")) + 1)))),
+    )
+    for name, join in wrong:
+        if not _join_fast_mismatches(join, texts):
+            out.append("(dl-join-fast-red-{}) a wrong fast path passes the equivalence check".format(name))
+    return out
+
+
 def _repeat(unit, size, tail=""):
     return unit * max(1, (size - len(tail)) // len(unit)) + tail
 
@@ -4811,6 +4872,7 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_deadline_relation_failures())
     failures.extend(_deadline_shape_rerun_failures())
     failures.extend(_raw_sequence_failures())
+    failures.extend(_join_fast_failures())
     child_tmp = tmp / "deadline"
     child_tmp.mkdir()
     code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import selftest_aiqt_hooks as m; "

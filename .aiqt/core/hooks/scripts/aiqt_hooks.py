@@ -982,7 +982,22 @@ def _join_continuations(command):
     quotes nest, as in _skip_quoting. DISCLOSED divergences: inside a QUOTED heredoc body bash keeps the
     pair and this join removes it (heredocs are not modelled; any '<<' marks the lex uncertain anyway),
     and a 'case' pattern ')' inside a substitution is read as closing it (any '$(' or backtick marks the
-    lex uncertain anyway). Linear, never raises."""
+    lex uncertain anyway). Linear, never raises.
+
+    A command that holds no backslash immediately followed by a newline returns (command, the identity
+    index) at once, without the context walk (_join_continuations_walk). The result is identical: the
+    walk removes characters only at a backslash whose next character is a newline, and every other step
+    copies the characters it passes in order, so with no such pair nothing is removed in any context and
+    the walk returns the command unchanged with raw_index[k] == k. The pair test is a plain substring
+    test, so a pair the walk keeps (inside single quotes or a comment) still takes the walk."""
+    if chr(92) + "\n" not in command:
+        return command, list(range(len(command) + 1))
+    return _join_continuations_walk(command)
+
+
+def _join_continuations_walk(command):
+    """The context walk behind _join_continuations, with no fast path: the same (joined, raw_index)
+    for every command. The self-test compares the two on commands with and without a continuation."""
     n = len(command)
     out = []
     raw_index = []
