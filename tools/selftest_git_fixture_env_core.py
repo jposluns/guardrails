@@ -1874,28 +1874,29 @@ def _member_bound_checks(roster):
     every override and for one non-member argv that keeps the default (red when the lookup is
     bypassed).
     config/member-roster-figures: the sizing comment's roster figures hold against the live
-    roster (107 members, 105 in the malformed lane) and, with the sizing account's fixed
+    roster (108 members, 106 in the malformed lane) and, with the sizing account's fixed
     coverage (89 members timed or bounded, ten measured under the malformed lane), the derived
-    figures (18 members with no recorded time, 95 malformed-lane members unmeasured); red when
-    a roster change leaves that comment stale."""
+    figures (19 members with no time in that account, 96 malformed-lane members unmeasured); red
+    when a roster change leaves that comment stale."""
     from unittest.mock import patch
 
     malformed = {argv for argv in roster
                  if _command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"]}
     # 89 and 10 are the sizing account's fixed coverage (see the SIZING comment above
     # CONFIG_MEMBER_BOUND_DEFAULT in the engine); the roster counts are live, so a roster change
-    # turns that comment's figures (107, 105, 18 and 95) red here.
+    # turns that comment's figures (108, 106, 19 and 96) red here.
     check("config/member-roster-figures",
           (len(roster), len(malformed), len(roster) - 89, len(malformed) - 10),
-          (107, 105, 18, 95))
+          (108, 106, 19, 96))
 
     record = ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert")
     opf_selftest = ("opf/tools/opf.py", "--self-test")
     adopt_observe = ("opf/tools/_opf_adopt_observe.py", "--self-test")
     release_delta = ("tools/check_release_delta.py", "--self-test")
     opf_init = ("opf/tools/check_opf_init.py", "--self-test")
+    closure = ("tools/check_opf_standalone_closure.py", "--self-test")
     overrides = {record: 5100, opf_selftest: 3600, adopt_observe: 1800, release_delta: 1800,
-                 opf_init: 1800}
+                 opf_init: 1800, closure: 3600}
     check("config/member-bound-table",
           (sorted(key for key in CONFIG_MEMBER_BOUNDS if key not in roster),
            {key: _config_member_bound(key) for key in CONFIG_MEMBER_BOUNDS},
@@ -1915,13 +1916,13 @@ def _member_bound_checks(roster):
     # _run_config_member resolves _run_bounded in the engine module's namespace, so the stub
     # is patched there, not into this runner.
     with patch.object(_gfe, "_run_bounded", recording):
-        for member in (record, opf_selftest, adopt_observe, release_delta, opf_init,
+        for member in (record, opf_selftest, adopt_observe, release_delta, opf_init, closure,
                        ("opf/tools/opf.py",)):
             _run_config_member(member, {})
     check("config/member-bound-reaches-run", handed,
           [(" ".join(record), 5100), (" ".join(opf_selftest), 3600),
            (" ".join(adopt_observe), 1800), (" ".join(release_delta), 1800),
-           (" ".join(opf_init), 1800), ("opf/tools/opf.py", 1200)])
+           (" ".join(opf_init), 1800), (" ".join(closure), 3600), ("opf/tools/opf.py", 1200)])
 
 
 def _manifest_setup_failures(base):
