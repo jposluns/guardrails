@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "2571f67a4dda5b4b8fe7fded5f88b5a3dcac6296b9962ea881f4d89b0dbf8089"
+tree-sha256 = "f15bf61ffbacf9d53be399b19e72ff165ffc430b1680e81118158e92aac96337"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -66,8 +66,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 316865
-sha256 = "193a8cb8776b228134ee8c0472b8cde5351f24bc63e3f4e784ccf141652f0d55"
+bytes = 316962
+sha256 = "6b1b0402c2d5856b0ecc92d143a856000eb0e039c3829902acc060d7fd20a43b"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -3691,8 +3691,8 @@ sha256 = "138df9180843eccc8dd09812fe17c45c82514936f2002a968d930ae2bc6eb9fc"
 
 [[sources]]
 path = "tools/merge_train.py"
-bytes = 350474
-sha256 = "02be3ebd531e7d6286f9476e5322161cb8beb0d3a6c90a6ab4e96c1d84f515e5"
+bytes = 356754
+sha256 = "f1714c4863e66bb914dc9d6cf26049710be323cbfe65b591fad47653f3e71e3c"
 
 [[sources]]
 path = "tools/migrate.py"
@@ -3741,8 +3741,8 @@ sha256 = "b1da52bd72d50d317422a8647745e5de0a4faa022f0b1698970259dd23ebc2c2"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 118040
-sha256 = "623afd1aa4c3019a3a5f0538d216fa09ce5c9cbd5a8a38c41a82d64d5e7f9c21"
+bytes = 118212
+sha256 = "e17de5b09ae7676ede42bd6e9769dbc0f5eb4a8bd2012771f6a1b9f1baf6f5ae"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

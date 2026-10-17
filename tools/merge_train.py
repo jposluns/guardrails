@@ -106,9 +106,9 @@ never overwritten. One observer reads the remote after every push attempt, a tim
 one included; a push whose outcome cannot be observed (a push timeout, an observer timeout, an
 unreadable remote, and a timed-out push with the remote still at the old head, which may still be
 in flight in the remote's receive-pack) is INDETERMINATE: a small marker is kept so the retry can
-classify it, and
-nothing else changes anywhere. There is no rollback machinery, because nothing local is mutated and
-so there is nothing to roll back.
+classify it, the author's working tree, index, HEAD and local branches are unchanged, and the push
+itself may have landed on the remote. There is no rollback machinery, because nothing local is
+mutated and so there is nothing to roll back.
 
 A DRY RUN (--dry-run, or any live selection without --apply) prepares and validates the SAME
 candidate in the same private scratch checkout: the branch and head agreement, the
@@ -851,14 +851,16 @@ def guard_config_fail_closed(data, tree=None, head_tree=None):
             # absolute executable realpath BEFORE the launch (shutil.which against the
             # sanitized PATH _clean_env rebuilt with every cwd-relative entry removed) and
             # refuses, by name, an empty sanitized PATH, an unresolvable head and a resolved
-            # realpath inside the private checkout or a repository worktree, then launches
-            # the resolved absolute path, never the bare name (a /proc/self/cwd PATH entry and
-            # every other
-            # absolute alias of the checkout fail the realpath containment, and the child
-            # repeats no PATH walk), so checkout content (tools/gen.py, ./python3,
-            # tools/python3, a committed python3 or a committed symlink, and content a PR
-            # adds that any PATH entry would resolve in the scratch
-            # checkout) never runs as a configured program head.
+            # realpath inside the private checkout or ANY repository directory of the run
+            # (the toplevel, the common git directory, every worktree git lists, each PR's
+            # and not only the one being processed, and the private base repository), then
+            # launches the resolved absolute path, never the bare name (a /proc/self/cwd PATH
+            # entry and every other absolute alias of that content fail the realpath
+            # containment, and the child repeats no PATH walk), so checkout and worktree
+            # content (tools/gen.py, ./python3, tools/python3, a committed python3 or a
+            # committed symlink, content a PR adds that any PATH entry would resolve in the
+            # scratch checkout, and a program in another PR's worktree) never runs as a
+            # configured program head.
             head = command[0]
             if "/" in head or "\\" in head:
                 # A PATH-form head (absolute, ./-prefixed or
@@ -1278,7 +1280,7 @@ def guard_fresh_checkout(ctx, scratch, new):
         for command in ctx["cfg"]["generated"]["check"]:
             code, _out, err = _run_external(command, fresh, ctx["cmd_timeout"],
                                             dict(PYTHONDONTWRITEBYTECODE="1"),
-                                            confine=(ctx.get("root"), ctx.get("wt")))
+                                            confine=ctx.get("confine", ()))
             reason = _child_failure(code, command, err)
             if reason is not None:
                 raise Refuse("normal-checkout-failed",
@@ -1548,7 +1550,7 @@ def _run_checks(ctx, scratch):
     for command in ctx["cfg"]["generated"]["check"]:
         code, _out, err = _run_external(command, scratch, ctx["cmd_timeout"],
                                         dict(PYTHONDONTWRITEBYTECODE="1"),
-                                        confine=(ctx.get("root"), ctx.get("wt")))
+                                        confine=ctx.get("confine", ()))
         _guard("check-exit")(code, command, err)
 
 
@@ -1557,7 +1559,8 @@ def _push_and_observe(ctx, scratch, old, new):
     exact-value lease makes the remote refuse unless the branch is still at old, the head this run
     validated), then one observer over the remote. A push whose outcome is unknown (a timeout, a
     launch failure) and an observation failure of ANY kind, an observer timeout included, are
-    INDETERMINATE: the marker is kept and nothing changes anywhere; nothing local exists to roll
+    INDETERMINATE: the marker is kept, the author's working tree, index, HEAD and local branches
+    are unchanged, and the push may have landed on the remote; nothing local exists to roll
     back. A push that raised AND left the remote still at the old head is ALSO indeterminate, not
     push-rejected: the remote's receive-pack may still be running (a slow pre-receive hook) and
     the push can land after this run reports, so the marker is kept for the retry to classify."""
@@ -1579,7 +1582,9 @@ def _push_and_observe(ctx, scratch, old, new):
         return dict(result="pushed", old_head=old, new_head=new, reason="")
     if observed is None:
         raise Refuse("push-unknown",
-                     "remote unreadable after the push; the marker is kept, nothing changed")
+                     "remote unreadable after the push, which may have landed; the marker is "
+                     "kept and the author's worktree, index, HEAD and local branches are "
+                     "unchanged")
     if indeterminate and observed == old:
         raise Refuse("push-unknown",
                      "the push timed out with the remote still at the old head; it may still be "
@@ -1646,8 +1651,8 @@ def _worktrees(root):
     return rows
 
 
-def _gh_json(argv, root, timeout):
-    code, out, err = _run_external(argv, root, timeout)
+def _gh_json(argv, root, timeout, confine=()):
+    code, out, err = _run_external(argv, root, timeout, confine=confine)
     if code != 0:
         raise FailClosed("gh failed (%s): %s" % (code, err.strip()[:300]))
     try:
@@ -1659,7 +1664,8 @@ def _gh_json(argv, root, timeout):
 def _gh_view(ctx):
     try:
         data = _gh_json(["gh", "pr", "view", str(ctx["pr"]), "--json",
-                         "headRefName,headRefOid,state"], ctx["root"], ctx["net_timeout"])
+                         "headRefName,headRefOid,state"], ctx["root"], ctx["net_timeout"],
+                        ctx.get("confine", ()))
     except FailClosed as exc:
         raise Refuse("branch-mismatch", "gh pr view unreadable: %s" % exc)
     if not isinstance(data, dict):
@@ -1774,7 +1780,7 @@ def _merge_commit_push(ctx, scratch, old, base, apply):
     for command in ctx["cfg"]["generated"]["regenerate"]:
         code, _out, err = _run_external(command, scratch, ctx["cmd_timeout"],
                                         dict(PYTHONDONTWRITEBYTECODE="1"),
-                                        confine=(ctx.get("root"), ctx.get("wt")))
+                                        confine=ctx.get("confine", ()))
         _guard("regenerate-exit")(code, command, err)
     _git(scratch, "add", "-A", "--", *generated)
     _run_checks(ctx, scratch)
@@ -1863,6 +1869,12 @@ def run_train(root, apply=False, only=None):
         common = _git_author_text(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
     except Refuse as exc:
         return 2, reports, "not a git repository: %s" % exc.reason
+    # The worktree list is read during discovery, before any program head launches, so gh is
+    # confined to every repository directory as well (see _run_locked_with_base).
+    try:
+        trees = _worktrees(top)
+    except Refuse as exc:
+        return 2, reports, "%s: %s" % (exc.status, exc.reason)
     with open(os.path.join(common, LOCK_NAME), "a+") as lock:
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1883,13 +1895,14 @@ def run_train(root, apply=False, only=None):
             for signum in sorted(UNWIND_SIGNALS - {signal.SIGINT}):
                 if signal.getsignal(signum) != signal.SIG_IGN:
                     previous[signum] = signal.signal(signum, _to_exception)
-            return _run_locked(Path(top), apply, only or set(), reports)
+            return _run_locked(Path(top), [top, common] + [t["path"] for t in trees], trees,
+                               apply, only or set(), reports)
         finally:
             for signum, handler in previous.items():
                 signal.signal(signum, handler)
 
 
-def _run_locked(root, apply, only, reports):
+def _run_locked(root, repo_dirs, trees, apply, only, reports):
     # The config lives on the base tip, so v1 resolves the conventional origin/main once, pins M,
     # and requires the config to name that same remote and base. The base fetch runs in the run's
     # PRIVATE base repository (see _base_fetch), never in the author's repository: the author's
@@ -1900,16 +1913,23 @@ def _run_locked(root, apply, only, reports):
     run_dir = tempfile.mkdtemp(prefix="merge-train-base-")
     SCRATCHES.append(run_dir)
     try:
-        return _run_locked_with_base(root, run_dir, remote, base, apply, only, reports)
+        return _run_locked_with_base(root, run_dir, remote, base, repo_dirs, trees, apply, only,
+                                     reports)
     finally:
         _cleanup(lambda: shutil.rmtree(run_dir, ignore_errors=True))
 
 
-def _run_locked_with_base(root, run_dir, remote, base, apply, only, reports):
+def _run_locked_with_base(root, run_dir, remote, base, repo_dirs, trees, apply, only, reports):
     try:
         base_repo, remote_url, base_sha = _base_fetch(root, run_dir, remote, base)
     except Refuse as exc:
         return 2, reports, "fetch failed: %s" % exc.reason
+    # Every program head the run launches (gh, and each configured regenerate and check
+    # command) is confined to EVERY repository directory of the run: the toplevel, the common
+    # git directory, every worktree git lists (each PR's, not only the one being processed)
+    # and the private base repository, beside each launch's own working directory (see
+    # _run_external).
+    confine = tuple(repo_dirs) + (base_repo,)
     try:
         cfg = load_config(base_repo, base_sha)
         if cfg["remote"] != remote or cfg["base"] != base:
@@ -1919,7 +1939,7 @@ def _run_locked_with_base(root, run_dir, remote, base, apply, only, reports):
         cmd_timeout = limits.get("command_timeout_seconds", 900)
         prs = _gh_json(["gh", "pr", "list", "--state", "open", "--base", base, "--json",
                         "number,headRefName,headRefOid,isCrossRepository,baseRefName",
-                        "--limit", str(PR_LIST_LIMIT)], root, net_timeout)
+                        "--limit", str(PR_LIST_LIMIT)], root, net_timeout, confine)
         if not isinstance(prs, list) or not all(isinstance(p, dict) for p in prs):
             raise FailClosed("gh pr list did not return a list of objects")
         if len(prs) >= PR_LIST_LIMIT:
@@ -1928,7 +1948,6 @@ def _run_locked_with_base(root, run_dir, remote, base, apply, only, reports):
             if (type(pr.get("number")) is not int or not isinstance(pr.get("headRefName"), str)
                     or not isinstance(pr.get("headRefOid"), str)):
                 raise FailClosed("gh pr list row malformed: %r" % (pr,))
-        trees = _worktrees(root)
     except FailClosed as exc:
         return 2, reports, str(exc)
     except Refuse as exc:
@@ -1963,7 +1982,7 @@ def _run_locked_with_base(root, run_dir, remote, base, apply, only, reports):
             report["worktree"] = wt
             ctx.update(root=root, wt=wt, pr=pr["number"], branch=branch, head_oid=pr["headRefOid"],
                        remote=remote, remote_url=remote_url, base=base, base_sha=base_sha, cfg=cfg,
-                       base_repo=base_repo,
+                       base_repo=base_repo, confine=confine,
                        generated=generated, cmd_timeout=cmd_timeout, net_timeout=net_timeout,
                        git_dir=_git_author_text(wt, "rev-parse", "--path-format=absolute",
                                                 "--git-dir"))
@@ -2946,6 +2965,46 @@ def case_pathenv(tmp):
         _restore_env(saved_path)
     check("config/unresolvable-head-refused",
           (code, "cannot be resolved" in err, unit_sentinel.exists()), (None, True, False))
+    # A RELATIVE path head (a separator, not absolute) is refused unresolved, by name, even
+    # where it names an executable relative to THIS process's working directory, which
+    # shutil.which would otherwise return as is and the containment would accept (it lies
+    # outside the child working directory): the impostor it names records that it ran.
+    rel_cwd = Path(tmp) / "relative-head-cwd"
+    (rel_cwd / "rel").mkdir(parents=True)
+    rel_sentinel = rel_cwd / "relative-ran"
+    rel_impostor = rel_cwd / "rel" / "python3"
+    rel_impostor.write_text("#!/bin/sh\n: > '%s'\nexit 7\n" % rel_sentinel, encoding="utf-8")
+    rel_impostor.chmod(0o755)
+    cwd_before = os.getcwd()
+    try:
+        os.chdir(str(rel_cwd))
+        code, _out, err = _run_external(["rel/python3", "--version"], unit_dir, 5)
+    finally:
+        os.chdir(cwd_before)
+    check("config/relative-head-refused",
+          (code, "is a relative path" in err, rel_sentinel.exists()), (None, True, False))
+    # A head resolving to anything but an executable regular file (an absolute head naming a
+    # plain file without the execute bit, or a directory, which carries one) is refused by
+    # name BEFORE any launch: a recording child observes that nothing was started.
+    plain = Path(tmp) / "plain-head"
+    plain.write_text("not a program\n", encoding="utf-8")
+    plain.chmod(0o644)
+    started = []
+
+    def _start_recording_child(argv, cwd=None, env=None, timeout=None, push=False):
+        started.append(list(argv))
+        return subprocess.CompletedProcess(list(argv), 0, b"", b"")
+
+    saved_child = globals()["_run_child"]
+    globals()["_run_child"] = _start_recording_child
+    try:
+        refused = [(code, "not an executable regular file" in err)
+                   for code, _out, err in (_run_external([str(plain), "--version"], unit_dir, 5),
+                                           _run_external([str(unit_dir), "--version"], vacant,
+                                                         5))]
+    finally:
+        globals()["_run_child"] = saved_child
+    check("config/non-executable-head-refused", (refused, started), ([(None, True)] * 2, []))
     # The accepted boundary (a compatibility check, never red-on-revert evidence): a head
     # resolved OUTSIDE the confined directories launches as the resolved ABSOLUTE realpath
     # (the symlink followed), never the bare name, observed through a recording child.
@@ -3011,6 +3070,64 @@ def case_pathenv(tmp):
               (rc, _result(reports, 1), sentinel.exists(),
                "never runs as a configured program head" in reason),
               (1, "regenerate-failed", False, True))
+    # Every repository directory of the run is confined, never only the toplevel and the
+    # worktree of the PR being processed: with a PATH entry naming ANOTHER PR's worktree,
+    # whose python3 records that it ran, processing PR 1 refuses the configured head by name.
+    # Red while the confinement held the toplevel and PR 1's worktree alone: the other
+    # worktree's program ran.
+    sentinel = Path(tmp) / "sibling-worktree-ran"
+    fx = _fixture(tmp, "sibling-worktree-impostor")
+    fixtures.append(fx)
+    _stale_pr(fx)
+    sibling = Path(fx.add_pr(2, "feat/y", dict([("src/d.txt", "delta\n")])))
+    for name in ("python3", "gh"):
+        impostor = sibling / name
+        impostor.write_text("#!/bin/sh\n: > '%s-%s'\nexit 7\n" % (sentinel, name),
+                            encoding="utf-8")
+        impostor.chmod(0o755)
+    os.remove(fx.bin / "python3")
+    fx.path = str(sibling) + os.pathsep + fx.path
+    rc, reports, _fatal = fx.run(only=set([1]))
+    check("config/sibling-worktree-path-entry-head-refused",
+          (rc, _result(reports, 1), os.path.lexists("%s-python3" % sentinel),
+           "lies inside" in _reason(reports, 1)),
+          (1, "regenerate-failed", False, True))
+    # gh is confined the same way: once the fixture's own gh is gone, the same PATH entry
+    # resolves gh to the other PR's worktree, and the PR list refuses it by name before any
+    # PR is processed (red while gh was confined to the toplevel alone: the impostor ran).
+    os.remove(fx.bin / "gh")
+    rc, reports, fatal = fx.run(only=set([1]))
+    check("config/gh-sibling-worktree-head-refused",
+          (rc, reports, os.path.lexists("%s-gh" % sentinel), "lies inside" in (fatal or "")),
+          (2, [], False, True))
+    # The run's PRIVATE base repository is confined too: a python3 planted there once the
+    # directory exists (by a wrapper around _base_fetch) and named by a PATH entry prepended
+    # at that moment is refused by name. Red while the base repository was outside the
+    # confinement: the planted program ran.
+    sentinel = Path(tmp) / "base-repository-ran"
+    fx = _fixture(tmp, "base-repository-impostor")
+    fixtures.append(fx)
+    _stale_pr(fx)
+    real_base_fetch = globals()["_base_fetch"]
+
+    def _planting_base_fetch(root, run_dir, remote, base):
+        fetched = real_base_fetch(root, run_dir, remote, base)
+        planted = Path(fetched[0]) / "python3"
+        planted.write_text("#!/bin/sh\n: > '%s'\nexit 7\n" % sentinel, encoding="utf-8")
+        planted.chmod(0o755)
+        os.environ["PATH"] = fetched[0] + os.pathsep + os.environ.get("PATH", os.defpath)
+        return fetched
+
+    saved_path = _put_env(dict(PATH=os.environ.get("PATH", os.defpath)))
+    globals()["_base_fetch"] = _planting_base_fetch
+    try:
+        rc, reports, _fatal = fx.run()
+    finally:
+        globals()["_base_fetch"] = real_base_fetch
+        _restore_env(saved_path)
+    check("config/base-repository-path-entry-head-refused",
+          (rc, _result(reports, 1), sentinel.exists(), "lies inside" in _reason(reports, 1)),
+          (1, "regenerate-failed", False, True))
     check("config/path-entries-invariants", _invariants(*fixtures), [])
 
 
@@ -4108,28 +4225,12 @@ def case_mergefault(tmp):
     # The C-locale control is byte-identical wherever the probe
     # runs: in the self-test scratch, inside a repository worktree, in the checkout and, where
     # the scratch has an ancestor on another filesystem, there. A probe relying on repository
-    # discovery would name the mount point below a filesystem boundary in its control and
-    # report a missing revision inside a repository; the second check pins that this
-    # vector turns red under that discovery-based probe, whatever filesystems the host has.
+    # discovery reports a missing revision inside a repository (and, below a filesystem
+    # boundary, names the mount point), so restoring such a probe turns this check red
+    # through its inside-repository row on any host.
     locations = _probe_locations(tmp, str(fx_leak.main))
     check("meta/native-probe-control-location-independent", _probe_controls(locations),
           [(label, False, 128, _PROBE_CONTROL) for label, _where in locations])
-    def _discovery_probe(locale, where=None):
-        # The discovery-based probe shape: rev-parse of an absent name, located by discovery.
-        proc = subprocess.run(["git", "rev-parse", "--verify", "merge-train-locale-probe"],
-                              cwd=where, env=_locale_probe_env(locale),
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-        return proc.returncode, proc.stderr.decode("utf-8", "replace")
-
-    discovery_control = "fatal: not a git repository (or any of the parent directories): .git\n"
-    try:
-        globals()["_native_probe"] = _discovery_probe
-        discovery = _probe_controls(locations)
-    finally:
-        globals()["_native_probe"] = real_probe
-    check("meta/native-probe-location-vector-red-under-discovery-probe",
-          discovery != [(label, False, 128, discovery_control) for label, _where in locations],
-          True)
     if native is None:
         why = ("no locale translating the git fatal: prefix is available on this host "
                "(candidates: de_DE.UTF-8+de, en_US.UTF-8+de, fr_FR.UTF-8+fr), so the native "
@@ -4339,16 +4440,22 @@ def case_push_unknown(tmp):
     wt = _stale_pr(fx)
     old = fx.remote_ref("feat/x")
     # The post-receive hook points the checkout's origin at a missing path once the push has
-    # landed, so the observer's ls-remote cannot read the remote: indeterminate, marker kept,
-    # nothing changed anywhere.
+    # landed, so the observer's ls-remote cannot read the remote: indeterminate. What holds,
+    # stated exactly: the retry marker is kept, the author's working tree, index, HEAD and
+    # local branches are unchanged, and the push itself DID land on the remote here (the
+    # outcome the marker lets the rerun classify).
     (fx.base / "unreadable-after-push").write_text("", encoding="utf-8")
     before = _snapshot(wt)
+    branches = _git_text(fx.main, "for-each-ref", "--format=%(refname) %(objectname)",
+                         "refs/heads")
     rc, reports, _fatal = fx.run(apply=True)
     marker = _read_marker(_git_dir(wt)) or dict()
-    check("push/unknown-keeps-marker-changes-nothing",
+    check("push/unknown-keeps-marker-author-unchanged-push-landed",
           (rc, _result(reports, 1), _snapshot_diff(before, _snapshot(wt)),
+           _git_text(fx.main, "for-each-ref", "--format=%(refname) %(objectname)",
+                     "refs/heads") == branches,
            marker.get("new") == fx.remote_ref("feat/x"), marker.get("old"), len(fx.pushes())),
-          (1, "push-unknown", [], True, old, 1))
+          (1, "push-unknown", [], True, True, old, 1))
     _git(fx.main, "config", "remote.origin.url", str(fx.remote))
     rc, reports, _fatal = fx.run(apply=True)
     check("push/unknown-rerun-already-pushed",
