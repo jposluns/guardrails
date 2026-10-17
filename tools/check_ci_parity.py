@@ -578,6 +578,19 @@ ALLOWLIST = (
         "backlog": "GD-123",
     },
     {
+        "side": "ci-only",
+        "identity": "tools/ci_build_bash.py --build",
+        "reason": (
+            "The bash 5.3 build, which runs only on the explicit --build, "
+            "installs into RUNNER_TEMP and writes GITHUB_PATH, which only a CI "
+            "runner provides; it gives the hooks behaviour self-test a bash "
+            "the runner image need not ship. The local runner builds nothing: "
+            "that self-test uses the host's bash and fails below 5.3, and only "
+            "the build script's offline self-test runs locally."
+        ),
+        "backlog": "GD-123",
+    },
+    {
         "side": "local-only",
         "identity": "tools/check_branch_root.py --max-lag 200",
         "reason": (

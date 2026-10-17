@@ -87,6 +87,20 @@ bare-`$`-before-escaped-paren over-ASK. The raw fallback ASKS on a coarse appare
 detected cases, deliberate over-ASKs, and selected named residual ALLOWs; they make no soundness or
 universal-coverage claim.
 
+It also covers the heredoc terminator guard (heredoc_terminator, sectvl): a heredoc opener with no later
+line exactly equal to its delimiter (after the line's leading tabs for <<-) denies, naming the opener and
+the closest near-miss line; matched quoted and unquoted openers, a here-string, and a << inside quotes, a
+comment, arithmetic, an assignment subscript or a parameter expansion allow; a # inside a word after
+$((...)) or $[...] hides no opener; a heredoc inside a $(...) or <(...) is judged, also in double quotes,
+arithmetic, a subscript or a ${...}, with a substitution's bodies read before the outer command's pending
+bodies at any depth; a quote inside arithmetic or a subscript is read as bash reads it, and a redirection's
+target is never a subscript; and the near-miss bound (a line of the opener's own body only), the payload
+postures, and named residual allows are pinned. A no-op handler passes every allow case, so each allow case
+is written to deny when the one behaviour it names is broken; this suite does not run such broken versions
+itself. Every hd case is also parsed by bash 5.3 or newer with -n, which runs nothing, and must agree with
+it (a deny case draws bash's warning that a here-document ran to the end of the input, an allow case parses
+cleanly), outside a closed table of named exceptions; a missing or older bash is a NOT RUN failure.
+
 It also covers the secrets-shift-left guard (secrets_shift_left, secsec): a Write content, an Edit
 new_string, or a Bash command that carries an obvious hardcoded secret (a provider-token prefix or a
 credential-named assignment of a real-length literal, single-sourced from tools/check_secrets.py) denies;
@@ -2365,6 +2379,495 @@ def _test_git_stash_ref(failures):
     if (aiqt_hooks.HANDLERS.get("git_stash_ref") is not aiqt_hooks.git_stash_ref or
             aiqt_hooks.HANDLER_EVENT.get("git_stash_ref") != aiqt_hooks.PRETOOL):
         failures.append("(sr-wiring) git_stash_ref handler/event wiring is missing or wrong")
+
+
+# The bash parse oracle over the hd-* cases. Bash itself parses each case's command with -n, which reads
+# commands without running any, and must agree with the case's expected verdict: a deny case draws bash's
+# warning that a here-document ran to the end of the input, and an allow case parses with exit 0 and no
+# here-document warning. The guard models bash 5.3, and an older bash can read bodies in another order, so a
+# missing bash, or one older than _HD_BASH_MIN, is a NOT RUN failure, never a pass.
+# Agreement is judged per opener: the warning must name (wanted `X') a delimiter X of an opener the guard
+# leaves unterminated, so a warning about another opener does not count. Bash's exit for a deny case is 0, or 2
+# where the unterminated body swallows a closing parenthesis and bash then refuses the command as a syntax
+# error; either way bash read that body to the end of the input, and any other exit does not agree.
+# Agreement with bash -n is agreement with bash's parse, not with a run of the command. bash -n reads
+# $((cmd) ) as arithmetic and reports no here-document in it, while a run reads it again as a command
+# substitution holding a subshell and runs the lines after an opener there as commands; the guard reads that
+# shape as arithmetic too (the disclosed residual for a (( that opens nested subshells), and this oracle
+# cannot see the difference.
+_HD_BASH_MIN = (5, 3)
+# The closed table of cases that need not agree with bash, each with its reason. An id here that names no hd
+# case, or whose case does agree with bash, fails the check, so no entry outlives its reason.
+_HD_BASH_EXCEPTIONS = {
+    # A substitution closes with a body unread: bash warns "command substitution: 1 unterminated
+    # here-document", then reads that body from the line after, where these cases close it. The guard models
+    # that reading (the documented command-substitution model), so it allows them.
+    "hd-a30": "bash warns of a body unread when its substitution closes, then reads it as the guard models",
+    "hd-a31": "bash warns of a body unread when its substitution closes, then reads it as the guard models",
+    "hd-a32": "bash warns of a body unread when its substitution closes, then reads it as the guard models",
+    "hd-a33": "bash warns of a body unread when its substitution closes, then reads it as the guard models",
+    # Delimiters the guard cannot read, which it denies fail-safe.
+    "hd-d12": "bash refuses a << with no delimiter word as a syntax error, so it reports no here-document",
+    "hd-d16": "bash decodes the ANSI-C delimiter $'E\\x4fF' to EOF, which closes the body; the guard does not "
+              "decode an escape in a delimiter",
+}
+
+
+def _hd_unterminated_delimiters(command):
+    """The delimiters of the openers the guard leaves unterminated in command (an opener whose delimiter word
+    it cannot read names none)."""
+    return {op.delim for op in aiqt_hooks._heredoc_openers(command) if not op.terminated and op.delim is not None}
+
+
+def _hd_bash_oracle(vectors, failures, exceptions, search_path, unterminated=_hd_unterminated_delimiters):
+    """(hd-bash) Parse the command of each (label, command, want) case with bash -n -c (nothing runs; the
+    environment is pinned and no startup file is read) and require bash to agree with want, unless the case's
+    id is in exceptions (see _HD_BASH_EXCEPTIONS). bash is looked up on search_path, the only PATH the pinned
+    environment holds. A deny case agrees only when bash's end-of-file warning names a delimiter in
+    unterminated(command). Returns True when every case was parsed, False after recording a NOT RUN failure."""
+    env = {"PATH": search_path, "LC_ALL": "C"}  # no BASH_ENV, ENV or HOME; --norc and --noprofile below
+    try:
+        version = subprocess.run(["bash", "--version"], stdin=subprocess.DEVNULL, capture_output=True, env=env,
+                                 timeout=30)
+    except FileNotFoundError:
+        failures.append("(hd-bash-not-run) NOT RUN: no bash on {!r}, so the hd cases were not checked against "
+                        "bash's own parse; coverage that did not run FAILS the self-test, never a silent skip"
+                        .format(search_path))
+        return False
+    except (OSError, subprocess.SubprocessError) as exc:
+        failures.append("(hd-bash-version) NOT RUN: bash --version could not run ({!r}), so the hd cases were not "
+                        "checked against bash's own parse".format(exc))
+        return False
+    out = version.stdout.decode("utf-8", "replace")
+    match = re.search(r"version (\d+)\.(\d+)", out)
+    if match is None or (int(match.group(1)), int(match.group(2))) < _HD_BASH_MIN:
+        failures.append("(hd-bash-old) NOT RUN: the bash on {!r} is not bash {}.{} or newer, the version whose "
+                        "reading the guard models ({!r}), so the hd cases were not checked against it"
+                        .format(search_path, _HD_BASH_MIN[0], _HD_BASH_MIN[1], out.split("\n")[0]))
+        return False
+    seen = set()
+    for label, command, want in vectors:
+        match = _LABEL_RE.match(label)
+        vid = match.group(1) if match else label
+        seen.add(vid)
+        try:
+            proc = subprocess.run(["bash", "--norc", "--noprofile", "-n", "-c", command], stdin=subprocess.DEVNULL,
+                                  capture_output=True, env=env, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            failures.append("(hd-bash-run) NOT RUN: bash -n could not parse {}: {!r}".format(label, exc))
+            return False
+        rc, err = proc.returncode, proc.stderr.decode("utf-8", "replace")
+        if want == "deny":
+            named = unterminated(command)
+            wanted = set(re.findall(r"delimited by end-of-file \(wanted `(.*)'\)$", err, re.MULTILINE))
+            agrees = rc in (0, 2) and bool(named & wanted)
+        else:
+            named = set()
+            agrees = rc == 0 and "here-document" not in err
+        if agrees and vid in exceptions:
+            failures.append("(hd-bash-stale) {} agrees with bash, so {} must leave the exception table"
+                            .format(label, vid))
+        elif not agrees and vid not in exceptions:
+            expected = want + (" naming one of {}".format(sorted(named)) if want == "deny" else "")
+            failures.append("(hd-bash-agree) {}: expected {}, but bash -n exits {} with {!r}"
+                            .format(label, expected, rc, err.strip()))
+    for vid in sorted(set(exceptions) - seen):
+        failures.append("(hd-bash-table) the exception table names {}, which is no hd case".format(vid))
+    return True
+
+
+def _test_heredoc_terminator(failures):
+    """(hd-*) heredoc_terminator (sectvl): every heredoc opener bash acts on needs a later line exactly equal to
+    its delimiter (after the line's leading tabs for <<-) before the end of the command, or the command is
+    denied, naming the opener and any near-miss line. Synthetic payloads only; no submitted Bash command is
+    executed. A no-op handler passes every allow case (hd-a*, hd-r*), so each one is written to deny when the
+    behaviour its label names is broken; the deny cases (hd-d*, hd-n*) fail under a no-op handler."""
+    handler = aiqt_hooks.heredoc_terminator
+
+    def payload(command):
+        return {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash", "tool_input": {"command": command}}
+
+    vectors = []  # (label, command, want) of every case below, for the bash parse oracle at the end
+
+    def hdexpect(label, command, want, has=(), lacks=()):
+        vectors.append((label, command, want))
+        code, stdout_obj, _stderr = handler(payload(command))
+        got = _reduce_result(code, stdout_obj)
+        if got != want:
+            failures.append("{}: expected {}, got {}".format(label, want, got))
+            return
+        reason = ((stdout_obj or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+        for text in has:
+            if text not in reason:
+                failures.append("{}: the reason must hold {!r}; got {!r}".format(label, text, reason))
+        for text in lacks:
+            if text in reason:
+                failures.append("{}: the reason must not hold {!r}; got {!r}".format(label, text, reason))
+
+    # A label ending in "(regression coverage)" pins a behaviour the reader already had before it modelled bash's
+    # body order, arithmetic contents and assignment subscripts: the case passes on that earlier reader too, so
+    # it guards the behaviour against a later change and is no evidence that a change made it. The converse does
+    # not hold: a case that also passes on that reader but fails on a later one carries no label, and the comment
+    # above it names the reader it fails on.
+
+    # Matched openers, and << forms bash does not read as a heredoc opener, allow silently.
+    hdexpect("(hd-a1) a matched quoted opener allows", "python3 - <<'PY'\nprint(1)\nPY\necho done", "allow")
+    hdexpect("(hd-a2) a matched unquoted opener allows", "cat <<EOF\nhello $USER\nEOF", "allow")
+    hdexpect("(hd-a3) a matched double-quoted opener allows", 'cat <<"EOF"\nbody\nEOF', "allow")
+    hdexpect("(hd-a4) <<- with a tab-indented terminator allows", "cat <<-EOF\n\tbody\n\tEOF\necho done", "allow")
+    hdexpect("(hd-a5) two closed heredocs allow", "cat <<A\na\nA\ncat <<B\nb\nB", "allow")
+    hdexpect("(hd-a6) two openers on one line closed in order allow", "cat <<A <<B\na\nA\nb\nB", "allow")
+    hdexpect("(hd-a7) an opener inside a double-quoted string is not an opener", 'echo "use <<EOF to start"',
+             "allow")
+    hdexpect("(hd-a8) an opener inside single quotes is not an opener", "echo 'cat <<EOF'", "allow")
+    hdexpect("(hd-a9) a here-string is not an opener", "cat <<<EOF", "allow")
+    hdexpect("(hd-a10) a here-string of a quoted word is not an opener", 'grep -c x <<< "$text"', "allow")
+    hdexpect("(hd-a11) an opener in a comment is not an opener", "echo hi # cat <<EOF", "allow")
+    hdexpect("(hd-a12) an escaped < is not an opener", "echo \\<<EOF", "allow")
+    hdexpect("(hd-a13) a shift in arithmetic is not an opener",
+             "echo $((1 << 2)); (( x = 1 << 3 )); echo $[1<<4]", "allow")
+    hdexpect("(hd-a14) a closed heredoc in a double-quoted commit message substitution allows",
+             'git commit -m "$(cat <<\'EOF\'\nTitle with "quotes" and (parens)\n\nBody\nEOF\n)"', "allow")
+    hdexpect("(hd-a15) a closed heredoc in a process substitution allows", "diff <(cat <<EOF\na\nEOF\n) /tmp/x",
+             "allow")
+    hdexpect("(hd-a16) a terminator on the last line with no newline allows", "python3 - <<'PY'\nprint(1)\nPY",
+             "allow")
+    hdexpect("(hd-a17) an unquoted body line continued onto the delimiter closes it",
+             "cat <<EOF\nbody\nEO\\\nF\necho after", "allow")
+    hdexpect("(hd-a18) an empty delimiter is closed by an empty line", "cat <<''\nbody\n\necho after", "allow")
+    hdexpect("(hd-a19) an opener in a parameter expansion or ANSI-C text is not an opener",
+             "echo \"${x/<<EOF/y}\" ${x:-<<EOF} ${x:-'<<EOF'} $'a <<EOF b'", "allow")
+    hdexpect("(hd-a20) a command with no << allows", "ls -la", "allow")
+    hdexpect("(hd-a21) a quoted delimiter's body is read verbatim", "cat <<'EOF'\nfoo\\\nEOF\necho after",
+             "allow")
+    hdexpect("(hd-a22) an even run of backslashes does not continue a body line",
+             "cat <<EOF\nfoo\\\\\nEOF\necho after", "allow")
+    hdexpect("(hd-a23) <<- with a space before the delimiter allows", "cat <<- EOF\n\tbody\n\tEOF", "allow")
+    hdexpect("(hd-a24) a comment after the opener allows", "cat <<EOF # note\nbody\nEOF", "allow")
+    hdexpect("(hd-a25) a line continued after the opener is command text, even one equal to the delimiter "
+             "(regression coverage)", "cat <<EOF \\\nEOF\nbody <<NOT\nEOF", "allow")
+    hdexpect("(hd-a26) a plain subshell does not end a body at a delimiter followed by )",
+             "(cat <<EOF\nbody\nEOF)\nEOF\n)", "allow")
+    hdexpect("(hd-a27) an escaped quote inside ANSI-C text does not end it", "echo $'it\\'s <<EOF'", "allow")
+    # Bash order: a substitution's bodies are read before the pending bodies of the command around it, and a
+    # substitution that closes with a body unread has it read at once from the line after it closes.
+    hdexpect("(hd-a28) an inner substitution's body is read before the outer body",
+             'cat <<A "$(cat <<B\nB\n)"\nA\n', "allow")
+    hdexpect("(hd-a29) two levels of substitution are read innermost first",
+             'cat <<A "$(cat <<B "$(cat <<C\nC\n)"\nB\n)"\nA\n', "allow")
+    hdexpect("(hd-a30) an outer opener after an inner one on the same line is read after it (regression coverage)",
+             'cat "$(cat <<B)" <<A\nB\nA\n', "allow")
+    hdexpect("(hd-a31) a substitution closed on the opener's line is read before an earlier outer opener",
+             'cat <<A "$(cat <<B)"\nB\nA\n', "allow")
+    hdexpect("(hd-a32) a string running past that line resumes after the body already read",
+             'cat "$(cat <<B)" "x\nsay "<<Q\nB\ny"\n', "allow")
+    hdexpect("(hd-a33) a backslash continuing that line resumes after the body already read",
+             "cat $(cat <<B) \\\nx <<Q\nB\n| cat\n", "allow")
+    hdexpect("(hd-a34) a # right after a ((...)) command starts a comment, as in bash (regression coverage)",
+             "((1))#; cat <<EOF\nx\nEOX", "allow")
+    hdexpect("(hd-a35) a closed heredoc in a $(...) in arithmetic allows, and a << beside it is a shift "
+             "(regression coverage)", "echo $(( $(cat <<EOF\n1\nEOF\n) << 2 ))\necho after", "allow")
+    hdexpect("(hd-a36) a << in the subscript of an assignment is a shift", 'a[1<<2]=3; echo "idx4=${a[4]}"',
+             "allow")
+    hdexpect("(hd-a37) a << in a subscript of a compound assignment is a shift",
+             "declare -A m=([k<<x]=1); a=([1<<2]=3)", "allow")
+    hdexpect("(hd-a38) a <( inside double quotes is literal text, not a process substitution (regression coverage)",
+             'echo "<(cat <<EOF\nx\nEOX\n)"', "allow")
+    hdexpect("(hd-a39) a line continuation between assignments is no word, so a later subscript stays one",
+             "a=1 \\\nb[1<<2]=3", "allow")
+    # Quotes inside a subscript are read as bash reads them, so a quoted ] or << in one ends nothing.
+    hdexpect("(hd-a40) a quoted ] and << inside an assignment subscript are subscript text",
+             "a[']<<x']=1", "allow")
+    hdexpect("(hd-a41) a quoted ] and << inside a compound assignment's subscript are subscript text",
+             "x=([']<<y']=1)", "allow")
+    hdexpect("(hd-a42) the word after a leading redirection's target can still be an assignment",
+             ">f a[1<<2]=3", "allow")
+    hdexpect("(hd-a43) a process substitution that is a redirection's target starts a command of its own",
+             "cat < <(a[1<<2]=3; echo x)", "allow")
+    hdexpect("(hd-a44) the word after a leading process substitution target can still be an assignment",
+             "< <(true) b[1<<2]=3", "allow")
+    # Disclosed residuals: text another parser reads later is not scanned, and a later exact line closes a body.
+    hdexpect("(hd-r1) a heredoc inside backticks is not checked (disclosed residual)", "x=`cat <<EOF\nin\nEOX\n`",
+             "allow")
+    hdexpect("(hd-r2) a heredoc inside an eval string is not checked (disclosed residual)",
+             "eval 'cat <<EOF\nbody\nEOX'", "allow")
+    hdexpect("(hd-r3) a heredoc inside a bash -c string is not checked (disclosed residual)",
+             'bash -c "python3 - <<PY\nprint(1)\nPYX"', "allow")
+    hdexpect("(hd-r4) a later line equal to the delimiter closes an earlier mistyped body (disclosed residual)",
+             "cat <<EOF\nbody\nEOF \ncat <<EOF\nmore\nEOF", "allow")
+
+    # An opener with no exactly matching terminator line denies, naming it and any near-miss line.
+    hdexpect("(hd-d1) a mistyped quoted terminator denies and names it",
+             "python3 - <<'PY'\nprint(1)\nPYX\necho after", "deny",
+             has=("<<'PY' on line 1", "exactly equal to 'PY'", "line 3, 'PYX', is 1 edit away"))
+    hdexpect("(hd-d2) a transposed unquoted terminator denies", "cat <<EOF\nbody\nEFO", "deny",
+             has=("line 3, 'EFO', is 2 edits away",))
+    hdexpect("(hd-d3) a trailing space after the terminator denies", "cat <<'EOF'\nbody\nEOF \necho after",
+             "deny", has=("'EOF '",))
+    hdexpect("(hd-d4) a carriage return after the terminator denies", "cat <<'EOF'\nbody\nEOF\r\necho after",
+             "deny", has=("'EOF\\r'",))
+    hdexpect("(hd-d5) a <<- terminator indented with spaces denies", "cat <<-EOF\n  body\n  EOF\necho after",
+             "deny", has=("after its leading tabs", "'  EOF'"))
+    hdexpect("(hd-d6) a tab before the terminator without <<- denies", "cat <<EOF\n\tEOF\necho after", "deny",
+             has=("'\\tEOF'",))
+    hdexpect("(hd-d7) of two heredocs only the unterminated one is named",
+             "cat <<'ONE' > /tmp/a\nalpha\nONE\ncat <<'TWO' > /tmp/b\nbeta\nTWO_\necho done", "deny",
+             has=("<<'TWO' on line 4", "'TWO_'"), lacks=("<<'ONE'",))
+    hdexpect("(hd-d8) two openers on one line closed out of order deny the second",
+             "cat <<A <<B\nbody\nB\nA\necho after", "deny", has=("<<B on line 1",), lacks=("<<A on",))
+    hdexpect("(hd-d9) a mistyped terminator in a commit message substitution denies",
+             'git commit -m "$(cat <<\'EOF\'\nmsg\nEOX\n)"', "deny", has=("'EOX'",))
+    hdexpect("(hd-d10) a terminator sharing its line with the ) of a substitution denies",
+             "x=$(cat <<EOF\nmsg\nEOF)", "deny", has=("cut short at line 3, 'EOF)'",))
+    hdexpect("(hd-d11) an opener at the end of the command denies", "echo before; cat <<EOF", "deny",
+             has=("<<EOF on line 1",), lacks=("away from it",))
+    hdexpect("(hd-d12) a << with no delimiter word denies", "cat <<", "deny",
+             has=("not followed by a delimiter word",))
+    hdexpect("(hd-d13) an unquoted continuation that swallows the terminator denies",
+             "cat <<EOF\nfoo\\\nEOF\necho after", "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d14) a double-quoted string earlier on the line does not hide an opener",
+             'echo "x" && cat <<EOF\nbody\nEOX', "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d15) a mistyped terminator in a process substitution denies",
+             "diff <(cat <<EOF\na\nEOX\n) /tmp/x", "deny", has=("'EOX'",))
+    hdexpect("(hd-d16) an ANSI-C delimiter holding an escape denies fail-safe", "cat <<$'E\\x4fF'\nbody\nEOF",
+             "deny", has=("not followed by a delimiter word",))
+    hdexpect("(hd-d17) four unterminated openers name three and count the rest", "cat <<A <<B <<C <<D\nx",
+             "deny", has=("<<C on line 1", "1 more such opener"), lacks=("<<D on",))
+    hdexpect("(hd-d18) an early stop resumes at the ) that closes the substitution",
+             "x=$(cat <<EOF\nmsg\nEOF)\ncat <<Z\nZ)\nZ", "deny", has=("cut short at line 3",), lacks=("<<Z",))
+    hdexpect("(hd-d19) a terminator sharing its line with the ) of a process substitution denies",
+             "cat <(cat <<EOF\na\nEOF) /tmp/x\nEOF", "deny", has=("cut short at line 3, 'EOF) /tmp/x'",))
+    hdexpect("(hd-d20) an outer delimiter line inside the inner body does not close the outer heredoc",
+             'cat <<A "$(cat <<B\nA\nB\n)"\n', "deny", has=("<<A on line 1",), lacks=("<<B on",))
+    hdexpect("(hd-d21) a near miss inside an inner body is not named for the outer opener",
+             'cat <<LONG "$(cat <<B\nLONGX\nB\n)"\n', "deny", has=("<<LONG on line 1",),
+             lacks=("LONGX", "away from it", "<<B on"))
+    hdexpect("(hd-d22) two levels of substitution read in the wrong order deny",
+             'cat <<A "$(cat <<B "$(cat <<C\nA\nB\nC\n)"\n)"\n', "deny", has=("<<B on line 1",),
+             lacks=("<<C on",))
+    hdexpect("(hd-d23) a substitution closed on the opener's line takes the next lines before an outer opener",
+             'cat <<A "$(cat <<B)"\nA\nB\n', "deny", has=("<<A on line 1",), lacks=("<<B on",))
+    hdexpect("(hd-d24) a # right after $((...)) is inside the word and hides no later opener",
+             "echo $((1))#; python3 - <<'PY'\nprint(1)\nPYX\necho after", "deny", has=("<<'PY' on line 1",))
+    hdexpect("(hd-d25) a # right after $[...] is inside the word and hides no later opener",
+             "echo $[1]#; cat <<EOF\nx\nEOX", "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d26) a heredoc in a $(...) inside $((...)) is checked",
+             "echo $(( $(cat <<EOF\n1\nEOX\n) ))\necho after", "deny", has=("<<EOF on line 1", "'EOX'"))
+    hdexpect("(hd-d27) a heredoc in a $(...) inside a ((...)) command is checked",
+             "(( $(cat <<EOF\n1\nEOX\n) )); echo after", "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d28) a heredoc in a $(...) inside $[...] is checked",
+             "echo $[ $(cat <<EOF\n1\nEOX\n) ]\necho after", "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d29) a name[...] argument of a declaration builtin is no subscript, as in bash "
+             "(regression coverage)", "declare a[1<<2]=3", "deny", has=("<<2]=3 on line 1",))
+    hdexpect("(hd-d30) a heredoc in a $(...) inside an assignment subscript is checked (regression coverage)",
+             "a[$(cat <<EOF\n1\nEOX\n)]=3\necho after", "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d31) a heredoc in a $(...) inside a ${...} expansion is checked (regression coverage)",
+             'echo "${x:-$(cat <<EOF\nx\nEOX\n)}"', "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d32) a heredoc in a <(...) inside a quoted ${...} expansion is checked",
+             'echo "${x:-<(cat <<EOF\nx\nEOX\n)}"\necho after', "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d33) a heredoc in a <(...) inside an assignment subscript is checked (regression coverage)",
+             "a[<(cat <<EOF\nx\nEOX\n)]=1\necho after", "deny", has=("<<EOF on line 1",))
+    # A single quote inside a subscript or arithmetic opens a quoted span, as in bash, so the ] or ) inside it
+    # does not end the subscript or arithmetic early and the real closing quote hides no later opener. The
+    # subscript cases here and hd-a40 and hd-a41 also pass on a reader that has no subscripts at all; they fail
+    # on one that reads a subscript without its quotes.
+    hdexpect("(hd-d34) a quoted ] in an assignment subscript does not hide a later opener",
+             "declare -A p; p[']']='['; python3 - <<'PY'\nprint(1)\nPYX\necho after", "deny",
+             has=("<<'PY' on line 1", "line 3, 'PYX', is 1 edit away"))
+    hdexpect("(hd-d35) quoted brackets in a compound assignment's subscripts do not hide a later opener",
+             "declare -A p=([')']='(' [']']='['); python3 - <<'PY'\nprint(1)\nPYX\necho after", "deny",
+             has=("<<'PY' on line 1",))
+    hdexpect("(hd-d36) a quoted ] in a plain array subscript does not hide a later opener",
+             "a[']']=1; python3 - <<PY\nprint(1)\nPYX\necho after", "deny", has=("<<PY on line 1",))
+    hdexpect("(hd-d37) a quoted ] in a compound assignment's subscript does not hide a later opener",
+             "x=([']']=1); cat <<EOF\nx\n", "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d38) a quoted ] in the subscript of a += assignment does not hide a later opener",
+             "a[']']+=1; cat <<EOF\nx\n", "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d39) a quoted ) in $((...)) does not end the arithmetic early",
+             "echo $(( ')' )) <<EOF\nx\n", "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d40) a quoted ) in a ((...)) command does not end the arithmetic early",
+             "(( ')' )) <<EOF\nx\n", "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d41) a quoted ] in $[...] does not end the arithmetic early",
+             "echo $[ ']' ] <<EOF\nx\n", "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d42) a quoted ) in the arithmetic of a for loop does not end it early",
+             "for (( i=')'; ; )); do :; done <<EOF\nx\n", "deny", has=("<<EOF on line 1",))
+    # A redirection's target is never an assignment, so a [ in it opens no subscript and a << there is an opener.
+    # These also pass on a reader that has no subscripts at all; they fail on one that opens a subscript there.
+    hdexpect("(hd-d43) a << in a [...] of a leading redirection's target is an opener",
+             ">f[1<<EOF]\nx\n", "deny", has=("<<EOF] on line 1", "exactly equal to 'EOF]'"))
+    hdexpect("(hd-d44) a << in a [...] of a redirection's target after an assignment is an opener",
+             "a=1 >f[1<<EOF]\nx\n", "deny", has=("<<EOF] on line 1",))
+    hdexpect("(hd-d45) a << in a [...] of a numbered redirection's target is an opener",
+             "2>f[1<<EOF]\nx\n", "deny", has=("<<EOF] on line 1",))
+    hdexpect("(hd-d46) a << in a [...] of an &> redirection's target is an opener",
+             "&>f[1<<EOF] true\nbody\n", "deny", has=("<<EOF] on line 1",))
+    hdexpect("(hd-d47) a << in a [...] of a >| redirection's target is an opener",
+             ">|f[1<<EOF] true\nbody\n", "deny", has=("<<EOF] on line 1",))
+    hdexpect("(hd-d48) a << in a [...] of a redirection's target after a command operator is an opener",
+             "true; >log[1<<EOF] python3 -\nprint(1)\nEOF\n", "deny",
+             has=("<<EOF] on line 1", "line 3, 'EOF', is 1 edit away"))
+    for operator in (">>", "<", "<>", ">&", "<&", "&>>", "<<<", "2>>", "10>", "> "):
+        hdexpect("(hd-d49) a << in a [...] of the target of {!r} is an opener".format(operator),
+                 operator + "f[1<<EOF]\nx\n", "deny", has=("<<EOF] on line 1",))
+    # A process substitution that is a redirection's target is the target word: the command inside it starts
+    # afresh, and an assignment before it ends the assignments, as any target does. These also pass on a reader
+    # that has no subscripts at all; they fail on one that carries the target on into the substitution.
+    hdexpect("(hd-d54) a < <(...) target does not pass the target on into its command",
+             "cat < <(echo a[1<<EOF]=1)\nx\n", "deny", has=("<<EOF]=1 on line 1",))
+    hdexpect("(hd-d55) a > >(...) target does not pass the target on into its command",
+             "cat > >(echo a[1<<EOF]=1)\nx\n", "deny", has=("<<EOF]=1 on line 1",))
+    hdexpect("(hd-d56) a process substitution target after an assignment ends the assignments",
+             "a=1 < <(true) b[1<<EOF]=3\nx\n", "deny", has=("<<EOF]=3 on line 1",))
+    # The runnable forms of hd-d26 and hd-d27 (bash refuses those two as a syntax error, since the unterminated
+    # body swallows the closing parentheses): here the body is cut short at EOF), so bash runs the command. Like
+    # hd-d26 and hd-d27, these fail on a reader that does not scan arithmetic contents; no quote is involved.
+    hdexpect("(hd-d50) a heredoc cut short in a $(...) inside $((...)) is checked",
+             "echo $(( $(cat <<EOF\n1\nEOF) ))\necho after", "deny", has=("<<EOF on line 1", "cut short at line 3"))
+    hdexpect("(hd-d51) a heredoc cut short in a $(...) inside a ((...)) command is checked",
+             "(( $(cat <<EOF\n1\nEOF) )); echo after", "deny", has=("<<EOF on line 1", "cut short at line 3"))
+    # A double-quoted string or a ${...} inside arithmetic is read as bash reads it, so a ) inside it does not
+    # end the arithmetic early. These fail on a reader that does not scan arithmetic contents and pass on one that
+    # scans them but reads a single quote there as plain text, so they do not stand in for hd-d39 to hd-d42.
+    hdexpect("(hd-d52) a double-quoted ) in $((...)) does not end the arithmetic early",
+             'echo $(( ")" )) <<EOF\nx\n', "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d53) a ${...} holding a quoted ) in $((...)) does not end the arithmetic early",
+             'echo $(( ${x:-")"} )) <<EOF\nx\n', "deny", has=("<<EOF on line 1",))
+
+    # Near-miss bounds: within 2 edits AND fewer edits than the delimiter has characters, closest first.
+    hdexpect("(hd-n1) a line 1 edit away is named", "cat <<END_OF\nx\nEND_OF ", "deny",
+             has=("is 1 edit away",))
+    hdexpect("(hd-n2) a line 2 edits away, at the bound, is named", "cat <<END_OF\nx\nEND_OF  ", "deny",
+             has=("is 2 edits away",))
+    hdexpect("(hd-n3) a line 3 edits away, past the bound, is not named", "cat <<END_OF\nx\nEND_OF   ", "deny",
+             lacks=("away from it",))
+    hdexpect("(hd-n4) for a two-character delimiter a line 1 edit away is named", "cat <<'PY'\nx\nPYX", "deny",
+             has=("is 1 edit away",))
+    hdexpect("(hd-n5) for a two-character delimiter a line 2 edits away is not named", "cat <<'PY'\nx\nPYXX",
+             "deny", lacks=("away from it",))
+    hdexpect("(hd-n6) a one-character delimiter names no near miss", "cat <<A\nB\n", "deny",
+             lacks=("away from it",))
+    hdexpect("(hd-n7) the closest near miss is named, not the first", "cat <<EOF\nEOF  \nEOF \n", "deny",
+             has=("line 3, 'EOF ', is 1 edit away",))
+    hdexpect("(hd-n8) a blank line is never a near miss", "cat <<'A B'\n \nx", "deny", lacks=("away from it",))
+    hdexpect("(hd-n9) the near miss comes from the opener's own body, not an inner one",
+             'cat <<LONG "$(cat <<B\nLONGX\nB\n)"\nLONGY\n', "deny", has=("line 5, 'LONGY', is 1 edit away",),
+             lacks=("LONGX",))
+
+    # The banded edit distance equals the full Levenshtein distance, capped at bound + 1.
+    def levenshtein(a, b):
+        row = list(range(len(b) + 1))
+        for i, ca in enumerate(a, 1):
+            prev, row = row, [i]
+            for j, cb in enumerate(b, 1):
+                row.append(min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        return row[-1]
+
+    for a, b in (("", ""), ("", "a"), ("EOF", "EOF"), ("EOF", "EFO"), ("EOF", "EOF "), ("EOF", "  EOF"),
+                 ("kitten", "sitting"), ("PY", "PYXX"), ("abc", "xyz"), ("EOF", "eof"), ("\tEOF", "EOF"),
+                 ("ab", "ba"), ("abcdef", "azcdxf"), ("EOF)", "EOF"), ("x", "")):
+        for bound in (0, 1, 2, 3):
+            got = aiqt_hooks._heredoc_edit_distance(a, b, bound)
+            want = min(levenshtein(a, b), bound + 1)
+            if got != want:
+                failures.append("(hd-ed) edit distance {!r} to {!r} within {}: got {}, want {}"
+                                .format(a, b, bound, got, want))
+
+    code, stdout_obj, _stderr = handler(payload("python3 - <<'PY'\nprint(1)\nPYX"))
+    if "<<'PY' on line 1" not in (stdout_obj or {}).get("systemMessage", ""):
+        failures.append("(hd-banner) the deny banner must name the first unterminated opener; got {!r}"
+                        .format(stdout_obj))
+
+    # Payload postures: an unreadable command denies fail-safe, a missing tool_name denies under the shared
+    # contract, another tool allows, and a mis-wired event hard-blocks.
+    for tool_input in ({}, {"command": None}, {"command": 42}, None, []):
+        code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                             "tool_input": tool_input})
+        if _reduce_result(code, stdout_obj) != "deny":
+            failures.append("(hd-p1) an unreadable command must deny fail-safe for {!r}; got {!r}"
+                            .format(tool_input, (code, stdout_obj)))
+    code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL,
+                                         "tool_input": {"command": "cat <<EOF"}})
+    if _reduce_result(code, stdout_obj) != "deny":
+        failures.append("(hd-p2) a missing tool_name must deny; got {!r}".format((code, stdout_obj)))
+    hdother = payload("cat <<EOF")
+    hdother["tool_name"] = "Read"
+    if handler(hdother) != (0, None, None):
+        failures.append("(hd-p3) a present non-Bash tool must allow silently")
+    hdevent = payload("cat <<EOF")
+    hdevent["hook_event_name"] = "Stop"
+    code, stdout_obj, stderr = handler(hdevent)
+    if not (code == 2 and stdout_obj is None and isinstance(stderr, str)
+            and "heredoc_terminator wired to unexpected event" in stderr):
+        failures.append("(hd-p4) a mis-wired event must hard-block; got {!r}".format((code, stdout_obj, stderr)))
+    if (aiqt_hooks.HANDLERS.get("heredoc_terminator") is not aiqt_hooks.heredoc_terminator or
+            aiqt_hooks.HANDLER_EVENT.get("heredoc_terminator") != aiqt_hooks.PRETOOL):
+        failures.append("(hd-wiring) heredoc_terminator handler/event wiring is missing or wrong")
+
+    # Every case above must agree with bash's own parse, outside the closed exception table.
+    search_path = os.environ.get("PATH", os.defpath)
+    if _hd_bash_oracle(vectors, failures, _HD_BASH_EXCEPTIONS, search_path):
+        # the oracle reports a case bash contradicts: an unterminated body expected to allow, and a closed one
+        # expected to deny, are each reported
+        probe = []
+        _hd_bash_oracle([("(hd-probe-allow) an unterminated body", "cat <<EOF\nx\n", "allow"),
+                         ("(hd-probe-deny) a closed body", "cat <<EOF\nx\nEOF\n", "deny")], probe, {}, search_path)
+        if [message.partition(" ")[0] for message in probe] != ["(hd-bash-agree)"] * 2:
+            failures.append("(hd-bash-probe) the bash oracle must report both contradicted probes; got {!r}"
+                            .format(probe))
+        # a deny case whose end-of-file warning names another delimiter than the guard's opener disagrees
+        probe = []
+        _hd_bash_oracle([("(hd-probe-other) an opener bash reads", "cat <<EOF\nx\n", "deny")], probe, {},
+                        search_path, unterminated=lambda command: {"OTHER"})
+        if [message.partition(" ")[0] for message in probe] != ["(hd-bash-agree)"]:
+            failures.append("(hd-bash-opener-probe) a warning naming another opener must not agree; got {!r}"
+                            .format(probe))
+        # an exception for a case that agrees with bash is stale, and one naming no case is refused
+        stale, unknown = [], []
+        _hd_bash_oracle(vectors[:1], stale, {"hd-a1": "probe"}, search_path)
+        _hd_bash_oracle(vectors[:1], unknown, {"hd-zz0": "probe"}, search_path)
+        if ([message.partition(" ")[0] for message in stale] != ["(hd-bash-stale)"]
+                or [message.partition(" ")[0] for message in unknown] != ["(hd-bash-table)"]):
+            failures.append("(hd-bash-table-probe) a stale and an unknown exception must each be refused; got {!r}"
+                            .format((stale, unknown)))
+    # with no bash to find (an empty directory is the whole PATH) the oracle records a NOT RUN failure
+    absent = []
+    with tempfile.TemporaryDirectory() as empty:
+        _hd_bash_oracle(vectors[:1], absent, {}, empty)
+    if [message.split(" ", 3)[:3] for message in absent] != [["(hd-bash-not-run)", "NOT", "RUN:"]]:
+        failures.append("(hd-bash-absent) with no bash the oracle must record a NOT RUN failure; got {!r}"
+                        .format(absent))
+    # Stub bashes, each alone on its PATH: every one prints a version line for --version and runs the given
+    # shell text for a parse.
+    def stub_bash(directory, version, parse=""):
+        os.makedirs(directory)
+        with open(os.path.join(directory, "bash"), "w", encoding="ascii") as handle:
+            handle.write("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'GNU bash, version {}(1)-release'; exit 0; "
+                         "fi\n{}".format(version, parse))
+        os.chmod(os.path.join(directory, "bash"), 0o755)
+        return directory
+
+    floor, exits = {}, {}
+    with tempfile.TemporaryDirectory() as stubs:
+        # the version floor at its edge: a bash reporting 5.2 is NOT RUN, and 5.3 or 6.0 is used (a stub that
+        # prints nothing for a parse, so an allow case parses clean under it)
+        for version in ("5.2.37", "5.3.0", "6.0.0"):
+            found = []
+            floor[version] = (_hd_bash_oracle(vectors[:1], found, {}, stub_bash(os.path.join(stubs, version), version)),
+                              [message.split(" ", 3)[:3] for message in found])
+        # a deny case agrees on the opener's end-of-file warning with exit 0, and not with the same warning and exit 1
+        warning = "echo \"bash: warning: here-document at line 1 delimited by end-of-file (wanted \\`EOF')\" >&2\n"
+        for code in ("0", "1"):
+            found = []
+            stub = stub_bash(os.path.join(stubs, "exit-" + code), "5.3.0", warning + "exit " + code + "\n")
+            _hd_bash_oracle([("(hd-probe-exit) an opener's warning with exit " + code, "cat <<EOF\nx\n", "deny")],
+                            found, {}, stub)
+            exits[code] = [message.partition(" ")[0] for message in found]
+    if floor != {"5.2.37": (False, [["(hd-bash-old)", "NOT", "RUN:"]]), "5.3.0": (True, []), "6.0.0": (True, [])}:
+        failures.append("(hd-bash-floor-probe) bash 5.2 must be NOT RUN and bash 5.3 and 6.0 used; got {!r}"
+                        .format(floor))
+    if exits != {"0": [], "1": ["(hd-bash-agree)"]}:
+        failures.append("(hd-bash-exit-probe) the warning must agree with exit 0 and not with exit 1; got {!r}"
+                        .format(exits))
 
 
 def main():
@@ -14218,6 +14721,7 @@ def _main_isolated(monitor):
                             "HANDLER_EVENT {!r}".format(aiqt_hooks.FLOOR_FAIL_OPEN_MODES, _pf_want))
 
         _test_git_stash_ref(failures)
+        _test_heredoc_terminator(failures)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)
@@ -14937,7 +15441,8 @@ def _main_isolated(monitor):
 
     _bash_guards = [aiqt_hooks.diff_source_pretool, aiqt_hooks.bash_absolute_paths,
                     aiqt_hooks.git_explicit_binding, aiqt_hooks.git_discard, aiqt_hooks.protected_line,
-                    aiqt_hooks.branch_root, aiqt_hooks.gate_weakening, aiqt_hooks.commit_msg_subst]
+                    aiqt_hooks.branch_root, aiqt_hooks.gate_weakening, aiqt_hooks.commit_msg_subst,
+                    aiqt_hooks.heredoc_terminator]
     _bash_vectors = [
         "git status", "ls -la", "git diff", "git diff --color=always | grep foo", "/usr/bin/git diff",
         "git checkout -- file.txt", "git reset --hard", "git reset --soft", "git clean -fd",
@@ -14948,7 +15453,14 @@ def _main_isolated(monitor):
         'git commit -m "fix `whoami`"', "git commit -m x", "git -c alias.co=checkout co -- f",
         "git checkout-index -a -f", "eval 'git reset --hard'", 'git reset --hard "unbalanced',
         'git push --force "unbalanced', 'git commit -m "x `y', "git branch --track t origin/x",
+        "python3 - <<'PY'\nprint(1)\nPYX\necho after",
     ]
+    # (noask-heredoc-deny) the << vector reaches the heredoc guard's deny path, so the sweep below would see an
+    # ask there; every other vector stops at the guard's early allow for a command with no <<.
+    _hd_sweep = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                 "tool_input": {"command": _bash_vectors[-1]}}
+    if _decision_any(aiqt_hooks.heredoc_terminator, _hd_sweep) != "deny":
+        failures.append("(noask-heredoc-deny) the sweep's << vector must reach the heredoc_terminator deny path")
     for _g in _bash_guards:
         for _cmd in _bash_vectors:
             for _cwd in (None, "/nonexistent-noask-probe"):
@@ -15161,7 +15673,10 @@ def _main_isolated(monitor):
           "(commit_msg_subst) DENIES-and-educates a backtick or $( command substitution in a git commit "
           "argument (re-issue single-quoted, in ANSI-C $'...' quoting, escaped, or via -F <file>); a "
           "literal marker inside single-quoted or ANSI-C $'...' quoting is NOT a substitution and ALLOWS "
-          "(finding 15); the fallback and unreadable command deny fail-safe. gensrc (gensrc_guard) "
+          "(finding 15); the fallback and unreadable command deny fail-safe. sectvl (heredoc_terminator) "
+          "DENIES-and-educates a Bash command whose heredoc opener has no line exactly equal to its "
+          "delimiter (naming the opener and any near-miss line), and denies fail-safe an unreadable "
+          "delimiter word or command. gensrc (gensrc_guard) "
           "DENIES-and-educates a hand-edit of a registered generated artefact (edit the source and "
           "regenerate) AND a PRESENT-but-unreadable/malformed registry (fail-closed, finding 8), and ALLOWS "
           "with a note the remaining cannot-evaluate branches (a non-git session, an outside-repo target, a "
