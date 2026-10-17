@@ -1058,18 +1058,21 @@ _LEX_UNCERTAIN_CAUSE_TEXT = {
     "quote": "an unbalanced quote or a trailing backslash",
     "continuation": "a line continuation the lexer reads differently once joined",
     "lexer": "a construct the shell lexer refuses",
+    "shell_string": ("a shell -c or eval command string that is built at run time, does not lex, nests past "
+                     "the depth bound or holds one of the other causes named here"),
 }
 
 
-def _lex_argvs(command):
-    """The argv list of every segment the full lexer reads from `command`, or None when it refuses."""
+def _lex_argvs(command, _depth=0):
+    """The argv list of every segment the full lexer reads from `command` (a shell -c or eval string _depth
+    levels down when _depth is above 0), or None when it refuses."""
     try:
-        return [seg.argv for seg in _lex_command(command)]
+        return [seg.argv for seg in _lex_command(command, _depth=_depth)]
     except ValueError:
         return None
 
 
-def _lex_uncertain_causes(command):
+def _lex_uncertain_causes(command, _depth=0):
     """The reasons the restored lexer's reading of `command` is UNCERTAIN, as an ordered
     tuple of keys of _LEX_UNCERTAIN_CAUSE_TEXT (empty when the reading is certain). Line
     continuations are joined first (_join_continuations), then the joined text is scanned with a
@@ -1087,10 +1090,15 @@ def _lex_uncertain_causes(command):
       - 'continuation': the full lexer reads the joined text differently from the raw text (bash
         reads the joined text, so the raw lex is not what bash runs, e.g. '&\\<newline>>' is the
         '&>' redirect);
+      - 'shell_string': a shell -c or eval command string (_shell_strings) that is an opaque word, that
+        nests past _SHELL_STRING_DEPTH, or whose own reading reports a cause; that string is read with
+        this same scan at the next depth, and its causes are reported too, since _lex_command reads its
+        segments as if they were written in place;
       - 'lexer': anything else the full lexer refuses (a {fd} redirect, a malformed redirect, NUL),
         reported only when no shape above already explains the refusal.
     A '#' at a word start skips its comment text, so a quote inside a comment opens nothing. Quoted
-    literals ("a # b", '(x)', "<<EOF") report nothing. Never raises."""
+    literals ("a # b", '(x)', "<<EOF") report nothing. _depth is the shell-string nesting depth of
+    `command` (0 for the command itself). Never raises."""
     causes = []
 
     def add(key):
@@ -1160,9 +1168,11 @@ def _lex_uncertain_causes(command):
         i += 1
     if in_dq:
         add("quote")  # an unmatched double quote
-    raw_argvs = _lex_argvs(command)
-    if joined != command and raw_argvs != _lex_argvs(joined):
+    raw_argvs = _lex_argvs(command, _depth)
+    if joined != command and raw_argvs != _lex_argvs(joined, _depth):
         add("continuation")
+    for key in _shell_string_causes(command, _depth):
+        add(key)
     if raw_argvs is None and not causes:
         add("lexer")
     return tuple(causes)
@@ -1173,8 +1183,8 @@ def _lex_uncertain(command):
     so no consumer may treat a clean lex as proof of what bash will run and a raw reading decides
     instead. It is True exactly when _lex_uncertain_causes reports a cause: the joined text holds ANY
     unquoted '#', '<<', '(' or ')', a lone '{' or '}' word, any backtick or '$(', an unclosed quote or
-    trailing backslash, a continuation the lexer reads differently once joined, or anything else the
-    full lexer refuses.
+    trailing backslash, a continuation the lexer reads differently once joined, a shell -c or eval string
+    it cannot read or whose own reading is uncertain, or anything else the full lexer refuses.
     No comment-boundary predicate decides it, so a comment after '(' or any other shell form cannot
     slip between the scanners' word boundaries.
     Consumers: protected_line lets _protected_line_fallback decide on an uncertain lex even when a
@@ -1191,7 +1201,32 @@ def _lex_uncertain(command):
     return bool(_lex_uncertain_causes(command))
 
 
-def _lex_command(command, partial=False, locale=False):
+def _lex_command(command, partial=False, locale=False, _depth=0):
+    """The shared segment reading every lexical Bash guard reads: _lex_flat's segments of the raw command, with
+    the command string of each shell -c or eval segment read as a command line of its own and its segments
+    placed in the list as if written in place (_expand_shell_strings), so no guard needs its own copy of that
+    reading. partial and locale keep _lex_flat's contracts. A shell -c or eval string the reading cannot read
+    (an opaque word, a string that does not lex, or nesting past _SHELL_STRING_DEPTH) raises
+    _ShellStringUncertain, a ValueError, so each caller takes the path it takes on any other parse failure;
+    with partial True such a segment is kept as lexed, its string not read, and complete is False. _depth is
+    the shell-string nesting depth of `command` (0 for the command itself)."""
+    if not partial:
+        return _expand_shell_strings(_lex_flat(command, locale=locale), locale, _depth)
+    segments, complete, in_progress = _lex_flat(command, partial=True, locale=locale)
+    closed = segments[:-1] if in_progress else segments
+    out = []
+    for seg in closed:
+        try:
+            out.extend(_expand_shell_strings([seg], locale, _depth))
+        except ValueError:
+            out.append(seg)  # its string is unread: the scan is incomplete, never a proof
+            complete = False
+    if in_progress:
+        out.append(segments[-1])  # the segment the lexer was still inside: its words may be incomplete
+    return out, complete, in_progress
+
+
+def _lex_flat(command, partial=False, locale=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
     '{fd}>' redirect, or a malformed redirect), so the caller falls back conservatively rather than acting on
@@ -1352,6 +1387,204 @@ def _segments(command, locale=False):
     locale is passed to _lex_command; only the commit-identity reader (_cmtidn_line_ai) sets it, and it reads
     each line with it set and unset."""
     return [(seg.argv, seg.sep_after) for seg in _lex_command(command, locale=locale)]
+
+
+# --- shell -c and eval strings ------------------------------------------------------------------------
+# A command that a shell runs from the string operand of its -c option (bash -c 'git commit --no-verify'), or
+# that eval runs from its operands, is ONE word to _lex_flat, so a guard reading segments never saw it.
+# _lex_command reads each such string as a command line of its own and places its segments in the list as if
+# they were written in place (_expand_shell_strings), so every guard that reads segments sees them.
+# The POSIX shells, by basename, whose -c option runs its first operand as a command line.
+_SHELL_C_SHELLS = frozenset(("bash", "sh", "dash", "zsh", "ksh"))
+# The single-letter shell options that take the next word as their value (-o and +o option names, -O and +O
+# shopt names) and the long ones (bash --rcfile FILE, --init-file FILE), so that word is passed over and never
+# read as the command string.
+_SHELL_C_VALUE_LETTERS = frozenset("oO")
+_SHELL_C_VALUE_LONG = frozenset(("--rcfile", "--init-file"))
+# How deep shell -c and eval strings are read inside one another: the command itself is depth 0, a string it
+# runs is depth 1, and strings down to depth _SHELL_STRING_DEPTH are read; a string inside a string at that
+# depth is not read, and the command is uncertain instead (_ShellStringUncertain). Each level is a string
+# inside the level above, so the reading and the uncertainty scan (_shell_string_causes) cost a multiple of
+# the command's length that grows with this bound (about its square, since the scan reads each level again);
+# four levels cover the nesting a command line plausibly needs (eval running bash -c running sh -c holds
+# three), and a deeper string is never read as safe, only as uncertain.
+_SHELL_STRING_DEPTH = 4
+
+
+class _ShellStringUncertain(ValueError):
+    """A shell -c or eval string that the shared segment reading cannot read as a command line: an opaque word
+    (an expansion, a substitution or a glob the shell resolves at run time), a string that does not lex, or
+    nesting past _SHELL_STRING_DEPTH. A ValueError, so a caller of _lex_command takes its parse-failure path."""
+
+
+def _shell_c_option(token):
+    """True when a word is a short-option cluster that carries the shell's -c option (-c, -lc, -ec, -xec)."""
+    return token[:1] == "-" and token[:2] != "--" and "c" in token[1:]
+
+
+def _shell_c_string(argv, opaque, k):
+    """The command string of the shell whose command word is argv[k], or None when it reads none: no -c
+    option among its options, or no operand after them (the shell then refuses to start). Options are read
+    as bash and the other POSIX shells read them: every short-option cluster up to the first operand, '-'
+    or '--' ending the options, each 'o' or 'O' letter in a cluster taking the next word as its value, and
+    the -c option (alone or in a cluster such as -lc, before or after other options) making the first
+    operand the command string. The later operands set $0 and the positional parameters; they are not
+    commands. Raises _ShellStringUncertain when the string is an opaque word, or when an opaque word stands
+    where an option can be while a -c option is given or follows it."""
+    n = len(argv)
+    i = k + 1
+    has_c = False
+    while i < n:
+        token = argv[i]
+        if opaque[i]:
+            if has_c or any(_shell_c_option(later) for later in argv[i + 1:]):
+                raise _ShellStringUncertain("an opaque word where a shell -c option or its string can stand")
+            return None  # a script operand built at run time: the shell reads no -c string
+        if token in ("-", "--"):
+            i += 1
+            break
+        if len(token) < 2 or token[0] not in "-+":
+            break
+        if token.startswith("--"):
+            i += 2 if token in _SHELL_C_VALUE_LONG else 1
+            continue
+        has_c = has_c or _shell_c_option(token)
+        i += 1 + sum(1 for letter in token[1:] if letter in _SHELL_C_VALUE_LETTERS)
+    if not has_c or i >= n:
+        return None
+    if opaque[i]:
+        raise _ShellStringUncertain("a shell -c string built at run time")
+    return argv[i]
+
+
+def _eval_string(argv, opaque, k):
+    """The command line that eval, the command word argv[k], runs: its operands joined by single spaces, as
+    eval joins them, after a leading '--'; None when there is none. Raises _ShellStringUncertain when an
+    operand is an opaque word."""
+    words = argv[k + 1:]
+    flags = opaque[k + 1:]
+    if words[:1] == ["--"]:
+        words, flags = words[1:], flags[1:]
+    if any(flags):
+        raise _ShellStringUncertain("an eval operand built at run time")
+    text = " ".join(words)
+    return text if text.strip() else None
+
+
+def _shell_strings(seg):
+    """The command strings one segment runs through a shell's -c option or through eval, in order ([] when it
+    runs none). The command word is found after leading reserved words (_GATE_RESERVED, with the NAME after
+    'function' or 'coproc' before a compound opener) and VAR=value words; it is a shell (_SHELL_C_SHELLS) or
+    eval by its _gate_word name. When it is a wrapper instead (_GATE_NOTE_WRAPPERS, or xargs), a wrapper's
+    own options and operands are not parsed: every later word that names a shell or eval is read as one, so
+    a wrapper option value spelled as a shell is read too (a safe-direction over-read). Raises
+    _ShellStringUncertain when a string is an opaque word (_shell_c_string, _eval_string)."""
+    argv = seg.argv
+    opaque = seg.argv_opaque
+    n = len(argv)
+    i = 0
+    while i < n and (argv[i] in _GATE_RESERVED or _ENV_ASSIGN_RE.match(argv[i])):
+        named = argv[i] in ("function", "coproc")
+        i += 1
+        if named and i + 1 < n and argv[i + 1] in _CMTIDN_COMPOUND_OPENERS:
+            i += 1  # the NAME of a function definition or a named coprocess, before its compound body
+    if i >= n:
+        return []
+    word = _gate_word(argv[i])
+    if word in _GATE_NOTE_WRAPPERS or word == "xargs":
+        starts = [k for k in range(i + 1, n)
+                  if _gate_word(argv[k]) in _SHELL_C_SHELLS or _gate_word(argv[k]) == "eval"]
+    else:
+        starts = [i]
+    strings = []
+    for k in starts:
+        name = _gate_word(argv[k])
+        if name == "eval":
+            text = _eval_string(argv, opaque, k)
+        elif name in _SHELL_C_SHELLS:
+            text = _shell_c_string(argv, opaque, k)
+        else:
+            text = None
+        if text is not None:
+            strings.append(text)
+    return strings
+
+
+def _shell_string_in_place(inner, seg):
+    """The segments of a string that segment `seg` runs, placed as if written in place of it: each carries
+    seg's redirects before its own (the shell's redirects apply to everything the string runs, and the
+    string's own come later and win), and the last one ends with ';' when the string ended its own list.
+    Trailing empty segments (a string ending in a newline) are dropped first."""
+    inner = list(inner)
+    while inner and not inner[-1].argv and not inner[-1].redirects and inner[-1].sep_after == "":
+        inner.pop()
+    placed = [rec._replace(redirects=list(seg.redirects) + list(rec.redirects)) for rec in inner]
+    if placed and not placed[-1].sep_after:
+        placed[-1] = placed[-1]._replace(sep_after=";")
+    return placed
+
+
+def _expand_shell_strings(segments, locale, depth):
+    """The segments, with the segments of each shell -c or eval string a segment runs placed right after it as
+    if written in place (_shell_string_in_place). The segment that runs a string is kept, its argv and
+    redirects unchanged; its separator moves to the last placed segment and it ends with ';' instead, so a
+    pipe, list operator or '&' after the shell command reads from the string's last command (a pipe INTO the
+    shell command still reads as feeding that segment, not the string's first command). Strings are read with
+    _lex_command at depth + 1, so a string inside a string is read too: strings down to depth
+    _SHELL_STRING_DEPTH are read. Raises _ShellStringUncertain when a string is opaque, does not lex, or lies
+    deeper than that bound."""
+    out = []
+    for seg in segments:
+        strings = _shell_strings(seg)
+        if not strings:
+            out.append(seg)
+            continue
+        if depth >= _SHELL_STRING_DEPTH:
+            raise _ShellStringUncertain("a shell -c or eval string nested past the depth bound")
+        placed = []
+        for text in strings:
+            try:
+                inner = _lex_command(text, locale=locale, _depth=depth + 1)
+            except _ShellStringUncertain:
+                raise
+            except ValueError as exc:
+                raise _ShellStringUncertain("a shell -c or eval string that does not lex: {}".format(exc))
+            placed.extend(_shell_string_in_place(inner, seg))
+        if not placed:
+            out.append(seg)
+            continue
+        if seg.sep_after:
+            placed[-1] = placed[-1]._replace(sep_after=seg.sep_after)
+        out.append(seg._replace(sep_after=";"))
+        out.extend(placed)
+    return out
+
+
+def _shell_string_causes(command, depth):
+    """The _lex_uncertain_causes keys the shell -c and eval strings of `command` (a string `depth` levels
+    down) add: 'shell_string' for a string that is an opaque word or nests past _SHELL_STRING_DEPTH, and,
+    for each string read, the causes its own reading reports (at depth + 1) with 'shell_string' beside them.
+    () when `command` does not lex; the caller's own scan reports why."""
+    try:
+        segments = _lex_flat(command)
+    except ValueError:
+        return ()
+    causes = []
+    for seg in segments:
+        try:
+            strings = _shell_strings(seg)
+        except ValueError:
+            causes.append("shell_string")
+            continue
+        if strings and depth >= _SHELL_STRING_DEPTH:
+            causes.append("shell_string")
+            continue
+        for text in strings:
+            inner = _lex_uncertain_causes(text, depth + 1)
+            if inner:
+                causes.extend(inner)
+                causes.append("shell_string")
+    return tuple(causes)
 
 
 # A leading inline shell env-var assignment (FOO=bar or the APPEND form FOO+=bar) that PREFIXES a command,
@@ -1684,10 +1917,41 @@ _DEV_PROC_TARGET_RE = re.compile(r"^/+(?:dev|proc)(?:/|$)")
 # It therefore cannot be proven a plain file lexically, so it is routed OPAQUE (ASK), never a proven
 # real-file ALLOW - matching how a '..' escape (equally cwd-dependent) is handled.
 _REL_DEV_PROC_TARGET_RE = re.compile(r"^(?:dev|proc)(?:/|$)")
+
+
+class _ChainRe:
+    """A linear-time reading of a raw-text probe written as a chain regex such as (?is)\\bgit\\b.*?\\bpush\\b:
+    each chain is a sequence of part patterns, and search(text) walks one chain at a time, finding the first
+    match of each part at or after the end of the match before it (lookbehinds and \\b still see the text
+    before that position), and returns the last part's match, or None when no chain completes. Every part
+    before the last is one fixed word (git, fetch, add, commit), so its first match also ends first and leaves
+    the most text for the parts after it, and with DOTALL ('.*?' matching any text) the walk completes exactly
+    when the single chain regex matches. The single regex retried its later
+    parts from EVERY match of its first part, which cost time quadratic in the text's length on a text of
+    many 'git' words and no verb after them; a 64 KiB command of that shape took seconds per probe. Only the
+    truth of the result is read by its callers."""
+
+    def __init__(self, *chains):
+        self.chains = tuple(tuple(re.compile(part) for part in chain) for chain in chains)
+
+    def search(self, text):
+        for chain in self.chains:
+            pos = 0
+            match = None
+            for part in chain:
+                match = part.search(text, pos)
+                if match is None:
+                    break
+                pos = match.end()
+            if match is not None:
+                return match
+        return None
+
+
 # Fallback-only broad producer probe over the RAW command, used only when _lex_command cannot parse the
 # command: an apparent 'git ... <producer>' ASKS (never a silent allow, never a regex-earned allow).
-_RAW_DIFF_PRODUCER_RE = re.compile(
-    r"(?is)\bgit\b.*?\b(?:diff|show|range-diff|log|diff-tree|diff-index|diff-files|format-patch)\b")
+_RAW_DIFF_PRODUCER_RE = _ChainRe((
+    r"(?is)\bgit\b", r"(?is)\b(?:diff|show|range-diff|log|diff-tree|diff-index|diff-files|format-patch)\b"))
 
 
 def _has_patch_flag(tokens):
@@ -3600,15 +3864,16 @@ _GIT_CONFIG_WRITE_FLAGS = frozenset((
     "-e", "--edit"))
 _EXPBND_WRAPPER_WORDS = frozenset(("command", "exec", "builtin", "env", "sudo"))
 _RAW_EXPBND_CD_RE = re.compile(r"(?i)(?:^|[\s;&|()])(?:cd|pushd|popd)(?=$|[\s;&|()])")
-_RAW_EXPBND_MUTATE_RE = re.compile(
-    r"(?is)\bgit\b.*?\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
-    r"notes|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|worktree)\b")
-_RAW_EXPBND_PRUNING_FETCH_RE = re.compile(
-    r"(?is)\bgit\b.*?\bfetch\b.*?(?:--prune(?:-tags)?\b|(?<!\S)-[^\s]*p)")
-_RAW_EXPBND_BREADTH_RE = re.compile(
-    r"(?is)\bgit\b.*?(?:\badd\b.*?(?:--all\b|(?<!\S)-[^\s]*A|(?<!\S)(?:\.|:/)(?!\S))|"
-    r"\bcommit\b.*?(?:--all\b|(?<!\S)-[^\s]*a))")
-_RAW_EXPBND_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
+_RAW_EXPBND_MUTATE_RE = _ChainRe((
+    r"(?is)\bgit\b",
+    r"(?is)\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
+    r"notes|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|worktree)\b"))
+_RAW_EXPBND_PRUNING_FETCH_RE = _ChainRe((
+    r"(?is)\bgit\b", r"(?is)\bfetch\b", r"(?is)(?:--prune(?:-tags)?\b|(?<!\S)-[^\s]*p)"))
+_RAW_EXPBND_BREADTH_RE = _ChainRe(
+    (r"(?is)\bgit\b", r"(?is)\badd\b", r"(?is)(?:--all\b|(?<!\S)-[^\s]*A|(?<!\S)(?:\.|:/)(?!\S))"),
+    (r"(?is)\bgit\b", r"(?is)\bcommit\b", r"(?is)(?:--all\b|(?<!\S)-[^\s]*a)"))
+_RAW_EXPBND_PUSH_RE = _ChainRe((r"(?is)\bgit\b", r"(?is)\bpush\b"))
 
 
 def _is_abs_binding(value):
@@ -7258,8 +7523,8 @@ _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests bod
 
 # Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct);
 # mirrors the _RAW_DIFF_PRODUCER_RE / _RAW_LOSSY_VERB_RE posture: conservative, over-matching, never
-# a silent allow. _RAW_PUSH_RE/_RAW_COMMIT_RE pair git with the verb in one pattern ((?is): case-fold,
-# '.' spans newlines). _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--for[a-z-]*' covers
+# a silent allow. _RAW_PUSH_RE/_RAW_COMMIT_RE pair git with a later verb ((?is): case-fold, any text
+# between them, newlines included), read in linear time by _ChainRe. _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--for[a-z-]*' covers
 # --for/--force/--force-with-lease/--force-if-includes; the short cluster scan now admits a digit
 # ('-[A-Za-z0-9]*f'), so an ipv4/ipv6 '-4f'/'-6f' clustered with force is caught (F-117), and its
 # disclosed false-hit on an attached -o value ending in f ('-of') now also covers '-o4f'; the short
@@ -7329,7 +7594,7 @@ def _push_abbrev_alternative(name, shortest):
     return "--" + re.escape(shortest) + tail + r"(?![\w-])"
 
 
-_RAW_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
+_RAW_PUSH_RE = _ChainRe((r"(?is)\bgit\b", r"(?is)\bpush\b"))
 _RAW_PUSH_FORCE_RE = re.compile(
     r"(?i)--for[a-z-]*|"
     + "|".join(_push_abbrev_alternative(name, shortest) for name, shortest in _PUSH_FORCE_ABBREVS)
@@ -7364,7 +7629,7 @@ _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")
 _RAW_PUSH_MIRRORCFG_RE = re.compile(
     r"(?i)(?:^|[\s'\"])-c[\s'\"]+remote\.[^\s=]+\.mirror"
     r"|(?:^|[\s'\"])--config-env[=\s]['\"]*remote\.[^\s=]+\.mirror")
-_RAW_COMMIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
+_RAW_COMMIT_RE = _ChainRe((r"(?is)\bgit\b", r"(?is)\bcommit\b"))
 
 # Commit proof contract. Recognizers establish syntax, never authorization.
 # The ordered evaluator supplies the evidence consumed by _commit_on_protected.
@@ -9384,9 +9649,9 @@ _GATE_ALTS = (
 # mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. '--no-ver'
 # deliberately also hits '--no-verbose' (an over-deny on the unparseable path only); the short cluster
 # probe requires a whitespace-preceded single-dash token so a long option ('--amend') never matches.
-_RAW_NOVERIFY_VERB_RE = re.compile(r"(?is)\bgit\b.*?\b(?:commit|merge|push|pull|rebase|am)\b")
+_RAW_NOVERIFY_VERB_RE = _ChainRe((r"(?is)\bgit\b", r"(?is)\b(?:commit|merge|push|pull|rebase|am)\b"))
 _RAW_NOVERIFY_RE = re.compile(r"(?i)--no-ver")
-_RAW_SHORT_NOVERIFY_VERB_RE = re.compile(r"(?is)\bgit\b.*?\b(?:commit|am)\b")
+_RAW_SHORT_NOVERIFY_VERB_RE = _ChainRe((r"(?is)\bgit\b", r"(?is)\b(?:commit|am)\b"))
 _RAW_SHORT_N_RE = re.compile(r"(?:^|\s)-[A-Za-z]*n\b")
 _RAW_CHECKER_RE = re.compile(
     r"(?i)\b(?:pytest|tox|nox|unittest|mypy|pyright|ruff|flake8|pylint|bandit|eslint|tsc|jest|"
@@ -9399,7 +9664,7 @@ _RAW_TRUNCATE_RE = re.compile(r"\|\s*(?:head|tail)\b")
 # checker's output may reach the sink through it, so the fallback notes it as it notes a raw '| head'.
 _RAW_FLOW_RE = re.compile(r"<<<|<\(|>\(")
 _RAW_SINK_WORD_RE = re.compile(r"\b(?:head|tail|cut)\b")
-_RAW_COMMIT_MSG_GIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
+_RAW_COMMIT_MSG_GIT_RE = _ChainRe((r"(?is)\bgit\b", r"(?is)\bcommit\b"))
 _RAW_COMMIT_MSG_MARKER_RE = re.compile(r"`|\$\(")
 
 
@@ -10101,8 +10366,12 @@ def gate_weakening(data):
     awk, sort or grep stage, a sink spelling off the list or cut, a checker-shaped or verify-option command
     followed by a pipe and later a stage that may pass on only part of its input). On a parse error
     the partially lexed complete segments are judged for the deny tier first (DENY outranks the parse error);
-    otherwise the raw fallback stands. Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
-    xargs body; R2 an alias or shell function; R3 a gate whose name and options carry no checker part
+    otherwise the raw fallback stands. A command inside a shell -c or eval string is read as if written in
+    place (_lex_command), so a --no-verify there denies; a string that reading cannot read takes the raw
+    fallback. Disclosed residuals: R1 a check inside a shell string piped into a sink notes rather than denies
+    (the shell command before it is an earlier command the deny tier does not count as benign), and a check
+    inside an xargs body that runs no shell or a string built at run time is not read; R2 an alias or shell
+    function; R3 a gate whose name and options carry no checker part
     (tools/doctor.py, sha256sum -c, a build); R4 a plain '| grep PATTERN' filter or '| wc', which are not
     counted as truncating sinks."""
     if data.get("hook_event_name") != PRETOOL:

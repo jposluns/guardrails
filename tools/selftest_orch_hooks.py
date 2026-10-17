@@ -9296,7 +9296,10 @@ def _main_isolated(report_path=None):
         check("trunc/reserved-for-allows-note", _verdict(bg("for x in a b")), "warn")
         check("trunc/glob-allows-note", _verdict(bg("cat *.log")), "warn")
         check("trunc/comment-allows-note", _verdict(bg("python3 build.py # note")), "warn")
-        check("trunc/shell-c-allows-note", _verdict(bg("bash -c 'python3 build.py | tail'")), "warn")
+        # A pipeline inside a shell -c string is read as if written in place (the shared segment reading), so it
+        # denies like trunc/pipe-tail-denies; a string the reading cannot read stays the unprovable note.
+        check("trunc/shell-c-denies", _verdict(bg("bash -c 'python3 build.py | tail'")), "deny")
+        check("trunc/shell-c-opaque-allows-note", _verdict(bg('bash -c "$CMD"')), "warn")
         check("trunc/tilde-allows-note", _verdict(bg("cat ~/notes.txt")), "warn")
         check("trunc/foreground-plain-allows", _verdict(bg("python3 build.py", rib=False)), "allow")
         check("trunc/foreground-pipe-allows", _verdict(bg("python3 build.py | tail -5", rib=False)), "allow")
