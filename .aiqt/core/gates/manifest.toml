@@ -1045,7 +1045,7 @@ rules = []
 platform = "ci"
 default = "block"
 class = "a"
-residue = "Enforces the canonical byte format, .gitattributes coverage, and the platform matrix over the release scope at release time. It does not police an adopter's post-checkout local mutation; the checkout-bytes claim is proven only on the two CI matrix platforms; the zero-width/bidi allowance table is maintainer-authored policy whose rationale is reviewed, not proven; and coverage is evaluated against this repository's git attribute state, not any adopter clone's."
+residue = "Enforces the canonical byte format, .gitattributes coverage, and the platform matrix over the release scope at release time. It does not police an adopter's post-checkout local mutation; the checkout-bytes claim is proven only on the two CI matrix platforms; the zero-width/bidi allowance table is maintainer-authored policy whose rationale is reviewed, not proven; and coverage is evaluated against this repository's git attribute state, not any adopter clone's. Its refusal of a literal U+2028 or U+2029 covers this repository's release scope only: the separators stay outside the shared forbidden set, so opf neither escapes them in the records it writes nor refuses a view rendered from a record that carries one in an adopter's store."
 
 # --- VER-CORE Section 12 step 6 (VC-6): migration engine, crosswalk tooling, archive ------------------
 

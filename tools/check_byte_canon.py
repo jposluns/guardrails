@@ -12,6 +12,11 @@ ownership map's [checkout].binary roster. Coverage is evaluated through git's ow
 gen_manifest, and the engine evaluation additionally catches a nested tracked .gitattributes
 overriding the root one.
 
+The 3.1 scan forbids the zero-width and bidirectional control codepoints held in _byte_canon.FORBIDDEN
+and, in this gate only, a literal U+2028 LINE SEPARATOR or U+2029 PARAGRAPH SEPARATOR (str.splitlines()
+splits on both). The separators stay out of FORBIDDEN because opf's record emitter and view generator read
+that set; no allowance clears them.
+
 check_no_dashes.py stays separate (3.1). Hashing elsewhere stays byte-literal (3.2): this gate
 canonicalizes at release; no verifier normalizes.
 
@@ -90,11 +95,30 @@ CLASS_FINDING = {
     "empty": "empty file",
 }
 
+# U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR: str.splitlines() splits on both, so a literal one
+# inside a string or comment changes how every line-based tool reads the file (an editor can decode the
+# escape text into the character itself). They are refused by THIS repository gate only, never added to
+# _byte_canon.FORBIDDEN: that set also drives opf's record emitter (which escapes every member) and opf's
+# view generator (which refuses a render carrying any member), so widening it would change what opf writes
+# and renders in an adopter's store. No allowance can clear them; write the escape text instead.
+LINE_SEPARATORS = {ch.encode("utf-8"): ch for ch in (chr(0x2028), chr(0x2029))}
+LINE_SEPARATORS_RE = re.compile(b"|".join(re.escape(b) for b in sorted(LINE_SEPARATORS)))
+
+
 class GateError(Exception):
     """An input the gate cannot read, parse, or trust. Caught at run() and reported as exit 2."""
 
 
 # --- pure legs (scan_bytes / _is_two_space_break and the forbidden sets are imported from _byte_canon) --
+
+def scan_line_separators(data):
+    """The repository-only leg over one file's raw bytes: one finding per literal U+2028 or U+2029. It
+    runs on the raw bytes, so it reports them in a file that is not valid UTF-8 too; scan_bytes reports
+    the decode failure itself. Returns a list of finding strings."""
+    return ["byte offset {}: line or paragraph separator U+{:04X} (str.splitlines() splits on it); "
+            "write the escape text".format(m.start(), ord(LINE_SEPARATORS[m.group(0)]))
+            for m in LINE_SEPARATORS_RE.finditer(data)]
+
 
 
 def coverage_findings(scope_paths, binary_set, effective):
@@ -335,7 +359,8 @@ def run(root):
             except OSError as exc:
                 raise GateError("cannot read in-scope file {} ({})".format(path, exc))
             findings += ["{}: {}".format(path, f) for f in
-                         scan_bytes(data, allowances.get(path, ()), path in hardbreak_paths)]
+                         scan_bytes(data, allowances.get(path, ()), path in hardbreak_paths)
+                         + scan_line_separators(data)]
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -436,6 +461,32 @@ def self_test_main():
         failures.append("an in-span allowance failed to clear its codepoint")
     if not scan_bytes(zw, ((0, 1, frozenset(chr(0x200B))),)):
         failures.append("an out-of-span allowance wrongly cleared a codepoint")
+    # Line and paragraph separators: the repository-only leg flags each literal U+2028 and U+2029, in a
+    # string and in a comment, one finding per occurrence. They stay outside _byte_canon.FORBIDDEN (opf's
+    # emitter and view generator read that set), so scan_bytes alone must still pass them.
+    for name, text, cp in (
+            ("line-separator-in-string", 'x = "a{}b"\n'.format(chr(0x2028)), "U+2028"),
+            ("paragraph-separator-in-string", 'x = "a{}b"\n'.format(chr(0x2029)), "U+2029"),
+            ("line-separator-in-comment", "# a{}b\n".format(chr(0x2028)), "U+2028"),
+            ("paragraph-separator-in-comment", "# a{}b\n".format(chr(0x2029)), "U+2029")):
+        data = text.encode("utf-8")
+        if not any(cp in f for f in scan_line_separators(data)):
+            failures.append("scan_line_separators[{}] did not report {}".format(name, cp))
+        if scan_bytes(data):
+            failures.append("scan_bytes[{}] reported a separator; it must stay out of the shared "
+                            "forbidden set".format(name))
+    both = "a{}b{}c\n".format(chr(0x2028), chr(0x2029)).encode("utf-8")
+    if len(scan_line_separators(both)) != 2:
+        failures.append("scan_line_separators did not report each of two separators once")
+    for cp in (0x2028, 0x2029):
+        if chr(cp) in FORBIDDEN.values():
+            failures.append("U+{:04X} is in _byte_canon.FORBIDDEN, which also drives opf's record "
+                            "emitter and view generator".format(cp))
+    # Control: a printable non-ASCII letter (U+00E9) passes both legs, and the escape text passes too.
+    for name, data in (("e-acute", 'x = "caf{}"\n'.format(chr(0x00E9)).encode("utf-8")),
+                       ("escape-text", b'x = "a\\u2028b\\u2029c"\n')):
+        if scan_bytes(data) or scan_line_separators(data):
+            failures.append("control[{}] was flagged".format(name))
     # Coverage logic, synthetic effective maps.
     eff = {"a.md": {"text": "set", "eol": "lf"}, "b.zip": {"text": "unset", "eol": "unspecified"},
            "c.md": {"text": "unspecified", "eol": "unspecified"}}
@@ -530,6 +581,15 @@ def self_test_main():
                             "{}".format(exc))
     except Exception as exc:  # a non-GateError (e.g. TypeError) is the exact pre-fix escape
         failures.append("a nested allowance codepoint raised {!r} instead of GateError".format(exc))
+    # No allowance row can clear a line or paragraph separator.
+    for cp in ("U+2028", "U+2029"):
+        try:
+            validate_allowances(repo_root(), [dict(good_row, codepoints=[cp])], {"x"})
+            failures.append("an allowance naming {} was not rejected".format(cp))
+        except GateError as exc:
+            if "outside the forbidden sets" not in str(exc):
+                failures.append("an allowance naming {} was not rejected on its own terms: {}".format(
+                    cp, exc))
     # Two-space CommonMark hard break: cleared only with hardbreak=True, and ONLY for exactly two
     # trailing spaces on a non-blank line. Every other trailing-whitespace vector still fails, even on a
     # hardbreak-allowed path. This is the durable guard for the SKILL.md five-line header render.
@@ -720,7 +780,8 @@ def self_test_main():
         for f in failures:
             print("  - " + f)
         return 1
-    print("SELF-TEST PASS: byte-format legs, allowance scoping, coverage logic, the containment "
+    print("SELF-TEST PASS: byte-format legs, the line and paragraph separator leg, allowance scoping, "
+          "coverage logic, the containment "
           "mode table and probe fail-safe, the policy and vector schema fail-closed legs, and the "
           "published vectors all hold")
     return 0
