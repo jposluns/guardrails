@@ -16,6 +16,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   branch_root         PreToolUse  brnrot  deny branch creation from an orphaned or unprovable start point
   gate_weakening      PreToolUse  gatdis  deny a git hook bypass and a verification run piped into a truncating sink; allow+note another swallowed or truncated checker
   commit_msg_subst    PreToolUse  sectvl  deny shell substitution in a git commit argument
+  heredoc_terminator  PreToolUse  sectvl  deny a Bash heredoc whose opener has no exactly matching terminator line
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
   gensrc_guard        PreToolUse  gensrc  a Write/Edit/MultiEdit that hand-edits a registered generated artefact
 
@@ -79,6 +80,11 @@ commit_msg_subst (sectvl): a backtick or $( command substitution in a git commit
 command-injection hazard the shell runs before git sees the argument, so it DENIES and names the safe
 re-issue (single quotes, escape the marker, or git commit -F <file>); the unparseable-fallback and unreadable
 -command cases deny fail-safe on the same terms. Only a mis-wired event hard-blocks (no structured decision).
+
+heredoc_terminator (sectvl): a heredoc opener with no line exactly equal to its delimiter before the end of the
+command makes bash read the rest of the command as heredoc text, so it DENIES, naming the opener and any
+near-miss line; a << whose delimiter word cannot be read and an unreadable command deny fail-safe on the same
+terms. Only a mis-wired event hard-blocks.
 
 git_explicit_binding (expbnd): an ambient git target or a whole-tree breadth+publish is a binding CONVENTION
 where the orchestrator normally binds its own target, not a hazard, so every former ask (including the
@@ -168,6 +174,9 @@ DELIBERATE decision where the platform documents exit 2 as the block (the orches
 manufactured wind-down that way, doc-confirmed 2026-08-29, bounded by its own loop bound so it cannot wedge
 the chain). Outside that deliberate deny, only a PreToolUse handler fails closed via exit 2, and only a
 genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on a bad invocation.
+A handler result whose exit code is not 0 or 2, or whose stderr text is neither a str nor None, is a
+handler crash with that same posture, and an exception's text in a diagnostic is built so that its own
+str() raising cannot end main() early.
 
 These exits, and the floor guard's on an older interpreter that can start this file, hold even when a
 standard stream cannot be written or flushed (a closed descriptor, a full
@@ -183,6 +192,39 @@ decision whose stdout write failed exited 0, which allows. The floor guard above
 write-flush-os._exit shape inline, since it runs before any helper exists.
 The PYTHON-FLOOR comment below gives the floor guard's exits and the exit of an interpreter that cannot
 start this file, which fails first with Python's own exit.
+
+DEADLINE (PreToolUse): every PreToolUse mode that is not fail-open reads its payload and runs its check
+inside one _DeadlineWindow of PRETOOL_BUDGET_SECONDS (8 seconds: HOOK_TIMEOUT_SECONDS, the 10-second
+hooks.json timeout tools/gen_hooks.py renders, less 2), armed before the payload read. A check that has
+not decided by then is interrupted by _HookDeadline, a BaseException that no handler's except Exception
+branch catches, and the call fails CLOSED with exit 2 and a stderr line naming the handler, the budget and
+the input size and asking for smaller calls or long content moved into a file; the timer is cancelled
+before the decision is written to stdout. Any other exception out of the window (an error entering or
+leaving it, or an in-process caller's own alarm handler raising when its expiry is delivered) fails
+closed with exit 2 as well, and a fail-open mode warns on exit 0 instead, except for a stop (an exit
+or an interrupt) raised in a fail-open mode, which ends the hook as it would with no window, save that
+an exit whose status would be 2 ends it with status 1. The raw 'git ... <verb>'
+fallback scans are _RawSequence probes of linear cost: the single regexes they replaced grew with the
+square or the cube of the command length, and five guards ran past the hook timeout on some shape at or
+below 64 KB. Measured in-process on a 24-core host with Python 3.14.4 over runs on 2026-10-15 and
+2026-10-16, the slowest PreToolUse handler call on the worst shapes tools/selftest_aiqt_hooks.py times
+took at most 0.10 s of wall-clock time at 64 KB, 0.49 s at 256 KB and 2.07 s at 1 MB (nest_parens under
+git_stash_ref). With the raw-text push backstop and the joined and de-quoted readings of the command,
+runs on 2026-10-17 on a 24-core host with Python 3.14.4 that was running other work measured at most
+0.13 s at 64 KB (protected_line, whose backstop reads the whole command before its 65,536-character
+commit size cap), 0.55 s at 256 KB and 2.17 s at 1 MB (nest_parens under git_discard). Interpreter
+start-up adds about 0.1 to 0.2 s to each call. Outside the deadline: interpreter start-up and
+module import, which run before main(); a wait the interpreter cannot interrupt (a system call in
+uninterruptible sleep, such as a read from a hung network mount, or a long call into C code that does not
+check for signals), which holds the deadline back until it returns, as does review_dispatch_pin's wait for
+its worker thread when the kernel delivers the alarm to that thread (the wait ends within that guard's
+own 8-second budget plus a quarter second); cleanup that runs while the deadline
+unwinds (a finally block, killing and reaping a child process), which still counts against the platform's
+timeout; and a platform without SIGALRM and setitimer (Windows), a caller that blocks SIGALRM, or a call
+off the main thread, which run with no deadline. Whether the platform blocks or allows a PreToolUse call
+whose hook it stops at its own timeout has not been verified; the deadline makes the decision the
+dispatcher's own exit 2 instead. An interrupted git_discard recovery snapshot can leave a temporary index
+or unreferenced objects behind.
 """
 import sys
 
@@ -237,6 +279,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         os._exit(0)
     os._exit(2)
 
+import _signal
 import collections
 import datetime
 import errno
@@ -254,6 +297,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 
 PRETOOL = "PreToolUse"
@@ -263,6 +307,14 @@ STOP_EVENTS = ("Stop", "SubagentStop")
 # cannot block at all; an errored UserPromptSubmit stamp must never block a human prompt; a
 # PostToolUse recorder error must surface as a warning, not a tool failure. Doc-confirmed 2026-08-29.
 FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSubmit", "PostToolUse")
+# The platform stops a hook command at the timeout tools/gen_hooks.py writes into hooks.json (its
+# TIMEOUT); HOOK_TIMEOUT_SECONDS mirrors that value, and gen_hooks refuses to render (exit 2) when the two
+# differ, so both numbers come from that one source. main() gives every PreToolUse mode that is not
+# fail-open PRETOOL_BUDGET_SECONDS, counted from before the payload read, and fails closed with exit 2
+# when its check has not decided by then, so the refusal is written before the platform's own timeout.
+# gen_hooks also refuses a budget that is not at least one second below the timeout or not positive.
+HOOK_TIMEOUT_SECONDS = 10
+PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - 2.0
 
 
 # --- decision constructors ---------------------------------------------------------------------------
@@ -1684,10 +1736,39 @@ _DEV_PROC_TARGET_RE = re.compile(r"^/+(?:dev|proc)(?:/|$)")
 # It therefore cannot be proven a plain file lexically, so it is routed OPAQUE (ASK), never a proven
 # real-file ALLOW - matching how a '..' escape (equally cwd-dependent) is handled.
 _REL_DEV_PROC_TARGET_RE = re.compile(r"^(?:dev|proc)(?:/|$)")
+
+
+class _RawSequence:
+    """A raw-text probe whose steps must match IN ORDER: each step is searched once, from the end of the
+    previous step's leftmost match, and search() returns the last step's match or None. It decides the
+    same set as the single regex that joins the steps with a lazy '.*?' under re.DOTALL ('\\bgit\\b.*?\\bpush\\b'
+    and its siblings), at linear cost: that single regex retries the lazy gap from every match of the
+    first step, so on a command with many git words and no verb after them its cost grew with the square
+    of the command length, and with the cube for a three-step pattern (seconds at a few KB, past the hook
+    timeout well under 64 KB). Taking each step's leftmost match loses no solution because every step but
+    the last matches one fixed-length word, so the leftmost match also ends first, and a search started at
+    a position still reads the characters before it, so a word boundary or lookbehind at that position
+    sees the same neighbour it sees in the single regex. tools/selftest_aiqt_hooks.py holds every probe
+    built from this class equal to the single regex it replaced over a generated corpus."""
+    __slots__ = ("steps",)
+
+    def __init__(self, *patterns):
+        self.steps = tuple(re.compile(pattern) for pattern in patterns)
+
+    def search(self, text):
+        found, pos = None, 0
+        for step in self.steps:
+            found = step.search(text, pos)
+            if found is None:
+                return None
+            pos = found.end()
+        return found
+
+
 # Fallback-only broad producer probe over the RAW command, used only when _lex_command cannot parse the
 # command: an apparent 'git ... <producer>' ASKS (never a silent allow, never a regex-earned allow).
-_RAW_DIFF_PRODUCER_RE = re.compile(
-    r"(?is)\bgit\b.*?\b(?:diff|show|range-diff|log|diff-tree|diff-index|diff-files|format-patch)\b")
+_RAW_DIFF_PRODUCER_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\b(?:diff|show|range-diff|log|diff-tree|diff-index|diff-files|format-patch)\b")
 
 
 def _has_patch_flag(tokens):
@@ -3600,15 +3681,19 @@ _GIT_CONFIG_WRITE_FLAGS = frozenset((
     "-e", "--edit"))
 _EXPBND_WRAPPER_WORDS = frozenset(("command", "exec", "builtin", "env", "sudo"))
 _RAW_EXPBND_CD_RE = re.compile(r"(?i)(?:^|[\s;&|()])(?:cd|pushd|popd)(?=$|[\s;&|()])")
-_RAW_EXPBND_MUTATE_RE = re.compile(
-    r"(?is)\bgit\b.*?\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
+_RAW_EXPBND_MUTATE_RE = _RawSequence(
+    r"(?i)\bgit\b",
+    r"(?i)\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
     r"notes|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|worktree)\b")
-_RAW_EXPBND_PRUNING_FETCH_RE = re.compile(
-    r"(?is)\bgit\b.*?\bfetch\b.*?(?:--prune(?:-tags)?\b|(?<!\S)-[^\s]*p)")
-_RAW_EXPBND_BREADTH_RE = re.compile(
-    r"(?is)\bgit\b.*?(?:\badd\b.*?(?:--all\b|(?<!\S)-[^\s]*A|(?<!\S)(?:\.|:/)(?!\S))|"
-    r"\bcommit\b.*?(?:--all\b|(?<!\S)-[^\s]*a))")
-_RAW_EXPBND_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
+_RAW_EXPBND_PRUNING_FETCH_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\bfetch\b", r"(?i)--prune(?:-tags)?\b|(?<!\S)-[^\s]*p")
+# The whole-tree breadth probe is two sequences, git then add then an add breadth selector, or git then
+# commit then a commit breadth selector; a command shows breadth when either matches.
+_RAW_EXPBND_ADD_BREADTH_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\badd\b", r"(?i)--all\b|(?<!\S)-[^\s]*A|(?<!\S)(?:\.|:/)(?!\S)")
+_RAW_EXPBND_COMMIT_BREADTH_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\bcommit\b", r"(?i)--all\b|(?<!\S)-[^\s]*a")
+_RAW_EXPBND_PUSH_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bpush\b")
 
 
 def _is_abs_binding(value):
@@ -3863,7 +3948,8 @@ def _expbnd_fallback(command):
     if (_RAW_EXPBND_CD_RE.search(command) and
             (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command))):
         return _expbnd_target_ask("mutation")
-    if _RAW_EXPBND_BREADTH_RE.search(command) and _RAW_EXPBND_PUSH_RE.search(command):
+    if ((_RAW_EXPBND_ADD_BREADTH_RE.search(command) or _RAW_EXPBND_COMMIT_BREADTH_RE.search(command))
+            and _RAW_EXPBND_PUSH_RE.search(command)):
         return _expbnd_breadth_publish_deny("breadth operation")  # finding 11: breadth + publish -> deny
     return _allow()
 
@@ -7258,8 +7344,8 @@ _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests bod
 
 # Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct);
 # mirrors the _RAW_DIFF_PRODUCER_RE / _RAW_LOSSY_VERB_RE posture: conservative, over-matching, never
-# a silent allow. _RAW_PUSH_RE/_RAW_COMMIT_RE pair git with the verb in one pattern ((?is): case-fold,
-# '.' spans newlines). _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--for[a-z-]*' covers
+# a silent allow. _RAW_PUSH_RE/_RAW_COMMIT_RE pair git with a LATER verb (a _RawSequence, case-folded,
+# the gap spanning newlines). _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--for[a-z-]*' covers
 # --for/--force/--force-with-lease/--force-if-includes; the short cluster scan now admits a digit
 # ('-[A-Za-z0-9]*f'), so an ipv4/ipv6 '-4f'/'-6f' clustered with force is caught (F-117), and its
 # disclosed false-hit on an attached -o value ending in f ('-of') now also covers '-o4f'; the short
@@ -7329,7 +7415,7 @@ def _push_abbrev_alternative(name, shortest):
     return "--" + re.escape(shortest) + tail + r"(?![\w-])"
 
 
-_RAW_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
+_RAW_PUSH_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bpush\b")
 _RAW_PUSH_FORCE_RE = re.compile(
     r"(?i)--for[a-z-]*|"
     + "|".join(_push_abbrev_alternative(name, shortest) for name, shortest in _PUSH_FORCE_ABBREVS)
@@ -7364,7 +7450,7 @@ _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")
 _RAW_PUSH_MIRRORCFG_RE = re.compile(
     r"(?i)(?:^|[\s'\"])-c[\s'\"]+remote\.[^\s=]+\.mirror"
     r"|(?:^|[\s'\"])--config-env[=\s]['\"]*remote\.[^\s=]+\.mirror")
-_RAW_COMMIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
+_RAW_COMMIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
 
 # Commit proof contract. Recognizers establish syntax, never authorization.
 # The ordered evaluator supplies the evidence consumed by _commit_on_protected.
@@ -9384,9 +9470,9 @@ _GATE_ALTS = (
 # mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. '--no-ver'
 # deliberately also hits '--no-verbose' (an over-deny on the unparseable path only); the short cluster
 # probe requires a whitespace-preceded single-dash token so a long option ('--amend') never matches.
-_RAW_NOVERIFY_VERB_RE = re.compile(r"(?is)\bgit\b.*?\b(?:commit|merge|push|pull|rebase|am)\b")
+_RAW_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|merge|push|pull|rebase|am)\b")
 _RAW_NOVERIFY_RE = re.compile(r"(?i)--no-ver")
-_RAW_SHORT_NOVERIFY_VERB_RE = re.compile(r"(?is)\bgit\b.*?\b(?:commit|am)\b")
+_RAW_SHORT_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|am)\b")
 _RAW_SHORT_N_RE = re.compile(r"(?:^|\s)-[A-Za-z]*n\b")
 _RAW_CHECKER_RE = re.compile(
     r"(?i)\b(?:pytest|tox|nox|unittest|mypy|pyright|ruff|flake8|pylint|bandit|eslint|tsc|jest|"
@@ -9399,7 +9485,7 @@ _RAW_TRUNCATE_RE = re.compile(r"\|\s*(?:head|tail)\b")
 # checker's output may reach the sink through it, so the fallback notes it as it notes a raw '| head'.
 _RAW_FLOW_RE = re.compile(r"<<<|<\(|>\(")
 _RAW_SINK_WORD_RE = re.compile(r"\b(?:head|tail|cut)\b")
-_RAW_COMMIT_MSG_GIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
+_RAW_COMMIT_MSG_GIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
 _RAW_COMMIT_MSG_MARKER_RE = re.compile(r"`|\$\(")
 
 
@@ -10337,6 +10423,474 @@ def commit_msg_subst(data):
             "AIQT guardrail: denied a git commit argument that appears to carry an executable command "
             "substitution (rule sectvl); re-issue single-quoted, escaped, or via -F <file>.")
     return _allow()
+
+
+# --- sectvl: a heredoc opener with no exactly matching terminator line ------------------------------
+# A heredoc ends at the first body line that is EXACTLY its delimiter. A mistyped terminator (EFO, a trailing
+# space or carriage return after EOF, a <<- terminator indented with spaces, an EOF sharing its line with the
+# ) of a command substitution) ends nothing: bash reads every remaining line of the command as heredoc text,
+# so a program fed by the heredoc (python3 - <<'PY', bash -s <<'SH') can run the rest of the command as its
+# own code while the shell runs none of it. The shared _lex_command cannot judge this (it refuses an unquoted
+# heredoc, and reads a double-quoted "$(cat <<'EOF' ...)" as one word), so this guard makes its own raw pass,
+# tracking only what decides whether a << is an opener: quoting, escapes, comments, assignment subscripts,
+# and the command, arithmetic and parameter substitutions that nest inside one another. A delimiter
+# word is read by the shared _parse_heredoc_delim, so both passes read a delimiter alike.
+_HeredocOpener = collections.namedtuple(
+    "_HeredocOpener", ("spec", "line", "delim", "strip_tabs", "quoted", "terminated", "near", "stop"))
+_HEREDOC_NEAR_MISS_MAX = 2  # the largest edit distance at which a body line is named as a near miss
+_HEREDOC_SHOWN = 80  # the longest opener, delimiter or near-miss text quoted in a deny reason
+_HEREDOC_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Words after which bash still reads the next word as a possible assignment: reserved words that begin a
+# command. A declaration builtin lets a later name=(...) argument be a compound assignment, but bash does
+# not read a name[...] argument of it as a subscript.
+_HEREDOC_COMMAND_WORDS = frozenset(("!", "{", "coproc", "do", "elif", "else", "if", "then", "time", "until",
+                                    "while"))
+_HEREDOC_DECL_WORDS = frozenset(("alias", "declare", "eval", "export", "let", "local", "readonly", "typeset"))
+
+
+def _heredoc_edit_distance(a, b, bound):
+    """The Levenshtein distance between a and b when it is at most bound, else bound + 1. Only the cells within
+    bound of the diagonal are computed, so the cost is linear in len(a)."""
+    big = bound + 1
+    if abs(len(a) - len(b)) > bound:
+        return big
+    width = 2 * bound + 1
+    # prev[k] is row i - 1 at column j = (i - 1) + k - bound; row 0 holds the distance from "" to b[:j], j
+    prev = [k - bound if 0 <= k - bound <= len(b) else big for k in range(width)]
+    for i in range(1, len(a) + 1):
+        cur = [big] * width
+        for k in range(width):
+            j = i + k - bound
+            if j < 0 or j > len(b):
+                continue
+            if j == 0:
+                cur[k] = min(i, big)
+                continue
+            best = prev[k] + (a[i - 1] != b[j - 1])  # match or substitute, from (i - 1, j - 1)
+            if k + 1 < width:
+                best = min(best, prev[k + 1] + 1)  # delete a[i - 1], from (i - 1, j)
+            if k > 0:
+                best = min(best, cur[k - 1] + 1)  # insert b[j - 1], from (i, j - 1)
+            cur[k] = min(best, big)
+        prev = cur
+    return prev[len(b) - len(a) + bound]
+
+
+def _heredoc_body(command, i, n, opener, in_subst, line_no):
+    """Read one heredoc body the way bash does, from index i (where _heredoc_openers says bash starts it: the
+    line after a newline of the opener's own command context, or after the line on which its substitution
+    closed, or where the previous body ended), which is on line line_no. Returns (next_i, terminated, near,
+    stop):
+    next_i is where scanning resumes; terminated is True when a line EXACTLY equal to the delimiter was found
+    (next_i is then just past that line); near is None or, for an unterminated body, (line, text, distance)
+    for the closest body line (the first on a tie) that is not blank and is within _HEREDOC_NEAR_MISS_MAX
+    edits of the delimiter and fewer edits than the delimiter has characters; stop is None or (line, text)
+    for the early end below.
+    A line is one physical line, except that for an UNQUOTED delimiter a line ending in an odd run of
+    backslashes is joined to the next with that backslash and the newline removed (bash's line continuation
+    in an interpolating heredoc; a quoted delimiter's body is read verbatim). For <<- the leading tabs of
+    the line are removed before it is compared. In a $(...), <(...) or >(...) substitution (in_subst), bash
+    5.3 also ends the body early, with a here-document warning, at a line that starts with the delimiter and
+    holds a ) later on, such as EOF) or EOF;true): it reads the rest of that line, from just after the
+    delimiter, as commands, so next_i is that point and the body is not terminated. With no terminator
+    next_i is n."""
+    delim = opener.delim
+    bound = min(_HEREDOC_NEAR_MISS_MAX, len(delim) - 1)
+    near = None
+    while i < n:
+        first_line = line_no
+        pieces = []  # (index in command, text) of each physical part of this line
+        while True:
+            nl = command.find("\n", i)
+            physical = command[i:n if nl < 0 else nl]
+            start = i
+            i = n if nl < 0 else nl + 1
+            line_no += 1
+            backslashes = len(physical) - len(physical.rstrip("\\"))
+            if opener.quoted or nl < 0 or backslashes % 2 == 0:
+                pieces.append((start, physical))
+                break
+            pieces.append((start, physical[:-1]))
+            if i >= n:
+                break
+        text = "".join(piece for _start, piece in pieces)
+        tabs = len(text) - len(text.lstrip("\t")) if opener.strip_tabs else 0
+        candidate = text[tabs:]
+        if candidate == delim:
+            return i, True, None, None
+        if in_subst and candidate.startswith(delim) and ")" in candidate[len(delim):]:
+            offset = tabs + len(delim)  # the line holds a ) past this offset, so one of its pieces holds it
+            for start, piece in pieces:
+                if offset < len(piece):
+                    return start + offset, False, None, (first_line, text)
+                offset -= len(piece)
+        if bound > 0 and candidate.strip():
+            distance = _heredoc_edit_distance(candidate, delim, bound)
+            if distance <= bound and (near is None or distance < near[2]):
+                near = (first_line, text, distance)
+    return n, False, near, None
+
+
+def _heredoc_skip_to(command, i, n, close):
+    """The index just past the first unescaped close character at or after i (n when there is none); a
+    backslash escapes the character after it. Skips an ANSI-C $'...' body or a backtick command substitution,
+    whose text this pass does not scan for openers."""
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            i += 2
+        elif c == close:
+            return i + 1
+        else:
+            i += 1
+    return n
+
+
+def _heredoc_openers(command):
+    """Every heredoc opener bash would act on in a raw Bash command, in source order, each read through to its
+    terminator by _heredoc_body. An opener is a << that is not part of a here-string <<<, and that is not
+    quoted, escaped, commented out, inside arithmetic ($((...)), $[...], ((...))) or the subscript of an
+    assignment (name[...]= where an assignment can stand, which a redirection's target never is, or [...]=
+    in a compound assignment name=(...)), inside a ${...} parameter expansion, or inside a backtick
+    substitution or ANSI-C $'...' text (both skipped unread). Quotes inside arithmetic or a subscript are
+    read as in a command, so a ] or ) inside them does not end it. A << inside a $(...) command
+    substitution or a <(...)/>(...) process substitution IS an opener, also within double quotes, in
+    arithmetic, in a subscript or in a ${...}; a <( directly inside double quotes or in arithmetic is literal
+    text, as in bash. A << whose delimiter word _parse_heredoc_delim cannot read is returned with delim None
+    and terminated False.
+    Bodies are read in bash's order. Each command context (the command, and each $(...), <(...) or >(...)
+    in it at any depth) keeps its own pending openers, and a newline of that context reads only its own
+    pending bodies, in the order their openers appeared; the pending bodies of the contexts around it wait
+    for a newline of their own. So when a line cat <<A "$(cat <<B is followed by lines B, )" and A, the
+    body of B (the line B) is read before the body of A (the line A). A substitution that closes with
+    bodies still unread (bash warns of an unterminated here-document) has them read at once, from the line
+    after the one it closes on (or after bodies already read that way), before anything still pending
+    around it; the scan then finishes that line and, at its newline (also within a string or expansion,
+    or after a backslash), resumes after those bodies. One forward pass with a stack of open contexts, each [kind, depth]: cmd (a command; depth
+    counts plain parentheses; then its pending openers, whether a word starting now can be an assignment,
+    and whether it is the parentheses of a compound assignment), dq (a double-quoted string), param
+    (${...}), arith (depth counts parentheses; then whether a word ends with it) and bracket ($[...] or a
+    subscript; depth counts brackets; then whether a word ends with it, and whether it is a subscript)."""
+    n = len(command)
+    openers = []
+    # a cmd frame's third item lists indexes into openers whose bodies it has not read; its fourth is
+    # "command" before a command's first word, "assign" after only assignments (a word read in either can
+    # be an assignment), "decl" after a declaration builtin, else ""; its fifth marks a compound assignment
+    stack = [["cmd", 0, [], "command", False]]
+    word_start = True  # a '#' starts a comment only at the start of a word
+    seen = [0, 1]  # [index, its line]; the scan only moves forward, so line counting stays linear
+    ahead = None  # (index, line) just past the bodies read when a substitution closed with bodies unread
+    redirect = False  # the next word is a redirection's target, which leaves a command's position as it was
+    compound_at = -1  # the index of the ( that opens a compound assignment name=(...)
+
+    def line_at(index):
+        seen[1] += command.count("\n", seen[0], index)
+        seen[0] = index
+        return seen[1]
+
+    def read_bodies(pending, i, line_no, in_subst):
+        """Read each pending body in turn from index i on line line_no; returns where the next one starts."""
+        for index in pending:
+            start = i
+            i, terminated, near, stop = _heredoc_body(command, i, n, openers[index], in_subst, line_no)
+            openers[index] = openers[index]._replace(terminated=terminated, near=near, stop=stop)
+            line_no += command.count("\n", start, i)
+        del pending[:]
+        return i, line_no
+
+    i = 0
+    while i < n:
+        frame = stack[-1]
+        kind = frame[0]
+        c = command[i]
+        nx = command[i + 1] if i + 1 < n else ""
+        if ahead is not None and ahead[0] <= i:
+            ahead = None  # a quoted or skipped span crossed lines past those bodies; never scan backwards
+        if ahead is not None and (c == "\n" and kind != "cmd" or c == "\\" and nx == "\n"):
+            # the line ends inside a string or an expansion, or is continued by a backslash: bash goes on with
+            # the line after the bodies a closed substitution already read (a newline of a command is below)
+            i = ahead[0]
+            ahead = None
+            continue
+        if kind == "cmd" and word_start and c not in " \t\n;&|<>()#" and not (c == "\\" and nx == "\n"):
+            # the first character of a word. Bash reads name[...] as an assignment's subscript, in which << is a
+            # shift, only where an assignment can stand (not after a command word, not as an argument of a
+            # declaration builtin, and never as a redirection's target, as in >f[1<<EOF]), and [...] at the
+            # start of a word inside a compound assignment's parentheses
+            match = _HEREDOC_NAME_RE.match(command, i)
+            j = match.end() if match else i
+            digits = i
+            while digits < n and command[digits].isdigit():
+                digits += 1
+            if not redirect and (frame[4] and c == "[" or match and frame[3] in ("command", "assign")
+                                 and command.startswith("[", j)):
+                stack.append(["bracket", 0, False, True])
+                word_start = False
+                i = (i if c == "[" else j) + 1
+                continue
+            if digits > i and command[digits:digits + 1] in ("<", ">"):
+                pass  # the file descriptor number of a redirection
+            elif redirect:
+                redirect = False  # a redirection's target; after an assignment it ends the command position
+                if frame[3] == "assign":
+                    frame[3] = ""
+            elif match and frame[3] and (command.startswith("=", j) or command.startswith("+=", j)):
+                if frame[3] == "command":
+                    frame[3] = "assign"  # the next word can still be an assignment
+                equals = j + (command[j] == "+")
+                if command.startswith("(", equals + 1):
+                    compound_at = equals + 1
+            elif not frame[4]:
+                end = j if match else i + (c in "!{")
+                word = command[i:end] if end >= n or command[end] in " \t\n;&|<>()" else None
+                if frame[3] in ("command", "assign") and word in _HEREDOC_DECL_WORDS:
+                    frame[3] = "decl"
+                elif not (frame[3] == "command" and word in _HEREDOC_COMMAND_WORDS) and frame[3] != "decl":
+                    frame[3] = ""
+        if c == "\\":  # the next character is literal; a backslash-newline joins lines and ends no word
+            if nx != "\n":
+                word_start = False
+            i += 2
+            continue
+        if kind in ("arith", "bracket") and c not in "$`\"'":
+            # << here is a shift; a $(...), ${...} or nested arithmetic, a backtick, or a single- or
+            # double-quoted string inside it is read below as it is elsewhere, so a heredoc in a $(...) in
+            # arithmetic is checked, and a ] or ) inside quotes (p[']']=x, $(( ')' ))) does not end it
+            if kind == "bracket" and frame[3] and c in "<>" and nx == "(":
+                stack.append(["cmd", 0, [], "command", False])  # bash runs a <(...) inside a subscript
+                word_start = True
+                i += 2
+                continue
+            if c == ("(" if kind == "arith" else "["):
+                frame[1] += 1
+            elif c == (")" if kind == "arith" else "]"):
+                if frame[1]:
+                    frame[1] -= 1
+                else:
+                    stack.pop()
+                    word_start = frame[2]  # mid-word after an expansion; a new word after a ((...)) command
+                    if kind == "arith" and nx == ")":
+                        i += 1  # the second ) of a closing ))
+                    elif kind == "bracket" and frame[3] and not stack[-1][4]:
+                        # name[...]= is an assignment; name[...] with no = after it is a command word
+                        assigned = command.startswith("=", i + 1) or command.startswith("+=", i + 1)
+                        stack[-1][3] = "assign" if assigned else ""
+            i += 1
+            continue
+        if c == "$":
+            if command.startswith("$((", i):
+                stack.append(["arith", 0, False])
+                word_start = False
+                i += 3
+            elif nx == "(":
+                stack.append(["cmd", 0, [], "command", False])
+                word_start = True
+                i += 2
+            elif nx == "{":
+                stack.append(["param", 0])
+                i += 2
+            elif nx == "[":
+                stack.append(["bracket", 0, False, False])
+                word_start = False
+                i += 2
+            elif nx == "'" and kind != "dq":  # ANSI-C quoting (inside double quotes $' is literal)
+                i = _heredoc_skip_to(command, i + 2, n, "'")
+                word_start = False
+            else:  # a $"..." locale string then opens as a double-quoted one
+                word_start = False
+                i += 1
+            continue
+        if c == "`":
+            i = _heredoc_skip_to(command, i + 1, n, "`")
+            word_start = False
+            continue
+        if kind == "dq":
+            if c == '"':
+                stack.pop()
+                word_start = False
+            i += 1
+            continue
+        if c == "'":  # in a command, a ${...}, arithmetic or a subscript: literal to the next single quote
+            close = command.find("'", i + 1)
+            i = n if close < 0 else close + 1
+            word_start = False
+            continue
+        if c == '"':
+            stack.append(["dq", 0])
+            word_start = False
+            i += 1
+            continue
+        if kind == "param":
+            if c in "<>" and nx == "(":  # bash runs a <(...) inside ${...}, also within double quotes
+                stack.append(["cmd", 0, [], "command", False])
+                word_start = True
+                i += 2
+                continue
+            if c == "}":
+                stack.pop()
+                word_start = False
+            i += 1
+            continue
+        if c == "\n":  # a newline of this command context reads its own pending bodies, and no others
+            i += 1
+            word_start = True
+            redirect = False
+            if not frame[4]:
+                frame[3] = "command"
+            if ahead is not None:
+                i, line_no = ahead
+                ahead = None
+            else:
+                line_no = line_at(i)
+            if frame[2]:
+                i, _line_no = read_bodies(frame[2], i, line_no, len(stack) > 1)
+            continue
+        if c == "#" and word_start:
+            nl = command.find("\n", i)
+            i = n if nl < 0 else nl
+            continue
+        if c == "<" and nx == "<":
+            if command.startswith("<<<", i):  # a here-string: no body and no terminator line
+                word_start = True
+                redirect = True
+                i += 3
+                continue
+            parsed = _parse_heredoc_delim(command, i + 2, n)
+            end = i + 2 if parsed is None else parsed[3]
+            if parsed is None:
+                openers.append(_HeredocOpener(command[i:end], line_at(i), None, False, False, False, None, None))
+            else:
+                quoted, delim, strip_tabs, _end = parsed
+                openers.append(_HeredocOpener(command[i:end], line_at(i), delim, strip_tabs, quoted, False, None,
+                                              None))
+                frame[2].append(len(openers) - 1)
+            word_start = parsed is None
+            i = end
+            continue
+        if c in "<>" and nx == "(":  # a process substitution runs a command
+            if redirect:  # it is a redirection's target (cat < <(...)), read as a target word is read below
+                redirect = False
+                if frame[3] == "assign":
+                    frame[3] = ""
+            stack.append(["cmd", 0, [], "command", False])
+            word_start = True
+            i += 2
+            continue
+        if c in "<>" or c == "&" and nx == ">":  # a redirection operator (>&, >>, >|, <&, <> and &> in full)
+            redirect = True
+            if nx and nx in "&>|" or c == "<" and nx == ">":
+                i += 1
+            i += 1
+            word_start = True
+            continue
+        if c == "(":
+            if i == compound_at:  # the parentheses of a compound assignment name=(...)
+                stack.append(["cmd", 0, [], "", True])
+                word_start = True
+                i += 1
+                continue
+            if nx == "(" and word_start:  # an arithmetic command
+                stack.append(["arith", 0, True])
+                i += 2
+                continue
+            frame[1] += 1
+        elif c == ")":
+            if frame[1]:
+                frame[1] -= 1
+            elif frame[4]:  # the ) that closes a compound assignment
+                stack.pop()
+                word_start = False
+                i += 1
+                continue
+            elif len(stack) > 1:  # the ) that closes a $(...), <(...) or >(...)
+                stack.pop()
+                if frame[2]:
+                    # bodies the substitution never reached a newline for: bash warns, then reads them at once
+                    # from the line after this one (or after bodies already read so), early-end rule included
+                    if ahead is None:
+                        nl = command.find("\n", i)
+                        ahead = (n if nl < 0 else nl + 1, line_at(i) + 1)
+                    ahead = read_bodies(frame[2], ahead[0], ahead[1], True)
+                word_start = False
+                i += 1
+                continue
+        if c in ";&|()" and not frame[4]:  # a command operator: the next word starts a command
+            frame[3] = "command"
+            redirect = False
+        word_start = c in " \t;&|<>()"
+        i += 1
+    return openers
+
+
+def _heredoc_terminator_reason(bad):
+    """The deny reason: each unterminated or unreadable heredoc opener (the first three, then a count), with
+    its near-miss line where one was found."""
+    clauses = []
+    for op in bad[:3]:
+        spec = op.spec[:_HEREDOC_SHOWN]
+        if op.delim is None:
+            clauses.append("the {} on line {} is not followed by a delimiter word this check can read, so "
+                           "where its heredoc ends cannot be told".format(spec, op.line))
+            continue
+        if op.stop is not None:
+            clauses.append("the heredoc opened by {} on line {} is cut short at line {}, {!r}: that line starts "
+                           "with {!r} but is not exactly it, and because it holds a ) inside a substitution, "
+                           "bash ends the heredoc after the delimiter with a warning and reads the rest of the "
+                           "line as commands".format(spec, op.line, op.stop[0], op.stop[1][:_HEREDOC_SHOWN],
+                                                     op.delim[:_HEREDOC_SHOWN]))
+            continue
+        clause = ("the heredoc opened by {} on line {} has no line exactly equal to {!r}{} before the end of "
+                  "the command".format(spec, op.line, op.delim[:_HEREDOC_SHOWN],
+                                       " after its leading tabs" if op.strip_tabs else ""))
+        if op.near is not None:
+            near_line, near_text, distance = op.near
+            clause += "; line {}, {!r}, is {} edit{} away from it".format(
+                near_line, near_text[:_HEREDOC_SHOWN], distance, "" if distance == 1 else "s")
+        clauses.append(clause)
+    if len(bad) > 3:
+        clauses.append("{} more such opener{}".format(len(bad) - 3, "" if len(bad) == 4 else "s"))
+    return ("AIQT rule sectvl (tool-argument-validation): {}. Bash reads every line after an unterminated "
+            "heredoc's opener as heredoc text, so a program fed by it (python3 - <<'PY', bash -s) can run the "
+            "rest of the command as its own code while the shell runs none of it; the command is denied "
+            "before anything runs. Re-issue it with each heredoc closed by a line that is exactly its "
+            "delimiter: nothing before it (only tabs, and only for <<-) and nothing after it (no trailing "
+            "space or carriage return, and no ) of a $(...), which goes on the next line)."
+            .format("; and ".join(clauses)))
+
+
+def heredoc_terminator(data):
+    """sectvl (security/tool-argument-validation), PreToolUse/Bash. DENY-and-educate a Bash command in which a
+    heredoc opener (<<TOKEN, <<'TOKEN', <<"TOKEN", <<-TOKEN) has no later line exactly equal to its delimiter
+    (after the line's leading tabs for <<-) before the end of the command, naming the opener and the nearest
+    near-miss line. Hooks never ask; a command with every opener terminated allows silently. A << whose
+    delimiter word cannot be read, and a payload with no readable command string, deny fail-safe."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: heredoc_terminator wired to unexpected event {!r}; failing closed"
+                           .format(data.get("hook_event_name")))
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("sectvl")
+    if tool_name != "Bash":
+        return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return _deny(
+            "AIQT rule sectvl (tool-argument-validation): the Bash payload carried no readable command "
+            "string, so the heredoc terminator check could not run; it is denied fail-safe. Re-issue a "
+            "well-formed Bash command.",
+            "AIQT guardrail: denied a Bash call with no readable command; re-issue a well-formed command "
+            "(rule sectvl, fail-safe).")
+    if "<<" not in command:
+        return _allow()
+    bad = [op for op in _heredoc_openers(command) if not op.terminated]
+    if not bad:
+        return _allow()
+    return _deny(
+        _heredoc_terminator_reason(bad),
+        "AIQT guardrail: denied a Bash command whose heredoc {} on line {} has no exactly matching terminator "
+        "line (rule sectvl); close it with a line that is exactly its delimiter."
+        .format(bad[0].spec[:_HEREDOC_SHOWN], bad[0].line))
 
 
 # --- secsec: an obvious hardcoded secret in a Write/Edit/MultiEdit/Bash write-form -------------------
@@ -21691,6 +22245,7 @@ HANDLERS = {
     "branch_root": branch_root,
     "gate_weakening": gate_weakening,
     "commit_msg_subst": commit_msg_subst,
+    "heredoc_terminator": heredoc_terminator,
     "secrets_shift_left": secrets_shift_left,
     "gensrc_guard": gensrc_guard,
     "write_scope_guard": write_scope_guard,
@@ -21730,6 +22285,7 @@ HANDLER_EVENT = {
     "branch_root": PRETOOL,
     "gate_weakening": PRETOOL,
     "commit_msg_subst": PRETOOL,
+    "heredoc_terminator": PRETOOL,
     "secrets_shift_left": PRETOOL,
     "gensrc_guard": PRETOOL,
     "write_scope_guard": PRETOOL,
@@ -21747,6 +22303,422 @@ HANDLER_EVENT = {
     "orch_lease_heartbeat_post": "PostToolUse",
     "orch_lease_heartbeat_stop": "Stop",
 }
+
+
+class _HookDeadline(BaseException):
+    """Raised inside a _DeadlineWindow when its deadline passes, carrying that window as its one argument
+    so a catcher can tell its own deadline from an enclosing window's. It derives from BaseException, not
+    Exception, so no handler's own `except Exception` (or narrower) branch, several of which allow on a
+    cannot-evaluate, can catch it and turn an overrun into a decision."""
+
+
+class _DeadlineWindow:
+    """The one shared, nesting-safe borrow of the process real-time timer (ITIMER_REAL and its SIGALRM
+    disposition), used as `with _DeadlineWindow(seconds):` once per instance. Inside the window,
+    _HookDeadline is raised when `seconds` have passed, or earlier when a timer the caller had already
+    set comes due first (the window never outlives the caller's own deadline).
+
+    The caller's timer is restored elapsed-aware, never verbatim: its countdown is taken with
+    setitimer(ITIMER_REAL, 0) and the time of the take is read from time.monotonic, the clock the kernel
+    counts ITIMER_REAL in, so on exit an active caller timer is re-armed with what it had left minus the
+    time the window used (to the microsecond setitimer resolves), keeping its repeat interval; an inactive
+    one stays inactive; one that came due during the window is delivered once its handler is back (a
+    periodic one is first re-armed at the phase it would have reached, its expiries inside the window
+    delivered as the one notification the kernel itself would have left pending). A periodic timer taken
+    between an expiry and the delivery of its signal reads (0, interval), and the kernel no longer re-arms
+    it once taken, so the window counts it as due one interval after the take. A nested window is just
+    such a caller, so nesting restores each level.
+
+    The take and the restore each run with every maskable signal blocked (signal.pthread_sigmask over
+    signal.valid_signals()). A signal sent to the main thread while the mask is held (a caller expiry, an
+    enclosing window's expiry, or any other signal) stays pending until the mask in force before is put
+    back, once the window has fully taken or fully given back: its handler never sees a half-done take or
+    restore, and an exception it raises goes on from there. Two kinds of Python handler can still run while
+    the mask is held: one for a signal that arrived before the mask was set runs inside the call that sets
+    it, once the mask is set and before the take or the restore begins; and one for a signal another thread
+    received runs where the thread limit below says. The mask is put back by a direct call of the C
+    function that the signal module's pthread_sigmask wraps (_SET_MASK), never through that Python wrapper,
+    whose entry is a point where Python can run pending handlers: the call sets the mask before any Python
+    handler can run, so a handler that raises then raises from that call with the mask already back, and a
+    handler left pending behind it runs when Python next runs pending handlers.
+
+    The take (_take) records the caller's disposition, reads the clock, takes the caller's timer, installs
+    the window's handler and arms the window's timer, each once and in that order. A SIGALRM pending once
+    the window's handler is installed, before its timer is armed, cannot be the window's own: the caller's
+    timer came due at or before the take, or the signal was sent while the caller's disposition was in
+    place. The window then counts the caller's timer as due, sets `pending_at_entry`, and ends at once: it
+    gives everything back, the caller's handler receives that SIGALRM once as the mask is put back, and
+    __enter__ raises this window's _HookDeadline (or what that handler raised in its place). An enclosing
+    window's expiry that lands before an inner window's take is such a signal, so its deadline reaches its
+    owner.
+
+    The restore (_give_back) cancels the window's timer, reading what it had left; installs SIG_IGN, which
+    discards a pending SIGALRM, only when that timer had run out and the window's own expiry has not been
+    delivered since the timer was armed (`_unheard`, which _fire clears as below), so the SIGALRM pending is
+    that expiry and it never reaches the caller; reinstalls the caller's disposition; reads the clock and
+    decides, once, whether the caller's timer came due; re-arms the caller's timer; and, for a due expiry,
+    queues a SIGALRM with signal.raise_signal unless one is pending already, so the expiry is delivered
+    once, to the caller's handler, as the mask is put back.
+    Any other SIGALRM pending at the restore (one sent while the mask was held, say) is left pending and
+    reaches the caller's handler the same way, except where the restore takes it for the window's own
+    expiry: when the window's timer had run out, read by a cancel whose first run returned, and `_unheard` is
+    still set, the SIGALRM pending is discarded as that expiry even when it came from elsewhere (the paragraph
+    on _fire's reads below states the residual case). The kernel keeps at most one pending instance of a
+    standard signal, which leaves two merges: a SIGALRM from elsewhere pending with the window's own expiry
+    (in either order) is discarded with it, and a caller expiry that came due and another SIGALRM pending at
+    the restore reach the caller's handler as one delivery. A re-armed periodic timer whose next expiry also
+    falls due before the mask is put back adds no second delivery: the kernel can hold one SIGALRM pending for
+    the process and one for the thread, both are delivered on return from the call that puts the mask back,
+    before Python runs any handler, and Python runs a signal's handler once for all the deliveries it has
+    received since it last ran handlers (observed on Linux with Python 3.14.4: a timer expiry and a
+    raise_signal both pending ran the handler once). An enclosing window's expiry that falls due during the
+    restore is delivered the same way, after the inner window has fully finished. The restore discards nothing
+    in these cases: after an arming setitimer that raised (`_unheard` is set only once it has returned), after
+    a cancel whose first run raised (_twice says why), or after a read in _fire that raised; a window's own
+    expiry then pending reaches the caller's handler. Nothing in the hook installs SIG_DFL for SIGALRM:
+    main(), run as the hook process, runs the window under the disposition that process inherited. Under
+    SIG_DFL, the disposition the hook process normally inherits, that delivery kills the hook process by
+    SIGALRM, so it ends without the exit 2 that fails a PreToolUse call closed. An inherited SIG_IGN stays
+    ignored across exec, and under SIG_IGN the pending signal is discarded (not fatal).
+
+    An operation of the restore that raises (setitimer, signal.signal, sigpending or raise_signal failing)
+    is tried once more inside the same blocked section; the restore then goes on, and the first exception
+    is raised once it has finished. One that raises twice ends the restore there: the window is recorded as
+    broken (`broken` True, `armed` False) and the second exception is raised. Either way the window is
+    closed before the mask is put back, so no restore is left for a later call to finish. A broken window
+    leaves the process where its restore stopped, and nothing restores the caller's state after that: a
+    failed cancel leaves the window's timer running and its handler installed (that expiry then ends
+    nothing), with the caller's disposition and timer not back; a failed discard or reinstall leaves the
+    window's handler, or SIG_IGN, in place of the caller's, with the caller's timer inactive; a failed re-arm
+    leaves the caller's handler back and its timer inactive; and a failed pending check or queue leaves a
+    due expiry undelivered. The ItimerError (an OSError) that a broken window raises therefore reports a
+    timer state that is no longer the caller's, and a caller must let it go on, never swallow it: main()
+    turns it into exit 2 on a PreToolUse mode and a non-blocking warning on a fail-open one.
+
+    The window's own expiry is delivered in whatever frame is running while the window is live, the entry
+    of __exit__ before its first statement included, so _fire closes the window (the restore above) and
+    then raises this window's _HookDeadline. A caller expiry that came due is delivered to the caller's
+    handler as _fire puts the mask back. An enclosing window's _HookDeadline from that handler goes on as
+    it is, to its owner; any other exception it raises is held while the body unwinds on this window's
+    _HookDeadline, so no except branch in the body can catch it and decide on it, and __exit__ (or
+    __enter__'s cleanup) raises it in place of the deadline. Once the window's exit has begun, its own
+    expiry raises no deadline: _fire then only closes the window, if it is still armed.
+
+    Before its close attempts _fire reads whether the SIGALRM it handles is the window's own expiry, and
+    clears `_unheard` only when the window's timer reads as run out and no SIGALRM is pending. A SIGALRM
+    from elsewhere that _fire handles while the window's timer still runs therefore leaves the window's
+    expiry, if it comes pending later in the restore, to be discarded; an expiry already pending when _fire
+    runs inside the call that sets the mask (for a SIGALRM that arrived just before it) is discarded the
+    same way. A read that raises counts the expiry as delivered, and its exception is kept like a close
+    attempt's. Where this read leaves `_unheard` set, one SIGALRM is still taken for that expiry wrongly,
+    and discarded: one sent once the mask is set, when the window's expiry arrived just before the call that
+    sets it and _fire runs inside that call. _fire then reads the timer run out and a SIGALRM pending, as in
+    the ordering the other way round (a SIGALRM from elsewhere just before that call, the window's expiry
+    once the mask is set), so neither of its reads can tell the two apart. This discard is kept as a disclosed
+    residual. It is not the only way a SIGALRM from elsewhere is discarded as the window's expiry; the ways
+    that follow are examples, and the list is not exhaustive. A SIGALRM from elsewhere pending together with
+    the window's expiry merges with it and is discarded with it (the restore above). While the window is live,
+    with _fire installed and the main thread able to run handlers, Python runs _fire once for all the
+    SIGALRMs received since it last ran handlers, so a SIGALRM from elsewhere and the window's expiry that
+    both arrive, in either order, before the main thread next checks for signals (during a long C call, say)
+    are handled as one, and the one from elsewhere never reaches the caller. And the limits below state two
+    more: after a handler that raises at the entry of _fire has taken that expiry with it, and after another
+    thread has taken it.
+
+    CPython runs a Python handler only where it checks for signals: at the entry of a function, at the
+    back edge of a loop, and inside or on return from a call. So a handler can still run before the take or
+    the restore begins: at the entry of _close, and in the calls that read and set the mask (in the one that
+    sets it, once the mask is set). A handler that raises there runs before anything is taken, or before
+    anything is given back (the restore starts only once the call that sets the mask has returned), and
+    leaves the window armed. __exit__, _fire and __enter__'s cleanup therefore each make three close
+    attempts (each a call of _close, which does nothing once the window is closed), one after another with
+    no call, loop or function entry between them, and keep the first exception an attempt (or _fire's read
+    before them) raised, raising it once the attempts are over. The window is left armed only when a
+    raising handler interrupts each of the three attempts before _give_back begins. Its own timer then
+    still runs (only the restore cancels it), and _fire closes the window when that expiry is delivered:
+    once an attempt has marked the exit begun, with three more attempts that raise no deadline of their
+    own, the caller's disposition and timer coming back and an enclosing window's expiry that came due
+    meanwhile reaching its owner as the mask is put back; if none got that far, as the live window's
+    deadline, raised wherever the program is.
+
+    The limits that remain. A handler that raises at the entry of __exit__, before its first statement, or
+    at the return instruction of __enter__, after its last, runs where no code of the window can: the
+    window stays live until its own timer ends it through _fire, which then restores the caller's state and
+    raises its deadline wherever the program is. A handler that raises at the entry of _fire, before its
+    first statement, takes the window's expiry with it: a live window then has no deadline left, and its
+    restore when __exit__ closes it counts a SIGALRM then pending as that expiry and discards it. A window
+    whose three exit attempts are all interrupted, and whose expiry is then lost the same way (at the entry
+    of _fire, or in each of its three attempts), stays armed for good. And the mask is the calling thread's:
+    a signal sent to the process can still be taken by another thread that leaves it unblocked (a worker
+    thread review_dispatch_pin leaves running past its wait is one), and its Python handler then runs in
+    the main thread inside the blocked section, as whichever handler is installed at that moment (so a
+    window's own expiry taken that way can reach the caller's handler, and a SIGALRM from elsewhere then
+    pending at the restore can be discarded as that expiry).
+
+    The borrow is refused, and the window runs with no deadline at all (armed stays False, nothing is
+    changed), where it cannot be done faithfully: no finite positive `seconds` (the fail-open modes pass
+    None), a platform without setitimer, getitimer, pthread_sigmask, sigpending, valid_signals or
+    raise_signal (Windows) or without a callable _SET_MASK (the signal module defines its pthread_sigmask
+    wrapper only when _signal has the C function, so _SET_MASK is there whenever signal.pthread_sigmask is;
+    it is checked as well, so a borrow never starts without it), a thread other than the main thread
+    (Python runs signal handlers only there, and the mask it sets would not be the main thread's), a caller
+    that blocks SIGALRM (a deadline could not fire, and its pending notification could not be kept apart
+    from ours), or a SIGALRM disposition not installed from Python (getsignal returns None, which cannot be
+    reinstalled)."""
+    __slots__ = ("seconds", "armed", "broken", "pending_at_entry", "_live", "_ending", "_unheard", "_handler",
+                 "_timer", "_began", "_held")
+    # Every signal the take and the restore hold back (the kernel never blocks SIGKILL or SIGSTOP).
+    _EVERY_SIGNAL = frozenset(signal.valid_signals()) if hasattr(signal, "valid_signals") else frozenset()
+    # The C function signal.pthread_sigmask wraps, which puts the mask back before any Python handler runs.
+    _SET_MASK = getattr(_signal, "pthread_sigmask", None)
+
+    def __init__(self, seconds):
+        self.seconds = seconds
+        self.armed = self.broken = self.pending_at_entry = self._live = self._ending = self._unheard = False
+        self._handler = self._timer = self._began = self._held = None
+
+    def _fire(self, signum, frame):
+        # Whether the SIGALRM handled is the window's own expiry, read as the class docstring describes: a
+        # read that raises leaves it unknown, counted as delivered, and its exception is kept.
+        heard = True
+        try:
+            heard = (signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+                     and signal.SIGALRM not in signal.sigpending())
+        except BaseException as error:
+            first = error
+        else:
+            first = None
+        if heard:
+            self._unheard = False  # the window's own expiry has been delivered: none is pending for the restore
+        live = self._live
+        if not (live or self._ending):
+            if first is not None:
+                raise first
+            return
+        # The close attempts the class docstring describes, the first exception kept.
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        if not live:
+            # The exit had begun and left the window armed: its expiry only closes it.
+            if first is not None:
+                raise first
+            return
+        if first is None:
+            raise _HookDeadline(self)
+        if isinstance(first, _HookDeadline):
+            raise first  # an enclosing window's deadline, delivered as the caller expiry that came due
+        self._held = first
+        raise _HookDeadline(self) from first
+
+    def _raise_held(self):
+        held, self._held = self._held, None
+        if held is not None:
+            raise held
+
+    @staticmethod
+    def _as_taken(timer):
+        value, interval = timer
+        return (interval, interval) if value <= 0 < interval else timer
+
+    def _can_borrow(self):
+        seconds = self.seconds
+        if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
+                or not math.isfinite(seconds) or seconds <= 0):
+            return False
+        if not all(hasattr(signal, name) for name in (
+                "setitimer", "getitimer", "ITIMER_REAL", "SIGALRM", "pthread_sigmask", "sigpending",
+                "valid_signals", "raise_signal")):
+            return False
+        if not callable(self._SET_MASK):
+            return False  # there whenever signal.pthread_sigmask is (the class docstring says why)
+        if threading.current_thread() is not threading.main_thread():
+            return False
+        if signal.SIGALRM in signal.pthread_sigmask(signal.SIG_BLOCK, ()):
+            return False
+        return signal.getsignal(signal.SIGALRM) is not None
+
+    def __enter__(self):
+        if self.armed or not self._can_borrow():
+            return self
+        # The mask is read first, so a handler already due runs before anything is blocked or taken, and
+        # the mask to put back is known even when a handler raises as the blocking call returns. The return
+        # statement is inside the try, so a handler raising up to it gives everything back (the return
+        # instruction itself is a limit the class docstring states).
+        try:
+            mask = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+            try:
+                signal.pthread_sigmask(signal.SIG_BLOCK, self._EVERY_SIGNAL)
+                self._take()
+            finally:
+                self._SET_MASK(signal.SIG_SETMASK, mask)
+            return self
+        except BaseException:
+            # The take failed, or a handler raised as the mask was set or put back: whatever the window
+            # holds goes back to the caller before the exception goes on, through the close attempts the
+            # class docstring describes, the first exception kept.
+            try:
+                self._ending = True
+                self._live = False
+                self._close()
+            except BaseException as error:
+                first = error
+            else:
+                first = None
+            try:
+                self._close()
+            except BaseException as error:
+                first = error if first is None else first
+            try:
+                self._close()
+            except BaseException as error:
+                first = error if first is None else first
+            if first is not None:
+                raise first
+            self._raise_held()
+            raise
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            # The close attempts the class docstring describes, the first exception kept.
+            self._ending = True
+            self._live = False
+            self._close()
+        except BaseException as error:
+            first = error
+        else:
+            first = None
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        if first is not None:
+            raise first
+        self._raise_held()
+        return False
+
+    def _close(self):
+        """One close attempt: run _give_back with every maskable signal blocked, then put back the mask in
+        force before (through _SET_MASK), which delivers what came pending meanwhile. It marks the exit
+        begun (`_ending` before `_live` goes False, so an armed window that is not live is always one whose
+        exit has begun or whose take is still running). _give_back runs only once the call that sets the
+        mask has returned: a handler that raises before then leaves the window armed and holding everything,
+        and the caller makes its next attempt."""
+        self._ending = True
+        self._live = False
+        if not self.armed:
+            return
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+        try:
+            signal.pthread_sigmask(signal.SIG_BLOCK, self._EVERY_SIGNAL)
+            self._give_back()
+        finally:
+            self._SET_MASK(signal.SIG_SETMASK, mask)
+
+    def _take(self):
+        """The take, run with every maskable signal blocked, in the order the class docstring gives. The
+        clock is read just before the take, so the window's use is never undercounted (a caller timer comes
+        back at most microseconds early, never late). Anything that raises once the timer is taken gives it
+        back, with the disposition, before the exception goes on."""
+        handler = signal.getsignal(signal.SIGALRM)
+        began = time.monotonic()
+        timer = self._as_taken(signal.setitimer(signal.ITIMER_REAL, 0))
+        (self._handler, self._timer, self._began, self.pending_at_entry, self._unheard, self._ending,
+         self.broken, self.armed) = (handler, timer, began, False, False, False, False, True)
+        try:
+            signal.signal(signal.SIGALRM, self._fire)
+            if signal.SIGALRM in signal.sigpending():
+                self.pending_at_entry = True  # not the window's expiry: its timer is not armed yet
+                self._give_back()
+                raise _HookDeadline(self)
+            left = timer[0]
+            signal.setitimer(signal.ITIMER_REAL, self.seconds if left <= 0 else min(self.seconds, left))
+            self._unheard = True  # from here on an expiry of the window's timer can be pending at the restore
+            self._live = True
+        except BaseException:
+            self._give_back()
+            raise
+
+    def _give_back(self):
+        """The restore, run with every maskable signal blocked, in the order the class docstring gives: each
+        operation through _twice, the clock read once to decide whether the caller's timer came due, and a
+        due expiry queued last. `armed` is False when it returns or raises."""
+        self._live = False
+        if not self.armed:
+            return
+        errors = []
+        try:
+            reading = self._twice(errors, signal.setitimer, signal.ITIMER_REAL, 0)
+            if not errors and reading == (0.0, 0.0) and self._unheard:
+                # The window's timer ran out (read by a cancel whose first run returned, as _twice says) and
+                # its expiry has not been delivered since: the SIGALRM pending is its own.
+                self._twice(errors, signal.signal, signal.SIGALRM, signal.SIG_IGN)
+            self._unheard = False
+            self._twice(errors, signal.signal, signal.SIGALRM, self._handler)
+            value, interval = self._timer
+            left = value - (time.monotonic() - self._began)
+            due = self.pending_at_entry or (value > 0 and left <= 0)
+            if left > 0:
+                self._twice(errors, signal.setitimer, signal.ITIMER_REAL, left, interval)
+            elif due and interval > 0:
+                self._twice(errors, signal.setitimer, signal.ITIMER_REAL, interval - (-left % interval), interval)
+            if due and signal.SIGALRM not in self._twice(errors, signal.sigpending):
+                self._twice(errors, signal.raise_signal, signal.SIGALRM)
+        except BaseException:
+            self.broken = True
+            raise
+        finally:
+            self.armed = False
+        if errors:
+            raise errors[0]
+
+    @staticmethod
+    def _twice(errors, operation, *args):
+        """One restore operation, tried once more when it raises, returning what the run that returned gave:
+        the first exception is appended to errors, and a second one goes on. Each operation can run twice
+        with the effect of once: setitimer and signal.signal set the same state again, sigpending only
+        reads, and a second queued SIGALRM joins the one already pending. What the cancel reads is the one
+        exception: a first run that cancels the window's timer and then raises leaves the retry reading an
+        inactive timer that was running, so _give_back counts that timer as run out only from a cancel whose
+        first run returned, and after a retried cancel it discards nothing (it never discards on an
+        unknown)."""
+        try:
+            return operation(*args)
+        except BaseException as exc:
+            errors.append(exc)
+            return operation(*args)
+
+
+def _deadline_message(handler_name, seconds, payload):
+    """The stderr refusal main() writes when a PreToolUse check runs out of its deadline: it names the
+    handler, the budget and the payload size, and the two ways to bring the input inside the budget."""
+    if payload is None:
+        size = "an input it had not finished reading"
+    else:
+        size = "an input of {} bytes".format(len(payload.encode("utf-8", "replace")))
+    return ("AIQT guardrail: the {} check could not reach a decision within its {:g}-second budget on {}; "
+            "failing closed. Split the command into smaller calls, or move long content into a file and "
+            "pass its path.".format(handler_name, seconds, size))
+
+
+def _pending_alarm_message(handler_name, seconds):
+    """The stderr refusal main() writes when the window ends at its entry because a SIGALRM was already
+    pending (pending_at_entry): the check did not run, so nothing about the input or the budget applies."""
+    return ("AIQT guardrail: the {} check did not run: a SIGALRM was already pending when its {:g}-second "
+            "deadline was being set, so the deadline ended at once; failing closed.".format(handler_name, seconds))
 
 
 def _dispatcher_fail_open_warn(handler_name, detail):
@@ -21780,6 +22752,24 @@ def _stderr_note(line):
         pass
 
 
+def _exception_text(exc):
+    """'<type name>: <message>' for a diagnostic, built so that it cannot raise out of main(): an exception
+    whose str() raises (or whose type name cannot be formatted) gets a placeholder in its place, so main()
+    still returns its mode's exit. A _HookDeadline that comes due while it formats goes on as it is."""
+    try:
+        return "{}: {}".format(type(exc).__name__, exc)
+    except _HookDeadline:
+        raise
+    except BaseException:
+        pass
+    try:
+        return "{}: <its message could not be read>".format(type(exc).__name__)
+    except _HookDeadline:
+        raise
+    except BaseException:
+        return "<an exception whose type and message could not be read>"
+
+
 def main(argv):
     # The MODE (argv[0]) alone decides the error posture, never the payload (which may be unreadable).
     # A genuinely unknown mode is not identifiable as Stop and is a broken install, so it fails closed
@@ -21806,42 +22796,107 @@ def main(argv):
                 return 0
         _stderr_note("aiqt_hooks: {} ({}); failing closed".format(handler_name, detail))
         return 2
+    # The PreToolUse deadline: every mode that is not fail-open reads its payload and runs its handler
+    # inside one _DeadlineWindow of PRETOOL_BUDGET_SECONDS, armed before the read; when the check has not
+    # decided by then the window raises _HookDeadline and the call fails CLOSED with exit 2 and a stderr
+    # line naming the handler, the budget and the input size. The window closes (the timer is cancelled
+    # and any caller timer restored) before the stdout decision below is written; the stderr notes of
+    # the unreadable-payload and handler-crash paths are written inside it, and both paths exit 2 even
+    # when the deadline interrupts the note. A fail-open mode gets a window with no deadline, so its
+    # error posture is unchanged. Any other exception out of the window keeps the mode's posture too.
+    window = _DeadlineWindow(None if is_fail_open else PRETOOL_BUDGET_SECONDS)
+    payload = None
     try:
-        data = json.loads(sys.stdin.read())
-        if not isinstance(data, dict):
-            raise ValueError("payload is not a JSON object")
-    except Exception as exc:  # any failure to read the payload is an unreadable payload
-        # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload, and ALSO a
-        # RecursionError (deeply nested JSON) or a MemoryError: the old narrow except let those escape as a
-        # traceback with exit 1, which the platform treats as non-blocking. Every exception is named.
-        detail = "{}: {}".format(type(exc).__name__, exc)
-        if is_fail_open:
-            # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so no Stop
-            # payload (including a bare '{' or any garbage) can ever wedge the session. The warn print
-            # raising (a stdout that cannot be written or flushed) loses the warning and keeps the 0.
+        with window:
             try:
-                return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(detail))
-            except BaseException:
-                return 0
-        # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
-        # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
-        _stderr_note("aiqt_hooks: unreadable hook payload ({}); failing closed".format(detail))
+                payload = sys.stdin.read()
+                data = json.loads(payload)
+                if not isinstance(data, dict):
+                    raise ValueError("payload is not a JSON object")
+            except Exception as exc:  # any failure to read the payload is an unreadable payload
+                # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload, and
+                # ALSO a RecursionError (deeply nested JSON) or a MemoryError: the old narrow except let those
+                # escape as a traceback with exit 1, which the platform treats as non-blocking. Every exception
+                # is named.
+                detail = _exception_text(exc)
+                if is_fail_open:
+                    # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so
+                    # no Stop payload (including a bare '{' or any garbage) can ever wedge the session. The
+                    # warn print raising (a stdout that cannot be written or flushed) loses the warning and
+                    # keeps the 0.
+                    try:
+                        return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(detail))
+                    except BaseException:
+                        return 0
+                # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
+                # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
+                _stderr_note("aiqt_hooks: unreadable hook payload ({}); failing closed".format(detail))
+                return 2
+            try:
+                code, stdout_obj, stderr_text = HANDLERS[handler_name](data)
+                # The result is checked here, inside the window and this crash branch, so a malformed one
+                # gets the mode's posture: an exit code other than 0 or 2 (one os._exit cannot take, or one
+                # the platform reads as non-blocking) or a stderr text neither a str nor None (whose truth
+                # test below could raise). The stdout object is checked by its json.dumps below.
+                if type(code) is not int or code not in (0, 2) or not (
+                        stderr_text is None or type(stderr_text) is str):
+                    raise TypeError("the handler result is not an exit code of 0 or 2 with a str or None "
+                                    "stderr text")
+            except Exception as exc:  # a handler crash is an unreadable result
+                if is_fail_open:
+                    # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws
+                    # on a pathological message): WARN and exit 0, never exit 2. The warn print raising (a
+                    # stdout that cannot be written or flushed) loses the warning and keeps the 0.
+                    try:
+                        return _dispatcher_fail_open_warn(
+                            handler_name, "handler crash: {}".format(_exception_text(exc)))
+                    except BaseException:
+                        return 0
+                # A PreToolUse handler crash fails closed (block), not pass.
+                _stderr_note("aiqt_hooks: handler {} failed ({}); failing closed".format(
+                    handler_name, _exception_text(exc)))
+                return 2
+    except _HookDeadline as exc:
+        if exc.args[:1] != (window,):
+            raise  # an enclosing window's deadline (an in-process caller's), not this call's
+        # Built inside a guard like the other diagnostics, so a message that cannot be built (a payload
+        # whose encoding raises, a MemoryError) still leaves exit 2, with a fixed note in its place. A
+        # window that ended at its entry on a SIGALRM already pending gets its own note: its budget did
+        # not run out.
+        try:
+            if window.pending_at_entry:
+                note = _pending_alarm_message(handler_name, window.seconds)
+            else:
+                note = _deadline_message(handler_name, window.seconds, payload)
+        except _HookDeadline:
+            raise
+        except BaseException:
+            note = "AIQT guardrail: a PreToolUse check could not reach a decision within its budget; failing closed."
+        _stderr_note(note)
         return 2
-    try:
-        code, stdout_obj, stderr_text = HANDLERS[handler_name](data)
-    except Exception as exc:  # a handler crash is an unreadable result
+    except BaseException as exc:
+        # Anything else out of the window: an error entering or leaving it (an ItimerError, or a caller's
+        # own alarm handler raising when its expiry is delivered during the take or on the way out), or a
+        # BaseException from the read or the handler that no branch above catches. Left to escape, it
+        # would end the run with a traceback and status 1, which the platform treats as non-blocking.
+        if is_fail_open and isinstance(exc, (SystemExit, KeyboardInterrupt)):
+            # A stop (an exit or an interrupt) raised in a fail-open mode ends the hook as it would with no
+            # window, so a binding that sets its own exit status keeps it (the lease-heartbeat bindings,
+            # whose exit-status vectors run this dispatcher in a child process), save a status the
+            # platform reads as blocking: an exit whose status would be 2 (_orch_lease_hb_stop_exits_2,
+            # which judges any SystemExit) goes on as an exit with status 1, so no fail-open mode exits 2
+            # on this path.
+            if isinstance(exc, SystemExit) and _orch_lease_hb_stop_exits_2(exc):
+                raise SystemExit(1) from exc
+            raise
+        detail = _exception_text(exc)
         if is_fail_open:
-            # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws on a
-            # pathological message): WARN and exit 0, never exit 2. The warn print raising (a stdout
-            # that cannot be written or flushed) loses the warning and keeps the 0.
             try:
-                return _dispatcher_fail_open_warn(
-                    handler_name, "handler crash: {}: {}".format(type(exc).__name__, exc))
+                return _dispatcher_fail_open_warn(handler_name, "dispatcher error: {}".format(detail))
             except BaseException:
                 return 0
-        # A PreToolUse handler crash fails closed (block), not pass.
-        _stderr_note("aiqt_hooks: handler {} failed ({}: {}); failing closed".format(
-            handler_name, type(exc).__name__, exc))
+        _stderr_note("aiqt_hooks: {}: the check did not complete ({}); failing closed".format(
+            handler_name, detail))
         return 2
     if stdout_obj is not None:
         try:
@@ -21857,8 +22912,8 @@ def main(argv):
             # so a lost decision blocks rather than allows.
             if is_fail_open:
                 return 0
-            _stderr_note("aiqt_hooks: {}: the decision could not be written to stdout ({}: {}); "
-                         "failing closed".format(handler_name, type(exc).__name__, exc))
+            _stderr_note("aiqt_hooks: {}: the decision could not be written to stdout ({}); "
+                         "failing closed".format(handler_name, _exception_text(exc)))
             return 2
     if stderr_text:
         _stderr_note(stderr_text)

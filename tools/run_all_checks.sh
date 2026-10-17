@@ -66,6 +66,7 @@ else
 fi
 echo
 run_gate "leaks"     python3 -I -B tools/check_leaks.py
+run_gate "leaks-selftest" python3 -I -B tools/check_leaks.py --self-test
 run_gate "msg-leaks-selftest" python3 -I -B tools/check_msg_leaks.py --self-test  # real scan needs CI event context
 run_gate "portability-selftest" python3 -I -B tools/check_portability.py --self-test
 run_gate "portability" python3 -I -B tools/check_portability.py
@@ -189,6 +190,12 @@ run_gate "worker-pack-drift" python3 -I -B tools/gen_worker_pack.py --check
 run_gate "hooks-selftest" python3 -I -B tools/gen_hooks.py --self-test
 run_gate "secret-patterns-drift" python3 -I -B tools/gen_secret_patterns.py --check
 run_gate "hooks-drift"    python3 -I -B tools/gen_hooks.py --check
+# CI builds bash 5.3 at patch level 9 before the hooks behaviour self-test (tools/ci_build_bash.py --build, a
+# CI-only step: it installs into RUNNER_TEMP and writes GITHUB_PATH, which only a CI runner provides; the script
+# builds only on that explicit --build, and run with no argument it runs its offline self-test). This runner
+# builds nothing: the self-test uses the host's bash, and it fails, never skips, when that bash is older than
+# 5.3. Only the build script's offline self-test runs here.
+run_gate "ci-build-bash-selftest" python3 -I -B tools/ci_build_bash.py --self-test
 run_gate "hooks-behaviour-selftest" python3 -I -B tools/selftest_aiqt_hooks.py
 run_gate "char-policy-selftest" python3 -I -B tools/gen_char_policy.py --self-test
 run_gate "char-policy-drift" python3 -I -B tools/gen_char_policy.py --check
@@ -203,6 +210,7 @@ run_gate "git-fixture-env-config-malformed" python3 -I -B tools/check_selftest_e
 run_gate "git-fixture-env-config-system" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system
 run_gate "instruction-budget-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite instruction-budget-selftest
 run_gate "brief-capability-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite brief-capability-selftest
+run_gate "ci-build-bash-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-build-bash-selftest
 run_gate "entry-guard-selftest" python3 -I -B tools/check_selftest_execution.py --suite entry-guard-selftest
 run_gate "entry-guard" python3 -I -B tools/check_entry_guard.py
 run_gate "record-drift-selftest" python3 -I -B tools/check_record_drift.py --self-test
@@ -225,6 +233,15 @@ run_gate "launcher-isolation-selftest" python3 -I -B tools/check_python_launcher
 run_gate "launcher-isolation" python3 -I -B tools/check_python_launcher_isolation.py
 run_gate "python-floor-selftest" python3 -I -B tools/check_selftest_execution.py --suite python-floor-selftest
 run_gate "python-floor" python3 -I -B tools/check_python_floor.py
+# The host-patch pin: the CI host-patch jobs run their suites on the release .aiqt/python-host.toml
+# names, and the live leg FAILS this run when this interpreter is another patch release (a run there does
+# not predict those required CI legs); when the host interpreter changes, update that file and both
+# host-job pins in .github/workflows/quality.yml together.
+run_gate "python-host-pin-selftest" python3 -I -B tools/check_python_host_pin.py --self-test
+run_gate "python-host-pin" python3 -I -B tools/check_python_host_pin.py
+# The jobs-leg-only member mirrors the registry job's CI step, which judges the host-patch jobs from
+# outside them (roster symmetry; ci-parity reconciles it).
+run_gate "python-host-pin-jobs" python3 -I -B tools/check_python_host_pin.py --jobs-only
 run_gate "renderers-selftest"    python3 -I -B tools/gen_renderers.py --self-test
 run_gate "renderers-drift"       python3 -I -B tools/gen_renderers.py --check
 run_gate "manifest-gen-selftest" python3 -I -B tools/gen_manifest.py --self-test
