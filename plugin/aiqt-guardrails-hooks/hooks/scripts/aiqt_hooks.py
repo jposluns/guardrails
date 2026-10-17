@@ -706,17 +706,76 @@ class _SubstHeredocRetry(Exception):
     no parse-error handler on the way out reads it as a failed lex."""
 
 
+# MAIN'S DECISION AS A FLOOR. Main's lexer reads no here-document body inside a "$(...)", so it fails on the
+# commit message form whenever the body holds an apostrophe or another unpaired quote, and each guard then
+# takes the path it takes on a lex that fails, whose raw scans read the whole text. A clean lex reads no
+# command inside a word: a -c string, a string piped into a shell, a trap or eval string. So once the lexer
+# reads such a body, the clean lex could allow a command that main's fallback denied (a later
+# sh -c 'git commit --no-verify -m y', for example). Where a lex a guard makes reads a body in a
+# substitution that main reads otherwise (_subst_heredoc_misread: the skip reading no body fails on it or
+# ends it elsewhere, so _SubstHeredocs.reads moves), the guard therefore also takes the decision of the
+# path it takes on a lex that fails, on the same command, and keeps the stricter of the two. Where main's
+# skip ends that substitution at the same ')', main lexed it as the clean lex does, and no floor applies. That path runs with every lex inside
+# _SubstHeredocFloor failing at the body (_SubstHeredocRefused, a plain ValueError, never read as an
+# uncertain '#'), as main's lex failed on such a body. A guard cannot run twice and compare the two results,
+# since the hooks self-test refuses a handler's or constructor's result bound anywhere but main's dispatch,
+# so each guard reads that path's decision through its pure parts and returns it where it is stricter: in
+# place of the guard's own allow, and before the guard's own allow or note where that path denies. Each
+# guard's docstring names its parts. git_stash_ref allows on a lex that fails, and the truncation guard's
+# failed-lex path gives the note its clean path also gives when it does not deny, and the poll-loop
+# classifier's gives 'indeterminate', which emits nothing, so those three need no floor. COST: each body a
+# lex reads costs one more skip of its substitution reading no body (_subst_heredoc_misread), linear in the
+# substitution's length, and a lex reads at most one body per pass. The floor runs only where such a body
+# was read in a substitution main reads otherwise. It adds the fallback's raw scans, each linear in the
+# command's length,
+# and the lexes the failed-lex path makes: one partial lex in gate_weakening, bash_absolute_paths and
+# branch_root, and up to six in protected_line (the commit syntax twice, a full and a partial lex each, and
+# the uncertainty causes, a lex of the command and of its joined text). Each such lex fails or stops at the
+# body and reads none, so it never starts again: it makes one linear pass per reading, and the two-pass
+# bound of a lex holds.
+_SUBST_HEREDOC_REFUSED = "a quoted here-document body in a command substitution, read as a lex that fails"
+
+
+class _SubstHeredocRefused(ValueError):
+    """Raised where a lex meets the commit message form's here-document while _SubstHeredocs.refuse is True
+    (inside _SubstHeredocFloor), in place of reading its body: the lex fails there, as main's lex fails on such
+    a body, so the guard takes its failed-lex path (MAIN'S DECISION AS A FLOOR, above). _lex_readings passes it
+    on unchanged, so it is never read as an uncertain '#'."""
+
+
+class _SubstHeredocFloor:
+    """A context in which every lex fails at the commit message form's here-document (_SubstHeredocRefused)
+    instead of reading its body: a guard computes the decision of its failed-lex path inside it (MAIN'S
+    DECISION AS A FLOOR, above). It restores the previous setting on exit."""
+
+    def __enter__(self):
+        self.refuse = _SubstHeredocs.refuse
+        _SubstHeredocs.refuse = True
+        return self
+
+    def __exit__(self, *exc_info):
+        _SubstHeredocs.refuse = self.refuse
+        return False
+
+
 class _SubstHeredocs:
     """What one lex shares across its substitution skips for reading a quoted here-document's body (the
     HERE-DOCUMENTS paragraph of _skip_quoting): on is False once a skip meets a '<<' it does not read,
     substitutions counts the command substitutions the lex reads as opaque text (each '$(' a skip opens or
-    meets, and each backquote, quoted or not) outside a body it read, and read is True once it has read a
-    body."""
+    meets, and each backquote, quoted or not) outside a body it read, read is True once it has read a
+    body, and floor is True once it has read one in a substitution that main reads otherwise
+    (_subst_heredoc_misread). Two class attributes hold across lexes: reads counts the lexes whose result
+    read such a body (_lex_reading), which each guard compares before and after its lexes, and refuse is True
+    inside _SubstHeredocFloor, where a lex fails at any body it would read instead of reading it."""
+
+    reads = 0
+    refuse = False
 
     def __init__(self):
         self.on = True
         self.substitutions = 0
         self.read = False
+        self.floor = False
 
     def substitution(self):
         """Count one command substitution. One met after a body was read could hold a command the guards do
@@ -754,7 +813,8 @@ def _skip_quoting(command, i, n, nest=None, hash_reading=None, heredoc=None):
     the whole text, so a body read must not turn that fallback into a lex beside a command they cannot read:
     a '$(' or backquote the lex meets after it read a body raises _SubstHeredocRetry, and _lex_reading lexes
     the command again with no body read. So a lex makes at most one body search and, when it starts again,
-    two linear passes.
+    two linear passes. Inside _SubstHeredocFloor (heredoc.refuse True) the skip raises _SubstHeredocRefused
+    at such a body instead of reading it, the failed lex each guard's floor reads.
 
     An unquoted '#' inside a '$(...)' command substitution or a '${...}' expansion this skips follows the
     comment rule (see the comment above _nest_track), since a comment there runs to the end of its line,
@@ -905,7 +965,10 @@ def _skip_quoting(command, i, n, nest=None, hash_reading=None, heredoc=None):
             close = (_subst_heredoc_close(command, opened, i, n)
                      if len(stack) == 1 and heredoc.substitutions == 1 else None)
             if close is not None:
+                if heredoc.refuse:
+                    raise _SubstHeredocRefused(_SUBST_HEREDOC_REFUSED)
                 heredoc.read = True
+                heredoc.floor = heredoc.floor or _subst_heredoc_misread(command, opened, close, n)
                 i = close
                 continue
             heredoc.on = False
@@ -1404,6 +1467,20 @@ def _subst_heredoc_close(command, opened, at, n):
     return close.end() - 1 if close else None
 
 
+def _subst_heredoc_misread(command, opened, close, n):
+    """True when the '$(...)' opened at index opened, whose body the skip read to the ')' at index close, is read
+    otherwise when no body is read: the skip with no here-document, nesting stack or '#' reading fails on it
+    (an unpaired quote in the body, or a '#' whose reading would matter) or ends it at another index. Main
+    reads no body, so there its lex failed or read the text otherwise, and the guards take main's decision as
+    a floor (MAIN'S DECISION AS A FLOOR, above _SubstHeredocRefused). Where it is False main's skip ends the
+    substitution at the same ')': a '#' it met changes nothing there, since the skip reads such a '#' as word
+    text only when the rest of its line holds no character the skip reads."""
+    try:
+        return _skip_quoting(command, opened, n) != close + 1
+    except ValueError:
+        return True
+
+
 # The characters after which bash starts a new word: blanks, newline and the shell metacharacters.
 # An unquoted '#' that follows one of these (or starts the text) opens a comment.
 _SHELL_WORD_BREAK = " \t\n;&|()<>"
@@ -1762,7 +1839,7 @@ def _lex_readings(command, partial=False, locale=False):
             pending.append(_hash_reading_with(reading, exc.at, False))
             pending.append(_hash_reading_with(reading, exc.at, True))
         except ValueError as exc:
-            if not reading:
+            if not reading or isinstance(exc, _SubstHeredocRefused):
                 raise
             raise _UncertainHashError("a reading of an uncertain '#' does not lex: {}".format(exc)) from exc
     return readings
@@ -1783,11 +1860,17 @@ def _lex_reading(command, partial, hash_reading, locale=False):
     None, where the segments recovered before it are returned as for any other unparseable construct. A lex
     that reads a quoted here-document's body inside a command substitution and then meets another command
     substitution starts again with no body read (the HERE-DOCUMENTS paragraph of _skip_quoting), so it makes
-    at most two passes."""
+    at most two passes. A lex whose result read a body in a substitution main reads otherwise
+    (_subst_heredoc_misread) adds one to _SubstHeredocs.reads, which the guards read for their floor (MAIN'S
+    DECISION AS A FLOOR, above _SubstHeredocRefused)."""
+    heredocs = _SubstHeredocs()
     try:
-        return _lex_pass(command, partial, hash_reading, locale, _SubstHeredocs())
+        lexed = _lex_pass(command, partial, hash_reading, locale, heredocs)
     except _SubstHeredocRetry:
         return _lex_pass(command, partial, hash_reading, locale, None)
+    if heredocs.floor:
+        _SubstHeredocs.reads += 1
+    return lexed
 
 
 def _lex_pass(command, partial, hash_reading, locale, subst_heredocs):
@@ -2866,7 +2949,9 @@ def diff_source_pretool(data):
     the segments of both readings of each such '#'; one the lexer cannot judge that way (_UncertainHashError)
     DENIES an apparent producer its text names (_hash_doubt_names) as a possible dump rather than taking the
     unparseable-command note (_diff_source_fallback), and DENIES as well when its text holds quoting that
-    fallback does not decode (_hash_doubt_opaque), where a producer cannot be ruled out."""
+    fallback does not decode (_hash_doubt_opaque), where a producer cannot be ruled out. Where a lex read a
+    quoted here-document's body (MAIN'S DECISION AS A FLOOR, above _SubstHeredocRefused), the fallback a lex
+    that fails takes, which never denies, decides in place of this guard's allow."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: diff_source_pretool wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -2881,6 +2966,7 @@ def diff_source_pretool(data):
             "AIQT rule cnsdif (no-console-diff-dumps): the Bash payload carried no readable command "
             "string, so the diff-source check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule cnsdif, fail-closed).")
+    reads = _SubstHeredocs.reads
     try:
         segments = _lex_command(command)
     except _UncertainHashError:
@@ -2900,12 +2986,14 @@ def diff_source_pretool(data):
     except ValueError:
         return _diff_source_fallback(command)
     possibles = [(index, seg) for index, seg in enumerate(segments) if _is_possible_producer(seg)]
-    if not possibles:
-        return _allow()  # no producer-capable form anywhere: the bounded true boundary allows
-    # AIRTIGHT-NARROW ALLOW: only when the WHOLE command is one of the five closed proofs.
-    if (_diff_proof_help(command) or _diff_proof_summary(command)
-            or _diff_proof_log_listing(command) or _diff_proof_show_blob(command)
-            or _diff_proof_realfile(segments) or _diff_proof_pager(segments)):
+    # No producer-capable form anywhere (the bounded true boundary), or AIRTIGHT-NARROW: the WHOLE command is
+    # one of the five closed proofs. Either allows, unless a lex read a here-document body, where the
+    # fallback a lex that fails takes decides instead (its note, or the allow).
+    if not possibles or (_diff_proof_help(command) or _diff_proof_summary(command)
+                         or _diff_proof_log_listing(command) or _diff_proof_show_blob(command)
+                         or _diff_proof_realfile(segments) or _diff_proof_pager(segments)):
+        if _SubstHeredocs.reads != reads:
+            return _diff_source_fallback(command)
         return _allow()
     # Otherwise judge each possible producer: a confirmed console dump DENIES (outranking ASK across a
     # compound), and any remaining producer-capable-but-unproven form ASKS.
@@ -3653,7 +3741,9 @@ def commit_identity(data):
     """cmtidn (integ/commit-identity), PreToolUse/Bash: deny a git command that records an AI as
     author, committer, or co-author. No escape hatch: the rule is absolute. Behind a '#' whose comment
     reading the shared lexer cannot judge under both readings, the raw scan also reads _hash_doubt_scan, and
-    a command whose quoting that scan does not decode (_hash_doubt_opaque) denies."""
+    a command whose quoting that scan does not decode (_hash_doubt_opaque) denies. Where a lex read a quoted
+    here-document's body (MAIN'S DECISION AS A FLOOR, above _SubstHeredocRefused), the raw fallback a lex that
+    fails takes, which denies or allows, decides in place of this guard's allow."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: commit_identity wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -3668,6 +3758,7 @@ def commit_identity(data):
             "AIQT rule cmtidn (commit-identity): the Bash payload carried no readable command string, "
             "so the commit-identity check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule cmtidn, fail-closed).")
+    reads = _SubstHeredocs.reads
     try:
         hit = find_ai_authorship(command)
     except _UncertainHashError as exc:
@@ -3683,6 +3774,8 @@ def commit_identity(data):
     except ValueError as exc:
         return _commit_identity_fallback(command, str(exc))
     if hit is None:
+        if _SubstHeredocs.reads != reads:
+            return _commit_identity_fallback(command, _SUBST_HEREDOC_REFUSED)  # main's fallback, in place
         return _allow()
     reason = ("AIQT rule cmtidn (commit-identity): a recorded change carries the human maintainer's "
               "own identity, with no AI as author, committer, or co-author; this git command sets an "
@@ -3909,7 +4002,10 @@ def bash_absolute_paths(data):
     a cd cannot be ruled out. A redirect operator is never quoted, so the '>' test reads the text as written.
     The guard lexes the command twice (the full lex that finds the fallback, then the partial lex below), so
     on a command holding uncertain '#' characters it can make twice the thirty-one lexes of one _lex_readings
-    call, each taking time linear in the command's length."""
+    call, each taking time linear in the command's length. Where a lex read a quoted here-document's body
+    (MAIN'S DECISION AS A FLOOR, above _SubstHeredocRefused), it also judges the segments a partial lex that
+    fails at the body recovers, the segments a lex that fails leaves this guard, with the clean lex's own, so
+    a reason either list carries counts: a third lex call, which stops at the body."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: bash_absolute_paths wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -3938,6 +4034,7 @@ def bash_absolute_paths(data):
     # quoting the fallback text does not decode (a cd may be spelled in it). This full lex and the partial
     # lex below each make up to thirty-one lexes, each linear in the command's length, on a command with
     # uncertain '#' characters.
+    reads = _SubstHeredocs.reads
     try:
         _lex_command(command)
     except _UncertainHashError:
@@ -3969,6 +4066,10 @@ def bash_absolute_paths(data):
     except ValueError:
         pass
     segments = _lex_command(command, partial=True)[0]
+    if _SubstHeredocs.reads != reads:
+        # A lex read a here-document body: the segments a lex that fails at it recovers are judged too.
+        with _SubstHeredocFloor():
+            segments = segments + _lex_command(command, partial=True)[0]
     reasons = []       # relative/opaque cd or NON-destructive redirect: an allow-note convention nudge
     deny_reasons = []  # a DESTRUCTIVE truncating redirect to a relative/opaque target: fail-closed deny
     for seg in segments:
@@ -4552,12 +4653,25 @@ def _expbnd_breadth_publish_deny(verb):
         "expbnd); stage explicit paths and push as a reviewed separate step.".format(verb))
 
 
-def _expbnd_fallback(command):
-    """Conservative ASK fallback for visible in-scope pairs in an unparseable shell command."""
+def _expbnd_fallback_kind(command):
+    """The decision _expbnd_fallback gives command, by its raw probes: "target" (a cd and a mutation or a
+    pruning fetch) notes, "publish" (a breadth stage and a push, with no such cd pair) denies, and None allows.
+    git_explicit_binding reads it for its floor (MAIN'S DECISION AS A FLOOR, above _SubstHeredocRefused)."""
     if (_RAW_EXPBND_CD_RE.search(command) and
             (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command))):
-        return _expbnd_target_ask("mutation")
+        return "target"
     if _RAW_EXPBND_BREADTH_RE.search(command) and _RAW_EXPBND_PUSH_RE.search(command):
+        return "publish"
+    return None
+
+
+def _expbnd_fallback(command):
+    """Conservative ASK fallback for visible in-scope pairs in an unparseable shell command
+    (_expbnd_fallback_kind)."""
+    kind = _expbnd_fallback_kind(command)
+    if kind == "target":
+        return _expbnd_target_ask("mutation")
+    if kind == "publish":
         return _expbnd_breadth_publish_deny("breadth operation")  # finding 11: breadth + publish -> deny
     return _allow()
 
@@ -4573,7 +4687,9 @@ def git_explicit_binding(data):
     'git add <path>' are not breadth and are unaffected. It never asks. Behind a '#' whose comment reading
     the shared lexer cannot judge under both readings, the raw fallback reads _hash_doubt_scan, and a command
     whose quoting that scan does not decode (_hash_doubt_opaque) DENIES, since the breadth-and-publish pair
-    cannot be ruled out there."""
+    cannot be ruled out there. Where a lex read a quoted here-document's body (MAIN'S DECISION AS A FLOOR,
+    above _SubstHeredocRefused), the raw fallback a lex that fails takes (_expbnd_fallback_kind) denies after
+    this guard's own deny and before its notes, and decides in place of its allow."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: git_explicit_binding wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -4589,6 +4705,7 @@ def git_explicit_binding(data):
             "AIQT guardrail (rule expbnd, explicit-binding): the Bash command was absent or unreadable, so "
             "its git target and scope could not be checked. This is a binding convention, not a hazard, so "
             "it is allowed; prefer an explicit '-C' target and enumerated scope.")
+    reads = _SubstHeredocs.reads
     try:
         segments = _segments(command)
     except _UncertainHashError:
@@ -4620,6 +4737,9 @@ def git_explicit_binding(data):
             return _expbnd_breadth_publish_deny(breadth_before_push)
         if _git_is_breadth(s, a):
             breadth_before_push = s
+    floor = _SubstHeredocs.reads != reads  # the lex read a here-document body: main's decision is a floor
+    if floor and _expbnd_fallback_kind(command) == "publish":
+        return _expbnd_fallback(command)  # the deny a lex that fails at the body takes
 
     # A cd/pushd/popd SHIFTS the target out of the session cwd (popd lands on an unknowable stack-top
     # directory, so it too confuses a following git segment). The shift confuses a git segment only when it
@@ -4647,6 +4767,8 @@ def git_explicit_binding(data):
             return _expbnd_target_ask(sub)
         if _git_is_breadth(sub, args) and saw_dir_change:
             return _expbnd_breadth_ask(sub)
+    if floor:
+        return _expbnd_fallback(command)  # its note, or the allow, in place of this allow
     return _allow()
 
 
@@ -5563,6 +5685,13 @@ def _worktree_within_repo(wt_dir, repo_probe):
     return w == t or w.startswith(t + os.sep)
 
 
+def _git_discard_fallback_flags(command):
+    """True when _git_discard_fallback denies command: its raw text or its de-quoted copy names git together
+    with a work-losing verb keyword. git_discard reads it for its floor (MAIN'S DECISION AS A FLOOR, above
+    _SubstHeredocRefused)."""
+    return _raw_has_lossy_git(command) or _raw_has_lossy_git(_dequoted_text(command))
+
+
 def _git_discard_fallback(command):
     """D-423-NARROW fail-closed fallback when the shared tokenizer cannot parse the command (an unbalanced
     quote or an unsupported construct): the closed allowlist grammar cannot be applied to a command that
@@ -5581,8 +5710,9 @@ def _git_discard_fallback(command):
     (_dequoted_text: continuations joined, a '$' before a quote, quote characters and backslashes
     removed), so a fragmented 're""set' in an unparseable command is flagged and denied like its
     plain spelling. Every flagged unparseable command denies here, so a redirect a continuation or a
-    quote splits ('-\\<newline>C', '-"C"') can never reach a session-directory snapshot."""
-    if not (_raw_has_lossy_git(command) or _raw_has_lossy_git(_dequoted_text(command))):
+    quote splits ('-\\<newline>C', '-"C"') can never reach a session-directory snapshot. Whether it denies is
+    _git_discard_fallback_flags'."""
+    if not _git_discard_fallback_flags(command):
         return _allow()  # no git + work-losing verb in the raw text or its de-quoted copy: the true boundary
     return _deny(
         "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell lexer "
@@ -7428,7 +7558,10 @@ def git_discard(data):
     one whose text holds quoting that removal does not decode (_hash_doubt_opaque: g$'i't, g'it' re'set'
     --hard) is DENIED without the scan, since a work-losing git verb cannot be ruled out there. No such
     command reaches a recovery snapshot: its '(', ')', backquote or '${' is outside the closed allowlist
-    grammar and its raw text is never pristine, so it either allows at the true boundary or denies.
+    grammar and its raw text is never pristine, so it either allows at the true boundary or denies. Where a
+    lex read a quoted here-document's body (MAIN'S DECISION AS A FLOOR, above _SubstHeredocRefused), the
+    fallback a lex that fails takes denies first wherever it would (_git_discard_fallback_flags), before any
+    probe or snapshot; where it would allow, this guard's own decision is at least as strict.
 
     SIDE-EFFECTING (EN-6 recovery layer): this handler is NO LONGER pure-decision. Before returning its
     decision for a snapshottable in-scope verb (checkout/switch/restore/reset/rm/clean) whose worktree it can
@@ -7466,6 +7599,7 @@ def git_discard(data):
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
         return _allow()  # boundary: unreadable/malformed command container
+    reads = _SubstHeredocs.reads
     try:
         segments = _segments(command)
     except _UncertainHashError:
@@ -7488,6 +7622,10 @@ def git_discard(data):
     except ValueError:
         # Conservative raw scan, not a silent allow (D-423-NARROW): an unparseable command the raw scan
         # flags is denied outright; only a command the scan clears is allowed at the true boundary.
+        return _git_discard_fallback(command)
+    if _SubstHeredocs.reads != reads and _git_discard_fallback_flags(command):
+        # A lex read a here-document body, and the fallback a lex that fails at it takes denies: that deny
+        # stands, before any probe or snapshot (its allow is no stricter than any decision below).
         return _git_discard_fallback(command)
 
     # Precisely-identified lossy git segments (the clean-parse signal). A git command-word segment whose
@@ -9328,6 +9466,13 @@ def _fallback_push_hit(text):
                                                or _RAW_PUSH_MIRRORCFG_RE.search(text)))
 
 
+def _protected_line_fallback_push(command):
+    """True when _protected_line_fallback's push scan denies command (its commit syntax aside): the raw text or
+    its de-quoted copy (_dequoted_text) pairs a git..push spelling with a force, delete or mirror spelling.
+    protected_line reads it for its floor (MAIN'S DECISION AS A FLOOR, above _SubstHeredocRefused)."""
+    return _fallback_push_hit(command) or _fallback_push_hit(_dequoted_text(command))
+
+
 def _protected_line_fallback(command, wrapped=False):
     """Commit-free push fallback; commit syntax is checked before this path.
 
@@ -9361,7 +9506,7 @@ def _protected_line_fallback(command, wrapped=False):
     plain = _dequoted_text(command)
     # R10: raw and unstripped; stripping could remove a real, mis-paired line. The de-quoted copy
     # is read beside it, never instead of it.
-    if _fallback_push_hit(command) or _fallback_push_hit(plain):
+    if _protected_line_fallback_push(command):
         named = (" a protected branch" if (_RAW_PROTECTED_RE.search(command) or _RAW_PROTECTED_RE.search(plain))
                  else " a target this guard cannot read")
         causes = [_LEX_UNCERTAIN_CAUSE_TEXT[key] for key in _lex_uncertain_causes(command)]
@@ -9410,6 +9555,13 @@ def protected_line(data):
     reached only for commit-free commands after the input validation, the raw backstop, the
     'help' early return and the commit-grammar reading above it; it is not the unconditional
     backstop.
+
+    Where a lex read a quoted here-document's body (MAIN'S DECISION AS A FLOOR, above
+    _SubstHeredocRefused), the path a lex that fails at that body takes denies wherever
+    it would, after this guard's own denies of the same stage and before its allows: the
+    commit syntax read with that lex failing, and the push scan of the fallback
+    (_protected_line_fallback_push) on a commit-free command (a commit the grammar
+    proves cannot carry that body, since a '$' is outside the literal grammar).
     """
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: protected_line wired to unexpected event {!r}; failing closed"
@@ -9435,11 +9587,21 @@ def protected_line(data):
     if _raw_push_match(command):
         return _raw_push_guard(command)
     deadline = time.monotonic() + _COMMIT_SECONDS
+    reads = _SubstHeredocs.reads
     syntax = _commit_command_syntax(command)
+    # A lex read a here-document body. The path a lex that fails at it takes (main's on such a form) denies
+    # or allows: an apparent commit its commit syntax cannot prove denies, and so does its push fallback on
+    # a commit-free command. Each such deny stands after this guard's own denies and before its allows.
+    floor = _SubstHeredocs.reads != reads
+    if floor:
+        with _SubstHeredocFloor():
+            failed = _commit_command_syntax(command)
     if syntax.status == "help":
         return _allow()  # only literal lone git commit --help / -h
     if syntax.status == "unverifiable":
         return _commit_denial(syntax.detail)
+    if floor and failed.status == "unverifiable":
+        return _commit_denial(failed.detail)
     if syntax.status == "grammar":
         evidence = _commit_evaluate(syntax, data.get("cwd"), deadline)
         if not evidence:
@@ -9522,6 +9684,9 @@ def protected_line(data):
     if ((not saw_git or _lex_uncertain(command))
             and (_RAW_GIT_RE.search(command) or _RAW_GIT_RE.search(_dequoted_text(command)))):
         return _protected_line_fallback(command, wrapped=not saw_git)
+    if floor and failed.status == "outside" and _protected_line_fallback_push(command):
+        with _SubstHeredocFloor():
+            return _protected_line_fallback(command)  # the push deny a lex that fails at the body takes
     return _allow()
 
 
@@ -9973,7 +10138,10 @@ def branch_root(data):
     both readings of each such '#'; one the lexer cannot judge that way whose text (_hash_doubt_scan) names
     git and a branch-capable verb (checkout, switch, branch, worktree), or holds quoting that text does not
     decode (_hash_doubt_opaque), DENIES fail-safe, since the lexer reads nothing past that '#'; any other
-    unparseable command takes the partial-recovery path below."""
+    unparseable command takes the partial-recovery path below. Where a lex read a quoted here-document's body
+    (MAIN'S DECISION AS A FLOOR, above _SubstHeredocRefused), the segments that path recovers from a lex that
+    fails at the body are judged too, after the clean lex's own, so a creation either list holds is checked
+    (a cd in the clean lex's segments also counts for a creation in the recovered ones, the stricter way)."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block(
             "aiqt_hooks: branch_root wired to unexpected event {!r}; failing closed"
@@ -9990,6 +10158,7 @@ def branch_root(data):
             "AIQT rule brnrot (branch-rooted-on-live-main): the Bash payload carried no readable "
             "command string, so branch creation could not be checked; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule brnrot, fail-closed).")
+    reads = _SubstHeredocs.reads
     try:
         segments = _segments(command)
     except ValueError as exc:
@@ -10015,6 +10184,10 @@ def branch_root(data):
             segments = [(seg.argv, seg.sep_after) for seg in _lex_command(command, partial=True)[0]]
         except ValueError:
             return _allow()  # even partial recovery failed: open grammar, best-effort
+    if _SubstHeredocs.reads != reads:
+        # A lex read a here-document body: the segments a lex that fails at it recovers are judged too.
+        with _SubstHeredocFloor():
+            segments = segments + [(seg.argv, seg.sep_after) for seg in _lex_command(command, partial=True)[0]]
 
     # No-ask posture: branch rooting is a HAZARD class (an orphan/unrooted branch dispatches work onto a
     # retired root), so a case this guard cannot prove rooted DENIES-and-educates, naming the reachable
@@ -10860,15 +11033,17 @@ def _gate_weakening_fallback(command):
     prove the -n is the bypass rather than an unrelated flag); a checker keyword next to a raw swallow
     or truncating-pipe spelling ASKS; anything else ALLOWS (the true boundary). Over-matching by
     design, the documented posture of the sibling fallbacks (_diff_source_fallback,
-    _commit_identity_fallback, _protected_line_fallback): re-issue the command parseable."""
-    if _RAW_NOVERIFY_VERB_RE.search(command) and _RAW_NOVERIFY_RE.search(command):
+    _commit_identity_fallback, _protected_line_fallback): re-issue the command parseable. Which decision the
+    text earns is _gate_weakening_fallback_kind's."""
+    kind = _gate_weakening_fallback_kind(command)
+    if kind == "no-verify":
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
             "(likely unbalanced quotes) and it appears to bypass verification hooks with a --no-verify "
             "spelling; failing closed. {}".format(_GATE_ALTS),
             "AIQT guardrail: denied an unparseable command that appears to bypass git verification "
             "hooks (rule gatdis, fail-safe).")
-    if _RAW_SHORT_NOVERIFY_VERB_RE.search(command) and _RAW_SHORT_N_RE.search(command):
+    if kind == "short-n":
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
             "(likely unbalanced quotes) and it appears to run git commit or git am with a short -n, "
@@ -10877,9 +11052,7 @@ def _gate_weakening_fallback(command):
             .format(_GATE_ALTS),
             "AIQT guardrail: denied an unparseable git commit/am that appears to carry -n (--no-verify) "
             "(rule gatdis, fail-safe); run the hooks, do not bypass them.")
-    if _RAW_CHECKER_RE.search(command) and (
-            _RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
-            or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command))):
+    if kind == "swallow":
         # ROUND-2 FINDING 14: the swallow/truncate checker-shape heuristic is too broad (a benign optional
         # probe is common), so on the unparseable fallback it ALLOWS-WITH-NOTE rather than denying; the
         # --no-verify bypass spellings above still deny fail-safe, and the caller first denies a verification
@@ -10892,6 +11065,37 @@ def _gate_weakening_fallback(command):
             "let its exit status stand (redirect output to a file if you need to page it), rather than "
             "discarding its failure signal; if it is a benign optional probe, this is allowed.")
     return _allow()
+
+
+# The kinds of _gate_weakening_fallback_kind on which _gate_weakening_fallback denies.
+_GATE_FALLBACK_DENIES = frozenset(("no-verify", "short-n"))
+
+
+def _gate_weakening_fallback_kind(command):
+    """The decision _gate_weakening_fallback gives command, by its raw probes: "no-verify" (a no-verify verb
+    and a --no-ver spelling) and "short-n" (git commit or am and a short -n cluster) deny, "swallow" (a
+    checker keyword and a swallow or truncating-pipe spelling) notes, and None allows. gate_weakening reads it
+    for its floor (MAIN'S DECISION AS A FLOOR, above _SubstHeredocRefused)."""
+    if _RAW_NOVERIFY_VERB_RE.search(command) and _RAW_NOVERIFY_RE.search(command):
+        return "no-verify"
+    if _RAW_SHORT_NOVERIFY_VERB_RE.search(command) and _RAW_SHORT_N_RE.search(command):
+        return "short-n"
+    if _RAW_CHECKER_RE.search(command) and (
+            _RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
+            or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command))):
+        return "swallow"
+    return None
+
+
+def _gate_recovered_sink(command):
+    """The verification run piped into a truncating sink (_verification_sink) that the complete segments a
+    partial lex of command recovers prove, or None: gate_weakening's first check on a lex that fails, before
+    its raw fallback. The in-progress segment the lexer was inside is dropped, since its unseen tokens could
+    change it; a construct that begins a new segment leaves every recovered segment complete."""
+    recovered, _complete, in_progress = _lex_command(command, partial=True)
+    if in_progress:
+        recovered = recovered[:-1]
+    return _verification_sink(recovered)
 
 
 def gate_weakening(data):
@@ -10925,6 +11129,10 @@ def gate_weakening(data):
     segments of all readings in turn. Where the lexer cannot judge it that way, text holding quoting
     _hash_doubt_scan does not decode (_hash_doubt_opaque) DENIES, a pipe into a listed sink word anywhere in
     its text (_hash_doubt_scan) DENIES, and the raw fallback reads that text otherwise.
+    Where a lex read a quoted here-document's body (MAIN'S DECISION AS A FLOOR, above _SubstHeredocRefused),
+    the decision of the path a lex that fails takes is a floor: the sink that a partial lex failing at the body
+    proves (_gate_recovered_sink) and a raw fallback deny (_gate_weakening_fallback_kind) deny after this
+    guard's own denies, and the raw fallback decides in place of this guard's allow.
     Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
     xargs body; R2 an alias or shell function; R3 a gate whose name and options carry no checker part
     (tools/doctor.py, sha256sum -c, a build); R4 a plain '| grep PATTERN' filter or '| wc', which are not
@@ -10943,6 +11151,7 @@ def gate_weakening(data):
             "AIQT rule gatdis (gate-discipline): the Bash payload carried no readable command string, "
             "so the gate-weakening check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule gatdis, fail-closed).")
+    reads = _SubstHeredocs.reads
     try:
         # Each reading of an uncertain '#' (the shared lexer's comment rule) is kept apart for the deny tier
         # below, whose canonical shape needs every earlier segment benign; every other check reads the
@@ -10954,10 +11163,7 @@ def gate_weakening(data):
         # otherwise the raw fallback stands. Only the in-progress segment the lexer was inside is dropped,
         # since its unseen tokens could change it; a construct that begins a new segment (a lone quote after
         # 'pytest | head;') leaves every recovered segment complete, so none is dropped.
-        recovered, _complete, in_progress = _lex_command(command, partial=True)
-        if in_progress:
-            recovered = recovered[:-1]
-        hit = _verification_sink(recovered)
+        hit = _gate_recovered_sink(command)
         if hit is not None:
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
@@ -10982,6 +11188,7 @@ def gate_weakening(data):
                 "AIQT guardrail: denied a possible verification run piped into a truncating sink behind a '#' "
                 "this guard could not read (rule gatdis, fail-closed).")
         return _gate_weakening_fallback(scan)
+    floor = _SubstHeredocs.reads != reads  # the lex read a here-document body: main's decision is a floor
     records = [seg for reading in readings for seg in reading]
     segments = [(seg.argv, seg.sep_after) for seg in records]
     pending_note = None  # the first heuristic gate-weakening allow-note; a certain --no-verify deny wins first
@@ -11038,11 +11245,23 @@ def gate_weakening(data):
     if hit is not None:
         reason, banner = _verification_sink_message(hit)
         return _deny(reason, banner)
+    if floor:
+        # The path a lex that fails at the body takes (main's on such a form) denies here before any note:
+        # a sink its recovered prefix proves, or a raw bypass spelling anywhere in the text.
+        with _SubstHeredocFloor():
+            hit = _gate_recovered_sink(command)
+        if hit is not None:
+            reason, banner = _verification_sink_message(hit)
+            return _deny(reason, banner)
+        if _gate_weakening_fallback_kind(command) in _GATE_FALLBACK_DENIES:
+            return _gate_weakening_fallback(command)
     if pending_note is not None:
         return _allow_note(pending_note)
     flow_note = _gate_flow_note(records, command)
     if flow_note is not None:
         return _allow_note(flow_note)
+    if floor:
+        return _gate_weakening_fallback(command)  # its note, or the allow, in place of this allow
     return _allow()
 
 
@@ -11153,7 +11372,9 @@ def commit_msg_subst(data):
     never ask; the caller self-corrects by re-issuing single-quoted, escaped, or via git commit -F <file>.
     Behind a '#' whose comment reading the shared lexer cannot judge under both readings, the raw fallback
     reads _hash_doubt_scan, and a command whose quoting that scan does not decode (_hash_doubt_opaque)
-    DENIES."""
+    DENIES. Where a lex read a quoted here-document's body (MAIN'S DECISION AS A FLOOR, above
+    _SubstHeredocRefused), the raw fallback a lex that fails takes, which denies or allows, decides in place
+    of this guard's allow."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: commit_msg_subst wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -11171,6 +11392,7 @@ def commit_msg_subst(data):
             "(the payload could not be parsed safely). Re-issue a well-formed Bash command.",
             "AIQT guardrail: denied a Bash call with no readable command; re-issue a well-formed command "
             "(rule sectvl, fail-safe).")
+    reads = _SubstHeredocs.reads
     try:
         segments = _lex_command(command)
     except _UncertainHashError:
@@ -11198,6 +11420,8 @@ def commit_msg_subst(data):
             .format(argument[:80], marker),
             "AIQT guardrail: denied a git commit argument that appears to carry an executable command "
             "substitution (rule sectvl); re-issue single-quoted, escaped, or via -F <file>.")
+    if _SubstHeredocs.reads != reads:
+        return _commit_msg_subst_fallback(command)  # a lex read a here-document body: main's fallback, in place
     return _allow()
 
 

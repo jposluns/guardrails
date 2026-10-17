@@ -10795,9 +10795,10 @@ def _main_isolated(report_path=None):
         # stack of its own; each takes time linear in the command's length (COST in the comment above
         # _nest_track in aiqt_hooks.py), so each must decide these inputs in under 1 s of CPU: a 256 KiB line
         # of blank-led '#' inside a double-quoted substitution, and a 128 KiB run of open parentheses and
-        # backquote substitutions (the hook self-test's lex-cost inputs). Measured on one host, the code before
-        # the linear skip and the counted nesting stack took 15.2 s and 9.2 s in the classifier, 14.9 s in the
-        # word scan and 13.8 s in the foreground scan, and this code at most 0.08 s on any of them. The word
+        # backquote substitutions (the hook self-test's lex-cost inputs). Measured on one host by timing one
+        # call of each with time.process_time, the code before the linear skip and the counted nesting stack
+        # took 14.85 s and 9.25 s in the classifier, 14.84 s in the word scan and 13.90 s in the foreground
+        # scan, and this code at most 0.09 s on any of them (the classifier on the nesting input). The word
         # scan on the nesting input (0.02 s) and the foreground scan on the comment line (under 0.01 s) stayed
         # under the bound on both, so neither is checked.
         _cost_long = 'echo "$(echo ' + "# " * (128 * 1024) + '\n)"\ngit status'
