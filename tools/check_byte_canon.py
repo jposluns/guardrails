@@ -15,7 +15,9 @@ overriding the root one.
 The 3.1 scan forbids the zero-width and bidirectional control codepoints held in _byte_canon.FORBIDDEN
 and, in this gate only, a literal U+2028 LINE SEPARATOR or U+2029 PARAGRAPH SEPARATOR (str.splitlines()
 splits on both). The separators stay out of FORBIDDEN because opf's record emitter and view generator read
-that set; no allowance clears them.
+that set; no allowance clears them. Like the rest of the 3.1 scan, the separator scan reads every in-scope
+path except the [checkout].binary roster, and it matches only the UTF-8 encoding of each separator: a file
+in another encoding (UTF-16, say) that holds one is not reported.
 
 check_no_dashes.py stays separate (3.1). Hashing elsewhere stays byte-literal (3.2): this gate
 canonicalizes at release; no verifier normalizes.
@@ -96,7 +98,8 @@ CLASS_FINDING = {
 }
 
 # U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR: str.splitlines() splits on both, so a literal one
-# inside a string or comment changes how every line-based tool reads the file (an editor can decode the
+# inside a string or comment changes how a tool that splits lines with str.splitlines() reads the file (a
+# reader that splits only on LF, such as _has_two_space_break below, is unaffected; an editor can decode the
 # escape text into the character itself). They are refused by THIS repository gate only, never added to
 # _byte_canon.FORBIDDEN: that set also drives opf's record emitter (which escapes every member) and opf's
 # view generator (which refuses a render carrying any member), so widening it would change what opf writes
@@ -470,14 +473,56 @@ def self_test_main():
             ("line-separator-in-comment", "# a{}b\n".format(chr(0x2028)), "U+2028"),
             ("paragraph-separator-in-comment", "# a{}b\n".format(chr(0x2029)), "U+2029")):
         data = text.encode("utf-8")
-        if not any(cp in f for f in scan_line_separators(data)):
-            failures.append("scan_line_separators[{}] did not report {}".format(name, cp))
+        want = "byte offset {}: line or paragraph separator {} ".format(
+            data.find(chr(int(cp[2:], 16)).encode("utf-8")), cp)
+        if [f[:len(want)] for f in scan_line_separators(data)] != [want]:
+            failures.append("scan_line_separators[{}] did not report {} once at its byte offset "
+                            "({!r})".format(name, cp, want))
         if scan_bytes(data):
             failures.append("scan_bytes[{}] reported a separator; it must stay out of the shared "
                             "forbidden set".format(name))
     both = "a{}b{}c\n".format(chr(0x2028), chr(0x2029)).encode("utf-8")
-    if len(scan_line_separators(both)) != 2:
-        failures.append("scan_line_separators did not report each of two separators once")
+    if [f.split(":")[0] for f in scan_line_separators(both)] != ["byte offset 1", "byte offset 5"]:
+        failures.append("scan_line_separators did not report each of two separators once at its "
+                        "byte offset")
+    # The gate's own run() path, over an isolated temp tree: run() must report each separator under its
+    # path and byte offset and exit 1, and pass the same tree without them. Only the inputs that need git
+    # or the live policy (the scope, the policy, the attribute map, the platform probe) are replaced; the
+    # per-file read and judgement are run()'s own, so a run() that drops the separator scan fails here.
+    import contextlib as _cl
+    import io as _io
+    import tempfile as _tf
+    sep_files = {"ls.py": ('x = "a{}b"\n'.format(chr(0x2028)), "byte offset 6: ", "U+2028"),
+                 "ps.md": ("# a{}b\n".format(chr(0x2029)), "byte offset 3: ", "U+2029")}
+    g = globals()
+    saved_inputs = {k: g[k] for k in ("release_scope", "load_policy", "effective_attributes",
+                                      "check_matrix")}
+    try:
+        with _tf.TemporaryDirectory() as _d:
+            _root = Path(_d)
+            (_root / "clean.txt").write_bytes(b"clean\n")
+            for name, (text, _off, _cp) in sep_files.items():
+                (_root / name).write_bytes(text.encode("utf-8"))
+            g["load_policy"] = lambda _r: ([], [])
+            g["effective_attributes"] = lambda _r, s: {p: {"text": "set", "eol": "lf"} for p in s}
+            g["check_matrix"] = lambda _r: None
+            for scope, want_rc, want_lines in (
+                    ({"clean.txt"}, 0, []),
+                    ({"clean.txt"} | set(sep_files), 1,
+                     ["  {}: {}line or paragraph separator {} ".format(name, off, cp)
+                      for name, (_t, off, cp) in sorted(sep_files.items())])):
+                g["release_scope"] = lambda _r, _s=scope: (set(_s), set())
+                out = _io.StringIO()
+                with _cl.redirect_stdout(out), _cl.redirect_stderr(out):
+                    rc = run(_root)
+                lines = [l for l in out.getvalue().splitlines() if l.startswith("  ")]
+                if rc != want_rc or [l[:len(w)] for l, w in zip(lines, want_lines)] != want_lines \
+                        or len(lines) != len(want_lines):
+                    failures.append("run() over a temp tree with {} gave exit {} and findings {}; "
+                                    "expected exit {} and {}".format(sorted(scope), rc, lines, want_rc,
+                                                                     want_lines))
+    finally:
+        g.update(saved_inputs)
     for cp in (0x2028, 0x2029):
         if chr(cp) in FORBIDDEN.values():
             failures.append("U+{:04X} is in _byte_canon.FORBIDDEN, which also drives opf's record "
@@ -780,7 +825,8 @@ def self_test_main():
         for f in failures:
             print("  - " + f)
         return 1
-    print("SELF-TEST PASS: byte-format legs, the line and paragraph separator leg, allowance scoping, "
+    print("SELF-TEST PASS: byte-format legs, the line and paragraph separator leg (direct and through "
+          "run() over a temp tree), allowance scoping, "
           "coverage logic, the containment "
           "mode table and probe fail-safe, the policy and vector schema fail-closed legs, and the "
           "published vectors all hold")
