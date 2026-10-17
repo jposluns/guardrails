@@ -4352,8 +4352,10 @@ def _watchdog_completion_case(mode):
                 assert failures, "the flip close was read as clean"
                 await_state(subject, (None, "Z"), "the flip cleanup did not complete")
     elif mode == "subject-orphan":
+        import dis
         import time
         import types
+        import warnings
         # QA18 codex F3: pdeathsig is not retroactive, so a subject first scheduled
         # after its guardian died arms too late; it must detect the reparenting and
         # refuse to run. Independently, close() must kill and prove a
@@ -4418,28 +4420,49 @@ def _watchdog_completion_case(mode):
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
 
+            # The warning block the fork of this process can write: os.fork,
+            # called by _launch_fork on the launcher thread of this
+            # multi-threaded process, raises the CPython DeprecationWarning
+            # naming THIS pid, attributed to the file and line of that
+            # call, and the warnings module prints it as a header line
+            # (file:line: category: message) followed by the stripped
+            # source text of the call, indented. fork_block is that block,
+            # formatted by the warnings module itself from the same call.
+            launch_fork = emit._FixtureProcess._launch_fork
+            fork_line = next(
+                instruction.positions.lineno
+                for instruction in dis.get_instructions(launch_fork)
+                if instruction.argval == "fork")
+            fork_block = warnings.formatwarning(
+                "This process (pid=%d) is multi-threaded, use of fork() may "
+                "lead to deadlocks in the child." % os.getpid(),
+                DeprecationWarning, launch_fork.__code__.co_filename,
+                fork_line).splitlines()
+
             def subject_lines(capture):
                 # The per-launch fd 2 redirect window covers the fork this
-                # process makes, so a warning block of the leg process
-                # itself (for example the CPython multi-threaded fork
-                # DeprecationWarning, which names THIS pid) can land in the
-                # capture alongside subject output; tolerate exactly that
-                # block -- a warning line naming this process and its
-                # indented source-text continuation -- and nothing else
-                # (without this tolerance, a run with warnings made visible
-                # wrote the leg's own line into the capture and Leg 2
-                # failed falsely).
-                own = "(pid=%d)" % os.getpid()
+                # process makes, so the warning block of the leg process
+                # itself (fork_block above) can land in the capture
+                # alongside subject output; tolerate exactly that block --
+                # a line equal to its full header and, directly after it,
+                # its one source-text continuation -- and keep every other
+                # line, a subject line that merely names this pid and an
+                # indented line after the block included (without this
+                # tolerance, a run with warnings made visible wrote the
+                # leg's own block into the capture and Leg 2 failed
+                # falsely). A block this filter does not recognise stays
+                # in the capture, so Leg 2 fails red, never green.
+                header = fork_block[0]
+                continuation = fork_block[1] if len(fork_block) > 1 else None
                 kept = []
-                tolerated = False
+                after_header = False
                 for line in capture.splitlines():
-                    if own in line:
-                        tolerated = True
+                    if line == header:
+                        after_header = True
                         continue
-                    if tolerated and line.startswith(" "):
-                        continue
-                    tolerated = False
-                    kept.append(line)
+                    if not (after_header and line == continuation):
+                        kept.append(line)
+                    after_header = False
                 return kept
 
             def reap_subject(target):
@@ -4509,8 +4532,15 @@ def _watchdog_completion_case(mode):
                 # killed guardian reported nothing and its subject
                 # reparented HERE: the leg reaps it (require_sigkill).
                 # A subject that guardian reaped before it was killed has
-                # no status left, which reap_subject refuses loudly. Either
-                # branch charges one 30 s bound and leaves no zombie.
+                # no status left, which reap_subject refuses loudly. That
+                # refusal is a load-dependent red, never a pass: cancel
+                # sets the cleanup grace to 1 s and close() escalates a
+                # guardian not collected within twice that grace, so on a
+                # loaded host a guardian that reaped its subject but had
+                # not yet reported the status by then fails this verdict
+                # as cannot-evaluate, whatever the subject died of.
+                # Either branch charges one 30 s bound and leaves no
+                # zombie.
                 if fixture.status is None:
                     require_sigkill(target, note)
                     return
@@ -4519,8 +4549,8 @@ def _watchdog_completion_case(mode):
 
             # Every close fault the launch failure path below keeps beneath
             # its launch failure: a vector that accepts the launch failure
-            # would otherwise drop it with the outcome, so a check after
-            # the last such vector refuses any that is left here.
+            # would otherwise drop it with the outcome, so a diagnostic
+            # check after the last such vector names any that is left here.
             close_faults = []
 
             def launch_held(arm=True, ack_bound=30, capture_open=os.open,
@@ -4644,10 +4674,17 @@ def _watchdog_completion_case(mode):
                     # headroom can still expire it. The gate stays (it ends
                     # a gated subject that is never released, such as one
                     # whose leg died after killing its guardian, before any
-                    # pdeathsig is armed), and its expiry is an explicit,
-                    # named failure in every vector: require_cause reports
-                    # the exit 96 of the subject as the gate expiring, never
-                    # as a clean death.
+                    # pdeathsig is armed), and its expiry is never read as
+                    # a clean death: wherever a vector reads the death cause
+                    # of its subject, require_cause reports the exit 96 as
+                    # the gate expiring, by name. An expiry inside this
+                    # launch is the stated exception: the waits here report
+                    # their own bound or refusal (the receipt, the
+                    # acknowledgment marker, or the wait of a fault seam),
+                    # and the failure path below discards the
+                    # cannot-evaluate refusals of its cancel and reads no
+                    # subject status, so such a launch fails red, but not
+                    # by the gate's name.
                     bound = _watchdog_deadline(ack_bound)
                     while not acked.exists():
                         assert not refused.exists(), (
@@ -4802,23 +4839,33 @@ def _watchdog_completion_case(mode):
                      "a reported setup-error exit satisfied the drain verdict")
 
             # Capture-filter vector: subject_lines drops ONLY the warning
-            # block naming this process (the line and its indented
-            # continuation) and keeps every subject line around it,
-            # indented traceback lines included: a filter that dropped
-            # everything, which would leave the empty-capture check of
-            # Leg 2 green, fails here.
+            # block of this process (fork_block: its header line and the
+            # one source-text continuation after it) and keeps every
+            # other line. The block alone comes out empty, so a filter
+            # that dropped nothing fails; around it, a subject line that
+            # merely names this pid, an indented line right after the
+            # block and the indented traceback lines all survive, so a
+            # filter keyed on the pid alone, one dropping every indented
+            # line after the block, and one that dropped everything
+            # (which would leave the empty-capture check of Leg 2 green)
+            # fail here.
+            assert subject_lines("\n".join(fork_block)) == [], (
+                "the capture filter kept the warning block of the leg",
+                fork_block)
             capture = "\n".join((
                 "Traceback (most recent call last):",
                 '  File "<subject>", line 1, in <module>',
-                "x.py:1: DeprecationWarning: This process (pid=%d) is "
-                "multi-threaded, use of fork() may lead to deadlocks in the "
-                "child." % os.getpid(),
-                "  pid = os.fork()",
-                "a subject line after the warning block"))
+                *fork_block,
+                "  an indented subject line after the warning block",
+                "a subject line naming this process (pid=%d)" % os.getpid(),
+                "  an indented subject line after it"))
             kept = subject_lines(capture)
-            assert kept == ["Traceback (most recent call last):",
-                            '  File "<subject>", line 1, in <module>',
-                            "a subject line after the warning block"], (
+            assert kept == [
+                "Traceback (most recent call last):",
+                '  File "<subject>", line 1, in <module>',
+                "  an indented subject line after the warning block",
+                "a subject line naming this process (pid=%d)" % os.getpid(),
+                "  an indented subject line after it"], (
                 "the capture filter did not keep exactly the subject lines",
                 kept)
 
@@ -4849,8 +4896,15 @@ def _watchdog_completion_case(mode):
             with patch.object(emit, "_fixture_escalate_subject",
                               lambda subject, fd: None):
                 cancel(child, failures)
-            assert failures and "could not confirm subject exit" in failures[0], failures
+            # The live check comes BEFORE the failure text: a subject
+            # already dead before the close leaves its pidfd readable, so
+            # close() never reports "could not confirm subject exit" for
+            # it, and a text check first would fail without the cause.
+            # require_alive reaps such a subject and names its cause (an
+            # exit 96 as the hold gate expiring); a live subject passes
+            # it and reaches the text check unchanged.
             require_alive(subject, "flip: the subject died without its kill")
+            assert failures and "could not confirm subject exit" in failures[0], failures
             os.kill(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
             await_state(subject, (None, "Z"), "the flip hygiene did not complete")
             # The hygiene zombie is reaped AND its cause asserted: a subject
@@ -5048,10 +5102,14 @@ def _watchdog_completion_case(mode):
                             "the restoration fault subject died otherwise "
                             "than by its drain kill")
 
-            # A launch failure some vector above accepted must not carry a
-            # close fault of its failure path: kept beneath the launch
-            # failure rather than in its place, such a fault is refused
-            # here instead of being lost with the vector's outcome.
+            # Diagnostic: a launch failure some vector above accepted must
+            # not carry a close fault of its failure path, and this check
+            # names any such fault right after the vectors that could
+            # leave one. It is not an independent check: the close-fault
+            # vector below requires close_faults to equal its one
+            # injected fault, so a fault left by an earlier vector turns
+            # that vector red as well; this check only reports it first,
+            # with the faults listed.
             assert not close_faults, (
                 "a failure-path close fault was accepted with its launch "
                 "failure", close_faults)
