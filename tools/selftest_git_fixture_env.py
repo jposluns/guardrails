@@ -966,12 +966,15 @@ def _config_poison_fixture(base):
 # 2026-10-14 merge from main added a fifth (.github/check_cited_standards_contract.py
 # --self-test). The 2026-10-15 merge from main added a sixth (opf/tools/_opf_import_batch.py
 # --self-test). The 2026-10-16 merge of main into the change adding tools/gen_agents.py --self-test
-# made that a seventh. The merged roster is 108 members, 106 of them in the malformed lane
-# (counted by running _registered_selftests() on the merged tree, 2026-10-16;
+# made that a seventh. The child-status change (2026-10-17) added four more
+# (opf/tools/_child_status.py --self-test, tools/check_child_status_coverage.py, and
+# tools/check_selftest_execution.py --suite child-status-selftest and the same with
+# --suite child-status-coverage-selftest). The roster is 112 members, 110 of them in the
+# malformed lane (counted by running _registered_selftests() on that tree, 2026-10-17;
 # config/member-roster-figures asserts these counts and the two derived counts below against
 # _registered_selftests(), so a later roster change turns this comment red instead of stale).
 # NOT MEASURED, though these bounds govern those reruns all the same: the system lane; the
-# malformed lane's configuration for the 96 of its 106 members outside those ten; and the
+# malformed lane's configuration for the 100 of its 110 members outside those ten; and the
 # fsmonitor pass's own configuration (fsmonitor set in both config files, ignore and attributes
 # files removed, its four members run one at a time).
 # The opf.py --self-test times above and below and its 3600 s entry were sized before the
@@ -984,14 +987,14 @@ def _config_poison_fixture(base):
 # bound) are not fed to the formula; the factor's headroom is meant to allow for them, but a run
 # that reached a bound has no known length, so no bound here is shown to cover it (below).
 # Roster coverage: the account of the whole-roster run gives a time or an upper bound for 89 of
-# the 108 members (every member registered when it was taken; the seven added by the 2026-10-13,
-# 2026-10-14, 2026-10-15 and 2026-10-16 merges are outside it).
+# the 112 members (every member registered when it was taken; the seven added by the 2026-10-13,
+# 2026-10-14, 2026-10-15 and 2026-10-16 merges and the four added on 2026-10-17 are outside it).
 # Five took over 180 s and carry the entries below. The other 84 took 180 s or less: nine named
 # here (the six shorter opf/tools self-tests, check_python_floor.py, check_release_cut.py
 # --self-test --red-on-revert and check_selftest_execution.py --suite orch-behaviour-selftest),
 # the slowest 142.55 s; and 75 REPORTED by that account as each 62.42 s or less, with no
-# per-member time and no names given. The remaining 19 roster members have no recorded time (the
-# 12 the account does not name, plus the seven added by those merges, named above), so their
+# per-member time and no names given. The remaining 23 roster members have no recorded time (the
+# 12 the account does not name, plus the eleven added since, named above), so their
 # default bound is NOT sized from a measurement.
 # For every member, reaching its bound is cannot-evaluate, never a pass.
 # The factor is 40 / 24 * 4. 40 / 24 covers load5 40 under the model that wall time grows in
@@ -3745,6 +3748,8 @@ def _verdict(failures, cannot_evaluate, caused):
 # lifecycle. They still require a successful observed system-config-lane run.
 # New modules and removed wrappers are NOT implicitly exempt.
 OPF_LIFECYCLE_EXEMPTIONS = {
+    "opf/tools/_child_status.py": ("Child-status probe vectors over forked and trampolined interpreter and bash "
+                                   "children; no git."),
     "opf/tools/_journal.py": "Descriptor-helper vectors over in-process pipes with patched os primitives.",
     "opf/tools/_opf_adopt.py": ("Adoption vocabulary and validator vectors; its observe vector suite runs "
                                 "git only inside _opf_adopt_observe._git_archive_fixture's lifecycle."),
