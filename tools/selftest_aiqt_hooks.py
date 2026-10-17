@@ -8672,40 +8672,60 @@ def _main_isolated(monitor):
         # commit message shapes, a body that a nested substitution's line holds (bash 5.3.9 reads its 'git
         # commit' line as body text), two here-documents on one operator line, and a top-level assignment
         # whose here-document bash ends at 'EOF)' (main and this code allow it alike). Main's decisions were
-        # recorded by running main's module on each command, per guard in _hd_floor_guards order. The eleven
-        # rows of _hd_then fail on the code before this rule; the last five rows pass there too and are
-        # REGRESSION GUARDS. Not a row: the ')"' line shape (tok-dq-heredoc-close-line), where gate_weakening
-        # and commit_msg_subst allow and main denies, by design: bash 5.3.9 reads that line as body text and
-        # runs nothing on it.
+        # recorded by running main's module on each command, per guard in _hd_floor_guards order, and each guard
+        # must decide exactly as main does, except the seven guards _hd_retry_over names on the eleven rows of
+        # _hd_then and on two-on-operator-line, which must decide at least as strictly: there the lex starts
+        # again reading no body, one reading of the body's '#' does not lex, and those guards take their
+        # cannot-evaluate path, an over-deny kept from the commit that added the retry. The eleven rows of
+        # _hd_then fail on the code before that retry; the last five rows pass there too and are REGRESSION
+        # GUARDS.
         _hd_floor_guards = (aiqt_hooks.gate_weakening, aiqt_hooks.diff_source_pretool, aiqt_hooks.git_explicit_binding,
                             aiqt_hooks.commit_identity, aiqt_hooks.bash_absolute_paths, aiqt_hooks.branch_root,
                             aiqt_hooks.git_discard, aiqt_hooks.git_stash_ref, aiqt_hooks.commit_msg_subst,
                             aiqt_hooks.protected_line)
-        _hd_main_then = ("deny",) + ("allow",) * 7 + ("deny", "deny")
-        _hd_floor = [(_hdn, _hdc, _hd_main_then) for _hdn, _hdc in _hd_then] + [
-            ("apostrophe", _hd_m1, ("allow",) * 8 + ("deny", "deny")),
-            ("five-headings", _hd_h5, ("allow",) * 8 + ("deny", "deny")),
-            ("nested-line-body", "echo \"$(echo $(cat <<'EOF') $(true\n" + _hd_nv + "\nEOF\n))\"",
-             ("allow",) * 9 + ("deny",)),
-            ("two-on-operator-line", "echo \"$(cat <<'EOF'; echo $(cat <<B\n# Don't\nEOF\n$(" + _hd_nv + ")\nB\n))\"",
-             _hd_main_then),
-            ("top-level-assignment", "x=$(cat <<'EOF'\nEOF); " + _hd_nv + "\nEOF\n)", ("allow",) * 10),
-        ]
         _hd_rank = {"allow": 0, "allow-note": 1, "deny": 2}  # deny > note > allow; anything else fails
-        for _hdn, _hdc, _hdmain in _hd_floor:
-            for _hdg, _hdm in zip(_hd_floor_guards, _hdmain):
-                _hdgot = _decision(_hdg, _hdc)
-                if _hd_rank.get(_hdgot, -1) < _hd_rank[_hdm]:
-                    failures.append("(hd-main-floor-{}) {}: main decides {}, got {}".format(
-                        _hdn, _hdg.__name__, _hdm, _hdgot))
-        # MAIN'S DECISION AS A FLOOR (the comment above _SubstHeredocRefused). Main's lex fails on the commit
+        _hd_letter = {"A": "allow", "N": "allow-note", "D": "deny"}
+
+        def _hd_main_check(tag, command, main_decisions, over=()):
+            """Each guard in _hd_floor_guards decides command exactly as main does (main_decisions: main's
+            recorded decisions in that order, as a tuple or as a string of A, N and D), and each guard named in
+            over at least as strictly."""
+            if len(main_decisions) != len(_hd_floor_guards):
+                failures.append("({}) records {} decisions for {} guards".format(
+                    tag, len(main_decisions), len(_hd_floor_guards)))
+            for _hdg, _hdm in zip(_hd_floor_guards, main_decisions):
+                _hdm = _hd_letter.get(_hdm, _hdm)
+                _hdgot = _decision(_hdg, command)
+                if _hdg.__name__ in over:
+                    if _hd_rank.get(_hdgot, -1) < _hd_rank[_hdm]:
+                        failures.append("({}) {}: main decides {}, got {}, less strictly".format(
+                            tag, _hdg.__name__, _hdm, _hdgot))
+                elif _hdgot != _hdm:
+                    failures.append("({}) {}: main decides {}, got {}".format(tag, _hdg.__name__, _hdm, _hdgot))
+
+        _hd_main_then = ("deny",) + ("allow",) * 7 + ("deny", "deny")
+        _hd_retry_over = ("diff_source_pretool", "git_explicit_binding", "commit_identity", "bash_absolute_paths",
+                          "branch_root", "git_discard", "git_stash_ref")
+        _hd_floor = [(_hdn, _hdc, _hd_main_then, _hd_retry_over) for _hdn, _hdc in _hd_then] + [
+            ("apostrophe", _hd_m1, ("allow",) * 8 + ("deny", "deny"), ()),
+            ("five-headings", _hd_h5, ("allow",) * 8 + ("deny", "deny"), ()),
+            ("nested-line-body", "echo \"$(echo $(cat <<'EOF') $(true\n" + _hd_nv + "\nEOF\n))\"",
+             ("allow",) * 9 + ("deny",), ()),
+            ("two-on-operator-line", "echo \"$(cat <<'EOF'; echo $(cat <<B\n# Don't\nEOF\n$(" + _hd_nv + ")\nB\n))\"",
+             _hd_main_then, _hd_retry_over),
+            ("top-level-assignment", "x=$(cat <<'EOF'\nEOF); " + _hd_nv + "\nEOF\n)", ("allow",) * 10, ()),
+        ]
+        for _hdn, _hdc, _hdmain, _hdover in _hd_floor:
+            _hd_main_check("hd-main-floor-" + _hdn, _hdc, _hdmain, _hdover)
+        # MAIN'S DECISION AS A FLOOR (the comment above _MainHashReading). Main's lex fails on the commit
         # message form whose body holds an apostrophe, and its guards then take their failed-lex path, whose raw
         # scans read the whole text, a command inside a string included; reading that body made the lex clean,
         # and the clean lex reads no command inside a -c, eval, trap or python3 -c string, or one piped or fed
-        # into a shell. Each guard now also takes its failed-lex decision where a lex read such a body, and keeps
-        # the stricter. In every row below the form comes before the command bash runs from the string, after
-        # it, or on the line above it, and the string runs git commit --no-verify -m y. Main (fe381129) denies
-        # all 54 in gate_weakening and the code before this floor allowed all 54 (both measured by running each
+        # into a shell. Each guard now also takes the decision of main's failed-lex path where main's reading of
+        # such a body fails, and keeps the stricter. In every row below the form comes before the command bash
+        # runs from the string, after it, or on the line above it, and the string runs git commit --no-verify -m
+        # y. Main (fe381129) denies all 54 in gate_weakening, and each row must decide as main does in every
+        # guard; the code before the floor allowed all 54 in gate_weakening (both measured by running each
         # module on each command), so every hd-floor row fails there.
         _hdf_form = "git commit -m \"$(cat <<'EOF'\n# Don't\nEOF\n)\""
         _hdf_body = "git commit --no-verify -m y"
@@ -8726,13 +8746,13 @@ def _main_isolated(monitor):
                        ("bash-heredoc-before", "bash <<'X'; " + _hdf_form + "\n" + _hdf_body + "\nX"),
                        ("bash-heredoc-next-line", _hdf_form + "\nbash <<'X'\n" + _hdf_body + "\nX")]
         for _hdfn, _hdfc in _hdf_cases:
-            texpect("(hd-floor-{}) gate_weakening denies as main does".format(_hdfn),
-                    _decision(aiqt_hooks.gate_weakening, _hdfc), "deny")
-        # The other guards' floors, each on a command where main's decision, recorded per guard in
+            _hd_main_check("hd-floor-" + _hdfn, _hdfc, _hd_main_then)
+        # The other guards' failed-lex floors, each on a command where main's decision, recorded per guard in
         # _hd_floor_guards order by running main's module, is stricter than the code before this floor in one
         # guard (git_explicit_binding, commit_identity, commit_msg_subst twice and gate_weakening, in row order),
-        # so each row fails there. The last row is a commit message that names --no-verify and holds an
-        # apostrophe: main denies it through its fallback, so it denies here too (the over-deny main had).
+        # so each row fails there; each guard must decide as main does. The last row is a commit message that
+        # names --no-verify and holds an apostrophe: main denies it through its fallback, so it denies here too
+        # (the over-deny main had).
         _hdf_guard_rows = (
             ("publish", _hdf_form + "; sh -c 'git add -A && git push'", ("allow", "allow", "deny") + ("allow",) * 5
              + ("deny", "deny")),
@@ -8745,24 +8765,99 @@ def _main_isolated(monitor):
              ("deny",) + ("allow",) * 7 + ("deny", "deny")),
         )
         for _hdn, _hdc, _hdmain in _hdf_guard_rows:
-            for _hdg, _hdm in zip(_hd_floor_guards, _hdmain):
-                _hdgot = _decision(_hdg, _hdc)
-                if _hd_rank.get(_hdgot, -1) < _hd_rank[_hdm]:
-                    failures.append("(hd-floor-guard-{}) {}: main decides {}, got {}".format(
-                        _hdn, _hdg.__name__, _hdm, _hdgot))
-        # Where main's skip ends the substitution at the same ')' (no unpaired quote in the body), main lexed
-        # the form as the clean lex does, and no floor applies: a message without an apostrophe that names
+            _hd_main_check("hd-floor-guard-" + _hdn, _hdc, _hdmain)
+        # Where main's skip ends the substitution at the same ')' (no unpaired quote or ')' in the body), main
+        # lexed the form as the clean lex does, and no floor applies: a message without an apostrophe that names
         # --no-verify allows in gate_weakening, as on main (a REGRESSION GUARD: it passes on the code before
         # this floor and fails where a floor applies to every body read).
         texpect("(hd-floor-same-reading) a body main reads to the same ')' takes no floor",
                 _decision(aiqt_hooks.gate_weakening, "git commit -m \"$(cat <<'EOF'\nDocument the --no-verify bypass\n"
                                                     "EOF\n)\""), "allow")
+        # Main's own reading of a body this lexer reads (MAIN'S DECISION AS A FLOOR): main's skip reads the body
+        # as text, so a ')' in it can close the substitution early and a quote in it can pair with one past
+        # it. Where main's reading then lexes, its segments are one more reading here; where it fails, main's
+        # failed-lex path is the floor, with its partial lex reading on past the body. Main's decisions were
+        # recorded by running main's module on each command, per guard in _hd_floor_guards order (A allow, N
+        # note, D deny), and each guard must decide exactly as main does; bash -n accepts every command.
+        # early-close-switch: main closes the substitution at the body's ')"' line and lexes, so branch_root
+        # reads the git switch -c segment bash would run if that line were code (bash 5.3.9 reads it as body
+        # text). The case rows put a 'case x in x) sh -c "...";; esac' line after a body holding an unpaired
+        # '"' (form E, an echo, and form F, a commit): main pairs that quote past the ')', closes its
+        # substitution at the case pattern's ')' and fails at the end, and its partial lex then reads on past
+        # the body into the -c string, so bash_absolute_paths and branch_root deny or note there (bash 5.3.9
+        # runs the -c string: it wrote out.txt for case-E-trunc in an empty scratch directory). The paren rows
+        # are harmless messages with a ')' in the body, which main reads to an earlier ')' and lexes: every
+        # guard allows there as on main (the code before this change denied them in gate_weakening,
+        # gate_weakening and git_explicit_binding, in row order). The close rows put a command on the body's
+        # ')"' line, which main reads as its own segment, one row each for diff_source_pretool,
+        # bash_absolute_paths, git_stash_ref, git_discard, gate_weakening, git_explicit_binding, commit_identity,
+        # commit_msg_subst and protected_line, in row order (protected_line denies the last one without main's
+        # reading too, through the commit text in the echo's word). heredoc-diff and heredoc-commit hold a
+        # top-level here-document naming git diff or git commit after the form with an apostrophe, where main's
+        # lex fails and its raw scans read that body: diff_source_pretool notes and commit_msg_subst and
+        # protected_line deny there, through their failed-lex floors. paren-heredoc-commit is the same with a
+        # body main reads to an earlier ')' and lexes, which excludes that here-document's body: protected_line
+        # and commit_msg_subst allow there as on main (both denied on the code before this change). The
+        # close-line rows hold the ')"' line in a quoted body, where main's lex fails and gate_weakening and
+        # commit_msg_subst deny through their fallback as main does (bash 5.3.9 reads that line as body text
+        # and runs nothing on it, an over-deny main had). On the code before this change 27 rows fail (measured
+        # by running this suite on its module): early-close-switch, the case rows, the paren rows, close-diff,
+        # close-trunc, close-stash, close-no-verify, close-identity, close-commit and paren-heredoc-commit. The
+        # other seven pass there and fail where the floor they test is removed (measured by running this suite
+        # on modules with main's reading, or its clean-lex or failed-lex half, removed for every guard or for one,
+        # and with each guard's own failed-lex code removed): close-publish and close-subst without main's
+        # segments, and heredoc-diff, heredoc-commit and the close-line rows without the failed-lex floor.
+        # close-reset records git_discard's decision, which no removal changes (git_discard needs no floor, its
+        # docstring says why): a REGRESSION GUARD.
+        _hdx_e = "echo \"$(cat <<'EOF'\nsay \"hi\nEOF\n)\""
+        _hdx_f = "git commit -m \"$(cat <<'EOF'\nsay \"hi\nEOF\n)\""
+        _hdx_close = "echo \"$(cat <<'EOF'\n)\"; {}; echo \"\nEOF\n)\""
+        _hdx_inners = (("trunc", "echo hi > out.txt; true"), ("cd-trunc", "\ncd foo; echo hi > out.txt; true"),
+                       ("checkout-b", "\ngit checkout -b feat; true"), ("switch-c", "\ngit switch -c feat; true"),
+                       ("worktree-b", "\ngit worktree add ../w -b feat; true"),
+                       ("cd-checkout-b", "\ncd foo; git checkout -b feat; true"),
+                       ("cd-commit", "\ncd foo; git commit -m y; true"),
+                       ("cd-add-push", "\ncd foo; git add -A; git push; true"))
+        _hdx_main = {"E": ("AAAADAAAAA", "AAAADAAAAA", "AAAAADDAAA", "AAAAADDAAA", "AAAAADAAAA", "AANANDDAAA",
+                           "AANANAAADD", "AANANAAAAA"),
+                     "F": ("AAAADAAADD", "AANADAAADD", "AAAAADDADD", "AAAAADDADD", "AAAAADAADD", "AANANDDADD",
+                           "AANANAAADD", "AANANAAADD")}
+        _hd_main_rows = [("early-close-switch", "git commit -m \"$(cat <<'EOF'\n)\"; git switch -c test origin/other; "
+                          "echo \"\nEOF\n)\"", "AAAAADDADD")]
+        for _hdxf, _hdxform in (("E", _hdx_e), ("F", _hdx_f)):
+            for (_hdxn, _hdxi), _hdxm in zip(_hdx_inners, _hdx_main[_hdxf]):
+                _hd_main_rows.append(("case-{}-{}".format(_hdxf, _hdxn),
+                                      _hdxform + "\ncase x in x) sh -c \"" + _hdxi + "\";; esac", _hdxm))
+        for _hdxn, _hdxb in (("paren-no-verify", "fix a) document --no-verify"),
+                             ("paren-short-n", "fix a) git commit -n is a route around"),
+                             ("paren-publish", "1) git add -A then git push")):
+            _hd_main_rows.append((_hdxn, "git commit -m \"$(cat <<'EOF'\n" + _hdxb + "\nEOF\n)\"", "AAAAAAAADD"))
+        for _hdxn, _hdxi, _hdxm in (("close-diff", "git diff", "ADAAAAAAAA"),
+                                    ("close-trunc", "echo hi > out.txt", "AAAADAAAAA"),
+                                    ("close-stash", "git stash pop", "AAAAAADNAA"),
+                                    ("close-reset", "git reset --hard", "AAAAAADAAA"),
+                                    ("close-no-verify", "git commit --no-verify -m y", "DAAAAAAAAD"),
+                                    ("close-publish", "git add -A && git push", "AADAAAAAAA"),
+                                    ("close-identity", "git commit --author=\"Claude <noreply@anthropic.com>\" -m y",
+                                     "AAADAAAAAD"),
+                                    ("close-subst", "git commit -m \"$(date)\"", "AAAAAAAADD"),
+                                    ("close-commit", "git commit -m y", "AAAAAAAAAD")):
+            _hd_main_rows.append((_hdxn, _hdx_close.format(_hdxi), _hdxm))
+        _hd_main_rows += [
+            ("heredoc-diff", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n)\"\ncat <<'X'\ngit diff\nX", "ANAAAAAAAA"),
+            ("heredoc-commit", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n)\"\ncat <<'X'\ngit commit -m y\nX", "AAAAAAAADD"),
+            ("paren-heredoc-commit", "echo \"$(cat <<'EOF'\n)\nEOF\n)\"\ncat <<'X'\ngit commit -m y\nX", "AAAAAAAAAA"),
+            ("close-line", "echo \"$(cat <<'EOF'\n)\"; " + _hd_nv + "\nEOF\n)\"", "DAAAAAAADD"),
+            ("close-line-apostrophe", "echo \"$(cat <<'EOF'\n# Don't\n)\"; " + _hd_nv + "\nEOF\n)\"", "DAAAAAAADD"),
+        ]
+        for _hdn, _hdc, _hdmain in _hd_main_rows:
+            _hd_main_check("hd-main-reading-" + _hdn, _hdc, _hdmain)
         # COST. The lexer's cost per lex is linear in the command's length (the comment above _nest_track), so
         # each guard below decides these inputs in well under its hook timeout: a 256 KiB line of blank-led '#'
         # inside a double-quoted substitution, where the substitution skip searched to the end of the line from
         # every '#', and a 128 KiB run of open parentheses and backquote substitutions, where the nesting stack
         # was searched or copied for every word, skip and backquote. Each must take under 1 s of CPU. Measured
-        # on one host, this code took at most 0.07 s on the first input and 0.16 s on the second (in
+        # on one host, this code took at most 0.074 s on the first input and 0.151 s on the second (in
         # bash_absolute_paths), a margin of about six times, and the code before the linear skip and the counted
         # nesting stack took 14.4 s, 30.4 s and 15.2 s on the first and 9.3 s and 18.4 s on the second in
         # gate_weakening, bash_absolute_paths and protected_line. protected_line took 0.09 s on the second
@@ -8770,19 +8865,22 @@ def _main_isolated(monitor):
         # rows fail on that code. The orch self-test checks the cost of the poll-loop classifier, the raw word
         # scan and the foreground detach scan on the same inputs. The retry rows put the commit message form
         # before each input, so each lex reads the body, meets a later substitution and starts again reading
-        # none (two passes); the floor row puts it before 128 Ki plain words, so the body read stands and each
-        # guard also takes its failed-lex path (MAIN'S DECISION AS A FLOOR). Measured on one host as the max of
-        # three runs per guard, this code took 0.514 s and, in an earlier run, 0.533 s (gate_weakening on
-        # retry-deep-nesting, a margin of about 1.9 times against the 1 s bound), at most 0.060 s on
-        # retry-long-comment-line and at most 0.175 s on floor-long-words. These rows are REGRESSION GUARDS for
-        # the two-pass bound and the floor's cost: the code before the floor took 0.537 s, 0.062 s and 0.187 s
-        # on them, so they pass there too.
+        # none (two passes); the floor row puts it before 128 Ki plain words, so the body read stands, main's
+        # reading (one more pass) fails, and each guard also takes its failed-lex path (MAIN'S DECISION AS A
+        # FLOOR); the main-reading row puts a body main reads to an earlier ')' before them, so main's reading
+        # lexes and each guard judges both readings' segments. Measured on one host as the max of three runs
+        # per guard, this code took at most 0.541 s (gate_weakening on retry-deep-nesting, a margin of about 1.8
+        # times against the 1 s bound), 0.062 s on retry-long-comment-line, 0.183 s on floor-long-words and
+        # 0.238 s on main-reading-long-words (bash_absolute_paths). These rows are REGRESSION GUARDS for the
+        # two-pass bound and the floor's cost: the code before main's reading took 0.557 s, 0.063 s, 0.182 s and
+        # 0.200 s on them, so they pass there too.
         _cost_form = "git commit -m \"$(cat <<'EOF'\n# Don't\nEOF\n)\"\n"
         _cost_inputs = (("long-comment-line", 'echo "$(echo ' + "# " * (128 * 1024) + '\n)"\ngit status'),
                         ("deep-nesting", "(" * 56000 + " `a`" * (56000 // 3)),
                         ("retry-long-comment-line", _cost_form + 'echo "$(echo ' + "# " * (128 * 1024) + '\n)"\ngit status'),
                         ("retry-deep-nesting", _cost_form + "(" * 56000 + " `a`" * (56000 // 3)),
-                        ("floor-long-words", _cost_form + "echo " + "a " * (128 * 1024)))
+                        ("floor-long-words", _cost_form + "echo " + "a " * (128 * 1024)),
+                        ("main-reading-long-words", "echo \"$(cat <<'EOF'\n)\nEOF\n)\"\necho " + "a " * (128 * 1024)))
         for _cost_name, _cost_cmd in _cost_inputs:
             for _cost_guard in (aiqt_hooks.gate_weakening, aiqt_hooks.bash_absolute_paths, aiqt_hooks.protected_line):
                 _cost_t0 = time.process_time()
