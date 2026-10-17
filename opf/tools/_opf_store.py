@@ -340,6 +340,79 @@ def homes_generation(manifest_data):
                  and version == HOMES2_SPEC_VERSION) else 1
 
 
+# The imported-series machine-store leaves (spec 8.2/4.2): a store that declares spec_version
+# IMPORTED_SPEC_VERSION or later keeps imported history beside the clean-series files, one leaf per
+# enabled type except legacy_fragment; worklog, a ledger, uses worklog.imported.toml instead of an
+# imported index. Inert until activation: the gate below requires this tooling's OWN support
+# (SUPPORTED_SPEC_VERSION, currently 1.2.0, at or above IMPORTED_SPEC_VERSION), never the declared
+# version alone, because C-MANIFEST ACCEPTS one newer declaration today, the reserved spec_version
+# 2.0.0 / homes = 2 pair (spec 4.2).
+IMPORTED_SPEC_VERSION = "1.3.0"        # the first base spec_version whose stores carry the imported series
+IMPORTED_INDEX_SUFFIX = ".imported.index.toml"
+IMPORTED_WORKLOG_NAME = "worklog.imported.toml"
+# The namespaces the imported series admits: the baseline and module-tier bindings, never the
+# importer-only legacy_fragment (LF), the reserved-excluded transaction (TX), or the unassigned CL
+# (spec 8.1/8.2). _opf_schema.IMPORTED_NAMESPACES is built from these SAME taxonomy maps (that module
+# imports this one, so the set is mirrored here rather than imported); the opf-check self-test
+# reconciles the two rosters so they cannot drift.
+_IMPORTED_SERIES_NAMESPACES = (frozenset(BASELINE_TYPES.values())
+                               | frozenset(ns for ns, _module in MODULE_TYPES.values()))
+
+
+def imported_series_supported():
+    """True when this tooling ITSELF supports the imported series: SUPPORTED_SPEC_VERSION at or
+    above IMPORTED_SPEC_VERSION, through the house SemVer parser. The ONE support comparison,
+    shared by the imported_series_declared gate below and by the opf-check activation predicate
+    imported_content_checks_landed, so the gate and that predicate cannot disagree about when
+    the series is supported."""
+    return _parse(SUPPORTED_SPEC_VERSION) >= _parse(IMPORTED_SPEC_VERSION)
+
+
+def imported_series_declared(manifest_data):
+    """True when the [opf] base table declares a spec_version of IMPORTED_SPEC_VERSION or later AND
+    this tooling itself supports that series (imported_series_supported: SUPPORTED_SPEC_VERSION
+    at or above IMPORTED_SPEC_VERSION), the activation gate the imported-series registrations
+    read (spec 8.2/4.2).
+    Graded through the house SemVer parser; an absent, non-string, or unparseable spec_version reads
+    False (manifest validation, not this helper, reports it). The tooling-support condition mirrors
+    homes_generation's gate on SUPPORTED_HOMES: validate_manifest does NOT fail every newer
+    declaration closed (it accepts the reserved HOMES2_SPEC_VERSION / homes = 2 pair, spec 4.2), so a
+    VALID store can declare 2.0.0 today, and reading the declaration alone would register the
+    imported leaves on it while every imported-content check is still deferred. Raising
+    SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION is the spec 1.3.0 activation; this helper
+    needs no edit then, but activation must also land the imported-content checks (C-IMPORTED-*):
+    the opf-check activation tripwire refuses to certify an active imported series while that
+    roster is empty, so raising the constant alone cannot ship."""
+    opf = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
+    version = opf.get("spec_version") if isinstance(opf, dict) else None
+    parsed = _parse(version) if isinstance(version, str) else None
+    return (parsed is not None and parsed >= _parse(IMPORTED_SPEC_VERSION)
+            and imported_series_supported())
+
+
+def imported_leaf_names(enabled_types):
+    """The imported-series managed-leaf FILENAMES for `enabled_types` (an iterable of enabled
+    section-8.1 type names, e.g. the C-ROSTER type -> namespace mapping): one
+    `<type>.imported.index.toml` per enabled non-ledger type, and worklog.imported.toml for the worklog
+    ledger, whose imported home is a worklog-shaped ledger file, not an index (spec 4.2; the first
+    imported-series release keeps these leaves inline in either layout). A type whose normative
+    namespace lies outside _IMPORTED_SERIES_NAMESPACES -- the importer-only legacy_fragment (LF) -- and
+    a name outside the section-8.1 roster contribute NO leaf (fail-closed), so the leaf roster derives
+    from the same namespace set as the imported id and counter grammar and the two cannot drift
+    (spec 8.2)."""
+    names = set()
+    for tname in enabled_types:
+        namespace = BASELINE_TYPES.get(tname)
+        if namespace is None and tname in MODULE_TYPES:
+            namespace = MODULE_TYPES[tname][0]
+        if namespace is None and tname in IMPORTER_TYPES:
+            namespace = IMPORTER_TYPES[tname]
+        if namespace not in _IMPORTED_SERIES_NAMESPACES:
+            continue
+        names.add(IMPORTED_WORKLOG_NAME if tname == "worklog" else tname + IMPORTED_INDEX_SUFFIX)
+    return frozenset(names)
+
+
 def store_control_roots(homes):
     """Store-relative control roots for a homes generation. A legacy store reserves only the
     imports staging tree; the homes-2 names are ordinary store paths there."""
@@ -3897,6 +3970,99 @@ def self_test():
                   and "stale" not in hs_seam.views)
         finally:
             os.close(hs_wfd)
+
+        # OPF-IMPORTED-SERIES IS-2: imported_leaf_names derives the imported machine-store leaf names
+        # from an enabled-type roster: one <type>.imported.index.toml per non-ledger type, the worklog
+        # ledger worklog.imported.toml, NO leaf for the importer-only legacy_fragment (its LF
+        # namespace is outside the imported series, spec 8.2), and NO leaf for a name outside the
+        # section-8.1 roster (fail-closed). The agreement with _opf_schema.IMPORTED_NAMESPACES is
+        # reconciled in the opf-check self-test, beside the containment vectors that consume this
+        # roster.
+        _il_base = imported_leaf_names(BASELINE_TYPES)
+        check("imported-leaf-names-baseline",
+              _il_base == frozenset({IMPORTED_WORKLOG_NAME}
+                                    | {t + IMPORTED_INDEX_SUFFIX
+                                       for t in BASELINE_TYPES if t != "worklog"}))
+        check("imported-leaf-names-lf-excluded",
+              imported_leaf_names(dict(BASELINE_TYPES, legacy_fragment="LF")) == _il_base
+              and imported_leaf_names(IMPORTER_TYPES) == frozenset())
+        check("imported-leaf-names-module-tier",
+              imported_leaf_names(("release",)) == frozenset({"release" + IMPORTED_INDEX_SUFFIX}))
+        check("imported-leaf-names-unknown-skipped",
+              imported_leaf_names(("nonsense", "transaction")) == frozenset())
+        # The activation threshold is PINNED: imported_series_declared compares both arms (the
+        # support arm through the shared imported_series_supported helper) against the
+        # IMPORTED_SPEC_VERSION constant, so this equality anchors every sampled point below
+        # (red when the constant itself drifts, e.g. to a multidigit 1.2.100 the interval
+        # samples alone would not see; a drift to the sampled 1.2.10 the matrix already reds).
+        check("imported-spec-version-pinned-130", IMPORTED_SPEC_VERSION == "1.3.0")
+        # imported_series_declared: the activation gate requires BOTH the declared spec_version
+        # (IMPORTED_SPEC_VERSION or later, through the house SemVer parser) AND this tooling's own
+        # support (SUPPORTED_SPEC_VERSION at or above IMPORTED_SPEC_VERSION, the way homes_generation
+        # gates on SUPPORTED_HOMES). A newer declaration ALONE answers False, including the reserved
+        # 2.0.0 / homes = 2 pair validate_manifest accepts today (spec 4.2): without the
+        # tooling-support condition that accepted store would register the imported leaves while
+        # every imported-content check is still deferred. The current 1.2.0, an older, a non-string,
+        # and an unparseable declaration answer False in every case (spec 8.2/4.2), INCLUDING while
+        # support is raised: once the tooling-support clause is satisfied, only the declared-version
+        # comparison keeps them out, so that arm is asserted on its False side under the patch (red
+        # when the comparison is removed, or when its threshold drifts down to a SAMPLED point:
+        # 1.2.0, 1.2.1, 1.2.9, or the multidigit 1.2.10 and 1.2.99 below. The samples establish
+        # those points only, never the whole open 1.2.x range; the threshold constant itself is
+        # pinned to 1.3.0 by its own check above).
+        check("imported-series-declared-false-until-tooling-supports",
+              not imported_series_declared({"opf": {"spec_version": "1.3.0"}})
+              and not imported_series_declared({"opf": {"spec_version": "2.0.0"}})
+              and not imported_series_declared(
+                  {"opf": {"spec_version": HOMES2_SPEC_VERSION, "homes": 2}}))
+        _isd_prev = SUPPORTED_SPEC_VERSION
+        try:
+            globals()["SUPPORTED_SPEC_VERSION"] = IMPORTED_SPEC_VERSION
+            check("imported-series-declared-130-and-later-once-supported",
+                  imported_series_declared({"opf": {"spec_version": "1.3.0"}})
+                  and imported_series_declared({"opf": {"spec_version": "2.0.0"}}))
+            check("imported-series-declared-below-130-false-even-once-supported",
+                  not imported_series_declared({"opf": {"spec_version": "1.2.0"}})
+                  and not imported_series_declared({"opf": {"spec_version": "1.2.1"}})
+                  and not imported_series_declared({"opf": {"spec_version": "1.2.9"}})
+                  and not imported_series_declared({"opf": {"spec_version": "1.0.0"}})
+                  and not imported_series_declared({"opf": {"spec_version": "one.three"}}))
+            # Multidigit patch declarations below the threshold: the house parser does not stop
+            # at single-digit patches, so 1.2.10 and 1.2.99 parse, sit below 1.3.0, and answer
+            # False under raised support. Sampled points only (red when the declared threshold
+            # drifts down to 1.2.99, or past it to the lower 1.2.10).
+            check("imported-series-declared-multidigit-patch-below-130-false",
+                  not imported_series_declared({"opf": {"spec_version": "1.2.10"}})
+                  and not imported_series_declared({"opf": {"spec_version": "1.2.99"}}))
+            # Support ABOVE the threshold activates too: the support comparison is at-or-above,
+            # not equality (red when its ">=" tightens to "==").
+            globals()["SUPPORTED_SPEC_VERSION"] = "1.3.1"
+            check("imported-series-declared-under-support-above-130",
+                  imported_series_declared({"opf": {"spec_version": "1.3.0"}})
+                  and imported_series_declared({"opf": {"spec_version": "1.3.1"}}))
+            # Support BELOW the threshold stays inactive whatever the declaration: the support
+            # arm also compares against IMPORTED_SPEC_VERSION, so the sampled support values
+            # 1.2.1 and the multidigit 1.2.10 both answer False even for 1.3.0 and 2.0.0
+            # declarations (red when the support threshold drifts down to the interior
+            # multidigit 1.2.10, or past it to the lower 1.2.1). Sampled support points only,
+            # the way the declared arm is sampled above.
+            globals()["SUPPORTED_SPEC_VERSION"] = "1.2.1"
+            _isd_sup_121 = (not imported_series_declared({"opf": {"spec_version": "1.3.0"}})
+                            and not imported_series_declared({"opf": {"spec_version": "2.0.0"}}))
+            globals()["SUPPORTED_SPEC_VERSION"] = "1.2.10"
+            check("imported-series-declared-false-under-support-below-130",
+                  _isd_sup_121
+                  and not imported_series_declared({"opf": {"spec_version": "1.3.0"}})
+                  and not imported_series_declared({"opf": {"spec_version": "2.0.0"}}))
+        finally:
+            globals()["SUPPORTED_SPEC_VERSION"] = _isd_prev
+        check("imported-series-declared-current-and-malformed-false",
+              not imported_series_declared({"opf": {"spec_version": SUPPORTED_SPEC_VERSION}})
+              and not imported_series_declared({"opf": {"spec_version": "1.0.0"}})
+              and not imported_series_declared({"opf": {"spec_version": "one.three"}})
+              and not imported_series_declared({"opf": {"spec_version": 2}})
+              and not imported_series_declared({"opf": {}})
+              and not imported_series_declared(None))
 
         # tomllib's RecursionError (a deeply-nested value, and a 1001-part key under the emulated cap) is a
         # StoreError naming both causes, so a long dotted key is never reported as nesting alone.
