@@ -11,16 +11,24 @@ import os
 from pathlib import Path
 
 
-def walk_files(root, skip_dirs=frozenset(), suffixes=None):
+def walk_files(root, skip_dirs=frozenset(), suffixes=None, symlink_dirs=None):
     """Yield files under root (Path objects), fail-closed. Directories whose name is in skip_dirs are
     pruned (not descended), and a FILE whose name is in skip_dirs is skipped too (a git worktree's `.git`
     is a file, not a dir). suffixes, if given, keeps only files with those extensions (e.g. {".md"}).
+    symlink_dirs, if given as a list, receives every directory SYMLINK the walk meets (os.walk never
+    follows one: followlinks stays False), so a caller can name the subtree behind such a link instead
+    of losing it silently; with the default None the behaviour is unchanged.
     Raises OSError if a directory that must be walked cannot be listed (caller converts to exit 2)."""
     def _raise(exc):
         raise exc
     root = Path(root)
     for dirpath, dirnames, filenames in os.walk(root, onerror=_raise):
         dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+        if symlink_dirs is not None:
+            for d in dirnames:
+                entry = Path(dirpath) / d
+                if entry.is_symlink():
+                    symlink_dirs.append(entry)
         for fn in filenames:
             # Also skip a FILE whose name is in skip_dirs: in a git worktree `.git` is a file (a pointer),
             # not a directory, and it is tool metadata that must not be scanned, exactly like the .git dir.
