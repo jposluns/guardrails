@@ -43,7 +43,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | A check fails closed on input it cannot read | `chkfcl` | None | Enforcement has not been built yet. |
 | Commit identity | `cmtidn` | Enforced | `hook:commit-identity`, class b |
 | Bind to the explicit target, not the ambient context | `expbnd` | Enforced | `hook:git-discard`, class b; `hook:git-explicit-binding`, class b; `hook:git-stash-ref`, class b; `hook:orch-dispatch-ledger`, class c |
-| Gate discipline | `gatdis` | Enforced | `gate:ci-parity`, class c; `hook:gate-weakening-guard`, class b |
+| Gate discipline | `gatdis` | Enforced | `gate:ci-parity`, class c; `gate:control-retirement`, class c; `hook:gate-weakening-guard`, class b |
 | A generated artefact is changed only through its source | `gensrc` | Enforced | `gate:adapters-drift`, class a; `gate:agents-drift`, class a; `gate:changelog-drift`, class a; `gate:char-policy-drift`, class a; `gate:claude-drift`, class a; `gate:crosswalk-schema-drift`, class a; `gate:cursor-drift`, class a; `gate:disclosure-drift`, class a; `gate:enforceability-drift`, class a; `gate:enforcement-register-drift`, class a; `gate:first-pin-demo-drift`, class a; `gate:gensrc-failclose`, class a; `gate:gensrc-registry-drift`, class a; `gate:hooks-drift`, class a; `gate:install-drift`, class a; `gate:manifest-gen-drift`, class a; `gate:mappings-page-drift`, class a; `gate:notice-drift`, class a; `gate:reference-roster-drift`, class a; `gate:renderers-drift`, class a; `gate:roadmap-drift`, class a; `gate:rules-drift`, class a; `gate:secret-patterns-drift`, class a; `gate:skill-drift`, class a; `gate:worker-pack-drift`, class a; `hook:gensrc-edit-guard`, class c |
 | Verify licence compatibility before introducing third-party material | `liccmp` | None | Enforcement has not been built yet. |
 | No concealed failure | `nocncl` | Enforced | `hook:orch-truncation-guard`, class b |
@@ -268,6 +268,20 @@ Technical limits (from the enforcement ledger):
 
 ```
 A byte-identity drift gate over the artefact tools/gen_claude.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.
+```
+
+### `gate:control-retirement`
+
+- Platform: `ci`
+- Default: `block`
+- Entry point: `tools/check_control_retirement.py`
+- Class: `c`
+- Channel: `repository gate`
+
+Technical limits (from the enforcement ledger):
+
+```
+Compares three control id sets between the comparison base and the head working tree: every [[gate]] id in the gates manifest, every [[hook]] id in the hooks manifest, and every expected check id of every registered self-test suite in tools/selftest_checks.toml. A control present at the base and absent at the head needs one row in tools/control_retirements.toml in the state covered (a successor live at the head, with evidence), unreachable (with evidence) or disclosed (with an authorization reference); a rename is one covered row. The record is append-only, and a row may not name a control live at the head. The base is the merge base of HEAD and origin/GITHUB_BASE_REF on a pull request, the event payload's before commit on a push, and the merge base of HEAD and the local main ref (or --base) locally; a shallow repository, an unresolvable or ambiguous base, or a missing or malformed input is cannot-evaluate (exit 2). It sees only those id sets: a control whose id survives while its assertion weakens or its input class narrows, a diagnostic no registered check pins, a reason whose wording changes while its meaning is lost, preview-channel hooks, unregistered self-test suites (the main hook suite among them) and gate steps outside the gates manifest are not checked. It compares two endpoints, so an id removed and restored inside the range is not seen. A row's evidence and authorization are checked for presence and form only; whether the evidence is true and whether the authorization was given is not checked. Locally the base follows the local main ref, which can be stale. Grafts are not inspected. Executable provenance is trusted.
 ```
 
 ### `gate:crosswalk-schema-drift`

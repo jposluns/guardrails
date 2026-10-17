@@ -1,0 +1,942 @@
+#!/usr/bin/env python3
+"""Control-retirement gate (control-retirement): a control removed between the comparison base and the head
+carries a recorded disposition.
+
+Removing or replacing a control is a set operation, so a removal is a reduction until its coverage is
+shown (rule gate-discipline, its second paragraph). This gate holds the part of that accounting the
+repository can read mechanically: three control id sets, each compared between the base commit and the
+head working tree.
+
+  gate:<id>                  every [[gate]] id in .aiqt/core/gates/manifest.toml
+  hook:<id>                  every [[hook]] id in .aiqt/core/hooks/manifest.toml
+  check:<suite>/<check id>   every expected check id of every [[suite]] in tools/selftest_checks.toml
+
+A control present at the base and absent at the head needs exactly one [[retirement]] row in
+tools/control_retirements.toml, in one of the rule's three states:
+
+  covered      successor names a control live at the head, and evidence names the case exercised against
+               it and observed to be caught; a rename is one covered row naming the new id
+  unreachable  evidence names the change that removes the capability and the observed attempt
+  disclosed    authorization names the maintainer's recorded authorization; evidence is optional
+
+The record is append-only: a row present at the base stays byte-for-byte equal at the head, unless its
+control is live at the head again, which every row forbids. A row may name only a control absent at the
+head; a row naming a control absent at both ends is history and stays.
+
+Base binding. On a pull request (GITHUB_EVENT_NAME=pull_request or GITHUB_BASE_REF set) the base is the
+unique merge base of HEAD and refs/remotes/origin/<GITHUB_BASE_REF>, and --base is refused. On a GitHub
+Actions push the base is the event payload's before commit (GITHUB_EVENT_PATH), and --base is refused; any
+other Actions event is refused. Locally the base is the unique merge base of HEAD and refs/heads/main, or
+the commit --base names. A shallow repository, an unresolvable or ambiguous base, a missing or malformed
+input at either end, or a missing head record cannot be evaluated (exit 2), never a pass. The base record
+may be absent (an empty record).
+
+Loaders: the registry rows are validated by the execution gate's own schema validator
+(check_selftest_execution._manifest_rows) at both ends, and gate and hook ids are held to the hooks
+generator's control-id grammar (gen_hooks.ID_RE). The full gate and hook loaders
+(gen_enforceability.load_gates_manifest, gen_hooks.load_manifest) are not reused: they read a filesystem
+path and the gate loader requires each script on disk, so neither can read a base snapshot, and a schema
+change landing in the same change would make a full base validation refuse. Their own gates validate the
+head.
+
+Residue. It sees only the three id sets: a control whose id survives while its assertion weakens, a
+diagnostic no registered check pins, a reason whose wording changes while its meaning is lost, a hook in
+the preview channel (.aiqt/core/hooks/preview.toml), every self-test suite that is not registered
+(the main hook suite among them) and every gate step that is not in the gates manifest are outside it. It
+compares two endpoints, so an id removed and restored inside the range is unseen. A row's evidence and
+authorization are checked for presence only; whether the evidence is true, and whether the authorization
+was given, is review's to establish. Locally the base follows the local main ref, which can be stale.
+Grafts and replace objects are not inspected beyond GIT_NO_REPLACE_OBJECTS.
+
+  check_control_retirement.py               check the repository
+  check_control_retirement.py --base REV    check against REV (local runs only)
+  check_control_retirement.py --self-test   assert the gate's vectors, and that each is discriminating
+  check_control_retirement.py [--self-test] --execution-report ABS_PATH
+                                            the self-test, also writing its execution report, finalized
+                                            at interpreter exit (tools/_selftest_exit_report.py)
+Exit: 0 every removed control has a valid disposition; 1 findings; 2 cannot evaluate.
+"""
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_control_retirement.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+import contextlib
+import importlib.util
+import io
+import json
+import os
+import re
+import stat
+import subprocess
+import tempfile
+import tomllib
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _selftest_exit_report  # noqa: E402  (the execution report, finalized at interpreter exit)
+import check_selftest_execution  # noqa: E402  (the authoritative registry schema)
+from _git_fixture_env import fixture_git_lifecycle, git_fixture_env  # noqa: E402  (self-test fixtures only)
+from gen_hooks import ID_RE  # noqa: E402  (the control-id grammar of gate and hook ids)
+
+ROOT = Path(__file__).resolve().parents[1]
+SUITE_ID = "control-retirement-selftest"
+GATES_REL = ".aiqt/core/gates/manifest.toml"
+HOOKS_REL = ".aiqt/core/hooks/manifest.toml"
+REGISTRY_REL = "tools/selftest_checks.toml"
+LEDGER_REL = "tools/control_retirements.toml"
+LOCAL_TARGET = "refs/heads/main"
+TIMEOUT = 60
+OID_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+BRANCH_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._/-]*")
+LEDGER_TOP_KEYS = {"format-version", "retirement"}
+ROW_KEYS = {"control", "state", "successor", "evidence", "authorization"}
+# Per state: (the fields a row must carry non-empty, the further fields it may carry).
+STATE_FIELDS = {
+    "covered": ({"successor", "evidence"}, set()),
+    "unreachable": ({"evidence"}, set()),
+    "disclosed": ({"authorization"}, {"evidence"}),
+}
+
+
+class CannotEvaluate(Exception):
+    """An input the gate cannot resolve, read or parse; the run exits 2."""
+
+
+def _git_env(environ):
+    """The caller's environment minus every GIT_-prefixed variable, so no repository-selecting variable
+    redirects a read, with replace objects, optional locks and prompts off."""
+    env = {key: value for key, value in environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_NO_REPLACE_OBJECTS="1", GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", LC_ALL="C")
+    return env
+
+
+def _finish(result, label):
+    if result.returncode != 0:
+        raise CannotEvaluate("{} exited {}: {}".format(
+            label, result.returncode, result.stderr.decode("utf-8", "replace").strip()))
+    return result.stdout
+
+
+def _rev_parse(root, env, *args):
+    try:
+        result = subprocess.run(["git", "-C", str(root), "rev-parse", *args],
+                                capture_output=True, env=env, timeout=TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CannotEvaluate("git rev-parse: {}".format(exc))
+    return _finish(result, "git rev-parse")
+
+
+def _merge_base(root, env, *args):
+    try:
+        result = subprocess.run(["git", "-C", str(root), "merge-base", *args],
+                                capture_output=True, env=env, timeout=TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CannotEvaluate("git merge-base: {}".format(exc))
+    return _finish(result, "git merge-base")
+
+
+def _ls_tree(root, env, *args):
+    try:
+        result = subprocess.run(["git", "-C", str(root), "ls-tree", *args],
+                                capture_output=True, env=env, timeout=TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CannotEvaluate("git ls-tree: {}".format(exc))
+    return _finish(result, "git ls-tree")
+
+
+def _cat_file(root, env, *args):
+    try:
+        result = subprocess.run(["git", "-C", str(root), "cat-file", *args],
+                                capture_output=True, env=env, timeout=TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CannotEvaluate("git cat-file: {}".format(exc))
+    return _finish(result, "git cat-file")
+
+
+def _commit(root, env, revision):
+    """The commit oid revision names, or CannotEvaluate."""
+    if not revision or revision.startswith("-"):
+        raise CannotEvaluate("revision {!r} is not a usable commit name".format(revision))
+    try:
+        raw = _rev_parse(root, env, "--verify", "--quiet", "--end-of-options", revision + "^{commit}")
+    except CannotEvaluate as exc:
+        raise CannotEvaluate("{} does not resolve to a commit ({})".format(revision, exc))
+    value = raw.decode("ascii", "replace").strip()
+    if not OID_RE.fullmatch(value) or raw.count(b"\n") != 1:
+        raise CannotEvaluate("{} does not resolve to one commit".format(revision))
+    return value
+
+
+def _merge_base_of(root, env, target):
+    """The unique merge base of HEAD and target, or CannotEvaluate."""
+    head, tip = _commit(root, env, "HEAD"), _commit(root, env, target)
+    bases = _merge_base(root, env, "--all", head, tip).decode("ascii", "replace").split()
+    if len(bases) != 1 or not OID_RE.fullmatch(bases[0]):
+        raise CannotEvaluate("expected exactly one merge base of HEAD and {} (found {})".format(
+            target, len(bases)))
+    return bases[0]
+
+
+def _push_before(environ):
+    """The before commit of the GitHub Actions push event payload, or CannotEvaluate."""
+    path = environ.get("GITHUB_EVENT_PATH", "")
+    if not path:
+        raise CannotEvaluate("push event without GITHUB_EVENT_PATH")
+    try:
+        with open(path, "rb") as handle:
+            payload = json.loads(handle.read().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise CannotEvaluate("push event payload unreadable ({})".format(type(exc).__name__))
+    before = payload.get("before") if isinstance(payload, dict) else None
+    if not isinstance(before, str) or not OID_RE.fullmatch(before) or not before.strip("0"):
+        raise CannotEvaluate("push event payload carries no usable before commit")
+    return before
+
+
+def resolve_base(root, base_arg, environ):
+    """(how the base was bound, the base commit oid); every unresolvable binding raises CannotEvaluate."""
+    env = _git_env(environ)
+    if _rev_parse(root, env, "--is-shallow-repository") != b"false\n":
+        raise CannotEvaluate("shallow or unrecognizable repository; the base history cannot be trusted")
+    event = environ.get("GITHUB_EVENT_NAME", "")
+    base_ref = environ.get("GITHUB_BASE_REF", "")
+    if event == "pull_request" or base_ref:
+        if base_arg is not None:
+            raise CannotEvaluate("a pull request derives its base from GITHUB_BASE_REF; --base is refused")
+        if not BRANCH_RE.fullmatch(base_ref) or ".." in base_ref or base_ref.endswith((".lock", "/")):
+            raise CannotEvaluate("pull request without a usable GITHUB_BASE_REF ({!r})".format(base_ref))
+        target = "refs/remotes/origin/" + base_ref
+        return "merge base of HEAD and " + target, _merge_base_of(root, env, target)
+    if environ.get("GITHUB_ACTIONS") == "true":
+        if event != "push":
+            raise CannotEvaluate("unsupported GitHub Actions event {!r}".format(event))
+        if base_arg is not None:
+            raise CannotEvaluate("a push derives its base from the event payload; --base is refused")
+        return "push before commit", _commit(root, env, _push_before(environ))
+    if base_arg is not None:
+        return "--base " + base_arg, _commit(root, env, base_arg)
+    return "merge base of HEAD and " + LOCAL_TARGET, _merge_base_of(root, env, LOCAL_TARGET)
+
+
+def _base_reader(root, env, base):
+    """read(rel) for the base commit: the blob bytes, or None when the path is absent there."""
+    def read(rel):
+        listing = _ls_tree(root, env, "-z", base, "--", rel)
+        if not listing:
+            return None
+        entry = listing.split(b"\0")[0]
+        meta, _tab, path = entry.partition(b"\t")
+        fields = meta.split(b" ")
+        if (path != rel.encode("utf-8") or len(fields) != 3 or fields[1] != b"blob"
+                or fields[0] not in (b"100644", b"100755")):
+            raise CannotEvaluate("base {}: not a regular file in the base tree".format(rel))
+        return _cat_file(root, env, "blob", fields[2].decode("ascii"))
+    return read
+
+
+def _head_reader(root):
+    """read(rel) for the head working tree: the file bytes, or None when the path is absent."""
+    def read(rel):
+        path = Path(root) / rel
+        try:
+            mode = os.lstat(path).st_mode
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise CannotEvaluate("head {}: unreadable ({})".format(rel, type(exc).__name__))
+        if not stat.S_ISREG(mode):
+            raise CannotEvaluate("head {}: not a regular file".format(rel))
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            raise CannotEvaluate("head {}: unreadable ({})".format(rel, type(exc).__name__))
+    return read
+
+
+def _parse_toml(data, label):
+    try:
+        return tomllib.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("{}: malformed ({})".format(label, type(exc).__name__))
+
+
+def _required(read, where, rel):
+    data = read(rel)
+    if data is None:
+        raise CannotEvaluate("{} {}: missing".format(where, rel))
+    return _parse_toml(data, "{} {}".format(where, rel))
+
+
+def control_ids(data, table, kind, label):
+    """The control keys kind:<id> of every [[table]] row; a row without a control id cannot be evaluated."""
+    rows = data.get(table)
+    if not isinstance(rows, list) or not rows:
+        raise CannotEvaluate("{}: [[{}]] must be a non-empty array of tables".format(label, table))
+    keys = set()
+    for number, row in enumerate(rows, 1):
+        cid = row.get("id") if isinstance(row, dict) else None
+        if not isinstance(cid, str) or not ID_RE.fullmatch(cid):
+            raise CannotEvaluate("{}: [[{}]] #{} has no kebab-case id".format(label, table, number))
+        key = "{}:{}".format(kind, cid)
+        if key in keys:
+            raise CannotEvaluate("{}: duplicate {} id {!r}".format(label, table, cid))
+        keys.add(key)
+    return keys
+
+
+def check_keys(data, label):
+    """The control keys check:<suite>/<check id> of the registry, after the execution gate's schema."""
+    violation = io.StringIO()
+    with contextlib.redirect_stderr(violation):
+        rows = check_selftest_execution._manifest_rows(data, label)
+    if rows is None:
+        raise CannotEvaluate("{}: schema-invalid ({})".format(label, " ".join(violation.getvalue().split())))
+    return {"check:{}/{}".format(row["id"], cid) for row in rows for cid in row["expected-check-ids"]}
+
+
+def live_controls(read, where):
+    """Every control key live in one snapshot."""
+    live = set()
+    live |= control_ids(_required(read, where, GATES_REL), "gate", "gate", where + " " + GATES_REL)
+    live |= control_ids(_required(read, where, HOOKS_REL), "hook", "hook", where + " " + HOOKS_REL)
+    live |= check_keys(_required(read, where, REGISTRY_REL), where + " " + REGISTRY_REL)
+    return live
+
+
+def load_ledger(data, label):
+    """The [[retirement]] rows of one record; an absent record (data None) is empty."""
+    if data is None:
+        return []
+    parsed = _parse_toml(data, label)
+    if not {"format-version"} <= set(parsed) <= LEDGER_TOP_KEYS:
+        raise CannotEvaluate("{}: top-level keys must be format-version and optionally [[retirement]]"
+                             .format(label))
+    if type(parsed["format-version"]) is not int or parsed["format-version"] != 1:
+        raise CannotEvaluate("{}: format-version must be exactly the integer 1".format(label))
+    rows = parsed.get("retirement", [])
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise CannotEvaluate("{}: [[retirement]] must be an array of tables".format(label))
+    return rows
+
+
+def removed_controls(base_live, head_live):
+    return base_live - head_live
+
+
+def _text(value):
+    return isinstance(value, str) and bool(value.strip()) and not check_selftest_execution._has_ctrl(value)
+
+
+def control_key_ok(key):
+    """True for gate:<id>, hook:<id> or check:<suite>/<check id> in the grammars the registries use."""
+    kind, sep, rest = key.partition(":")
+    if kind in ("gate", "hook"):
+        return bool(sep) and bool(ID_RE.fullmatch(rest))
+    if kind == "check":
+        suite, slash, cid = rest.partition("/")
+        return (bool(sep) and bool(check_selftest_execution.SUITE_ID_RE.fullmatch(suite)) and bool(slash)
+                and _text(cid) and cid == cid.strip())
+    return False
+
+
+def row_findings(number, row, head_live):
+    """The findings of one head [[retirement]] row."""
+    where = "{} row {}".format(LEDGER_REL, number)
+    control = row.get("control")
+    if not isinstance(control, str) or not control_key_ok(control):
+        return [where + ": control must be gate:<id>, hook:<id> or check:<suite>/<check id>"]
+    where = "{} ({})".format(where, control)
+    findings = []
+    unknown = sorted(set(row) - ROW_KEYS)
+    if unknown:
+        findings.append("{}: unknown field(s) {}".format(where, ", ".join(unknown)))
+    if control in head_live:
+        findings.append("{}: names a control still live at head; a disposition is for a removed control"
+                        .format(where))
+    state = row.get("state")
+    if state not in STATE_FIELDS:
+        findings.append("{}: state must be covered, unreachable or disclosed".format(where))
+        return findings
+    required, optional = STATE_FIELDS[state]
+    for key in sorted(required):
+        if not _text(row.get(key)):
+            findings.append("{}: a row in state {} needs a non-empty {}".format(where, state, key))
+    for key in sorted((set(row) & ROW_KEYS) - {"control", "state"} - required - optional):
+        findings.append("{}: {} does not belong on a {} row".format(where, key, state))
+    # The row's own control is absent at head (else the live-row finding above), so a successor live at head
+    # is never the control itself.
+    successor = row.get("successor")
+    if state == "covered" and _text(successor):
+        if successor not in head_live:
+            findings.append("{}: successor {} is not a control live at head".format(where, successor))
+    return findings
+
+
+def evaluate(base_read, head_read):
+    """(count of removed controls, findings); raises CannotEvaluate naming the input it could not use."""
+    base_live = live_controls(base_read, "base")
+    head_live = live_controls(head_read, "head")
+    base_rows = load_ledger(base_read(LEDGER_REL), "base " + LEDGER_REL)
+    head_data = head_read(LEDGER_REL)
+    if head_data is None:
+        raise CannotEvaluate("head {}: missing".format(LEDGER_REL))
+    head_rows = load_ledger(head_data, "head " + LEDGER_REL)
+    removed = removed_controls(base_live, head_live)
+    findings, rows_by_control = [], {}
+    for number, row in enumerate(head_rows, 1):
+        findings.extend(row_findings(number, row, head_live))
+        control = row.get("control")
+        if isinstance(control, str):
+            if control in rows_by_control:
+                findings.append("{} row {} ({}): duplicates row {}".format(
+                    LEDGER_REL, number, control, rows_by_control[control]))
+            rows_by_control.setdefault(control, number)
+    for control in sorted(removed):
+        if control not in rows_by_control:
+            findings.append("{}: present at base, absent at head, and no row in {} records its disposition"
+                            .format(control, LEDGER_REL))
+    for number, row in enumerate(base_rows, 1):
+        if row not in head_rows and row.get("control") not in head_live:
+            findings.append("{} base row {} ({}): edited or removed; recorded dispositions are append-only"
+                            .format(LEDGER_REL, number, row.get("control")))
+    return len(removed), findings
+
+
+def run(root, base_arg=None, environ=None):
+    environ = os.environ if environ is None else environ
+    try:
+        how, base = resolve_base(root, base_arg, environ)
+        count, findings = evaluate(_base_reader(root, _git_env(environ), base), _head_reader(root))
+    except CannotEvaluate as exc:
+        print("error: cannot evaluate control retirement ({}); fail-closed".format(exc), file=sys.stderr)
+        return 2
+    if findings:
+        print("FAIL: control-retirement: {} finding(s) against base {} ({})".format(len(findings), base, how))
+        for finding in findings:
+            print("  " + finding)
+        return 1
+    print("PASS: control-retirement: {} control(s) removed against base {} ({}), each with a recorded "
+          "disposition".format(count, base, how))
+    return 0
+
+
+# ---------------------------------------------------------------------------------------------- self-test
+
+BASE_GATES = ("ci-parity", "entry-guard")
+BASE_HOOKS = ("gate-weakening-guard", "stop-guard")
+BASE_SUITES = (("orch-behaviour-selftest", ("trunc/head-denies", "trunc/head-allows")),
+               ("entry-guard-selftest", ("live/real-tree-passes", "live/direct-launch-passes")))
+DROPPED = "check:orch-behaviour-selftest/trunc/head-denies"
+SUCCESSOR = "check:orch-behaviour-selftest/trunc/head-refuses"
+EVIDENCE = "case trunc/head-refuses exercised against the successor and observed to deny"
+LEDGER_HEADER = "format-version = 1\n"
+
+
+def _gates_text(ids):
+    return "".join('[[gate]]\nid = "{}"\nscript = "tools/x.py"\n\n'.format(cid) for cid in ids)
+
+
+def _hooks_text(ids):
+    return '[plugin]\nname = "fixture"\n\n' + "".join(
+        '[[hook]]\nid = "{}"\nhandler = "h_{}"\n\n'.format(cid, number) for number, cid in enumerate(ids, 1))
+
+
+def _registry_text(suites):
+    rows = "".join('\n[[suite]]\nid = "{}"\nrunner = "tools/{}.py"\nexpected-check-ids = [{}]\n'.format(
+        sid, sid.replace("-", "_"), ", ".join(json.dumps(cid) for cid in ids)) for sid, ids in suites)
+    return "format-version = 1\n" + rows
+
+
+def _ledger_text(rows):
+    return LEDGER_HEADER + "".join("\n[[retirement]]\n" + "".join(
+        "{} = {}\n".format(key, json.dumps(value)) for key, value in row.items()) for row in rows)
+
+
+def _without(suites, suite_id, cid=None, add=None):
+    """suites with one check id (or, when cid is None, the whole suite) removed, and an id optionally added."""
+    kept = []
+    for sid, ids in suites:
+        if sid == suite_id and cid is None:
+            continue
+        if sid == suite_id:
+            ids = tuple(i for i in ids if i != cid) + ((add,) if add else ())
+        kept.append((sid, ids))
+    return tuple(kept)
+
+
+def _fixture_commit(root):
+    # This broad staging is confined to a newly created fixture repository.
+    subprocess.run(["git", "-C", str(root), "add", "--all", "--", "."],
+                   check=True, capture_output=True, timeout=TIMEOUT, env=git_fixture_env())
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=Selftest", "-c", "user.email=selftest@example.invalid",
+                    "-c", "commit.gpgsign=false", "commit", "-q", "-m", "fixture"],
+                   check=True, capture_output=True, timeout=TIMEOUT, env=git_fixture_env())
+
+
+def _write(root, files):
+    for rel, text in files.items():
+        path = Path(root) / rel
+        if text is None:
+            path.unlink(missing_ok=True)
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
+def _snapshot(gates=BASE_GATES, hooks=BASE_HOOKS, suites=BASE_SUITES, ledger=()):
+    return {GATES_REL: _gates_text(gates), HOOKS_REL: _hooks_text(hooks), REGISTRY_REL: _registry_text(suites),
+            LEDGER_REL: None if ledger is None else _ledger_text(ledger)}
+
+
+def _repo(base_dir, name, base, head, branch="main"):
+    """A fixture repository: base committed on branch, head written over the working tree."""
+    root = Path(base_dir) / name
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", branch, str(root)], check=True, capture_output=True,
+                   timeout=TIMEOUT, env=git_fixture_env())
+    _write(root, base)
+    _fixture_commit(root)
+    _write(root, head)
+    return root
+
+
+def _covered(control=DROPPED, successor=SUCCESSOR):
+    return dict(control=control, state="covered", successor=successor, evidence=EVIDENCE)
+
+
+def _fixtures(base_dir):
+    """[(vector, root, environ, base_arg, expected exit, expected output fragments)]."""
+    vectors = []
+    environ = {key: value for key, value in os.environ.items() if not key.startswith("GITHUB_")}
+
+    def add(vector, base, head, code, texts, env=None, base_arg=None, branch="main", prepare=None):
+        # A preparer adjusts the fixture and the run environment; it may return a replacement root.
+        root = _repo(base_dir, vector.replace("/", "-"), base, head, branch)
+        run_env = dict(environ, **(env or {}))
+        if prepare is not None:
+            root = prepare(root, run_env) or root
+        vectors.append((vector, root, run_env, base_arg, code, texts))
+
+    base = _snapshot()
+    dropped = _without(BASE_SUITES, "orch-behaviour-selftest", "trunc/head-denies")
+    renamed = _without(BASE_SUITES, "orch-behaviour-selftest", "trunc/head-denies", "trunc/head-refuses")
+    add("same/base-equals-head", base, _snapshot(), 0, ("0 control(s) removed",))
+    add("drop/check-no-row", base, _snapshot(suites=dropped), 1, (DROPPED + ": present at base",))
+    add("drop/check-covered", base, _snapshot(suites=renamed, ledger=[_covered()]), 0, ("1 control(s) removed",))
+    add("covered/successor-absent", base, _snapshot(suites=dropped, ledger=[_covered()]), 1,
+        ("successor " + SUCCESSOR + " is not a control live at head",))
+    add("covered/successor-is-self", base, _snapshot(suites=dropped, ledger=[_covered(successor=DROPPED)]), 1,
+        ("successor " + DROPPED + " is not a control live at head",))
+    add("covered/no-evidence", base, _snapshot(suites=renamed, ledger=[
+        dict(control=DROPPED, state="covered", successor=SUCCESSOR)]), 1, ("a row in state covered needs a non-empty evidence",))
+    add("disclosed/no-authorization", base, _snapshot(suites=dropped, ledger=[
+        dict(control=DROPPED, state="disclosed", evidence="no successor pins this diagnostic")]), 1,
+        ("a row in state disclosed needs a non-empty authorization",))
+    add("disclosed/blank-authorization", base, _snapshot(suites=dropped, ledger=[
+        dict(control=DROPPED, state="disclosed", authorization="  ")]), 1,
+        ("a row in state disclosed needs a non-empty authorization",))
+    add("disclosed/authorized", base, _snapshot(suites=dropped, ledger=[
+        dict(control=DROPPED, state="disclosed", authorization="maintainer authorization recorded in the change")]),
+        0, ("1 control(s) removed",))
+    add("unreachable/no-evidence", base, _snapshot(suites=dropped, ledger=[
+        dict(control=DROPPED, state="unreachable")]), 1, ("a row in state unreachable needs a non-empty evidence",))
+    add("unreachable/with-evidence", base, _snapshot(suites=dropped, ledger=[
+        dict(control=DROPPED, state="unreachable", evidence="the change removes the path; an attempt was refused")]),
+        0, ("1 control(s) removed",))
+    add("drop/hook-no-row", base, _snapshot(hooks=("gate-weakening-guard",)), 1,
+        ("hook:stop-guard: present at base",))
+    add("drop/gate-no-row", base, _snapshot(gates=("ci-parity",)), 1, ("gate:entry-guard: present at base",))
+    add("drop/suite-no-row", base, _snapshot(suites=_without(BASE_SUITES, "entry-guard-selftest")), 1,
+        ("check:entry-guard-selftest/live/real-tree-passes: present at base",
+         "check:entry-guard-selftest/live/direct-launch-passes: present at base", "2 finding(s)"))
+    add("rename/no-row", base, _snapshot(suites=renamed), 1, (DROPPED + ": present at base",))
+    add("row/names-live", base, _snapshot(ledger=[
+        dict(control="gate:ci-parity", state="disclosed", authorization="recorded")]), 1,
+        ("(gate:ci-parity): names a control still live at head",))
+    add("row/duplicate", base, _snapshot(suites=renamed, ledger=[_covered(), _covered()]), 1,
+        ("row 2 (" + DROPPED + "): duplicates row 1",))
+    add("row/unknown-state", base, _snapshot(suites=dropped, ledger=[dict(control=DROPPED, state="retired")]), 1,
+        ("state must be covered, unreachable or disclosed",))
+    add("row/foreign-field", base, _snapshot(suites=renamed, ledger=[dict(_covered(), authorization="x")]), 1,
+        ("authorization does not belong on a covered row",))
+    add("row/unknown-field", base, _snapshot(suites=renamed, ledger=[dict(_covered(), reviewer="x")]), 1,
+        ("unknown field(s) reviewer",))
+    add("row/bad-control", base, _snapshot(suites=dropped, ledger=[
+        dict(control="orch-behaviour-selftest/trunc/head-denies", state="disclosed", authorization="x")]), 1,
+        ("row 1: control must be gate:<id>, hook:<id> or check:<suite>/<check id>", DROPPED + ": present at base"))
+    history = dict(control="gate:retired-gate", state="disclosed", authorization="recorded earlier")
+    add("ledger/history-kept", _snapshot(ledger=[history]), _snapshot(ledger=[history]), 0,
+        ("0 control(s) removed",))
+    add("ledger/append-edit", _snapshot(ledger=[history]), _snapshot(ledger=[dict(history, authorization="other")]),
+        1, ("base row 1 (gate:retired-gate): edited or removed",))
+    add("ledger/append-delete", _snapshot(ledger=[history]), _snapshot(), 1,
+        ("base row 1 (gate:retired-gate): edited or removed",))
+    add("ledger/readopted-row-deleted", _snapshot(gates=BASE_GATES, ledger=[history]),
+        _snapshot(gates=BASE_GATES + ("retired-gate",)), 0, ("0 control(s) removed",))
+    two = _without(_without(BASE_SUITES, "orch-behaviour-selftest", "trunc/head-denies", "trunc/head-refuses"),
+                   "entry-guard-selftest", "live/direct-launch-passes")
+    second = dict(control="check:entry-guard-selftest/live/direct-launch-passes", state="unreachable",
+                  evidence="the launch leg is removed with its runner; a launch attempt was refused")
+    add("boundary/exact-rows", base, _snapshot(suites=two, ledger=[_covered(), second]), 0,
+        ("2 control(s) removed",))
+    add("boundary/one-short", base, _snapshot(suites=two, ledger=[_covered()]), 1,
+        ("check:entry-guard-selftest/live/direct-launch-passes: present at base", "1 finding(s)"))
+    add("boundary/extra-live-row", base, _snapshot(suites=two, ledger=[_covered(), second, dict(
+        control="hook:stop-guard", state="disclosed", authorization="recorded")]), 1,
+        ("(hook:stop-guard): names a control still live at head", "1 finding(s)"))
+    # base binding and inputs that cannot be evaluated
+    add("base/missing-main", base, _snapshot(suites=dropped), 2, ("refs/heads/main",), branch="trunk")
+    add("base/unparseable-registry", dict(base, **{REGISTRY_REL: "[[suite]\n"}), _snapshot(), 2,
+        ("base tools/selftest_checks.toml: malformed",))
+    add("base/schema-invalid-registry", dict(base, **{REGISTRY_REL: "format-version = 2\n"}), _snapshot(), 2,
+        ("base tools/selftest_checks.toml: schema-invalid",))
+    add("base/gate-without-id", dict(base, **{GATES_REL: '[[gate]]\nscript = "tools/x.py"\n'}), _snapshot(), 2,
+        ("base .aiqt/core/gates/manifest.toml: [[gate]] #1 has no kebab-case id",))
+    add("base/hooks-missing", dict(base, **{HOOKS_REL: None}), _snapshot(), 2,
+        ("base .aiqt/core/hooks/manifest.toml: missing",))
+    add("head/ledger-missing", base, _snapshot(ledger=None), 2, ("head tools/control_retirements.toml: missing",))
+    add("head/ledger-malformed", base, dict(_snapshot(), **{LEDGER_REL: "format-version = 1\n[[retirement]\n"}), 2,
+        ("head tools/control_retirements.toml: malformed",))
+    add("head/ledger-format-version", base, dict(_snapshot(), **{LEDGER_REL: "format-version = 2\n"}), 2,
+        ("format-version must be exactly the integer 1",))
+    add("head/duplicate-hook-id", base, dict(_snapshot(), **{HOOKS_REL: _hooks_text(("stop-guard", "stop-guard"))}),
+        2, ("duplicate hook id 'stop-guard'",))
+    add("local/base-arg", base, _snapshot(suites=dropped), 1, (DROPPED + ": present at base", "--base HEAD"),
+        base_arg="HEAD", branch="trunk")
+    add("local/base-arg-option", base, _snapshot(), 2, ("is not a usable commit name",), base_arg="--all")
+
+    def shallow(root, run_env):
+        # Two commits, then a depth-1 clone over file://, which git marks shallow; the clone replaces the root.
+        _write(root, {"later.txt": "later\n"})
+        _fixture_commit(root)
+        clone = root.with_name(root.name + "-clone")
+        subprocess.run(["git", "clone", "-q", "--depth", "1", "file://" + str(root), str(clone)],
+                       check=True, capture_output=True, timeout=TIMEOUT, env=git_fixture_env())
+        return clone
+
+    add("base/shallow", base, {}, 2, ("shallow",), prepare=shallow)
+
+    def origin_main(root, run_env):
+        # The pull request target is the base commit under origin/main; no local main remains.
+        subprocess.run(["git", "-C", str(root), "update-ref", "refs/remotes/origin/main", "HEAD"],
+                       check=True, capture_output=True, timeout=TIMEOUT, env=git_fixture_env())
+        subprocess.run(["git", "-C", str(root), "branch", "-q", "-m", "main", "feature"],
+                       check=True, capture_output=True, timeout=TIMEOUT, env=git_fixture_env())
+
+    pr = dict(GITHUB_ACTIONS="true", GITHUB_EVENT_NAME="pull_request", GITHUB_BASE_REF="main")
+    add("ci/pr-drop-no-row", base, _snapshot(suites=dropped), 1,
+        (DROPPED + ": present at base", "merge base of HEAD and refs/remotes/origin/main"), env=pr,
+        prepare=origin_main)
+    add("ci/pr-base-arg-refused", base, _snapshot(), 2, ("--base is refused",), env=pr, base_arg="HEAD",
+        prepare=origin_main)
+    add("ci/pr-no-base-ref", base, _snapshot(), 2, ("without a usable GITHUB_BASE_REF",),
+        env=dict(pr, GITHUB_BASE_REF=""))
+    add("ci/pr-base-ref-unresolved", base, _snapshot(), 2, ("refs/remotes/origin/main",), env=pr)
+
+    def payload(before):
+        def prepare(root, run_env):
+            oid = _commit(root, _git_env(run_env), "HEAD") if before is None else before
+            path = Path(base_dir) / (root.name + "-event.json")
+            path.write_text(json.dumps({"before": oid}), encoding="utf-8")
+            run_env["GITHUB_EVENT_PATH"] = str(path)
+        return prepare
+
+    push = dict(GITHUB_ACTIONS="true", GITHUB_EVENT_NAME="push")
+    add("ci/push-drop-no-row", base, _snapshot(suites=dropped), 1, (DROPPED + ": present at base",
+                                                                    "push before commit"),
+        env=push, prepare=payload(None))
+    add("ci/push-zero-before", base, _snapshot(), 2, ("no usable before commit",), env=push,
+        prepare=payload("0" * 40))
+    add("ci/push-no-payload", base, _snapshot(), 2, ("without GITHUB_EVENT_PATH",), env=push)
+    add("ci/push-base-arg-refused", base, _snapshot(), 2, ("--base is refused",), env=push, base_arg="HEAD",
+        prepare=payload(None))
+    add("ci/unsupported-event", base, _snapshot(), 2, ("unsupported GitHub Actions event 'workflow_dispatch'",),
+        env=dict(push, GITHUB_EVENT_NAME="workflow_dispatch"))
+    return vectors
+
+
+def _gate(module, vector):
+    """Run one vector against module (this gate or a mutant): (exit code or "crashed (...)", output)."""
+    _name, root, environ, base_arg, _code, _texts = vector
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = module.run(root, base_arg, environ)
+    except Exception as exc:
+        code = "crashed ({})".format(type(exc).__name__)
+    return code, out.getvalue()
+
+
+def _run_vectors(module, vectors):
+    """{vector: (ok, detail)} for every vector against module."""
+    results = {}
+    for vector in vectors:
+        code, output = _gate(module, vector)
+        results[vector[0]] = (code == vector[4] and all(text in output for text in vector[5]), (code, output))
+    return results
+
+
+@contextlib.contextmanager
+def _patched(owner, name, replacement):
+    original = getattr(owner, name)
+    setattr(owner, name, replacement)
+    try:
+        yield
+    finally:
+        setattr(owner, name, original)
+
+
+# Each mutant reverts one check (or one fail-closed path) in the gate half of this file's source: (mutant id,
+# the exact source text, its replacement, the vector that must then fail). The self-test loads every mutant
+# as a scratch module and requires its named vector to fail, and every vector that expects a nonzero exit to
+# fail under at least one mutant, so each finding and refusal is shown red on revert.
+MUTANTS = (
+    ("removal-leg", "        if control not in rows_by_control:\n", "        if False:\n", "drop/check-no-row"),
+    ("gate-set", '    live |= control_ids(_required(read, where, GATES_REL), "gate", "gate", where + " " + GATES_REL)\n',
+     "", "drop/gate-no-row"),
+    ("hook-set", '    live |= control_ids(_required(read, where, HOOKS_REL), "hook", "hook", where + " " + HOOKS_REL)\n',
+     "", "drop/hook-no-row"),
+    ("check-set", '    live |= check_keys(_required(read, where, REGISTRY_REL), where + " " + REGISTRY_REL)\n', "",
+     "drop/suite-no-row"),
+    ("successor-live", "        if successor not in head_live:\n", "        if False:\n", "covered/successor-absent"),
+    ("required-field", "        if not _text(row.get(key)):\n", "        if row.get(key) is None:\n",
+     "disclosed/blank-authorization"),
+    ("required-present", "        if not _text(row.get(key)):\n", "        if False:\n",
+     "disclosed/no-authorization"),
+    ("live-row", "    if control in head_live:\n", "    if False:\n", "row/names-live"),
+    ("duplicate-row", "            if control in rows_by_control:\n", "            if False:\n", "row/duplicate"),
+    ("state-vocabulary", "    if state not in STATE_FIELDS:\n        findings", "    if state is None:\n        findings",
+     "row/unknown-state"),
+    ("foreign-field", '    for key in sorted((set(row) & ROW_KEYS) - {"control", "state"} - required - optional):\n',
+     "    for key in ():\n", "row/foreign-field"),
+    ("unknown-field", "    if unknown:\n", "    if False:\n", "row/unknown-field"),
+    ("control-grammar", "    if not isinstance(control, str) or not control_key_ok(control):\n",
+     "    if not isinstance(control, str):\n", "row/bad-control"),
+    ("append-only", "        if row not in head_rows and row.get(\"control\") not in head_live:\n",
+     "        if False:\n", "ledger/append-edit"),
+    ("local-target", 'LOCAL_TARGET = "refs/heads/main"', 'LOCAL_TARGET = "HEAD"', "base/missing-main"),
+    ("toml-parse", "    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:\n"
+     "        raise CannotEvaluate(\"{}: malformed ({})\".format(label, type(exc).__name__))\n",
+     "    except ZeroDivisionError as exc:\n        raise CannotEvaluate(str(exc))\n", "base/unparseable-registry"),
+    ("registry-schema", "    if rows is None:\n        raise CannotEvaluate(\"{}: schema-invalid",
+     "    if rows is None:\n        return set()\n        raise CannotEvaluate(\"{}: schema-invalid",
+     "base/schema-invalid-registry"),
+    ("control-id", "        if not isinstance(cid, str) or not ID_RE.fullmatch(cid):\n", "        if False:\n",
+     "base/gate-without-id"),
+    ("input-required", "    if data is None:\n        raise CannotEvaluate(\"{} {}: missing\".format(where, rel))\n",
+     "    if data is None:\n        data = b\"\"\n", "base/hooks-missing"),
+    ("head-ledger-required", "    if head_data is None:\n        raise", "    if head_data is None and False:\n        raise",
+     "head/ledger-missing"),
+    ("ledger-version", "    if type(parsed[\"format-version\"]) is not int or parsed[\"format-version\"] != 1:\n",
+     "    if False:\n", "head/ledger-format-version"),
+    ("duplicate-id", "        if key in keys:\n", "        if False:\n", "head/duplicate-hook-id"),
+    ("option-revision", 'if not revision or revision.startswith("-"):', "if not revision:",
+     "local/base-arg-option"),
+    ("shallow-refused", '    if _rev_parse(root, env, "--is-shallow-repository") != b"false\\n":\n',
+     "    if False:\n", "base/shallow"),
+    ("pr-base-arg", "            raise CannotEvaluate(\"a pull request derives its base from GITHUB_BASE_REF; --base is refused\")\n",
+     "            pass\n", "ci/pr-base-arg-refused"),
+    ("pr-base-ref", '        if not BRANCH_RE.fullmatch(base_ref) or ".." in base_ref or base_ref.endswith((".lock", "/")):\n',
+     "        if False:\n", "ci/pr-no-base-ref"),
+    ("pr-binding", 'target = "refs/remotes/origin/" + base_ref', 'target = "HEAD"', "ci/pr-base-ref-unresolved"),
+    ("push-before-zero", 'or not before.strip("0"):', ":", "ci/push-zero-before"),
+    ("push-payload", '    if not path:\n        raise CannotEvaluate("push event without GITHUB_EVENT_PATH")\n', "",
+     "ci/push-no-payload"),
+    ("push-base-arg", "            raise CannotEvaluate(\"a push derives its base from the event payload; --base is refused\")\n",
+     "            pass\n", "ci/push-base-arg-refused"),
+    ("actions-event", '        if event != "push":\n', "        if False:\n", "ci/unsupported-event"),
+)
+
+
+def _load_mutant(source, directory, number):
+    """Write one mutant module to the scratch directory and load it with importlib."""
+    path = Path(directory) / "control_retirement_mutant_{}.py".format(number)
+    path.write_text(source, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("control_retirement_mutant_{}".format(number), path)
+    module = importlib.util.module_from_spec(spec)
+    saved = list(sys.path)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path[:] = saved
+    return module
+
+
+def _registered_check_ids():
+    """This suite's registered check ids, read through the execution gate's schema validator: (set of ids,
+    None), or (None, reason)."""
+    try:
+        data = tomllib.loads((ROOT / REGISTRY_REL).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        return None, "{}: {}".format(REGISTRY_REL, exc)
+    with contextlib.redirect_stderr(io.StringIO()):
+        rows = check_selftest_execution._manifest_rows(data, REGISTRY_REL)
+    row = next((row for row in rows or () if row["id"] == SUITE_ID), None)
+    if row is None:
+        return None, "{} registers no valid suite {}".format(REGISTRY_REL, SUITE_ID)
+    return set(row["expected-check-ids"]), None
+
+
+def self_test(report_path=None):
+    """Fixture git calls run under the hermetic fixture environment, gate reads included."""
+    executed = []
+    if report_path is not None:
+        # The execution report is finalized at interpreter exit, after this run's cleanup
+        # (tools/_selftest_exit_report.py); nothing writes it in band. It is armed before the fixture
+        # environment, whose scratch home registers its own exit handler, so the finalizer runs last.
+        _selftest_exit_report.arm(report_path, SUITE_ID, executed)
+    with fixture_git_lifecycle():
+        return _self_test_isolated(executed)
+
+
+def _self_test_isolated(executed):
+    results = []
+
+    def check(check_id, ok, detail=""):
+        results.append((check_id, bool(ok), detail))
+        executed.append(check_id)
+
+    this = sys.modules[__name__]
+    with tempfile.TemporaryDirectory(prefix="control-retirement-selftest-") as base_dir:
+        try:
+            vectors = _fixtures(base_dir)
+            harness_problem = None
+        except (OSError, subprocess.SubprocessError, CannotEvaluate) as exc:
+            vectors, harness_problem = [], "fixture build failed: {}".format(exc)
+        outcome = _run_vectors(this, vectors)
+        missing = (False, harness_problem or "vector not built")
+        checked = []
+        # 1. every vector holds against this gate
+        for check_id, vector in (
+                ("vector/same-base-equals-head", "same/base-equals-head"),
+                ("vector/drop-check-no-row", "drop/check-no-row"),
+                ("vector/drop-check-covered", "drop/check-covered"),
+                ("vector/covered-successor-absent", "covered/successor-absent"),
+                ("vector/covered-successor-is-self", "covered/successor-is-self"),
+                ("vector/covered-no-evidence", "covered/no-evidence"),
+                ("vector/disclosed-no-authorization", "disclosed/no-authorization"),
+                ("vector/disclosed-blank-authorization", "disclosed/blank-authorization"),
+                ("vector/disclosed-authorized", "disclosed/authorized"),
+                ("vector/unreachable-no-evidence", "unreachable/no-evidence"),
+                ("vector/unreachable-with-evidence", "unreachable/with-evidence"),
+                ("vector/drop-hook-no-row", "drop/hook-no-row"),
+                ("vector/drop-gate-no-row", "drop/gate-no-row"),
+                ("vector/drop-suite-no-row", "drop/suite-no-row"),
+                ("vector/rename-no-row", "rename/no-row"),
+                ("vector/row-names-live", "row/names-live"),
+                ("vector/row-duplicate", "row/duplicate"),
+                ("vector/row-unknown-state", "row/unknown-state"),
+                ("vector/row-foreign-field", "row/foreign-field"),
+                ("vector/row-unknown-field", "row/unknown-field"),
+                ("vector/row-bad-control", "row/bad-control"),
+                ("vector/ledger-history-kept", "ledger/history-kept"),
+                ("vector/ledger-append-edit", "ledger/append-edit"),
+                ("vector/ledger-append-delete", "ledger/append-delete"),
+                ("vector/ledger-readopted-row-deleted", "ledger/readopted-row-deleted"),
+                ("vector/boundary-exact-rows", "boundary/exact-rows"),
+                ("vector/boundary-one-short", "boundary/one-short"),
+                ("vector/boundary-extra-live-row", "boundary/extra-live-row"),
+                ("vector/base-missing-main", "base/missing-main"),
+                ("vector/base-unparseable-registry", "base/unparseable-registry"),
+                ("vector/base-schema-invalid-registry", "base/schema-invalid-registry"),
+                ("vector/base-gate-without-id", "base/gate-without-id"),
+                ("vector/base-hooks-missing", "base/hooks-missing"),
+                ("vector/base-shallow", "base/shallow"),
+                ("vector/head-ledger-missing", "head/ledger-missing"),
+                ("vector/head-ledger-malformed", "head/ledger-malformed"),
+                ("vector/head-ledger-format-version", "head/ledger-format-version"),
+                ("vector/head-duplicate-hook-id", "head/duplicate-hook-id"),
+                ("vector/local-base-arg", "local/base-arg"),
+                ("vector/local-base-arg-option", "local/base-arg-option"),
+                ("vector/ci-pr-drop-no-row", "ci/pr-drop-no-row"),
+                ("vector/ci-pr-base-arg-refused", "ci/pr-base-arg-refused"),
+                ("vector/ci-pr-no-base-ref", "ci/pr-no-base-ref"),
+                ("vector/ci-pr-base-ref-unresolved", "ci/pr-base-ref-unresolved"),
+                ("vector/ci-push-drop-no-row", "ci/push-drop-no-row"),
+                ("vector/ci-push-zero-before", "ci/push-zero-before"),
+                ("vector/ci-push-no-payload", "ci/push-no-payload"),
+                ("vector/ci-push-base-arg-refused", "ci/push-base-arg-refused"),
+                ("vector/ci-unsupported-event", "ci/unsupported-event")):
+            checked.append(vector)
+            check(check_id, *outcome.get(vector, missing))
+        by_name = dict((vector[0], vector) for vector in vectors)
+        check("vector/every-built-vector-checked", harness_problem is None and sorted(checked) == sorted(by_name)
+              and len(by_name) == len(vectors), (harness_problem, sorted(set(by_name) ^ set(checked))))
+
+        # 2. red on revert, by attribute: with the removal set patched to empty, the dropped-check vector turns
+        # green (exit 0), so the vector that holds it fails
+        reverted = (None, "vector not built")
+        if "drop/check-no-row" in by_name:
+            with _patched(this, "removed_controls", lambda base_live, head_live: set()):
+                reverted = _gate(this, by_name["drop/check-no-row"])
+        check("revert/empty-removal-set-turns-drop-green", reverted[0] == 0 and "PASS" in reverted[1], reverted)
+
+        # 3. every mutant (one check reverted) fails its named vector, and every vector expecting a nonzero exit
+        # fails under at least one mutant
+        gate_source, marker, rest = Path(__file__).read_text(encoding="utf-8").partition("\nBASE_GATES = ")
+        exposed, uncaught = set(), []
+        mutant_dir = Path(base_dir) / "mutants"
+        mutant_dir.mkdir()
+        for number, (mutant, old, new, vector) in enumerate(MUTANTS, 1):
+            if not marker or gate_source.count(old) != 1:
+                uncaught.append((mutant, "anchor found {} times".format(gate_source.count(old))))
+                continue
+            module = _load_mutant(gate_source.replace(old, new) + marker + rest, mutant_dir, number)
+            failed = set(name for name, (ok, _detail) in _run_vectors(module, vectors).items() if not ok)
+            exposed |= failed
+            if vector not in failed:
+                uncaught.append((mutant, vector, sorted(failed)))
+        check("mutant/every-mutant-caught", vectors and not uncaught, uncaught)
+        never = sorted(vector[0] for vector in vectors if vector[4] != 0 and vector[0] not in exposed)
+        check("mutant/every-refusing-vector-discriminates", vectors and not never, never)
+
+    # the in-run self-guard: the executed set is exactly this suite's registered set
+    expected, problem = _registered_check_ids()
+    harness = []
+    if problem is not None:
+        harness.append(("execution-set/registry", problem))
+    elif len(set(executed)) != len(executed) or set(executed) != expected:
+        harness.append(("execution-set/reconciled", dict(missing=sorted(expected - set(executed)),
+                                                         extra=sorted(set(executed) - expected))))
+
+    failed = [(check_id, detail) for check_id, ok, detail in results if not ok] + harness
+    if failed:
+        print("SELF-TEST FAIL: control-retirement {} of {} check(s) failed".format(len(failed), len(results)))
+        for check_id, detail in failed:
+            print("  {}: {!r}".format(check_id, detail))
+        return 1
+    print("SELF-TEST PASS: control-retirement {} checks ({} vectors: removed gate, hook and check ids without a "
+          "row are findings; covered, unreachable and disclosed rows are held to their fields; a rename is one "
+          "row; the record is append-only; unresolvable bases and malformed inputs fail closed; {} mutants each "
+          "caught, every refusing vector discriminating)".format(len(results), len(vectors), len(MUTANTS)))
+    return 0
+
+
+def main(argv=None):
+    args = sys.argv[1:] if argv is None else argv
+    if (len(args) in (2, 3) and args[-2] == "--execution-report" and os.path.isabs(args[-1])
+            and args[:-2] in ([], ["--self-test"])):
+        return self_test(args[-1])
+    if args == ["--self-test"]:
+        return self_test()
+    if not args:
+        return run(ROOT)
+    if len(args) == 2 and args[0] == "--base":
+        return run(ROOT, args[1])
+    print("usage: check_control_retirement.py [--base REV | --self-test [--execution-report ABS_PATH]]",
+          file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    _selftest_exit_report.exit_with(main())
