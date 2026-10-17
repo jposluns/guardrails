@@ -817,6 +817,8 @@ expected-check-ids = [
   "wl/for-header-variable-probe-match",
   "trunc/brace-group-sink-denies",
   "trunc/quoted-backquote-sink-denies",
+  "wl/bound-match",
+  "wl/bound-kept",
   "wl/bound-indeterminate",
   "wl/bound-cost",
   "trunc/bound-cost",

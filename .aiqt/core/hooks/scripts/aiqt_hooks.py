@@ -1412,17 +1412,20 @@ def _command_word(tokens):
 # $(...) is read, as the lexer splits it at its parentheses and its inner command is read as a segment of
 # its own), a substitution nested more than _SUBSTITUTION_DEPTH deep, and the rest of a substitution body
 # after a construct the lexer cannot parse (its complete prefix is read).
-# The reading of one command line's substitutions has a work bound (_substitution_work): past it, the reading
-# raises ValueError with _SUBSTITUTION_WORK_SPENT. The command itself lexed, so each guard still judges its own
-# segments, past their leading reserved and grouping words, with no substitution body read, and returns the
-# stricter of that decision and the one it gives a command the lexer cannot parse (its fallback): where the
-# fallback denies it decides at once, and otherwise the own segments are judged and the fallback decides only
-# where they would allow. bash_absolute_paths and branch_root, which have no fallback for a command that lexes,
-# judge the own segments alone. A decision the guard makes on the command's own segments therefore stands past
-# the bound, at the cost of judging those segments beside the raw scan, in time linear in their length; a
-# trigger that only a substitution body holds is judged by the fallback's raw scan alone, which can be less
-# strict than reading that body. Each fallback message or note that says the command could not be parsed names
-# both causes: the command could not be parsed, or reading its substitutions passed the work bound.
+# The reading of one command line's substitutions reads each distinct body once (its text, its locale and its
+# nesting depth): a body found again, by the other backquote scan or written again, is neither lexed nor
+# scanned again (_SubstitutionWork). It has a work bound (_substitution_work), and the reading reports whether
+# it passed it (spent). Every body it lexed before the bound was spent is kept, and each guard judges the
+# command's own segments and those bodies, past their leading reserved and grouping words, as it judges them
+# with no bound. Past the bound it returns the stricter of that decision and the one it gives a command the
+# lexer cannot parse (its fallback): where the fallback denies it decides at once, and otherwise the lines
+# read are judged and the fallback decides only where they would allow. bash_absolute_paths and branch_root,
+# which have no fallback for a command that lexes, judge the lines read alone. A decision the guard makes on a
+# line read therefore stands past the bound; a trigger that only a body left unread holds is judged by the
+# fallback's raw scan alone, which can be less strict than reading that body. The reading goes depth first, so
+# the bodies nested inside a substitution are read before its next sibling. Each fallback message or note that
+# says the command could not be parsed names both causes: the command could not be parsed, or reading its
+# substitutions passed the work bound.
 # Words after which bash reads a command in the same simple-command position: the conditional and loop
 # keywords whose next word starts a command list, brace grouping, the '!' pipeline negation and the 'time'
 # pipeline prefix (with its -p option, and one '--' after 'time' or 'time -p').
@@ -1431,14 +1434,18 @@ _COMMAND_LEAD_WORDS = frozenset(("!", "{", "if", "then", "elif", "else", "do", "
 _COMPOUND_OPENERS = frozenset(("{", "if", "while", "until", "for", "select", "case", "[["))
 _SUBSTITUTION_DEPTH = 16
 # The work bound of the substitution reading of one command line (_substitution_work): the characters of the
-# substitution bodies it lexes and of the constructs _skip_quoting reads for its second backquote scan, at
-# most _SUBSTITUTION_WORK_SCALE times the line's length plus _SUBSTITUTION_WORK_FLOOR. Each nested line it
-# scans is rebuilt from a body it lexed and is no longer than about that body, so the bound holds its scans
-# too. The union of the two backquote scans can keep two bodies of one substitution (_backquote_bodies), and
-# each is read in turn, so a body holding the same shape doubles the reading at each level: a 52,513-byte
-# command nested 14 deep took about 25 s of CPU in gate_weakening, past the hooks' 10 s timeout. The second
-# scan's try at each $( or ${ inside double quotes reads to the end of the text when the construct does not
-# close, so a run of such openers costs time quadratic in its length unless the tries are charged.
+# substitution bodies it lexes, or adds again where a body recurs (_substitution_lines with repeat set, and
+# _command_flow), and of the constructs _skip_quoting reads for its second backquote scan, at most
+# _SUBSTITUTION_WORK_SCALE times the line's length plus _SUBSTITUTION_WORK_FLOOR. Each nested line it scans is
+# rebuilt from a body it lexed and is no longer than about that body, so the bound holds its scans too. The
+# union of the two backquote scans can keep two bodies of one substitution (_backquote_bodies), both holding
+# the same next level, so a reading that read each body in turn doubled at each level: with no bound and no
+# memo, a 52,513-byte command nested 14 deep took about 23 s of CPU in gate_weakening on one host, past the
+# hooks' 10 s timeout. Read once (_SubstitutionWork), its 28 distinct bodies are all read within the bound, and
+# gate_weakening decides it in about 0.04 s there; a reading that adds a body's records again where it recurs
+# still doubles, and passes the bound. The second scan's try at each $( or ${ inside double quotes reads to
+# the end of the text when the construct does not close, so a run of such openers costs time quadratic in its
+# length unless the tries are charged: about 16 s of CPU on a 42,044-byte command with no bound, there.
 _SUBSTITUTION_WORK_SCALE = 8
 _SUBSTITUTION_WORK_FLOOR = 4096
 _SUBSTITUTION_WORK_SPENT = "the backquote substitution reading passed its work bound"
@@ -1625,35 +1632,52 @@ def _backquote_scan(text, nest, depth, work):
     return out
 
 
-def _substitution_work(records):
-    """A fresh work bound for reading the backquote substitutions of one lexed command line: a one-item list
-    of the characters the reading may still charge (_substitution_charge), _SUBSTITUTION_WORK_SCALE times
-    the length of the line's text as _substitution_records rebuilds it, plus _SUBSTITUTION_WORK_FLOOR. Every
-    nested line of the command shares it, so the whole reading costs time linear in the line's length."""
-    size = sum(len(seg.raw) + len(seg.sep_after or "\n") for seg in records)
-    return [_SUBSTITUTION_WORK_SCALE * size + _SUBSTITUTION_WORK_FLOOR]
+class _SubstitutionWork:
+    """The state of one command line's backquote substitution reading (_substitution_work). left is the
+    characters it may still charge (_substitution_charge), and spent is set once a charge passes that bound.
+    read maps each distinct body already read, keyed on its text, its locale and its nesting depth (the
+    reading context: _lex_command reads the body by its locale, and _SUBSTITUTION_DEPTH stops the nesting by
+    its depth), to what its reading produced (its lines or its flow, with the bodies nested in it) and the
+    characters that reading charged, so a body found again is neither lexed nor scanned again."""
+
+    __slots__ = ("left", "spent", "read")
+
+    def __init__(self, left):
+        self.left = left
+        self.spent = False
+        self.read = {}
+
+
+def _substitution_work(records, left=None):
+    """A fresh reading state (_SubstitutionWork) for the backquote substitutions of one lexed command line:
+    its work bound is _SUBSTITUTION_WORK_SCALE times the length of the line's text as _substitution_bodies
+    rebuilds it, plus _SUBSTITUTION_WORK_FLOOR, or left where given. Every nested line of the command shares
+    it, so the whole reading costs time linear in the line's length."""
+    if left is None:
+        size = sum(len(seg.raw) + len(seg.sep_after or "\n") for seg in records)
+        left = _SUBSTITUTION_WORK_SCALE * size + _SUBSTITUTION_WORK_FLOOR
+    return _SubstitutionWork(left)
 
 
 def _substitution_charge(work, size):
-    """Charge size characters to a substitution reading's work bound (_substitution_work), and raise
-    ValueError with _SUBSTITUTION_WORK_SPENT once it is spent: the reading is then uncertain, and each guard
-    judges the command's own segments and returns the stricter of that decision and its fallback's."""
-    work[0] -= size
-    if work[0] < 0:
+    """Charge size characters to a substitution reading's work bound (_substitution_work), and once it is
+    spent set work.spent and raise ValueError with _SUBSTITUTION_WORK_SPENT: the reading stops there, and the
+    lines it read before are kept (_substitution_lines, _command_flow)."""
+    work.left -= size
+    if work.left < 0:
+        work.spent = True
         raise ValueError(_SUBSTITUTION_WORK_SPENT)
 
 
-def _substitution_records(records, work, locale=False):
-    """[(index, body records)] for each top-level backquote substitution in one lexed command line, in source
-    order: index is the record whose raw text opens it, and the body is lexed as a command line of its own
-    (best effort: the complete segments before a construct the lexer cannot parse), with locale passed to
-    _lex_command (only the commit-identity reader sets it, _cmtidn_line_ai). The line's text is
+def _substitution_bodies(records, work):
+    """[(index, body)] for each top-level backquote substitution in one lexed command line, in source order:
+    index is the record whose raw text opens it, and body is its text (_backquote_bodies). The line's text is
     rebuilt from the records' raw slices and separators, so on a full lex a quoted heredoc body, which the
     lexer drops as literal data, is never read as a substitution. On a partial lex the unfinished segment's
     raw slice runs to the end of the command, so a backquote in a later quoted heredoc body is read as a
     substitution: an over-read in the safe direction (cat <(true) <<'EOF' with a backquoted relative
-    redirect on a body line denies under bash_absolute_paths). Each body lexed is charged to work, and so is
-    each try of the second backquote scan (_backquote_scan)."""
+    redirect on a body line denies under bash_absolute_paths). Each try of the second backquote scan is
+    charged to work (_backquote_scan), so this raises ValueError once work is spent."""
     starts = []
     parts = []
     pos = 0
@@ -1668,54 +1692,121 @@ def _substitution_records(records, work, locale=False):
     for offset, body in _backquote_bodies("".join(parts), work):
         while k + 1 < len(starts) and starts[k + 1] <= offset:
             k += 1
-        _substitution_charge(work, len(body))
-        out.append((k, _lex_command(body, partial=True, locale=locale)[0]))
+        out.append((k, body))
     return out
 
 
-def _substitution_lines(records, _depth=0, locale=False, _work=None):
-    """The lexed records of every backquote substitution in a command line, nested ones included (each body
-    before the substitutions inside it), each as a line of its own, unread (see _command_lines). locale is
-    passed to _substitution_records. Raises ValueError once the reading's work bound (_substitution_work) is
-    spent."""
+def _substitution_lines(records, locale=False, repeat=False, work=None):
+    """(lines, spent) for a command line: lines holds the lexed records of every backquote substitution in it,
+    nested ones included (each body before the substitutions inside it), each as a line of its own, unread
+    (see _command_lines), and spent is True when the reading passed its work bound (_substitution_work, or
+    work where given). Each body is lexed as a command line of its own (best effort: the complete segments
+    before a construct the lexer cannot parse), with locale passed to _lex_command (only the commit-identity
+    reader sets it, _cmtidn_line_ai), and the bodies nested in it are read before its next sibling. Each body
+    lexed is charged to the bound, and so is each try of the second backquote scan (_backquote_scan). A body
+    is lexed and scanned once (_SubstitutionWork). With repeat False, a body found again adds no line, since
+    its lines are already read: for a guard that judges each line alone, which then decides as it does on the
+    lines a reading with no memo builds. With repeat True its lines are added again where it recurs, as a
+    reading with no memo adds them, and each time charged what its first reading charged: for a guard that
+    charges a bound of its own for each segment it reads (find_ai_authorship). Past the bound no further body
+    is read, and every line read before is kept."""
+    if work is None:
+        work = _substitution_work(records)
     lines = []
-    if _depth >= _SUBSTITUTION_DEPTH:
-        return lines
-    if _work is None:
-        _work = _substitution_work(records)
-    for _index, body in _substitution_records(records, _work, locale):
-        lines.append(body)
-        lines.extend(_substitution_lines(body, _depth + 1, locale, _work))
-    return lines
+    _substitution_read_lines(records, 0, locale, repeat, work, lines)
+    return lines, work.spent
+
+
+def _substitution_read_lines(records, depth, locale, repeat, work, lines):
+    """Append to lines the lines of _substitution_lines for one lexed line at a nesting depth, and memoize each
+    body read in work.read; stop, keeping what was read, once work is spent."""
+    if depth >= _SUBSTITUTION_DEPTH:
+        return
+    try:
+        bodies = _substitution_bodies(records, work)
+    except ValueError:
+        return  # past the work bound (work.spent is set)
+    for _index, body in bodies:
+        key = (body, locale, depth)
+        known = work.read.get(key)
+        if known is not None and not repeat:
+            continue
+        try:
+            _substitution_charge(work, len(body) if known is None else known[1])
+        except ValueError:
+            return
+        if known is not None:
+            lines.extend(known[0])
+            continue
+        left = work.left + len(body)
+        start = len(lines)
+        body_records = _lex_command(body, partial=True, locale=locale)[0]
+        lines.append(body_records)
+        _substitution_read_lines(body_records, depth + 1, locale, repeat, work, lines)
+        if work.spent:
+            return
+        work.read[key] = (lines[start:] if repeat else None, left - work.left)
 
 
 def _command_lines(records):
-    """The command lines a guard reads for one lexed command: the command's own records first, then each
-    backquote substitution as a line of its own, every record read past its leading reserved and grouping
-    words (_command_segment). For a guard that judges a segment with its neighbours (a pipe, '||'), so a
-    substitution's records never sit between two of the command's own. Raises ValueError once the reading's
-    work bound is spent (_substitution_lines)."""
-    return [[_command_segment(seg) for seg in line] for line in [records] + _substitution_lines(records)]
+    """(lines, spent) for one lexed command: lines holds the command lines a guard reads, the command's own
+    records first, then each backquote substitution as a line of its own, every record read past its leading
+    reserved and grouping words (_command_segment), and spent is True when the substitution reading passed
+    its work bound (_substitution_lines; a body found again adds no line, and the lines read before the bound
+    are kept). For a guard that judges a segment with its neighbours (a pipe, '||'), so a substitution's
+    records never sit between two of the command's own."""
+    sub_lines, spent = _substitution_lines(records)
+    return [[_command_segment(seg) for seg in line] for line in [records] + sub_lines], spent
 
 
-def _command_flow(records, _depth=0, _work=None):
-    """The records of one lexed command in execution order, each read past its leading reserved and grouping
-    words (_command_segment): a backquote substitution's records come just before the record whose words
-    hold it, as bash runs a substitution while it expands that command's words. For a guard that tracks
-    state across segments (a directory change, a stage before a push). A directory change inside a
-    substitution runs in a subshell, yet it still counts for the records after it here: an over-read. Raises
-    ValueError once the reading's work bound (_substitution_work) is spent."""
-    if _work is None:
-        _work = _substitution_work(records)
-    subs = _substitution_records(records, _work) if _depth < _SUBSTITUTION_DEPTH else []
+def _command_flow(records):
+    """(flow, spent) for one lexed command: flow holds its records in execution order, each read past its
+    leading reserved and grouping words (_command_segment): a backquote substitution's records come just
+    before the record whose words hold it, as bash runs a substitution while it expands that command's words.
+    spent is True when the substitution reading passed its work bound (_substitution_work). For a guard that
+    tracks state across segments (a directory change, a stage before a push). A directory change inside a
+    substitution runs in a subshell, yet it still counts for the records after it here: an over-read. A body
+    is lexed and scanned once (_SubstitutionWork), and its flow is added again where it recurs, as a reading
+    with no memo adds it, each time charged what its first reading charged, so the order a reading with no memo
+    gives is kept. Past the bound no further body is read, and every record of each body read before, the
+    command's own included, is kept in its place."""
+    work = _substitution_work(records)
     flow = []
+    _substitution_read_flow(records, 0, work, flow)
+    return flow, work.spent
+
+
+def _substitution_read_flow(records, depth, work, flow):
+    """Append to flow the records of _command_flow for one lexed line at a nesting depth, and memoize each body
+    read in work.read; once work is spent, read no further body but still append every record of the line."""
+    subs = []
+    if depth < _SUBSTITUTION_DEPTH and not work.spent:
+        try:
+            subs = _substitution_bodies(records, work)
+        except ValueError:
+            subs = []  # past the work bound (work.spent is set): the line's own records are still added
     j = 0
     for k, seg in enumerate(records):
         while j < len(subs) and subs[j][0] == k:
-            flow.extend(_command_flow(subs[j][1], _depth + 1, _work))
+            body = subs[j][1]
             j += 1
+            if work.spent:
+                continue
+            key = (body, False, depth)
+            known = work.read.get(key)
+            try:
+                _substitution_charge(work, len(body) if known is None else known[1])
+            except ValueError:
+                continue
+            if known is not None:
+                flow.extend(known[0])
+                continue
+            left = work.left + len(body)
+            start = len(flow)
+            _substitution_read_flow(_lex_command(body, partial=True)[0], depth + 1, work, flow)
+            if not work.spent:
+                work.read[key] = (flow[start:], left - work.left)
         flow.append(_command_segment(seg))
-    return flow
 
 
 # git global options that CONSUME a following space-separated argument, so the option's value (now its
@@ -2554,8 +2645,8 @@ def _diff_source_fallback(command):
     broad raw probe) ASKS, everything else ALLOWS. An unparseable command can never earn an ALLOW from a
     summary or redirect regex - the old raw-summary/redirect escapes are removed - so a plausibly-dumping
     unparseable command is surfaced for confirmation rather than proven either way. The note names both
-    causes. Past the work bound the caller also judges the command's own segments and returns the stricter
-    decision."""
+    causes. Past the work bound the caller also judges the command's own segments and the substitution lines
+    read before the bound, and returns the stricter decision."""
     if _RAW_DIFF_PRODUCER_RE.search(command):
         return _allow_note(
             "AIQT guardrail (rule cnsdif, no-console-diff-dumps): the shared tokenizer could not parse this "
@@ -2596,22 +2687,16 @@ def diff_source_pretool(data):
     # with every segment read past its leading reserved and grouping words (_command_lines); the lexer
     # splits an unquoted $(...) into segments of its own. A stage's pipe neighbour is always taken from its
     # own line. The possible-producer scope itself reads every word of the unread segment. Past its work
-    # bound the reading raises ValueError (spent): the command's own line is then judged with no
-    # substitution read, and the fallback, which notes or allows, decides where that judgement would allow,
-    # and where it would note and the fallback notes too (its note names the bound); a console dump in the
-    # command's own segments still denies.
+    # bound (spent) the command's own line and each substitution line read before the bound are judged, and
+    # the fallback, which notes or allows, decides where that judgement would allow, and where it would note
+    # and the fallback notes too (its note names the bound); a console dump in a line read still denies.
     try:
         segments = _lex_command(command)
     except ValueError:
         return _diff_source_fallback(command)
-    spent = False
-    try:
-        unread = [segments] + _substitution_lines(segments)
-        lines = _command_lines(segments)
-    except ValueError:
-        spent = True
-        unread = [segments]
-        lines = [[_command_segment(seg) for seg in segments]]
+    sub_lines, spent = _substitution_lines(segments)
+    unread = [segments] + sub_lines
+    lines = [[_command_segment(seg) for seg in line] for line in unread]
     possibles = [(line, index, seg) for raw_line, line in zip(unread, lines)
                  for index, (raw_seg, seg) in enumerate(zip(raw_line, line)) if _is_possible_producer(raw_seg)]
     # No producer-capable form anywhere (the bounded true boundary), or, AIRTIGHT-NARROW, the WHOLE command
@@ -3065,7 +3150,8 @@ _CMTIDN_REBASE_LONG = {
 # (_cmtidn_line_ai), so a command built to nest or repeat them costs time linear in its length. A line past
 # either bound is left unread, and so is a line, at any depth, that the shared tokenizer cannot parse (an
 # unbalanced quote in a foreach operand or an exec value); a run line whose backquote substitution reading
-# passes its work bound (_substitution_work) has its own segments judged and counts as left unread too:
+# passes its work bound (_substitution_work) has its own segments, and the substitution lines read before the
+# bound, judged and counts as left unread too:
 # every other segment of the command and every other
 # run line within the bounds is still judged, so such a line cannot hide an AI identity that the reader can
 # read. Only when none of them sets one does find_ai_authorship raise ValueError with _CMTIDN_RUN_BOUNDS, so
@@ -3189,11 +3275,12 @@ def find_ai_authorship(command):
     one reading alone reads is still read, and no command that one reading alone denies is allowed. Raises
     ValueError on a shell parse error in the command itself (via _segments; under one reading only, after the
     other reading has found nothing and left no run line unread), ValueError(_SUBSTITUTION_WORK_SPENT) when
-    the reading of its backquote substitutions passes its work bound and nothing read, its own segments and the
-    run lines they build included, sets an AI identity and no run line was left unread,
-    ValueError(_CMTIDN_RUN_BOUNDS) when a run line was left unread, because it could not be parsed, the
-    reading of its backquote substitutions passed the work bound (its own segments are still judged), or it
-    was past the bounds (_CMTIDN_RUN_DEPTH), and
+    the reading of its backquote substitutions passes its work bound and nothing read, its own segments, the
+    substitution lines read before the bound and the run lines they build included, sets an AI identity and
+    no run line was left unread, ValueError(_CMTIDN_RUN_BOUNDS) when a run line was left unread, because it
+    could not be parsed, the reading of its backquote substitutions passed the work bound (its own segments and
+    the substitution lines read before the bound are still judged), or it was past the bounds
+    (_CMTIDN_RUN_DEPTH), and
     nothing read sets an AI identity, and ValueError(_CMTIDN_TOO_LONG) at once, before any reading, when the
     command is longer than _CMTIDN_READ_LIMIT characters; the handler turns each into the conservative
     fallback."""
@@ -3227,18 +3314,19 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
     shared tokenizer cannot parse under a reading. Such a line is not read, but the other segments of the
     command and of every line being read still are, and so are the other run lines within the bounds. A run
     line whose backquote substitution reading passes its work bound (_substitution_work) sets unread too, and
-    its own segments are still read. Once the
+    its own segments and the substitution lines read before the bound are still read. Once the
     bounds that a reading charges are spent it builds no further run line, and each rebase reads its options
     only up to the next rebase subcommand (_cmtidn_run_lines), so the cost stays linear. judged maps each word
     already scanned for a co-author trailer, on this line or another line of the command, to its result
     (_co_author_ai). Each backquote substitution in the line, nested ones included, is read under each reading
     as a command line of its own, its segments judged with the line's own (_substitution_lines; a body is read
-    up to a construct the lexer cannot parse, as every guard reads it), and a segment runs a git commit-family
-    command when either _cmtidn_git_commands or the shared command reading (_command_argv) finds one. A parse
-    error in the command itself (depth 0) raises: at once when neither reading parses it, and otherwise after
-    the other reading has found nothing. A substitution reading of the command itself that passes the work
-    bound raises its ValueError after the command's own segments, and the run lines they build, have found
-    nothing."""
+    up to a construct the lexer cannot parse, as every guard reads it, and its lines are added again where it
+    recurs, as a reading with no memo adds them), and a segment runs a git commit-family command when either
+    _cmtidn_git_commands or the shared command reading (_command_argv) finds one. A parse error in the command
+    itself (depth 0) raises: at once when neither reading parses it, and otherwise after the other reading has
+    found nothing. A substitution reading of the command itself that passes the work bound raises
+    ValueError(_SUBSTITUTION_WORK_SPENT) after the command's own segments, the substitution lines read before
+    the bound, and the run lines they build, have found nothing."""
     readings = []  # (the readings that read the line so, its segments)
     error = None
     bound_error = None  # the ValueError of a substitution reading that passed its work bound
@@ -3253,12 +3341,14 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
             error = error or exc
             continue
         if "`" in command:
-            try:
-                segments += [(seg.argv, seg.sep_after) for line in
-                             _substitution_lines(_lex_command(command, locale=locale), locale=locale)
-                             for seg in line]
-            except ValueError as exc:
-                bound_error = bound_error or exc  # past the work bound: the line's own segments are still judged
+            # Each body's lines are added again where it recurs (repeat), as a reading with no memo adds them,
+            # so the run lines they build are charged to the run-line bounds as often as that reading charges
+            # them. Past the work bound the line's own segments and the lines read before it are still judged.
+            sub_lines, spent = _substitution_lines(_lex_command(command, locale=locale), locale=locale,
+                                                   repeat=True)
+            segments += [(seg.argv, seg.sep_after) for line in sub_lines for seg in line]
+            if spent:
+                bound_error = bound_error or ValueError(_SUBSTITUTION_WORK_SPENT)
         for same, read in readings:
             if read == segments:
                 same.append(locale)
@@ -3662,14 +3752,10 @@ def bash_absolute_paths(data):
     # over-asking on every such command. This is the conservative-floor boundary, not a proof of safety.
     # Each segment is read past its leading reserved and grouping words, and each backquote substitution as
     # a command line of its own (_command_flow), so the cd of 'then cd rel' is read as a cd, and a redirect
-    # inside a backquote substitution, double-quoted too, is read on that substitution's line. A reading past
-    # its work bound is left uninspected as an unparseable construct is: the command's own segments are read,
-    # past their leading reserved and grouping words, and no substitution body.
-    records = _lex_command(command, partial=True)[0]
-    try:
-        segments = _command_flow(records)
-    except ValueError:
-        segments = [_command_segment(seg) for seg in records]
+    # inside a backquote substitution, double-quoted too, is read on that substitution's line. Past its work
+    # bound the rest of the reading is left uninspected as an unparseable construct is: the command's own
+    # segments and each substitution body read before the bound are read, and no further body.
+    segments, _spent = _command_flow(_lex_command(command, partial=True)[0])
     reasons = []       # relative/opaque cd or NON-destructive redirect: an allow-note convention nudge
     deny_reasons = []  # a DESTRUCTIVE truncating redirect to a relative/opaque target: fail-closed deny
     for seg in segments:
@@ -4267,7 +4353,8 @@ def _expbnd_fallback_kind(command):
 def _expbnd_fallback(command):
     """Conservative ASK fallback for visible in-scope pairs in a shell command that the tokenizer cannot
     parse or whose backquote substitution reading passes its work bound (_substitution_work); past the bound
-    the caller also judges the command's own segments and returns the stricter decision."""
+    the caller also judges the command's own segments and the substitution records read before the bound, and
+    returns the stricter decision."""
     kind = _expbnd_fallback_kind(command)
     if kind == "target":
         return _expbnd_target_ask("mutation")
@@ -4302,21 +4389,16 @@ def git_explicit_binding(data):
             "it is allowed; prefer an explicit '-C' target and enumerated scope.")
     # Each segment is read past its leading reserved and grouping words, and each backquote substitution's
     # records come in execution order just before the segment that holds it (_command_flow). Past its work
-    # bound the reading raises ValueError (spent): the fallback then decides at once where it denies;
-    # otherwise the command's own segments are judged below, with no substitution read, and the fallback
-    # decides only where they would allow, so the stricter decision stands.
+    # bound (spent) the fallback decides at once where it denies; otherwise the command's own segments and the
+    # substitution records read before the bound are judged below, and the fallback decides only where they
+    # would allow, so the stricter decision stands.
     try:
         records = _lex_command(command)
     except ValueError:
         return _expbnd_fallback(command)
-    spent = False
-    try:
-        flow = _command_flow(records)
-    except ValueError:
-        if _expbnd_fallback_kind(command) == "breadth":
-            return _expbnd_fallback(command)
-        spent = True
-        flow = [_command_segment(seg) for seg in records]
+    flow, spent = _command_flow(records)
+    if spent and _expbnd_fallback_kind(command) == "breadth":
+        return _expbnd_fallback(command)
     segments = [(seg.argv, seg.sep_after) for seg in flow]
 
     # ROUND-2 FINDING 11 PRE-SCAN: a whole-tree BREADTH stage ('git add -A/./:/', 'git commit -a/--all')
@@ -4407,8 +4489,8 @@ def git_stash_ref(data):
     of stack state, with no escalation for a dangerous stack. Bash PreToolUse only; no prior-turn
     shell-state resolution. Other stash verbs, including bare stash (push), are outside this guard;
     drop/clear/export belong to git_discard. Unparseable text silently allows. A command whose backquote
-    substitution reading passes its work bound (_substitution_work) is judged on its own segments, with no
-    substitution body read, so a bare pop/apply among them still warns. An absent/unreadable
+    substitution reading passes its work bound (_substitution_work) is judged on its own segments and the
+    substitution bodies read before the bound, so a bare pop/apply among them still warns. An absent/unreadable
     command gets the sibling's convention note.
     This note can co-occur with git_discard's raw/pristine fallback note on a wrapped or compound
     pop/apply, and with git_explicit_binding's note on a relocated form (e.g. `cd /x && git stash
@@ -4434,13 +4516,10 @@ def git_stash_ref(data):
         records = _lex_command(command)
     except ValueError:
         return _allow()
-    # Past its work bound the reading raises ValueError: the command's own segments are then judged, past
-    # their leading reserved and grouping words, with no substitution read. Unparseable text allows, so that
-    # decision is the stricter one.
-    try:
-        flow = _command_flow(records)
-    except ValueError:
-        flow = [_command_segment(seg) for seg in records]
+    # Past its work bound the reading stops: the command's own segments and the substitution records read
+    # before the bound are judged, past their leading reserved and grouping words. Unparseable text allows, so
+    # that decision is the stricter one.
+    flow, _spent = _command_flow(records)
 
     for seg in flow:
         eff = _expbnd_effective_tokens(seg.argv)
@@ -5272,7 +5351,8 @@ def _git_discard_fallback(command):
     """D-423-NARROW fail-closed fallback when the shared tokenizer cannot parse the command (an unbalanced
     quote or an unsupported construct) or the reading of its backquote substitutions passes its work bound
     (_substitution_work), and the deny names both causes; past the bound, a command this fallback allows is
-    judged on its own segments instead (git_discard): the closed allowlist grammar cannot be applied
+    judged on its own segments and the substitution records read before the bound instead (git_discard): the
+    closed allowlist grammar cannot be applied
     to a command that cannot be segmented, so the ONLY allow is the true boundary - the raw scan, run on the FULL raw
     command (ROUND 8: heredoc bodies are no longer stripped on this path; stripping removed text, so
     it could only hide a real discard and widen acceptance, and the round-7 stripper did exactly that
@@ -7044,9 +7124,10 @@ def _uncertain_line_lossy(command):
     found = []
     for line in _join_continuations(command)[0].split("\n"):
         try:
-            line_flow = _command_flow(_lex_command(line))
+            line_records = _lex_command(line)
         except ValueError:
-            continue  # a line the lexer cannot read alone, or read within the work bound, contributes no name
+            continue  # a line the lexer cannot read alone contributes no name
+        line_flow, _spent = _command_flow(line_records)  # past the work bound, what was read before it names
         for seg in line_flow:
             tokens = seg.argv
             if _command_word(tokens) != "git":
@@ -7176,16 +7257,13 @@ def git_discard(data):
         # Conservative raw scan, not a silent allow (D-423-NARROW): an unparseable command the raw scan
         # flags is denied outright; only a command the scan clears is allowed at the true boundary.
         return _git_discard_fallback(command)
-    try:
-        flow = _command_flow(records)
-    except ValueError:
-        # A reading of the backquote substitutions past its work bound raises ValueError. The fallback then
-        # decides where its scan flags the command, since it denies, the strictest decision, and no snapshot
-        # is taken; where it would allow, the command's own segments are judged below, past their leading
-        # reserved and grouping words, with no substitution read, so the stricter decision stands.
-        if _git_discard_fallback_flags(command):
-            return _git_discard_fallback(command)
-        flow = [_command_segment(seg) for seg in records]
+    flow, spent = _command_flow(records)
+    if spent and _git_discard_fallback_flags(command):
+        # Past its work bound the reading of the backquote substitutions stops. The fallback then decides
+        # where its scan flags the command, since it denies, the strictest decision, and no snapshot is taken;
+        # where it would allow, the command's own segments and the substitution records read before the bound
+        # are judged below, past their leading reserved and grouping words, so the stricter decision stands.
+        return _git_discard_fallback(command)
     segments = [(seg.argv, seg.sep_after) for seg in records]
 
     # Precisely-identified lossy git segments (the clean-parse signal). A git command-word segment whose
@@ -9154,17 +9232,14 @@ def protected_line(data):
         seg_records = _lex_command(command)
     except ValueError:
         return _protected_line_fallback(command)
-    # A reading of the backquote substitutions past its work bound raises ValueError. Only a commit-free
+    # Past its work bound the reading of the backquote substitutions stops (spent). Only a commit-free
     # command reaches here, so the fallback denies exactly where its push scan hits: it then decides, the
-    # strictest decision, and its deny names the bound; where it would allow, the command's own segments are
-    # judged below, past their leading reserved and grouping words, with no substitution read, so the
-    # stricter decision stands.
-    try:
-        flow = _command_flow(seg_records)
-    except ValueError:
-        if _protected_fallback_push_hit(command):
-            return _protected_line_fallback(command, spent=True)
-        flow = [_command_segment(seg) for seg in seg_records]
+    # strictest decision, and its deny names the bound; where it would allow, the command's own segments and
+    # the substitution records read before the bound are judged below, past their leading reserved and
+    # grouping words, so the stricter decision stands.
+    flow, spent = _command_flow(seg_records)
+    if spent and _protected_fallback_push_hit(command):
+        return _protected_line_fallback(command, spent=True)
     cwd = data.get("cwd")
     pending_deny = None
     # The raw fallback below keeps its trigger: no segment whose own first command word is git (saw_git), or
@@ -9692,13 +9767,10 @@ def branch_root(data):
         except ValueError:
             return _allow()  # even partial recovery failed: open grammar, best-effort
     # Each segment is read past its leading reserved and grouping words, and each backquote substitution's
-    # records come in execution order just before the segment that holds it (_command_flow). A reading past
-    # its work bound is left unread as the text after an unsupported construct is: the recovered segments
-    # are judged, past their leading reserved and grouping words, and no substitution body.
-    try:
-        flow = _command_flow(records)
-    except ValueError:
-        flow = [_command_segment(seg) for seg in records]
+    # records come in execution order just before the segment that holds it (_command_flow). Past its work
+    # bound the rest of the reading is left unread as the text after an unsupported construct is: the
+    # recovered segments and the substitution records read before the bound are judged, and no further body.
+    flow, _spent = _command_flow(records)
     segments = [(seg.argv, seg.sep_after) for seg in flow]
 
     # No-ask posture: branch rooting is a HAZARD class (an orphan/unrooted branch dispatches work onto a
@@ -10628,9 +10700,9 @@ def gate_weakening(data):
     followed by a pipe and later a stage that may pass on only part of its input). On a parse error
     the partially lexed complete segments are judged for the deny tier first (DENY outranks the parse error);
     otherwise the raw fallback stands, its messages naming both causes. On a backquote substitution reading
-    past its work bound (_substitution_work) the command's own segments are judged by every tier above, with
-    no substitution read, and the stricter of that decision and the raw fallback's stands. Disclosed
-    residuals: R1 a check inside an sh -c/bash -c, eval or xargs body; R2 an alias or shell function; R3 a gate whose name and options carry no checker part
+    past its work bound (_substitution_work) the command's own segments and the substitution lines read before
+    the bound are judged by every tier above, and the stricter of that decision and the raw fallback's stands.
+    Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or xargs body; R2 an alias or shell function; R3 a gate whose name and options carry no checker part
     (tools/doctor.py, sha256sum -c, a build); R4 a plain '| grep PATTERN' filter or '| wc', which are not
     counted as truncating sinks."""
     if data.get("hook_event_name") != PRETOOL:
@@ -10663,19 +10735,14 @@ def gate_weakening(data):
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
         return _gate_weakening_fallback(command)
-    # Past its work bound the substitution reading raises ValueError (spent): the raw fallback then decides
-    # at once where it denies; otherwise the command's own line is judged below, with no substitution read,
-    # and the fallback decides only where that judgement would allow, so the stricter decision stands and a
-    # --no-verify, a verification sink or a swallowed checker in the command's own segments decides as it
-    # does with the substitutions read.
-    spent = False
-    try:
-        command_lines = _command_lines(records)
-    except ValueError:
-        if _gate_weakening_fallback_kind(command) in ("no-verify", "short-n"):
-            return _gate_weakening_fallback(command)
-        spent = True
-        command_lines = [[_command_segment(seg) for seg in records]]
+    # Past its work bound the substitution reading stops (spent): the raw fallback then decides at once where
+    # it denies; otherwise the command's own line and each substitution line read before the bound are judged
+    # below, and the fallback decides only where that judgement would allow, so the stricter decision stands
+    # and a --no-verify, a verification sink or a swallowed checker in a line read decides as it does with
+    # every substitution read.
+    command_lines, spent = _command_lines(records)
+    if spent and _gate_weakening_fallback_kind(command) in ("no-verify", "short-n"):
+        return _gate_weakening_fallback(command)
     pending_note = None  # the first heuristic gate-weakening allow-note; a certain --no-verify deny wins first
     # Each segment is read past its leading reserved and grouping words, and each backquote substitution as
     # a command line of its own (_command_lines); a segment's '||' or '|' neighbour is taken from its own
@@ -10839,7 +10906,8 @@ def _commit_msg_subst_fallback(command):
     a HAZARD-class (command-injection) case this guard cannot parse, so it DENIES-and-educates (hooks never
     ask; a possibly-executing substitution in a commit argument is blocked with the safe re-issue named), and
     the deny names both causes. Anything else ALLOWS at the true boundary, and past the bound the caller then
-    judges the command's own segments. The probes (_commit_msg_subst_raw_hit) intentionally over-match."""
+    judges the command's own segments and the substitution records read before the bound. The probes
+    (_commit_msg_subst_raw_hit) intentionally over-match."""
     if _commit_msg_subst_raw_hit(command):
         return _deny(
             "AIQT rule sectvl (tool-argument-validation): the command could not be parsed by the shell "
@@ -10879,19 +10947,17 @@ def commit_msg_subst(data):
     # Each segment is read past its leading reserved and grouping words, and each backquote substitution as
     # a command line of its own (_command_flow), so a git commit after a leading reserved or grouping word
     # or inside a backquote substitution is read as a git commit; the lexer splits an unquoted $(...) into
-    # segments of its own. Past its work bound the reading raises ValueError: the fallback then decides when it
-    # denies, the strictest decision; when it allows, the command's own segments are judged below, past their
-    # leading reserved and grouping words, with no substitution read, so the stricter decision stands.
+    # segments of its own. Past its work bound the reading stops (spent): the fallback then decides when it
+    # denies, the strictest decision; when it allows, the command's own segments and the substitution records
+    # read before the bound are judged below, past their leading reserved and grouping words, so the stricter
+    # decision stands.
     try:
         records = _lex_command(command)
     except ValueError:
         return _commit_msg_subst_fallback(command)
-    try:
-        flow = _command_flow(records)
-    except ValueError:
-        if _commit_msg_subst_raw_hit(command):
-            return _commit_msg_subst_fallback(command)
-        flow = [_command_segment(seg) for seg in records]
+    flow, spent = _command_flow(records)
+    if spent and _commit_msg_subst_raw_hit(command):
+        return _commit_msg_subst_fallback(command)
     for seg in flow:
         hit = _commit_msg_subst_hit(seg)
         if hit is None:
@@ -14448,9 +14514,9 @@ def orch_truncation_guard(data):
     # hazard, not a merely-unprovable capture, so it DENIES-and-educates (use full durable capture, or keep
     # it foreground) rather than allow-note. Detected lexically: any head/tail stage fed by an upstream `|`
     # producer. A parse error falls through to the unprovable allow-note below (nothing proven). Past its work
-    # bound the substitution reading raises ValueError: the command's own line is then judged with no
-    # substitution read, so a sink in the command's own segments still denies, and otherwise the allow-note
-    # below, the decision for a command that does not lex, stands.
+    # bound the substitution reading stops: the command's own line and each substitution line read before the
+    # bound are judged, so a sink in a line read still denies, and otherwise the allow-note below, the
+    # decision for a command that does not lex, stands.
     # Each stage is read past its leading reserved and grouping words, and each backquote substitution as a
     # command line of its own (_command_lines), so '| { head; }' and a substitution's own pipe are judged as
     # the bare form is; a stage's feeding neighbour is always taken from its own line.
@@ -14458,10 +14524,7 @@ def orch_truncation_guard(data):
         _records = _lex_command(command)
     except ValueError:
         _records = []
-    try:
-        _read = _command_lines(_records)
-    except ValueError:
-        _read = [[_command_segment(seg) for seg in _records]]
+    _read, _spent = _command_lines(_records)
     _lines = [[(seg.argv, seg.sep_after) for seg in line] for line in _read]
     for _segs in _lines:
         for _i, (_argv, _sep) in enumerate(_segs):
@@ -14643,7 +14706,8 @@ def _orch_bg_poll_loop(command):
     an unparseable construct, subshell or C-style `(( ))` grouping, more than one bare `&`, a command
     trailing the bare-`&` `done`, a nested or extra loop keyword, a conditional reserved word, or brace
     grouping, and a command whose backquote substitution reading passes its work bound (_substitution_work)
-    unless its own line is the canonical shape, which still answers 'match'.
+    unless its own line or a substitution line read before the bound is the canonical shape, which still
+    answers 'match'.
 
     Reserved words (for/while/until/do/done) are recognized ONLY as the EXACT raw-unquoted token, never a
     basename or a quoted spelling: because `_command_word` basenames and argv is quote-decoded, a bare `&`
@@ -14656,19 +14720,19 @@ def _orch_bg_poll_loop(command):
     DENY-and-educate on the same event. Residuals are disclosed in the manifest."""
     # Each backquote substitution is read as a command line of its own (_substitution_lines): a line that
     # is the canonical shape makes the command 'match'; otherwise the command's own line decides. Past its
-    # work bound the reading raises ValueError: the command's own line still makes it 'match', the stricter
+    # work bound a line read before the bound, or the command's own line, still makes it 'match', the stricter
     # answer, and otherwise it is 'indeterminate', as for a command that does not lex.
     try:
         segments = _lex_command(command)
     except ValueError:
         return "indeterminate"              # heredoc/process-sub/unbalanced-quote/NUL/malformed-redirect
-    try:
-        sub_lines = _substitution_lines(segments)
-    except ValueError:
-        return "match" if _orch_poll_line(segments) == "match" else "indeterminate"
+    sub_lines, spent = _substitution_lines(segments)
     if any(_orch_poll_line(line) == "match" for line in sub_lines):
         return "match"
-    return _orch_poll_line(segments)
+    own = _orch_poll_line(segments)
+    if spent and own != "match":
+        return "indeterminate"
+    return own
 
 
 def _orch_poll_line(segments):

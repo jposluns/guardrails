@@ -10787,23 +10787,35 @@ def _main_isolated(report_path=None):
         # The shared reading's work bound (aiqt_hooks._substitution_work): BASE in a backquote substitution
         # after 1,500 words, nested 13 more levels deep, each level x="$(echo "'")" "'" then a backquote
         # substitution holding the next level and a single-quoted escaped double quote, which the two backquote
-        # scans read as two different bodies, so the reading doubles at each level and passes its bound. The
-        # classifier then reads no substitution and answers 'indeterminate', where with no bound it read BASE 14
-        # deep and answered 'match' after about 12 s of CPU: the wait-loop guard allows NESTED and the
-        # truncation guard notes it in the background. Past the bound each guard still judges the command's own
-        # line, as it did with no bound: BASE after the same nesting around echo (OWN_LOOP) is a 'match' that the
-        # wait-loop guard denies, and a background dispatch piping pytest into head before that nesting
-        # (OWN_SINK) is denied by the truncation guard. Each guard decides each command within 1 s of CPU.
-        NESTED = "echo " + "y " * 1500 + "`" + BASE + "`"
-        ECHO_NEST = "echo " + "y " * 1500
-        for _level in range(13):
-            NESTED = 'x="$(echo "\'")" "\'" `' + NESTED.replace("\\", "\\\\").replace("`", "\\`") + " '\\\"'`"
-        for _level in range(14):
-            ECHO_NEST = 'x="$(echo "\'")" "\'" `' + ECHO_NEST.replace("\\", "\\\\").replace("`", "\\`") + " '\\\"'`"
-        OWN_LOOP = ECHO_NEST + "; " + BASE
-        OWN_SINK = "pytest | head -5; " + ECHO_NEST
-        check("wl/bound-indeterminate", (clf(NESTED), clf(OWN_LOOP)), ("indeterminate", "match"))
-        for cid, decide, own, wants in (("wl/bound-cost", wl, OWN_LOOP, ("allow", "deny")),
+        # scans read as two different bodies holding the same next level. The classifier reads each distinct
+        # body once (aiqt_hooks._SubstitutionWork), so it reads all 28 within the bound and answers 'match', as
+        # the reading with no bound and no memo did after about 12 s of CPU on one host (wl/bound-match), where
+        # it now takes about 0.04 s. Nested 6 levels
+        # deep (KEPT) its reading passes the bound after reading BASE, the innermost body, and that line read
+        # before the bound still answers 'match' (wl/bound-kept); around echo, nested 6 deep (ECHO_6), no line
+        # read is the loop, and past the bound the classifier answers 'indeterminate'
+        # (wl/bound-indeterminate). Past the bound each guard still judges the command's own line, as it did with
+        # no bound: BASE after the nesting around echo 6 deep (OWN_LOOP) is a 'match' that the wait-loop guard
+        # denies, and a background dispatch piping pytest into head before that nesting (OWN_SINK) is denied by
+        # the truncation guard; the reading of each passes the bound (wl/bound-indeterminate). Each guard decides
+        # each command, NESTED (44,322 bytes) included, within 1 s of CPU.
+        def _nest(command, levels):
+            for _level in range(levels):
+                command = 'x="$(echo "\'")" "\'" `' + command.replace("\\", "\\\\").replace("`", "\\`") + " '\\\"'`"
+            return command
+        NESTED = _nest("echo " + "y " * 1500 + "`" + BASE + "`", 13)
+        KEPT = _nest("echo " + "y " * 1500 + "`" + BASE + "`", 5)
+        ECHO_6 = _nest("echo " + "y " * 1500, 6)
+        OWN_LOOP = ECHO_6 + "; " + BASE
+        OWN_SINK = "pytest | head -5; " + ECHO_6
+        check("wl/bound-match", (clf(NESTED), clf(OWN_LOOP)), ("match", "match"))
+        check("wl/bound-kept", (aiqt_hooks._substitution_lines(aiqt_hooks._lex_command(KEPT))[1], clf(KEPT)),
+              (True, "match"))
+        check("wl/bound-indeterminate",
+              (tuple(aiqt_hooks._substitution_lines(aiqt_hooks._lex_command(cmd))[1]
+                     for cmd in (ECHO_6, OWN_LOOP, OWN_SINK)), clf(ECHO_6)),
+              ((True, True, True), "indeterminate"))
+        for cid, decide, own, wants in (("wl/bound-cost", wl, OWN_LOOP, ("deny", "deny")),
                                         ("trunc/bound-cost", tg, OWN_SINK, ("warn", "deny"))):
             got = []
             for cmd in (NESTED, own):
