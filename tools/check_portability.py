@@ -868,9 +868,10 @@ class _ChildOutcome:
     ready is False when a requested readiness handshake never produced a complete line;
     survivors means the group still had a member when the bounded post-reap OBSERVATION
     ended (nothing is ever signalled after the reap); anchor_lost means an anchor check or
-    the reap found the leader ALREADY REAPED by another path (SIGCHLD ignored, or an
-    outside reap), or the cleanup's anchor check could not be made, so every destructive
-    group signal still to come was withheld. Ordinary vector-entry callers treat timed_out,
+    the reap found the leader ALREADY REAPED by another path (SIGCHLD ignored in a way the
+    launch check cannot see, or an outside reap), or the cleanup's anchor check could not
+    be made, so every destructive group signal still to come was withheld. Ordinary
+    vector-entry callers treat timed_out,
     a None returncode, ready False and survivors True each as a failure, so a lost anchor
     reaches every one of them as a failure through its None returncode; the launcher's own
     NEGATIVE vectors are the deliberate exceptions (launcher-timeout and
@@ -974,9 +975,10 @@ def _leader_unreaped(proc):
     never reaped here; False when the anchor is LOST (Popen already holds a returncode, or
     the observation raises ChildProcessError because another path reaped the leader). Any
     other failure propagates, so an anchor that cannot be verified is never treated as
-    held. It relies on two PRECONDITIONS: SIGCHLD keeps its DEFAULT disposition (ignored,
-    the kernel reaps the leader itself and this check reports the anchor lost), and this
-    process is the leader's ONLY reaper. What it cannot exclude: an outside reap landing
+    held. It relies on two PRECONDITIONS: SIGCHLD is not ignored (_run_bounded_child
+    refuses to launch under SIG_IGN; ignored anyway, the kernel reaps the leader itself and
+    this check reports the anchor lost), and this process is the leader's ONLY reaper.
+    What it cannot exclude: an outside reap landing
     AFTER this observation and BEFORE the signal it guards (no unsynchronized observation
     can); the launcher's reap then finds the leader gone and reports the anchor lost, but
     that signal has already been sent."""
@@ -1009,6 +1011,15 @@ def _reap_leader(pid, deadline):
         if time.monotonic() >= deadline:
             return None, False
         time.sleep(0.05)
+
+
+class _SigchldIgnoredError(RuntimeError):
+    """Raised by _run_bounded_child BEFORE anything is launched when SIGCHLD is ignored
+    (SIG_IGN) in this process. The kernel would then reap each leader itself at its exit,
+    so no anchor check could hold the leader's process-group id and the launcher's own
+    reap could collect no status. A parent's ignore survives exec, so a self-test started
+    by such a parent inherits it and is refused under this name, not by a bare
+    ChildProcessError from a later wait."""
 
 
 def _run_bounded_child(args, env, timeout=_CHILD_TIMEOUT, ready_path=None):
@@ -1052,15 +1063,29 @@ def _run_bounded_child(args, env, timeout=_CHILD_TIMEOUT, ready_path=None):
     raised. Attempting a cleanup step cannot guarantee it succeeds: a close, signal or reap
     that fails is reported (raised, or set aside for the primary), never retried, so a
     failed signal can leave the group running and a failed reap leaves returncode None.
-    PRECONDITIONS, relied on by every anchor check: SIGCHLD at its DEFAULT disposition (with
-    SIGCHLD ignored, SIG_IGN, the kernel reaps the leader itself and the check reports the
-    anchor lost) and this process as the leader's ONLY reaper. The RESIDUAL they leave open:
+    PRECONDITIONS, relied on by every anchor check: SIGCHLD NOT IGNORED (ignored, the kernel
+    reaps the leader itself and the check reports the anchor lost) and this process as the
+    leader's ONLY reaper. The first is CHECKED once, before anything is created or
+    launched: when signal.getsignal reports SIGCHLD as SIG_IGN (a parent's ignore survives
+    exec), the launcher raises _SigchldIgnoredError and launches nothing. That check sees
+    only what Python recorded: a disposition changed after it, or set outside Python (a
+    C-level ignore or SA_NOCLDWAIT, which getsignal does not report), is not refused, and a
+    leader the kernel reaps under it surfaces as a ChildProcessError from a wait or as a
+    lost anchor. The second precondition is stated, not checked. The RESIDUAL they leave open:
     an outside reap landing after an anchor check and before the signal it guards is not
     excluded (no unsynchronized observation can exclude it); the reap that follows then
     finds the leader gone, so the outcome still reports anchor_lost True and returncode
     None, but that one signal was already sent."""
     import signal
     import time
+    # the SIGCHLD precondition, checked before anything exists: ignored, the kernel would
+    # reap each leader itself, so the launch is refused by name and nothing is launched
+    if signal.getsignal(signal.SIGCHLD) == signal.SIG_IGN:
+        raise _SigchldIgnoredError(
+            "refused before launch: SIGCHLD is ignored (SIG_IGN) in this process, possibly "
+            "inherited across exec from a parent that ignores it; the kernel would reap each "
+            "launched leader itself, so no anchor check could hold its process-group id and "
+            "no exit status could be collected (run with SIGCHLD at SIG_DFL)")
     child_env = dict(env)
     child_env[_CHILD_DEPTH_ENV] = "1"
     # everything the cleanup reads exists BEFORE the launch: an allocation failure here
@@ -1399,8 +1424,9 @@ def _not_run_vectors(failures):
     PUBLIC-ENTRY child environment except the unmarked-drifted-lifecycle child's
     additionally carries _SUPPRESS_VECTORS_ENV (the launcher-group, launcher-timeout and
     launcher-cleanup probe children carry only the depth marker, and the
-    launcher-group-replacement, launcher-readiness-window and launcher-anchor vectors
-    launch nothing: modelled doubles), so a marked child records the named suppression
+    launcher-group-replacement, launcher-readiness-window, launcher-anchor and
+    launcher-sigchld-refusal vectors launch nothing: modelled doubles, or a spied Popen),
+    so a marked child records the named suppression
     NOT RUN and exits
     1 without printing any PASS text; the unmarked child drives only the explicit no-vectors
     seam, whose nested entry prints the distinct no-vectors note, never the full PASS line.
@@ -1846,6 +1872,69 @@ def _not_run_vectors(failures):
                             "without raising (got {})".format(anchor_label, want_kills,
                                                              anchor_got))
 
+    # Launcher SIGCHLD-refusal vectors (in-process, a spied Popen): with SIGCHLD ignored the
+    # kernel reaps every leader itself, so no anchor check could hold its group id; the
+    # launcher must refuse with the named _SigchldIgnoredError BEFORE anything is launched.
+    # subprocess.Popen is replaced by a spy that records every launch attempt and raises
+    # its own error, so nothing real starts under any disposition here. ignored (SIG_IGN)
+    # must be refused with no launch attempt; default (SIG_DFL) and python-handler (a
+    # no-op handler installed through signal.signal, under which the kernel does not reap)
+    # must reach exactly one launch attempt, the spy's own error propagating unchanged. The
+    # caller's disposition is restored after each, whatever happened, and the vector
+    # requires it restored. A handler installed outside Python (getsignal None) cannot be
+    # put back through signal.signal, so these vectors then leave it alone and record a
+    # NAMED NOT RUN. Red when the refusal is removed or moves after the launch, and red for
+    # python-handler when the refusal widens to every disposition other than SIG_DFL.
+    sigchld_prior = signal.getsignal(signal.SIGCHLD)
+    if sigchld_prior is None:
+        _not_run(failures, "the launcher-sigchld-refusal vectors",
+                 "SIGCHLD has a handler installed outside Python, which signal.signal "
+                 "cannot restore")
+    else:
+        sigchld_launches = []
+        sigchld_spy_error = RuntimeError("spy: the launcher attempted a launch")
+
+        def _sigchld_spy_popen(*_args, **_kwargs):
+            sigchld_launches.append(signal.getsignal(signal.SIGCHLD))
+            raise sigchld_spy_error
+
+        def _sigchld_noop_handler(_signum, _frame):
+            return None
+
+        for sc_label, sc_disposition, sc_refused in (
+                ("ignored", signal.SIG_IGN, True),
+                ("default", signal.SIG_DFL, False),
+                ("python-handler", _sigchld_noop_handler, False)):
+            del sigchld_launches[:]
+            sc_got = None
+            real_sc_popen = subprocess.Popen
+            subprocess.Popen = _sigchld_spy_popen
+            try:
+                signal.signal(signal.SIGCHLD, sc_disposition)
+                _run_bounded_child(["-c", "pass"], os.environ, timeout=5)
+                sc_got = "no exception"
+            except _SigchldIgnoredError as exc:
+                if not sc_refused:
+                    sc_got = "refused: {}".format(exc)
+            except Exception as exc:  # reported below as this vector's own named failure
+                if sc_refused or exc is not sigchld_spy_error:
+                    sc_got = "an escaped {}: {}".format(type(exc).__name__, exc)
+            finally:
+                subprocess.Popen = real_sc_popen
+                signal.signal(signal.SIGCHLD, sigchld_prior)
+            want_launches = 0 if sc_refused else 1
+            if sc_got is None and len(sigchld_launches) != want_launches:
+                sc_got = "{} launch attempt(s), want {}".format(len(sigchld_launches),
+                                                              want_launches)
+            if sc_got is None and signal.getsignal(signal.SIGCHLD) != sigchld_prior:
+                sc_got = "the caller's SIGCHLD disposition was not restored"
+            if sc_got is not None:
+                failures.append("(vector launcher-sigchld-refusal {}) the launcher must "
+                                "refuse with _SigchldIgnoredError and launch nothing exactly "
+                                "when SIGCHLD is SIG_IGN, and reach its launch otherwise, "
+                                "with the caller's disposition restored (got {})".format(
+                                    sc_label, sc_got))
+
     # Launcher exception-cleanup vectors (fresh processes, injected failures): whatever
     # raises after Popen returns, the launcher's try/finally must run EVERY cleanup stage:
     # close both owned pipes with EXACTLY ONE close call each, attempt the final group
@@ -1867,9 +1956,14 @@ def _not_run_vectors(failures):
     # REAL outside reap (the exit observation is replaced by a bounded waitpid that collects
     # the status 3) before the cleanup: no destructive signal, no exception, and the
     # outcome must carry anchor_lost True and returncode None, never the 0 CPython's
-    # Popen.wait makes of ECHILD. These vectors, like the anchor check they exercise, rely
-    # on SIGCHLD keeping its DEFAULT disposition (the launcher's stated precondition). A
-    # child a red vector leaves unreaped is killed and reaped by its pid afterwards. Red
+    # Popen.wait makes of ECHILD. Its window is _CHILD_TIMEOUT, the bound every vector-entry
+    # child gets, not 5 seconds: the drain and the outside reap both run against the
+    # launcher's one window, so a child slow to start under load would otherwise run it
+    # out, and the first timeout kill that follows (recorded, never sent) would turn the
+    # vector red although the launcher behaved. These vectors, like the anchor check they
+    # exercise, rely on SIGCHLD not being ignored (the launcher's precondition; under
+    # SIG_IGN it refuses by name, as the vectors above require). A child a red vector
+    # leaves unreaped is killed and reaped by its pid afterwards. Red
     # when the cleanup try/finally is removed, when the buffers are allocated after the
     # launch, when a cleanup stage is no longer isolated (or catches only OSError), when a
     # final close is duplicated, when the kept cleanup failure is dropped or re-raised at
@@ -1890,9 +1984,10 @@ def _not_run_vectors(failures):
         return _raise
 
     def _drive_cleanup_vector(child_args, ready_path, injected, install, restore,
-                              close_raises=None, launches=True, extra=None):
-        """Launch a REAL child with INSTALL's injected failure in place and return what
-        the launcher got wrong (None when every guarantee held): INJECTED itself re-raised
+                              close_raises=None, launches=True, extra=None, window=5):
+        """Launch a REAL child with INSTALL's injected failure in place and a WINDOW-second
+        timeout, and return what the launcher got wrong (None when every guarantee held):
+        INJECTED itself re-raised
         unchanged (None: a normal return is required), both pipes closed by EXACTLY ONE
         close call each, a returncode collected, the leader reaped and the group empty,
         plus EXTRA's own check of what SEEN recorded. With LAUNCHES False the failure must
@@ -1938,7 +2033,7 @@ def _not_run_vectors(failures):
         install(seen)
         got = None
         try:
-            seen["outcome"] = _run_bounded_child(child_args, os.environ, timeout=5,
+            seen["outcome"] = _run_bounded_child(child_args, os.environ, timeout=window,
                                                  ready_path=ready_path)
             if injected is not None:
                 got = "no exception propagated"
@@ -2139,7 +2234,9 @@ def _not_run_vectors(failures):
              _install_echild, None, _echild_reported)):
         cl_got = _drive_cleanup_vector(cl_args, cl_ready_path, cl_injected, cl_install,
                                        _restore_all, close_raises=cl_close,
-                                       launches=cl_label != "allocation", extra=cl_extra)
+                                       launches=cl_label != "allocation", extra=cl_extra,
+                                       window=(_CHILD_TIMEOUT if cl_label == "anchor-echild"
+                                               else 5))
         if cl_got is not None:
             failures.append("(vector launcher-cleanup-{}) the {} injection must leave the "
                             "launcher's cleanup guarantees intact: the expected exception "
