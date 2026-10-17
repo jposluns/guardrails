@@ -8744,8 +8744,9 @@ def main(report_path=None):
         # The execution report is finalized at interpreter exit, after this run's cleanup
         # (tools/_selftest_exit_report.py); nothing writes it in band.
         _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
-    from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
-    scrub_git_environment()
+    # The lifecycle applies the git fixture scrub itself after saving the caller's environment; a
+    # scrub before it would make it save, and so restore, the already scrubbed values.
+    from _git_fixture_env import fixture_git_lifecycle
     with fixture_git_lifecycle():
         return _main_isolated(report_path)
 
@@ -10731,6 +10732,58 @@ def _main_isolated(report_path=None):
                          "sleep 20; done &")), "deny")
         check("wl/handler-deny-rib-true",
               _verdict(wl("while true; do gh pr checks 42; sleep 30; done &", rib=True)), "deny")
+        # The shared command reading (aiqt_hooks._command_argv, _substitution_lines): a body command read past
+        # a leading `time` (and past one `--` after it), and a poll loop inside a backquote substitution read as
+        # a line of its own, match. In each `time --` row the sleep or the probe after `time --` is the loop's
+        # only one, so the row fails if the reading stops at the `--`. This classifier still reads a for
+        # header's loop variable as its command word, so a variable named gh or curl reads as a probe (a kept
+        # over-match). The truncation guard reads a sink stage past a brace and inside a double-quoted
+        # substitution.
+        check("wl/time-prefixed-sleep-match",
+              clf("while true; do gh pr checks 42; time sleep 30; done &"), "match")
+        TIME_DD_SLEEP = "while true; do gh pr checks 42; time -- sleep 30; done &"
+        TIME_DD_PROBE = "while true; do time -- gh pr checks 42; sleep 30; done &"
+        check("wl/time-dashdash-sleep-match", clf(TIME_DD_SLEEP), "match")
+        check("wl/time-dashdash-probe-match", clf(TIME_DD_PROBE), "match")
+        check("wl/handler-deny-time-dashdash-sleep", _verdict(wl(TIME_DD_SLEEP)), "deny")
+        check("wl/handler-deny-time-dashdash-probe", _verdict(wl(TIME_DD_PROBE)), "deny")
+        check("wl/backquote-line-match", clf("x=`while true; do gh pr checks 42; sleep 30; done &`"), "match")
+        # The wrapped examples this guard's text names: a loop whose header is not the first word of its
+        # segment, a loop inside an unquoted $(...), and a canonical loop beside an unquoted $(...) are
+        # 'indeterminate', unless a backquote substitution in the command holds a 'match' (checked first).
+        TIME_HEADERS = tuple(lead + BASE for lead in ("time ", "time -p ", "! ", "FOO=1 "))
+        DOLLAR_LOOP = "x=$(" + BASE + ")"
+        DOLLAR_BESIDE = "echo $(date); " + BASE
+        DOLLAR_BACKQUOTE = "echo $(date) `" + BASE + "`"
+        check("wl/time-header-indeterminate", tuple(clf(cmd) for cmd in TIME_HEADERS), ("indeterminate",) * 4)
+        check("wl/dollar-subst-loop-indeterminate", clf(DOLLAR_LOOP), "indeterminate")
+        check("wl/dollar-subst-beside-indeterminate", clf(DOLLAR_BESIDE), "indeterminate")
+        check("wl/dollar-subst-backquote-match", clf(DOLLAR_BACKQUOTE), "match")
+        # The decision the text states for each, at the handlers: this guard denies the backquote 'match', and
+        # it allows each 'indeterminate' form while the truncation guard denies it on the same event. Each
+        # truncation deny must be its bare-& detach deny, so a deny from another path (a malformed payload or a
+        # registry scope fault) fails these checks.
+        def tg_detach(cmd):
+            res = tg(cmd)
+            why = (res[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+            return _verdict(res), "detaches a child with a bare '&'" in why
+        check("wl/handler-deny-dollar-subst-backquote", _verdict(wl(DOLLAR_BACKQUOTE)), "deny")
+        check("wl/degrade-time-header-guard-allows", tuple(_verdict(wl(cmd)) for cmd in TIME_HEADERS),
+              ("allow",) * 4)
+        check("wl/degrade-time-header-trunc-denies", tuple(tg_detach(cmd) for cmd in TIME_HEADERS),
+              (("deny", True),) * 4)
+        for guard_cid, trunc_cid, cmd in [
+                ("wl/degrade-dollar-subst-loop-guard-allows", "wl/degrade-dollar-subst-loop-trunc-denies",
+                 DOLLAR_LOOP),
+                ("wl/degrade-dollar-subst-beside-guard-allows", "wl/degrade-dollar-subst-beside-trunc-denies",
+                 DOLLAR_BESIDE)]:
+            check(guard_cid, _verdict(wl(cmd)), "allow")
+            check(trunc_cid, tg_detach(cmd), ("deny", True))
+        check("wl/for-header-variable-probe-match",
+              (clf("for gh in 1 2; do sleep 5; done &"), clf("for curl in a; do sleep 5; done &")),
+              ("match", "match"))
+        check("trunc/brace-group-sink-denies", _verdict(tg("pytest | { head -5; }", rib=True)), "deny")
+        check("trunc/quoted-backquote-sink-denies", _verdict(tg('echo "`pytest | head -5`"', rib=True)), "deny")
         # handler ALLOW: a foreground poll loop (no detach) and a bounded watch acquire no deny here.
         check("wl/handler-allow-foreground",
               _verdict(wl("while true; do gh pr checks 42; sleep 30; done")), "allow")
@@ -13311,6 +13364,21 @@ def _main_isolated(report_path=None):
     finally:
         aiqt_hooks._orch_dirfd_has_registry = saved_probe
         shutil.rmtree(tmp, ignore_errors=True)
+
+    # An in-process call of main() hands the caller's environment back exactly (HOME,
+    # XDG_CONFIG_HOME, the GIT_CONFIG_* pins and the caller's own GIT_* variables), with the git
+    # fixture scrub in effect inside: the entry point is run in a child around a stand-in main,
+    # once without a report path and once with one, so the branch that arms the execution report
+    # before the lifecycle runs too. There _selftest_exit_report.arm is a recorder that must be
+    # called once, with the caller's environment unchanged; the path is handed only to it. The
+    # stand-in must receive exactly the arguments passed, so the first run passes None, the
+    # parameter's default, explicitly.
+    from _entry_restore_selftest import entry_restore_failures
+    check("harness/entry-restores-caller-env",
+          entry_restore_failures(__file__, "main", "_main_isolated", args=(None,))
+          + entry_restore_failures(__file__, "main", "_main_isolated",
+                                   args=("entry-restore-report.json",),
+                                   helpers=(("_selftest_exit_report", "arm"),)), [])
 
     # In-run execution-set self-guard (defence in depth beside tools/check_selftest_execution.py): the
     # executed set reconciles against the hand-authored expectation manifest even on a direct developer
