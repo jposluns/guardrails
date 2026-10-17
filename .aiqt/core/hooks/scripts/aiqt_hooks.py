@@ -14428,16 +14428,22 @@ def citation_read_recorder(data):
 # --- citation read check (citint/refcap) -------------------------------------------------------------
 # PreToolUse Bash, stage BAKE: it surfaces a note and never denies. Where a git commit message (-m, -F) or a
 # gh pr create or edit body (--body, --body-file) cites a path with a line or a line range, it reads this
-# session's citation ledger (both generations, as citation_read_recorder writes them) and names each cited
+# session's citation ledgers (both generations, as citation_read_recorder writes them, under the state
+# directory of each distinct toplevel among the session cwd's, each command's git -C toplevel and each cited
+# file's, at most _CITECHK_MAX_LEDGERS of them; _citechk_tops), merges their rows, and names each cited
 # range that no recorded read or write row covers at the cited lines with the content those lines hold now.
+# A toplevel whose ledger is not read (past that bound or the deadline, or a cited file's directory whose
+# toplevel is not probed) is named in the guard-events row and, when a range is judged, in the note; a
+# read recorded under any other toplevel is not seen.
 # Quoted logs and tracebacks, URLs, times and versions, ranges a body labels as verifier-supplied, and lines
 # the author wrote (Write and Edit rows, and lines the relevant diff adds) are excluded by construction. Each
 # checked command earns one guard-events row (kind citint) recording every citation's class, the bake
 # evidence a later promotion is decided on. As in the recorder, one deadline set when the handler starts
 # covers the toplevel probes, every git probe (each given only the time left, none started once it is
-# reached), every path resolution, every stat, open or fstat of a resolved path, every message, body and
-# cited-file read, the scan of every message, body and here-document text (made first, before the toplevel
-# probe), and every row digest; a range not judged by then is named as such, and where the deadline stops
+# reached), every path resolution, every stat, open or fstat of a resolved path, every message, body,
+# ledger and cited-file read, the scan of every message, body and here-document text (made first, before
+# the toplevel probe), and every row digest; a range not judged by then is named as such, and where the
+# deadline stops
 # a scan no toplevel probe is started and the note says no citation was checked. Every path the check
 # resolves goes through _cite_resolution (_citechk_real): a message or body file, a cited path (joined to
 # the repository top where relative), the repository top a diff is read against, and the session cwd and a
@@ -14448,12 +14454,14 @@ def citation_read_recorder(data):
 # named (where the deadline passes before the toplevel probe, that note names each body file not read). The
 # deadline is checked at each line of a text's scan, before each citation is judged, before each path is
 # resolved, between two components of its resolution and before each symlink it reads, before each stat,
-# open or fstat of a resolved path, before each chunk of a message, body or cited-file read and before each
-# row's digest. A step under way when it is reached finishes
+# open or fstat of a resolved path, before each state directory's ledger is read, before each ledger
+# generation's open, before each chunk of a message, body, ledger or cited-file read and before each row's
+# digest. A step under way when it is reached finishes
 # first: one line of a scan, one lstat or readlink of a resolution, one stat, open or fstat, one chunk's
 # read, or one digest (at most _CITE_MAX_FILE bytes). Not checked against the deadline, and bounded by size
-# or count instead: the two ledger generations (at most _CITECHK_LEDGER_MAX bytes each), read and parsed
-# whole within that bound; the decoding of a message or body file read before the deadline (at most
+# or count instead: the parse of each ledger generation read (at most _CITECHK_LEDGER_MAX bytes each, two
+# in each of at most _CITECHK_MAX_LEDGERS state directories); the decoding of a message or body file read
+# before the deadline (at most
 # _CITECHK_BODY_MAX bytes); a cited file's split into lines (at most _CITE_MAX_FILE bytes); for each of at
 # most _CITECHK_MAX_CITES citations, the match of a relative cited path against the paths the ledger
 # records and of the range against the rows of its file (ledgers within their bound); the parse of a diff
@@ -14464,8 +14472,9 @@ def citation_read_recorder(data):
 # delimiter one splits (each visited once, and the command not lexed again); for a command that does not lex,
 # or that is read both ways, the search of its text for arithmetic expansions and for here-documents with an
 # unquoted delimiter; the split of each text into lines before its scan (at the text's size); and the
-# orchestration registry read that locates the state directory (read whole, as every hook here reads it) and
-# the guard-events append. A command's standard input (-F -) is the here-document bash gives it, its last
+# orchestration registry read that locates each state directory (once per toplevel the check reads or
+# names, read whole, as every hook here reads it) and the guard-events append. A command's standard input
+# (-F -) is the here-document bash gives it, its last
 # standard-input redirection (a later one that duplicates fd 0 onto itself, such as <&0, leaves it), read
 # once however many -F - options name it; where that redirection is no here-document of the command,
 # standard input is named as not read (so is a here-document moved there through another descriptor, as in
@@ -14489,6 +14498,7 @@ _CITECHK_READ_MAX = 64 * 1024 * 1024     # at most this many bytes of cited file
 _CITECHK_SHOWN = 10                      # at most this many ranges are listed in the note
 _CITECHK_PATH_SHOWN = 200                # at most this many characters of a cited or body-file path are shown
 _CITECHK_BUDGET = 6.0                    # seconds for every probe, read and digest of a call (hook timeout 10)
+_CITECHK_MAX_LEDGERS = 8                 # at most this many state directories' ledgers are read per Bash call
 _CITECHK_HEAD = "AIQT guardrail (rules citint/refcap, BAKE: warning only, nothing is blocked): "
 _CITECHK_OUT_OF_TIME = "the check ran out of its time budget"
 _CITECHK_PREFILTER = re.compile(r"\bcommit\b|\bpr\b")
@@ -15205,10 +15215,13 @@ def _citechk_scan(texts, deadline):
     return cites, counts
 
 
-def _citechk_generation(dirfd, name):
+def _citechk_generation(dirfd, name, deadline):
     """(bytes, None) for one ledger generation in the open ledger directory, (None, None) when it is absent,
     or (None, reason) when it cannot be read: opened without following a symlink and non-blocking, refused
-    unless a regular file of at most _CITECHK_LEDGER_MAX bytes."""
+    unless a regular file of at most _CITECHK_LEDGER_MAX bytes, and neither opened nor read on once the
+    check's deadline is reached (checked before the open and before each chunk; the budget named)."""
+    if _cite_over(deadline):
+        return None, _CITECHK_OUT_OF_TIME
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=dirfd)
     except FileNotFoundError:
@@ -15220,6 +15233,8 @@ def _citechk_generation(dirfd, name):
             return None, "it is not a regular file"
         chunks, total = [], 0
         while total <= _CITECHK_LEDGER_MAX:
+            if _cite_over(deadline):
+                return None, _CITECHK_OUT_OF_TIME
             chunk = os.read(fd, min(1 << 20, _CITECHK_LEDGER_MAX + 1 - total))
             if not chunk:
                 break
@@ -15253,10 +15268,11 @@ def _citechk_row(line):
     return None
 
 
-def _citechk_ledger(directory, key):
-    """This session's ledger rows: (rows, faults), rows from <key>.jsonl.1 then <key>.jsonl, faults naming
-    each part that could not be read (the directory, a generation, or lines that are not rows). An absent
-    directory or generation is no fault; it holds no rows."""
+def _citechk_ledger(directory, key, deadline):
+    """This session's ledger rows in one ledger directory: (rows, faults), rows from <key>.jsonl.1 then
+    <key>.jsonl, faults naming each part that could not be read (the directory, a generation, or lines that
+    are not rows; a generation the deadline stops, _citechk_generation). An absent directory or generation is
+    no fault; it holds no rows."""
     rows, faults = [], []
     try:
         dirfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
@@ -15266,7 +15282,7 @@ def _citechk_ledger(directory, key):
         return rows, ["the ledger directory {} cannot be opened ({})".format(directory, _cite_fail(exc))]
     try:
         for name in (key + ".jsonl.1", key + ".jsonl"):
-            blob, reason = _citechk_generation(dirfd, name)
+            blob, reason = _citechk_generation(dirfd, name, deadline)
             if reason is not None:
                 faults.append("{}: {}".format(os.path.join(directory, name), reason))
             bad = 0
@@ -15283,6 +15299,73 @@ def _citechk_ledger(directory, key):
         except OSError:
             pass
     return rows, faults
+
+
+def _citechk_tops(commands, root, deadline):
+    """(tops, missed): the toplevels whose ledgers the check reads, in order and each once, and the cited
+    files' directories whose toplevel is not known. The recorder writes a read to the ledger of the toplevel
+    of the session cwd at the time of the read, so the rows that can cover a citation lie under the session
+    cwd's toplevel (root), the command's repository top (its git -C toplevel, else root), or the toplevel of
+    the cited file's directory, which the recorder used where the session's cwd was there. That toplevel is
+    found as the recorder finds one (_recovery_toplevel, given only the time left) for the directory of the
+    regular file _citechk_resolve gives a citation the check judges (not exempt, within the citation cap, of
+    a command whose session cwd and git -C directory resolved), with no ledger path tried, so a cited path
+    matched only by its suffix to a recorded path adds none; a directory that is already one of the tops is
+    its own toplevel and is not probed. At most _CITECHK_MAX_FILES distinct directories are probed; missed
+    names, with the reason, each directory past that bound and each whose probe the deadline cut short or
+    left no time to start."""
+    tops, missed, seen = [root], [], set()
+    for item in commands:
+        if item["root"] not in tops:
+            tops.append(item["root"])
+    room = _CITECHK_MAX_CITES
+    for item in commands:
+        cites, room = item["found"][:max(room, 0)], room - len(item["found"])
+        if item["unresolved"]:
+            continue
+        for cite in cites:
+            if cite[4]:
+                continue
+            real, _why = _citechk_resolve(cite[0], item["root"], {}, deadline)
+            directory = None if real is None else os.path.dirname(real)
+            if directory is None or directory in seen or directory in tops:
+                continue
+            seen.add(directory)
+            if len(seen) > _CITECHK_MAX_FILES:
+                missed.append((directory, "not probed: more than {} distinct directories hold cited files"
+                               .format(_CITECHK_MAX_FILES)))
+                continue
+            left = _cite_left(deadline)
+            top = None if left is None else _recovery_toplevel(directory, timeout=left)
+            if top is None and _cite_over(deadline):
+                missed.append((directory, "not probed: " + _CITECHK_OUT_OF_TIME))
+            elif top is not None and top not in tops:
+                tops.append(top)
+    return tops, missed
+
+
+def _citechk_ledgers(tops, key, deadline):
+    """(rows, faults, read, skipped): this session's ledger rows under each toplevel in tops, merged. Each
+    toplevel's state directory is located as the recorder locates it (_orch_state_dir_for_root) and its
+    ledger read once however many toplevels share it (_citechk_ledger, within its byte bound and the
+    deadline); faults are those reads' faults, read the number of state directories read, at most
+    _CITECHK_MAX_LEDGERS, and skipped names, with the reason, each toplevel whose ledger was not read: one
+    past that bound, or one reached once the deadline has passed."""
+    rows, faults, done, skipped = [], [], set(), []
+    for top in tops:
+        directory = os.path.join(_orch_state_dir_for_root(top), _CITE_DIR)
+        if directory in done:
+            continue
+        if len(done) >= _CITECHK_MAX_LEDGERS:
+            skipped.append((top, "past the {} state directories read per call".format(_CITECHK_MAX_LEDGERS)))
+        elif _cite_over(deadline):
+            skipped.append((top, _CITECHK_OUT_OF_TIME))
+        else:
+            done.add(directory)
+            found, failed = _citechk_ledger(directory, key, deadline)
+            rows += found
+            faults += failed
+    return rows, faults, len(done), skipped
 
 
 def _citechk_covers(spans, first, last):
@@ -15524,12 +15607,18 @@ def _citechk_run(data):
             left = _cite_left(deadline)
             if not item["unresolved"] and here != there:
                 item["root"] = (None if left is None else _recovery_toplevel(item["repo"], timeout=left)) or root
-    rows, faults, status = [], [], "not-read"
+    # The ledgers read are those of the session cwd's toplevel, each command's and each cited file's
+    # (_citechk_tops), so a read made with the cwd in the repository a command commits to, or in the one a
+    # cited file lies in, is seen from a session cwd in another.
+    rows, faults, status, read, unread_tops = [], [], "not-read", 0, []
     if any(not cite[4] for item in commands for cite in item["found"]):
         if key is None:
             status = "no-session"
         else:
-            rows, faults = _citechk_ledger(os.path.join(_orch_state_dir_for_root(root), _CITE_DIR), key)
+            tops, missed = _citechk_tops(commands, root, deadline)
+            rows, faults, read, skipped = _citechk_ledgers(tops, key, deadline)
+            unread_tops = ["{} ({})".format(_citechk_short(top), why) for top, why in skipped] \
+                + ["the toplevel of {} ({})".format(_citechk_short(directory), why) for directory, why in missed]
             status = "unreadable" if faults else ("ok" if rows else "empty")
     index = {}
     for path, start, end, digest in rows:
@@ -15564,7 +15653,7 @@ def _citechk_run(data):
     flagged = [(item, result) for item in commands for result in item["results"]
                if result["class"] in _CITECHK_FLAGGED]
     considered = sum(1 for item in commands for result in item["results"] if result["class"] != "exempt-verifier")
-    ledger_faulty = considered > 0 and status in ("no-session", "unreadable")
+    ledger_faulty = considered > 0 and (status in ("no-session", "unreadable") or bool(unread_tops))
     lines = []
     for item, result in flagged[:_CITECHK_SHOWN]:
         lines.append("  {} ({})".format(result["cite"], _citechk_phrase(result, item["root"])))
@@ -15589,13 +15678,17 @@ def _citechk_run(data):
     if ledger_faulty and status == "no-session":
         parts.append("The payload carries no session id, so this session's citation ledger cannot be found and "
                      "no cited range can be matched to a read.")
-    elif ledger_faulty:
-        parts.append("This session's citation ledger could not be read in full ({}), so a range it holds may "
-                     "show here as unread.".format("; ".join(faults)))
-    elif status == "empty" and flagged:
-        parts.append("This session has no citation-ledger rows at all (session key {}): nothing was recorded "
-                     "for it, or its session id changed (after a compaction or a resume, for example)."
-                     .format(key))
+    else:
+        if ledger_faulty and faults:
+            parts.append("This session's citation ledger could not be read in full ({}), so a range it holds may "
+                         "show here as unread.".format("; ".join(faults)))
+        if ledger_faulty and unread_tops:
+            parts.append("This session's citation ledger was not read under {} toplevel(s), so a range recorded "
+                         "there may show here as unread: {}.".format(len(unread_tops), "; ".join(unread_tops)))
+        if status == "empty" and read and flagged:
+            parts.append("This session has no citation-ledger rows at all in the {} state director{} read (session "
+                         "key {}): nothing was recorded for it there, or its session id changed (after a "
+                         "compaction or a resume, for example).".format(read, "y" if read == 1 else "ies", key))
     if budget:
         parts.append("The citation check is incomplete (budget): it ran out of its {} second budget before "
                      "every range was judged.".format(_CITECHK_BUDGET))
@@ -15607,7 +15700,10 @@ def _citechk_run(data):
                      "rg with a line-number flag, sed -n 'A,Bp' PATH, Write and Edit; it records nothing for any "
                      "other tool (cat, head, tail, less, a pipeline or compound command, bash -c, a script), for "
                      "an image, PDF or notebook read, or for another session's or a subagent's reads, so a range "
-                     "read that way shows here as unmatched. Re-open each range (Read with offset and limit, or "
+                     "read that way shows here as unmatched. Each read is kept in the ledger of the repository the "
+                     "session's cwd was in at the time, and this check reads those of the session cwd's "
+                     "repository, the command's (git -C) and each cited file's, so a read made from any other "
+                     "repository shows as unmatched too. Re-open each range (Read with offset and limit, or "
                      "git show REV:PATH) and re-check the claim before citing it, or cite the symbol alone "
                      "without a line number. A range a verifier supplied can be placed under a \"Verifier "
                      "report\" heading or on a \"Verifier-cited:\" line.")
@@ -15621,7 +15717,7 @@ def _citechk_run(data):
             or item["over_cap"] > 0
         detail = {"v": 1, "control": "citation-read-check", "cmd": item["cmd"], "parse": item["parse"],
                   "parse_why": item.get("why"), "session": key, "ledger": status, "ledger_rows": len(rows),
-                  "budget_exhausted": budget,
+                  "ledgers_read": read, "ledgers_not_read": unread_tops, "budget_exhausted": budget,
                   "citations": [{"cite": r["cite"], "class": r["class"], "form": r["form"]}
                                 for r in item["results"]],
                   "not_judged_past_cap": item["over_cap"], "dropped_not_citation": item["dropped"],
@@ -15642,21 +15738,25 @@ def citation_read_check(data):
     """citint/refcap, PreToolUse Bash (stage BAKE: it surfaces and never denies): where a git commit message
     (-m, --message, -F, --file, and on -F - the here-document the command's standard input receives) or a
     gh pr create or edit body (--body, -b, --body-file, -F) cites a path with a line or line range, note
-    each cited range that this session's citation ledger (both generations) does not cover at the cited
-    lines with matching content, naming the range and why (unread, stale, no such file, a file the recorder
-    never records, or not judged), and append one guard-events row (kind citint) per checked command,
-    decision warn or allow. Inert (a silent allow, no row) on any other event, tool or command, a payload
-    with no command string, and a session cwd that resolves to no git toplevel (a toplevel probe the
-    deadline cuts short is named in a note instead). A ledger that cannot be read, a missing session id, a
-    body file that cannot be read, a body on standard input it cannot see, the expansion of a here-document
-    with an unquoted delimiter in a command that does not lex or that is read both ways (_citechk_commands;
-    the note says why it was), and an exhausted budget (one that stops the
-    scan of the message texts included), citation cap, file cap, read bound, path bound or link bound (a
-    path the check would resolve that is longer than _CITE_MAX_PATH characters, or whose resolution would
-    follow more than _CITE_MAX_LINKS symlinks or meets a symlink loop) are each named in the note, never a
-    silent clean. Any fault inside the check is caught and named in a note, so during the bake no path of this
-    handler blocks; the dispatcher's own PreToolUse error paths (an unreadable payload, a bad invocation, an
-    interpreter below the floor) still exit 2 as for every PreToolUse mode."""
+    each cited range that this session's citation ledgers (both generations, merged over the state
+    directories of the session cwd's toplevel, each command's git -C toplevel and each cited file's
+    toplevel, at most _CITECHK_MAX_LEDGERS of them; _citechk_tops) do not cover at the cited lines with
+    matching content, naming the range and why (unread, stale, no such file, a file the recorder never
+    records, or not judged), and append one guard-events row (kind citint) per checked command, decision
+    warn or allow. Inert (a silent allow, no row) on any other event, tool or command, a payload with no
+    command string, and a session cwd that resolves to no git toplevel (a toplevel probe the deadline cuts
+    short is named in a note instead). A ledger that cannot be read, a toplevel whose ledger is not read
+    (past that bound or the deadline, or a cited file's directory whose toplevel is not probed), a missing
+    session id, a body file that cannot be read, a body on standard input it cannot see, the expansion of a
+    here-document with an unquoted delimiter in a command that does not lex or that is read both ways
+    (_citechk_commands; the note says why it was), and an exhausted budget (one that stops the scan of the
+    message texts included), citation cap, file cap, read bound, path bound or link bound (a path the check
+    would resolve that is longer than _CITE_MAX_PATH characters, or whose resolution would follow more than
+    _CITE_MAX_LINKS symlinks or meets a symlink loop) are each named in the note, never a silent clean. Any
+    fault inside the check is caught and named in a note, so during the bake no path of this handler
+    blocks; the dispatcher's own PreToolUse error paths (an unreadable payload, a bad invocation, an
+    interpreter below the floor, and a decision that cannot be written to stdout) still exit 2 as for every
+    PreToolUse mode."""
     try:
         message = _citechk_run(data)
     except Exception as exc:  # a fault in the check never blocks during the bake; it is named instead

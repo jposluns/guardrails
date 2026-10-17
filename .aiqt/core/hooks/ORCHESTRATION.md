@@ -219,7 +219,10 @@ span, digest and revision) is skipped only while the file is under 256 KiB; crea
 session's, or the fresh one after a rotation) removes up to 50 regular files of
 the ledger name shape in the directory last modified more than 14 days earlier. A failed append is named
 in a non-blocking note, never swallowed. The citation read check (the `citation-read-check` hook, a
-PreToolUse Bash hook in its warning-only bake) reads both generations of the session's ledger when a
+PreToolUse Bash hook in its warning-only bake) reads both generations of the session's ledger, merged
+over the state directory of each distinct toplevel among the session cwd's, the command's `git -C`
+toplevel and each cited file's (at most 8 state directories; one past that bound or the deadline is named
+in its guard-events row and, when a cited range is judged, in its note), when a
 `git commit` message or a `gh pr create` or `gh pr edit` body cites a path with a line or line range,
 notes each cited range no row covers at its current content, and appends one `guard-events.jsonl` row of
 kind `citint` per checked command (decision `warn` or `allow`, with each citation's class), the evidence a

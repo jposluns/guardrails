@@ -4676,6 +4676,198 @@ def _citecheck_path_cases(tmp):
            "body": [(shown_max - 1, True), (shown_max, True), (shown_max, False)]})
 
 
+def _citecheck_cross_cases(tmp):
+    """The recorder keeps a read in the ledger of the toplevel the session cwd resolved to at the time, so
+    the check reads, and merges, the ledgers under the session cwd's toplevel, each command's git -C
+    toplevel and each cited file's toplevel. A read of f.py made with the cwd in repository a covers its
+    citation from a cwd in a (the control), from a cwd in b through git -C a, and from a cwd in b as an
+    absolute path, each silent. Each kind of toplevel counts on its own: a read of a's f.py made with the
+    cwd in b covers it through git -C a from b (the session cwd's ledger), and a read made with the cwd in a
+    of a file outside every repository covers it through git -C a from b (the command's ledger), while the
+    absolute citation above needs the file's. A line of a that was not read is still noted from b, with no
+    word of a ledger with no rows, since a's holds some. Where no ledger read holds a row, the note names how many
+    state directories were read, and where none was read it says nothing of rows. At most
+    _CITECHK_MAX_LEDGERS state directories are read: citations of files read in one under, at and one over
+    that many repositories, counting the session's own, are covered, covered, and the one past the bound
+    unread with its toplevel named as not read. At most _CITECHK_MAX_FILES cited files' directories are
+    probed for their toplevel, each probe given only the time left, and a directory past that bound, or
+    whose probe the deadline leaves no time to start or cuts short, is named as not probed (each tried one
+    under, at and one over the bound, and just inside, at and just past the deadline). Each ledger read
+    stops at the deadline: with a stand-in clock
+    moved just inside, at or just past it as the toplevels are found, as the session cwd's ledger read
+    returns, as a ledger generation's read returns, or as a generation's first chunk returns, the next
+    ledger, generation or chunk is read inside it and, at and past it, not read (no step on the ledger
+    file) and named, with the budget."""
+    a = _CiteRepo(tmp / "citecheck-cross-a", {"f.py": b"f1\nf2\nf3\n"})
+    b = _CiteRepo(tmp / "citecheck-cross-b", {"g.py": b"g1\n"})
+    bound = aiqt_hooks._CITECHK_MAX_LEDGERS
+    others = [_CiteRepo(tmp / "citecheck-cross-r{}".format(n), {"h.py": b"h1\nh2\n"}) for n in range(bound)]
+
+    def read(repo, rel, lines, session):
+        path = os.path.join(repo.top, rel)
+        repo.call("Read", {"file_path": path}, {"type": "text", "file": {
+            "filePath": path, "content": "\n".join("{}{}".format(rel[0], n) for n in range(1, lines + 1)),
+            "startLine": 1, "numLines": lines}}, session)
+
+    def seen(repo, command, session):
+        """The verdict, each citation's class, each row's ledgers read and not read, and the note."""
+        verdict, note, rows = _citecheck_run(repo.root, command, session)
+        return (verdict, [(c["cite"], c["class"]) for r in rows for c in r["detail"]["citations"]],
+                [(r["detail"]["ledgers_read"], r["detail"]["ledgers_not_read"]) for r in rows], note)
+    read(a, "f.py", 2, "cross")
+    git_c, f_py = "git -C {} commit -m 'see {{}}'".format(a.root), os.path.join(a.top, "f.py")
+    covered = ("allow", [("f.py:2", "covered")])
+    control = seen(a, "git commit -m 'see f.py:2'", "cross")
+    check("citeledger/cross-repo-control-cwd-a", control[:3] + (control[3] == "",), covered + ([(1, [])], True))
+    through = seen(b, git_c.format("f.py:2"), "cross")
+    check("citeledger/cross-repo-git-C-silent", through[:3] + (through[3] == "",), covered + ([(2, [])], True))
+    absolute = seen(b, "git commit -m 'see {}:2'".format(f_py), "cross")
+    check("citeledger/cross-repo-absolute-silent", absolute[:3] + (absolute[3] == "",),
+          ("allow", [(f_py + ":2", "covered")], [(2, [])], True))
+    # Each kind of toplevel is read on its own account: a read of a's f.py made with the cwd in b covers it
+    # through git -C a from b (the session cwd's ledger, though neither the command's nor the file's is b's),
+    # and a read made with the cwd in a of a file outside every repository covers it through git -C a from b
+    # (the command's ledger, though the file has no toplevel).
+    outside = tmp / "citecheck-cross-outside"
+    outside.mkdir()
+    (outside / "o.txt").write_bytes(b"o1\no2\n")
+    o_txt = os.path.realpath(str(outside / "o.txt"))
+    b.call("Read", {"file_path": f_py}, {"type": "text", "file": {"filePath": f_py, "content": "f1\nf2",
+                                                                  "startLine": 1, "numLines": 2}}, "cross-from-b")
+    a.call("Read", {"file_path": o_txt}, {"type": "text", "file": {"filePath": o_txt, "content": "o1\no2",
+                                                                    "startLine": 1, "numLines": 2}}, "cross-outside")
+    from_b = seen(b, git_c.format("f.py:2"), "cross-from-b")
+    check("citeledger/cross-repo-session-cwd-ledger", from_b[:2] + (from_b[3] == "",), covered + (True,))
+    beyond = seen(b, git_c.format(o_txt + ":2"), "cross-outside")
+    check("citeledger/cross-repo-git-C-outside-file", beyond[:2] + (beyond[3] == "",),
+          ("allow", [(o_txt + ":2", "covered")], True))
+    unread = seen(b, git_c.format("f.py:3"), "cross")
+    check("citeledger/cross-repo-unread-still-noted",
+          unread[:3] + ("f.py:3 (no read or write recorded this session covers these lines)" in unread[3],
+                        "no citation-ledger rows at all" in unread[3]),
+          ("warn", [("f.py:3", "unread")], [(2, [])], True, False))
+    # No rows in any ledger read: the note names the number of state directories read, one or two here.
+    empty = [seen(repo, command, "cross-none") for repo, command in ((a, "git commit -m 'see f.py:2'"),
+                                                                      (b, git_c.format("f.py:2")))]
+    check("citeledger/cross-repo-empty-names-count",
+          [(verdict, classes, dirs, "no citation-ledger rows at all in the {} read".format(count) in note)
+           for (verdict, classes, dirs, note), count in zip(empty, ("1 state directory", "2 state directories"))],
+          [("warn", [("f.py:2", "unread")], [(1, [])], True), ("warn", [("f.py:2", "unread")], [(2, [])], True)])
+    # The bound: from a cwd in b, citations of h.py in bound - 2, bound - 1 and bound other repositories, each
+    # read there, need one under, at and one over the bound of state directories with b's own.
+    for repo in others:
+        read(repo, "h.py", 2, "cross-bound")
+    cited = [os.path.join(repo.top, "h.py") + ":1" for repo in others]
+    over = "{} (past the {} state directories read per call)".format(others[-1].top, bound)
+    capped = []
+    for count in (bound - 2, bound - 1, bound):
+        verdict, classes, dirs, note = seen(b, "git commit -m '{}'".format(" ".join(cited[:count])), "cross-bound")
+        capped.append((verdict, [cls for _cite, cls in classes], dirs, over in note))
+    check("citeledger/ledger-dirs-bound", (bound, capped),
+          (8, [("allow", ["covered"] * (bound - 2), [(bound - 1, [])], False),
+               ("allow", ["covered"] * (bound - 1), [(bound, [])], False),
+               ("warn", ["covered"] * (bound - 1) + ["unread"], [(bound, [over])], True)]))
+    # The cited files' directories: at most _CITECHK_MAX_FILES are probed (lowered to two here), so citations
+    # in one under, at and one over that many directories are covered, covered, and the last named as not
+    # probed (its range not judged, past the file cap of the same bound). A probe is given only the time
+    # left: with a stand-in clock moved just inside, at or just past the deadline as the cited path's
+    # resolution returns, the probe is started inside it and, at and past it, not started and its directory
+    # named as not probed (budget); and a probe that returns nothing (as one cut short does) as the clock
+    # moves there is read inside it as no repository (the range unread, nothing named) and, at and past
+    # it, named as not probed (budget).
+    saved_probe = (aiqt_hooks._CITECHK_MAX_FILES, aiqt_hooks.time, aiqt_hooks._recovery_toplevel,
+                   aiqt_hooks._citechk_resolve)
+    probes = {"dirs-bound": []}
+    hs = [os.path.join(repo.top, "h.py") + ":1" for repo in others[:3]]
+    past = "the toplevel of {} (not probed: more than 2 distinct directories hold cited files)".format(others[2].top)
+    try:
+        aiqt_hooks._CITECHK_MAX_FILES = 2
+        for count in (1, 2, 3):
+            verdict, classes, dirs, note = seen(b, "git commit -m '{}'".format(" ".join(hs[:count])), "cross-bound")
+            probes["dirs-bound"].append((verdict, [cls for _cite, cls in classes], dirs, past in note))
+        aiqt_hooks._CITECHK_MAX_FILES = saved_probe[0]
+        tops_of = {str(b.root): b.top, b.top: b.top, a.top: a.top}
+        not_probed = "the toplevel of {} (not probed: {})".format(a.top, aiqt_hooks._CITECHK_OUT_OF_TIME)
+        for site in ("probe-start", "probe-cut"):
+            for offset in (-0.001, 0.0, 0.001):
+                clock, started = _CiteClock(1000.0, 1000.0 + aiqt_hooks._CITECHK_BUDGET + offset, False), []
+
+                def toplevel(directory, *args, site=site, clock=clock, started=started, **kwargs):
+                    if directory != a.top:
+                        return tops_of.get(directory)
+                    started.append(True)
+                    if site == "probe-cut":
+                        clock.advance()
+                        return None
+                    return tops_of.get(directory)
+
+                def resolve(*args, clock=clock, **kwargs):
+                    try:
+                        return saved_probe[3](*args, **kwargs)
+                    finally:
+                        clock.advance()
+                try:
+                    aiqt_hooks.time, aiqt_hooks._recovery_toplevel = clock, toplevel
+                    if site == "probe-start":
+                        aiqt_hooks._citechk_resolve = resolve
+                    verdict, classes, _dirs, note = seen(b, "git commit -m 'see {}:2'".format(f_py), "cross")
+                finally:
+                    (aiqt_hooks.time, aiqt_hooks._recovery_toplevel,
+                     aiqt_hooks._citechk_resolve) = saved_probe[1:]
+                probes.setdefault(site, []).append((bool(started), verdict, classes, not_probed in note))
+    finally:
+        (aiqt_hooks._CITECHK_MAX_FILES, aiqt_hooks.time, aiqt_hooks._recovery_toplevel,
+         aiqt_hooks._citechk_resolve) = saved_probe
+    cut_short = (True, "warn", [(f_py + ":2", "unjudged")], True)
+    check("citeledger/cited-top-probe-bounds", probes,
+          {"dirs-bound": [("allow", ["covered"], [(2, [])], False), ("allow", ["covered"] * 2, [(3, [])], False),
+                          ("warn", ["covered", "covered", "unjudged"], [(3, [past])], True)],
+           "probe-start": [(True, "allow", [(f_py + ":2", "covered")], False),
+                           (False, "warn", [(f_py + ":2", "unjudged")], True),
+                           (False, "warn", [(f_py + ":2", "unjudged")], True)],
+           "probe-cut": [(True, "warn", [(f_py + ":2", "unread")], False), cut_short, cut_short]})
+    # The deadline: the clock moved as _citechk_tops returns (no ledger read, the session cwd's toplevel
+    # named, and nothing said of rows), as the session cwd's ledger read returns (the git -C repository's
+    # ledger), as the absent older generation's read returns (the current one's open) and as the current
+    # generation's first chunk returns (its next chunk).
+    name = hashlib.sha256("cross".encode("utf-8")).hexdigest()[:16] + ".jsonl"
+    late = aiqt_hooks._CITECHK_OUT_OF_TIME
+    sites = (("tops", "_citechk_tops", None, a, "git commit -m 'see f.py:2'", "{} ({})".format(a.top, late)),
+             ("ledger-dir", "_citechk_ledger", None, b, git_c.format("f.py:2"), "{} ({})".format(a.top, late)),
+             ("generation-open", "_citechk_generation", None, a, "git commit -m 'see f.py:2'",
+              "{}: {}".format(os.path.join(str(a.ledger_dir), name), late)),
+             ("generation-chunk", None, "read", a, "git commit -m 'see f.py:2'",
+              "{}: {}".format(os.path.join(str(a.ledger_dir), name), late)))
+    timed = {}
+    for site, step, cut, repo, command, named in sites:
+        for offset in (-0.001, 0.0, 0.001):
+            clock = _CiteClock(1000.0, 1000.0 + aiqt_hooks._CITECHK_BUDGET + offset, False)
+            saved_time, saved_step, out = aiqt_hooks.time, None if step is None else getattr(aiqt_hooks, step), []
+
+            def stand_in(*args, saved_step=saved_step, clock=clock, **kwargs):
+                try:
+                    return saved_step(*args, **kwargs)
+                finally:
+                    clock.advance()
+            try:
+                aiqt_hooks.time = clock
+                if step is not None:
+                    setattr(aiqt_hooks, step, stand_in)
+                made = _cite_touches({name}, clock, lambda repo=repo, command=command: out.append(
+                    seen(repo, command, "cross")), cut)
+            finally:
+                aiqt_hooks.time = saved_time
+                if step is not None:
+                    setattr(aiqt_hooks, step, saved_step)
+            verdict, classes, dirs, note = out[0]
+            timed.setdefault(site, []).append((any(made), verdict, classes, named in note,
+                                               "no citation-ledger rows at all" in note))
+    # Cut off at the ledger-dir site, the one ledger read (b's, which holds no row) is named as holding none.
+    inside = (True, "allow", [("f.py:2", "covered")], False, False)
+    cut_off = {site: (False, "warn", [("f.py:2", "unjudged")], True, site == "ledger-dir") for site, *_rest in sites}
+    check("citeledger/ledger-read-deadline", timed, {site: [inside, cut, cut] for site, cut in cut_off.items()})
+
+
 class _CiteCutPattern:
     """Stands in for a compiled pattern of aiqt_hooks: match() is the pattern's own, and its cut-th call moves
     the stand-in clock set as clock on, so a scan that matches the pattern once per line reaches the
@@ -16162,6 +16354,7 @@ def _main_isolated(report_path=None):
             _citecheck_show_cases(tmp)
             _citecheck_deadline_cases(tmp)
             _citecheck_path_cases(tmp)
+            _citecheck_cross_cases(tmp)
             _citeledger_walk_cases(tmp)
             _citecheck_step_cases(tmp)
             _cite_roadmap_cases(tmp)

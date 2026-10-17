@@ -10864,6 +10864,20 @@ def _main_isolated(monitor):
             if _ci_lex != _ci_lex_want:
                 failures.append("(ci-wr-locale-lex) the tokenizer with locale={} read {!r} as {!r} (want {!r})"
                                 .format(_ci_locale, _ci_cmd, _ci_lex, _ci_lex_want))
+        # A redirect target is read with the same locale setting as a word: with locale=True a locale quote
+        # there is a double-quoted string, by default its '$' stays literal, and the target stays opaque either
+        # way (ci-wr-locale-redirect).
+        _ci_redir_cmd = 'x >$"a b" 2>$"e""f"'
+        for _ci_locale, _ci_targets in ((False, ["$a b", "$ef"]), (True, ["a b", "ef"])):
+            try:
+                _ci_redir = [[(r.target, r.target_class) for r in seg.redirects]
+                             for seg in aiqt_hooks._lex_command(_ci_redir_cmd, locale=_ci_locale)]
+            except (TypeError, ValueError) as exc:
+                _ci_redir = "{}: {}".format(type(exc).__name__, exc)
+            if _ci_redir != [[(target, "opaque") for target in _ci_targets]]:
+                failures.append("(ci-wr-locale-redirect) the tokenizer with locale={} read the redirect targets of "
+                                "{!r} as {!r} (want {!r})".format(_ci_locale, _ci_redir_cmd, _ci_redir,
+                                                                  [[(t, "opaque") for t in _ci_targets]]))
         _ci_got = aiqt_hooks._segments(_ci_cmd)
         if _ci_got != [(_ci_want[False][0][0], "")]:
             failures.append("(ci-wr-locale-default) _segments read {!r} as {!r} by default (want the literal '$' "
