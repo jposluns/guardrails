@@ -1356,8 +1356,13 @@ expected-check-ids = [
   "citeledger/check-split-heredoc-delim",
   "citeledger/check-split-heredoc-variants",
   "citeledger/check-lexings-differ",
+  "citeledger/check-lexings-differ-variant",
   "citeledger/check-command-in-group",
   "citeledger/check-scan-deadline",
+  "citeledger/check-command-bound",
+  "citeledger/check-command-bound-variant",
+  "citeledger/check-cost-shapes",
+  "citeledger/check-linear-patterns",
   # ---------- the citation hooks together ----------
   "citeledger/roadmap-pairs-recorder-with-check",
   "citeledger/state-dir-inside-tmp",

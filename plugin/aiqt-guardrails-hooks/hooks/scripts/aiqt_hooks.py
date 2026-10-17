@@ -15263,17 +15263,25 @@ def citation_read_recorder(data):
 # most _CITECHK_MAX_CITES citations, the match of a relative cited path against the paths the ledger
 # records and of the range against the rows of its file (ledgers within their bound); the parse of a diff
 # probe's output (what git printed in the time it was given); the lexing of the command and the parse of
-# its here-documents, once in each of its two lexings (_citechk_commands), so twice, at whatever size the
-# payload gives them, with the join of a body file or
+# its here-documents, once in each of its two lexings (_citechk_commands), so twice, for a command of at
+# most _CITECHK_COMMAND_MAX characters, with the join of a body file or
 # git -C path to the directory it is relative to; for a command that lexes and holds a backslash-newline,
 # the search of the here-document operators and double-quoted strings that lexing read for a here-document
 # delimiter one splits (each visited once, and the command not lexed again); for a command that does not lex,
 # or that is read both ways, the search of its text for arithmetic expansions and for here-documents with an
-# unquoted delimiter; the split of each text into lines before its scan (at the text's size); and the
+# unquoted delimiter; for a command that does not lex, is read both ways or is over the bound, the search of
+# its text for the git commit or gh pr create or edit it names (_citechk_kind), and in each line scanned, the
+# masking of URLs (_CITECHK_URL), each of which reads its text about once; the split of each text into lines
+# before its scan (at the text's size); and the
 # orchestration registry read that locates each state directory (once per toplevel reached before
 # _CITECHK_MAX_LEDGERS state directories are read and before the deadline, read whole and through a
 # symlinked registry, as every hook here reads it, so the command's git -C directory and the citations in
-# its texts choose which repositories' registries are read) and the guard-events append. A command's
+# its texts choose which repositories' registries are read) and the guard-events append. Those steps that
+# grow with the command's length, but for the kind search, are taken only for a command of at most
+# _CITECHK_COMMAND_MAX characters, checked before any of them: a longer command is neither lexed nor
+# scanned (_citechk_too_long), and the first git commit or gh pr create or edit its text names is named as
+# not read, with that bound, in the note and in its guard-events row (parse too-long), so no citation in it
+# is checked. A command's
 # standard input (-F -) is the here-document bash gives it, its last
 # standard-input redirection (a later one that duplicates fd 0 onto itself, such as <&0, leaves it), read
 # once however many -F - options name it; where that redirection is no here-document of the command,
@@ -15286,15 +15294,16 @@ def citation_read_recorder(data):
 # not follow as bash does (_citechk_substituted_ops), the command is read both ways, and so is a command
 # whose two lexings differ, or of which only one lexes (_citechk_commands), unless a backslash-newline splits
 # a here-document delimiter in it, when it is scanned as one that does not lex. Read both ways, a command is
-# lexed, with every message and body file that a lexing that lexed names read (a lexing that did not lex is
-# not evaluated, so a file only it names is neither read nor named), and scanned as written, with those
-# expansions named. A command is found after
+# lexed, with a read attempted of every message and body file that a lexing that lexed names (one that
+# cannot be read is named as not read; a lexing that did not lex is not evaluated, so a file only it names
+# is neither read nor named), and scanned as written, with those expansions named. A command is found after
 # the reserved words that begin its segment, so one in a brace group, after '!', 'if' or 'then', or after
 # time -- or coproc is read.
 # Each text is scanned once, in the order the command's options name it, and a cited or body-file path
 # longer than _CITECHK_PATH_SHOWN characters is shown in the note and the row shortened to that many
 # characters (_citechk_short).
 _CITECHK_BODY_MAX = 1024 * 1024          # a message or body file larger than this is not read (noted)
+_CITECHK_COMMAND_MAX = _CITE_MAX_COMMAND  # a longer Bash command (characters) is not lexed or scanned (noted)
 _CITECHK_LEDGER_MAX = 2 * _CITE_CAP      # a ledger generation larger than this is not read (noted)
 _CITECHK_MAX_CITES = 200                 # at most this many citations are judged per Bash call
 _CITECHK_MAX_FILES = 50                  # at most this many distinct cited files are read per Bash call
@@ -15308,10 +15317,19 @@ _CITECHK_HEAD = "AIQT guardrail (rules citint/refcap, BAKE: warning only, nothin
 _CITECHK_OUT_OF_TIME = "the check ran out of its time budget"
 _CITECHK_PREFILTER = re.compile(r"\bcommit\b|\bpr\b")
 # A command the lexer cannot read (an unquoted here-document, for example) is scanned whole as body text
-# when it names one of these.
-_CITECHK_RAW_KINDS = ((re.compile(r"\bgit\b[^\n;&|]*\bcommit\b"), "git-commit"),
-                      (re.compile(r"\bgh\b[^\n;&|]*\bpr\s+create\b"), "gh-pr-create"),
-                      (re.compile(r"\bgh\b[^\n;&|]*\bpr\s+edit\b"), "gh-pr-edit"))
+# when it names one of these: a git (gh) word followed in its segment, up to the next newline, ';', '&' or
+# '|', by a commit (pr create, pr edit) word, found where group 1 begins (_citechk_kind), and searched for
+# only where the command holds that git or gh at all. Each pattern is tried only at a segment's start and
+# takes only that segment's first git or gh (an atomic group), so a search reads the command about once;
+# it finds what \bgit\b[^\n;&|]*\bcommit\b finds first, since a later git in a segment has no commit after
+# it where the first has none, and that plain form, which tries each later git again, takes time that
+# grows with the square of a segment's length.
+_CITECHK_RAW_KINDS = (("git", re.compile(r"(?:^|(?<=[\n;&|]))(?>[^\n;&|]*?(\bgit\b))[^\n;&|]*\bcommit\b"),
+                       "git-commit"),
+                      ("gh", re.compile(r"(?:^|(?<=[\n;&|]))(?>[^\n;&|]*?(\bgh\b))[^\n;&|]*\bpr\s+create\b"),
+                       "gh-pr-create"),
+                      ("gh", re.compile(r"(?:^|(?<=[\n;&|]))(?>[^\n;&|]*?(\bgh\b))[^\n;&|]*\bpr\s+edit\b"),
+                       "gh-pr-edit"))
 # Why the expansions of an unquoted here-document in such a command are named as not read: in a command that
 # does not lex, and in one read both ways (_citechk_commands).
 _CITECHK_EXPANDED = ("its delimiter is unquoted, so bash expands parameters, command substitutions and "
@@ -15372,7 +15390,13 @@ _CITECHK_FORM_B = re.compile(r"(?i:\blines?\s+)" + _CITECHK_N + r"(?:\s*-\s*" + 
                              + r")?\s+(?i:of|in)\s+`?" + _CITECHK_PATH)
 _CITECHK_EXT = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,9}$")  # a lettered extension, one to ten characters
 _CITECHK_LOG = re.compile(r": (?:(?:[A-Z][A-Za-z]*)?(?:Error|Exception|Warning|Failure)|error|warning)\b")
-_CITECHK_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+|<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\s]*>")
+# A URL (a scheme, '://' and what follows to a blank) or an autolink. A URL is tried only where a run of
+# scheme characters begins, its leading digits, '+', '.' and '-' (group lead) kept and the rest masked
+# (_citechk_blank), so a line is read about once; it masks what [A-Za-z][A-Za-z0-9+.-]*://\S+ masks, which
+# begins at the run's first letter, and that plain form, which tries each later letter of a run that holds
+# no '://' again, takes time that grows with the square of the run's length.
+_CITECHK_URL = re.compile(r"(?<![A-Za-z0-9+.-])(?P<lead>[0-9+.-]*)[A-Za-z][A-Za-z0-9+.-]*://\S+"
+                          r"|<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\s]*>")
 _CITECHK_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
 _CITECHK_FENCE_CLOSE = re.compile(r" {0,3}(`{3,}|~{3,})[ \t]*")
 _CITECHK_QUOTE = re.compile(r" {0,3}>")
@@ -15797,20 +15821,46 @@ def _citechk_keeps_stdin(red):
     return red.op in ("<&", ">&") and target.isascii() and target.isdigit() and int(target) == 0
 
 
+def _citechk_kind(command):
+    """The first git commit, gh pr create or gh pr edit that command's text names as written, the kind whose
+    git or gh word comes first (_CITECHK_RAW_KINDS), or None where it names none."""
+    hits = sorted((found.start(1), kind) for word, regex, kind in _CITECHK_RAW_KINDS if word in command
+                  for found in [regex.search(command)] if found)
+    return hits[0][1] if hits else None
+
+
 def _citechk_as_written(command, cwd, parse, reason):
     """The command, scanned whole as body text, as the one item of the first git commit or gh pr create or
-    edit that its text names (none where it names none): parse is "raw" or "both", and each here-document
-    with an unquoted delimiter that its text shows (_citechk_expanded_heredocs) is named as not read, with
-    reason, since bash expands parameters, command substitutions and arithmetic in such a body and the scan
-    sees only the text as written."""
-    hits = sorted((found.start(), kind) for regex, kind in _CITECHK_RAW_KINDS for found in [regex.search(command)]
-                  if found)
-    if not hits:
+    edit that its text names (_citechk_kind; none where it names none): parse is "raw" or "both", and each
+    here-document with an unquoted delimiter that its text shows (_citechk_expanded_heredocs) is named as
+    not read, with reason, since bash expands parameters, command substitutions and arithmetic in such a
+    body and the scan sees only the text as written."""
+    kind = _citechk_kind(command)
+    if kind is None:
         return []
     unread = [("expanded <<{} here-document".format(_citechk_short(delim)), reason)
               for delim in _citechk_expanded_heredocs(command)]
-    return [{"cmd": hits[0][1], "parse": parse, "texts": [("command text", command)], "unread": unread,
+    return [{"cmd": kind, "parse": parse, "texts": [("command text", command)], "unread": unread,
              "repo": cwd, "base": None}]
+
+
+def _citechk_too_long(command, cwd):
+    """A command longer than _CITECHK_COMMAND_MAX characters, as the one item of the first git commit or gh
+    pr create or edit that its text names (_citechk_kind; none where it names none), with parse "too-long",
+    no text, and the command named as not read: it is neither lexed nor scanned, since the two lexings and
+    the search for split delimiters are not checked against the deadline, the scan of its text is checked
+    only between lines, and each takes time that grows with its length (the shapes
+    tools/selftest_orch_hooks.py times, _citecheck_cost_cases), so no message, body file or here-document in
+    it is read and no citation in it is checked. Of the command, only the prefilter's search for a commit or
+    pr word, its length and that kind search are read before the toplevel probe."""
+    kind = _citechk_kind(command)
+    if kind is None:
+        return []
+    reason = ("this check cannot evaluate a command longer than {:,} characters, and this one is {:,}, so it "
+              "was neither lexed nor scanned: no message, body file or here-document in it was read and no "
+              "citation in it was checked").format(_CITECHK_COMMAND_MAX, len(command))
+    return [{"cmd": kind, "parse": "too-long", "texts": [], "unread": [("command text", reason)], "repo": cwd,
+             "base": None}]
 
 
 def _citechk_commands(command, cwd, deadline):
@@ -15831,18 +15881,20 @@ def _citechk_commands(command, cwd, deadline):
     expands. A raw command names, as not read, the expansion of each here-document with an unquoted delimiter
     that its text shows (_citechk_as_written). A command whose double-quoted string holds what the walk there
     does not follow as bash does, before any such delimiter, is read both ways, since the walk cannot tell
-    which reading bash makes: its commands as lexed, every message and body file read, and after them the
-    item that the raw scan gives, all with parse "both"; a citation both readings find is judged in each,
+    which reading bash makes: its commands as lexed, with a read attempted of every message and body file
+    (one that cannot be read named as not read), and after them the item that the raw scan gives, all with
+    parse "both"; a citation both readings find is judged in each,
     so it can be listed twice. A command is read both ways too where only one of its two lexings lexes, or
     where their words, redirects or here-documents differ (_citechk_shape; a double quote inside a
     substitution in a double-quoted string, for example, which the first lexing takes as the string's end,
     so a later -F file can fall inside one -m value): the commands of each lexing that lexes are read, the
-    first's then each of the second's that differs from all of the first's, every message and body file of
-    each read, and the raw scan's item after them; a lexing that does not lex is not evaluated. This holds
-    with or without a backslash-newline in the command, which is what the walk alone needs before it runs,
-    except where a backslash-newline splits a here-document delimiter: that command is scanned as one that
-    does not lex, as above, before the lexings are compared, so even the files of a lexing that lexes are
-    neither read nor named. A command is found after any reserved words
+    first's then each of the second's that differs from all of the first's, with a read attempted of every
+    message and body file of each, and the raw scan's item after them; a lexing that does not lex is not
+    evaluated. This holds with or without a backslash-newline in the command, which is what the walk alone
+    needs before it runs, except where a backslash-newline splits a here-document delimiter: that command
+    is scanned as one that does not lex, as above, before the lexings are compared, so even the files of a
+    lexing that lexes are neither read nor named (an omission: no note says such a file was not read, so a
+    citation only it holds is not seen). A command is found after any reserved words
     that begin its segment (_CITECHK_LEADING), so one
     inside a brace group, after '!', 'if' or 'then', or after time -- or coproc is read; a redirection of
     the group as a whole (after its '}') is not the command's own. A message or body file resolves against
@@ -15895,7 +15947,7 @@ def _citechk_shape(segments, heredocs):
 def _citechk_items(segments, heredocs, cwd, parse, deadline):
     """The git commit and gh pr create or edit commands of one lexing of a Bash command (segments and the
     heredocs _lex_command gave with them), each a dict as _citechk_commands describes, with parse, and with
-    each message and body file it names read."""
+    a read attempted of each message and body file it names (one that cannot be read named in unread)."""
     stdin = {}  # segment index: (redirects before it, body) of its last here-document
     for index, before, body in heredocs:
         stdin[index] = before, body
@@ -15971,8 +16023,11 @@ def _citechk_items(segments, heredocs, cwd, parse, deadline):
 
 
 def _citechk_blank(match):
-    """A regex match replaced by as many spaces, so the columns of the rest of the line hold."""
-    return " " * len(match.group(0))
+    """A URL or autolink match (_CITECHK_URL) replaced by as many spaces, so the columns of the rest of the
+    line hold, but for the leading characters of a URL's run before its scheme's first letter (group lead),
+    which are no part of the URL and stay as written."""
+    lead = match.group("lead") or ""
+    return lead + " " * (len(match.group(0)) - len(lead))
 
 
 def _citechk_cite(path, first, last, form, exempt, counts):
@@ -16037,8 +16092,8 @@ def _citechk_extract(text, deadline):
             if level is None and _CITECHK_VERIFIER.match(line, heading.end()):
                 level = depth
         exempt = level is not None or line.startswith("Verifier-cited: ")
-        counts["url"] += len(_CITECHK_URL.findall(line))
-        line = _CITECHK_URL.sub(_citechk_blank, line)
+        line, urls = _CITECHK_URL.subn(_citechk_blank, line)
+        counts["url"] += urls
         spans = []
         for found in _CITECHK_FORM_A.finditer(line):
             spans.append(found.span())
@@ -16437,7 +16492,15 @@ def _citechk_run(data):
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str) or not _CITECHK_PREFILTER.search(command):
         return None
-    commands = _citechk_commands(command, cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None, deadline)
+    # The bound is checked before any lexing: neither lexing nor the search for split delimiters is checked
+    # against the deadline (and a scan only between lines), and their time grows with the command's length,
+    # so a longer command is named as not read (_citechk_too_long) rather than lexed past the platform's
+    # timeout, where its note and row would be lost.
+    repo = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
+    if len(command) > _CITECHK_COMMAND_MAX:
+        commands = _citechk_too_long(command, repo)
+    else:
+        commands = _citechk_commands(command, repo, deadline)
     if not commands or not (isinstance(cwd, str) and cwd):
         return None
     # The texts are scanned for citations first, so no probe or resolution can use up the time a scan needs.
@@ -16544,9 +16607,10 @@ def _citechk_run(data):
             parts.append("The {} {} was not read: {}.".format(_CITECHK_LABELS[item["cmd"]], label, reason))
     both = next((item["why"] for item in commands if item.get("why")), None)  # one Bash command, one reason
     if both is not None:
-        parts.append("This command was read both ways, as lexed (each message and body file that a lexing of it "
-                     "that lexed names read; a lexing that did not lex is not evaluated, so a file only it names "
-                     "is neither read nor named) and as written (its text scanned, with the expansion of each "
+        parts.append("This command was read both ways, as lexed (a read attempted of each message and body file "
+                     "that a lexing of it that lexed names, each one that could not be read named as not read; a "
+                     "lexing that did not lex is not evaluated, so a file only it names is neither read nor "
+                     "named) and as written (its text scanned, with the expansion of each "
                      "here-document with an unquoted delimiter named), because a double-quoted string in it holds {}, which this check does not follow "
                      "as bash does; a citation both readings find is judged in each.".format(both))
     if ledger_faulty and status == "no-session":
@@ -16629,7 +16693,9 @@ def citation_read_check(data):
     counted), a missing session id, a body file that cannot be read, a body on standard input it cannot
     see, the expansion of a
     here-document with an unquoted delimiter in a command that does not lex or that is read both ways
-    (_citechk_commands; the note says why it was), and an exhausted budget (one that stops the scan of the
+    (_citechk_commands; the note says why it was), a command longer than _CITECHK_COMMAND_MAX characters,
+    which is neither lexed nor scanned (_citechk_too_long; that bound is checked before any lexing, so such
+    a call ends well within the platform's timeout), and an exhausted budget (one that stops the scan of the
     message texts included), citation cap, file cap, read bound, path bound or link bound (a path the check
     would resolve that is longer than _CITE_MAX_PATH characters, or whose resolution would follow more than
     _CITE_MAX_LINKS symlinks or meets a symlink loop) are each named in the note, never a silent clean. Any

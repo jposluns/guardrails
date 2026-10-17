@@ -5305,8 +5305,9 @@ def _citecheck_step_cases(tmp):
     of each here-document with an unquoted delimiter as not read (a shift inside a one-line $((...)) is
     none); one whose double-quoted string holds what the walk there does not follow as bash does is read
     both ways, its message and body files read and its text scanned as written, and its note and rows say so
-    and why; and each rule that decides where such a delimiter counts is shown to decide its vector, which
-    gives another result under a variant of the hook without that rule; a command is read after the
+    and why; and each rule that decides where such a delimiter counts, and the rule that scans a command
+    with a split delimiter as written before its two lexings are compared, is shown to decide its vector,
+    which gives another result under a variant of the hook without that rule; a command is read after the
     reserved words that begin its segment (a brace group's '{', '!', 'if', 'then', 'do', 'time -p',
     'time --', 'coproc'). The scan of a message stops at the deadline: a stand-in pattern moves the clock on
     at line 2 of the masking or of the search, line 3 is not scanned, and the note says no citation was
@@ -5776,16 +5777,21 @@ def _citecheck_step_cases(tmp):
     # not evaluated. A substitution with no quote inside, which both lexings read alike, leaves the command
     # lexed. A backslash-newline that splits a here-document delimiter overrides all of this: with the same
     # ANSI-C quote and a split quoted delimiter, the command is scanned as one that does not lex (parse raw,
-    # its text as written), and the -F file of the lexing that lexes is neither read nor named.
-    differ, lexings = {}, aiqt_hooks._CITECHK_LEXINGS_DIFFER
-    unlexed = ("as lexed (each message and body file that a lexing of it that lexed names read; a lexing that did "
-               "not lex is not evaluated, so a file only it names is neither read nor named)")
+    # its text as written), and the -F file of the lexing that lexes is neither read nor named. That
+    # vector, ansi-c-split-delim, pins an omission the residue lists under what the check does not see: its
+    # row names no source as not read, so msg.txt is skipped with no note that it was, and a citation only
+    # msg.txt held would go unseen; a change that names such a file as not read must change this vector too.
+    differ, commands_differ, lexings = {}, {}, aiqt_hooks._CITECHK_LEXINGS_DIFFER
+    unlexed = ("as lexed (a read attempted of each message and body file that a lexing of it that lexed names, each "
+               "one that could not be read named as not read; a lexing that did not lex is not evaluated, so a "
+               "file only it names is neither read nor named)")
     for name, command in (("dquote-in-subst", "git commit -m \"$(echo '\"')\" -F msg.txt -m \"$(echo '\"')\""),
                           ("squote-in-subst", "git commit -F msg.txt -m \"$(echo \"it's\")\""),
                           ("ansi-c-in-subst", "git commit -F msg.txt -m \"$(echo $'x\\' y')\""),
                           ("ansi-c-split-delim", "git commit -F msg.txt -m \"$(echo $'x\\' y')\" <<'E\\\nOF'\n"
                                                  "see tools/a.py:1\nEOF\n"),
                           ("alike", "git commit -F msg.txt -m \"$(echo x)\"")):
+        commands_differ[name] = command
         differ[name] = read_split(command, "lexings-" + name, unlexed if name == "ansi-c-in-subst" else None)
     check("citeledger/check-lexings-differ", differ,
           {"dquote-in-subst": ("warn", [("both", lexings, [], ["-m value"], []),
@@ -5798,6 +5804,24 @@ def _citecheck_step_cases(tmp):
                                         ("both", lexings, [], ["command text"], [])], False, lexings, True),
            "ansi-c-split-delim": ("warn", [("raw", None, ["tools/a.py:1"], ["command text"], [])], False, None),
            "alike": ("warn", [("lexed", None, ["tools/a.py:1"], ["-F msg.txt", "-m value"], [])], False, None)})
+    # The rule that scans a command with a split delimiter as one that does not lex before its two lexings
+    # are compared decides ansi-c-split-delim: under a variant of _citechk_commands without it, the same
+    # command is read both ways, its -F msg.txt read, so the vector above gives another result.
+    raw_first = _hook_variant(base, "_citechk_commands",
+                              _hook_functions("_citechk_commands").get("_citechk_commands", ""),
+                              'if parse == "raw":', "if False:")
+    if raw_first is None:
+        ordered_raw = "no variant: the raw decision does not occur exactly once in _citechk_commands"
+    else:
+        original = aiqt_hooks._citechk_commands
+        aiqt_hooks._citechk_commands = raw_first
+        try:
+            ordered_raw = read_split(commands_differ["ansi-c-split-delim"], "lexings-variant-ansi-c-split-delim")
+        finally:
+            aiqt_hooks._citechk_commands = original
+    check("citeledger/check-lexings-differ-variant", ordered_raw,
+          ("warn", [("both", lexings, ["tools/a.py:1"], ["-F msg.txt", "-m value"], []),
+                    ("both", lexings, ["tools/a.py:1"], ["command text"], [])], False, lexings))
     # A command after the reserved words that begin its segment is read: in a brace group, after '!', 'if'
     # or 'then', after 'do', after 'time -p', after a '--' that follows time or its -p, and after coproc,
     # with the NAME bash reads before a compound command. Where bash runs another command, none is read: a
@@ -5858,6 +5882,175 @@ def _citecheck_step_cases(tmp):
     check("citeledger/check-scan-deadline", scanned,
           {"search": [(3, ["unread", "unread"], ["warn"], False)] + late,
            "masking": [(3, ["unread", "unread"], ["warn"], False)] + late})
+
+
+# The command shapes whose cost the citation check's residue gives (_citecheck_cost_cases), each (name, head,
+# unit, tail, parse): the unit repeated as often as fits the length asked for, between head and tail, and the
+# parse its rows give at or under the command bound. The first thirteen each hold a backslash-newline and
+# cost most in the two lexings and the search for split delimiters: double-quoted look-alikes of a split
+# delimiter; one double-quoted substitution holding many split delimiters that bash reads as quoted, many
+# comments, many ANSI-C quotes (an odd count of quote characters, so the nested lexing, which reads them as
+# plain single quotes, does not lex), a long run of '#' inside a word, or many subshells; many double-quoted
+# substitutions each holding one split delimiter that bash reads as quoted; many comments in backticks on
+# one line; many quoted here-documents with a body line, without one, two to a line, or before a split
+# delimiter; and one quoted here-document with a large body in a -m value's substitution. The last three
+# cost most in the scan of a text for URLs (one long run of letters with no '://'), and in the search of a
+# command that does not lex for the git commit or gh pr it names (a git commit followed by many gh words
+# with no pr create after them, or a gh pr create followed by many git words with no commit after them),
+# each of which took time that grew with the square of its length before those patterns were made linear
+# (_CITECHK_URL, _CITECHK_RAW_KINDS).
+_CITECHK_COST_BODY = "OF\nsee tools/${F}.py:1\nEOF\n"
+_CITECHK_COST_SHAPES = (
+    ("look-alikes", "git commit -F msg.txt; echo", " \"x <<E\\\nOF y\"", "", "lexed"),
+    ("subst-quoted-delims", "git commit -F msg.txt; echo \"$(", "cat <<E\\\n'OF'\nx\nEOF\n", ")\"", "both"),
+    ("subst-comments", "git commit -F msg.txt; echo \"$(", " # <<E\\\n# OF\n", ": )\"", "lexed"),
+    ("subst-ansi-c", "git commit -F msg.txt; echo \"$(echo $'x\\' y'", "; echo $'x\\' <<E\\\nOF y' $'\\''", ")\"",
+     "both"),
+    ("subst-hash-run", "git commit -m \"$(: x", "#", "; cat <<E\\\n" + _CITECHK_COST_BODY + ")\"", "raw"),
+    ("subst-subshells", "git commit -m \"$(:; ", "(:); ", "cat <<E\\\n" + _CITECHK_COST_BODY + ")\"", "raw"),
+    ("substs-quoted-delim", "git commit -F msg.txt; echo", " \"$(cat <<E\\\n'OF'\nx\nEOF\n)\"", "", "both"),
+    ("backtick-comments", "git commit -F msg.txt; echo \"", "`: # x` ", "<<E\\\nOF y\"", "both"),
+    ("heredocs-body", "git commit -F msg.txt; ", "cat <<'Q'\nx\nQ\n", "echo a\\\nb", "lexed"),
+    ("heredocs-empty", "git commit -F msg.txt; ", "cat <<'Q'\nQ\n", "echo a\\\nb", "lexed"),
+    ("heredocs-paired", "git commit -F msg.txt; ", "cat <<'Q'; cat <<'R'\nx\nQ\ny\nR\n", "echo a\\\nb", "lexed"),
+    ("heredocs-then-split", "git commit -F msg.txt; ", "cat <<'Q'\nx\nQ\n", "cat <<E\\\n'OF'\nx\nEOF\n", "raw"),
+    ("subst-heredoc-body", "git commit -m \"$(cat <<'EOF'\n", "see tools/a.py:1\n", "EOF\n)\" \\\n--no-edit",
+     "both"),
+    ("url-letters", "git commit -m 'see ", "a", "'", "lexed"),
+    ("raw-gh-words", "git commit '", "gh ", "", "raw"),
+    ("raw-git-words", "gh pr create '", "git ", "", "raw"))
+_CITECHK_COST_OVER = 16 * 1024 * 1024  # the length the shapes are timed at over the bound (characters)
+_CITECHK_COST_LIMIT = 30               # seconds a timed hook process is given before it is stopped
+
+
+def _citecheck_cost_command(head, unit, tail, size):
+    """head, then unit repeated as often as fits, then tail: a command of at most size characters (one unit
+    at the least)."""
+    return head + unit * max(1, (size - len(head) - len(tail)) // len(unit)) + tail
+
+
+def _citecheck_cost_run(root, command, session):
+    """One citation_read_check call on command at root, made as the platform makes it: the hook script run
+    as its own process (python3 -I -B, so it compiles the hook rather than reading a cached compilation), the
+    payload on its standard input. (exit code, note, the parse of each citint row it appended, CPU seconds of
+    that process and the git probes it waited for, wall seconds); the exit code is "timeout" where it ran past
+    _CITECHK_COST_LIMIT seconds and was stopped."""
+    import resource
+    events = Path(aiqt_hooks._orch_state_dir_for_root(str(root))) / "guard-events.jsonl"
+
+    def rows():
+        if not events.is_file():
+            return []
+        return [json.loads(x) for x in events.read_text(encoding="utf-8").splitlines() if x.strip()]
+    payload = json.dumps({"hook_event_name": "PreToolUse", "cwd": str(root), "tool_name": "Bash",
+                          "tool_input": {"command": command}, "session_id": session}).encode("utf-8")
+    before, used = len(rows()), resource.getrusage(resource.RUSAGE_CHILDREN)
+    began = time.perf_counter()
+    try:
+        done = subprocess.run([sys.executable, "-I", "-B", aiqt_hooks.__file__, "citation_read_check"],
+                              input=payload, capture_output=True, timeout=_CITECHK_COST_LIMIT)
+        code, out = done.returncode, done.stdout
+    except subprocess.TimeoutExpired:
+        code, out = "timeout", b""
+    wall = time.perf_counter() - began
+    after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu = (after.ru_utime - used.ru_utime) + (after.ru_stime - used.ru_stime)
+    try:
+        note = json.loads(out.decode("utf-8")).get("systemMessage", "")
+    except (ValueError, AttributeError):
+        note = ""
+    parses = [r["detail"]["parse"] for r in rows()[before:] if r.get("kind") == "citint"]
+    return code, note, parses, cpu, wall
+
+
+def _citecheck_cost_cases(tmp):
+    """The command bound of the citation check (_CITECHK_COMMAND_MAX) is checked before any lexing: a command
+    one character under it or at it is lexed and its citation judged, and one a character over it is
+    neither lexed nor scanned, named as not read with the bound (parse too-long) in the note and in its
+    guard-events row; under a variant of _citechk_run without the bound, that command is lexed and judged
+    instead. Each command shape of _CITECHK_COST_SHAPES is then timed through the hook run as its own
+    process, as the platform runs it: at the bound's length, where it gives its parse, and at 16 MiB, where
+    it ends with the note and the row of a command over the bound. Each run's CPU time (the process and the
+    git probes it waited for) and wall time are printed, one line each ("citation-check cost: " and a JSON
+    object), so the figures the residue gives can be made again from this suite; a run is checked to take at
+    most the check's budget in CPU time (CPU time, which a runner busy with other work stretches less than
+    elapsed time) and to end within _CITECHK_COST_LIMIT seconds. The URL pattern and the kind search, made
+    linear, mask and find what the plain patterns did on a fixed set of generated strings."""
+    import random
+    import re
+    repo = _CiteRepo(tmp / "citecheck-cost", {"tools/a.py": b"a1\na2\n", "msg.txt": b"see tools/a.py:1\n"})
+    bound, budget = aiqt_hooks._CITECHK_COMMAND_MAX, aiqt_hooks._CITECHK_BUDGET
+    phrase = "this check cannot evaluate a command longer than {:,} characters".format(bound)
+    head = "git commit -m 'see tools/a.py:1"
+
+    def padded(length):
+        return head + " " * (length - len(head) - 1) + "'"
+
+    def bounded(length, session):
+        """The command of length characters checked: its length, the verdict, each row's parse, citations
+        and count of sources not read, and whether the note names the bound."""
+        verdict, note, rows = _citecheck_run(repo.root, padded(length), session)
+        return (len(padded(length)), verdict,
+                [(r["detail"]["parse"], [c["cite"] for c in r["detail"]["citations"]],
+                  len(r["detail"]["sources_unread"])) for r in rows], phrase in note)
+    edges = {name: bounded(length, "bound-" + name)
+             for name, length in (("under", bound - 1), ("at", bound), ("over", bound + 1))}
+    judged = ("warn", [("lexed", ["tools/a.py:1"], 0)], False)
+    check("citeledger/check-command-bound", edges,
+          {"under": (bound - 1,) + judged, "at": (bound,) + judged,
+           "over": (bound + 1, "warn", [("too-long", [], 1)], True)})
+    # The bound decides the over vector: without it, the same command is lexed and its citation judged.
+    variants = tmp / "citecheck-cost-variants"
+    variants.mkdir()
+    unbounded = _hook_variant(variants, "_citechk_run", _hook_functions("_citechk_run").get("_citechk_run", ""),
+                              "if len(command) > _CITECHK_COMMAND_MAX:", "if False:")
+    if unbounded is None:
+        lifted = "no variant: the bound does not occur exactly once in _citechk_run"
+    else:
+        original = aiqt_hooks._citechk_run
+        aiqt_hooks._citechk_run = unbounded
+        try:
+            lifted = bounded(bound + 1, "bound-variant-over")
+        finally:
+            aiqt_hooks._citechk_run = original
+    check("citeledger/check-command-bound-variant", lifted, (bound + 1,) + judged)
+    # The shapes, timed through the hook's own process at the bound's length and at 16 MiB.
+    timed, want = {}, {}
+    for name, unit_head, unit, tail, parse in _CITECHK_COST_SHAPES:
+        for side, size in (("at-bound", bound), ("over", _CITECHK_COST_OVER)):
+            command = _citecheck_cost_command(unit_head, unit, tail, size)
+            code, note, parses, cpu, wall = _citecheck_cost_run(repo.root, command, "cost-{}-{}".format(name, side))
+            print("citation-check cost: " + json.dumps({"shape": name, "side": side, "chars": len(command),
+                                                       "parse": parses, "cpu": round(cpu, 3),
+                                                       "wall": round(wall, 3)}, sort_keys=True), flush=True)
+            timed[(name, side)] = (code, sorted(set(parses)), phrase in note, cpu <= budget)
+            want[(name, side)] = (0, [parse], False, True) if side == "at-bound" else (0, ["too-long"], True, True)
+    check("citeledger/check-cost-shapes", timed, want)
+    # The linear patterns against the plain ones they replace, on strings drawn from the characters they turn
+    # on (a fixed seed, so every run draws the same strings).
+    plain_url = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+|<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\s]*>")
+    plain_kinds = ((re.compile(r"\bgit\b[^\n;&|]*\bcommit\b"), "git-commit"),
+                   (re.compile(r"\bgh\b[^\n;&|]*\bpr\s+create\b"), "gh-pr-create"),
+                   (re.compile(r"\bgh\b[^\n;&|]*\bpr\s+edit\b"), "gh-pr-edit"))
+
+    def plain_kind(text):
+        hits = sorted((found.start(), kind) for regex, kind in plain_kinds for found in [regex.search(text)] if found)
+        return hits[0][1] if hits else None
+    draw = random.Random(7)
+    url_atoms = ("a", "Z", "1", "+", ".", "-", ":", "/", "://", " ", "\t", "<", ">", "x:", "<ab:", "http", "_",
+                 "\u00e9", "1a")
+    kind_atoms = ("git", "gh", "commit", "pr", "create", "edit", " ", "\n", ";", "&", "|", "x", "_", "\t", "-",
+                  "gitx", "xgit", "commits", "pr\n", "\ncreate", "'")
+    differ = []
+    for _ in range(20000):
+        line = "".join(draw.choice(url_atoms) for _ in range(draw.randint(0, 30)))
+        plain = (plain_url.sub(lambda found: " " * len(found.group(0)), line), len(plain_url.findall(line)))
+        if aiqt_hooks._CITECHK_URL.subn(aiqt_hooks._citechk_blank, line) != plain:
+            differ.append(("url", line))
+        text = "".join(draw.choice(kind_atoms) + draw.choice(("", " ")) for _ in range(draw.randint(0, 20)))
+        if aiqt_hooks._citechk_kind(text) != plain_kind(text):
+            differ.append(("kind", text))
+    check("citeledger/check-linear-patterns", differ[:3], [])
 
 
 def _cite_unpaired(roadmap):
@@ -16548,6 +16741,7 @@ def _main_isolated(report_path=None):
             _citecheck_suffix_cases(tmp)
             _citeledger_walk_cases(tmp)
             _citecheck_step_cases(tmp)
+            _citecheck_cost_cases(tmp)
             _cite_roadmap_cases(tmp)
         finally:
             _cite_unpin_state(tmp, pinned)
