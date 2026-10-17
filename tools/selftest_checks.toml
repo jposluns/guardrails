@@ -612,6 +612,8 @@ expected-check-ids = [
   "trunc/comment-allows-note",
   "trunc/shell-c-denies",
   "trunc/shell-c-opaque-allows-note",
+  "trunc/shell-find-exec-denies",
+  "trunc/shell-find-exec-plain-allows-note",
   "trunc/tilde-allows-note",
   "trunc/foreground-plain-allows",
   "trunc/foreground-pipe-allows",

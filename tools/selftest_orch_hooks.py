@@ -9300,6 +9300,13 @@ def _main_isolated(report_path=None):
         # denies like trunc/pipe-tail-denies; a string the reading cannot read stays the unprovable note.
         check("trunc/shell-c-denies", _verdict(bg("bash -c 'python3 build.py | tail'")), "deny")
         check("trunc/shell-c-opaque-allows-note", _verdict(bg('bash -c "$CMD"')), "warn")
+        # A find -exec shell -c string is read as a command line too (the shared segment reading, extended to
+        # the find/xargs runners), so a producer piped into a truncating sink inside it denies; the same find
+        # with no truncating sink stays the unprovable note.
+        check("trunc/shell-find-exec-denies",
+              _verdict(bg("find . -maxdepth 0 -exec sh -c 'python3 build.py | tail' \\;")), "deny")
+        check("trunc/shell-find-exec-plain-allows-note",
+              _verdict(bg("find . -maxdepth 0 -exec sh -c 'python3 build.py' \\;")), "warn")
         check("trunc/tilde-allows-note", _verdict(bg("cat ~/notes.txt")), "warn")
         check("trunc/foreground-plain-allows", _verdict(bg("python3 build.py", rib=False)), "allow")
         check("trunc/foreground-pipe-allows", _verdict(bg("python3 build.py | tail -5", rib=False)), "allow")
