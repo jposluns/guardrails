@@ -21798,7 +21798,8 @@ def _child_status_refusal():
     except OSError as exc:
         return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
     if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
-        return "a probe child that exited {} was read as {}".format(_CHILD_STATUS_PROBE_CODE, status)
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
     return None
 
 

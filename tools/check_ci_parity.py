@@ -3971,16 +3971,20 @@ def self_test():
     # from BOTH runners together is a missing-mandatory finding, never a silent pass. The
     # member list is spelled out rather than derived from MANDATORY_MEMBERS, so reverting
     # the contracts out of that set turns these vectors red instead of silently skipping.
+    # The child-status probe and its coverage gate are held the same way: either one
+    # removed from both runners together is a missing-mandatory finding.
     for member in (
             ".github/check_cited_standards_contract.py",
             ".github/check_cited_standards_contract.py --self-test",
-            ".github/check_newtab_contract.py"):
+            ".github/check_newtab_contract.py",
+            "opf/tools/_child_status.py",
+            "tools/check_child_status_coverage.py"):
         count += 1
         if member not in MANDATORY_MEMBERS:
             failures.append(
                 "01h {} is not in MANDATORY_MEMBERS; a both-runner removal of a "
-                "repository contract would be undetected again".format(member))
-        case("01h repository contract removed from both runners: " + member,
+                "mandatory member would be undetected again".format(member))
+        case("01h mandatory member removed from both runners: " + member,
              evaluate(local_fixture(drop(member)), ci_fixture(drop(member)), ()),
              1, ("missing-mandatory",), (), ())
     unknown = "python3 -I -B .github/unrecognized.py"

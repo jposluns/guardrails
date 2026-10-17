@@ -11,7 +11,8 @@ when either layer fails. Nothing is reset here.
 Two layers, because each sees what the other cannot: the disposition read sees a Python-level SIGCHLD handler
 that the fork probe would pass, and the fork probe sees a lost status that the disposition read cannot see (a
 handler or flag set below Python, such as SA_NOCLDWAIT on a kernel where it reaps children). On a platform
-without SIGCHLD or without fork, the guard refuses nothing.
+without SIGCHLD or without fork, the guard refuses nothing, and this file's PASS line says that nothing was
+probed.
 
 The guard runs first in both runners (tools/run_all_checks.sh and opf/tools/run_all_checks.sh) and in every CI
 job of the three workflows, as this file's own launch. opf/tools/opf.py, tools/check_selftest_execution.py and
@@ -51,6 +52,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import os
+import signal
 import subprocess
 
 # The status the probe child exits with; any value other than 0 and the refusal exit would do.
@@ -82,7 +84,8 @@ def _child_status_refusal():
     except OSError as exc:
         return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
     if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
-        return "a probe child that exited {} was read as {}".format(_CHILD_STATUS_PROBE_CODE, status)
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
     return None
 
 
@@ -130,9 +133,13 @@ HANDLER_CHILD = (_LOAD_PROBE + "signal.signal(signal.SIGCHLD, lambda signum, fra
 # probe refuses.
 LOST_CHILD = (_LOAD_PROBE + "signal.signal(signal.SIGCHLD, signal.SIG_IGN); "
               "signal.getsignal = lambda signum: signal.SIG_DFL; print(probe._child_status_refusal())")
+# A platform without fork: the guard refuses nothing, and the PASS line says that nothing was probed.
+NO_FORK_CHILD = _LOAD_PROBE + "del os.fork; print(probe._child_status_refusal()); probe.main([])"
+NOTHING_PROBED = ("PASS: child-status: this platform has no SIGCHLD or no fork, so nothing was probed and the "
+                  "guard refuses nothing")
 PROBE_CHECK_IDS = ("repro/ignored-reads-failed-child-as-zero", "repro/default-reads-failed-child",
                    "live/default-passes", "live/ignored-refuses-by-name", "layer/handler-seen-by-disposition",
-                   "layer/lost-status-seen-by-probe")
+                   "layer/lost-status-seen-by-probe", "layer/no-fork-nothing-probed")
 
 
 def child_env():
@@ -193,6 +200,8 @@ def self_test_results(path=None):
     got = run_child(["-c", LOST_CHILD, path])
     out.append(("layer/lost-status-seen-by-probe", got[:2] == (
         0, "the probe child was reaped before its exit status could be read (ECHILD)\n"), got))
+    got = run_child(["-c", NO_FORK_CHILD, path])
+    out.append(("layer/no-fork-nothing-probed", got[:2] == (0, "None\n" + NOTHING_PROBED + "\n"), got))
     return out
 
 
@@ -208,7 +217,8 @@ def self_test():
     print("SELF-TEST PASS: child-status {} checks (an ignoring Python reader reads a failed child as 0 and a "
           "default one reads its status; the probe passes at SIG_DFL and, under an inherited SIG_IGN read by a "
           "bash parent, refuses by name with exit 2; the disposition layer sees a Python-level handler the fork "
-          "probe passes, and the fork layer sees a lost status the disposition read cannot)".format(len(results)))
+          "probe passes, and the fork layer sees a lost status the disposition read cannot; without fork it "
+          "refuses nothing and says that nothing was probed)".format(len(results)))
     return 0
 
 
@@ -217,6 +227,9 @@ def main(argv=None):
     if args:
         print("usage: _child_status.py [--self-test]", file=sys.stderr)
         return 2
+    if not (hasattr(signal, "SIGCHLD") and hasattr(os, "fork")):
+        print(NOTHING_PROBED)
+        return 0
     print("PASS: child-status: SIGCHLD is at SIG_DFL and a probe child's exit status {} was read back".format(
         _CHILD_STATUS_PROBE_CODE))
     return 0
