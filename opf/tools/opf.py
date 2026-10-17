@@ -4684,7 +4684,12 @@ def _watchdog_completion_case(mode):
                     # and the failure path below discards the
                     # cannot-evaluate refusals of its cancel and reads no
                     # subject status, so such a launch fails red, but not
-                    # by the gate's name.
+                    # by the gate's name. No expiry can happen during
+                    # child.start(): the guardian forks the subject only
+                    # after it reads the GO byte, which start() writes as
+                    # its last step before it returns, and the subject
+                    # starts its 120 s gate after that fork, so the gate
+                    # can expire only in the waits after start().
                     bound = _watchdog_deadline(ack_bound)
                     while not acked.exists():
                         assert not refused.exists(), (
@@ -4868,6 +4873,73 @@ def _watchdog_completion_case(mode):
                 "  an indented subject line after it"], (
                 "the capture filter did not keep exactly the subject lines",
                 kept)
+            # A line naming this pid, plain or indented, is a subject line
+            # wherever it sits around the block: between the header and
+            # the continuation, directly before the header, and indented
+            # directly after the block. A filter that drops an indented
+            # line after the header, a pid line after the header, or a
+            # pid line before the header fails one of these layouts.
+            header, continuation = fork_block[0], fork_block[1]
+            named = "x (pid=%d)" % os.getpid()
+            for layout, expected in (
+                    ((header, "  " + named, continuation),
+                     ["  " + named, continuation]),
+                    ((named, header, continuation), [named]),
+                    ((header, continuation, "  " + named), ["  " + named])):
+                kept = subject_lines("\n".join(layout))
+                assert kept == expected, (
+                    "the capture filter did not keep exactly the subject lines",
+                    layout, kept)
+
+            # Real-warning check: fork_block is derived from the call site
+            # dis finds and the message this leg expects, and both sides
+            # of the vector above are built from it, so an error in either
+            # would pass there. Under the default filters the warning is
+            # ignored (it is attributed to _opf_emit, not __main__), so no
+            # other leg sees it. Fork once through _launch_fork itself, on
+            # a second thread as the launch does, with warnings forced on
+            # and fd 2 routed to a capture, and require that capture to be
+            # exactly fork_block: a wrong call line or a changed CPython
+            # wording fails here, red. The stand-in guardian exits at
+            # once, and the leg reaps it.
+            warned = Path(directory, "warned")
+            stand_in = types.SimpleNamespace(
+                _guardian=lambda: os._exit(0), pid=None, pidfd=None)
+            fork_errors = []
+
+            def fork_warned():
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("always")
+                        launch_fork(stand_in)
+                except BaseException as exc:
+                    fork_errors.append(exc)
+
+            forker = threading.Thread(target=fork_warned)
+            saved_stderr = os.dup(2)
+            try:
+                capture = os.open(warned, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                try:
+                    os.dup2(capture, 2)
+                finally:
+                    os.close(capture)
+                forker.start()
+                forker.join(30)
+            finally:
+                try:
+                    os.dup2(saved_stderr, 2)
+                finally:
+                    os.close(saved_stderr)
+            assert not forker.is_alive(), "the warned fork never returned"
+            if stand_in.pidfd is not None:
+                os.close(stand_in.pidfd)
+            if stand_in.pid is not None:
+                os.waitpid(stand_in.pid, 0)  # exits at once: an untimed reap
+            assert fork_errors == [], ("the warned fork failed", fork_errors)
+            observed = warned.read_text(encoding="ascii").splitlines()
+            assert observed == fork_block, (
+                "the real fork warning is not the block the filter drops",
+                observed, fork_block)
 
             # Flip A: without the parent check (and with pdeathsig disarmed, which
             # a post-death arm cannot help anyway) the released orphan runs its
@@ -13791,7 +13863,9 @@ def _watchdog_regression_self_test():
         # 30, cause reap 30). The committed vectors: the cause probes 180
         # (three 30 s zombie waits, three 30 s reap bounds; the two
         # reported-status probes and the capture-filter vector charge
-        # nothing), the barrier flip 512 (as Flip A), the refused write
+        # nothing), the real-warning check 30 (one 30 s join of its
+        # forking thread; its reap is untimed), the barrier flip 512 (as
+        # Flip A), the refused write
         # 452 (launch 390, guardian collection 30, drain verdict 30: the
         # gone check after a reported status, or the reap after an
         # escalated close, one 30 s bound either way, close 2), the
@@ -13800,8 +13874,8 @@ def _watchdog_regression_self_test():
         # launch fails before any charged wait: close 2), the restoration
         # fault 362 (start 300, held acknowledgment 30, close 2, drain
         # verdict 30) and the close fault 2 (as the pre-start fault).
-        ("subject-orphan", 482 + 452 + 180 + 512 + 452 + 512 + 452 + 427
-         + 2 + 362 + 2),
+        ("subject-orphan", 482 + 452 + 180 + 30 + 512 + 452 + 512 + 452
+         + 427 + 2 + 362 + 2),
         # escalation-subject: 884 is the UPPER bound on the leg's declared
         # timeouts, not an exact base (two of its charges are fixture holds
         # charged at what REMAINS of their 300 s hold when start() runs, so
