@@ -2511,7 +2511,7 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
     if imported and not IMPORTED_CHECKS:
         rep.cant("C-CONTAINMENT: the imported series is active but every imported-content check "
                  "(C-IMPORTED-*) is still deferred; the imported leaves would be certified "
-                 "unread, so the store cannot be evaluated (spec 8.2/4.2; OPF-SPEC-130)")
+                 "unread, so the store cannot be evaluated (spec 8.2/4.2)")
     # Re-emit the classifier's collected messages in the ORIGINAL order (all malformed CANNOT-EVALUATEs, then
     # all colliding findings), exactly as the inline classification emitted them before the extraction.
     for msg in cls.malformed + cls.worklog_errors:
