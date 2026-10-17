@@ -33,13 +33,13 @@ DECISION-ID LAYER, tree-wide (scan_tree_decision_ids). The internal maintainer-d
 is checked over the WHOLE working tree, walked fail-closed with the skips and text suffixes above, not only
 over SCOPE_RELPATHS: no file in the tree carries one, so this layer has no legitimate occurrence to exempt.
 A line carrying an internal-allow marker is exempt here as well. In this layer a file that is not valid
-UTF-8 is skipped, as the whole-tree leak gate skips it; a scoped surface that is not valid UTF-8 still
-fails closed. The walk reads untracked and git-ignored files too (everything on disk outside the skipped
-directories), does not follow a symlinked directory, and reads a file only when its suffix is one of the
-leak gate's TEXT_SUFFIXES or it has no suffix, so a file under any other suffix (a .csv, say) is not read.
-A bare ordinal with no further segment (D-3) is not matched. An unlistable directory, an unreadable file
-and a non-regular file (a FIFO) each fail closed with exit 2; a file that vanishes between the walk and
-the read is a fail-closed finding, as in the scoped layer.
+UTF-8 is skipped, where the whole-tree leak gate decodes it losslessly and scans it; a scoped surface that
+is not valid UTF-8 still fails closed. The walk reads untracked and git-ignored files too (everything on
+disk outside the skipped directories), does not follow a symlinked directory, and reads a file only when
+its suffix is one of the leak gate's TEXT_SUFFIXES or it has no suffix, so a file under any other suffix
+(a .csv, say) is not read. A bare ordinal with no further segment (D-3) is not matched. An unlistable
+directory, an unreadable file and a non-regular file (a FIFO) each fail closed with exit 2; a file that
+vanishes between the walk and the read is a fail-closed finding, as in the scoped layer.
 
 DISCLOSED SCOPE LIMITS. SCOPE_RELPATHS is a HAND-MAINTAINED allowlist with no drift-guard: a new QA-suite
 surface must be ADDED HERE BY HAND to be covered, and a surface not yet listed is out of this gate's reach
@@ -293,8 +293,8 @@ def scan_tree_decision_ids(root):
     walked fail-closed (an unlistable directory raises OSError) with SKIP_DIRS, SKIP_NAMES and TEXT_SUFFIXES
     as in _iter_scope. A line carrying an internal-allow marker is exempt, as in scan_text. A present file
     that is not a readable regular file raises OSError (through _read_present_text, so a FIFO never blocks);
-    a file that vanished during the walk is a fail-closed finding; a file that is not valid UTF-8 is skipped,
-    as the whole-tree leak gate skips it."""
+    a file that vanished during the walk is a fail-closed finding; a file that is not valid UTF-8 is skipped
+    (the whole-tree leak gate instead decodes such a file losslessly and scans it)."""
     pattern, label = DECISION_ID
     findings = []
     for path in sorted(walk_files(root, SKIP_DIRS)):
