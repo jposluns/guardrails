@@ -11885,7 +11885,10 @@ def _main_isolated(report_path=None):
         # the SHAPE check must own these two holds (the specific malformed-anchor
         # classification): a short digest already held on the base code through the digest
         # COMPARISON, and a non-object anchor through the unreadable-authority catch, so the
-        # verdict alone does not discriminate the strict shape check
+        # verdict alone does not discriminate the strict shape check.
+        # attest/anchor-digest-short-holds and attest/anchor-non-object-holds are CONTROLS
+        # (they pass without the strict shape check); the paired -names-malformed checks are
+        # the regression checks
         short_auth = aiqt_hooks._orch_register_authority(str(a.root), str(at_reg))
         check("attest/anchor-digest-short-holds", short_auth[0], "hold")
         check("attest/anchor-digest-short-names-malformed",
@@ -11895,8 +11898,39 @@ def _main_isolated(report_path=None):
         check("attest/anchor-non-object-holds", nonobj_auth[0], "hold")
         check("attest/anchor-non-object-names-malformed",
               "anchor is malformed" in str(nonobj_auth[1]), True)
+        # attest/anchor-valid-after-shape-vectors-ok is a CONTROL: a valid anchor restored after
+        # the shape vectors answers ok, so the holds above come from the shapes, not from a
+        # fixture that never answers ok
         at_anchor(mirror_tip)
         check("attest/anchor-valid-after-shape-vectors-ok", authority(), "ok")
+        # the anchor is opened ONCE without following a final symlink and without blocking, and
+        # its type is checked on the opened descriptor: a live symlink to a VALID anchor (which
+        # the base code followed to ok), a live symlink to a directory (held on the base code
+        # too, as an unreadable target, so the hold must name the link) and a FIFO (on which
+        # the base code's open blocked; TIMED, so that is a named red, never a hung suite) are
+        # each a HOLD
+        mirror_anchor = at_anchor_file.read_text(encoding="utf-8")
+        anchor_store = a.root / "anchor-store.json"
+        anchor_store.write_text(mirror_anchor, encoding="utf-8")
+        anchor_store_dir = a.root / "anchor-store-dir"
+        anchor_store_dir.mkdir()
+        at_anchor_file.unlink()
+        at_anchor_file.symlink_to(anchor_store)
+        check("attest/anchor-live-symlink-holds", authority(), "hold")
+        at_anchor_file.unlink()
+        at_anchor_file.symlink_to(anchor_store_dir)
+        dir_link_auth = aiqt_hooks._orch_register_authority(str(a.root), str(at_reg))
+        check("attest/anchor-directory-symlink-holds-naming-link",
+              (dir_link_auth[0], "symlink" in str(dir_link_auth[1])), ("hold", True))
+        at_anchor_file.unlink()
+        os.mkfifo(str(at_anchor_file))
+        check("attest/anchor-fifo-holds-without-blocking", _leasehb_timed(authority, seconds=10),
+              (True, "hold"))
+        at_anchor_file.unlink()
+        # a CONTROL: the same anchor as a regular file answers ok, so the three holds above
+        # come from the entry types, not from the anchor's content
+        at_anchor_file.write_text(mirror_anchor, encoding="utf-8")
+        check("attest/anchor-regular-after-type-vectors-ok", authority(), "ok")
         # the tracked DECISION fails closed, as in the gate: a root where git ls-files answers
         # neither 0 (tracked) nor 1 (not tracked), here a non-repository root (exit 128), is a
         # HOLD, never a fall-through into the anchor leg

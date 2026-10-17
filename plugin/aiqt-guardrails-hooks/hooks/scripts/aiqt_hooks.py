@@ -17397,10 +17397,33 @@ def _orch_register_authority(root, path):
                         "register is not an append-only extension of its merge-base state", None)
             return _orch_register_tip(lines)
     anchor = path + ".anchor"
+    # The gate's anchor rule: the anchor is opened ONCE, non-blocking and without following a
+    # final symlink, its type is checked on the OPENED descriptor, and its bytes are read from
+    # that same descriptor, so a symlink (live or dangling), a directory, a FIFO or any other
+    # non-regular entry is a HOLD, never a file the link names and never a blocked hook.
     try:
-        with open(anchor, "r", encoding="utf-8") as fh:
-            a = json.load(fh)
-    except (OSError, ValueError):
+        fd = os.open(anchor, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+                     | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return ("hold", "the register anchor is a symlink, which is never followed", None)
+        return ("hold", "declared register has no readable anchor authority", None)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ("hold", "the register anchor is not a regular file", None)
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except OSError:
+        return ("hold", "declared register has no readable anchor authority", None)
+    finally:
+        os.close(fd)
+    try:
+        a = json.loads(b"".join(chunks).decode("utf-8"))
+    except ValueError:
         return ("hold", "declared register has no readable anchor authority", None)
     # The same strict anchor shape as the gate: an object whose seq is an int (bools excluded)
     # of at least 1 and whose digest is 64 lowercase hex. A zero, negative or false seq, a

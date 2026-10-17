@@ -35,7 +35,9 @@ violation (exit 1); and an append-only AUTHORITY that cannot be read (no computa
 failure deciding whether the register is tracked, a malformed or unreadable anchor, an anchor
 entry that exists but is unusable (anchor presence is an explicit lstat whose only absence answer
 is ENOENT: a dangling symlink, a non-regular file, or an lstat failure such as EIO is never read
-as a missing anchor), or a declared untracked register with no anchor) is a distinct cannot-evaluate
+as a missing anchor; the anchor is then read through one non-blocking open that never follows a
+final symlink and whose descriptor must be a regular file, so a live symlink never supplies the
+anchor), or a declared untracked register with no anchor) is a distinct cannot-evaluate
 failure (exit 2), never a
 silent skip nor a HEAD-against-itself self-comparison (chkfcl/grdinp). The LIVE leg resolves its
 validation root from this gate's own installed location (gate_root: the nearest ancestor holding a
@@ -84,6 +86,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import errno
 import hashlib
 import json
 import os
@@ -92,6 +95,12 @@ import subprocess
 from pathlib import Path
 
 REGISTRY_FILES = (".aiqt/orchestration.local.json", ".aiqt/orchestration.json")
+# The anchor read's open, the one tools/check_entry_guard.py uses for its control inputs (that
+# gate is not imported: this gate installs standalone beside the appender). Non-blocking, so a
+# FIFO opens at once and is then refused by type; no final-symlink follow, so a symlink, live or
+# dangling, is refused at open (ELOOP); close-on-exec, so no launched child inherits it.
+READ_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
+READ_CHUNK = 1 << 16
 STATUSES = ("proposed", "accepted", "landed", "declined", "superseded")
 ZERO = "0" * 64
 TRANSITIONS = {"proposed": {"accepted", "declined", "superseded"},
@@ -175,6 +184,35 @@ def entry_state(path):
     except OSError as exc:
         raise CannotEvaluate("the entry at {} cannot be inspected ({}); only confirmed absence "
                              "(ENOENT) reads as absent".format(path, exc))
+
+
+def _read_regular(path, label):
+    """Read one authority file as bytes: opened ONCE with READ_FLAGS, refused unless the OPENED
+    descriptor is a regular file (fstat), and read from that same descriptor, so an entry
+    swapped after an earlier inspection is judged as it was opened and a FIFO never blocks the
+    gate. Every failure raises CannotEvaluate naming label and path: a symlink, live or
+    dangling (ELOOP), an entry that cannot be opened (one gone since its inspection included),
+    a directory, a FIFO or any other non-regular file, and a read error."""
+    try:
+        fd = os.open(str(path), READ_FLAGS)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise CannotEvaluate("{} at {} is a symlink, which is never followed".format(
+                label, path))
+        raise CannotEvaluate("{} at {} cannot be opened ({})".format(label, path, exc))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise CannotEvaluate("{} at {} is not a regular file".format(label, path))
+        chunks = []
+        while True:
+            chunk = os.read(fd, READ_CHUNK)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+    except OSError as exc:
+        raise CannotEvaluate("{} at {} cannot be read ({})".format(label, path, exc))
+    finally:
+        os.close(fd)
 
 
 def gate_root(start):
@@ -368,9 +406,9 @@ def verify_append_only(root, path, lines, allow_missing_anchor=False):
     # Anchor PRESENCE is an EXPLICIT lstat whose only absence answer is ENOENT: the
     # missing-anchor allowance covers only an anchor path with NO entry at all. An lstat failure
     # other than ENOENT (EIO, EACCES, ENOTDIR, ...) leaves the presence question OPEN, and an
-    # entry that exists but cannot be used (a dangling symlink, a directory, a FIFO or any other
-    # non-regular file) is an authority that cannot be read: each is cannot-evaluate, never the
-    # allowance.
+    # entry that exists but cannot be used (a symlink, live or dangling, a directory, a FIFO or
+    # any other non-regular file) is an authority that cannot be read: each is cannot-evaluate,
+    # never the allowance.
     try:
         anchor_entry = entry_state(anchor)
     except CannotEvaluate as exc:
@@ -383,23 +421,23 @@ def verify_append_only(root, path, lines, allow_missing_anchor=False):
                                  "--update-anchor to establish the baseline (an absent authority "
                                  "is not a clean result)")
         return []
+    # The present entry is then opened ONCE without following a final symlink and read from
+    # that same descriptor (_read_regular), so a link, live or dangling, never supplies the
+    # authority from a file it names, and an entry swapped after the inspection above is
+    # judged as it was opened, never followed and never a blocked read.
     try:
-        anchor_stat = os.stat(str(anchor))
-    except OSError as exc:
-        raise CannotEvaluate("the anchor entry exists but cannot be used ({}); a dangling symlink "
-                             "or an uninspectable entry is never the missing-anchor "
-                             "allowance".format(exc))
-    if not stat.S_ISREG(anchor_stat.st_mode):
-        raise CannotEvaluate("the anchor entry exists but is not a regular file; a non-regular "
-                             "entry is never the missing-anchor allowance")
+        raw = _read_regular(anchor, "the anchor entry")
+    except CannotEvaluate as exc:
+        raise CannotEvaluate("{}; an anchor entry that exists but cannot be used is never the "
+                             "missing-anchor allowance".format(exc))
     # The anchor is the append-only AUTHORITY: one that cannot be read, or that does not hold
     # the declared shape (an object with an integer seq >= 1, bools excluded, and a 64-hex
     # digest), is cannot-evaluate, never a violation list and never a silently skipped digest
     # comparison (a zero, negative or false seq used to bypass the anchored-row check; a true
     # seq was coerced to 1 and still compared).
     try:
-        a = json.loads(anchor.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+        a = json.loads(raw.decode("utf-8"))
+    except ValueError as exc:
         raise CannotEvaluate("the anchor file cannot be read as JSON ({})".format(exc))
     n = a.get("seq") if isinstance(a, dict) else None
     digest = a.get("digest") if isinstance(a, dict) else None
@@ -579,6 +617,7 @@ def self_test():
     import io
     import shutil
     import tempfile
+    import threading
     # Hermetic git fixtures (test-hermeticity): every fixture git call below inherits
     # os.environ, where an inherited GIT_INDEX_FILE / GIT_DIR (git exports these to hook
     # children) would redirect the fixture's init/add/commit into the CALLER's repository.
@@ -755,6 +794,73 @@ def self_test():
                 failures.append("the directory-anchor refusal should name the shape, got: "
                                 "{}".format(exc))
         anchor_path.rmdir()
+        # the anchor is opened ONCE without following a final symlink and its type is checked
+        # on the opened descriptor: a live symlink to a VALID anchor (which the gate used to
+        # follow and pass) and a live symlink to a directory (which the gate used to refuse
+        # only by its target's type, so the refusal must name the link) are each
+        # cannot-evaluate, bootstrap included
+        anchor_store = reg_dir / "anchor-store.json"
+        anchor_store.write_text(good_anchor, encoding="utf-8")
+        (reg_dir / "anchor-store-dir").mkdir()
+        for tag, target in (("live symlink to a valid anchor", "anchor-store.json"),
+                            ("live symlink to a directory", "anchor-store-dir")):
+            anchor_path.symlink_to(target)
+            for allow in (False, True):
+                try:
+                    verify_append_only(reg_dir, rp, good, allow_missing_anchor=allow)
+                    failures.append("a {} at the anchor path should be cannot-evaluate "
+                                    "(allow_missing_anchor={})".format(tag, allow))
+                except CannotEvaluate as exc:
+                    if "is a symlink, which is never followed" not in str(exc) \
+                            or "never the missing-anchor allowance" not in str(exc):
+                        failures.append("the {} refusal should name the link and the "
+                                        "allowance, got: {}".format(tag, exc))
+            anchor_path.unlink()
+
+        def timed_refusal(seconds=10):
+            # a TIMED daemon thread, so a blocking anchor read is a named failure here, never
+            # a hung self-test (the thread is reaped at interpreter exit)
+            box = []
+
+            def work():
+                try:
+                    box.append(("returned", verify_append_only(
+                        reg_dir, rp, good, allow_missing_anchor=True)))
+                except CannotEvaluate as exc:
+                    box.append(("refused", str(exc)))
+            worker = threading.Thread(target=work, daemon=True)
+            worker.start()
+            worker.join(seconds)
+            return box[0] if box else ("blocked", None)
+
+        # a FIFO at the anchor path is refused without blocking (a CONTROL: a FIFO at rest was
+        # refused before, by a type check on the path), and a FIFO swapped in AFTER the type
+        # check of the path (simulated by masking lstat and stat to report the regular store
+        # file) is refused on the opened descriptor (the gate used to block in its read)
+        os.mkfifo(str(anchor_path))
+        fifo_kind, fifo_detail = timed_refusal()
+        if fifo_kind != "refused" or "not a regular file" not in fifo_detail:
+            failures.append("a FIFO at the anchor path should be refused promptly as not a "
+                            "regular file, got {}: {}".format(fifo_kind, fifo_detail))
+        real_os_lstat, real_os_stat = os.lstat, os.stat
+        store_stat = real_os_stat(str(anchor_store))
+
+        def regular_view(real):
+            def view(p, *largs, **lkw):
+                if str(p) == str(anchor_path):
+                    return store_stat
+                return real(p, *largs, **lkw)
+            return view
+
+        os.lstat, os.stat = regular_view(real_os_lstat), regular_view(real_os_stat)
+        try:
+            swap_kind, swap_detail = timed_refusal()
+        finally:
+            os.lstat, os.stat = real_os_lstat, real_os_stat
+        if swap_kind != "refused" or "not a regular file" not in swap_detail:
+            failures.append("a FIFO swapped in after the type check should be refused on the "
+                            "opened descriptor, got {}: {}".format(swap_kind, swap_detail))
+        anchor_path.unlink()
         anchor_path.write_text(good_anchor, encoding="utf-8")
         # anchor presence is an EXPLICIT lstat whose only absence answer is ENOENT: any other
         # inspection failure (EIO here) leaves the presence question open and is
@@ -1294,8 +1400,9 @@ def self_test():
         at_anchor_path.write_text(saved_anchor, encoding="utf-8")
         if run(repo) != 0:
             failures.append("gate should pass again once the dangling anchor entry is replaced")
-        # a LIVE anchor symlink is refused by the anchor WRITE: the link is never followed,
-        # its target is never rewritten, and the link entry survives the refusal
+        # a LIVE anchor symlink is refused, by the anchor READ before the write is reached (the
+        # tracked leg below holds the write's own refusal): the link is never followed, its
+        # target is never rewritten, and the link entry survives the refusal
         at_store = repo / "at-anchor-store.json"
         at_store.write_text(saved_anchor, encoding="utf-8")
         at_anchor_path.unlink()
@@ -1591,9 +1698,12 @@ def self_test():
           "rewrite with no computable merge-base, and a declared untracked register with no "
           "anchor all fail; a malformed, non-object or wrongly shaped anchor (a zero, negative, "
           "boolean or float seq, a short or non-hex digest), an anchor entry that exists but is "
-          "not a usable regular file (a dangling symlink or a directory, the --update-anchor "
-          "bootstrap included), an anchor lstat failure that is not ENOENT (absence is only "
-          "ENOENT, bootstrap included), a present registry that is not a JSON object, a "
+          "not a usable regular file (a dangling symlink, a directory, a live symlink to a "
+          "valid anchor or to a directory, named as a link, a FIFO, and a FIFO swapped in "
+          "after the type check, refused on the opened descriptor without blocking, the "
+          "--update-anchor bootstrap included), an anchor lstat failure that is not ENOENT "
+          "(absence is only ENOENT, bootstrap included), a present registry that is not a JSON "
+          "object, a "
           "registry entry whose lstat fails with anything but ENOENT or that is a dangling "
           "symlink (registry presence is ENOENT-only: selected and refused, never NOT "
           "APPLICABLE and never the lower-priority registry file), a declared register value "

@@ -921,6 +921,10 @@ expected-check-ids = [
   "attest/anchor-non-object-holds",
   "attest/anchor-non-object-names-malformed",
   "attest/anchor-valid-after-shape-vectors-ok",
+  "attest/anchor-live-symlink-holds",
+  "attest/anchor-directory-symlink-holds-naming-link",
+  "attest/anchor-fifo-holds-without-blocking",
+  "attest/anchor-regular-after-type-vectors-ok",
   "attest/git-failure-tracked-decision-holds",
   # ---------- GD-127: the systemic-lapse lifecycle (verdict-preservation legs) ----------
   "lapse/klass-recorded",
