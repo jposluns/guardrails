@@ -91,8 +91,10 @@ It also covers the shared command reading the lexer-reading guards use (cs-* cas
 the compound-subject table (one or two shapes per guard, each one the guard denies bare; for git_stash_ref,
 the one it notes), wrapped in a compound command (if, else, elif, for, for NAME do, while, until, select,
 case, a brace group, '!', time -p, time --) and in a backquote substitution (also one after a double-quoted
-$(...) or ${...} holding a quote, which the lexer nests, and one between two single quotes inside a
-double-quoted ${...}, which bash runs), must decide at least as strictly as the bare shape. These rows are
+$(...) or ${...} holding a quote, which the lexer nests, one between two single quotes inside a
+double-quoted ${...}, which bash runs, and one in a backquote body after a double-quoted $(...) whose comment
+or heredoc body holds a lone single quote, then a double-quoted $(...) or ${...} holding a quote), must decide
+at least as strictly as the bare shape. These rows are
 outcome checks of each guard's decision, not checks of the backquote scan: another path decides some
 wrapped shapes for some guards, so a row can pass with the scan changed. The cs-read cases check the
 shared reading itself, and each half of the backquote scan has one that fails without it. A reserved word
@@ -101,7 +103,12 @@ quoted heredoc body must each keep the decision every guard gave it before the s
 cs-cost cases bound the backquote scan's cost: gate_weakening, bash_absolute_paths and diff_source_pretool
 must each decide a command whose double-quoted backquote body is a long run of unterminated $( openers
 (a 42,044-byte command, and one with a 64 KiB body) within 1 s of CPU, and gate_weakening must deny both
-for their --no-verify. The table does not cover gate_weakening's verification-sink deny
+for their --no-verify. The cs-bound cases check the shared reading's work bound: a reading of one 8-character
+body completes within a bound of 9 or 8 characters and raises ValueError within one of 7, the reading of a
+52,513-byte command whose backquote substitutions nest 14 deep, each read as two bodies, passes the bound, and
+each guard in the table must decide that command within 1 s of CPU without raising, gate_weakening denying it
+for its --no-verify; the same holds for that shape around a commit-free git push. The table does not cover
+gate_weakening's verification-sink deny
 tier, which still reads the command's own records, or the two orchestration guards (orch_truncation_guard,
 orch_untracked_wait_loop), whose shared reading tools/selftest_orch_hooks.py checks. The wx-* cases pin each
 wrapped example that the git_discard, gate_weakening, diff_source_pretool and bash_absolute_paths texts name
@@ -2403,8 +2410,13 @@ def _test_git_stash_ref(failures):
 # of that scan misses it, yet another path also decides some of those shapes: the protected_line and
 # git_discard rows under them pass with either half removed, the bash_absolute_paths rows under
 # dq-subst-quote and dq-param-quote pass without the nested half, and 16 of the 24 dq-subst-quote and
-# dq-param-quote rows passed before the scan read nested quotes. The cs-read cases in _test_compound_subject
-# check the scan itself.
+# dq-param-quote rows passed before the scan read nested quotes. The bq-* wrappers put a backquote body inside
+# double quotes holding a double-quoted $(...) whose comment or heredoc body holds a lone single quote, so the
+# nested half cannot close that $(...), then a later double-quoted $(...) or ${...} holding a quoted single
+# quote, which ends the plain half's double-quoted span early, then the substitution: bash runs it, and only
+# the nested half's try at the later $( or ${ finds it. Their rows fail when the nested half stops trying
+# after one it cannot close, except the protected_line and git_discard rows. The cs-read cases in
+# _test_compound_subject check the scan itself.
 _CS_SHAPES = (
     ("commit_identity", 'git commit -m x --author="Claude <c@x>"', "deny"),
     ("commit_msg_subst", 'git commit -m "a$(id)"', "deny"),
@@ -2437,6 +2449,9 @@ _CS_WRAPPERS = (
     ("dq-subst-quote", 'x="$(echo "\'")" `{}`'),
     ("dq-param-quote", 'y="${{z:-"\'"}}" `{}`'),
     ("dq-param-squote", 'echo "${{x:-\'}}" `{}` "\'}}"'),
+    ("bq-comment-quote", 'echo "`echo x=\\"$(echo # don\'t\n)\\"; y=\\"$(echo \\"\'\\")\\" \\`{}\\``"'),
+    ("bq-heredoc-quote", 'echo "`echo x=\\"$(cat <<E\n\'\nE\n)\\"; y=\\"$(echo \\"\'\\")\\" \\`{}\\``"'),
+    ("bq-comment-param", 'echo "`echo x=\\"$(echo # don\'t\n)\\"; y=\\"${{z:-\\"\'\\"}}\\" \\`{}\\``"'),
 )
 _CS_RANK = {"allow": 0, "allow-note": 1, "deny": 2}
 # Controls: a reserved word as a plain argument, a git command inside a quoted string, a single-quoted
@@ -2517,12 +2532,14 @@ def _test_compound_subject(failures):
 
 
 def _test_backquote_scan_cost(failures):
-    """(cs-cost) The backquote scan stays linear on unterminated input. Each command below lexes as a whole
-    (the lexer skips a backquote body inside double quotes in one piece); its backquote body, a double-quoted
-    run of $( openers none of which closes, is lexed as a partial line, and that unfinished segment's raw
-    text, which runs to the end of the body, is scanned for backquote substitutions. A scan that retried each
-    opener to the end of the text took about 15 s of CPU in gate_weakening and bash_absolute_paths and 31 s in
-    diff_source_pretool on the 42,044-byte command, over the hooks' 10 s timeout. Each guard must decide each
+    """(cs-cost) The backquote scan's tries stay bounded on unterminated input. Each command below lexes as a
+    whole (the lexer skips a backquote body inside double quotes in one piece); its backquote body, a
+    double-quoted run of $( openers none of which closes, is lexed as a partial line, and that unfinished
+    segment's raw text, which runs to the end of the body, is scanned for backquote substitutions. The nested
+    scan tries each opener, and each try reads to the end of the text: with no bound that took about 15 s of
+    CPU in gate_weakening and bash_absolute_paths and 31 s in diff_source_pretool on the 42,044-byte command,
+    over the hooks' 10 s timeout. Each try is charged to the reading's work bound (_substitution_work), so the
+    run spends it and each guard decides as for a command that does not lex. Each guard must decide each
     command within 1 s of CPU; where the bound was set each took under 0.1 s, so the bound leaves a margin
     above ten times for a slower machine. gate_weakening must still deny both for their --no-verify. No
     submitted Bash command is executed."""
@@ -2538,6 +2555,56 @@ def _test_backquote_scan_cost(failures):
             if name == "gate_weakening" and got != "deny":
                 failures.append("(cs-cost-{}) a {}-byte command with a {}-byte unterminated backquote body: "
                                 "expected deny, got {}".format(name, len(command), len(body), got))
+
+
+def _test_substitution_work_bound(failures):
+    """(cs-bound) The substitution reading's work bound (_substitution_work). Its ends: reading x=`git diff`
+    lexes one 8-character body and charges nothing else, so it reads within a bound of 9 or 8 characters and
+    raises ValueError with _SUBSTITUTION_WORK_SPENT within one of 7. The nested shape: each level is
+    x="$(echo "'")" "'" then a backquote substitution holding the next level and a single-quoted escaped double
+    quote, where the two backquote scans read the substitution as two different bodies, so the reading doubles
+    at each level. Fourteen levels around git commit --no-verify -m x and 1,500 words make a 52,513-byte
+    command, which bash parses: its reading must raise that ValueError, and each guard in the compound-subject
+    table must decide it within 1 s of CPU without raising (each decides as for a command that does not lex),
+    gate_weakening denying it for its --no-verify. With no bound gate_weakening took about 25 s of CPU on it.
+    The same holds for the shape around git push origin feature, a commit-free command that protected_line
+    reads past its commit check. No submitted Bash command is executed."""
+    records = aiqt_hooks._lex_command("x=`git diff`")
+    for size, want in ((9, None), (8, None), (7, aiqt_hooks._SUBSTITUTION_WORK_SPENT)):
+        try:
+            aiqt_hooks._substitution_lines(records, 0, False, [size])
+            got = None
+        except ValueError as exc:
+            got = str(exc)
+        if got != want:
+            failures.append("(cs-bound-end) x=`git diff` read within a bound of {} characters: expected {}, got {}"
+                            .format(size, want or "a complete reading", got or "a complete reading"))
+    for marker in ("git commit --no-verify -m x", "git push origin feature"):
+        command = marker + " " + "y " * 1500
+        for _level in range(14):
+            command = 'x="$(echo "\'")" "\'" `' + command.replace("\\", "\\\\").replace("`", "\\`") + " '\\\"'`"
+        try:
+            aiqt_hooks._substitution_lines(aiqt_hooks._lex_command(command))
+            got = "a complete reading"
+        except ValueError as exc:
+            got = str(exc)
+        if got != aiqt_hooks._SUBSTITUTION_WORK_SPENT:
+            failures.append("(cs-bound-read) the {}-byte command nested around {}: expected ValueError({!r}), got {}"
+                            .format(len(command), marker, aiqt_hooks._SUBSTITUTION_WORK_SPENT, got))
+        for name in _CS_GUARDS:
+            start = time.process_time()
+            try:
+                got = _decision(getattr(aiqt_hooks, name), command)
+            except Exception as exc:  # a guard that lets the reading's ValueError out fails here, not the suite
+                got = "{}: {}".format(type(exc).__name__, exc)
+            spent = time.process_time() - start
+            want = "deny" if name == "gate_weakening" and "--no-verify" in marker else "a decision"
+            if spent >= 1.0:
+                failures.append("(cs-bound-{}) the {}-byte command nested around {}: {:.2f} s of CPU, over the 1 s "
+                                "bound".format(name, len(command), marker, spent))
+            if got not in _CS_RANK or (want == "deny" and got != "deny"):
+                failures.append("(cs-bound-{}) the {}-byte command nested around {}: expected {}, got {}"
+                                .format(name, len(command), marker, want, got))
 
 
 # The wrapped examples the guard texts in .aiqt/core/hooks/manifest.toml name, each with the exact decision
@@ -14522,6 +14589,7 @@ def _main_isolated(monitor):
         _test_git_stash_ref(failures)
         _test_compound_subject(failures)
         _test_backquote_scan_cost(failures)
+        _test_substitution_work_bound(failures)
         _test_wrapped_examples(failures, tmp)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)

@@ -10784,6 +10784,21 @@ def _main_isolated(report_path=None):
               ("match", "match"))
         check("trunc/brace-group-sink-denies", _verdict(tg("pytest | { head -5; }", rib=True)), "deny")
         check("trunc/quoted-backquote-sink-denies", _verdict(tg('echo "`pytest | head -5`"', rib=True)), "deny")
+        # The shared reading's work bound (aiqt_hooks._substitution_work): BASE in a backquote substitution
+        # after 1,500 words, nested 13 more levels deep, each level x="$(echo "'")" "'" then a backquote
+        # substitution holding the next level and a single-quoted escaped double quote, which the two backquote
+        # scans read as two different bodies, so the reading doubles at each level and passes its bound. The
+        # classifier then answers 'indeterminate', as for a command that does not lex, where with no bound it
+        # read BASE 14 deep and answered 'match' after about 12 s of CPU; each guard decides the command within
+        # 1 s of CPU.
+        NESTED = "echo " + "y " * 1500 + "`" + BASE + "`"
+        for _level in range(13):
+            NESTED = 'x="$(echo "\'")" "\'" `' + NESTED.replace("\\", "\\\\").replace("`", "\\`") + " '\\\"'`"
+        check("wl/bound-indeterminate", clf(NESTED), "indeterminate")
+        for cid, decide in (("wl/bound-cost", wl), ("trunc/bound-cost", tg)):
+            started = aiqt_hooks.time.process_time()
+            decide(NESTED, rib=True)
+            check(cid, aiqt_hooks.time.process_time() - started < 1.0, True)
         # handler ALLOW: a foreground poll loop (no detach) and a bounded watch acquire no deny here.
         check("wl/handler-allow-foreground",
               _verdict(wl("while true; do gh pr checks 42; sleep 30; done")), "allow")
