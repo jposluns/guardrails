@@ -2907,6 +2907,15 @@ def _citeledger_cases(tmp):
     check("citeledger/bash-unrecognized-records-nothing",
           [name for name in [n for n, _c, _s in bash_unknown] + ["interrupted", "no-stdout"]
            if ledger("unknown-bash-" + name).exists()], [])
+    # A nested quote in a recorded command: the recorder lexes as bash nests a substitution's quotes inside
+    # a double-quoted string, so the double quote inside single quotes in $(...) does not end the pattern,
+    # and the pattern, a substitution, records nothing (the walk's lexing, which ends the string there,
+    # leaves a quote that does not close and records nothing too). A single quote inside double quotes with
+    # no substitution is recorded.
+    bash("grep -n \"$(echo '\"')beta\" tools/a.py", "2:beta = 2\n", "nested-quote-subst")
+    bash("grep -n \"b'*eta\" tools/a.py", "2:beta = 2\n", "nested-quote-plain")
+    check("citeledger/bash-nested-quote", (spans("nested-quote-subst"), spans("nested-quote-plain")),
+          ([], [("grep", "tools/a.py", 2, 2)]))
 
     # Write is the whole written file and Edit the lines of its new text, both as "wrote" rows; a Write
     # whose file does not hold the written content records nothing.
@@ -4986,6 +4995,31 @@ def _citecheck_suffix_cases(tmp):
     own = seen(a, "git commit -m 'see sub/y.py:2'", "suffix-control")
     check("citeledger/suffix-own-repo-covered", (through[:2] + (through[3] == "",), own[:2] + (own[3] == "",)),
           (("allow", [("sub/y.py:2", "covered")], True), ("allow", [("sub/y.py:2", "covered")], True)))
+    # The same citation from a cwd in a, with the deadline reached as the command's repository top is
+    # resolved for the suffix match (a stand-in clock, moved by a wrapper around that one resolution, which
+    # the real _citechk_real then refuses): unjudged, naming the budget, never no such file.
+    saved = (aiqt_hooks.time, aiqt_hooks._citechk_real)
+    clock, original = _CiteClock(0.0, 1e12, False), aiqt_hooks._citechk_real
+
+    def real(path, what, deadline):
+        if what == "the repository top":
+            clock.advance()
+        return original(path, what, deadline)
+    aiqt_hooks.time, aiqt_hooks._citechk_real = clock, real
+    try:
+        late = seen(a, "git commit -m 'see sub/y.py:2'", "suffix-control")
+    finally:
+        aiqt_hooks.time, aiqt_hooks._citechk_real = saved
+    check("citeledger/suffix-top-not-resolved", late[:2] + (aiqt_hooks._CITECHK_OUT_OF_TIME in late[3],),
+          ("warn", [("sub/y.py:2", "unjudged")], True))
+    # The limit is on the recorded path alone: a repository nested inside a's tree (here at vendor/n) is
+    # under a's toplevel, so a read of its sub/z.py, made with the cwd in a, covers sub/z.py:1 cited from a,
+    # which names no file there.
+    nested = _CiteRepo(a.root / "vendor" / "n", {"sub/z.py": b"z1\n"})
+    read(a, nested.root / "sub" / "z.py", 1, "suffix-nested")
+    inside = seen(a, "git commit -m 'see sub/z.py:1'", "suffix-nested")
+    check("citeledger/suffix-nested-repo-covered", inside[:2] + (inside[3] == "",),
+          ("allow", [("sub/z.py:1", "covered")], True))
 
 
 class _CiteCutPattern:
@@ -5513,9 +5547,10 @@ def _citecheck_step_cases(tmp):
     # reads as text, so with a split delimiter that bash reads as unquoted the command is scanned as written
     # and that expansion named, also on the line after a comment in the substitution, after a '#' inside a
     # word (x#y, $(true)#z), after an escaped blank (a\ #y) and after a '#' that a run of backslash-newlines
-    # joins to a word. A '<<' inside single quotes, an ANSI-C quote with an escaped quote, a comment (from a
-    # '#' at the substitution's opening, after an opening '(', a blank, a tab, a newline, ';', '&' or '|', to
-    # its newline) or $((...)) in such a substitution leaves the command lexed with its -F file read. A
+    # joins to a word. A '<<' inside single quotes, a comment (from a '#' at the substitution's opening,
+    # after an opening '(', a blank, a tab, a newline, ';', '&' or '|', to its newline) or $((...)) in such a
+    # substitution leaves the command lexed with its -F file read; one inside an ANSI-C quote with an escaped
+    # quote there, which the nested lexing refuses, leaves it read both ways with its -F file read. A
     # look-alike the lexer does not read as an operator, inside quotes (after a substitution closes, too), a
     # comment or a quoted here-document's body (also one that, with '<(' for its '<<', would be the line that
     # closes that body), or after an escaped '<', leaves the command lexed, so its -F file (after the escaped
@@ -5646,7 +5681,8 @@ def _citecheck_step_cases(tmp):
            "subst-double": by_text, "backticks-double": by_value(in_ticks), "subst-quoted": by_both(heredoc_body),
            "subst-single": by_file, "subst-arith": by_file, "subst-comment": by_file, "subst-comment-after": by_file,
            "subst-comment-line": by_text, "subst-hash-word": by_text, "backticks-comment": by_value(hash_in_ticks),
-           "subst-ansi-c": by_file, "subst-joins-before": by_both(heredoc_body),
+           "subst-ansi-c": by_both(aiqt_hooks._CITECHK_LEXINGS_DIFFER, "EOF"),
+           "subst-joins-before": by_both(heredoc_body),
            "backticks-to-quote": by_both(in_ticks), "subst-escaped-blank": by_text, "subst-join-run": by_text,
            "subst-comment-at-open": by_file, "subst-comment-at-paren": by_file, "subst-comment-after-tab": by_file,
            "subst-comment-after-semicolon": by_file, "subst-comment-after-ampersand": by_file,
@@ -5728,6 +5764,31 @@ def _citecheck_step_cases(tmp):
            "subst-comment-at-open": by_text, "subst-comment-at-paren": by_text, "subst-comment-after-tab": by_text,
            "subst-comment-after-semicolon": by_text, "subst-comment-after-ampersand": by_text,
            "subst-comment-after-pipe": by_text, "backticks-hash": by_file, "subst-brace-semicolon": lexed_value})
+    # The command is also lexed as bash nests a substitution's quotes inside a double-quoted string, with no
+    # backslash-newline needed. Where that lexing and the walk's (each string ending at its next double
+    # quote) differ, or only one of them lexes, the command is read both ways, the -F file of each lexing
+    # read: a double quote inside single quotes in a substitution, which the walk's lexing reads as the
+    # string's end and so takes the -F msg.txt between two such strings into one -m value; a single quote
+    # inside double quotes in a substitution, which leaves the walk's lexing with a quote that does not close
+    # (the command was scanned only as written, msg.txt unread); and an ANSI-C quote with an escaped quote in
+    # a substitution, which the nested lexing refuses. A substitution with no quote inside, which both
+    # lexings read alike, leaves the command lexed.
+    differ, lexings = {}, aiqt_hooks._CITECHK_LEXINGS_DIFFER
+    for name, command in (("dquote-in-subst", "git commit -m \"$(echo '\"')\" -F msg.txt -m \"$(echo '\"')\""),
+                          ("squote-in-subst", "git commit -F msg.txt -m \"$(echo \"it's\")\""),
+                          ("ansi-c-in-subst", "git commit -F msg.txt -m \"$(echo $'x\\' y')\""),
+                          ("alike", "git commit -F msg.txt -m \"$(echo x)\"")):
+        differ[name] = read_split(command, "lexings-" + name)
+    check("citeledger/check-lexings-differ", differ,
+          {"dquote-in-subst": ("warn", [("both", lexings, [], ["-m value"], []),
+                                        ("both", lexings, ["tools/a.py:1"], ["-m value", "-F msg.txt", "-m value"],
+                                         []),
+                                        ("both", lexings, [], ["command text"], [])], False, lexings),
+           "squote-in-subst": ("warn", [("both", lexings, ["tools/a.py:1"], ["-F msg.txt", "-m value"], []),
+                                        ("both", lexings, [], ["command text"], [])], False, lexings),
+           "ansi-c-in-subst": ("warn", [("both", lexings, ["tools/a.py:1"], ["-F msg.txt", "-m value"], []),
+                                        ("both", lexings, [], ["command text"], [])], False, lexings),
+           "alike": ("warn", [("lexed", None, ["tools/a.py:1"], ["-F msg.txt", "-m value"], [])], False, None)})
     # A command after the reserved words that begin its segment is read: in a brace group, after '!', 'if'
     # or 'then', after 'do', after 'time -p', after a '--' that follows time or its -p, and after coproc,
     # with the NAME bash reads before a compound command. Where bash runs another command, none is read: a

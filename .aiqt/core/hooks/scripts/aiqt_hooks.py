@@ -1255,10 +1255,13 @@ def _lex_command(command, partial=False, heredocs=None, spans=None, locale=False
     nested is passed to _read_word for every word: the default True reads a command substitution or
     backquote inside a double-quoted string as its own quoting context, the nested-quote reading every other
     caller relies on. Only the citation check (_citechk_commands) passes False, so a double-quoted string
-    ends at the next unescaped double quote, as the walk through it (_citechk_substituted_ops) expects: that
-    walk reads a substitution still open at that quote as one it does not follow and so reads the command
-    both ways, and a quote form the nested reading refuses (an ANSI-C $'...' with an escaped quote in a
-    substitution) still lets the command lex, so its message and body files are read."""
+    ends at the next unescaped double quote, as the walk through it (_citechk_substituted_ops) expects; that
+    walk, which runs only on a command that holds a backslash-newline, reads a substitution still open at
+    that quote as one it does not follow and so reads the command both ways. The citation check also lexes
+    the command with nested True and reads it both ways wherever the two lexings differ (_citechk_shape) or
+    only one of them lexes, with or without a backslash-newline, so a quote form the nested reading refuses
+    (an ANSI-C $'...' with an escaped quote in a substitution) still lets the command's message and body
+    files be read."""
     n = len(command)
     segments = []
     argv = []
@@ -15313,6 +15316,9 @@ _CITECHK_EXPANDED_BOTH = ("its delimiter is unquoted, so bash expands parameters
 # the string's closing quote: bash reads on through that quote, so the lexer's reading of what follows it is
 # not bash's.
 _CITECHK_OPEN_AT_QUOTE = "a command substitution still open at its closing quote"
+# What _citechk_commands names where the command's two lexings (a double-quoted string ending at its next
+# double quote, and bash's nesting of a substitution's quotes in it) disagree, or only one of them lexes.
+_CITECHK_LEXINGS_DIFFER = "a substitution that the command's two lexings read differently"
 # The characters _citechk_substituted_ops stops at in a double-quoted string: a backslash, a backtick, a '$',
 # a single quote, a parenthesis, a '<', a '#' after a blank, a newline, ';', '&', '|' or a parenthesis, and a
 # word 'case' after one of those or a backtick. Bash begins a comment only at a '#' that begins a word, so a
@@ -15805,19 +15811,29 @@ def _citechk_commands(command, cwd, deadline):
     gh-pr-create or gh-pr-edit), parse ("lexed"; "raw" where the command does not lex and its whole text is
     scanned as body text; or "both"), texts [(label, text)] in the order the command's options name them,
     unread [(label, reason)], repo (the directory the command runs in, after a git -C; None without an
-    absolute session cwd), base (a gh --base value) and, where parse is "both", why (what the walk met). A
-    command in which a backslash-newline splits a here-document delimiter where bash reads one
-    (_citechk_split_delim, from the places the lexing read) is scanned as one that does not lex: at an
-    operator the lexer reads, quoted or not, the lexer reads a delimiter that no line can match and runs that
-    body to the end of the command, later commands included, and in a command substitution in a
+    absolute session cwd), base (a gh --base value) and, where parse is "both", why (what the walk met, or
+    _CITECHK_LEXINGS_DIFFER). The command is lexed twice: as the walk reads a double-quoted string, which
+    ends at its next unescaped double quote (nested=False), and as bash reads a command substitution or
+    backquote in one, whose own quotes nest (nested=True). A command that neither lexes is scanned as
+    written ("raw"). A command in which a backslash-newline splits a here-document delimiter where bash
+    reads one (_citechk_split_delim, from the places the first reading that lexes shows) is scanned as one
+    that does not lex: at an operator the lexer reads, quoted or not, the lexer reads a delimiter that no
+    line can match and runs that body to the end of the command, later commands included, and in a command
+    substitution in a
     double-quoted string, where bash reads that delimiter as unquoted, the lexer reads as text a body bash
     expands. A raw command names, as not read, the expansion of each here-document with an unquoted delimiter
     that its text shows (_citechk_as_written). A command whose double-quoted string holds what the walk there
     does not follow as bash does, before any such delimiter, is read both ways, since the walk cannot tell
     which reading bash makes: its commands as lexed, every message and body file read, and after them the
     item that the raw scan gives, all with parse "both"; a citation both readings find is judged in each,
-    so it can be listed twice. A command is found after any reserved words that begin its segment
-    (_CITECHK_LEADING), so one
+    so it can be listed twice. A command is read both ways too where only one of its two lexings lexes, or
+    where their words, redirects or here-documents differ (_citechk_shape; a double quote inside a
+    substitution in a double-quoted string, for example, which the first reading takes as the string's end,
+    so a later -F file can fall inside one -m value): the commands of each lexing that lexes are read, the
+    first's then each of the second's that differs from all of the first's, every message and body file of
+    each read, and the raw scan's item after them. This holds with or without a backslash-newline in the
+    command, which is what the walk alone needs before it runs. A command is found after any reserved words
+    that begin its segment (_CITECHK_LEADING), so one
     inside a brace group, after '!', 'if' or 'then', or after time -- or coproc is read; a redirection of
     the group as a whole (after its '}') is not the command's own. A message or body file resolves against
     repo and is read by _citechk_read_body within the check's deadline. "-" is standard input, one stream
@@ -15826,14 +15842,50 @@ def _citechk_commands(command, cwd, deadline):
     duplicates fd 0 onto itself leaves it), and otherwise, where that last redirection is a file, a
     descriptor or none of the command's own (a pipe, or a redirection of its group, for example), named as
     unseen. A here-document is read only by the command it redirects."""
-    heredocs, spans = [], []
-    try:
-        segments = _lex_command(command, heredocs=heredocs, spans=spans, nested=False)
-        parse, why = _citechk_split_delim(command, spans)
-        if parse == "raw":
-            raise ValueError("a here-document delimiter split by a backslash-newline")
-    except ValueError:
+    readings = []  # (segments, heredocs, spans) of each reading that lexes, the walk's (nested=False) first
+    for nested in (False, True):
+        heredocs, spans = [], []
+        try:
+            readings.append((_lex_command(command, heredocs=heredocs, spans=spans, nested=nested), heredocs,
+                             spans))
+        except ValueError:
+            continue
+    if not readings:
         return _citechk_as_written(command, cwd, "raw", _CITECHK_EXPANDED)
+    parse, why = _citechk_split_delim(command, readings[0][2])
+    if parse == "raw":
+        return _citechk_as_written(command, cwd, "raw", _CITECHK_EXPANDED)
+    differ = len(readings) == 1 or _citechk_shape(*readings[0][:2]) != _citechk_shape(*readings[1][:2])
+    if differ:
+        parse, why = "both", why or _CITECHK_LEXINGS_DIFFER
+    out = _citechk_items(readings[0][0], readings[0][1], cwd, parse, deadline)
+    if differ and len(readings) == 2:
+        first = list(out)
+        out += [item for item in _citechk_items(readings[1][0], readings[1][1], cwd, parse, deadline)
+                if item not in first]
+    if parse == "both":
+        out += _citechk_as_written(command, cwd, "both", _CITECHK_EXPANDED_BOTH)
+        for item in out:
+            item["why"] = why
+    return out
+
+
+def _citechk_shape(segments, heredocs):
+    """What the citation check takes from one lexing of a command, to compare two lexings by: each
+    segment's words and redirects, and the here-documents. The text of a word or a redirect target that
+    holds a substitution, an expansion or a glob (opaque) is left out and only its place compared, since the
+    two lexings decode one differently (the nested one keeps a substitution's text as written, its escapes
+    and backslash-newlines included); so a citation that only a backslash escape inside such a substitution
+    changes is read as the first lexing decodes it."""
+    return ([([None if opaque else word for word, opaque in zip(seg.argv, seg.argv_opaque)],
+              [(red.op, red.src_fd, red.target_class, None if red.target_class == "opaque" else red.target)
+               for red in seg.redirects]) for seg in segments], heredocs)
+
+
+def _citechk_items(segments, heredocs, cwd, parse, deadline):
+    """The git commit and gh pr create or edit commands of one lexing of a Bash command (segments and the
+    heredocs _lex_command gave with them), each a dict as _citechk_commands describes, with parse, and with
+    each message and body file it names read."""
     stdin = {}  # segment index: (redirects before it, body) of its last here-document
     for index, before, body in heredocs:
         stdin[index] = before, body
@@ -15905,10 +15957,6 @@ def _citechk_commands(command, cwd, deadline):
                 else:
                     item["texts"].append((label, text))
         out.append(item)
-    if parse == "both":
-        out += _citechk_as_written(command, cwd, "both", _CITECHK_EXPANDED_BOTH)
-        for item in out:
-            item["why"] = why
     return out
 
 
@@ -16222,9 +16270,11 @@ def _citechk_added(repo, top, base, real, deadline):
 def _citechk_resolve(token, repo, index, deadline, tops=None):
     """(real, None): the resolved regular file a cited path names, under repo (an absolute path kept), else,
     for a relative path, the one ledger path under repo's resolved toplevel that ends in /token, where
-    exactly one does; (None, None) where it names none. A ledger path under any other toplevel is never
-    tried, so a read recorded in another repository (whichever ledger holds it) never stands for a relative
-    path that names no file under repo. (None, reason), with no ledger path tried, where the path, joined to
+    exactly one does; (None, None) where it names none. A ledger path outside repo's toplevel is never
+    tried, so a read recorded in a repository outside it (whichever ledger holds it) never stands for a
+    relative path that names no file under repo. The test is on the path alone, so a read of a file in a
+    repository nested under repo's toplevel (a submodule, or a repository inside its tree) is tried and can
+    stand for one. (None, reason), with no ledger path tried, where the path, joined to
     repo where relative, is not resolved (_citechk_real: over the length or link bound, or the check's
     deadline reached, and the reason names which), where the deadline is reached after the resolution,
     before the stat of the resolved path (the budget named), or where repo itself, resolved only when a
