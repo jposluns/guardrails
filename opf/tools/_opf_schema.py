@@ -4777,7 +4777,8 @@ def self_test():
         _res = _imp_try(_rec, **_kw)
         check("imported-module-name-bounded-" + _name, _res is not None and _res.status == _status
               and any(_needle in f for f in _res.findings) and _bounded_findings(_res, 2))
-    # The clean validators keep their messages byte for byte: their renderer is _safe_display, the repr.
+    # The clean validators keep their messages byte for byte: their renderer is _safe_display, the repr (whole
+    # up to 65,536 characters, _opf_store._DISPLAY_FULL_MAX_CHARS, within its depth and value bounds).
     _bi_spec = BASELINE_SPECS["backlog_item"]
     check("clean-status-and-roster-messages-unchanged",
           parse_status("bogus", _bi_spec) == (
@@ -4786,7 +4787,8 @@ def self_test():
               None, "state 'open' may not carry '/proposed' for a backlog_item (spec 8.4/8.5)")
           and _specs_roster_error({"not_a_type": _bi_spec}) == (
               "the type-spec roster names a type absent from the section-8.1 taxonomy: 'not_a_type' (fail-closed)"))
-    # A name over the display budget appears there uncut, as its repr, so a switch to the bounded renderer
+    # A name over the display budget appears there uncut, as its repr, up to _safe_display's 65,536-character
+    # limit (_opf_store._DISPLAY_FULL_MAX_CHARS; a longer repr is cut), so a switch to the bounded renderer
     # (which would cut it) shows.
     _over = "x" * (_DISPLAY_BUDGET + 808)
     check("clean-status-and-roster-long-name-uncut",
@@ -4795,9 +4797,9 @@ def self_test():
           and _specs_roster_error({_over: _bi_spec}) == (
               "the type-spec roster names a type absent from the section-8.1 taxonomy: " + repr(_over)
               + " (fail-closed)"))
-    # The same names reach the clean validators' findings uncut through each call site whose message a
-    # finding carries (the gated-snapshot, type-specific and proposed-from sites drop theirs), so a switch
-    # to the bounded renderer at those call sites shows too.
+    # The same names reach the clean validators' findings uncut, up to the same 65,536-character limit,
+    # through each call site whose message a finding carries (the gated-snapshot, type-specific and
+    # proposed-from sites drop theirs), so a switch to the bounded renderer at those call sites shows too.
     _over_state = ("status state " + repr(_over) + " is not a backlog_item state "
                    "['active', 'done', 'dropped', 'open']")
     _over_roster = ("the type-spec roster names a type absent from the section-8.1 taxonomy: " + repr(_over)
@@ -5370,6 +5372,63 @@ def self_test():
                               ("mask-left-sigusr2-blocked", signal.SIG_BLOCK)):
             check("self-test-caller-timer-mask-clause-sees-" + _name,
                   _lost_on(_mask_left(_start), "mask", "", _start))
+
+    # ----- Deep values: a finding message renders a parsed value through the bounded
+    # _safe_display. tomllib builds a dotted table header iteratively, so a 100,000-part header parses into a
+    # 100,000-level nested table whose plain repr() overflowed the stack pre-fix (RecursionError, "Stack
+    # overflow ... while getting the repr of an object", escaping validate_record). CPython 3.14.8 and later
+    # refuse a TOML key of more than 1,000 dotted parts, so the deep vectors build that table directly and
+    # iteratively, in the shape tomllib gives the header, and run on every supported interpreter: no vector
+    # parses a longer key. Each deep check also compares the direct build with tomllib's own parse of the
+    # same header at 999 parts, under that cap. The deep vectors run in a bounded child (run_bounded), so a
+    # regression is the ERROR:RecursionError sentinel rather than a crash of this suite. Each refusal still
+    # stands: the record is INVALID with its finding. The wide vector rendered a megabyte-scale finding
+    # pre-fix; the small vector pins the byte-identical render. -----
+    import tomllib
+    from _opf_emit import run_bounded
+
+    def _dr_nest(parts):
+        # What tomllib gives for a table header [<name>.a.a ... .a] of `parts` a-parts holding b = 1.
+        nest = {"b": 1}
+        for _ in range(parts):
+            nest = {"a": nest}
+        return nest
+
+    _dr_id_shape = tomllib.loads("[id" + ".a" * 998 + "]\nb = 1\n")["id"] == _dr_nest(998)
+    _dr_link_shape = (tomllib.loads("[[links]]\nrel = 'relates'\n[links.id" + ".a" * 997 + "]\nb = 1\n")["links"]
+                      == [{"rel": "relates", "id": _dr_nest(997)}])
+
+    def _dr_outcome(rec, prefix):
+        res = validate_record(rec)
+        hit = [f for f in res.findings if f.startswith(prefix) and "is not a well-formed" in f]
+        return "{}|{}|{}".format(res.status, len(hit) == 1 and "nested deeper than" in hit[0],
+                                 all(len(f) <= 2048 for f in res.findings))
+
+    def _dr_deep_id():
+        rec = envelope("backlog_item", 90, "open")
+        rec["id"] = _dr_nest(100000)
+        return _dr_outcome(rec, "id ")
+
+    def _dr_deep_link():
+        rec = envelope("backlog_item", 91, "open")
+        rec["links"] = [{"rel": "relates", "id": _dr_nest(100000)}]
+        return _dr_outcome(rec, "links[0].id ")
+
+    check("deeprender-deep-id-refused-as-finding",
+          _dr_id_shape and run_bounded(_dr_deep_id, timeout_s=60) == "INVALID|True|True")
+    check("deeprender-deep-link-id-refused-as-finding",
+          _dr_link_shape and run_bounded(_dr_deep_link, timeout_s=60) == "INVALID|True|True")
+    _dr_wide = envelope("backlog_item", 92, "open")
+    _dr_wide["id"] = tomllib.loads("id = [" + "1, " * 200000 + "]\n")["id"]
+    _dr_wide_res = validate_record(_dr_wide)
+    check("deeprender-wide-id-finding-bounded",
+          _dr_wide_res.status == INVALID and all(len(f) <= 2048 for f in _dr_wide_res.findings)
+          and any(f.startswith("id [1, 1, ") and "...<truncated>" in f for f in _dr_wide_res.findings))
+    _dr_small = envelope("backlog_item", 93, "open")
+    _dr_small["id"] = tomllib.loads("id = [1, 'x', {a = 2}]\n")["id"]
+    check("deeprender-small-id-byte-identical",
+          "id {!r} is not a well-formed <NS>-<n> id (spec 8.2)".format([1, "x", {"a": 2}])
+          in validate_record(_dr_small).findings)
 
     if failures:
         print("OPF-SCHEMA SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
