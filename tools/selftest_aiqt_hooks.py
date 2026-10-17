@@ -7215,9 +7215,14 @@ def _main_isolated(monitor):
         # parenthesis after it on its line, are judged under both readings of that '#' (the shared lexer's
         # comment rule, applied inside _skip_quoting): the comment reading, the one bash takes, ends the
         # substitution at the next line's ')"' and lexes the push as its own segment, so the parsed
-        # classifier denies it first with its own reason. Each still denies; the fallback beneath it stays
-        # witnessed on the same command (pl-uncertain-<shape>-<spelling>-fallback).
-        _unc_hash_shapes = ('comment-paren', 'comment-apostrophe', 'commented-close', 'commented-close-heredoc')
+        # classifier denies it first with its own reason. The three whose quoted here-document sits inside a
+        # double-quoted command substitution are lexed as bash reads them too: the skip reads the body as
+        # text, so the substitution ends at the ')"' after the delimiter line and the push is its own
+        # segment, which the parsed classifier denies first (the unquoted one's body is still read as code,
+        # so the fallback decides it). Each still denies; the fallback beneath it stays witnessed on the same
+        # command (pl-uncertain-<shape>-<spelling>-fallback).
+        _unc_parsed_shapes = ('comment-paren', 'comment-apostrophe', 'commented-close', 'commented-close-heredoc',
+                              'heredoc-paren', 'heredoc-quote', 'nested-heredoc-close')
         for _unm, _ucmd in _unc_shapes:  # each _ucmd still spells the pl-mispair push; re-spelled below
             for _usn, _usp in (
                 ('head', 'git push --force origin HEAD'),
@@ -7227,7 +7232,7 @@ def _main_isolated(monitor):
             ):
                 _ucmdx = _ucmd.replace('git push --force origin main', _usp)
                 _udetail = 'appears to force-push or delete'
-                if _unm in _unc_hash_shapes:
+                if _unm in _unc_parsed_shapes:
                     _ufall = aiqt_hooks._protected_line_fallback(_ucmdx)
                     _ufall_obj = _ufall[1] if isinstance(_ufall[1], dict) else {}
                     _ufall_reason = _ufall_obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
@@ -8575,6 +8580,75 @@ def _main_isolated(monitor):
         texpect("(tok-dq-split-ctl) control: a word-text '#' in a double-quoted substitution still splits",
                 aiqt_hooks._raw_push_segments("echo \"$(echo a#b)\" ; git push --force origin x; echo main"),
                 ["echo \"$(echo a#b)\" ", " git push --force origin x", " echo main"])
+        # A here-document inside a double-quoted "$(...)" with a quoted delimiter: bash reads its body as text,
+        # so no comment rule, quote or parenthesis applies there and the skip jumps past it (bash 5.3.9 prints
+        # the body, '# Don't merge yet' line included, for the first shape, a common commit message form, and
+        # for the five '# H<n> (x)' lines of the second, which would otherwise exceed the four '#' the lexer
+        # judges). A ')"' line in such a body is body text too (bash runs no echo HIDDEN there).
+        _hd_m1 = "git commit -m \"$(cat <<'EOF'\nSubject line\n\n# Don't merge yet\nbody\nEOF\n)\""
+        _hd_h5 = "git commit -m \"$(cat <<'EOF'\n# H1 (x)\n# H2 (x)\n# H3 (x)\n# H4 (x)\n# H5 (x)\nEOF\n)\""
+        for _hdn, _hdc in (("apostrophe", _hd_m1), ("five-headings", _hd_h5)):
+            texpect("(tok-dq-heredoc-{}) a quoted here-document's body in a double-quoted substitution is "
+                    "body text".format(_hdn), _readings_or_error(_hdc), [[["git", "commit", "-m", _hdc[15:-1]]]])
+        texpect("(tok-dq-heredoc-close-line) a ')\"' line in a quoted here-document's body is body text",
+                _readings_or_error("echo \"$(cat <<'EOF'\n)\"; echo HIDDEN\nEOF\n)\"; echo RAN"),
+                [[["echo", "$(cat <<'EOF'\n)\"; echo HIDDEN\nEOF\n)"], ["echo", "RAN"]]])
+        # Where the skip does not read a body it reads the text as before: an unquoted delimiter (bash expands
+        # that body, which this skip does not model), a body that does not end before the command does, and a
+        # body line that begins with the delimiter but is not exactly it. Bash 5.3 ends a body inside a command
+        # substitution at such a line when a ')' follows on it and reads the rest of that line as commands, so
+        # its ')' closes the substitution here as there (bash 5.3.9 prints hello, RAN and the last string for
+        # the third, whose later 'EOF' line a body read to an exact delimiter line would reach instead).
+        texpect("(tok-dq-heredoc-unquoted) an unquoted here-document's body is read as text, as before",
+                _readings_or_error("echo \"$(cat <<EOF\n# it's\nEOF\n)\"; echo RAN"),
+                "ValueError: a reading of an uncertain '#' does not lex: unterminated single quote")
+        texpect("(tok-dq-heredoc-unterminated) a body with no delimiter line is read as text, as before",
+                _readings_or_error("echo \"$(cat <<'EOF'\n# it's\n)\"; echo RAN"),
+                "ValueError: a reading of an uncertain '#' does not lex: unterminated single quote")
+        texpect("(tok-dq-heredoc-delim-prefix) a body line beginning with the delimiter ends the read as bash does",
+                _readings_or_error("echo \"$(cat <<'EOF'\nhello\nEOF)\"; echo RAN; echo \"\nEOF\n)\""),
+                [[["echo", "$(cat <<'EOF'\nhello\nEOF)"], ["echo", "RAN"], ["echo", "\nEOF\n)"]]])
+        # Each guard that reads the lexer decides both shapes as main does (eight allow, where each denied or
+        # noted through the fallback before the skip read the body; commit_msg_subst denies the substitution
+        # in a commit argument and protected_line the unproven commit), and still judges a later line: each
+        # shape followed by a line its row's guard denies (or notes) decides that way.
+        for _hdn, _hdc in (("apostrophe", _hd_m1), ("five-headings", _hd_h5)):
+            for _hdg, _hdwant in ((aiqt_hooks.gate_weakening, "allow"), (aiqt_hooks.diff_source_pretool, "allow"),
+                                  (aiqt_hooks.git_explicit_binding, "allow"), (aiqt_hooks.commit_identity, "allow"),
+                                  (aiqt_hooks.bash_absolute_paths, "allow"), (aiqt_hooks.branch_root, "allow"),
+                                  (aiqt_hooks.git_discard, "allow"), (aiqt_hooks.git_stash_ref, "allow"),
+                                  (aiqt_hooks.commit_msg_subst, "deny"), (aiqt_hooks.protected_line, "deny")):
+                texpect("(hd-guard-{}) {} on the here-document shape".format(_hdn, _hdg.__name__),
+                        _decision(_hdg, _hdc), _hdwant)
+            for _hdg, _hdlater, _hdwant in (
+                    (aiqt_hooks.gate_weakening, "git commit --no-verify -m x", "deny"),
+                    (aiqt_hooks.bash_absolute_paths, "echo hi > out.txt", "deny"),
+                    (aiqt_hooks.commit_identity, 'git commit -m x --author="Claude <noreply@anthropic.com>"', "deny"),
+                    (aiqt_hooks.branch_root, "git checkout --orphan x", "deny"),
+                    (aiqt_hooks.diff_source_pretool, "git diff", "deny"),
+                    (aiqt_hooks.git_explicit_binding, "git add -A && git push", "deny"),
+                    (aiqt_hooks.git_discard, "git reset --hard", "deny"),
+                    (aiqt_hooks.git_stash_ref, "git stash pop", "allow-note")):
+                texpect("(hd-later-{}) {} on a line after the here-document shape".format(_hdn, _hdg.__name__),
+                        _decision(_hdg, _hdc + "\n" + _hdlater), _hdwant)
+        # COST. The lexer's cost per lex is linear in the command's length (the comment above _nest_track), so
+        # each guard below decides these inputs in well under its hook timeout: a 256 KiB line of blank-led '#'
+        # inside a double-quoted substitution, where the substitution skip searched to the end of the line from
+        # every '#', and a 128 KiB run of open parentheses and backquote substitutions, where the nesting stack
+        # was searched or copied for every word, skip and backquote. Each must take under 1 s of CPU. On the
+        # development host these took at most 0.08 s and 0.14 s, a margin of more than seven times; the code
+        # before the linear skip and the counted nesting stack took more than 1 s on each (the commit message
+        # carries the figures).
+        _cost_inputs = (("long-comment-line", 'echo "$(echo ' + "# " * (128 * 1024) + '\n)"\ngit status'),
+                        ("deep-nesting", "(" * 56000 + " `a`" * (56000 // 3)))
+        for _cost_name, _cost_cmd in _cost_inputs:
+            for _cost_guard in (aiqt_hooks.gate_weakening, aiqt_hooks.bash_absolute_paths, aiqt_hooks.protected_line):
+                _cost_t0 = time.process_time()
+                _decision(_cost_guard, _cost_cmd)
+                _cost_cpu = time.process_time() - _cost_t0
+                if _cost_cpu >= 1.0:
+                    failures.append("(lex-cost-{}) {} took {:.2f} s of CPU on a {}-character command; the bound "
+                                    "is 1 s".format(_cost_name, _cost_guard.__name__, _cost_cpu, len(_cost_cmd)))
         # The other scanners main's lexer helpers carry read a comment their own way, beside the lexer:
         # the continuation join keeps a backslash-newline after a '#' at a word start ('(' included) and removes
         # one after a '#' glued to a substitution's ')'; the uncertainty causes report any '#' outside quotes
@@ -8610,10 +8684,12 @@ def _main_isolated(monitor):
             (aiqt_hooks.git_stash_ref, "", "git stash pop", "allow-note", "allow"),
             (aiqt_hooks.branch_root, "", "git checkout --orphan x", "deny", "allow"),
             (aiqt_hooks.bash_absolute_paths, "", "echo hi > out.txt", "deny", "allow"),
-            # The discard guard's control denies: its scope scan reads the de-quoted text unstripped, a
-            # comment included, so the commented-out g'it' re'set' --hard puts the command in scope and the
-            # closed allowlist grammar denies it (that scan's disclosed over-refusal, not the lexer's).
-            (aiqt_hooks.git_discard, "", "g'it' re'set' --hard", "deny", "deny"),
+            # The discard guard has no comment-out control (None): its scope scan reads the de-quoted text
+            # unstripped, a comment included, so a commented-out g'it' re'set' --hard still puts the command in
+            # scope and the closed allowlist grammar denies it, exactly as it denies the same command with the
+            # shape not commented out (that scan's disclosed over-refusal, not the lexer's). No such control
+            # tells the comment rule apart for this guard, so none is checked; its rows behind every prefix are.
+            (aiqt_hooks.git_discard, "", "g'it' re'set' --hard", "deny", None),
         ]
         _hash_prefixes = ("x=$(true)#; ", "x=$((1))#; ", "a=(1 2)#; ", "x=$(true)\\\n#; ",
                           "echo ${x:- #}; ", "x=`true #`; ")
@@ -8635,11 +8711,12 @@ def _main_isolated(monitor):
                     if _hash_rank.get(_hgot, -1) < _hash_rank[_hwant]:
                         failures.append("(hash-glued) {} on {!r}: expected {} or stricter, got {}".format(
                             _hg.__name__, _hcmd, _hwant, _hgot))
-            _hcmd = _hlead + "x=$(true) #; " + _hshape
-            _hgot = _decision(_hg, _hcmd)
-            if _hgot != _hcontrol:
-                failures.append("(hash-control) {} on {!r}: the blank-led '#' must comment the shape out, "
-                                "expected {}, got {}".format(_hg.__name__, _hcmd, _hcontrol, _hgot))
+            if _hcontrol is not None:
+                _hcmd = _hlead + "x=$(true) #; " + _hshape
+                _hgot = _decision(_hg, _hcmd)
+                if _hgot != _hcontrol:
+                    failures.append("(hash-control) {} on {!r}: the blank-led '#' must comment the shape out, "
+                                    "expected {}, got {}".format(_hg.__name__, _hcmd, _hcontrol, _hgot))
             # Behind each double-quoted substitution prefix (tok-dq above), in each spelling.
             for _hspelled in _hash_spellings("git"):
                 _hbody = _hash_spell(_hshape, "git", _hspelled)

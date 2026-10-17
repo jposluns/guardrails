@@ -10779,6 +10779,10 @@ def _main_isolated(report_path=None):
         # it as word text first and as a comment where that does not scan, so a loop header beside that
         # double-quoted word is still counted. Without that, the header segment read no words and the canonical
         # loop below read 'indeterminate', where fc11d9bc's lexer and main's both read 'match'.
+        # wl/dq-subst-hash-header-match and wl/raw-words-dq-subst-hash-word-text are REGRESSION GUARDS: they
+        # pass on main by design (main's substitution skip reads no '#' at all) and fail only where the skip's
+        # comment rule stops the scan from reading the header's words again. wl/raw-words-dq-subst-hash-comment
+        # is the one of the three that fails on main (main reads the apostrophe in the comment as a quote).
         check("wl/dq-subst-hash-header-match",
               clf('for x in "$(echo a # (b)\n)"; do sleep 5; gh pr checks 1; done &'), "match")
         check("wl/raw-words-dq-subst-hash-word-text",
