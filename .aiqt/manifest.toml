@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "2e8803029c48c39029d24956759bff909aad79a87a07e34398460fb404d02215"
+tree-sha256 = "53bcbca25885dbf6a9d33db86583cec244d3a2d5d33457f7c43e0f25981a99cb"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2771,23 +2771,23 @@ sha256 = "0d9e538618029fbc77e6e92abcf327013eb4f4245cbd4ddf6767ccaabda67af2"
 
 [[sources]]
 path = "opf/tools/_opf_record.py"
-bytes = 249045
-sha256 = "41ec4614e6f25a445111a1b568a78e1e508e2fc6019cfc204085f9cd21dd7724"
+bytes = 252296
+sha256 = "973715fd68b213fbfd908f1dcb6f849b2704654db8ce9cd6a19560404222a7ec"
 
 [[sources]]
 path = "opf/tools/_opf_release.py"
-bytes = 128571
-sha256 = "51bfed8962a0a91d8fefd4afeb5c492291ee7d1ce45e674e5f44200a2853f521"
+bytes = 128865
+sha256 = "f9e4f2c9ef361d6ff1b379ca2b83d30cbb3a95ddecc86b9961a9e1084b9b1fee"
 
 [[sources]]
 path = "opf/tools/_opf_schema.py"
-bytes = 361344
-sha256 = "d646ecef82496680dd4737b647cc6a9e9b4e0249b946bad388fab427e6f2152d"
+bytes = 364997
+sha256 = "6ca849473862cfcbfb3eed0b837d855f1c6b0ffd118a887f02a651c9121b7627"
 
 [[sources]]
 path = "opf/tools/_opf_store.py"
-bytes = 235786
-sha256 = "c0f0a4ccce8211eb6859fdcabca7086e82d0c219870c7632b4670197647c47f1"
+bytes = 305428
+sha256 = "8ded78ec2f13b343f3677ccf7dc59bb5b8a16f3ab6ab5d2e652430f4de123161"
 
 [[sources]]
 path = "opf/tools/_opf_views.py"
@@ -3776,8 +3776,8 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
-bytes = 22314
-sha256 = "311b5a1269b981e25558871305a4b6b8de4e9b7bce1218875582a8620bad498c"
+bytes = 22450
+sha256 = "fb85509e5aadeedb3ee5c3a8c5518c09b717ca6e6459bf68def40305b5a11671"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"
