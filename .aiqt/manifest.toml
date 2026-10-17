@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "8c909b339d91dbd4b7d8a76cfccf8f68003ea18d0b10885ca30d15a0d4dd082b"
+tree-sha256 = "3029ae18d255e89349d928d0dd28cb7fceb081c82550104c3e622248e3b5efa1"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3681,8 +3681,8 @@ sha256 = "138df9180843eccc8dd09812fe17c45c82514936f2002a968d930ae2bc6eb9fc"
 
 [[sources]]
 path = "tools/measure_hook_latency.py"
-bytes = 64837
-sha256 = "d945cd8446802b207e7e94deb60e00249ff16d1d8926efa7e1172b5911b5ccc9"
+bytes = 97554
+sha256 = "cc174003c785601c764f4458816154f4391cf16532a5596011b131db2f384d64"
 
 [[sources]]
 path = "tools/migrate.py"
@@ -3731,8 +3731,8 @@ sha256 = "c213547236ede74c9d9ab122875a9bdc4052a45ead5924f7c075a45b6ba618fc"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 97972
-sha256 = "8127e4e0eae4d674f9165a778c86c9079f0be62fac657dac699af8430e50d24a"
+bytes = 98570
+sha256 = "0f7835071976f89a180727644f6c0875851612191b64f6ed17470a38052f2828"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

@@ -12,7 +12,11 @@ whole-string regular expression (re.fullmatch), and every hook whose matcher mat
 that case. Each case runs every matching hook --runs times (default 5), one child at a time, the runs
 interleaved across the hooks of the case; a sample is the wall time from launch to exit. A call that matches
 several hooks may run them concurrently on the platform; contention between sibling hooks is not in these
-figures.
+figures. Every PreToolUse hook in hooks.json must be run by at least one case that calls a tool, and every
+such case must match at least one hook: a hook that no case runs, or a case that no hook matches, ends the run
+with exit 2 naming it before the fixture root exists, never a silent skip (the startup case does not count,
+because it times only the dispatcher's start). With --hook, a case that no selected hook matches is skipped
+and listed as skipped.
 
 THE CASES (every child runs in the git fixture below, and every event but startup's names it as cwd):
   startup          the first PreToolUse hook (hooks.json order) given the payload [] (a JSON array, not an
@@ -34,13 +38,24 @@ THE CASES (every child runs in the git fixture below, and every event but startu
                    main, over --commits commits of history on main (default 1000);
   protected-line   Bash `git push --force origin HEAD` with HEAD on the non-protected branch measure/feature,
                    which takes the push path's HEAD probe.
+Every Bash hook runs in each Bash case, the three git cases included; the hook id in a GIT_CASES entry names
+the hook whose path that case's fixture state is built to reach.
 The Bash and Write shapes are chosen to reach the scanning paths; they are not proven worst cases for every
 handler. The outcomes column shows what each hook decided, so a sample that ended early on a deny is visible.
 
-ISOLATION. Every fixture lives under one tempfile.mkdtemp() root, removed on every path (a root that cannot be
-removed is an error, exit 2): the git fixture (a repository with main, an orphan branch, a feature branch, a
-local bare origin and the untracked files) and the directories HOME, XDG_CONFIG_HOME, XDG_STATE_HOME,
-XDG_CACHE_HOME, XDG_DATA_HOME and TMPDIR point at. Each hook child gets PATH (inherited), LC_ALL=C.UTF-8,
+ISOLATION. Every fixture lives under one tempfile.mkdtemp() root: the git fixture (a repository with main, an
+orphan branch, a feature branch, a local bare origin and the untracked files) and the directories HOME,
+XDG_CONFIG_HOME, XDG_STATE_HOME, XDG_CACHE_HOME, XDG_DATA_HOME and TMPDIR point at. The root is removed at the
+normal end of a run (timed-out samples included), on an error, and on SIGINT, SIGTERM and SIGHUP. For the
+measurement's duration this tool handles those three signals and restores the previous handlers afterwards
+(a signal ignored when the run starts, as under nohup, stays ignored): the handler kills the process group of
+the hook child or interpreter version probe then running and stops the run (a fixture git call in progress is
+killed by subprocess.run as the interruption passes through it), the root is removed, and the tool exits 128
+plus the signal number. A signal that arrives while the root is being made or removed, or while a child is
+being launched, is held until that step ends. A root that cannot be removed is an error (exit 2); when an error or a signal
+stopped the run first, that cause is the one reported and the root left behind is reported with it.
+Residual: SIGKILL or a power loss leaves the root, and a hook child running at that moment, behind. Each hook
+child gets PATH (inherited), LC_ALL=C.UTF-8,
 those directories, CLAUDE_PLUGIN_ROOT and CLAUDE_PROJECT_DIR, and nothing else: every other ambient variable,
 each GIT_* and PYTHON* one included, is dropped. This tool's own git calls (the fixture build, the git
 version) get the same plus GIT_CONFIG_GLOBAL=os.devnull and GIT_CONFIG_NOSYSTEM=1. Those two are NOT given
@@ -57,8 +72,19 @@ objects and the hooks' recovery refs grow inside the root from one run to the ne
 CONDITIONS. The table is preceded by the conditions it was measured under: the load average at start and end
 (os.getloadavg), the CPU count, the harness and hook interpreters, the git version and the fixture sizes.
 --json PATH writes the same figures and conditions (a PATH that already exists is refused, never
-overwritten). A timed-out sample is TIMED OUT, never a time: it is known only to exceed --case-timeout, so it
-sorts after every completed sample, and a statistic whose position lands on it reads TIMED OUT.
+overwritten).
+
+SAMPLES. A completed sample is valid when its outcome is a hook decision: exit 0 with nothing on stdout
+(allow), exit 0 with a permissionDecision of allow, deny or ask (or the older top-level decision approve or
+block, read as allow or deny), or exit 0 with a systemMessage and no decision (warn). The startup case's one
+valid outcome is the dispatcher's rejection of its payload: exit 2, nothing on stdout, and "payload is not a
+JSON object" on stderr. Every other outcome is a failed sample: a nonzero exit (the platform reads no
+decision from one), a death by signal, a launch failure, or stdout that names no decision. A failed sample
+contributes no time: it is counted in the row's failed column and in its outcomes, never in min, median or
+max, and a row with no valid and no timed-out sample reads NO VALID SAMPLE in place of all three figures, in
+the table and in --json. A timed-out sample is TIMED OUT, never a time: it is known only to exceed
+--case-timeout, so it sorts after every valid sample, and a statistic whose position lands on it reads TIMED
+OUT.
 
   measure_hook_latency.py [--runs N] [--files N] [--commits N] [--case-timeout SECONDS] [--hook ID]...
                           [--json PATH]
@@ -68,11 +94,13 @@ sorts after every completed sample, and a statistic whose position lands on it r
                                           interpreter exit (tools/_selftest_exit_report.py), as
                                           tools/check_selftest_execution.py runs it
 
-Exit: 0 the measurement ran (whatever the times, timed-out samples included); 2 cannot measure (a bad
-argument, an unreadable or malformed hooks.json, a hook id it needs that hooks.json lacks, a dispatcher that
-names no command budget, git or the hook interpreter missing, a fixture that cannot be built or removed, a
---json PATH that exists or cannot be written, a host that is not POSIX). The self-test exits 0 pass, 1 a
-failed check.
+Exit: 0 the measurement ran (whatever the times, timed-out and failed samples included); 2 cannot measure (a
+bad argument, an unreadable or malformed hooks.json, a hook id it needs that hooks.json lacks, a hook that no
+case runs or a case that no hook matches, a dispatcher that names no command budget, git or the hook
+interpreter missing, a hook interpreter whose version probe fails, a fixture that cannot be built or removed,
+signal handlers that cannot be installed, a --json PATH that exists or cannot be written, a host that is not
+POSIX); 128 plus the signal number (130, 143 or 129) when SIGINT, SIGTERM or SIGHUP stopped the run, after
+the fixture root is removed. The self-test exits 0 pass, 1 a failed check.
 """
 import sys
 
@@ -144,7 +172,9 @@ SEGMENT_MIN = len(SEGMENT_HEAD) + 2   # the head, a space and a one-character pa
 
 FEATURE = "measure/feature"
 ORPHAN = "measure/orphan"
-# (case, the hook id it measures, the Bash command); each hook id must be a Bash PreToolUse hook in hooks.json.
+# (case, the hook id its fixture is built for, the Bash command). Every Bash PreToolUse hook runs in each of
+# these cases, as in any Bash case; the hook id names the one hook whose path the case's fixture state is
+# built to reach, and it must be a Bash PreToolUse hook in hooks.json.
 GIT_CASES = (
     ("git-discard", "git_discard", "git clean -f -d"),
     ("branch-root", "branch_root", "git switch -c measure/new " + ORPHAN),
@@ -161,6 +191,13 @@ REAP_SECONDS = 10                    # draining a killed child's output
 PINNED_DIRS = (("HOME", "home"), ("XDG_CONFIG_HOME", "xdg/config"), ("XDG_STATE_HOME", "xdg/state"),
                ("XDG_CACHE_HOME", "xdg/cache"), ("XDG_DATA_HOME", "xdg/data"), ("TMPDIR", "tmp"))
 TIMED_OUT = "TIMED OUT"
+NO_VALID_SAMPLE = "NO VALID SAMPLE"
+# The startup case's one valid outcome names this on stderr: the dispatcher's rejection of a payload that is
+# not a JSON object.
+STARTUP_REJECTION = b"payload is not a JSON object"
+# The signals that stop a measurement through its handler (see _interrupt_handlers).
+INTERRUPT_SIGNALS = tuple(getattr(signal, name) for name in ("SIGINT", "SIGTERM", "SIGHUP")
+                          if hasattr(signal, name))
 USAGE = ("usage: measure_hook_latency.py [--runs N] [--files N] [--commits N] [--case-timeout SECONDS] "
          "[--hook ID]... [--json PATH]\n"
          "       measure_hook_latency.py [--self-test] [--execution-report ABS_PATH]")
@@ -168,6 +205,10 @@ USAGE = ("usage: measure_hook_latency.py [--runs N] [--files N] [--commits N] [-
 Hook = collections.namedtuple("Hook", ("hook_id", "matcher", "argv", "script", "timeout"))
 # tool is None for the startup case, whose one hook is target and whose payload is fixed.
 Case = collections.namedtuple("Case", ("name", "tool", "tool_input", "target", "payload", "note"))
+# One launch: the seconds from launch to exit (None when it timed out or never launched), the exit code
+# (negative for a death by signal, None when it timed out or never launched), stdout, stderr, whether it timed
+# out, and why it could not launch (None when it launched).
+Sample = collections.namedtuple("Sample", ("seconds", "code", "out", "err", "timed_out", "launch_error"))
 
 
 class UsageError(Exception):
@@ -176,6 +217,87 @@ class UsageError(Exception):
 
 class MeasureError(Exception):
     """A measurement that cannot be made; exit 2."""
+
+
+class Interrupted(BaseException):
+    """SIGINT, SIGTERM or SIGHUP stopped a measurement (see _interrupt_handlers); exit 128 plus signum. A
+    BaseException, so no `except Exception` on its way out can swallow it before the root is removed."""
+
+    def __init__(self, signum):
+        super().__init__(signum)
+        self.signum = signum
+
+    def __str__(self):
+        return "interrupted by {}".format(_signal_name(self.signum))
+
+
+def _signal_name(signum):
+    try:
+        return signal.Signals(signum).name
+    except ValueError:
+        return "signal {}".format(signum)
+
+
+class _Interrupts:
+    """What the interrupt handler works from: the hook child running now (registered by _sample from its
+    launch until it is reaped), whether a signal may stop the run, and a signal held meanwhile. Armed, a signal
+    kills that child's process group and raises Interrupted; not armed (the root being made or removed, a
+    child being launched), it kills that group when one is registered and is held."""
+
+    def __init__(self):
+        self.armed = False
+        self.held = None
+        self.child = None
+
+    def handle(self, signum, _frame):
+        self.kill_child()
+        if self.armed:
+            self.armed = False
+            raise Interrupted(signum)
+        if self.held is None:
+            self.held = signum
+
+    def kill_child(self):
+        """SIGKILL the registered child's process group while that child is not yet reaped, so the group id
+        is still this tool's own child's (it leads a group of its own)."""
+        child = self.child
+        if child is not None and child.returncode is None:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+    def arm(self):
+        """Let a signal stop the run from here on; a signal held meanwhile kills the registered child's group
+        and raises Interrupted now."""
+        if self.held is not None:
+            signum, self.held = self.held, None
+            self.kill_child()
+            raise Interrupted(signum)
+        self.armed = True
+
+
+@contextlib.contextmanager
+def _interrupt_handlers():
+    """Install the interrupt handler for SIGINT, SIGTERM and SIGHUP for the block, restore the previous
+    handlers when it ends, and yield the _Interrupts the handler works from. A signal ignored on entry (as
+    under nohup) stays ignored. A signal still held when the block ends normally raises Interrupted once the
+    previous handlers are back. MeasureError when the handlers cannot be installed (not the main thread)."""
+    interrupts = _Interrupts()
+    previous = []
+    try:
+        try:
+            for signum in INTERRUPT_SIGNALS:
+                if signal.getsignal(signum) != signal.SIG_IGN:
+                    previous.append((signum, signal.signal(signum, interrupts.handle)))
+        except ValueError as exc:
+            raise MeasureError("cannot install the interrupt handlers: {}".format(exc))
+        yield interrupts
+    finally:
+        for signum, handler in reversed(previous):
+            signal.signal(signum, signal.SIG_DFL if handler is None else handler)
+    if interrupts.held is not None:
+        raise Interrupted(interrupts.held)
 
 
 def parse_args(argv):
@@ -385,47 +507,91 @@ def build_fixture(root, files, commits, env):
     return repo
 
 
-def _sample(argv, payload, env, cwd, timeout):
-    """One launch: (seconds, exit code, stdout, stderr), or (None, None, None, None) when the child is still
-    running at timeout, in which case its whole process group is killed and reaped first. The child leads a
-    process group of its own, so the group id is its pid and only this tool's own child is signalled."""
+def _sample(argv, payload, env, cwd, timeout, interrupts=None):
+    """One launch, as a Sample. A child still running at timeout has its whole process group killed and
+    reaped first; a child that cannot be launched is a Sample with its launch_error. The child leads a process
+    group of its own, so the group id is its pid and only this tool's own child is signalled. Given
+    interrupts (an _Interrupts), the child is registered with it from launch to reaping, so an interrupt
+    kills the child's group; a signal that arrives while the child is being launched is held until the child
+    is registered."""
+    armed = interrupts is not None and interrupts.armed
+    if armed:
+        interrupts.armed = False
     start = time.perf_counter()
     try:
         child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  cwd=cwd, env=env, process_group=0)
     except (OSError, ValueError) as exc:
-        raise MeasureError("cannot launch {}: {}".format(argv[0], exc))
-    with child:
-        try:
-            out, err = child.communicate(payload, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            try:
-                child.communicate(timeout=REAP_SECONDS)
-            except subprocess.TimeoutExpired:
-                child.kill()
-            return None, None, None, None
-        elapsed = time.perf_counter() - start
-    return elapsed, child.returncode, out, err
-
-
-def _outcome(code, out):
-    """The sample's label: its exit code, plus the permission decision its stdout JSON names, or note when
-    that JSON carries only a systemMessage."""
+        if armed:
+            interrupts.arm()
+        return Sample(None, None, b"", b"", False, "{}: {}".format(type(exc).__name__, exc))
+    if interrupts is not None:
+        interrupts.child = child
     try:
-        data = json.loads(out.decode("utf-8")) if out.strip() else None
+        with child:
+            if armed:
+                interrupts.arm()
+            try:
+                out, err = child.communicate(payload, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    child.communicate(timeout=REAP_SECONDS)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                return Sample(None, None, b"", b"", True, None)
+            elapsed = time.perf_counter() - start
+    finally:
+        if interrupts is not None:
+            interrupts.child = None
+    return Sample(elapsed, child.returncode, out, err, False, None)
+
+
+def _decision(code, out):
+    """The hook decision a completed sample's exit code and stdout express (allow, deny, ask or warn), or
+    None when they express none (see SAMPLES in the module docstring)."""
+    if code != 0:
+        return None
+    if not out.strip():
+        return "allow"
+    try:
+        data = json.loads(out.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, RecursionError):
-        data = None
-    specific = data.get("hookSpecificOutput") if isinstance(data, dict) else None
-    decision = specific.get("permissionDecision") if isinstance(specific, dict) else None
-    if not isinstance(decision, str) and isinstance(data, dict) and isinstance(data.get("decision"), str):
-        decision = data["decision"]
-    if not (isinstance(decision, str) and decision) and isinstance(data, dict) and data.get("systemMessage"):
-        decision = "note"
-    return "exit {}".format(code) + (" " + decision if isinstance(decision, str) and decision else "")
+        return None
+    if not isinstance(data, dict):
+        return None
+    specific = data.get("hookSpecificOutput")
+    if isinstance(specific, dict) and "permissionDecision" in specific:
+        decision = specific["permissionDecision"]
+        return decision if decision in ("allow", "deny", "ask") else None
+    if "decision" in data:
+        legacy = data["decision"]
+        return {"approve": "allow", "block": "deny"}.get(legacy) if isinstance(legacy, str) else None
+    if isinstance(data.get("systemMessage"), str) and data["systemMessage"]:
+        return "warn"
+    return None
+
+
+def _outcome(sample, startup=False):
+    """(the sample's label, True when it is a failed sample), as SAMPLES in the module docstring sets out: a
+    timed-out sample is TIMED OUT and not failed; the startup case's sample is valid only as the dispatcher's
+    rejection of its payload; any other completed sample is valid only with a hook decision."""
+    if sample.timed_out:
+        return TIMED_OUT, False
+    if sample.launch_error is not None:
+        return "launch failed ({})".format(sample.launch_error), True
+    if sample.code < 0:
+        return "killed by {}".format(_signal_name(-sample.code)), True
+    if startup and sample.code == 2 and not sample.out.strip() and STARTUP_REJECTION in sample.err:
+        return "exit 2 rejected", False
+    decision = _decision(sample.code, sample.out)
+    if decision is None:
+        return "exit {}{}".format(sample.code, " no decision" if sample.code == 0 else ""), True
+    # The startup payload is built to be rejected, so a decision there means the sample took another path.
+    return "exit 0 " + decision, startup
 
 
 def _loadavg():
@@ -439,8 +605,9 @@ def _utc_now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
-def _interpreters(hooks, env, cwd):
-    """For each distinct hook command: where PATH resolves it and the Python version it reports."""
+def _interpreters(hooks, env, cwd, interrupts=None):
+    """For each distinct hook command: where PATH resolves it and the Python version it reports. MeasureError
+    when a command is not on PATH or its version probe fails, since the report would then name no version."""
     found = {}
     for hook in hooks:
         command = hook.argv[0]
@@ -449,10 +616,14 @@ def _interpreters(hooks, env, cwd):
         path = shutil.which(command, path=env["PATH"])
         if path is None:
             raise MeasureError("the hook command {!r} is not on PATH".format(command))
-        elapsed, code, out, _err = _sample([command, "-I", "-c", "import sys; print(sys.version)"], b"", env, cwd,
-                                           PROBE_TIMEOUT)
-        version = out.decode("utf-8", "replace").strip() if elapsed is not None and code == 0 else None
-        found[command] = {"path": path, "version": version or "unknown (the version probe failed)"}
+        sample = _sample([command, "-I", "-c", "import sys; print(sys.version)"], b"", env, cwd, PROBE_TIMEOUT,
+                         interrupts)
+        version = sample.out.decode("utf-8", "replace").strip() if sample.code == 0 else ""
+        if not version:
+            why = _outcome(sample)[0] if sample.code != 0 else "exit 0 with no version on stdout"
+            raise MeasureError("the version probe of the hook command {} ({}) failed ({}), so the report would "
+                               "name no interpreter version".format(command, path, why))
+        found[command] = {"path": path, "version": version}
     return found
 
 
@@ -500,10 +671,37 @@ def build_cases(first, repo, cap, write_sizes, files, commits):
     return cases
 
 
+def _matching(case, hooks):
+    """The hooks a case runs: the startup case its one target; any other case every hook whose matcher matches
+    its tool as a whole string."""
+    if case.tool is None:
+        return [hook for hook in hooks if hook.hook_id == case.target]
+    return [hook for hook in hooks if hook.matcher.fullmatch(case.tool)]
+
+
+def coverage_problems(hooks, cap, write_sizes, files, commits):
+    """What would leave hooks.json not fully measured: each hook that no case calling a tool runs, and each
+    such case that no hook matches (the startup case does not count; it times only the dispatcher's start).
+    The cases are built here for their tools only, under a path that is never created, and one Write size
+    stands for every Write case, since each calls the same tool."""
+    cases = build_cases(hooks[0].hook_id, Path(ROOT_PREFIX + "unbuilt", "repo"), cap, write_sizes[:1], files,
+                        commits)
+    tool_cases = [case for case in cases if case.tool is not None]
+    measured = {hook.hook_id for case in tool_cases for hook in _matching(case, hooks)}
+    problems = ["hook id {!r} (matcher {!r}) is run by no case".format(hook.hook_id, hook.matcher.pattern)
+                for hook in hooks if hook.hook_id not in measured]
+    problems += ["the {} case calls {}, which no {} hook matches".format(case.name, case.tool, EVENT)
+                 for case in tool_cases if not _matching(case, hooks)]
+    return problems
+
+
 def measure(hooks_json, plugin_root, runs=DEFAULT_RUNS, files=DEFAULT_FILES, commits=DEFAULT_COMMITS,
             case_timeout=DEFAULT_CASE_TIMEOUT, selected=(), write_sizes=WRITE_SIZES, progress=None):
-    """Run every case and return the figures and conditions. MeasureError when it cannot measure; every hook
-    id it needs is checked before the fixture root exists, and that root is removed on every path."""
+    """Run every case and return the figures and conditions. MeasureError when it cannot measure; Interrupted
+    when SIGINT, SIGTERM or SIGHUP stops it. Every hook id it needs, and the coverage of hooks.json by the
+    cases, are checked before the fixture root exists. The root is removed at the normal end, on an error and
+    on those signals; a root left behind is added as a note to the error or interruption that stopped the run
+    first, never put in its place."""
     hooks = load_hooks(hooks_json, plugin_root)
     known = [hook.hook_id for hook in hooks]
     unknown = [hook_id for hook_id in selected if hook_id not in known]
@@ -518,13 +716,33 @@ def measure(hooks_json, plugin_root, runs=DEFAULT_RUNS, files=DEFAULT_FILES, com
     if not active:
         raise MeasureError("no {} hook in {} is selected".format(EVENT, hooks_json))
     cap = command_budget(next(hook for hook in hooks if hook.matcher.fullmatch("Bash")).script)
-    root = Path(tempfile.mkdtemp(prefix=ROOT_PREFIX))
-    result = None
-    try:
-        result = _measure_in(root, hooks_json, plugin_root, active, runs, files, commits, case_timeout, cap,
-                             write_sizes, progress)
-    finally:
+    problems = coverage_problems(hooks, cap, write_sizes, files, commits)
+    if problems:
+        raise MeasureError("the cases do not measure every {} hook in {}: {}".format(EVENT, hooks_json,
+                                                                                    "; ".join(problems)))
+    with _interrupt_handlers() as interrupts:
+        # Not armed yet, so a signal while the root is made is held, and arm() raises it inside the try.
+        root = Path(tempfile.mkdtemp(prefix=ROOT_PREFIX))
+        failure = None
+        try:
+            interrupts.arm()
+            result = _measure_in(root, hooks_json, plugin_root, active, runs, files, commits, case_timeout, cap,
+                                 write_sizes, progress, interrupts)
+        except BaseException as exc:
+            interrupts.armed = False
+            failure = exc
+        # Disarmed before the removal: a signal during it is held, so it cannot cut the removal short.
+        interrupts.armed = False
         leftover = _remove_root(root)
+        held, interrupts.held = interrupts.held, None
+        if held is not None and failure is None:
+            failure = Interrupted(held)
+        elif held is not None:
+            failure.add_note("{} also arrived while the run was stopping".format(_signal_name(held)))
+        if failure is not None:
+            if leftover is not None:
+                failure.add_note(leftover)
+            raise failure
         if leftover is not None:
             raise MeasureError(leftover)
     return result
@@ -545,13 +763,13 @@ def _remove_root(root):
 
 
 def _measure_in(root, hooks_json, plugin_root, active, runs, files, commits, case_timeout, cap, write_sizes,
-                progress):
+                progress, interrupts):
     repo = root / "repo"
     env = child_env(root, plugin_root, repo)
     for _variable, rel in PINNED_DIRS:
         Path(root, rel).mkdir(parents=True)
     started, load_start = _utc_now(), _loadavg()
-    interpreters = _interpreters(active, env, root)
+    interpreters = _interpreters(active, env, root, interrupts)
     git_version = _git(["--version"], git_env(env)).strip()
     if progress is not None:
         progress("building the git fixture: {} commit(s), {} untracked file(s)".format(commits, files))
@@ -560,10 +778,7 @@ def _measure_in(root, hooks_json, plugin_root, active, runs, files, commits, cas
     transcript.write_bytes(b"")
     rows, ran, skipped = [], [], []
     for case in build_cases(active[0].hook_id, repo, cap, write_sizes, files, commits):
-        if case.tool is None:
-            matching = [hook for hook in active if hook.hook_id == case.target]
-        else:
-            matching = [hook for hook in active if hook.matcher.fullmatch(case.tool)]
+        matching = _matching(case, active)
         if not matching:
             skipped.append(case.name)
             continue
@@ -572,17 +787,24 @@ def _measure_in(root, hooks_json, plugin_root, active, runs, files, commits, cas
                                                                          transcript)
         if progress is not None:
             progress("measuring {}: {} hook(s) x {} run(s)".format(case.name, len(matching), runs))
+        # samples holds the valid samples' seconds and None for each timed-out one; a failed sample is only
+        # counted in failed_samples and labelled in outcomes, never timed.
         case_rows = [{"case": case.name, "hook_id": hook.hook_id, "platform_timeout_seconds": hook.timeout,
-                      "load_average_at_case_start": _loadavg(), "samples": [], "outcomes": {}}
+                      "load_average_at_case_start": _loadavg(), "samples": [], "failed_samples": 0,
+                      "outcomes": {}}
                      for hook in matching]
         for _run in range(runs):
             for hook, row in zip(matching, case_rows):
-                elapsed, code, out, _err = _sample(hook.argv, payload, env, repo, case_timeout)
-                label = TIMED_OUT if elapsed is None else _outcome(code, out)
-                row["samples"].append(elapsed)
+                sample = _sample(hook.argv, payload, env, repo, case_timeout, interrupts)
+                label, failed = _outcome(sample, startup=case.tool is None)
+                if failed:
+                    row["failed_samples"] += 1
+                else:
+                    row["samples"].append(sample.seconds)
                 row["outcomes"][label] = row["outcomes"].get(label, 0) + 1
         for row in case_rows:
-            row["min"], row["median"], row["max"] = summarize(row["samples"])
+            row["min"], row["median"], row["max"] = (summarize(row["samples"]) if row["samples"]
+                                                     else (NO_VALID_SAMPLE,) * 3)
         rows.extend(case_rows)
     hooks_name = Path(hooks_json)
     if hooks_name.is_relative_to(ROOT):
@@ -602,7 +824,10 @@ def _measure_in(root, hooks_json, plugin_root, active, runs, files, commits, cas
 
 
 def _seconds(value):
-    return TIMED_OUT if value is None else "{:.3f}".format(value)
+    """A statistic as the table shows it: seconds, TIMED OUT (None) or NO VALID SAMPLE (that string)."""
+    if value is None:
+        return TIMED_OUT
+    return value if isinstance(value, str) else "{:.3f}".format(value)
 
 
 def render(result):
@@ -627,24 +852,34 @@ def render(result):
     lines.append("git: {}".format(conditions["git_version"]))
     lines.append("fixture: {} untracked file(s), {} commit(s) on main; case timeout {:g} s".format(
         conditions["untracked_files"], conditions["commits"], conditions["case_timeout_seconds"]))
+    lines.append("samples: a failed sample (a nonzero exit, a death by signal, a launch failure, or output that "
+                 "names no decision) is counted under failed and contributes no time; {} is known only to exceed "
+                 "the case timeout; {} means the row has no valid or timed-out sample".format(TIMED_OUT,
+                                                                                         NO_VALID_SAMPLE))
     lines.append("cases:")
     width = max([len(case["case"]) for case in result["cases"]] + [4])
     lines.extend("  {}  {}".format(case["case"].ljust(width), case["note"]) for case in result["cases"])
     if result["skipped_cases"]:
         lines.append("skipped (no selected hook matches): {}".format(", ".join(result["skipped_cases"])))
-    header = ("case", "hook id", "runs", "min s", "median s", "max s", "outcomes")
+    header = ("case", "hook id", "runs", "failed", "min s", "median s", "max s", "outcomes")
     table = [header]
     for row in result["rows"]:
         outcomes = ", ".join("{} x{}".format(label, count) for label, count in sorted(row["outcomes"].items()))
-        table.append((row["case"], row["hook_id"], str(len(row["samples"])), _seconds(row["min"]),
-                      _seconds(row["median"]), _seconds(row["max"]), outcomes))
+        table.append((row["case"], row["hook_id"], str(len(row["samples"]) + row["failed_samples"]),
+                      str(row["failed_samples"]), _seconds(row["min"]), _seconds(row["median"]),
+                      _seconds(row["max"]), outcomes))
     widths = [max(len(line[column]) for line in table) for column in range(len(header))]
     lines.append("")
     for line in table:
         cells = [line[0].ljust(widths[0]), line[1].ljust(widths[1])]
-        cells += [cell.rjust(width) for cell, width in zip(line[2:6], widths[2:6])]
-        lines.append("  ".join(cells + [line[6]]).rstrip())
+        cells += [cell.rjust(width) for cell, width in zip(line[2:7], widths[2:7])]
+        lines.append("  ".join(cells + [line[7]]).rstrip())
     return "\n".join(lines) + "\n"
+
+
+def _cause(exc):
+    """exc's message, then each note added to it (a fixture root left behind, a second signal)."""
+    return "; ".join([str(exc)] + [str(note) for note in getattr(exc, "__notes__", ())])
 
 
 def run_cli(argv, hooks_json, plugin_root, write_sizes=WRITE_SIZES, out=None, err=None):
@@ -673,8 +908,11 @@ def run_cli(argv, hooks_json, plugin_root, write_sizes=WRITE_SIZES, out=None, er
         result = measure(hooks_json, plugin_root, runs=opts["runs"], files=opts["files"], commits=opts["commits"],
                          case_timeout=opts["case_timeout"], selected=opts["hooks"], write_sizes=write_sizes,
                          progress=lambda text: print(text, file=err, flush=True))
+    except Interrupted as exc:
+        print("error: {} (the measurement stopped; nothing was reported)".format(_cause(exc)), file=err)
+        return 128 + exc.signum
     except MeasureError as exc:
-        print("error: {}".format(exc), file=err)
+        print("error: {}".format(_cause(exc)), file=err)
         return 2
     out.write(render(result))
     if target is not None:
@@ -690,49 +928,107 @@ def run_cli(argv, hooks_json, plugin_root, write_sizes=WRITE_SIZES, out=None, er
 
 # --- self-test -------------------------------------------------------------------------------------------
 # The harness's own checks on stub hooks and tiny inputs, each id registered under hook-latency-selftest in
-# tools/selftest_checks.toml. The stubs read their payload and exit 0; stub_slow.py sleeps 30 s as
-# branch_root (the timeout case) and 0.2 s as protected_line (a sample inside the timeout). Two real
-# dispatcher launches confirm the premises of two cases (the startup payload is rejected, the Write line scans
-# clean); neither runs git.
+# tools/selftest_checks.toml. The stubs reject a payload that is not a JSON object as the dispatcher does
+# (the rejection on stderr, exit 2), and otherwise read their payload and exit 0, except: stub_slow.py sleeps
+# 30 s as branch_root (the timeout case and the interrupt checks; it first writes its process group id and
+# working directory to held-branch_root in the plugin directory) and 0.2 s as protected_line (a sample inside
+# the timeout); stub_fail.py exits 1 as git_discard, kills itself with SIGKILL as protected_line, and as
+# branch_root exits 1 on its first, third, ... launch and naps MIXED_NAP before exiting 0 on the others (a
+# row mixing failed and valid samples). Two real dispatcher launches confirm the premises of two cases (the
+# startup payload is rejected, the Write line scans clean); neither runs git.
 
-STUB_SOURCE = '''"""A stub dispatcher for the hook-latency self-test: it reads its payload and exits 0."""
+STUB_SOURCE = '''"""A stub dispatcher for the hook-latency self-test (see the self-test comment in the harness)."""
 import json
 import os
+import signal
 import sys
 import time
 
 _COMMIT_MAX_COMMAND = 512
 
 mode = sys.argv[1] if len(sys.argv) > 1 else ""
-sys.stdin.read()
-if os.path.basename(__file__) == "stub_slow.py" and mode == "branch_root":
+name = os.path.basename(__file__)
+plugin = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+try:
+    payload = json.loads(sys.stdin.read())
+except ValueError:
+    payload = None
+if not isinstance(payload, dict):
+    sys.stderr.write("stub: unreadable hook payload (payload is not a JSON object); failing closed\\n")
+    sys.exit(2)
+if name == "stub_slow.py" and mode == "branch_root":
+    held = os.path.join(plugin, "held-branch_root")
+    with open(held + ".part", "w", encoding="utf-8") as handle:
+        handle.write("{} {}\\n".format(os.getpgrp(), os.getcwd()))
+    os.replace(held + ".part", held)
     time.sleep(30)
-if os.path.basename(__file__) == "stub_slow.py" and mode == "protected_line":
+if name == "stub_slow.py" and mode == "protected_line":
     time.sleep(0.2)
+if name == "stub_fail.py" and mode == "git_discard":
+    sys.exit(1)
+if name == "stub_fail.py" and mode == "protected_line":
+    os.kill(os.getpid(), signal.SIGKILL)
+if name == "stub_fail.py" and mode == "branch_root":
+    count = os.path.join(plugin, "count-branch_root")
+    try:
+        with open(count, encoding="utf-8") as handle:
+            launches = int(handle.read())
+    except FileNotFoundError:
+        launches = 0
+    with open(count, "w", encoding="utf-8") as handle:
+        handle.write(str(launches + 1))
+    if launches % 2 == 0:
+        sys.exit(1)
+    time.sleep(0.25)
 if mode == "env_dump":
     sys.stdout.write(json.dumps(dict(os.environ)))
 '''
 STUB_HOOKS = (("Bash", "git_discard"), ("Bash", "branch_root"), ("Bash", "protected_line"),
               ("Write", "secrets_shift_left"), ("AskUserQuestion", "orch_ask_guard"),
               ("ScheduleWakeup|CronCreate", "orch_yield_tool"))
+# Each variant's script and the hook ids that run it; every other hook runs stub_fast.py.
+STUB_VARIANTS = {"fast": ("stub_fast.py", ()), "slow": ("stub_slow.py", ("branch_root", "protected_line")),
+                 "fail": ("stub_fail.py", ("git_discard", "branch_root", "protected_line"))}
+MIXED_NAP = 0.25                     # stub_fail.py's nap as branch_root on a valid sample (in STUB_SOURCE)
 SELF_TEST_WRITE_SIZES = (1024, 2048, 4096)
 SELF_TEST_CASES = ["startup", "bash-512b", "write-1kib", "write-2kib", "write-4kib", "ask-user-question",
                    "schedule-wakeup", "git-discard", "branch-root", "protected-line"]
 SLOW_TIMEOUT = 1.5
+# The interrupt checks' runner: a child process that runs one stub measurement through run_cli.
+INTERRUPT_RUNNER = '''"""Run one stub measurement for the hook-latency self-test's interrupt checks. argv: the tools
+directory, the stub hooks.json, its plugin root, then the measurement's own arguments."""
+import signal
+import sys
+from pathlib import Path
+
+# A foreground process's dispositions, whatever this one inherited: a background launch can start with SIGINT
+# ignored, and the measurement leaves an ignored signal ignored.
+signal.signal(signal.SIGINT, signal.default_int_handler)
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+signal.signal(signal.SIGHUP, signal.SIG_DFL)
+sys.path.insert(0, sys.argv[1])
+import measure_hook_latency  # noqa: E402
+
+sys.exit(measure_hook_latency.run_cli(sys.argv[4:], Path(sys.argv[2]), Path(sys.argv[3])))
+'''
+INTERRUPT_WAIT = 20.0                # seconds for the held hook to start, and for the run to end once signalled
+GROUP_WAIT = 5.0                     # seconds for the hook child's process group to be gone
 
 
-def _stub_plugin(base, name, slow=False, drop=None):
-    """A plugin tree whose hooks.json runs the stub dispatcher for STUB_HOOKS (less drop): (hooks.json, root)."""
+def _stub_plugin(base, name, variant="fast", drop=None, extra=()):
+    """A plugin tree whose hooks.json runs the stub dispatcher for STUB_HOOKS (less drop) and then the extra
+    (matcher, hook id) pairs, the variant's script for the hook ids it names: (hooks.json, root)."""
     plugin = Path(base, name)
     scripts = plugin / "hooks" / "scripts"
     scripts.mkdir(parents=True)
-    for script in ("stub_fast.py", "stub_slow.py"):
+    for script in ("stub_fast.py", "stub_slow.py", "stub_fail.py"):
         (scripts / script).write_text(STUB_SOURCE, encoding="utf-8")
+    special, special_ids = STUB_VARIANTS[variant]
     entries = []
-    for matcher, hook_id in STUB_HOOKS:
+    for matcher, hook_id in STUB_HOOKS + tuple(extra):
         if hook_id == drop:
             continue
-        script = "stub_slow.py" if slow and hook_id in ("branch_root", "protected_line") else "stub_fast.py"
+        script = special if hook_id in special_ids else "stub_fast.py"
         entries.append({"matcher": matcher, "hooks": [{"type": "command", "command": "python3", "timeout": 10,
                                                         "args": ["-I", PLUGIN_ROOT_TOKEN + "/hooks/scripts/" + script,
                                                                  hook_id]}]})
@@ -850,6 +1146,41 @@ def _summary_vectors():
     return not wrong, wrong
 
 
+def _outcome_vectors():
+    """Each outcome class with its label and whether it is a failed sample (see SAMPLES in the module
+    docstring), the startup case's included."""
+    def done(code, out=b"", err=b""):
+        return Sample(0.01, code, out, err, False, None)
+    deny = b'{"hookSpecificOutput": {"permissionDecision": "deny"}, "systemMessage": "blocked"}'
+    table = (
+        (done(0), False, ("exit 0 allow", False)),
+        (done(0, b'{"hookSpecificOutput": {"permissionDecision": "allow"}}'), False, ("exit 0 allow", False)),
+        (done(0, deny), False, ("exit 0 deny", False)),
+        (done(0, b'{"hookSpecificOutput": {"permissionDecision": "ask"}}'), False, ("exit 0 ask", False)),
+        (done(0, b'{"systemMessage": "a note"}'), False, ("exit 0 warn", False)),
+        (done(0, b'{"decision": "approve"}'), False, ("exit 0 allow", False)),
+        (done(0, b'{"decision": "block"}'), False, ("exit 0 deny", False)),
+        (done(0, b'{"hookSpecificOutput": {"permissionDecision": "maybe"}}'), False, ("exit 0 no decision", True)),
+        (done(0, b'{"decision": ["block"]}'), False, ("exit 0 no decision", True)),
+        (done(0, b"{}"), False, ("exit 0 no decision", True)),
+        (done(0, b"not json"), False, ("exit 0 no decision", True)),
+        (done(1, deny), False, ("exit 1", True)),
+        (done(2, b"", b"aiqt_hooks: handler failed; failing closed"), False, ("exit 2", True)),
+        (done(2, b"", STARTUP_REJECTION), False, ("exit 2", True)),
+        (done(-signal.SIGKILL), False, ("killed by SIGKILL", True)),
+        (done(-signal.SIGHUP), False, ("killed by SIGHUP", True)),
+        (Sample(None, None, b"", b"", True, None), False, (TIMED_OUT, False)),
+        (Sample(None, None, b"", b"", False, "OSError: x"), False, ("launch failed (OSError: x)", True)),
+        (done(2, b"", b"aiqt_hooks: (" + STARTUP_REJECTION + b")"), True, ("exit 2 rejected", False)),
+        (done(2, b"{}", STARTUP_REJECTION), True, ("exit 2", True)),
+        (done(2, b"", b"python3: can't open file"), True, ("exit 2", True)),
+        (done(0), True, ("exit 0 allow", True)),
+    )
+    wrong = [(sample, startup, _outcome(sample, startup), want) for sample, startup, want in table
+             if _outcome(sample, startup) != want]
+    return not wrong, wrong
+
+
 def _bash_vectors():
     wrong = []
     repo = "/fixture root/repo"
@@ -899,15 +1230,16 @@ def _write_scan_vectors(base):
     payload = json.dumps({"session_id": "aiqt-hook-latency", "cwd": str(base), "hook_event_name": EVENT,
                           "tool_name": "Write", "tool_input": {"file_path": str(Path(base, "probe.txt")),
                                                                "content": write_content(64 * len(WRITE_LINE))}})
-    elapsed, code, out, err = _real_launch(base, "secrets_shift_left", payload.encode("utf-8"))
-    return elapsed is not None and code == 0 and "deny" not in _outcome(code, out), (code, out, err)
+    sample = _real_launch(base, "secrets_shift_left", payload.encode("utf-8"))
+    # The exact allow (a clean scan), not merely no deny: an ask or a warn would mean the scan reacted.
+    return _outcome(sample) == ("exit 0 allow", False), sample
 
 
 def _startup_vectors(base):
     hooks = load_hooks(ROOT / HOOKS_JSON_REL, ROOT / PLUGIN_REL)
-    elapsed, code, out, err = _real_launch(base, hooks[0].hook_id, STARTUP_PAYLOAD)
-    return (elapsed is not None and code == 2 and out == b"" and b"payload is not a JSON object" in (err or b""),
-            (hooks[0].hook_id, code, out, err))
+    sample = _real_launch(base, hooks[0].hook_id, STARTUP_PAYLOAD)
+    return (_outcome(sample, startup=True) == ("exit 2 rejected", False) and sample.out == b"",
+            (hooks[0].hook_id, sample))
 
 
 def _real_hooks_vectors():
@@ -933,6 +1265,10 @@ def _real_hooks_vectors():
             wrong.append(("missing", target))
     if not budget > 0:
         wrong.append(("budget", budget))
+    else:
+        problems = coverage_problems(hooks, budget, WRITE_SIZES, DEFAULT_FILES, DEFAULT_COMMITS)
+        if problems:
+            wrong.append(("not every hook measured", problems))
     return not wrong, (wrong, len(hooks), budget)
 
 
@@ -1002,11 +1338,13 @@ def _env_vectors(base):
     for _variable, rel in PINNED_DIRS:
         Path(root, rel).mkdir(parents=True)
     hook = load_hooks(hooks_json, plugin)[0]
-    elapsed, code, out, err = _sample(hook.argv[:-1] + ["env_dump"], b"{}", env, root, 30)
+    sample = _sample(hook.argv[:-1] + ["env_dump"], b"{}", env, root, 30)
     try:
-        seen = json.loads(out.decode("utf-8"))
-    except (AttributeError, UnicodeDecodeError, ValueError):
-        return False, (code, out, err)
+        seen = json.loads(sample.out.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        seen = None
+    if not isinstance(seen, dict):
+        return False, sample
     pinned = {variable for variable, _rel in PINNED_DIRS}
     wrong = [name for name in seen if name not in pinned | {"PATH", "LC_ALL", "CLAUDE_PLUGIN_ROOT",
                                                             "CLAUDE_PROJECT_DIR"}]
@@ -1017,7 +1355,7 @@ def _env_vectors(base):
     if (set(pins) - set(env), pins.get("GIT_CONFIG_GLOBAL"), pins.get("GIT_CONFIG_NOSYSTEM")) != (
             {"GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"}, os.devnull, "1"):
         wrong.append("the git configuration pins of this tool's own git calls")
-    return elapsed is not None and code == 0 and not wrong, (wrong, sorted(seen))
+    return sample.code == 0 and not wrong, (wrong, sorted(seen))
 
 
 def _samples_verdict(result, error, runs):
@@ -1028,16 +1366,91 @@ def _samples_verdict(result, error, runs):
     for row in result["rows"]:
         if row["case"] not in cases:
             cases.append(row["case"])
+        label = "exit 2 rejected" if row["case"] == "startup" else "exit 0 allow"
         if (len(row["samples"]) != runs or not all(isinstance(sample, float) and sample >= 0
                                                     for sample in row["samples"])
-                or sum(row["outcomes"].values()) != runs):
-            wrong.append((row["case"], row["hook_id"], row["samples"], row["outcomes"]))
+                or row["failed_samples"] != 0 or row["outcomes"] != {label: runs}):
+            wrong.append((row["case"], row["hook_id"], row["samples"], row["failed_samples"], row["outcomes"]))
     bash = sum(1 for matcher, _hook_id in STUB_HOOKS if matcher == "Bash")
     want_rows = 1 + 4 * bash + len(SELF_TEST_WRITE_SIZES) + 2
     startup = [row["hook_id"] for row in result["rows"] if row["case"] == "startup"]
     if cases != SELF_TEST_CASES or len(result["rows"]) != want_rows or startup != [STUB_HOOKS[0][1]]:
         wrong.append((cases, len(result["rows"]), want_rows, startup))
     return not wrong, wrong
+
+
+def _group_gone(group, seconds):
+    """True once no process is left in the process group, probed with signal 0 (which delivers nothing) for
+    up to seconds."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            os.killpg(group, 0)
+        except ProcessLookupError:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _interrupt_vectors(base, signum):
+    """signum sent to a child process running a stub measurement while its hook child (stub_slow.py as
+    branch_root) sleeps: the run exits 128 plus signum and names the signal, and both the fixture root and the
+    hook child's process group are gone. Whatever this check started that is still running afterwards is
+    killed by its process group: the runner leads its own, and the hook child leads its own and wrote its id."""
+    tag = _signal_name(signum).lower()
+    hooks_json, plugin = _stub_plugin(base, "interrupt-" + tag, variant="slow")
+    runner = Path(base, "interrupt-runner.py")
+    runner.write_text(INTERRUPT_RUNNER, encoding="utf-8")
+    tmp = Path(base, "interrupt-tmp-" + tag)
+    tmp.mkdir()
+    held = plugin / "held-branch_root"
+    argv = [sys.executable, "-I", "-B", str(runner), str(Path(__file__).resolve().parent), str(hooks_json),
+            str(plugin), "--runs", "1", "--files", "1", "--commits", "1", "--case-timeout", "60", "--hook",
+            "branch_root"]
+    env = {"PATH": os.environ.get("PATH") or os.defpath, "LC_ALL": "C.UTF-8", "TMPDIR": str(tmp)}
+    group = root = code = None
+    gone = False
+    err = b""
+    try:
+        child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.PIPE, env=env, process_group=0)
+    except OSError as exc:
+        return False, "cannot launch the runner: {}".format(exc)
+    with child:
+        try:
+            deadline = time.monotonic() + INTERRUPT_WAIT
+            while group is None and child.poll() is None and time.monotonic() < deadline:
+                try:
+                    words = held.read_text(encoding="utf-8").split()
+                    group, root = int(words[0]), Path(words[1]).parent
+                except (OSError, ValueError, IndexError):
+                    time.sleep(0.05)
+            if group is not None:
+                child.send_signal(signum)
+            try:
+                _out, err = child.communicate(timeout=INTERRUPT_WAIT)
+                code = child.returncode
+            except subprocess.TimeoutExpired:
+                pass
+        finally:
+            if child.poll() is None:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            if group is not None:
+                gone = _group_gone(group, GROUP_WAIT)
+                if not gone:
+                    try:
+                        os.killpg(group, signal.SIGKILL)
+                    except OSError:
+                        pass
+    leftovers = sorted(path.name for path in tmp.iterdir() if path.name.startswith(ROOT_PREFIX))
+    text = (err or b"").decode("utf-8", "replace")
+    ok = (group is not None and code == 128 + signum and "interrupted by " + _signal_name(signum) in text
+          and gone and leftovers == [] and root.name.startswith(ROOT_PREFIX) and not os.path.lexists(root))
+    return ok, (code, group, gone, leftovers, str(root), text[-400:])
 
 
 def _registered_check_ids():
@@ -1065,6 +1478,7 @@ def self_test(report_path=None):
         executed.append(check_id)
 
     this = sys.modules[__name__]
+    handlers_before = {signum: signal.getsignal(signum) for signum in INTERRUPT_SIGNALS}
     base = Path(tempfile.mkdtemp(prefix="hook-latency-selftest-"))
     try:
         # 1. the command line: each bound at both of its ends, the documented defaults, and refusals
@@ -1076,6 +1490,7 @@ def self_test(report_path=None):
 
         # 2. the statistics and the synthetic inputs
         check("summary/order-statistics", *_summary_vectors())
+        check("summary/outcome-classified", *_outcome_vectors())
         check("inputs/bash-command-at-cap", *_bash_vectors())
         check("inputs/write-sizes-exact", *_write_vectors())
         check("inputs/write-line-scans-clean", *_write_scan_vectors(base))
@@ -1095,6 +1510,24 @@ def self_test(report_path=None):
                             out=io.StringIO(), err=err)
         check("hooks/unknown-selection-named", code == 2 and "nonesuch" in err.getvalue() and made == [],
               (code, err.getvalue()[:300], made))
+        # every hook must be run by a case, and every case that calls a tool must match a hook: a hook whose
+        # matcher matches no case's tool, and a case left with no hook, are refused by name (exit 2) before
+        # the fixture root exists
+        unmeasured_json, unmeasured_root = _stub_plugin(base, "unmeasured",
+                                                        extra=(("NotebookEdit", "notebook_guard"),))
+        err = io.StringIO()
+        with _recording_roots() as made:
+            code = _try_cli(["--runs", "1", "--files", "1", "--commits", "1"], unmeasured_json, unmeasured_root,
+                            write_sizes=SELF_TEST_WRITE_SIZES, out=io.StringIO(), err=err)
+        check("hooks/unmeasured-id-refused", code == 2 and "'notebook_guard'" in err.getvalue() and made == [],
+              (code, err.getvalue()[:400], made))
+        unhooked_json, unhooked_root = _stub_plugin(base, "unhooked", drop="orch_yield_tool")
+        err = io.StringIO()
+        with _recording_roots() as made:
+            code = _try_cli(["--runs", "1", "--files", "1", "--commits", "1"], unhooked_json, unhooked_root,
+                            write_sizes=SELF_TEST_WRITE_SIZES, out=io.StringIO(), err=err)
+        check("hooks/unhooked-case-refused", code == 2 and "the schedule-wakeup case" in err.getvalue()
+              and made == [], (code, err.getvalue()[:400], made))
 
         # 4. the fixture and the child environment
         check("fixture/git-fixture-shape", *_fixture_vectors(base))
@@ -1109,9 +1542,10 @@ def self_test(report_path=None):
 
         # 6. the timeout: the slow stub's branch_root is TIMED OUT, never a time, and is killed, while its
         # protected_line naps inside the timeout and keeps a time; the exit stays 0 (never a gate). With
-        # only those two hooks selected, branch_root is also the startup hook: five branch_root rows (startup
-        # and the four Bash cases), four protected_line rows, the Write and other cases skipped.
-        slow_json, slow_root = _stub_plugin(base, "slow", slow=True)
+        # only those two hooks selected, branch_root is also the startup hook: five branch_root rows (startup,
+        # whose payload the stub rejects at once as the dispatcher does, and the four Bash cases, each TIMED
+        # OUT), four protected_line rows, the Write and other cases skipped.
+        slow_json, slow_root = _stub_plugin(base, "slow", variant="slow")
         figures = Path(base, "figures.json")
         out, err = io.StringIO(), io.StringIO()
         began = time.monotonic()
@@ -1125,12 +1559,12 @@ def self_test(report_path=None):
         except (OSError, ValueError) as exc:
             written = {"error": str(exc)}
         rows = written.get("rows", [])
-        slow = [row for row in rows if row["hook_id"] == "branch_root"]
+        slow = [row for row in rows if row["hook_id"] == "branch_root" and row["case"] != "startup"]
         nap = [row for row in rows if row["hook_id"] == "protected_line"]
-        check("measure/timed-out-never-a-time", len(slow) == 5 and all(
+        check("measure/timed-out-never-a-time", len(slow) == 4 and all(
             row["samples"] == [None] and (row["min"], row["median"], row["max"]) == (None, None, None)
-            and row["outcomes"] == {TIMED_OUT: 1} for row in slow), slow)
-        check("measure/timeout-kills-child", code == 0 and took < 5 * SLOW_TIMEOUT + 15, (code, took))
+            and row["outcomes"] == {TIMED_OUT: 1} and row["failed_samples"] == 0 for row in slow), slow)
+        check("measure/timeout-kills-child", code == 0 and took < 4 * SLOW_TIMEOUT + 15, (code, took))
         check("measure/inside-timeout-is-a-time", len(nap) == 4 and all(
             len(row["samples"]) == 1 and isinstance(row["samples"][0], float)
             and 0.2 <= row["samples"][0] < SLOW_TIMEOUT and row["max"] == row["samples"][0] for row in nap), nap)
@@ -1143,8 +1577,9 @@ def self_test(report_path=None):
             "finished_utc")) and conditions.get("git_version", "").startswith("git version")
             and conditions.get("cpu_count") == os.cpu_count() and len(rows) == 9, sorted(conditions))
         text = out.getvalue()
-        lines = [line for line in text.partition("\ncase ")[2].splitlines()[1:] if " branch_root " in line]
-        check("report/table-plain", "case" in text and "median s" in text and len(lines) == 5 and all(
+        lines = [line for line in text.partition("\ncase ")[2].splitlines()[1:]
+                 if " branch_root " in line and not line.startswith("startup ")]
+        check("report/table-plain", "case" in text and "median s" in text and len(lines) == 4 and all(
             line.count(TIMED_OUT) == 4 and not re.search(r"[0-9]\.[0-9]{3}", line) for line in lines),
             text[-1200:])
         before = figures.read_bytes() if figures.exists() else None
@@ -1156,15 +1591,135 @@ def self_test(report_path=None):
         check("report/json-existing-refused", again == 2 and made_again == []
               and (figures.read_bytes() if figures.exists() else None) == before, (again, err.getvalue()[:300]))
 
-        # 7. the fixture root is gone after a clean run, a run with a timed-out child, and a run that fails
+        # 7. failed samples carry no time. With the failing stub, git_discard exits 1 and protected_line dies
+        # by SIGKILL in every Bash case (each such row NO VALID SAMPLE with two failed samples), and
+        # branch_root fails one launch of two (each of its rows timed from its one valid sample only);
+        # git_discard is also the startup hook. A launch that fails is a failed sample with no time.
+        fail_json, fail_root = _stub_plugin(base, "fail", variant="fail")
+        fail_figures = Path(base, "fail-figures.json")
+        out = io.StringIO()
+        code = _try_cli(["--runs", "2", "--files", "1", "--commits", "1", "--case-timeout", "30", "--hook",
+                         "git_discard", "--hook", "branch_root", "--hook", "protected_line", "--json",
+                         str(fail_figures)], fail_json, fail_root, write_sizes=SELF_TEST_WRITE_SIZES, out=out,
+                        err=io.StringIO())
+        try:
+            fail_rows = [row for row in json.loads(fail_figures.read_text(encoding="utf-8"))["rows"]
+                         if row["case"] != "startup"]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            fail_rows = [{"error": str(exc)}]
+        dead = [row for row in fail_rows if row.get("hook_id") in ("git_discard", "protected_line")]
+        mixed = [row for row in fail_rows if row.get("hook_id") == "branch_root"]
+        unlaunched = _sample([str(Path(base, "no-such-dir", "no-such-hook"))], b"{}", {"PATH": os.defpath}, base,
+                             5)
+        died = {"git_discard": {"exit 1": 2}, "protected_line": {"killed by SIGKILL": 2}}
+        check("measure/failed-sample-no-time", code == 0 and len(dead) == 8 and all(
+            row["samples"] == [] and row["failed_samples"] == 2
+            and (row["min"], row["median"], row["max"]) == (NO_VALID_SAMPLE,) * 3
+            and row["outcomes"] == died[row["hook_id"]] for row in dead)
+            and unlaunched.seconds is None and _outcome(unlaunched)[1]
+            and _outcome(unlaunched)[0].startswith("launch failed"), (code, dead, unlaunched))
+        check("measure/mixed-row-valid-only", len(mixed) == 4 and all(
+            len(row["samples"]) == 1 and isinstance(row["samples"][0], float)
+            and MIXED_NAP <= row["samples"][0] < 30 and row["failed_samples"] == 1
+            and row["min"] == row["median"] == row["max"] == row["samples"][0]
+            and row["outcomes"] == {"exit 1": 1, "exit 0 allow": 1} for row in mixed), mixed)
+        text = out.getvalue()
+        lines = [line for line in text.partition("\ncase ")[2].splitlines()[1:]
+                 if not line.startswith("startup ") and (" git_discard " in line or " protected_line " in line)]
+        check("report/no-valid-sample-shown", len(lines) == 8 and all(
+            line.count(NO_VALID_SAMPLE) == 3 and re.search(r"\b2 +2 +" + NO_VALID_SAMPLE, line)
+            and not re.search(r"[0-9]\.[0-9]{3}", line) for line in lines), text[-1500:])
+
+        # 8. an interpreter version probe that fails ends the run with exit 2, not a report naming no version
+        real_sample = _sample
+
+        def probe_fails(argv, *args, **kwargs):
+            if "-c" in argv:
+                return Sample(0.01, 1, b"", b"injected probe failure", False, None)
+            return real_sample(argv, *args, **kwargs)
+        err = io.StringIO()
+        with _recording_roots() as made_probe, _patched(this, "_sample", probe_fails):
+            code = _try_cli(["--runs", "1", "--files", "1", "--commits", "1"], fast_json, fast_root,
+                            write_sizes=SELF_TEST_WRITE_SIZES, out=io.StringIO(), err=err)
+        check("measure/version-probe-failure-refused", code == 2 and "version probe" in err.getvalue()
+              and len(made_probe) == 1 and not os.path.lexists(made_probe[0]),
+              (code, err.getvalue()[:400], made_probe))
+
+        # 9. the fixture root is gone after a clean run, a run with a timed-out child, and a run that fails
         def failing(*_args, **_kwargs):
-            raise MeasureError("injected launch failure")
+            raise MeasureError("injected measurement failure")
         with _recording_roots() as made_failing, _patched(this, "_sample", failing):
             failed, failure = _try_measure(fast_json, fast_root, runs=1, files=1, commits=1)
         roots = made_fast + made_slow + made_failing
         check("measure/fixture-root-removed", len(made_fast) == 1 and len(made_slow) == 1
-              and len(made_failing) == 1 and failed is None and "injected launch failure" in (failure or "")
+              and len(made_failing) == 1 and failed is None and "injected measurement failure" in (failure or "")
               and not any(os.path.lexists(path) for path in roots), (roots, failure))
+
+        # 10. an interruption stays the reported cause when the root cannot be removed, and so does an error;
+        # the root left behind is reported with it (the removal is real; only its result is injected)
+        real_remove = _remove_root
+        during = {}
+
+        def interrupted(*_args, **_kwargs):
+            during.update({signum: signal.getsignal(signum) for signum in INTERRUPT_SIGNALS})
+            raise Interrupted(signal.SIGTERM)
+
+        def broken(*_args, **_kwargs):
+            raise MeasureError("injected measurement error")
+
+        def leaky(root):
+            real_remove(root)
+            return "the fixture root {} could not be removed: injected".format(root)
+        causes = []
+        for run_in in (interrupted, broken):
+            err = io.StringIO()
+            with _patched(this, "_measure_in", run_in), _patched(this, "_remove_root", leaky):
+                try:
+                    code = run_cli(["--runs", "1", "--files", "1", "--commits", "1"], fast_json, fast_root,
+                                   write_sizes=SELF_TEST_WRITE_SIZES, out=io.StringIO(), err=err)
+                except Interrupted as exc:
+                    code = "raised {}".format(exc)
+            causes.append((code, err.getvalue()))
+        check("measure/interrupt-cause-kept", causes[0][0] == 128 + signal.SIGTERM
+              and "interrupted by SIGTERM" in causes[0][1] and "could not be removed: injected" in causes[0][1]
+              and causes[1][0] == 2 and "injected measurement error" in causes[1][1]
+              and "could not be removed: injected" in causes[1][1], causes)
+
+        # a SIGTERM that arrives as the root's removal starts is held: the removal runs to its end, and the
+        # run then reports the interruption (this process signals itself only while this tool's own
+        # interrupt handler is installed)
+        def signalled_removal(root):
+            if not isinstance(getattr(signal.getsignal(signal.SIGTERM), "__self__", None), _Interrupts):
+                return "no interrupt handler was installed, so nothing was signalled"
+            os.kill(os.getpid(), signal.SIGTERM)
+            return real_remove(root)
+        with (_recording_roots() as made_held, _patched(this, "_measure_in", lambda *_args, **_kwargs: {}),
+              _patched(this, "_remove_root", signalled_removal)):
+            try:
+                measure(fast_json, fast_root, runs=1, files=1, commits=1, write_sizes=SELF_TEST_WRITE_SIZES)
+                held_result = "returned without the interruption"
+            except Interrupted as exc:
+                held_result = exc.signum
+            except MeasureError as exc:
+                held_result = str(exc)
+        held_left = [path for path in made_held if os.path.lexists(path)]
+        for path in held_left:
+            shutil.rmtree(path, ignore_errors=True)
+        check("measure/signal-during-removal-held", held_result == signal.SIGTERM and len(made_held) == 1
+              and held_left == [], (held_result, made_held, held_left))
+
+        # 11. the interrupt handlers are installed for a measurement's duration and the previous ones are back
+        # afterwards (after every in-process run above: clean, timed out, failed, refused and interrupted)
+        handlers_after = {signum: signal.getsignal(signum) for signum in INTERRUPT_SIGNALS}
+        check("measure/signal-handlers-restored", handlers_after == handlers_before and all(
+            during.get(signum) not in (None, handlers_before[signum]) for signum in INTERRUPT_SIGNALS
+            if handlers_before[signum] != signal.SIG_IGN), (handlers_before, during, handlers_after))
+
+        # 12. SIGTERM, SIGINT and SIGHUP in turn, each sent to a child process running a stub measurement
+        # while its hook child sleeps: the root and the hook child's process group are gone afterwards
+        check("measure/interrupt-sigterm-cleans-up", *_interrupt_vectors(base, signal.SIGTERM))
+        check("measure/interrupt-sigint-cleans-up", *_interrupt_vectors(base, signal.SIGINT))
+        check("measure/interrupt-sighup-cleans-up", *_interrupt_vectors(base, signal.SIGHUP))
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
@@ -1183,10 +1738,11 @@ def self_test(report_path=None):
             print("  {}: {}".format(check_id, repr(detail)[:600]))
         return 1
     print("SELF-TEST PASS: hook-latency {} checks (option bounds at both ends, order statistics with timed-out "
-          "samples, the Bash command at its budget and the Write sizes exact, the real hooks.json resolved, "
-          "malformed and missing hook ids refused by name, the git fixture shape, the pinned child "
-          "environment, every case with its runs, TIMED OUT never a time, the JSON conditions, and the "
-          "fixture root removed on every path)".format(len(results)))
+          "samples, the Bash command at its budget and the Write sizes exact, the real hooks.json resolved and "
+          "fully measured, malformed, missing and unmeasured hook ids refused by name, the git fixture shape, "
+          "the pinned child environment, every case with its runs, TIMED OUT never a time, failed samples "
+          "never timed, a failed version probe refused, the JSON conditions, and the fixture root removed at "
+          "the normal end, on a timeout, on an error and on SIGINT, SIGTERM and SIGHUP)".format(len(results)))
     return 0
 
 

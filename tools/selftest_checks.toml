@@ -2417,6 +2417,7 @@ expected-check-ids = [
   "args/unknown-refused",
   # ---------- the statistics and the synthetic inputs ----------
   "summary/order-statistics",
+  "summary/outcome-classified",
   "inputs/bash-command-at-cap",
   "inputs/write-sizes-exact",
   "inputs/write-line-scans-clean",
@@ -2426,6 +2427,8 @@ expected-check-ids = [
   "hooks/malformed-refused",
   "hooks/missing-id-named",
   "hooks/unknown-selection-named",
+  "hooks/unmeasured-id-refused",
+  "hooks/unhooked-case-refused",
   # ---------- the fixture and the child environment ----------
   "fixture/git-fixture-shape",
   "env/child-pinned",
@@ -2438,5 +2441,17 @@ expected-check-ids = [
   "report/json-conditions",
   "report/table-plain",
   "report/json-existing-refused",
+  # ---------- failed samples and the version probe ----------
+  "measure/failed-sample-no-time",
+  "measure/mixed-row-valid-only",
+  "report/no-valid-sample-shown",
+  "measure/version-probe-failure-refused",
+  # ---------- the fixture root and interrupts ----------
   "measure/fixture-root-removed",
+  "measure/interrupt-cause-kept",
+  "measure/signal-during-removal-held",
+  "measure/signal-handlers-restored",
+  "measure/interrupt-sigterm-cleans-up",
+  "measure/interrupt-sigint-cleans-up",
+  "measure/interrupt-sighup-cleans-up",
 ]
