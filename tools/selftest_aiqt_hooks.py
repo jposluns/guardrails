@@ -2324,6 +2324,15 @@ def _test_git_stash_ref(failures):
 # warning that a here-document ran to the end of the input, and an allow case parses with exit 0 and no
 # here-document warning. The guard models bash 5.3, and an older bash can read bodies in another order, so a
 # missing bash, or one older than _HD_BASH_MIN, is a NOT RUN failure, never a pass.
+# Agreement is judged per opener: the warning must name (wanted `X') a delimiter X of an opener the guard
+# leaves unterminated, so a warning about another opener does not count. Bash's exit for a deny case is 0, or 2
+# where the unterminated body swallows a closing parenthesis and bash then refuses the command as a syntax
+# error; either way bash read that body to the end of the input, and any other exit does not agree.
+# Agreement with bash -n is agreement with bash's parse, not with a run of the command. bash -n reads
+# $((cmd) ) as arithmetic and reports no here-document in it, while a run reads it again as a command
+# substitution holding a subshell and runs the lines after an opener there as commands; the guard reads that
+# shape as arithmetic too (the disclosed residual for a (( that opens nested subshells), and this oracle
+# cannot see the difference.
 _HD_BASH_MIN = (5, 3)
 # The closed table of cases that need not agree with bash, each with its reason. An id here that names no hd
 # case, or whose case does agree with bash, fails the check, so no entry outlives its reason.
@@ -2342,11 +2351,18 @@ _HD_BASH_EXCEPTIONS = {
 }
 
 
-def _hd_bash_oracle(vectors, failures, exceptions, search_path):
+def _hd_unterminated_delimiters(command):
+    """The delimiters of the openers the guard leaves unterminated in command (an opener whose delimiter word
+    it cannot read names none)."""
+    return {op.delim for op in aiqt_hooks._heredoc_openers(command) if not op.terminated and op.delim is not None}
+
+
+def _hd_bash_oracle(vectors, failures, exceptions, search_path, unterminated=_hd_unterminated_delimiters):
     """(hd-bash) Parse the command of each (label, command, want) case with bash -n -c (nothing runs; the
     environment is pinned and no startup file is read) and require bash to agree with want, unless the case's
     id is in exceptions (see _HD_BASH_EXCEPTIONS). bash is looked up on search_path, the only PATH the pinned
-    environment holds. Returns True when every case was parsed, False after recording a NOT RUN failure."""
+    environment holds. A deny case agrees only when bash's end-of-file warning names a delimiter in
+    unterminated(command). Returns True when every case was parsed, False after recording a NOT RUN failure."""
     env = {"PATH": search_path, "LC_ALL": "C"}  # no BASH_ENV, ENV or HOME; --norc and --noprofile below
     try:
         version = subprocess.run(["bash", "--version"], stdin=subprocess.DEVNULL, capture_output=True, env=env,
@@ -2380,15 +2396,19 @@ def _hd_bash_oracle(vectors, failures, exceptions, search_path):
             return False
         rc, err = proc.returncode, proc.stderr.decode("utf-8", "replace")
         if want == "deny":
-            agrees = "delimited by end-of-file" in err
+            named = unterminated(command)
+            wanted = set(re.findall(r"delimited by end-of-file \(wanted `(.*)'\)$", err, re.MULTILINE))
+            agrees = rc in (0, 2) and bool(named & wanted)
         else:
+            named = set()
             agrees = rc == 0 and "here-document" not in err
         if agrees and vid in exceptions:
             failures.append("(hd-bash-stale) {} agrees with bash, so {} must leave the exception table"
                             .format(label, vid))
         elif not agrees and vid not in exceptions:
+            expected = want + (" naming one of {}".format(sorted(named)) if want == "deny" else "")
             failures.append("(hd-bash-agree) {}: expected {}, but bash -n exits {} with {!r}"
-                            .format(label, want, rc, err.strip()))
+                            .format(label, expected, rc, err.strip()))
     for vid in sorted(set(exceptions) - seen):
         failures.append("(hd-bash-table) the exception table names {}, which is no hd case".format(vid))
     return True
@@ -2424,7 +2444,9 @@ def _test_heredoc_terminator(failures):
 
     # A label ending in "(regression coverage)" pins a behaviour the reader already had before it modelled bash's
     # body order, arithmetic contents and assignment subscripts: the case passes on that earlier reader too, so
-    # it guards the behaviour against a later change and is no evidence that a change made it.
+    # it guards the behaviour against a later change and is no evidence that a change made it. The converse does
+    # not hold: a case that also passes on that reader but fails on a later one carries no label, and the comment
+    # above it names the reader it fails on.
 
     # Matched openers, and << forms bash does not read as a heredoc opener, allow silently.
     hdexpect("(hd-a1) a matched quoted opener allows", "python3 - <<'PY'\nprint(1)\nPY\necho done", "allow")
@@ -2635,13 +2657,15 @@ def _test_heredoc_terminator(failures):
     hdexpect("(hd-d56) a process substitution target after an assignment ends the assignments",
              "a=1 < <(true) b[1<<EOF]=3\nx\n", "deny", has=("<<EOF]=3 on line 1",))
     # The runnable forms of hd-d26 and hd-d27 (bash refuses those two as a syntax error, since the unterminated
-    # body swallows the closing parentheses): here the body is cut short at EOF), so bash runs the command.
+    # body swallows the closing parentheses): here the body is cut short at EOF), so bash runs the command. Like
+    # hd-d26 and hd-d27, these fail on a reader that does not scan arithmetic contents; no quote is involved.
     hdexpect("(hd-d50) a heredoc cut short in a $(...) inside $((...)) is checked",
              "echo $(( $(cat <<EOF\n1\nEOF) ))\necho after", "deny", has=("<<EOF on line 1", "cut short at line 3"))
     hdexpect("(hd-d51) a heredoc cut short in a $(...) inside a ((...)) command is checked",
              "(( $(cat <<EOF\n1\nEOF) )); echo after", "deny", has=("<<EOF on line 1", "cut short at line 3"))
     # A double-quoted string or a ${...} inside arithmetic is read as bash reads it, so a ) inside it does not
-    # end the arithmetic early.
+    # end the arithmetic early. These fail on a reader that does not scan arithmetic contents and pass on one that
+    # scans them but reads a single quote there as plain text, so they do not stand in for hd-d39 to hd-d42.
     hdexpect("(hd-d52) a double-quoted ) in $((...)) does not end the arithmetic early",
              'echo $(( ")" )) <<EOF\nx\n', "deny", has=("<<EOF on line 1",))
     hdexpect("(hd-d53) a ${...} holding a quoted ) in $((...)) does not end the arithmetic early",
@@ -2728,6 +2752,21 @@ def _test_heredoc_terminator(failures):
         if [message.partition(" ")[0] for message in probe] != ["(hd-bash-agree)"] * 2:
             failures.append("(hd-bash-probe) the bash oracle must report both contradicted probes; got {!r}"
                             .format(probe))
+        # a deny case whose end-of-file warning names another delimiter than the guard's opener disagrees
+        probe = []
+        _hd_bash_oracle([("(hd-probe-other) an opener bash reads", "cat <<EOF\nx\n", "deny")], probe, {},
+                        search_path, unterminated=lambda command: {"OTHER"})
+        if [message.partition(" ")[0] for message in probe] != ["(hd-bash-agree)"]:
+            failures.append("(hd-bash-opener-probe) a warning naming another opener must not agree; got {!r}"
+                            .format(probe))
+        # an exception for a case that agrees with bash is stale, and one naming no case is refused
+        stale, unknown = [], []
+        _hd_bash_oracle(vectors[:1], stale, {"hd-a1": "probe"}, search_path)
+        _hd_bash_oracle(vectors[:1], unknown, {"hd-zz0": "probe"}, search_path)
+        if ([message.partition(" ")[0] for message in stale] != ["(hd-bash-stale)"]
+                or [message.partition(" ")[0] for message in unknown] != ["(hd-bash-table)"]):
+            failures.append("(hd-bash-table-probe) a stale and an unknown exception must each be refused; got {!r}"
+                            .format((stale, unknown)))
     # with no bash to find (an empty directory is the whole PATH) the oracle records a NOT RUN failure
     absent = []
     with tempfile.TemporaryDirectory() as empty:
@@ -2735,6 +2774,38 @@ def _test_heredoc_terminator(failures):
     if [message.split(" ", 3)[:3] for message in absent] != [["(hd-bash-not-run)", "NOT", "RUN:"]]:
         failures.append("(hd-bash-absent) with no bash the oracle must record a NOT RUN failure; got {!r}"
                         .format(absent))
+    # Stub bashes, each alone on its PATH: every one prints a version line for --version and runs the given
+    # shell text for a parse.
+    def stub_bash(directory, version, parse=""):
+        os.makedirs(directory)
+        with open(os.path.join(directory, "bash"), "w", encoding="ascii") as handle:
+            handle.write("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'GNU bash, version {}(1)-release'; exit 0; "
+                         "fi\n{}".format(version, parse))
+        os.chmod(os.path.join(directory, "bash"), 0o755)
+        return directory
+
+    floor, exits = {}, {}
+    with tempfile.TemporaryDirectory() as stubs:
+        # the version floor at its edge: a bash reporting 5.2 is NOT RUN, and 5.3 or 6.0 is used (a stub that
+        # prints nothing for a parse, so an allow case parses clean under it)
+        for version in ("5.2.37", "5.3.0", "6.0.0"):
+            found = []
+            floor[version] = (_hd_bash_oracle(vectors[:1], found, {}, stub_bash(os.path.join(stubs, version), version)),
+                              [message.split(" ", 3)[:3] for message in found])
+        # a deny case agrees on the opener's end-of-file warning with exit 0, and not with the same warning and exit 1
+        warning = "echo \"bash: warning: here-document at line 1 delimited by end-of-file (wanted \\`EOF')\" >&2\n"
+        for code in ("0", "1"):
+            found = []
+            stub = stub_bash(os.path.join(stubs, "exit-" + code), "5.3.0", warning + "exit " + code + "\n")
+            _hd_bash_oracle([("(hd-probe-exit) an opener's warning with exit " + code, "cat <<EOF\nx\n", "deny")],
+                            found, {}, stub)
+            exits[code] = [message.partition(" ")[0] for message in found]
+    if floor != {"5.2.37": (False, [["(hd-bash-old)", "NOT", "RUN:"]]), "5.3.0": (True, []), "6.0.0": (True, [])}:
+        failures.append("(hd-bash-floor-probe) bash 5.2 must be NOT RUN and bash 5.3 and 6.0 used; got {!r}"
+                        .format(floor))
+    if exits != {"0": [], "1": ["(hd-bash-agree)"]}:
+        failures.append("(hd-bash-exit-probe) the warning must agree with exit 0 and not with exit 1; got {!r}"
+                        .format(exits))
 
 
 def main():

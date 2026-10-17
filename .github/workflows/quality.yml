@@ -647,6 +647,18 @@ jobs:
         shell: bash
         run: python3 -I -B tools/gen_hooks.py --check
 
+      # The hooks behaviour self-test parses its heredoc cases with the bash on PATH and fails below bash 5.3,
+      # which the runner image need not ship. This job, and no other, builds GNU bash 5.3 with patches 001 to
+      # 009 from pinned digests and adds its bin directory to GITHUB_PATH, which GitHub documents as putting it
+      # first on PATH for every later step of this job. Its self-test runs first, offline; a refused or failed
+      # build fails the job.
+      - name: Pinned bash 5.3 build self-test
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --self-test
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py
+
       - name: Hooks behaviour self-test
         shell: bash
         run: python3 -I -B tools/selftest_aiqt_hooks.py
@@ -701,6 +713,10 @@ jobs:
       - name: Brief-capability self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite brief-capability-selftest
+
+      - name: Pinned bash build self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite ci-build-bash-selftest
 
       - name: Entry-guard self-test (execution-reconciled)
         shell: bash
