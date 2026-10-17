@@ -654,13 +654,14 @@ jobs:
       # which the runner image need not ship. This job, and no other, builds GNU bash 5.3 with patches 001 to
       # 009 from pinned digests and adds its bin directory to GITHUB_PATH, which GitHub documents as putting it
       # first on PATH for every later step of this job. Its self-test runs first, offline; a refused or failed
-      # build fails the job.
+      # build fails the job. The build runs only on the explicit --build; run with no argument the script runs
+      # its offline self-test.
       - name: Pinned bash 5.3 build self-test
         shell: bash
         run: python3 -I -B tools/ci_build_bash.py --self-test
       - name: Pinned bash 5.3 build (CI only)
         shell: bash
-        run: python3 -I -B tools/ci_build_bash.py
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Hooks behaviour self-test
         shell: bash

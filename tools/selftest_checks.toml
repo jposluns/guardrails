@@ -2487,6 +2487,10 @@ expected-check-ids = [
   "env/missing-runner-temp-exits-2",
   "env/relative-github-path-exits-2",
   "env/os-error-exits-2",
+  # ---------- the entry: a bare run is the self-test; only --build builds ----------
+  "main/bare-runs-self-test",
+  "main/self-test-forms-run-self-test",
+  "main/build-without-env-exits-2",
   "main/unknown-argument-exits-2",
   "network/never-reached",
 ]

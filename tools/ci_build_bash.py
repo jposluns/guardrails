@@ -5,11 +5,17 @@ add that directory's bin to GITHUB_PATH. The hooks behaviour self-test parses it
 finds on PATH and fails (never skips) below bash 5.3, so the job that runs it builds this one first, whatever bash
 the runner image ships.
 
-  ci_build_bash.py              fetch, verify, build and install; CI only (it needs RUNNER_TEMP and GITHUB_PATH)
-  ci_build_bash.py --self-test  offline vectors over small fixture files in a temporary directory
+  ci_build_bash.py [--self-test]
+                                offline vectors over small fixture files in a temporary directory
   ci_build_bash.py [--self-test] --execution-report ABS_PATH
                                 the self-test, also writing its execution report, finalized at interpreter
                                 exit (tools/_selftest_exit_report.py), as the execution gate runs it
+  ci_build_bash.py --build      fetch, verify, build and install; CI only (it needs RUNNER_TEMP and GITHUB_PATH)
+
+The build runs only on the explicit --build. Started with no argument, the script runs its offline self-test, so a
+test lane that starts this suite's runner bare (the git-fixture-env lanes start every suite runner directly) never
+fetches and never writes GITHUB_PATH, even where RUNNER_TEMP and GITHUB_PATH are set. Any other argument is a usage
+error.
 
 Every URL, byte count and sha256 is a literal in PINS. Every file is fetched and checked against its pin (its
 sha256, and the archive's byte count too) before anything is extracted. The patches are applied in PINS order
@@ -18,13 +24,14 @@ not apply stops the build. The built bash must report BASH_VERSINFO 5, 3 and 9 (
 the build tree before make install and again as installed, so the patch level the applied patches left is read
 from bash itself. GITHUB_PATH is written only after both checks pass.
 
-Exit: 0 installed and added to GITHUB_PATH; 1 refused (a file that is missing or differs from its pin, or a built
-bash that does not print 5 3 9 or exits non-zero); 2 not completed (usage; RUNNER_TEMP or GITHUB_PATH unset,
+Exit of --build: 0 installed and added to GITHUB_PATH; 1 refused (a file that is missing or differs from its pin,
+or a built bash that does not print 5 3 9 or exits non-zero); 2 not completed (RUNNER_TEMP or GITHUB_PATH unset,
 relative or not an existing directory and file; the install or work directory already present; a fetch error; an
 archive that does not extract; a patch, configure, make or make install step that fails; a built bash that cannot
 be started). On exit 1 or 2 nothing is installed: the install directory is removed if make install created it,
 and GITHUB_PATH is not written. The work directory (the downloads and the build tree) is left under the runner's
-temporary directory.
+temporary directory. Exit of the self-test: 0 every vector passed; 1 any failed; with --execution-report, 2 when
+the report's finalizer refuses the run (tools/_selftest_exit_report.py). A usage error exits 2.
 
 Not checked: the GNU signature of the archive and the patches (the pinned digests stand in for it, so a changed
 upstream file is a refusal, never a silent update); the compiler, make and patch that the runner image supplies,
@@ -356,6 +363,16 @@ def _outcome(call):
             return "crashed", "{}: {}".format(type(exc).__name__, exc)
 
 
+def _entry_outcome(args):
+    """main(args) with its stdout kept: (exit, stderr text), or ("crashed", message) when it raises."""
+    err = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+        try:
+            return main(args), err.getvalue()
+        except Exception as exc:
+            return "crashed", "{}: {}".format(type(exc).__name__, exc)
+
+
 def _registered_check_ids():
     """This suite's registered check ids, read through the execution gate's own schema validator: (set of ids,
     None), or (None, reason)."""
@@ -517,8 +534,58 @@ def self_test(report_path=None):
                                          failing, log=lambda line: None))
             check("env/os-error-exits-2", got == ("ok", 2) and listed.read_text(encoding="utf-8") == ""
                   and not os.path.lexists(base / "os-error" / INSTALL_NAME), got)
-            got = _outcome(lambda: main(["--bogus"]))
-            check("main/unknown-argument-exits-2", got == ("ok", 2), got)
+
+            # the entry: with no argument or --self-test (with or without --execution-report) it runs the
+            # self-test, and it builds only on the explicit --build. self_test is stubbed for these calls, so the
+            # self-test never runs itself again. A bare run with RUNNER_TEMP and GITHUB_PATH set, as on a CI
+            # runner, runs the self-test and never fetches, writes GITHUB_PATH or creates anything under
+            # RUNNER_TEMP, so a test lane that starts this suite's runner bare never starts the build.
+            from unittest.mock import patch
+            entered = []
+
+            def stub_self_test(report_path=None):
+                entered.append(report_path)
+                return 0
+
+            this = sys.modules[__name__]
+            bare = base / "bare"
+            os.makedirs(bare)
+            bare_listed = base / "bare-github-path"
+            bare_listed.write_text("/already/listed\n", encoding="utf-8")
+            with (patch.object(this, "self_test", stub_self_test),
+                  patch.dict(os.environ, {"RUNNER_TEMP": str(bare), "GITHUB_PATH": str(bare_listed)})):
+                got = _entry_outcome([])
+            check("main/bare-runs-self-test", got == (0, "") and entered == [None] and not reached
+                  and bare_listed.read_text(encoding="utf-8") == "/already/listed\n" and not os.listdir(bare),
+                  (got, entered, reached))
+            report = str(base / "report.json")
+            entered.clear()
+            with patch.object(this, "self_test", stub_self_test):
+                got = [_entry_outcome(args) for args in (["--self-test"], ["--execution-report", report],
+                                                         ["--self-test", "--execution-report", report])]
+            check("main/self-test-forms-run-self-test", got == [(0, "")] * 3 and entered == [None, report, report],
+                  (got, entered))
+
+            # --build reaches the CI entry, which stops before any fetch while RUNNER_TEMP or GITHUB_PATH is
+            # unset; every other argument list is a usage error. Both run with the two unset, so neither builds.
+            entered.clear()
+            with patch.object(this, "self_test", stub_self_test), patch.dict(os.environ):
+                os.environ.pop("RUNNER_TEMP", None)
+                os.environ.pop("GITHUB_PATH", None)
+                unset = _entry_outcome(["--build"])
+                os.environ["RUNNER_TEMP"] = str(bare)
+                temp_only = _entry_outcome(["--build"])
+                os.environ.pop("RUNNER_TEMP")
+                unknown = [_entry_outcome(args) for args in (
+                    ["--bogus"], ["--build", "--self-test"], ["--self-test", "--build"],
+                    ["--build", "--execution-report", report], ["--execution-report", "report.json"])]
+            check("main/build-without-env-exits-2",
+                  unset[0] == 2 and unset[1].startswith("error: RUNNER_TEMP must name")
+                  and temp_only[0] == 2 and temp_only[1].startswith("error: GITHUB_PATH must name")
+                  and not entered and not reached and not os.listdir(bare), (unset, temp_only, entered, reached))
+            check("main/unknown-argument-exits-2",
+                  all(code == 2 and err.startswith("usage: ") for code, err in unknown) and not entered and not reached,
+                  unknown)
     finally:
         urllib.request.urlopen = real_urlopen
     check("network/never-reached", not reached, reached)
@@ -542,7 +609,9 @@ def self_test(report_path=None):
           "refuse; a non-https URL is refused before any fetch; only BASH_VERSINFO 5 3 9 passes; over fixture "
           "files, a full build installs and appends to GITHUB_PATH, and a mismatch, a failed download, patches out "
           "of order, a wrong built or installed version, an existing install and an unexpected OSError each leave "
-          "nothing installed; no fetch reached the network)".format(len(results)))
+          "nothing installed; a bare run is the self-test even with RUNNER_TEMP and GITHUB_PATH set, only --build "
+          "reaches the build, which exits 2 without them, and any other argument exits 2; no fetch reached the "
+          "network)".format(len(results)))
     return 0
 
 
@@ -551,11 +620,12 @@ def main(argv=None):
     if (len(args) in (2, 3) and args[-2] == "--execution-report" and os.path.isabs(args[-1])
             and args[:-2] in ([], ["--self-test"])):
         return self_test(args[-1])
-    if args == ["--self-test"]:
+    if args in ([], ["--self-test"]):
         return self_test()
-    if not args:
+    if args == ["--build"]:
         return build(os.environ)
-    print("usage: ci_build_bash.py [--self-test] [--execution-report ABS_PATH]", file=sys.stderr)
+    print("usage: ci_build_bash.py [--self-test] [--execution-report ABS_PATH] | ci_build_bash.py --build",
+          file=sys.stderr)
     return 2
 
 

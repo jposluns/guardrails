@@ -967,12 +967,14 @@ def _config_poison_fixture(base):
 # --self-test). The 2026-10-15 merge from main added a sixth (opf/tools/_opf_import_batch.py
 # --self-test). The 2026-10-16 merge of main into the change adding tools/gen_agents.py --self-test
 # made that a seventh. The 2026-10-17 merge of main into the change adding tools/ci_build_bash.py
-# added an eighth, ninth and tenth (tools/ci_build_bash.py, the same with --self-test, and
-# tools/check_selftest_execution.py --suite ci-build-bash-selftest). The merged roster is 111
-# members, 109 of them in the malformed lane (counted by running _registered_selftests() on the
-# merged tree, 2026-10-17; config/member-roster-figures asserts these counts and the two derived
-# counts below against _registered_selftests(), so a later roster change turns this comment red
-# instead of stale).
+# added an eighth, ninth and tenth: tools/ci_build_bash.py with no argument (the runner of the
+# suite ci-build-bash-selftest, run directly; with no argument it runs its offline self-test, and
+# its build runs only on --build, which is no roster member), the same with --self-test, and
+# tools/check_selftest_execution.py --suite ci-build-bash-selftest. The roster is 111 members, 109
+# of them in the malformed lane (counted by running _registered_selftests() on the tree whose
+# build step runs tools/ci_build_bash.py --build, 2026-10-17; config/member-roster-figures asserts
+# these counts and the two derived counts below against _registered_selftests(), so a later
+# roster change turns this comment red instead of stale).
 # NOT MEASURED, though these bounds govern those reruns all the same: the system lane; the
 # malformed lane's configuration for the 99 of its 109 members outside those ten; and the
 # fsmonitor pass's own configuration (fsmonitor set in both config files, ignore and attributes
