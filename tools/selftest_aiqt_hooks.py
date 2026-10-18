@@ -4088,7 +4088,14 @@ def _deadline_shape_rerun_failures():
     return out
 
 
-_LEX_SCALING_SHAPE = "nest_cmdsubst"
+# The command shapes the scaling check reads, by what each one times: nest_cmdsubst holds no shell, eval
+# or trap word, so its rows time the flat lex plus the pre-scan that returns the segments unchanged
+# (dl-lex-prescan-skip witnesses that its resolution never runs); eval_words holds one eval per segment,
+# so its rows time the full shell-string resolution and placement that the pre-scan exists to skip.
+_LEX_SCALING_SHAPES = {
+    "nest_cmdsubst": lambda n: _DEADLINE_SHAPES["nest_cmdsubst"](n, "")[1]["command"],
+    "eval_words": lambda n: _repeat("eval true; ", n),
+}
 _LEX_SCALING_SIZES = (262144, 1048576)
 # A linear reader grows about 4 times over a 4-times size step; a quadratic one grows about 16 times.
 _LEX_SCALING_RATIO = 8.0
@@ -4103,38 +4110,46 @@ def _lex_scaling_over(small, large, floor):
     return large > floor and large > _LEX_SCALING_RATIO * small
 
 
-def _lex_scaling_failures(reader=None, sizes=_LEX_SCALING_SIZES, floor=_LEX_SCALING_FLOOR, runs=3):
-    """(dl-lex-scaling) The shared segment reading (_lex_command) stays about linear on the nested
-    command-substitution shape: reading the 1 MiB command may cost at most _LEX_SCALING_RATIO times the
-    CPU time of reading the 256 KiB one (a linear reader grows about 4 times over that size step, a
-    quadratic one about 16), unless the large read costs no more than `floor` CPU seconds, small on any
-    host (_lex_scaling_over). Each size is read `runs` times and the smallest CPU time kept, so one
-    scheduling stall cannot flip the check, and the ratio of two CPU times on one host is free of that
-    host's speed factor. reader, sizes, floor and runs are taken by the red check, which proves a
-    quadratic reader fails this check."""
+def _lex_scaling_failures(reader=None, shapes=tuple(_LEX_SCALING_SHAPES), sizes=_LEX_SCALING_SIZES,
+                          floor=_LEX_SCALING_FLOOR, runs=3):
+    """(dl-lex-scaling) The shared segment reading (_lex_command) stays about linear on each scaling shape
+    (_LEX_SCALING_SHAPES: the nested command substitution, whose rows time the flat lex and the pre-scan,
+    and the eval chain, whose rows time the shell-string resolution the pre-scan guards): reading the 1 MiB
+    command may cost at most _LEX_SCALING_RATIO times the CPU time of reading the 256 KiB one (a linear
+    reader grows about 4 times over that size step, a quadratic one about 16), unless the large read costs
+    no more than `floor` CPU seconds, small on any host (_lex_scaling_over). Each size is read `runs` times
+    and the smallest CPU time kept, so one scheduling stall cannot flip the check, and the ratio of two CPU
+    times on one host is free of that host's speed factor. reader, shapes, sizes, floor and runs are taken
+    by the red checks, which prove a quadratic reader and a quadratic shell-string resolution each fail
+    this check."""
     read = aiqt_hooks._lex_command if reader is None else reader
-    costs = []
-    for size in sizes:
-        command = _DEADLINE_SHAPES[_LEX_SCALING_SHAPE](size, "")[1]["command"]
-        best = None
-        for _ in range(runs):
-            began = time.process_time()
-            read(command)
-            spent = time.process_time() - began
-            best = spent if best is None or spent < best else best
-        costs.append(best)
-    small, large = costs
-    if _lex_scaling_over(small, large, floor):
-        return ["(dl-lex-scaling) the shared reading used {:.2f}s of CPU on the {}-character {} command "
-                "against {:.2f}s on the {}-character one, over {:g} times: superlinear growth".format(
-                    large, sizes[1], _LEX_SCALING_SHAPE, small, sizes[0], _LEX_SCALING_RATIO)]
-    return []
+    out = []
+    for shape in shapes:
+        costs = []
+        for size in sizes:
+            command = _LEX_SCALING_SHAPES[shape](size)
+            best = None
+            for _ in range(runs):
+                began = time.process_time()
+                read(command)
+                spent = time.process_time() - began
+                best = spent if best is None or spent < best else best
+            costs.append(best)
+        small, large = costs
+        if _lex_scaling_over(small, large, floor):
+            out.append("(dl-lex-scaling) the shared reading used {:.2f}s of CPU on the {}-character {} "
+                       "command against {:.2f}s on the {}-character one, over {:g} times: superlinear "
+                       "growth".format(large, sizes[1], shape, small, sizes[0], _LEX_SCALING_RATIO))
+    return out
 
 
 def _lex_scaling_red_failures():
     """(dl-lex-scaling-red) The scaling check discriminates: the shared reading wrapped with one
-    whole-command scan per segment (cost quadratic in the command's length) must fail it, run at a
-    quarter of the real sizes with no floor so the red case costs seconds, not minutes.
+    whole-command scan per segment (cost quadratic in the command's length) must fail it on the nested
+    shape, run at a quarter of the real sizes with no floor so the red case costs seconds, not minutes.
+    (dl-lex-scaling-res-red) It reaches the resolution it guards: a _shell_reading that adds one
+    whole-command scan per call must fail it on the eval chain, run over an 8-times size step (quadratic
+    cost grows about 64 times there, against the 8-times bound) with no floor.
     (dl-lex-scaling-bounds) Each bound at its edge: a large cost exactly at the ratio times the small one,
     or exactly at the floor, passes; one a microsecond over both fails; one over the ratio but at the
     floor passes (the floor keeps a tiny read from failing on noise)."""
@@ -4145,9 +4160,28 @@ def _lex_scaling_red_failures():
         for _seg in segments:
             command.count("\x00")
         return segments
-    if not _lex_scaling_failures(reader=quadratic, sizes=(65536, 262144), floor=0.0, runs=2):
+    if not _lex_scaling_failures(reader=quadratic, shapes=("nest_cmdsubst",), sizes=(65536, 262144),
+                                 floor=0.0, runs=2):
         out.append("(dl-lex-scaling-red) a reader with one whole-command scan per segment passes the "
                    "scaling check, so the check cannot see superlinear growth")
+
+    def resolution_quadratic(command):
+        real = aiqt_hooks._shell_reading
+
+        def slow(seg):
+            command.count("\x00")
+            return real(seg)
+
+        aiqt_hooks._shell_reading = slow
+        try:
+            return aiqt_hooks._lex_command(command)
+        finally:
+            aiqt_hooks._shell_reading = real
+    if not _lex_scaling_failures(reader=resolution_quadratic, shapes=("eval_words",),
+                                 sizes=(32768, 262144), floor=0.0, runs=2):
+        out.append("(dl-lex-scaling-res-red) a shell-string resolution with one whole-command scan per "
+                   "segment passes the scaling check, so the check cannot see superlinear growth in the "
+                   "resolution it guards")
     floor = _LEX_SCALING_FLOOR
     for label, small, large, want in (
             ("at-ratio", 0.1, _LEX_SCALING_RATIO * 0.1, False),
@@ -4158,6 +4192,185 @@ def _lex_scaling_red_failures():
         if _lex_scaling_over(small, large, floor) != want:
             out.append("(dl-lex-scaling-bounds) costs ({}, {}) must {} the scaling bound ({})".format(
                 small, large, "fail" if want else "pass", label))
+    return out
+
+
+def _lex_flat_texts(call):
+    """(result, texts): call()'s result and the first argument of every _lex_flat call made during it,
+    recorded by a wrapper installed on aiqt_hooks._lex_flat for the call and restored after it."""
+    real = aiqt_hooks._lex_flat
+    texts = []
+
+    def recording(command, *args, **kwargs):
+        texts.append(command)
+        return real(command, *args, **kwargs)
+
+    aiqt_hooks._lex_flat = recording
+    try:
+        result = call()
+    finally:
+        aiqt_hooks._lex_flat = real
+    return result, texts
+
+
+def _lex_once_failures():
+    """(dl-lex-once) protected_line takes one flat lex of the raw command on a command the lexer reads
+    completely: the commit-syntax reading takes it, the push loop reuses its records, and the broad-fallback
+    gate and the deny-message causes read its recorded flat argvs instead of lexing the command again. Each
+    case pins the exact texts _lex_flat reads (_lex_flat_texts), in order, with the decision beside them:
+    the raw command exactly once, a placed shell string once (its placement), and the JOINED text once where
+    a line continuation exists (the continuation comparison reads that different text). A reading that lexes
+    the raw command again fails the text rows, and one that stops lexing it at all fails them too, with the
+    decision row keeping the guard's outcome pinned.
+    (dl-lex-once-red) The recorder discriminates: a reading that lexes the command twice must be seen as two
+    calls by the same wrapper, so a recorder that no longer sees the lexer cannot green the bound."""
+    out = []
+    cases = (
+        ("git status", "allow", ["git status"]),
+        ("bash -c 'git status'", "allow", ["bash -c 'git status'", "git status"]),
+        ("git \\\n status", "allow", ["git \\\n status", "git  status"]),
+        ("git push --mirror origin", "deny", ["git push --mirror origin"]),
+        ("git push --force origin feature", "allow", ["git push --force origin feature"]),
+        ("bash -c 'git push --force origin feature'", "deny",
+         ["bash -c 'git push --force origin feature'", "git push --force origin feature"]),
+    )
+    for command, want, want_texts in cases:
+        data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command},
+                "cwd": "/", "session_id": "lex-once-session", "tool_use_id": "lex-once-call"}
+        result, texts = _lex_flat_texts(lambda: aiqt_hooks.protected_line(data))
+        got = _reduce_result(result[0], result[1])
+        if got != want or texts != want_texts:
+            out.append("(dl-lex-once) protected_line({!r}) must decide {} reading {!r} with _lex_flat, "
+                       "got {} reading {!r}".format(command, want, want_texts, got, texts))
+
+    def twice():
+        aiqt_hooks._lex_command("git status")
+        return aiqt_hooks._lex_flat("git status")
+
+    _result, texts = _lex_flat_texts(twice)
+    if texts != ["git status", "git status"]:
+        out.append("(dl-lex-once-red) the recorder must see a reading that lexes twice as two calls, got "
+                   "{!r}".format(texts))
+    return out
+
+
+# Pre-scan equivalence shapes: every word class _shell_reading_may_report resolves (a direct shell, eval
+# or trap word; a path word, where only _gate_word's basename proves it; a word that keeps a backslash,
+# which _gate_word strips; an upper- or mixed-case word, which _gate_word lowercases), beside controls
+# with no such word, where the skip is taken, and texts the lexer refuses.
+_LEX_PRESCAN_TEXTS = (
+    "sh -c 'git status'", "eval git status", "trap 'git status' EXIT", "\\eval git status",
+    "/bin/bash -c 'git status'", "/bin/sh -c 'git push --force origin main'", "/bin/true x",
+    '"\\\\eval" git status', "BASH -c 'git status'", "Bash -c 'git status'", "EVAL git status",
+    "ECHO hello", "echo hello", "true | cat", "echo eval", "x /bin/bash", "bash", "evaluate x",
+    "echo 'eval'", "echo; ;", "eval 'x", "bash -c 'echo )'", "echo x | sh", "eval eval eval true",
+)
+_LEX_PRESCAN_ALPHABET = ("bash ", "-c ", "'git status' ", "eval ", "\\eval ", "BASH ", "/bin/sh ",
+                         "Trap ", "'x' ", "echo ", "true; ", "| ", "x ", "'", "$(", "EXIT ",
+                         '"\\\\eval" ')
+
+
+def _lex_prescan_reading(prescan, text, partial, skip_empty):
+    """_lex_command(text, partial=partial, skip_empty=skip_empty) with aiqt_hooks._shell_reading_may_report
+    replaced by `prescan` for the call and restored after it, or "ValueError" when it raises."""
+    real = aiqt_hooks._shell_reading_may_report
+    aiqt_hooks._shell_reading_may_report = prescan
+    try:
+        return _lex_outcome(lambda: aiqt_hooks._lex_command(text, partial=partial, skip_empty=skip_empty))
+    finally:
+        aiqt_hooks._shell_reading_may_report = real
+
+
+def _lex_prescan_mismatches(prescan, texts):
+    """The (text, partial, skip_empty) readings on which _lex_command under `prescan` differs from the
+    reference reading whose pre-scan reports every segment, so the full resolution always runs:
+    [(text, partial, skip_empty, got, want)], at most three."""
+    out = []
+    for text in texts:
+        for partial in (False, True):
+            for skip_empty in (False, True):
+                want = _lex_prescan_reading(lambda seg: True, text, partial, skip_empty)
+                got = _lex_prescan_reading(prescan, text, partial, skip_empty)
+                if got != want:
+                    out.append((text, partial, skip_empty, got, want))
+                    if len(out) == 3:
+                        return out
+    return out
+
+
+def _shell_reading_calls(call):
+    """How many times call() took the full _shell_reading resolution, counted by a wrapper installed on
+    aiqt_hooks._shell_reading for the call and restored after it."""
+    real = aiqt_hooks._shell_reading
+    count = [0]
+
+    def counting(seg):
+        count[0] += 1
+        return real(seg)
+
+    aiqt_hooks._shell_reading = counting
+    try:
+        call()
+    finally:
+        aiqt_hooks._shell_reading = real
+    return count[0]
+
+
+def _lex_prescan_failures(count=2000, seed=20261018):
+    """(dl-lex-prescan) The pre-scan never changes the reading: _lex_command equals the reference reading
+    whose pre-scan reports every segment (the full per-segment resolution always runs), over
+    _LEX_PRESCAN_TEXTS and `count` seeded random texts over _LEX_PRESCAN_ALPHABET, in plain, partial and
+    skip_empty modes, with the same ValueError. The corpus must exercise every word class the pre-scan
+    resolves (_shell_reading_may_report): a direct shell, eval or trap word, a path word, a word keeping a
+    backslash, an upper- or mixed-case word, and a text whose segments all skip.
+    (dl-lex-prescan-skip) The skip is taken: _shell_reading never runs on the no-shell-word scaling shape,
+    so its dl-lex-scaling rows time the flat lex and the pre-scan, nothing else.
+    (dl-lex-prescan-resolve) The eval chain takes the full resolution on some segment, so its
+    dl-lex-scaling rows time the resolution the pre-scan guards.
+    (dl-lex-prescan-red-*) Two wrong pre-scans must each be caught by the same comparison, so it
+    discriminates: one that only matches a whole lowercase word (it misses the path, backslash and
+    upper-case words), and one that skips every segment."""
+    out = []
+    rng = random.Random(seed)
+    texts = list(_LEX_PRESCAN_TEXTS)
+    for _ in range(count):
+        texts.append("".join(rng.choice(_LEX_PRESCAN_ALPHABET) for _ in range(rng.randint(0, 8))))
+    words = aiqt_hooks._SHELL_READING_WORDS
+    direct = path = backslash = upper = skipped = 0
+    for text in texts:
+        segs = _lex_outcome(lambda: aiqt_hooks._lex_flat(text))
+        if segs == "ValueError":
+            continue
+        seen = [word for seg in segs for word in seg.argv]
+        direct += any(word in words for word in seen)
+        path += any("/" in word and aiqt_hooks._gate_word(word) in words for word in seen)
+        backslash += any("/" not in word and "\\" in word and aiqt_hooks._gate_word(word) in words
+                         for word in seen)
+        upper += any("/" not in word and "\\" not in word and not word.islower()
+                     and word.lower() in words for word in seen)
+        skipped += not any(map(aiqt_hooks._shell_reading_may_report, segs))
+    if not (direct and path and backslash and upper and skipped):
+        out.append("(dl-lex-prescan-corpus) the corpus must hold a direct shell/eval/trap word ({}), a "
+                   "path word ({}), a word keeping a backslash ({}), an upper- or mixed-case word ({}) "
+                   "and a text whose segments all skip ({})".format(direct, path, backslash, upper, skipped))
+    for text, partial, skip_empty, got, want in _lex_prescan_mismatches(
+            aiqt_hooks._shell_reading_may_report, texts):
+        out.append("(dl-lex-prescan) _lex_command({!r}, partial={}, skip_empty={}) gave {!r}, the "
+                   "always-resolving reference {!r}".format(text, partial, skip_empty, got, want))
+    nest = _LEX_SCALING_SHAPES["nest_cmdsubst"](65536)
+    if _shell_reading_calls(lambda: aiqt_hooks._lex_command(nest)):
+        out.append("(dl-lex-prescan-skip) the no-shell-word scaling shape must never take the full "
+                   "resolution, so its dl-lex-scaling rows time the flat lex and the pre-scan")
+    if not _shell_reading_calls(lambda: aiqt_hooks._lex_command(_LEX_SCALING_SHAPES["eval_words"](4096))):
+        out.append("(dl-lex-prescan-resolve) the eval chain must take the full resolution, so its "
+                   "dl-lex-scaling rows time the shell-string resolution")
+    wrong = (
+        ("narrow", lambda seg: any(word in words for word in seg.argv)),
+        ("never", lambda seg: False),
+    )
+    for name, prescan in wrong:
+        if not _lex_prescan_mismatches(prescan, texts):
+            out.append("(dl-lex-prescan-red-{}) a wrong pre-scan passes the comparison".format(name))
     return out
 
 
@@ -6235,6 +6448,8 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_raw_sequence_failures())
     failures.extend(_join_fast_failures())
     failures.extend(_lex_skip_failures())
+    failures.extend(_lex_once_failures())
+    failures.extend(_lex_prescan_failures())
     child_tmp = tmp / "deadline"
     child_tmp.mkdir()
     code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import selftest_aiqt_hooks as m; "

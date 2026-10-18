@@ -208,11 +208,14 @@ runs on 2026-10-17 on a 24-core host with Python 3.14.4 that was running other w
 0.13 s at 64 KB (protected_line, whose backstop reads the whole command before its 65,536-character
 commit size cap), 0.55 s at 256 KB and 2.17 s at 1 MB (nest_parens under git_discard). On the merged
 tree that combines this deadline with the shared reading of shell -c, eval, trap and interpreter code,
-after that reading was bounded to one lex per command (_shell_reading_may_report skips the per-segment
-resolution where no word can name a shell, eval or trap; the poll-loop classifier and protected_line
-reuse one reading instead of lexing again), five runs on 2026-10-18 on a 24-core host with Python 3.14.4
-that was running other work measured at most 0.17 s at 64 KB (nest_parens under commit_identity), 0.31 s
-at 256 KB and 1.50 s at 1 MB (nest_cmdsubst_background under orch_truncation_guard). Interpreter
+after that reading was bounded to one flat lex per read text (_shell_reading_may_report skips the
+per-segment resolution where no word can name a shell, eval or trap; the poll-loop classifier, the
+commit-syntax reading and protected_line reuse one reading instead of lexing the command again; each
+placed shell string is flat-lexed once; a text the lexer refuses still takes its partial recovery, and
+the continuation comparison still lexes the joined text where a continuation exists), five runs on
+2026-10-18 on a 24-core host with Python 3.14.4 that was running other work measured at most 0.17 s at
+64 KB (nest_parens under commit_identity), 0.31 s at 256 KB and 1.40 s at 1 MB (nest_cmdsubst_background
+under orch_truncation_guard). Interpreter
 start-up adds about 0.1 to 0.2 s to each call. Outside the deadline: interpreter start-up and
 module import, which run before main(); a wait the interpreter cannot interrupt (a system call in
 uninterruptible sleep, such as a read from a hung network mount, or a long call into C code that does not
@@ -1147,9 +1150,18 @@ def _lex_argvs(command):
         return None
 
 
-def _lex_uncertain_causes(command):
+# Sentinel for _lex_uncertain_causes and _lex_uncertain: the caller holds no flat argvs for the
+# command, so they are read here (the default for every caller that has not already lexed it).
+_LEX_ARGVS_UNREAD = object()
+
+
+def _lex_uncertain_causes(command, flat_argvs=_LEX_ARGVS_UNREAD):
     """The reasons the restored lexer's reading of `command` is UNCERTAIN, as an ordered
-    tuple of keys of _LEX_UNCERTAIN_CAUSE_TEXT (empty when the reading is certain). Line
+    tuple of keys of _LEX_UNCERTAIN_CAUSE_TEXT (empty when the reading is certain). flat_argvs
+    is what _lex_argvs(command) gives (the argv list of every segment of the flat lex, or None
+    where that lexer refuses the command) where the caller already holds it, so the raw command
+    is not lexed again; the default reads it here. The joined text, where it differs from the
+    raw text, is still lexed for the continuation comparison: that is a different text. Line
     continuations are joined first (_join_continuations), then the joined text is scanned with a
     deliberately blunt quoting model (single quotes, $'...' with its escapes, double quotes, backslash
     escapes) and these shapes are reported wherever they occur, with no comment-boundary predicate:
@@ -1240,7 +1252,7 @@ def _lex_uncertain_causes(command):
         i += 1
     if in_dq:
         add("quote")  # an unmatched double quote
-    raw_argvs = _lex_argvs(command)
+    raw_argvs = _lex_argvs(command) if flat_argvs is _LEX_ARGVS_UNREAD else flat_argvs
     if joined != command and raw_argvs != _lex_argvs(joined):
         add("continuation")
     if raw_argvs is None and not causes:
@@ -1248,10 +1260,12 @@ def _lex_uncertain_causes(command):
     return tuple(causes)
 
 
-def _lex_uncertain(command):
+def _lex_uncertain(command, flat_argvs=_LEX_ARGVS_UNREAD):
     """True when the restored nested-quote quoting model's reading of `command` is UNCERTAIN,
     so no consumer may treat a clean lex as proof of what bash will run and a raw reading decides
-    instead. It is True exactly when _lex_uncertain_causes reports a cause: the joined text holds ANY
+    instead. flat_argvs is passed through to _lex_uncertain_causes: a caller that already holds
+    the flat argvs supplies them so the raw command is not lexed again.
+    It is True exactly when _lex_uncertain_causes reports a cause: the joined text holds ANY
     unquoted '#', '<<', '(' or ')', a lone '{' or '}' word, any backtick or '$(', an unclosed quote or
     trailing backslash, a continuation the lexer reads differently once joined, or anything else the
     full lexer refuses.
@@ -1268,7 +1282,7 @@ def _lex_uncertain(command):
     a word ('ticket#1'), a subshell, a brace group, a function or a substitution makes the lex
     uncertain too; the same shapes carrying no push or work-losing spelling still allow (the
     pl-mispair-*-ctl controls)."""
-    return bool(_lex_uncertain_causes(command))
+    return bool(_lex_uncertain_causes(command, flat_argvs=flat_argvs))
 
 
 def _lex_command(command, partial=False, locale=False, skip_empty=False, _depth=0, _scopes=None):
@@ -2008,8 +2022,10 @@ def _expand_shell_strings(segments, locale, depth, scopes):
     as if written in place (_shell_string_in_place). The segment that runs a string is kept, its argv and
     redirects unchanged; its separator moves to the last placed segment and it ends with ';' instead, so a pipe,
     list operator or '&' after the shell command reads from the string's last command (a pipe INTO the shell
-    command still reads as feeding that segment, not the string's first command). Strings are read with
-    _lex_command at depth + 1, so a string inside a string is read too, down to _SHELL_STRING_DEPTH. The segments
+    command still reads as feeding that segment, not the string's first command). Each string is flat-lexed
+    once and expanded at depth + 1 (exactly the reading _lex_command builds), so a string inside a string is
+    read too, down to _SHELL_STRING_DEPTH, and on the default locale-free reading the string's own
+    uncertainty causes reuse that one flat lex instead of lexing the string again. The segments
     of a child shell's string or an EXIT trap action, which run apart, get a child scope (shell_scope) of their
     own, named from the counter `scopes` that every nested reading of the command shares.
     Nothing here raises. A segment is marked uncertain (shell_uncertain, the (kind, text) pairs its guard's
@@ -2061,15 +2077,21 @@ def _expand_shell_strings(segments, locale, depth, scopes):
             if child:
                 scopes[0] += 1  # named before the string is read, so the string's own child scopes follow it
                 scope = scope + (scopes[0],)
+            # One flat lex per string: expanding it over that lex is exactly what _lex_command builds,
+            # and on the default locale-free reading the same lex also feeds the string's own uncertainty
+            # causes below, so the string is not lexed a second time there. Under the locale reading the
+            # causes still take their own locale-free lex, as before: the two lexers can differ at a $".
             try:
-                inner = _lex_command(text, locale=locale, _depth=depth + 1, _scopes=scopes)
+                inner_flat = _lex_flat(text, locale=locale)
             except ValueError:
                 uncertain.append(("segment", seg.raw))  # a string that does not lex
                 continue
+            inner = _expand_shell_strings(inner_flat, locale, depth + 1, scopes)
             if len(seg.redirects) * len(inner) > _SHELL_PLACE_BUDGET:
                 uncertain.append(("segment", seg.raw))
                 continue
-            if _lex_uncertain_causes(text):
+            text_argvs = [s.argv for s in inner_flat] if not locale else _LEX_ARGVS_UNREAD
+            if _lex_uncertain_causes(text, flat_argvs=text_argvs):
                 uncertain.append(("segment", seg.raw))  # read and placed, but its own reading is uncertain
             placed.extend(_shell_string_in_place(inner, seg, scope))
         if uncertain:
@@ -8916,10 +8938,15 @@ _CommitStep = collections.namedtuple(
 # complete is True exactly when records hold the COMPLETE shared segment reading of the command
 # (_lex_command), so a caller that needs that reading reads records instead of lexing the command again;
 # it is False where no reading or only a partial recovery was taken (an unreadable or over-budget command,
-# or a command the lexer refused). Defaulted so the positional _CommitSyntax(...) builds need not pass it.
+# or a command the lexer refused). flat_argvs is what _lex_argvs(command) gives for the one flat lex that
+# reading took (the argv list of every segment, before any shell string was placed), or None where no flat
+# lex succeeded, so a caller that needs the flat view (whether a git segment was lexed, the continuation
+# comparison) reads it instead of lexing the command again. Both default to the fail-safe side (no complete
+# reading, no flat view): a build that leaves them unset routes a caller that needs the reading to its raw
+# fallback instead of over-trusting partial records, and every build below still sets them explicitly.
 _CommitSyntax = collections.namedtuple(
-    "_CommitSyntax", ("status", "records", "steps", "commit_indexes", "detail", "complete"))
-_CommitSyntax.__new__.__defaults__ = (True,)
+    "_CommitSyntax", ("status", "records", "steps", "commit_indexes", "detail", "complete", "flat_argvs"))
+_CommitSyntax.__new__.__defaults__ = (False, None)
 
 # Identity must be worktree-specific: the canonical absolute Git directory plus its
 # validated filesystem identity, not merely the common repository directory.
@@ -9105,11 +9132,17 @@ def _commit_command_syntax(command):
     grammar evidence. Exact lone help forms are non-committing syntax, not A-D.
     """
     if not isinstance(command, str):
-        return _CommitSyntax("unverifiable", (), (), (), "unreadable command", complete=False)
+        return _CommitSyntax("unverifiable", (), (), (), "unreadable command",
+                             complete=False, flat_argvs=None)
     if len(command) > _COMMIT_MAX_COMMAND:
-        return _CommitSyntax("unverifiable", (), (), (), "command size budget exhausted", complete=False)
+        return _CommitSyntax("unverifiable", (), (), (), "command size budget exhausted",
+                             complete=False, flat_argvs=None)
+    # The one flat lex, with the shell strings placed over it (exactly the reading _lex_command builds),
+    # taken apart here so the flat view is recorded beside the placed records: the segment budget and the
+    # protected-line consumers read that view instead of lexing the command again.
     try:
-        records = tuple(_lex_command(command))
+        flat = _lex_flat(command)
+        records = tuple(_expand_shell_strings(flat, False, 0, [0]))
     except ValueError:
         # Partial records improve detection only. They can NEVER establish a proof.
         partial, _complete, _in_progress = _lex_command(command, partial=True)
@@ -9117,36 +9150,45 @@ def _commit_command_syntax(command):
         apparent = apparent or not _commit_quote_bytes_known(command)
         apparent = apparent or any(_commit_apparent_segment(seg) for seg in partial)
         status = "unverifiable" if apparent else "outside"
-        return _CommitSyntax(status, tuple(partial), (), (), "incomplete shell parse", complete=False)
+        return _CommitSyntax(status, tuple(partial), (), (), "incomplete shell parse",
+                             complete=False, flat_argvs=None)
+    flat_argvs = [seg.argv for seg in flat]
     # The budget counts the segments the command itself holds (the flat lex), as before the shell-string
     # reading: the segments placed from a shell -c, eval or trap string are judged below, but a long script
     # inside one string does not exhaust the budget by itself.
-    if len(records) > _COMMIT_MAX_SEGMENTS and len(_lex_flat(command)) > _COMMIT_MAX_SEGMENTS:
-        return _CommitSyntax("unverifiable", records, (), (), "segment budget exhausted")
+    if len(records) > _COMMIT_MAX_SEGMENTS and len(flat) > _COMMIT_MAX_SEGMENTS:
+        return _CommitSyntax("unverifiable", records, (), (), "segment budget exhausted",
+                             complete=True, flat_argvs=flat_argvs)
     steps = tuple(_commit_syntax_step(seg) for seg in records)
     if any(not _commit_quote_bytes_known(seg.raw)
            for seg, step in zip(records, steps) if step is None):
         return _CommitSyntax("unverifiable", records, steps, (),
-                             "ANSI-C or locale quoting has unknown execution-time bytes")
+                             "ANSI-C or locale quoting has unknown execution-time bytes",
+                             complete=True, flat_argvs=flat_argvs)
     commits = tuple(i for i, step in enumerate(steps)
                     if step is not None and step.kind == "commit")
     hidden = any(_commit_apparent_segment(seg)
                  for seg, step in zip(records, steps) if step is None)
     if not commits and not hidden:
-        return _CommitSyntax("outside", records, steps, (), "no apparent direct commit")
+        return _CommitSyntax("outside", records, steps, (), "no apparent direct commit",
+                             complete=True, flat_argvs=flat_argvs)
     if (len(records) == 1 and steps[0] is not None
             and steps[0].kind == "commit" and records[0].sep_after == ""
             and records[0].argv in (["git", "commit", "--help"], ["git", "commit", "-h"])):
-        return _CommitSyntax("help", records, steps, commits, "exact lone help form")
+        return _CommitSyntax("help", records, steps, commits, "exact lone help form",
+                             complete=True, flat_argvs=flat_argvs)
     if hidden or any(step is None for step in steps):
         return _CommitSyntax("unverifiable", records, steps, commits,
-                             "segment outside the admitted commit grammar")
+                             "segment outside the admitted commit grammar",
+                             complete=True, flat_argvs=flat_argvs)
     if (not records or records[-1].sep_after != ""
             or any(seg.sep_after != "&&" for seg in records[:-1])):
         return _CommitSyntax("unverifiable", records, steps, commits,
-                             "commit command is not an uninterrupted && chain")
+                             "commit command is not an uninterrupted && chain",
+                             complete=True, flat_argvs=flat_argvs)
     return _CommitSyntax("grammar", records, steps, commits,
-                         "syntax established; target and state evidence still required")
+                         "syntax established; target and state evidence still required",
+                         complete=True, flat_argvs=flat_argvs)
 
 
 def _head_branch(repo):
@@ -10083,11 +10125,13 @@ def _fallback_push_hit(text):
                                                or _RAW_PUSH_MIRRORCFG_RE.search(text)))
 
 
-def _protected_line_fallback_denies(text):
+def _protected_line_fallback_denies(text, syntax=None):
     """True exactly when _protected_line_fallback(text) denies: an apparent commit that is not the lone help form
     (_commit_command_syntax), or a force, delete or mirror push spelling in the raw or de-quoted text
-    (_fallback_push_hit). A plain predicate: it builds no decision."""
-    syntax = _commit_command_syntax(text)
+    (_fallback_push_hit). A plain predicate: it builds no decision. syntax is the _commit_command_syntax
+    reading of `text` where the caller already holds it, so the text is not read again; None reads it here."""
+    if syntax is None:
+        syntax = _commit_command_syntax(text)
     if syntax.status != "outside":
         return syntax.status != "help"
     return bool(_fallback_push_hit(text) or _fallback_push_hit(_dequoted_text(text)))
@@ -10114,7 +10158,8 @@ def _protected_line_fallback(command, wrapped=False, syntax=None):
     The scan also reads the DE-QUOTED copy of the whole command (_dequoted_text:
     continuations joined, a '$' before a quote, quote characters and backslashes removed), so a
     fragmented spelling ('pu""sh', 'ma""in') that bash assembles into a push is caught; the deny message names the
-    actual reasons the reading is uncertain (_lex_uncertain_causes), plus 'wrapped' when the
+    actual reasons the reading is uncertain (_lex_uncertain_causes, given the reading's own flat argvs so the
+    command is not lexed again on this path), plus 'wrapped' when the
     caller lexed no segment whose command word is git. The pairing is read across the WHOLE
     text, so a force spelling in one command and a push word in another pair here (a disclosed
     over-denial, reached only on an uncertain, unparseable or wrapper-hidden command).
@@ -10132,7 +10177,8 @@ def _protected_line_fallback(command, wrapped=False, syntax=None):
     if _fallback_push_hit(command) or _fallback_push_hit(plain):
         named = (" a protected branch" if (_RAW_PROTECTED_RE.search(command) or _RAW_PROTECTED_RE.search(plain))
                  else " a target this guard cannot read")
-        causes = [_LEX_UNCERTAIN_CAUSE_TEXT[key] for key in _lex_uncertain_causes(command)]
+        causes = [_LEX_UNCERTAIN_CAUSE_TEXT[key]
+                  for key in _lex_uncertain_causes(command, flat_argvs=syntax.flat_argvs)]
         if wrapped:
             causes.append("no segment whose command word is git, so git sits under a command-word "
                           "wrapper or inside another command's text")
@@ -10214,9 +10260,11 @@ def protected_line(data):
         return _allow()
 
     # Only commit-free commands reach the existing push classifier/help shortcut. The commit reading above
-    # already took the shared segment reading: when it is complete its records ARE those segments, so the
-    # command is lexed once here; an incomplete reading (the lexer refused the command) routes to the raw
-    # fallback exactly as the lexer's refusal did when this path lexed for itself.
+    # already took the one flat lex and the shared reading built over it: when it is complete its records
+    # ARE those segments and flat_argvs is the flat view, so this path lexes the raw command no further (the
+    # push loop reads records, and the broad-fallback gate below reads flat_argvs); an incomplete reading
+    # (the lexer refused the command) routes to the raw fallback exactly as the lexer's refusal did when
+    # this path lexed for itself.
     if not syntax.complete:
         return _protected_line_fallback(command, syntax=syntax)
     seg_records = syntax.records
@@ -10227,8 +10275,9 @@ def protected_line(data):
     # reads the whole command when no git command was lexed). The other segments are judged below as the flat lex
     # judges them.
     for text in _shell_uncertain_texts(seg_records, stage=True):
-        if _protected_line_fallback_denies(text):
-            return _protected_line_fallback(text)
+        text_syntax = _commit_command_syntax(text)
+        if _protected_line_fallback_denies(text, syntax=text_syntax):
+            return _protected_line_fallback(text, syntax=text_syntax)
     cwd = data.get("cwd")
     pending_deny = None
     for seg in seg_records:
@@ -10278,12 +10327,15 @@ def protected_line(data):
     # wrapped force push naming NO protected branch, beside a benign parsed git segment, still
     # allows on a CERTAIN lex. The git gate reads the de-quoted text too, so a
     # quote-fragmented 'g""it' under a wrapper still reaches the fallback.
-    # Whether a git segment was lexed is read on the FLAT lex (_lex_flat), as before the shell-string reading: a
+    # Whether a git segment was lexed is read on the FLAT lex, as before the shell-string reading: a
     # git command placed from a shell -c, eval or trap string is judged by the push loop above, but it does not
     # count as a lexed git segment here, so a wrapped force push to a feature branch (bash -c 'git push --force
     # origin feature') still reaches this broad fallback and denies, as it does with no shell-string reading.
-    flat_saw_git = any(_command_word(seg.argv) == "git" for seg in _lex_flat(command))
-    if ((not flat_saw_git or _lex_uncertain(command))
+    # The commit reading recorded that flat view (flat_argvs), and the uncertainty check reads it too, so the
+    # raw command is not lexed again on this path (the continuation comparison still lexes the JOINED text,
+    # only where a continuation exists: that is a different text).
+    flat_saw_git = any(_command_word(argv) == "git" for argv in syntax.flat_argvs)
+    if ((not flat_saw_git or _lex_uncertain(command, flat_argvs=syntax.flat_argvs))
             and (_RAW_GIT_RE.search(command) or _RAW_GIT_RE.search(_dequoted_text(command)))):
         return _protected_line_fallback(command, wrapped=not flat_saw_git, syntax=syntax)
     return _allow()
