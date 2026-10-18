@@ -2517,4 +2517,8 @@ expected-check-ids = [
   "revert/empty-removal-set-turns-drop-green",
   "mutant/every-mutant-caught",
   "mutant/every-refusing-vector-discriminates",
+  # ---------- caller git configuration ----------
+  "config/poison-control-breaks-git",
+  "config/poisoned-same-result",
+  "config/poisoned-no-exposure",
 ]

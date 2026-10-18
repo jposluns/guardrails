@@ -31,6 +31,12 @@ the commit --base names. A shallow repository, an unresolvable or ambiguous base
 input at either end, or a missing head record cannot be evaluated (exit 2), never a pass. The base record
 may be absent (an empty record).
 
+Git configuration. Every git call, live and in the self-test, runs under the hermetic git environment of
+tools/_git_fixture_env.py (git_fixture_env): every GIT_-prefixed variable is dropped, HOME and
+XDG_CONFIG_HOME point at an empty scratch home, and the global and system config files are pinned to
+os.devnull with GIT_CONFIG_NOSYSTEM=1. So no global, XDG or system configuration, a malformed file
+included, reaches a read; the repository's own config, refs and objects are read as before.
+
 Loaders: the registry rows are validated by the execution gate's own schema validator
 (check_selftest_execution._manifest_rows) at both ends, and gate and hook ids are held to the hooks
 generator's control-id grammar (gen_hooks.ID_RE). The full gate and hook loaders
@@ -46,7 +52,9 @@ the preview channel (.aiqt/core/hooks/preview.toml), every self-test suite that 
 compares two endpoints, so an id removed and restored inside the range is unseen. A row's evidence and
 authorization are checked for presence only; whether the evidence is true, and whether the authorization
 was given, is review's to establish. Locally the base follows the local main ref, which can be stale.
-Grafts and replace objects are not inspected beyond GIT_NO_REPLACE_OBJECTS.
+Grafts and replace objects are not inspected beyond GIT_NO_REPLACE_OBJECTS. A safe.directory entry in the
+caller's global or system configuration is not read, so a checkout owned by another user cannot be
+evaluated (exit 2), never a pass.
 
   check_control_retirement.py               check the repository
   check_control_retirement.py --base REV    check against REV (local runs only)
@@ -76,6 +84,7 @@ import io
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import tempfile
@@ -85,7 +94,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _selftest_exit_report  # noqa: E402  (the execution report, finalized at interpreter exit)
 import check_selftest_execution  # noqa: E402  (the authoritative registry schema)
-from _git_fixture_env import fixture_git_lifecycle, git_fixture_env  # noqa: E402  (self-test fixtures only)
+from _git_fixture_env import fixture_git_lifecycle, git_fixture_env  # noqa: E402  (the hermetic git environment)
 from gen_hooks import ID_RE  # noqa: E402  (the control-id grammar of gate and hook ids)
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -112,12 +121,11 @@ class CannotEvaluate(Exception):
     """An input the gate cannot resolve, read or parse; the run exits 2."""
 
 
-def _git_env(environ):
-    """The caller's environment minus every GIT_-prefixed variable, so no repository-selecting variable
-    redirects a read, with replace objects, optional locks and prompts off."""
-    env = {key: value for key, value in environ.items() if not key.startswith("GIT_")}
-    env.update(GIT_NO_REPLACE_OBJECTS="1", GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", LC_ALL="C")
-    return env
+def _git_env():
+    """The hermetic git environment (git_fixture_env) with replace objects, optional locks and prompts off: no
+    GIT_-prefixed variable redirects a read, and no global, XDG or system configuration reaches it."""
+    return git_fixture_env(GIT_NO_REPLACE_OBJECTS="1", GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0",
+                           LC_ALL="C")
 
 
 def _finish(result, label):
@@ -205,7 +213,7 @@ def _push_before(environ):
 
 def resolve_base(root, base_arg, environ):
     """(how the base was bound, the base commit oid); every unresolvable binding raises CannotEvaluate."""
-    env = _git_env(environ)
+    env = _git_env()
     if _rev_parse(root, env, "--is-shallow-repository") != b"false\n":
         raise CannotEvaluate("shallow or unrecognizable repository; the base history cannot be trusted")
     event = environ.get("GITHUB_EVENT_NAME", "")
@@ -416,7 +424,7 @@ def run(root, base_arg=None, environ=None):
     environ = os.environ if environ is None else environ
     try:
         how, base = resolve_base(root, base_arg, environ)
-        count, findings = evaluate(_base_reader(root, _git_env(environ), base), _head_reader(root))
+        count, findings = evaluate(_base_reader(root, _git_env(), base), _head_reader(root))
     except CannotEvaluate as exc:
         print("error: cannot evaluate control retirement ({}); fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -645,7 +653,7 @@ def _fixtures(base_dir):
 
     def payload(before):
         def prepare(root, run_env):
-            oid = _commit(root, _git_env(run_env), "HEAD") if before is None else before
+            oid = _commit(root, _git_env(), "HEAD") if before is None else before
             path = Path(base_dir) / (root.name + "-event.json")
             path.write_text(json.dumps({"before": oid}), encoding="utf-8")
             run_env["GITHUB_EVENT_PATH"] = str(path)
@@ -772,6 +780,68 @@ def _load_mutant(source, directory, number):
     return module
 
 
+MALFORMED_CONFIG = "[core\n\tbroken\n"
+# The vectors run again under a poisoned caller git configuration: a pass, a finding, the push binding, a
+# shallow repository and an unresolvable base.
+POISONED_VECTORS = ("same/base-equals-head", "drop/check-no-row", "ci/push-drop-no-row", "base/shallow",
+                    "ci/pr-base-ref-unresolved")
+
+
+def _poisoned_config(base_dir, git):
+    """(environment changes, exposure log) for a caller git configuration that breaks every read honouring
+    it: HOME/.gitconfig, XDG_CONFIG_HOME/git/config and the GIT_CONFIG_SYSTEM file are each malformed. An
+    observer git placed first on PATH records home, xdg or system when a launch would read that surface (the
+    system file whenever neither GIT_CONFIG_NOSYSTEM=1 nor GIT_CONFIG_SYSTEM=/dev/null pins it off), then runs
+    git (the lifecycle's wrapper, which itself pins the system file off, so that surface is observed, not
+    read)."""
+    poison = Path(base_dir) / "caller-config"
+    home, xdg, system = poison / "home", poison / "xdg", poison / "system-gitconfig"
+    (xdg / "git").mkdir(parents=True)
+    home.mkdir()
+    for path in (home / ".gitconfig", xdg / "git" / "config", system):
+        path.write_text(MALFORMED_CONFIG, encoding="utf-8")
+    observer_dir = poison / "bin"
+    observer_dir.mkdir()
+    log = poison / "exposure"
+    log.write_bytes(b"")
+    observer = observer_dir / "git"
+    observer.write_text(
+        "#!/bin/sh\n"
+        '[ "${{HOME:-}}" != {home} ] || printf "home\\n" >> {log}\n'
+        '[ "${{XDG_CONFIG_HOME:-}}" != {xdg} ] || printf "xdg\\n" >> {log}\n'
+        'if [ "${{GIT_CONFIG_NOSYSTEM:-}}" != 1 ] && [ "${{GIT_CONFIG_SYSTEM:-}}" != {null} ]; then '
+        'printf "system\\n" >> {log}; fi\n'
+        'exec {git} "$@"\n'.format(home=shlex.quote(str(home)), xdg=shlex.quote(str(xdg)),
+                                   null=shlex.quote(os.devnull), log=shlex.quote(str(log)),
+                                   git=shlex.quote(git)), encoding="utf-8")
+    observer.chmod(0o700)
+    changes = dict(HOME=str(home), XDG_CONFIG_HOME=str(xdg), GIT_CONFIG_SYSTEM=str(system),
+                   PATH=str(observer_dir) + os.pathsep + os.environ.get("PATH", os.defpath))
+    return changes, log
+
+
+def _poisoned(environ, changes):
+    """environ with the poisoned configuration applied and the global and system pins removed."""
+    env = {key: value for key, value in environ.items() if key not in ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL")}
+    env.update(changes)
+    return env
+
+
+def _poisoned_gate(module, vector, changes):
+    """_gate with the poisoned configuration in the run environment and in the process environment, so a git
+    environment derived from either carries it; the process environment is restored afterwards."""
+    name, root, environ, base_arg, code, texts = vector
+    saved = dict(os.environ)
+    try:
+        poisoned = _poisoned(saved, changes)
+        os.environ.clear()
+        os.environ.update(poisoned)
+        return _gate(module, (name, root, _poisoned(environ, changes), base_arg, code, texts))
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
 def _registered_check_ids():
     """This suite's registered check ids, read through the execution gate's schema validator: (set of ids,
     None), or (None, reason)."""
@@ -795,11 +865,11 @@ def self_test(report_path=None):
         # (tools/_selftest_exit_report.py); nothing writes it in band. It is armed before the fixture
         # environment, whose scratch home registers its own exit handler, so the finalizer runs last.
         _selftest_exit_report.arm(report_path, SUITE_ID, executed)
-    with fixture_git_lifecycle():
-        return _self_test_isolated(executed)
+    with fixture_git_lifecycle() as git:
+        return _self_test_isolated(executed, git)
 
 
-def _self_test_isolated(executed):
+def _self_test_isolated(executed, git):
     results = []
 
     def check(check_id, ok, detail=""):
@@ -900,6 +970,33 @@ def _self_test_isolated(executed):
         never = sorted(vector[0] for vector in vectors if vector[4] != 0 and vector[0] not in exposed)
         check("mutant/every-refusing-vector-discriminates", vectors and not never, never)
 
+        # 4. caller git configuration: with a malformed HOME, XDG and system config in the run and process
+        # environments, every git read the gate makes is pinned off them, so each vector gives the same exit and
+        # output as without the poison, and no launch is observed reading those surfaces. A control first
+        # proves the poison breaks a git read that honours it and that the observer records all three surfaces.
+        changes, log = _poisoned_config(base_dir, git)
+        control_root = by_name.get("same/base-equals-head", (None, base_dir))[1]
+        try:
+            probe = subprocess.run(["git", "-C", str(control_root), "rev-parse", "HEAD"], capture_output=True,
+                                   timeout=TIMEOUT, env=_poisoned(os.environ, changes))
+            control = (probe.returncode != 0 and b"bad config" in probe.stderr,
+                       sorted(set(log.read_text(encoding="utf-8").split())))
+        except (OSError, subprocess.SubprocessError) as exc:
+            control = (False, "control launch failed: {}".format(exc))
+        check("config/poison-control-breaks-git", control == (True, ["home", "system", "xdg"]), control)
+        log.write_bytes(b"")
+        changed = []
+        for name in POISONED_VECTORS:
+            if name not in by_name:
+                changed.append((name, "vector not built"))
+                continue
+            clean, poisoned = _gate(this, by_name[name]), _poisoned_gate(this, by_name[name], changes)
+            if poisoned != clean:
+                changed.append((name, clean, poisoned))
+        check("config/poisoned-same-result", vectors and not changed, changed)
+        exposure = sorted(set(log.read_text(encoding="utf-8").split()))
+        check("config/poisoned-no-exposure", vectors and not exposure, exposure)
+
     # the in-run self-guard: the executed set is exactly this suite's registered set
     expected, problem = _registered_check_ids()
     harness = []
@@ -918,7 +1015,8 @@ def _self_test_isolated(executed):
     print("SELF-TEST PASS: control-retirement {} checks ({} vectors: removed gate, hook and check ids without a "
           "row are findings; covered, unreachable and disclosed rows are held to their fields; a rename is one "
           "row; the record is append-only; unresolvable bases and malformed inputs fail closed; {} mutants each "
-          "caught, every refusing vector discriminating)".format(len(results), len(vectors), len(MUTANTS)))
+          "caught, every refusing vector discriminating; a poisoned caller HOME, XDG and system git configuration "
+          "changes no result)".format(len(results), len(vectors), len(MUTANTS)))
     return 0
 
 
