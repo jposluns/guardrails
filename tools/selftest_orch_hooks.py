@@ -8281,7 +8281,7 @@ def _leasehb_write_integrity_cases(tmp):
     # --- (6) a separator str.splitlines breaks on (U+2028, U+0085, a form feed) stays inside
     # its line, so it never yields a phantom holder line (red on a splitlines reader: the
     # phantom proved the holder and the lease was touched) ---
-    for cid, name, sep in (("leasehb/lines-u2028-no-phantom-holder", "sepu2028", " "),
+    for cid, name, sep in (("leasehb/lines-u2028-no-phantom-holder", "sepu2028", "\u2028"),
                            ("leasehb/lines-nel-no-phantom-holder", "sepnel", "\x85"),
                            ("leasehb/lines-formfeed-no-phantom-holder", "sepff", "\x0c")):
         fs = fixture(name, "note: x" + sep + "holder: s1\n", hb(), primed=False)
