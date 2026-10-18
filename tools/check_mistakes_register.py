@@ -67,7 +67,12 @@ PRESENCE is an explicit lstat whose only absence answer is ENOENT (a dangling or
 registry entry is cannot-evaluate, never NOT APPLICABLE and never a silent fall-through to the
 lower-priority registry file), a registry that is PRESENT but not a JSON object is cannot-evaluate
 (exit 2), never NOT APPLICABLE, and a declared register value that is not a non-empty string is
-cannot-evaluate (exit 2), never a skipped surface.
+cannot-evaluate (exit 2), never a skipped surface. The registry and every declared register are
+read through one NON-BLOCKING open whose opened descriptor must prove a regular file before
+anything is read: a FIFO, a directory, a device or a socket at either path is cannot-evaluate
+(exit 2) with a diagnostic naming the file type, never read and never blocked on (the path is
+still followed, so a symlink to a regular file still reads; what it aliases is still
+type-checked).
   check_mistakes_register.py                   run the live leg
   check_mistakes_register.py --update-anchor   verify, then advance the anchor on green
   check_mistakes_register.py --self-test       synthetic fixtures for every invariant
@@ -211,6 +216,62 @@ def _read_regular(path, label):
             chunks.append(chunk)
     except OSError as exc:
         raise CannotEvaluate("{} at {} cannot be read ({})".format(label, path, exc))
+    finally:
+        os.close(fd)
+
+
+def _nonregular_name(mode):
+    """A plain name for a non-regular file type, for refusal messages."""
+    if stat.S_ISFIFO(mode):
+        return "a FIFO (named pipe)"
+    if stat.S_ISDIR(mode):
+        return "a directory"
+    if stat.S_ISSOCK(mode):
+        return "a socket"
+    if stat.S_ISCHR(mode):
+        return "a character device"
+    if stat.S_ISBLK(mode):
+        return "a block device"
+    return "a non-regular file (mode 0o{:o})".format(stat.S_IFMT(mode))
+
+
+def _read_following(path, label):
+    """Read PATH as bytes, following the path as these reads always have (a symlink to a
+    regular file still reads; what it aliases is still type-checked), without ever blocking
+    on the file type: the open is NON-BLOCKING (a blocking read-only open of a FIFO waits
+    for a writer), and the OPENED descriptor's own fstat must prove a regular file before
+    anything is read (a read of a FIFO descriptor can wait forever). A non-regular file
+    raises CannotEvaluate naming LABEL and the file type. On Linux a socket (and a device
+    node no driver backs) cannot be opened as a file at all (ENXIO, before any descriptor
+    exists), so that refusal names the type from the path's own lstat, a point-in-time read
+    taken only for the message, never as a proof about an opened descriptor. Every other
+    failure (absence included) propagates as the OSError it is, so each caller keeps its own
+    wording for an unreadable entry. O_NONBLOCK stays set on the proven-regular descriptor:
+    reads of a regular file behave the same with or without it."""
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError as exc:
+        if exc.errno == errno.ENXIO:
+            try:
+                mode = os.lstat(str(path)).st_mode
+            except OSError:
+                mode = None
+            if mode is not None and not stat.S_ISREG(mode):
+                raise CannotEvaluate(
+                    "{} names {}, not a regular file (the non-blocking open cannot address "
+                    "it, so it was never opened or read)".format(label, _nonregular_name(mode)))
+        raise
+    try:
+        st_mode = os.fstat(fd).st_mode
+        if not stat.S_ISREG(st_mode):
+            raise CannotEvaluate("{} names {}, not a regular file".format(
+                label, _nonregular_name(st_mode)))
+        chunks = []
+        while True:
+            chunk = os.read(fd, READ_CHUNK)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
     finally:
         os.close(fd)
 
@@ -539,8 +600,15 @@ def run(root, update=False):
         if reg_entry is None:
             continue
         reg_found = True
+        # The registry is read like the registers below: a non-blocking open whose opened
+        # descriptor must prove a regular file, so a FIFO (or any other non-regular file)
+        # at the registry path is refused by name instead of blocking the gate.
         try:
-            reg = json.loads(p.read_text(encoding="utf-8"))
+            reg = json.loads(_read_following(
+                p, "the orchestration registry").decode("utf-8"))
+        except CannotEvaluate as exc:
+            print("error: {}; fail-closed".format(exc))
+            return 2
         except (OSError, ValueError) as exc:
             print("error: cannot read the orchestration registry: {}".format(exc))
             return 2
@@ -568,9 +636,16 @@ def run(root, update=False):
     worst, green = 0, []
     for key, prefix, declared in surfaces:
         path = Path(declared) if os.path.isabs(declared) else Path(root) / declared
+        # The same non-blocking open and regular-file proof as the registry read above: a
+        # declared register that is a FIFO, a directory, a device or a socket is refused
+        # with a diagnostic naming the file type, never read and never blocked on.
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError as exc:
+            lines = _read_following(
+                path, "the declared " + key).decode("utf-8").splitlines()
+        except CannotEvaluate as exc:
+            print("error: {}; fail-closed".format(exc))
+            return 2
+        except (OSError, ValueError) as exc:
             print("error: the DECLARED {} is unreadable ({}); fail-closed".format(key, exc))
             return 2
         try:
@@ -616,6 +691,7 @@ def self_test():
     import contextlib
     import io
     import shutil
+    import signal
     import tempfile
     import threading
     # Hermetic git fixtures (test-hermeticity): every fixture git call below inherits
@@ -1489,6 +1565,75 @@ def self_test():
                             "string") not in decl_out.getvalue():
             failures.append("a malformed attestations declaration should name its own key, "
                             "got exit {}: {}".format(decl_rc, decl_out.getvalue().strip()))
+        # the live leg's registry and register reads never block on the file type: a FIFO at
+        # the declared register path, and a FIFO at the registry path itself, are each
+        # refused (exit 2) with a diagnostic naming the file type; each vector runs under an
+        # alarm so a read that blocks fails instead of hanging the suite. The bound is sized
+        # from measured clean runs of these reads (well under a second each) with two orders
+        # of magnitude of margin for a loaded host.
+        class ReadAlarm(Exception):
+            # deliberately NOT an OSError: the live leg's reads catch OSError, and the alarm
+            # must escape them to fail the vector
+            pass
+
+        def bounded_run(name, *rargs, seconds=60, **rkw):
+            def on_alarm(signum, frame):
+                raise ReadAlarm("blocked for {} s".format(seconds))
+            old_handler = signal.signal(signal.SIGALRM, on_alarm)
+            signal.alarm(seconds)
+            try:
+                bout = io.StringIO()
+                with contextlib.redirect_stdout(bout):
+                    rc = run(*rargs, **rkw)
+                return rc, bout.getvalue()
+            except ReadAlarm as exc:
+                failures.append("{}: the live leg blocked instead of refusing ({})".format(
+                    name, exc))
+                return None
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+
+        registry.write_text(json.dumps(
+            {"version": 1, "mistakes_register": "fifo-reg.jsonl"}), encoding="utf-8")
+        fifo_decl_reg = repo / "fifo-reg.jsonl"
+        os.mkfifo(str(fifo_decl_reg))
+        fifo_got = bounded_run("gate-fifo-register-refused", repo)
+        if fifo_got is not None and (
+                fifo_got[0] != 2 or "FIFO" not in fifo_got[1]
+                or "not a regular file" not in fifo_got[1]):
+            failures.append("gate-fifo-register-refused: a FIFO register should be exit 2 "
+                            "naming the file type, got exit {!r}: {}".format(
+                                fifo_got[0], fifo_got[1].strip()))
+        if not stat.S_ISFIFO(os.lstat(str(fifo_decl_reg)).st_mode):
+            failures.append("gate-fifo-register-refused: the refusal changed the register "
+                            "entry")
+        fifo_decl_reg.unlink()
+        registry.unlink()
+        os.mkfifo(str(registry))
+        fifo_got = bounded_run("gate-fifo-registry-refused", repo)
+        if fifo_got is not None and (
+                fifo_got[0] != 2 or "FIFO" not in fifo_got[1]
+                or "not a regular file" not in fifo_got[1]
+                or "orchestration registry" not in fifo_got[1]):
+            failures.append("gate-fifo-registry-refused: a FIFO registry should be exit 2 "
+                            "naming the registry and the file type, got exit {!r}: {}".format(
+                                fifo_got[0], fifo_got[1].strip()))
+        registry.unlink()
+        # the paired control: the same reads on a regular registry and register still verify
+        # and pass (update=True establishes the untracked register's first anchor), under the
+        # same bound
+        ctrl_reg = repo / "fifo-control-reg.jsonl"
+        ctrl_rows = chain(lambda p: row(1, "MR-1", "proposed", p))
+        ctrl_reg.write_text("\n".join(ctrl_rows) + "\n", encoding="utf-8")
+        registry.write_text(json.dumps(
+            {"version": 1, "mistakes_register": "fifo-control-reg.jsonl"}),
+            encoding="utf-8")
+        ctrl_got = bounded_run("gate-regular-reads-still-pass", repo, update=True)
+        if ctrl_got is not None and ctrl_got[0] != 0:
+            failures.append("gate-regular-reads-still-pass: the regular-file control should "
+                            "pass, got exit {!r}: {}".format(
+                                ctrl_got[0], ctrl_got[1].strip()))
         # TRACKED registers and the anchor WRITE: a green tracked run reaches update_anchor
         # through the merge-base leg (no anchor inspection on the read side), so the write
         # itself must refuse a symlink entry, dangling or live, and advance only by atomic
@@ -1742,9 +1887,14 @@ def self_test():
           "uninspectable marker is cannot-evaluate, never a walk past it, and a nested empty "
           ".git directory is refused by the realpath comparison); a landed check_ref whose "
           "inspection fails with anything but ENOENT is cannot-evaluate through the shared "
-          "entry state; and each malformed declaration form (a number, a list, an empty "
+          "entry state; each malformed declaration form (a number, a list, an empty "
           "string, null) is refused with its named per-key diagnostic (a malformed "
-          "attestations declaration names its own key)")
+          "attestations declaration names its own key); and the live leg's registry and "
+          "register reads never block on the file type (a FIFO at the declared register "
+          "path and a FIFO at the registry path are each refused, exit 2, with a diagnostic "
+          "naming the file type, alarm-bounded so a blocking regression fails rather than "
+          "hangs, while the regular-file control still verifies and passes under the same "
+          "bound)")
     return 0
 
 
