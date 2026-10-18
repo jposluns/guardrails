@@ -10799,10 +10799,10 @@ def _main_isolated(report_path=None):
         # the wait-loop guard denies, and a background dispatch piping pytest into head before that nesting
         # (OWN_SINK) is denied by the truncation guard; the reading of each passes the bound
         # (wl/bound-indeterminate). And a body left unread is judged by its words, as reading it could: BASE in
-        # a substitution after ECHO_6 is a 'match' that the wait-loop guard denies (wl/bound-unread-match), and
-        # pytest piped into head in a substitution after ECHO_6 is denied by the truncation guard
-        # (trunc/bound-unread-denies). Each guard decides each command, NESTED (44,322 bytes) included, within
-        # 1 s of CPU.
+        # a substitution after ECHO_6, which a body left unread there must hold, is a 'match' that the wait-loop
+        # guard denies (wl/bound-unread-match), and pytest piped into head in a substitution after ECHO_6, left
+        # unread the same way, is denied by the truncation guard (trunc/bound-unread-denies). Each guard decides
+        # each command, NESTED (44,322 bytes) included, within 1 s of CPU.
         def _nest(command, levels):
             for _level in range(levels):
                 command = 'x="$(echo "\'")" "\'" `' + command.replace("\\", "\\\\").replace("`", "\\`") + " '\\\"'`"
@@ -10820,8 +10820,17 @@ def _main_isolated(report_path=None):
                      for cmd in (ECHO_6, OWN_LOOP, OWN_SINK)), clf(ECHO_6)),
               ((True, True, True), "indeterminate"))
         UNREAD_LOOP = ECHO_6 + "; echo `" + BASE + "`"
-        check("wl/bound-unread-match", (clf(UNREAD_LOOP), _verdict(wl(UNREAD_LOOP, rib=True))), ("match", "deny"))
-        check("trunc/bound-unread-denies", _verdict(tg(ECHO_6 + "; echo `pytest | head -5`", rib=True)), "deny")
+        UNREAD_SINK = ECHO_6 + "; echo `pytest | head -5`"
+
+        def _left_unread(command, text):
+            """Whether a body the substitution reading of command leaves unread past the bound holds text."""
+            return any(text in body for body in aiqt_hooks._substitution_lines(aiqt_hooks._lex_command(command))[1])
+
+        check("wl/bound-unread-match",
+              (_left_unread(UNREAD_LOOP, BASE), clf(UNREAD_LOOP), _verdict(wl(UNREAD_LOOP, rib=True))),
+              (True, "match", "deny"))
+        check("trunc/bound-unread-denies",
+              (_left_unread(UNREAD_SINK, "pytest | head -5"), _verdict(tg(UNREAD_SINK, rib=True))), (True, "deny"))
         for cid, decide, own, wants in (("wl/bound-cost", wl, OWN_LOOP, ("deny", "deny")),
                                         ("trunc/bound-cost", tg, OWN_SINK, ("warn", "deny"))):
             got = []

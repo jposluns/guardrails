@@ -132,13 +132,24 @@ the bound before reaching it (diff_source_pretool, commit_identity, on the comma
 -x run line, git_discard, gate_weakening's three raw probes, commit_msg_subst, and protected_line, whose cause
 list names the bound and no unbalanced quote), and that bash_absolute_paths and branch_root still judge the
 command's own segments past the bound. The cs-floor cases check commands the reading with no bound decided
-in at most about 0.8 s of CPU on one host: a branch creation, a bare stash pop and a directory change in a
-substitution after that shape around echo 6 deep, and a quoted echo operand holding a --no-verify spelling
-nested 6 and 7 deep or beside the bound, must get the decision the guard gave each before the bound existed.
+in at most about 0.8 s of CPU on one host: a branch creation and a directory change in a substitution after
+that shape around echo 3 deep, and a bare stash pop after it 6 deep, each read in full, the trigger's body
+included, by the reading the guard uses within the bound (which a floor of 4,096 characters does not allow),
+and a quoted echo operand holding a --no-verify spelling nested 6 and 7 deep or beside the bound, must get the
+decision the guard gave each before the bound existed.
 The cs-unread cases check that past the bound a trigger that only a body left unread holds gets the decision
 the guard gives that trigger read, or a stricter one, in gate_weakening, diff_source_pretool,
 git_explicit_binding, git_stash_ref, protected_line, commit_msg_subst, commit_identity, bash_absolute_paths,
-git_discard and branch_root. The table does not cover gate_weakening's verification-sink deny
+git_discard and branch_root; nine of them must hold their trigger in a body left unread, and seven of those
+each fail when one path that fails closed or one clause of a raw probe is removed (the part of a line whose
+own scan passed the bound, a directory change beside a creation, the command's text beside a push, the '.'
+pathspec, a git word left unread beside a directory change, and line continuations doubled by a nested
+backquote, for gate_weakening and git_discard). The cs-unread-cost cases check that each raw probe of a text
+left unread costs time linear in it: a run of '/-' pairs before the short option cluster that decides, in a
+body left unread (84,383 to 184,383 bytes), in the command's own segment, or in a line whose own scan passes
+the bound, and a long backslash run beside a git commit -n in such a line, must be denied within 1 s of CPU by
+git_explicit_binding and gate_weakening. The cs-unread table
+does not cover gate_weakening's verification-sink deny
 tier, which reads the command's own records, or the two orchestration guards (orch_truncation_guard,
 orch_untracked_wait_loop), whose shared reading, and reading of the command's own line and of a body left
 unread past the bound, tools/selftest_orch_hooks.py checks. The wx-* cases pin each
@@ -2935,30 +2946,39 @@ _CS_BOUND_TEXT = (
 )
 
 
-def _cs_flow_spent(records):
-    """Whether the reading in execution order (_command_flow) of the lexed records passes the work bound."""
-    return bool(aiqt_hooks._command_flow(records)[1])
+def _cs_flow_read(records):
+    """(the records read, the texts left unread) for the reading in execution order (_command_flow) of the
+    lexed records: the texts are empty where it read every body within the work bound."""
+    return aiqt_hooks._command_flow(records)
 
 
-def _cs_lines_spent(records):
-    """Whether the reading that adds each body's lines once (_substitution_lines) passes the work bound."""
-    return bool(aiqt_hooks._substitution_lines(records)[1])
+def _cs_lines_read(records):
+    """(the records read, the texts left unread) for the reading that adds each body's lines once
+    (_substitution_lines), the command's own records first (_command_records)."""
+    return aiqt_hooks._command_records(records)
 
 
-# Whether the substitution reading a guard uses passes the work bound, for each guard that does not read in
-# execution order (_cs_flow_spent): diff_source_pretool, gate_weakening and orch_truncation_guard read each
-# body's lines once, as protected_line, commit_msg_subst, git_stash_ref and bash_absolute_paths read their
-# records (_command_records), and commit_identity reads them again where a body recurs, under its locale
-# reading first.
+def _cs_locale_read(records):
+    """(the records read, the texts left unread) for the reading that adds each body's lines again where it
+    recurs, under the locale reading (_substitution_lines with locale and repeat set), the command's own
+    records first."""
+    lines, unread = aiqt_hooks._substitution_lines(records, locale=True, repeat=True)
+    return [seg for line in [records] + lines for seg in line], unread
+
+
+# The substitution reading each guard that does not read in execution order (_cs_flow_read) uses:
+# diff_source_pretool, gate_weakening and orch_truncation_guard read each body's lines once, as
+# protected_line, commit_msg_subst, git_stash_ref and bash_absolute_paths read their records
+# (_command_records), and commit_identity reads them again where a body recurs, under its locale reading first.
 _CS_BOUND_READING = {
-    "diff_source_pretool": _cs_lines_spent,
-    "gate_weakening": _cs_lines_spent,
-    "orch_truncation_guard": _cs_lines_spent,
-    "protected_line": _cs_lines_spent,
-    "commit_msg_subst": _cs_lines_spent,
-    "git_stash_ref": _cs_lines_spent,
-    "bash_absolute_paths": _cs_lines_spent,
-    "commit_identity": lambda records: bool(aiqt_hooks._substitution_lines(records, locale=True, repeat=True)[1]),
+    "diff_source_pretool": _cs_lines_read,
+    "gate_weakening": _cs_lines_read,
+    "orch_truncation_guard": _cs_lines_read,
+    "protected_line": _cs_lines_read,
+    "commit_msg_subst": _cs_lines_read,
+    "git_stash_ref": _cs_lines_read,
+    "bash_absolute_paths": _cs_lines_read,
+    "commit_identity": _cs_locale_read,
 }
 
 
@@ -2975,7 +2995,7 @@ def _test_substitution_bound_text(failures):
         read = command
         if command.startswith("git rebase -x "):
             read = shlex.split(command)[3]  # the run line commit_identity reads as a command of its own
-        if not _CS_BOUND_READING.get(name, _cs_flow_spent)(aiqt_hooks._lex_command(read)):
+        if not _CS_BOUND_READING.get(name, _cs_flow_read)(aiqt_hooks._lex_command(read))[1]:
             failures.append("{}: expected its substitution reading past the work bound, got a complete reading"
                             .format(label))
         code, out, _stderr = getattr(aiqt_hooks, name)(
@@ -3000,44 +3020,76 @@ def _test_substitution_bound_text(failures):
                     label, part, reason))
 
 
-# (guard, command, decision): the floor rows. Each decision is the one the guard gave the command before the
-# reading had a bound, which read every body (in at most about 0.8 s of CPU on one host): a branch creation,
-# a bare stash pop and a directory change in a substitution after the nested shape 6 levels deep, which every
-# guard reading in execution order passes the bound inside, so the body holding the trigger is left unread
-# there; and a quoted echo operand holding a --no-verify spelling, nested 6 and 7 levels deep, and as the
-# command's own segment beside the nested shape with _CS_BOUND_WORDS words, which passes the bound: a spelling
-# the reading found quoted prose in a line it read is not denied for a body left unread.
+# (guard, command, decision, and optionally the argv of the trigger): the floor rows. Each decision is the one
+# the guard gave the command before the reading had a bound, which read every body (in at most about 0.8 s of
+# CPU on one host): a branch creation and a directory change in a substitution after the nested shape 3
+# levels deep, and a bare stash pop after it 6 levels deep, which the reading the guard uses (in execution
+# order for the first two, adding each body's lines once for the third) must read in full within the bound,
+# the trigger's body included, so the guard decides from that body read: with the floor of 4,096 characters
+# each reading passes the bound and leaves that body unread; and a quoted echo operand holding a --no-verify
+# spelling, nested 6 and 7 levels deep, and as the command's own segment beside the nested shape with
+# _CS_BOUND_WORDS words, which passes the bound: a spelling the reading found quoted prose in a line it read
+# is not denied for a body left unread.
 _CS_BOUND_FLOOR = (
-    ("branch_root", _cs_bound_nest("echo", 6) + "; echo `git checkout -b x`", "deny"),
-    ("git_stash_ref", _cs_bound_nest("echo", 6) + "; echo `git stash pop`", "allow-note"),
-    ("git_explicit_binding", _cs_bound_nest("echo", 6) + "; echo `cd sub`; git add -A", "allow-note"),
+    ("branch_root", _cs_bound_nest("echo", 3) + "; echo `git checkout -b x`", "deny",
+     ("git", "checkout", "-b", "x")),
+    ("git_stash_ref", _cs_bound_nest("echo", 6) + "; echo `git stash pop`", "allow-note", ("git", "stash", "pop")),
+    ("git_explicit_binding", _cs_bound_nest("echo", 3) + "; echo `cd sub`; git add -A", "allow-note",
+     ("cd", "sub")),
     ("gate_weakening", _cs_bound_nest('echo "git commit --no-verify -m x"', 6), "allow"),
     ("gate_weakening", _cs_bound_nest('echo "git commit --no-verify -m x"', 7), "allow"),
     ("gate_weakening", 'echo "git commit --no-verify -m x"; ' + _CS_BOUND_TAIL, "allow"),
 )
 
-# (guard, command, decision, a fragment its reason or note must carry, or None): a body left unread past the
-# work bound, judged by the guard's raw scans of its text (_unread_texts), each row past the bound under the
-# reading the guard uses (_CS_BOUND_READING). Each deny and each note is the decision the guard gives that
-# trigger read, or a stricter one: --no-verify spelled by a short leading part of the name and -n in a cluster,
-# which the unparseable-command probes miss; a pipe with no checker; the parts of a diff-producer split
-# across segments, a producer word with no git in a substitution nested in one left unread (the lexer keeps a
-# word nested that deep inside a backquote word of the command's own segment, so no segment read is a
-# possible producer), and a listing beside the bound; a mutation before a directory
-# change, a directory change left unread, and a whole-tree stage and push left unread; a bare stash pop; a
-# ':' refspec push, which the force and delete push scan misses; a quote-fragmented commit with a substitution
-# marker and AI author; a truncating redirect and a relative cd; a work-losing reset; and a branch creation.
+def _cs_dq_nest(depth, words):
+    """echo with words words, nested depth levels deep, each level echo "$(...)": the second backquote scan
+    (_backquote_scan) reads each level's double-quoted $(...) to its end and charges what it read to the work
+    bound, so at 15 levels with 10,000 words (a 20,155-byte line) the scan of the line that holds it passes the
+    bound itself, before it finds any substitution in that line, and the line's text from its first segment
+    holding a backquote is left unread (_substitution_leave)."""
+    command = "echo " + "y " * words
+    for _level in range(depth):
+        command = 'echo "$(' + command + ')"'
+    return command
+
+
+# (guard, command, decision, a fragment its reason or note must carry, or None, and optionally a text a body
+# left unread must hold): a body left unread past the work bound, judged by the guard's raw scans of its text
+# (_unread_texts), each row past the bound under the reading the guard uses (_CS_BOUND_READING). Each decision
+# is the one the guard gives that trigger read, or a stricter one: --no-verify spelled by a
+# short leading part of the name and -n in a cluster, which the unparseable-command probes miss; a pipe with
+# no checker; the parts of a diff-producer split across the command's own segments, which diff_source_pretool
+# reads as with no bound and allows, since past the bound it reads only the bodies left unread, a producer
+# word with no git in a substitution nested in one left unread (the lexer keeps a word nested that deep inside
+# a backquote word of the command's own segment, so no segment read is a possible producer), and a listing
+# beside the bound, which gets the producer-capable note of a listing read; a
+# mutation before a directory change, a directory change left unread, and a whole-tree stage and push left
+# unread; a bare stash pop; a ':' refspec push, which the force and delete push scan misses; a
+# quote-fragmented commit with a substitution marker and AI author; a truncating redirect and a relative cd; a
+# work-losing reset; a branch creation; and a branch creation, and a directory change before a whole-tree
+# stage, after the nested shape with 1,500 words 6 levels deep, which the reading in execution order passes
+# the bound inside, so each trigger is left unread (the floor rows read them 3 levels deep). The last three
+# each check one path that fails closed, with the trigger held by a body left unread: a branch creation in a
+# line whose own scan passes the bound (_cs_dq_nest), so the reading records that line's text
+# (_substitution_leave); a directory change left unread before a branch creation in the command's own segment
+# that, read alone, allows with a note (an unresolvable --git-dir target), which _branch_unread_creation
+# denies; and a push left unread after a whole-tree stage in the command's own segment, which
+# _expbnd_unread_breadth denies from the command's text. The next four each check a clause no other row
+# needs: a whole-tree '.' pathspec stage and push left unread (the pathspec part of _RAW_BREADTH_MARK); a
+# commit left unread beside a quoted cd in the command's own segment, which the fallback's directory-change
+# probe does not read as a word (the second clause of _expbnd_unread_note); and a git commit -n and a git reset
+# --hard whose word a line continuation splits in a backquote nested in a body left unread, where each
+# backslash is doubled, so only that body read once its continuations are removed names the word
+# (_unread_plain), and the whole command's text does not (git_discard, whose fallback then denies).
 _CS_BOUND_UNREAD = (
     ("gate_weakening", _cs_bound_after("git commit --n -m x"), "deny", "--no-verify spelling"),
     ("gate_weakening", _cs_bound_after("git commit -nm x"), "deny", "short -n"),
     ("gate_weakening", _cs_bound_after("ls | sort"), "allow-note",
      "none of those holds a --no-verify or short -n spelling"),
-    ("diff_source_pretool", "git status; echo diff; " + _CS_BOUND_TAIL, "allow-note",
-     "could not parse this command, or reading its backquote substitutions passed the work bound"),
+    ("diff_source_pretool", "git status; echo diff; " + _CS_BOUND_TAIL, "allow", None),
     ("diff_source_pretool", _cs_bound_after("echo \\`log\\`"), "allow-note",
      "none of those appears to invoke a git diff-producer"),
-    ("diff_source_pretool", "git log --oneline; " + _CS_BOUND_TAIL, "allow-note",
-     "could not parse this command, or reading its backquote substitutions passed the work bound"),
+    ("diff_source_pretool", "git log --oneline; " + _CS_BOUND_TAIL, "allow-note", "this command is producer-capable"),
     ("git_explicit_binding", "git commit -m x; cd /x; " + _CS_BOUND_TAIL, "allow-note",
      "a directory change in this command feeds a git"),
     ("git_explicit_binding", "git status; " + _cs_bound_nest("cd sub", 6, _CS_BOUND_WORDS), "allow-note",
@@ -3053,17 +3105,42 @@ _CS_BOUND_UNREAD = (
     ("bash_absolute_paths", _cs_bound_after("cd rel"), "allow-note", "which may hold a relative cd"),
     ("git_discard", _cs_bound_after("git reset --hard"), "deny", "passed the work bound"),
     ("branch_root", _cs_bound_after("git checkout -b x"), "deny", "a substitution left unread may create a branch"),
+    ("branch_root", _cs_bound_nest("echo", 6) + "; echo `git checkout -b x`", "deny",
+     "a substitution left unread may create a branch", "git checkout -b x"),
+    ("git_explicit_binding", _cs_bound_nest("echo", 6) + "; echo `cd sub`; git add -A", "allow-note",
+     "so some of them were not read, and a directory change or whole-tree stage", "cd sub"),
+    ("branch_root", "echo `git checkout -b x`; " + _cs_dq_nest(15, 10000), "deny",
+     "a substitution left unread may create a branch", "git checkout -b x"),
+    ("branch_root", _cs_bound_after("cd /x") + "; git --git-dir=/r/.git checkout -b x origin/main", "deny",
+     "or change directory before one", "cd /x"),
+    ("git_explicit_binding", "git add -A; " + _cs_bound_after("git push origin f"), "deny", None,
+     "git push origin f"),
+    ("git_explicit_binding", _cs_bound_after("git add . && git push origin f"), "deny", None, "git add . &&"),
+    ("git_explicit_binding", '"cd" /x; ' + _cs_bound_after("git commit -m x"), "allow-note",
+     "so some of them were not read, and a directory change or whole-tree stage", "git commit -m x"),
+    ("gate_weakening", _cs_bound_after("echo \\`git com\\\\\\\\\nmit -nm x\\`"), "deny", "short -n", "git com"),
+    ("git_discard", _cs_bound_after("echo \\`git re\\\\\\\\\nset --hard\\`"), "deny", "passed the work bound",
+     "git re"),
 )
 
 
 def _test_substitution_bound_unread(failures):
     """(cs-floor, cs-unread) Past the substitution reading's work bound no guard decides less strictly than it
-    did with every body read: each row of _CS_BOUND_FLOOR must get its decision within 1 s of CPU (cs-floor),
-    and each row of _CS_BOUND_UNREAD must pass the work bound under the reading the guard uses
-    (_CS_BOUND_READING), so a body is left unread, and get its decision, with its reason or note carrying the
-    row's fragment, within 1 s of CPU (cs-unread). No submitted Bash command is executed."""
-    for name, command, want in _CS_BOUND_FLOOR:
+    did with every body read: each row of _CS_BOUND_FLOOR must get its decision within 1 s of CPU, and where
+    the row names its trigger, the reading the guard uses (_CS_BOUND_READING) must read every body within the
+    bound, the trigger's included (cs-floor); and each row of _CS_BOUND_UNREAD must pass the work bound under
+    that reading, so a body is left unread, with the row's text, where it names one, held by a body left
+    unread, and get its decision, with its reason or note carrying the row's fragment, within 1 s of CPU
+    (cs-unread). No submitted Bash command is executed."""
+    for name, command, want, *trigger in _CS_BOUND_FLOOR:
         label = "(cs-floor-{}) the {}-byte command".format(name, len(command))
+        if trigger:
+            read, unread = _CS_BOUND_READING.get(name, _cs_flow_read)(aiqt_hooks._lex_command(command))
+            if unread or list(trigger[0]) not in [seg.argv for seg in read]:
+                failures.append("{}: expected every body read within the work bound, {!r} among them, got {} "
+                                "texts left unread and {!r} {}read".format(
+                                    label, " ".join(trigger[0]), len(unread), " ".join(trigger[0]),
+                                    "" if list(trigger[0]) in [seg.argv for seg in read] else "not "))
         start = time.process_time()
         got = _decision(getattr(aiqt_hooks, name), command)
         cost = time.process_time() - start
@@ -3071,11 +3148,15 @@ def _test_substitution_bound_unread(failures):
             failures.append("{}: expected {}, got {}".format(label, want, got))
         if cost >= 1.0:
             failures.append("{}: {:.2f} s of CPU, over the 1 s bound".format(label, cost))
-    for name, command, want, part in _CS_BOUND_UNREAD:
+    for name, command, want, part, *held in _CS_BOUND_UNREAD:
         label = "(cs-unread-{}) the {}-byte command {!r}".format(name, len(command), command[-40:])
-        if not _CS_BOUND_READING.get(name, _cs_flow_spent)(aiqt_hooks._lex_command(command)):
+        _read, unread = _CS_BOUND_READING.get(name, _cs_flow_read)(aiqt_hooks._lex_command(command))
+        if not unread:
             failures.append("{}: expected its substitution reading past the work bound, got a complete reading"
                             .format(label))
+        elif held and not any(held[0] in text for text in unread):
+            failures.append("{}: expected a body left unread to hold {!r}, got {} texts left unread without it"
+                            .format(label, held[0], len(unread)))
         start = time.process_time()
         got, reason = _cs_reason(name, command)
         cost = time.process_time() - start
@@ -3084,6 +3165,55 @@ def _test_substitution_bound_unread(failures):
         elif part is not None and part not in reason:
             failures.append("{}: its {} lacks {!r}: {!r}".format(
                 label, "reason" if want == "deny" else "note", part, reason))
+        if cost >= 1.0:
+            failures.append("{}: {:.2f} s of CPU, over the 1 s bound".format(label, cost))
+
+
+def _cs_slash_dash_after(pairs):
+    """The nested shape around echo with _CS_BOUND_WORDS words, 6 levels deep, then '; echo' and a backquote
+    substitution holding echo with a run of pairs '/-' pairs, a whole-tree stage and a push: the reading in
+    execution order passes the work bound inside the nested shape, so that body is left unread."""
+    return (_cs_bound_nest("echo", 6, _CS_BOUND_WORDS) + "; echo `echo " + "/-" * pairs
+            + "; git add -A; git push origin f`")
+
+
+# (guard, command): a raw probe's text holding a long run of '/-' pairs before the short option cluster that
+# decides, where each '-' opens a cluster as the probe reads one (_ShortClusterProbe): a body left unread after
+# the nested shape (84,383, 144,383 and 184,383 bytes), the run in the command's own segment, which
+# git_explicit_binding reads beside the bodies left unread (184,383 bytes), and a git commit with -n after the
+# run in a line whose own scan passes the bound (_cs_dq_nest, 180,191 bytes): beside the nested shape, a run
+# that long raises the bound of the reading that adds each body's lines once so far that gate_weakening reads
+# every body. A pattern that read on to the end of the run from each such '-' took about 3.8 s, 15 s and 25 s
+# of CPU on the first three, about 25 s on the fourth and about 3.4 s on the fifth on one host, where the probe
+# that reads one run at a time takes at most about 0.3 s on each. The last row holds a run of 120,000
+# backslashes that no newline follows beside a git commit -n whose word only the de-quoted text names, in such
+# a line (260,206 bytes): removing line continuations from a pattern free to start at each backslash took about
+# 3.0 s there, and from the first backslash of each run (_unread_plain) about 0.4 s.
+_CS_UNREAD_COST = (
+    ("git_explicit_binding", _cs_slash_dash_after(30000)),
+    ("git_explicit_binding", _cs_slash_dash_after(60000)),
+    ("git_explicit_binding", _cs_slash_dash_after(80000)),
+    ("git_explicit_binding", "echo " + "/-" * 80000 + "; " + _cs_bound_after("git add -A; git push origin f")),
+    ("gate_weakening", "echo `git commit " + "/-" * 40000 + " -nm x`; " + _cs_dq_nest(16, 50000)),
+    ("gate_weakening", "echo `true`; echo " + "\\" * 120000 + "x; git com''mit -nm x; " + _cs_dq_nest(16, 70000)),
+)
+
+
+def _test_unread_scan_cost(failures):
+    """(cs-unread-cost) A raw probe of a text left unread past the work bound costs time linear in the text:
+    each row of _CS_UNREAD_COST must pass the work bound under the reading the guard uses (_CS_BOUND_READING)
+    and be denied within 1 s of CPU, git_explicit_binding for the whole-tree stage and push and gate_weakening
+    for the short -n. No submitted Bash command is executed."""
+    for name, command in _CS_UNREAD_COST:
+        label = "(cs-unread-cost-{}) the {}-byte command".format(name, len(command))
+        if not _CS_BOUND_READING.get(name, _cs_flow_read)(aiqt_hooks._lex_command(command))[1]:
+            failures.append("{}: expected its substitution reading past the work bound, got a complete reading"
+                            .format(label))
+        start = time.process_time()
+        got = _decision(getattr(aiqt_hooks, name), command)
+        cost = time.process_time() - start
+        if got != "deny":
+            failures.append("{}: expected deny, got {}".format(label, got))
         if cost >= 1.0:
             failures.append("{}: {:.2f} s of CPU, over the 1 s bound".format(label, cost))
 
@@ -15075,6 +15205,7 @@ def _main_isolated(monitor):
         _test_substitution_bound_own(failures)
         _test_substitution_bound_text(failures)
         _test_substitution_bound_unread(failures)
+        _test_unread_scan_cost(failures)
         _test_wrapped_examples(failures, tmp)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
