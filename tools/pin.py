@@ -228,7 +228,7 @@ def _read_contained_toml(root_fd, relpath):
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise PinError("cannot parse {} ({})".format(relpath, exc))
 
 
@@ -561,9 +561,14 @@ def _read_release(staged):
     identity."""
     try:
         data = tomllib.loads((staged / "release.toml").read_text(encoding="utf-8"))
-    except RecursionError as exc:
-        # tomllib raises RecursionError (a RuntimeError, not a ValueError) on a deeply nested array or inline
-        # table, which do_pin's ValueError-family handler would not catch (F-TOML-BARE-VALUEERROR-CLASS).
+    except (ValueError, RecursionError, MemoryError) as exc:
+        # A ValueError (a TOMLDecodeError or an over-long integer literal) passes unchanged to do_pin's
+        # ValueError-family handler. tomllib raises RecursionError (a RuntimeError, not a ValueError) on a deeply
+        # nested array or inline table and, from CPython 3.14.8, on a key of more than 1000 dotted parts, and
+        # MemoryError on a many-part key under a memory limit, which that handler would not catch
+        # (F-TOML-BARE-VALUEERROR-CLASS).
+        if isinstance(exc, ValueError):
+            raise
         raise PinError("cannot parse release.toml ({})".format(exc)) from exc
     rel = data.get("release", {})
     if not isinstance(rel, dict):

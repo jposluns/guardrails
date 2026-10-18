@@ -182,7 +182,8 @@ the block is not.
 
 The budget source, .aiqt/core/instruction-budget.toml, carries exactly four keys: `ratchet` (the PACK
 figure enforced today; lower it as the pack shrinks, and raise it only with a reviewed reason), `ceiling`
-(the target PACK figure, reported, not enforced), and `claude-code-version` and `binary-sha256`, which pin
+(a reported PACK figure, not enforced, which PACK can exceed and currently does), and
+`claude-code-version` and `binary-sha256`, which pin
 the Claude Code build whose loading behaviour this gate follows.
 
 KNOWN OVER-COUNTS, by design (each can make PACK or SESSION higher than what the loader keeps):
@@ -1256,7 +1257,7 @@ def load_budget(root):
         data = tomllib.loads(read_text(_budget_file(root), BUDGET_REL))
     # ValueError and RecursionError too: tomllib raises a BARE ValueError on an integer literal past
     # CPython's int-string limit, and a RecursionError on a deeply nested array or inline table.
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("{} is not valid TOML ({})".format(BUDGET_REL, exc))
     if set(data) != BUDGET_KEYS:
         raise GateError("{}: keys must be exactly {} (got {})".format(
@@ -1289,9 +1290,11 @@ def run(root):
           "file headers {})".format(m["session"], m["rules"], m["claude"], DOT_CLAUDE_REL, m["dot_claude"],
                                     m["session_imports"], m["session_headers"]))
     print("conditional rule files not counted: {}".format(m["conditional_files"]))
-    print("ratchet {}; ceiling {} (the target, reported, not enforced); loading modelled on Claude "
-          "Code {} (binary sha256 {})".format(ratchet, budget["ceiling"], budget["claude-code-version"],
-                                                 budget["binary-sha256"]))
+    ceiling_note = "a reported figure, not enforced" + (
+        "; PACK currently exceeds it" if m["pack"] > budget["ceiling"] else "")
+    print("ratchet {}; ceiling {} ({}); loading modelled on Claude "
+          "Code {} (binary sha256 {})".format(ratchet, budget["ceiling"], ceiling_note,
+                                              budget["claude-code-version"], budget["binary-sha256"]))
     findings = list(m["findings"])
     if m["pack"] > ratchet:
         findings.append("PACK {} exceeds the ratchet {} by {}; shrink the always-loaded pack "
@@ -1514,7 +1517,7 @@ def _expected_check_ids():
         with open(CHECKS_MANIFEST, "rb") as handle:
             data = tomllib.load(handle)
     # ValueError and RecursionError too, as in load_budget.
-    except (OSError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (OSError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         print("SELF-TEST HARNESS ERROR: cannot read {}: {}".format(CHECKS_MANIFEST, exc),
               file=sys.stderr)
         return None

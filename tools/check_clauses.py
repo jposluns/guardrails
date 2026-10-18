@@ -1459,8 +1459,8 @@ def run(root, rules_dir, inventory_path, register_path, prev_inventory_path=None
 # --- self-test --------------------------------------------------------------------------------------
 # Pure-logic cases (clause-id parsing, numeric ordinal comparison, the completeness/resurrection set
 # logic) always run and are deterministic. The end-to-end fixture cases build a synthetic corpus in a
-# private tempdir and are skipped with a printed note (never a false pass) where no writable tempdir
-# exists. No wall clock, no randomness, no network.
+# private tempdir; where no writable tempdir exists they are a NAMED NOT RUN failure (never a skip
+# beside a PASS). No wall clock, no randomness, no network.
 
 def _canon(lines):
     """A canonical file body: LF-joined lines with exactly one trailing newline (3.1)."""
@@ -1607,7 +1607,33 @@ def _paths(base, **overrides):
     return kw
 
 
-def self_test_main():  # noqa: C901  a flat sequence of independent fixture cases, one per fail mode
+def _not_run(failures, case, cause):
+    """Record a self-test case that could not run as a NAMED failure (a counted cannot-evaluate that
+    fails the run), never a printed note beside a PASS: coverage that did not run is not coverage."""
+    failures.append("NOT RUN: {}: {}; coverage that did not run FAILS the self-test, never a silent "
+                    "PASS".format(case, cause))
+
+
+_E2E_CASES = "every end-to-end fixture case (a synthetic corpus per fail mode in a private tempdir)"
+
+
+def _not_run_vector(failures):
+    """Red-on-revert vector for the skip that printed SELF-TEST PASS (PARTIAL) and exited 0: a nested
+    self-test run with an unavailable temp directory (mkdtemp raises OSError) must exit nonzero AND name
+    the end-to-end fixture cases on a NOT RUN line."""
+    def _unavailable(*_args, **_kwargs):
+        raise OSError("injected: no writable temp directory")
+
+    out = io.StringIO()
+    with redirect_stdout(out), redirect_stderr(io.StringIO()):
+        rc = self_test_main(_mkdtemp=_unavailable, _vectors=False)
+    want = "NOT RUN: {}: no writable temp directory".format(_E2E_CASES)
+    if rc == 0 or want not in out.getvalue():
+        failures.append("(NOT RUN vector) an unavailable temp directory must exit nonzero AND record {!r}, "
+                        "never a PASS (PARTIAL) exit 0 (got exit {})".format(want, rc))
+
+
+def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence of fixture cases
     failures = []
 
     # --- always-run pure-logic cases (no filesystem) ----------------------------------------------
@@ -1842,16 +1868,12 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
     import tempfile
 
     try:
-        base_tmp = Path(tempfile.mkdtemp(prefix="aiqt-clauses-selftest-"))
-    except OSError:
+        base_tmp = Path((_mkdtemp or tempfile.mkdtemp)(prefix="aiqt-clauses-selftest-"))
+    except OSError as exc:
         base_tmp = None
+        _not_run(failures, _E2E_CASES, "no writable temp directory ({})".format(exc))
 
-    if base_tmp is None:
-        print("SELF-TEST NOTE: no writable temp directory; end-to-end fixture cases SKIPPED (the pure "
-              "clause-id, ordinal, resurrection, and completeness coverage above still ran)", file=sys.stderr)
-        e2e_ran = False
-    else:
-        e2e_ran = True
+    if base_tmp is not None:
         n = [0]
 
         def _fresh(rules, clause_rows, born, tombstones=(), successors=()):
@@ -3097,6 +3119,9 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
+    if _vectors:
+        _not_run_vector(failures)
+
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:
@@ -3104,69 +3129,66 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
         return 1
     core = ("clause-id parsing, numeric ordinal comparison (lexicographic trap both directions), "
             "resurrection and completeness set logic")
-    if e2e_ran:
-        print("SELF-TEST PASS: {}; and the end-to-end fixtures hold (passing genesis, deferred/armed "
-              "manifest leg, padded-ordinal fail-closed, duplicate id, missing corpus-id, span out of "
-              "range, text mismatch, digest mismatch, missing born row, resurrected id, cumulative-max "
-              "fail, lexicographic-trap pass, unexplained disappearance, the fail-closed register cases, "
-              "the Model C sub-line pass, multi-line embedded-LF pass, absent-text fail, twice-in-window "
-              "fail, untight-window fail, and empty-canonical-text fail; and the round-2 fixes: "
-              "cumulative-max unrelated-tombstone bypass fail, leading/trailing-newline tightness fails, "
-              "out-of-rules-dir source-path fail, non-string clause-id / corpus-id-failing-CID_RE / "
-              "malformed-born-id / malformed-, self-loop-, and dangling-successor-id / boolean-line-number "
-              "fail-closed exit 2, well-formed corpus-id mismatch exit 1, successor-row load with "
-              "successor-retired resurrection, explained-disappearance pass, whitespace-only canonical-text "
-              "fail, and legitimate shared-window rows pass; and the round-3 fixes: trailing-LF clause-id "
-              "reject, absolute source-path fail, phantom-born-id fail, retirement-before-birth fail, "
-              "two-node successor-cycle fail, and born-scalar / tombstone-table fail-closed exit 2; and "
-              "the round-4 fixes: newline-tainted born-release fail-closed exit 2, orphan-corpus born-id "
-              "fail, unbounded-ordinal fail-closed exit 2, and malformed-digest-syntax fail-closed exit 2; "
-              "and the Step-4 deferred items: a predecessor inventory with an integer or a malformed "
-              "clause-id fails closed (exit 2, the hardened load_prev_ids), a successor-id already retired "
-              "at an earlier release is a resurrection through the register (exit 1), and a same-release "
-              "pass-through fold is permitted (exit 0); and the whole-clause edges: a whole sentence passes, a "
-              "canonical-text cut short inside a clause fails (final '.' dropped inside the line or at the "
-              "window end, last word dropped, cut at a plain comma, first character dropped, wrapped last "
-              "line dropped, a row at a line start after an unended sentence), the legitimate ';' "
-              "clause splits and a row after a sentence end on an earlier part of its line pass, the "
-              "round-1 reproductions hold (list and quotation cuts at ', and' / ', or' fail; whole quoted "
-              "and bracketed sentences pass), the round-2 reproductions hold (a cut at a colon fails; a "
-              "fragment from inside a quotation or bracket, judged from the source paragraph, fails; a "
-              "sentence end inside an enclosure opened mid-sentence is no boundary), the round-3 "
-              "reproductions hold (a cut at either side of a quoted or bracketed sentence that a longer "
-              "sentence goes on from fails; a whole quoted sentence that ends inside a bracket passes; a "
-              "cut inside a code span fails; the scan crosses a single line break), the round-4 "
-              "reproductions hold (a quoted or bracketed sentence ends only before an ASCII capital, so "
-              "a cut at either side of one before a digit, another quotation or bracket, a code span or "
-              "a single quote fails), the round-5 reproductions hold (a bare '?' or '!' before a lower-case "
-              "word, or a bare sentence end before an opener, is no sentence end, and a closer is no next "
-              "start), each boundary "
-              "sub-predicate and each quote and bracket kind has its own vector, the disclosed fail-closed "
-              "over-fires are refused, and the disclosed residuals pass; and the text-coverage leg: a passage "
-              "whose clause rows and id-history rows are removed, or retired, while its text stays fails, an "
-              "exemption with no reason, a stale exemption (text gone, rule gone), and a redundant, repeated, "
-              "ambiguous, cut or empty exemption fail, a malformed exemptions file and every unclassifiable "
-              "or unreadable rule text is a cannot-evaluate (exit 2), and covered or exempted text passes; an "
-              "absent exemptions file is a cannot-evaluate, so deleting it cannot hide a stale exemption; an "
-              "underscore-only unit, uncovered or exempted, is a cannot-evaluate; an opener left open at the end "
-              "of a paragraph that is not the last, or of a file with no final newline, is a cannot-evaluate; "
-              "and wrapped prose lines that begin with '#', a number or '<' pass while each listed block start "
-              "is refused; and the round-3 reproductions hold: a paragraph's first line that opens with a tag "
-              "and ends with '>' (a quoted '<' or '>' included) and one that may open a link reference "
-              "definition whose label spans lines are refused, a carriage return is a cannot-evaluate, a GFM "
-              "table delimiter row with no leading pipe is refused, an exemptions file with no exempt key "
-              "(empty, comment-only, a symlink to the null device) is a cannot-evaluate, and an explicit "
-              "exempt = [] reads as no exemption; and the round-4 reproductions hold: a form feed and a carriage "
-              "return, each a line ending to the vendored renderer, are a cannot-evaluate inside a line, at a "
-              "line start, in the title and in the frontmatter, while a vertical tab, U+0085, U+2028 and U+2029 "
-              "stay prose; an inline '<!' or '<?' is refused; a line the vendored GFM table reads as a delimiter "
-              "row ('--x|--y') is refused; an ordered item in non-ASCII decimal digits is refused as a paragraph's "
-              "first line; and each whitespace-widened block start has a no-break-space or vertical-tab vector "
-              "the classifier itself refuses)"
-              .format(core))
-    else:
-        print("SELF-TEST PASS (PARTIAL): {}; the end-to-end fixture cases were SKIPPED (no writable temp "
-              "directory), so those invariants are UNVERIFIED this run".format(core))
+    print("SELF-TEST PASS: {}; and the end-to-end fixtures hold (passing genesis, deferred/armed "
+          "manifest leg, padded-ordinal fail-closed, duplicate id, missing corpus-id, span out of "
+          "range, text mismatch, digest mismatch, missing born row, resurrected id, cumulative-max "
+          "fail, lexicographic-trap pass, unexplained disappearance, the fail-closed register cases, "
+          "the Model C sub-line pass, multi-line embedded-LF pass, absent-text fail, twice-in-window "
+          "fail, untight-window fail, and empty-canonical-text fail; and the round-2 fixes: "
+          "cumulative-max unrelated-tombstone bypass fail, leading/trailing-newline tightness fails, "
+          "out-of-rules-dir source-path fail, non-string clause-id / corpus-id-failing-CID_RE / "
+          "malformed-born-id / malformed-, self-loop-, and dangling-successor-id / boolean-line-number "
+          "fail-closed exit 2, well-formed corpus-id mismatch exit 1, successor-row load with "
+          "successor-retired resurrection, explained-disappearance pass, whitespace-only canonical-text "
+          "fail, and legitimate shared-window rows pass; and the round-3 fixes: trailing-LF clause-id "
+          "reject, absolute source-path fail, phantom-born-id fail, retirement-before-birth fail, "
+          "two-node successor-cycle fail, and born-scalar / tombstone-table fail-closed exit 2; and "
+          "the round-4 fixes: newline-tainted born-release fail-closed exit 2, orphan-corpus born-id "
+          "fail, unbounded-ordinal fail-closed exit 2, and malformed-digest-syntax fail-closed exit 2; "
+          "and the Step-4 deferred items: a predecessor inventory with an integer or a malformed "
+          "clause-id fails closed (exit 2, the hardened load_prev_ids), a successor-id already retired "
+          "at an earlier release is a resurrection through the register (exit 1), and a same-release "
+          "pass-through fold is permitted (exit 0); and the whole-clause edges: a whole sentence passes, a "
+          "canonical-text cut short inside a clause fails (final '.' dropped inside the line or at the "
+          "window end, last word dropped, cut at a plain comma, first character dropped, wrapped last "
+          "line dropped, a row at a line start after an unended sentence), the legitimate ';' "
+          "clause splits and a row after a sentence end on an earlier part of its line pass, the "
+          "round-1 reproductions hold (list and quotation cuts at ', and' / ', or' fail; whole quoted "
+          "and bracketed sentences pass), the round-2 reproductions hold (a cut at a colon fails; a "
+          "fragment from inside a quotation or bracket, judged from the source paragraph, fails; a "
+          "sentence end inside an enclosure opened mid-sentence is no boundary), the round-3 "
+          "reproductions hold (a cut at either side of a quoted or bracketed sentence that a longer "
+          "sentence goes on from fails; a whole quoted sentence that ends inside a bracket passes; a "
+          "cut inside a code span fails; the scan crosses a single line break), the round-4 "
+          "reproductions hold (a quoted or bracketed sentence ends only before an ASCII capital, so "
+          "a cut at either side of one before a digit, another quotation or bracket, a code span or "
+          "a single quote fails), the round-5 reproductions hold (a bare '?' or '!' before a lower-case "
+          "word, or a bare sentence end before an opener, is no sentence end, and a closer is no next "
+          "start), each boundary "
+          "sub-predicate and each quote and bracket kind has its own vector, the disclosed fail-closed "
+          "over-fires are refused, and the disclosed residuals pass; and the text-coverage leg: a passage "
+          "whose clause rows and id-history rows are removed, or retired, while its text stays fails, an "
+          "exemption with no reason, a stale exemption (text gone, rule gone), and a redundant, repeated, "
+          "ambiguous, cut or empty exemption fail, a malformed exemptions file and every unclassifiable "
+          "or unreadable rule text is a cannot-evaluate (exit 2), and covered or exempted text passes; an "
+          "absent exemptions file is a cannot-evaluate, so deleting it cannot hide a stale exemption; an "
+          "underscore-only unit, uncovered or exempted, is a cannot-evaluate; an opener left open at the end "
+          "of a paragraph that is not the last, or of a file with no final newline, is a cannot-evaluate; "
+          "and wrapped prose lines that begin with '#', a number or '<' pass while each listed block start "
+          "is refused; and the round-3 reproductions hold: a paragraph's first line that opens with a tag "
+          "and ends with '>' (a quoted '<' or '>' included) and one that may open a link reference "
+          "definition whose label spans lines are refused, a carriage return is a cannot-evaluate, a GFM "
+          "table delimiter row with no leading pipe is refused, an exemptions file with no exempt key "
+          "(empty, comment-only, a symlink to the null device) is a cannot-evaluate, and an explicit "
+          "exempt = [] reads as no exemption; and the round-4 reproductions hold: a form feed and a carriage "
+          "return, each a line ending to the vendored renderer, are a cannot-evaluate inside a line, at a "
+          "line start, in the title and in the frontmatter, while a vertical tab, U+0085, U+2028 and U+2029 "
+          "stay prose; an inline '<!' or '<?' is refused; a line the vendored GFM table reads as a delimiter "
+          "row ('--x|--y') is refused; an ordered item in non-ASCII decimal digits is refused as a paragraph's "
+          "first line; and each whitespace-widened block start has a no-break-space or vertical-tab vector "
+          "the classifier itself refuses); an unavailable temp directory "
+          "is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL)"
+          .format(core))
     return 0
 
 

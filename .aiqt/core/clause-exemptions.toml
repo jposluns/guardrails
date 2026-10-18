@@ -32,7 +32,7 @@ reason = "Scope carve-out bounding setcmp.1; a permission, not an obligation."
 
 [[exempt]]
 corpus-id = "setcmp"
-text = "The enumeration requirement attaches to a quantifier that asserts the whole set, and the\nhigher bar attaches only to a claim that reduces work."
+text = "The enumeration\nrequirement attaches to a quantifier that asserts the whole set, and the higher bar attaches only to a claim\nthat reduces work."
 reason = "Scope note restating where setcmp.1 and setcmp.4 apply; it adds no obligation."
 
 [[exempt]]
@@ -359,11 +359,6 @@ reason = "Scope note separating this rule from the dependency-minimizing and lea
 corpus-id = "rmvpth"
 text = "Using a retained, constrained path is not itself a violation."
 reason = "Scope carve-out bounding rmvpth.1; a permission, not an obligation."
-
-[[exempt]]
-corpus-id = "secprv"
-text = "Incidental read-side activity needed to produce the preview,\nsuch as a lookup, a cache write, a metric, or an access log, is not such a side effect; the rule targets a\nchange to the subject the preview describes, not the mechanics of inspecting it."
-reason = "Scope carve-out bounding secprv.1 (incidental read-side activity is no side effect); a permission, not an obligation. Recorded as an exemption, not a row; the maintainer may prefer a row."
 
 [[exempt]]
 corpus-id = "secaud"
