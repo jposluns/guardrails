@@ -120,8 +120,9 @@ word, or second command makes the command not-pristine - a PURELY LEXICAL determ
 WITHOUT ever consulting the probe (a safe over-ask). An option the form-classifier cannot resolve is a
 SEPARATE mechanism and does NOT bear on pristineness: a pristine command carrying an unresolved option still
 reaches the probe, where its role routes to a scoped ASK, so it is not silently allowed either. A wrapper is
-caught only while the raw scan still sees a contiguous git verb keyword, so 'any wrapper ASKS' is NOT
-categorical (a wrapper that ALSO fragments the verb is a disclosed residual, below). Only a
+caught while the raw scan, the continuation-joined text or the de-quoted copy (quotes, a '$' before a quote,
+and backslashes removed) sees a contiguous git verb keyword, so 'any wrapper ASKS' is NOT categorical (a
+verb no such reading assembles is a disclosed residual, below). Only a
 metacharacter-free 'git <verb> <plain args>'
 reaches the probe, where PROVABLY CLEAN means the read-only, config-forced porcelain probe (git -c
 status.showUntrackedFiles=all status --porcelain --untracked-files=all, so a repo-local
@@ -134,11 +135,12 @@ on a dirty tree), or on a provably-clean tree - worst case it ASKS, at the cost 
 override exists (the operator channel is hook configuration). This guarantee is bounded to
 working-tree content: ref-level moves (reset --soft moving HEAD, a merged-branch delete) are reflog-
 recoverable, and the obfuscation/config residuals below are best-effort, not categorical. The HONEST RESIDUAL a lexical hook cannot catch: a git alias or shell
-function renaming git; deliberate token fragmentation or obfuscation of the COMMAND WORD 'git' ITSELF or of
-the verb (a wrapper whose git command word or verb is SPLIT so neither the token scan nor the raw scan sees
-a contiguous git+verb keyword, e.g. env git re'set' --hard, eval git re'set', or command g'it' reset --hard
-/ env /usr/bin/g'it' reset --hard, whose raw string carries no contiguous 'git'+'reset', reads as 'no
-recognized lossy verb' and is silently ALLOWED - a best-effort residual, not chased); a real discard whose
+function renaming git; deliberate obfuscation of the COMMAND WORD 'git' ITSELF or of the verb that no raw,
+continuation-joined or de-quoted reading assembles (an escape decoded inside $'...', or a word built by a
+parameter expansion or a command substitution at run time, reads as 'no recognized lossy verb' and is
+silently ALLOWED - a best-effort residual; a quote- or backslash-fragmented spelling under a wrapper, such
+as env git re'set' --hard, eval git re'set', command g'it' reset --hard or env /usr/bin/g'it' reset --hard,
+is in scope through the de-quoted copy); a real discard whose
 VERB is outside the recognized set AND the raw scan does NOT flag at all (a 'git worktree remove -f' of a
 dirty linked worktree discards that worktree's uncommitted work, yet 'worktree' matches no lossy keyword, so
 it is allowed at the true boundary - disclosed, not closed this round). A command the raw scan DOES flag as
@@ -166,6 +168,9 @@ DELIBERATE decision where the platform documents exit 2 as the block (the orches
 manufactured wind-down that way, doc-confirmed 2026-08-29, bounded by its own loop bound so it cannot wedge
 the chain). Outside that deliberate deny, only a PreToolUse handler fails closed via exit 2, and only a
 genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on a bad invocation.
+A handler result whose exit code is not 0 or 2, or whose stderr text is neither a str nor None, is a
+handler crash with that same posture, and an exception's text in a diagnostic is built so that its own
+str() raising cannot end main() early.
 
 These exits, and the floor guard's on an older interpreter that can start this file, hold even when a
 standard stream cannot be written or flushed (a closed descriptor, a full
@@ -181,6 +186,39 @@ decision whose stdout write failed exited 0, which allows. The floor guard above
 write-flush-os._exit shape inline, since it runs before any helper exists.
 The PYTHON-FLOOR comment below gives the floor guard's exits and the exit of an interpreter that cannot
 start this file, which fails first with Python's own exit.
+
+DEADLINE (PreToolUse): every PreToolUse mode that is not fail-open reads its payload and runs its check
+inside one _DeadlineWindow of PRETOOL_BUDGET_SECONDS (8 seconds: HOOK_TIMEOUT_SECONDS, the 10-second
+hooks.json timeout tools/gen_hooks.py renders, less 2), armed before the payload read. A check that has
+not decided by then is interrupted by _HookDeadline, a BaseException that no handler's except Exception
+branch catches, and the call fails CLOSED with exit 2 and a stderr line naming the handler, the budget and
+the input size and asking for smaller calls or long content moved into a file; the timer is cancelled
+before the decision is written to stdout. Any other exception out of the window (an error entering or
+leaving it, or an in-process caller's own alarm handler raising when its expiry is delivered) fails
+closed with exit 2 as well, and a fail-open mode warns on exit 0 instead, except for a stop (an exit
+or an interrupt) raised in a fail-open mode, which ends the hook as it would with no window, save that
+an exit whose status would be 2 ends it with status 1. The raw 'git ... <verb>'
+fallback scans are _RawSequence probes of linear cost: the single regexes they replaced grew with the
+square or the cube of the command length, and five guards ran past the hook timeout on some shape at or
+below 64 KB. Measured in-process on a 24-core host with Python 3.14.4 over runs on 2026-10-15 and
+2026-10-16, the slowest PreToolUse handler call on the worst shapes tools/selftest_aiqt_hooks.py times
+took at most 0.10 s of wall-clock time at 64 KB, 0.49 s at 256 KB and 2.07 s at 1 MB (nest_parens under
+git_stash_ref). With the raw-text push backstop and the joined and de-quoted readings of the command,
+runs on 2026-10-17 on a 24-core host with Python 3.14.4 that was running other work measured at most
+0.13 s at 64 KB (protected_line, whose backstop reads the whole command before its 65,536-character
+commit size cap), 0.55 s at 256 KB and 2.17 s at 1 MB (nest_parens under git_discard). Interpreter
+start-up adds about 0.1 to 0.2 s to each call. Outside the deadline: interpreter start-up and
+module import, which run before main(); a wait the interpreter cannot interrupt (a system call in
+uninterruptible sleep, such as a read from a hung network mount, or a long call into C code that does not
+check for signals), which holds the deadline back until it returns, as does review_dispatch_pin's wait for
+its worker thread when the kernel delivers the alarm to that thread (the wait ends within that guard's
+own 8-second budget plus a quarter second); cleanup that runs while the deadline
+unwinds (a finally block, killing and reaping a child process), which still counts against the platform's
+timeout; and a platform without SIGALRM and setitimer (Windows), a caller that blocks SIGALRM, or a call
+off the main thread, which run with no deadline. Whether the platform blocks or allows a PreToolUse call
+whose hook it stops at its own timeout has not been verified; the deadline makes the decision the
+dispatcher's own exit 2 instead. An interrupted git_discard recovery snapshot can leave a temporary index
+or unreferenced objects behind.
 """
 import sys
 
@@ -235,6 +273,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         os._exit(0)
     os._exit(2)
 
+import _signal
 import collections
 import datetime
 import errno
@@ -252,6 +291,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 
 PRETOOL = "PreToolUse"
@@ -261,6 +301,14 @@ STOP_EVENTS = ("Stop", "SubagentStop")
 # cannot block at all; an errored UserPromptSubmit stamp must never block a human prompt; a
 # PostToolUse recorder error must surface as a warning, not a tool failure. Doc-confirmed 2026-08-29.
 FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSubmit", "PostToolUse")
+# The platform stops a hook command at the timeout tools/gen_hooks.py writes into hooks.json (its
+# TIMEOUT); HOOK_TIMEOUT_SECONDS mirrors that value, and gen_hooks refuses to render (exit 2) when the two
+# differ, so both numbers come from that one source. main() gives every PreToolUse mode that is not
+# fail-open PRETOOL_BUDGET_SECONDS, counted from before the payload read, and fails closed with exit 2
+# when its check has not decided by then, so the refusal is written before the platform's own timeout.
+# gen_hooks also refuses a budget that is not at least one second below the timeout or not positive.
+HOOK_TIMEOUT_SECONDS = 10
+PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - 2.0
 
 
 # --- decision constructors ---------------------------------------------------------------------------
@@ -298,8 +346,7 @@ DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
     "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_git_discard_fallback",
-    "_protected_line_fallback",
-    "_wrtscp_deny")
+    "_protected_line_fallback", "_raw_push_guard", "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -412,7 +459,112 @@ _Segment = collections.namedtuple(
                  "argv_leading_tilde"))
 
 
-def _read_word(command, i, n):
+def _skip_quoting(command, i, n):
+    """Skip the quote or substitution opened at command[i]: a single or double quote, a backquote, or a
+    $( command substitution or ${ parameter expansion. Return the index just past the whole construct.
+    A substitution nested in a double-quoted string opens a FRESH quoting context whose own quotes nest, so
+    an inner quote never closes an outer string and a << quoted at any depth stays data, never a heredoc
+    opener. Iterative (an explicit context stack), linear, stdlib-only. Raises ValueError on an unterminated
+    context so the caller fails closed rather than mis-pairing a later quote."""
+    c = command[i]
+    if c == "'":
+        stack = ["sq"]
+        i += 1
+    elif c == '"':
+        stack = ["dq"]
+        i += 1
+    elif c == "`":
+        stack = ["bq"]
+        i += 1
+    elif c == "$" and i + 1 < n and command[i + 1] == "(":
+        stack = ["paren"]
+        i += 2
+    elif c == "$" and i + 1 < n and command[i + 1] == "{":
+        stack = ["brace"]
+        i += 2
+    else:
+        raise ValueError("not a quoting opener")
+    while stack:
+        if i >= n:
+            raise ValueError("unterminated quote or substitution")
+        top = stack[-1]
+        c = command[i]
+        if top == "sq":
+            j = command.find("'", i)
+            if j < 0:
+                raise ValueError("unterminated single quote")
+            i = j + 1
+            stack.pop()
+            continue
+        if top == "bq":
+            if c == chr(92) and i + 1 < n:
+                i += 2
+            elif c == "`":
+                i += 1
+                stack.pop()
+            else:
+                i += 1
+            continue
+        if c == chr(92):
+            if i + 1 >= n:
+                raise ValueError("unterminated escape")
+            i += 2
+            continue
+        if top == "dq":
+            if c == '"':
+                i += 1
+                stack.pop()
+                continue
+            if c == "`":
+                stack.append("bq")
+                i += 1
+                continue
+            if c == "$" and i + 1 < n and command[i + 1] == "(":
+                stack.append("paren")
+                i += 2
+                continue
+            if c == "$" and i + 1 < n and command[i + 1] == "{":
+                stack.append("brace")
+                i += 2
+                continue
+            i += 1
+            continue
+        if c == "'":
+            stack.append("sq")
+            i += 1
+            continue
+        if c == '"':
+            stack.append("dq")
+            i += 1
+            continue
+        if c == "`":
+            stack.append("bq")
+            i += 1
+            continue
+        if c == "$" and i + 1 < n and command[i + 1] == "(":
+            stack.append("paren")
+            i += 2
+            continue
+        if c == "$" and i + 1 < n and command[i + 1] == "{":
+            stack.append("brace")
+            i += 2
+            continue
+        if top == "paren":
+            if c == "(":
+                stack.append("paren")
+            elif c == ")":
+                stack.pop()
+            i += 1
+            continue
+        if c == "{":
+            stack.append("brace")
+        elif c == "}":
+            stack.pop()
+        i += 1
+    return i
+
+
+def _read_word(command, i, n, locale=False):
     """Read exactly ONE shell word starting at index i (which must be at a word character, never a space,
     newline, or metacharacter). Returns (text, opaque, started, all_digits, leading_tilde, new_i): text is
     the quote/escape decoded word, opaque is True if it carried an unquoted
@@ -425,7 +577,10 @@ def _read_word(command, i, n):
     after the tilde stay relative), while a quote or expansion AFTER the prefix-closing '/' (e.g. ~/$VAR) does
     not block it. Stops at an
     unquoted space, tab, newline, or metacharacter. Raises ValueError on an unbalanced quote or an
-    unterminated escape."""
+    unterminated escape. With locale True, an unquoted bash locale quote $"..." is read as the double-quoted
+    string bash reads when no message catalogue translates it (the '$' dropped, so Cl$""aude is Claude);
+    otherwise its '$' stays an ordinary opaque character, as every other caller reads it and as the
+    commit-identity check reads it too, alongside the locale reading."""
     chars = []
     opaque = False
     started = False
@@ -458,6 +613,14 @@ def _read_word(command, i, n):
             break
         was_started = started  # whether the word had begun BEFORE this char (a leading tilde needs it False)
         started = True
+        if locale and c == "$" and i + 1 < n and command[i + 1] == '"':
+            # bash locale quoting $"...": the text is looked up in the current locale's message catalogue
+            # and, when no translation applies, the '$' is dropped and the rest is a double-quoted string, read
+            # by the branch below. The word stays opaque, as its '$' made it before, since a catalogue can
+            # replace the text at run time.
+            opaque = True
+            i += 1
+            c = '"'
         if c == "'":  # single quote: everything literal, no escapes, until the next "'"
             if tilde_prefix_open:  # a quote inside the tilde-prefix disables bash expansion: stays relative
                 leading_tilde = False
@@ -494,6 +657,12 @@ def _read_word(command, i, n):
                         continue
                     chars.append("\\")  # a backslash before any other char is literal inside "..."
                     i += 1
+                    continue
+                if d == "`" or (d == "$" and i + 1 < n and command[i + 1] in "({"):
+                    _sub_start = i
+                    i = _skip_quoting(command, i, n)
+                    opaque = True
+                    chars.append(command[_sub_start:i])
                     continue
                 if d in "$`":
                     opaque = True
@@ -790,13 +959,309 @@ def _skip_heredoc_bodies(command, i, n, heredocs):
     return i
 
 
-def _lex_command(command, partial=False):
+# The characters after which bash starts a new word: blanks, newline and the shell metacharacters.
+# An unquoted '#' that follows one of these (or starts the text) opens a comment.
+_SHELL_WORD_BREAK = " \t\n;&|()<>"
+
+
+def _join_continuations(command):
+    """Remove every backslash-newline line continuation the way bash does BEFORE any raw
+    scanner reads the command, and return (joined, raw_index). raw_index[k] is the index in `command`
+    of joined[k], plus one final entry len(command), so a scanner can map a slice of the joined text
+    back to the raw slice it came from (for diagnostics and the segment strings it returns).
+
+    The join matches bash outside single quotes and ANSI-C quotes and at comment ends: a
+    backslash-newline is removed at top level, inside double quotes, inside a backtick, '$(...)',
+    '<(...)' or '>(...)' substitution and inside a '${...}' expansion, and kept inside single quotes,
+    inside $'...' and at the end of a comment (a comment ends at its newline; a trailing backslash does
+    not continue it). A '#' opens a comment only where bash starts a word: at the start of the text, of
+    a substitution or of a '(' group, or just past an UNESCAPED blank, newline or shell metacharacter;
+    never past an escaped character, a closing quote or the ')' that closes a substitution, and never
+    inside a backtick substitution or a '${...}' expansion ('a\\<newline>#b' and '$(x)#y' are each one
+    word, as in bash). A substitution nested in a double-quoted string opens a fresh context whose own
+    quotes nest, as in _skip_quoting. DISCLOSED divergences: inside a QUOTED heredoc body bash keeps the
+    pair and this join removes it (heredocs are not modelled; any '<<' marks the lex uncertain anyway),
+    and a 'case' pattern ')' inside a substitution is read as closing it (any '$(' or backtick marks the
+    lex uncertain anyway). Linear, never raises.
+
+    A command that holds no backslash immediately followed by a newline returns (command, the identity
+    index) at once, without the context walk (_join_continuations_walk). The result is identical: the
+    walk removes characters only at a backslash whose next character is a newline, and every other step
+    copies the characters it passes in order, so with no such pair nothing is removed in any context and
+    the walk returns the command unchanged with raw_index[k] == k. The pair test is a plain substring
+    test, so a pair the walk keeps (inside single quotes or a comment) still takes the walk."""
+    if chr(92) + "\n" not in command:
+        return command, list(range(len(command) + 1))
+    return _join_continuations_walk(command)
+
+
+def _join_continuations_walk(command):
+    """The context walk behind _join_continuations, with no fast path: the same (joined, raw_index)
+    for every command. The self-test compares the two on commands with and without a continuation."""
+    n = len(command)
+    out = []
+    raw_index = []
+    # The context stack, innermost last: 'top', 'subst' (a '$(', '<(' or '>(' substitution) and
+    # 'group' (a '(' group) are command contexts, where comments and word starts apply; 'dq' is a
+    # double-quoted string, 'bq' a backtick substitution and 'brace' a '${...}' expansion.
+    stack = ["top"]
+    word_break = True  # in a command context: the next unquoted character starts a word
+    prev = ""  # the previous character when the command-context branch at the end took it, else ""
+
+    def take(k, count):
+        for m in range(k, min(k + count, n)):
+            out.append(command[m])
+            raw_index.append(m)
+
+    i = 0
+    while i < n:
+        c = command[i]
+        context = stack[-1]
+        last, prev = prev, ""
+        if c == chr(92):
+            if i + 1 < n and command[i + 1] == "\n":
+                i += 2  # a line continuation: removed outside single quotes and comments, as bash does
+                continue
+            take(i, 2)  # an escaped character is literal and never starts a comment
+            i += 2
+            word_break = False
+            continue
+        if context == "bq":
+            if c == "`":
+                stack.pop()
+                word_break = False
+            take(i, 1)
+            i += 1
+            continue
+        if c == "$" and i + 1 < n and command[i + 1] in "({":
+            stack.append("subst" if command[i + 1] == "(" else "brace")
+            take(i, 2)
+            i += 2
+            word_break = True  # a substitution starts a command ('${' reads no comment either way)
+            continue
+        if c == "`":
+            stack.append("bq")
+            take(i, 1)
+            i += 1
+            continue
+        if context == "dq":
+            if c == '"':
+                stack.pop()
+                word_break = False
+            take(i, 1)
+            i += 1
+            continue
+        if c == "'" or (c == "$" and i + 1 < n and command[i + 1] == "'"):
+            ansi = c == "$"
+            k = i + (2 if ansi else 1)
+            while k < n and command[k] != "'":
+                k += 2 if (ansi and command[k] == chr(92)) else 1
+            end = min(k + 1, n)
+            take(i, end - i)  # single-quoted text is copied unchanged: no continuation inside
+            i = end
+            word_break = False
+            continue
+        if c == '"':
+            stack.append("dq")
+            take(i, 1)
+            i += 1
+            word_break = False
+            continue
+        if context == "brace":
+            if c == "{":
+                stack.append("brace")
+            elif c == "}":
+                stack.pop()
+            take(i, 1)
+            i += 1
+            word_break = False
+            continue
+        if c == "#" and word_break:
+            nl = command.find("\n", i)
+            end = n if nl == -1 else nl
+            take(i, end - i)  # a comment is copied unchanged up to its newline
+            i = end
+            continue
+        closes_subst = c == ")" and context == "subst"
+        if c == "(":
+            stack.append("subst" if last in ("<", ">") else "group")
+        elif c == ")" and context in ("subst", "group"):
+            stack.pop()
+        take(i, 1)
+        word_break = c in _SHELL_WORD_BREAK and not closes_subst
+        prev = c
+        i += 1
+    raw_index.append(n)
+    return "".join(out), raw_index
+
+
+def _dequoted_text(command):
+    """The command with its line continuations joined (_join_continuations) and then every
+    quote character and backslash removed, so a quote-fragmented spelling ('pu""sh', "ma''in",
+    'pu\\sh') reads as the word bash assembles from it. A '$' directly before a quote is
+    removed first, so a $'...' or $"..." fragment ('re$''set', 'check$""out') reads as the word bash
+    assembles too; escape decoding inside $'...' is not modelled (the disclosed boundary). A raw-text
+    reading only, always read BESIDE the raw text so it can only add a match or widen scope (for
+    example the push backstop's segments, the uncertain-lex push fallback and its git gate, the discard
+    scope scan on every reading, and the unparseable-command discard fallback's scope scan), never to
+    prove a command safe."""
+    joined, _raw_index = _join_continuations(command)
+    joined = re.sub(r"\$(?=['\"])", "", joined)
+    return joined.replace("'", "").replace('"', "").replace(chr(92), "")
+
+
+# The uncertainty causes _lex_uncertain_causes reports, worded for the deny messages.
+_LEX_UNCERTAIN_CAUSE_TEXT = {
+    "comment": "an unquoted '#', which can open a comment the lexer does not model",
+    "heredoc": "a '<<' heredoc",
+    "grouping": "an unquoted '(' or ')' grouping or a lone '{' or '}' brace-group word",
+    "substitution": "a backtick or '$(' command substitution",
+    "quote": "an unbalanced quote or a trailing backslash",
+    "continuation": "a line continuation the lexer reads differently once joined",
+    "lexer": "a construct the shell lexer refuses",
+}
+
+
+def _lex_argvs(command):
+    """The argv list of every segment the full lexer reads from `command`, or None when it refuses."""
+    try:
+        return [seg.argv for seg in _lex_command(command)]
+    except ValueError:
+        return None
+
+
+def _lex_uncertain_causes(command):
+    """The reasons the restored lexer's reading of `command` is UNCERTAIN, as an ordered
+    tuple of keys of _LEX_UNCERTAIN_CAUSE_TEXT (empty when the reading is certain). Line
+    continuations are joined first (_join_continuations), then the joined text is scanned with a
+    deliberately blunt quoting model (single quotes, $'...' with its escapes, double quotes, backslash
+    escapes) and these shapes are reported wherever they occur, with no comment-boundary predicate:
+      - 'comment': ANY unquoted '#', whether or not bash would start a comment there;
+      - 'heredoc': ANY unquoted '<<' (a heredoc, a '<<<' here-string, or a commented opener);
+      - 'grouping': ANY unquoted '(' or ')' (a subshell, a function, a case pattern, arithmetic),
+        and ANY unquoted lone '{' or '}' word (a brace group, reserved at command
+        position; the lexer reads it as a plain word, so a git command inside one is hidden from the
+        parsed scan; a literal '}' argument is flagged too, the safe direction);
+      - 'substitution': ANY backtick or '$(' outside single quotes, double-quoted or not;
+      - 'quote': an unpaired single quote, an unmatched double quote, an unclosed $'...', or a
+        trailing backslash;
+      - 'continuation': the full lexer reads the joined text differently from the raw text (bash
+        reads the joined text, so the raw lex is not what bash runs, e.g. '&\\<newline>>' is the
+        '&>' redirect);
+      - 'lexer': anything else the full lexer refuses (a {fd} redirect, a malformed redirect, NUL),
+        reported only when no shape above already explains the refusal.
+    A '#' at a word start skips its comment text, so a quote inside a comment opens nothing. Quoted
+    literals ("a # b", '(x)', "<<EOF") report nothing. Never raises."""
+    causes = []
+
+    def add(key):
+        if key not in causes:
+            causes.append(key)
+
+    joined, _raw_index = _join_continuations(command)
+    n = len(joined)
+    i = 0
+    in_dq = False
+    word_break = True
+    open_subst = 0  # unquoted '$(' openers, so their closing ')' is not also reported as grouping
+    while i < n:
+        c = joined[i]
+        if c == chr(92):
+            if i + 1 >= n:
+                add("quote")  # a trailing backslash escape: the full lexer raises
+            i += 2
+            word_break = False
+            continue
+        if c == "`":
+            add("substitution")
+            i += 1
+            word_break = False
+            continue
+        if c == "$" and i + 1 < n and joined[i + 1] == "(":
+            add("substitution")
+            if not in_dq:
+                open_subst += 1
+            i += 2
+            word_break = True
+            continue
+        if c == '"':
+            in_dq = not in_dq
+            i += 1
+            word_break = False
+            continue
+        if in_dq:
+            i += 1
+            continue
+        if c == "'" or (c == "$" and i + 1 < n and joined[i + 1] == "'"):
+            ansi = c == "$"
+            k = i + (2 if ansi else 1)
+            while k < n and joined[k] != "'":
+                k += 2 if (ansi and joined[k] == chr(92)) else 1
+            if k >= n:
+                add("quote")  # an unpaired single quote or an unclosed $'...'
+                break
+            i = k + 1
+            word_break = False
+            continue
+        if c == "#":
+            add("comment")
+            if word_break:
+                nl = joined.find("\n", i)
+                i = n if nl == -1 else nl  # comment text opens no quote and reports nothing
+                continue
+        elif c == "<" and i + 1 < n and joined[i + 1] == "<":
+            add("heredoc")
+        elif c == ")" and open_subst:
+            open_subst -= 1
+        elif c in "()":
+            add("grouping")
+        elif c in "{}" and word_break and (i + 1 >= n or joined[i + 1] in _SHELL_WORD_BREAK):
+            add("grouping")  # a lone '{' or '}' word: a brace group the lexer reads as a plain word
+        word_break = c in _SHELL_WORD_BREAK
+        i += 1
+    if in_dq:
+        add("quote")  # an unmatched double quote
+    raw_argvs = _lex_argvs(command)
+    if joined != command and raw_argvs != _lex_argvs(joined):
+        add("continuation")
+    if raw_argvs is None and not causes:
+        add("lexer")
+    return tuple(causes)
+
+
+def _lex_uncertain(command):
+    """True when the restored nested-quote quoting model's reading of `command` is UNCERTAIN,
+    so no consumer may treat a clean lex as proof of what bash will run and a raw reading decides
+    instead. It is True exactly when _lex_uncertain_causes reports a cause: the joined text holds ANY
+    unquoted '#', '<<', '(' or ')', a lone '{' or '}' word, any backtick or '$(', an unclosed quote or
+    trailing backslash, a continuation the lexer reads differently once joined, or anything else the
+    full lexer refuses.
+    No comment-boundary predicate decides it, so a comment after '(' or any other shell form cannot
+    slip between the scanners' word boundaries.
+    Consumers: protected_line lets _protected_line_fallback decide on an uncertain lex even when a
+    benign git segment was lexed, and the fallback reads the de-quoted text (_dequoted_text);
+    git_discard re-reads the raw lines of an uncertain in-scope command to NAME the work-losing verb
+    (_uncertain_line_lossy), while its scope scan reads the raw, joined and de-quoted text of every
+    command unstripped. DISCLOSED
+    over-denial (the safe direction): an uncertain command whose text pairs git..push with a
+    force/delete/mirror spelling denies via the fallback even when the push names only a FEATURE ref
+    or the pairing is prose or spans two commands (pl-uncertain-cost, pl-overrefusal-cost-*), and a '#' in
+    a word ('ticket#1'), a subshell, a brace group, a function or a substitution makes the lex
+    uncertain too; the same shapes carrying no push or work-losing spelling still allow (the
+    pl-mispair-*-ctl controls)."""
+    return bool(_lex_uncertain_causes(command))
+
+
+def _lex_command(command, partial=False, locale=False, skip_empty=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
     '{fd}>' redirect, or a malformed redirect), so the caller falls back conservatively rather than acting on
     a partially-cleaned command. A QUOTED heredoc (<<'EOF'/<<"EOF"/<<\\EOF) is NOT unsupported: its literal
     body is EXCLUDED from analysis (round-2 finding 17) so a guard never fires on shell syntax quoted inside
-    heredoc prose. Linear, non-recursive, stdlib-only.
+    heredoc prose. This quoting model is a best-effort reading of bash, not a guarantee (a
+    comment, heredoc body or nested substitution can read differently under bash), so the push
+    guard never depends on it: _raw_push_guard rescans the raw text on every protected_line
+    call. Linear, non-recursive, stdlib-only.
 
     When partial is True the raise-on-error contract is replaced by a best-effort one: instead of raising,
     the lexer returns (segments, complete, in_progress), where segments are the segments recovered before the
@@ -807,7 +1272,16 @@ def _lex_command(command, partial=False):
     in_progress False: every recovered segment is then complete. This lets the Bash abspth floor still
     inspect a resolvable PREFIX (an earlier relative cd/redirect) even when a LATER segment is unparseable,
     rather than discarding every parsed segment on the first heredoc/here-string/process-substitution. The
-    default partial=False keeps the list-returning, raise-on-error contract every other caller relies on."""
+    default partial=False keeps the list-returning, raise-on-error contract every other caller relies on.
+
+    locale is passed to _read_word for every word: True reads a bash locale quote $"..." as a double-quoted
+    string, and the default False keeps the reading every other caller relies on.
+
+    skip_empty True leaves out every segment with no word and no redirect, whose record would be
+    _Segment([], sep, [], raw, False, [], []), so a long run of separators ('((((', ';;;;') builds no record,
+    list or tuple for it; every other record, its order and the partial-mode flags are unchanged. Only a
+    caller that reads nothing from such a segment (not its sep_after, its raw slice, or its place in the
+    list) passes it; the default False keeps every record."""
     n = len(command)
     segments = []
     argv = []
@@ -819,14 +1293,17 @@ def _lex_command(command, partial=False):
     pending_heredocs = []  # queued (delim, strip_tabs) for QUOTED heredocs whose bodies to skip (finding 17)
 
     def end_segment(sep, op_start, next_start):
-        segments.append(_Segment(list(argv), sep, list(redirects),
-                                  command[seg_start[0]:op_start], opaque[0], list(argv_opaque),
-                                  list(argv_leading_tilde)))
-        del argv[:]
-        del argv_opaque[:]
-        del argv_leading_tilde[:]
-        del redirects[:]
-        opaque[0] = False
+        # With no word and no redirect there is nothing to reset: argv_opaque, argv_leading_tilde and opaque
+        # change only together with argv, so a skipped segment leaves them empty and False as well.
+        if argv or redirects or not skip_empty:
+            segments.append(_Segment(list(argv), sep, list(redirects),
+                                      command[seg_start[0]:op_start], opaque[0], list(argv_opaque),
+                                      list(argv_leading_tilde)))
+            del argv[:]
+            del argv_opaque[:]
+            del argv_leading_tilde[:]
+            del redirects[:]
+            opaque[0] = False
         seg_start[0] = next_start
 
     def consume_redirect(op, oplen, at, src_fd):
@@ -837,7 +1314,7 @@ def _lex_command(command, partial=False):
         # treats '#' at a word start as a comment, so the redirect has no target): cannot-evaluate, ASK.
         if k >= n or command[k] == "\n" or command[k] in _METACHARS or command[k] == "#":
             raise ValueError("malformed redirect: no target")
-        target, t_opaque, started, _digits, t_ltilde, k2 = _read_word(command, k, n)
+        target, t_opaque, started, _digits, t_ltilde, k2 = _read_word(command, k, n, locale)
         if not started:
             raise ValueError("malformed redirect target")
         redirects.append(_classify_redirect(op, src_fd, target, t_opaque, t_ltilde))
@@ -891,7 +1368,7 @@ def _lex_command(command, partial=False):
                     raise ValueError("unsupported shell construct: {}".format(op))
                 i = consume_redirect(op, oplen, i, None)
                 continue
-            text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n)
+            text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n, locale)
             # An IO_NUMBER: an entirely-unquoted-digit word IMMEDIATELY adjacent to a '<'/'>' redirect
             # operator is that redirect's source fd, consumed as fd syntax, never left in argv. '2>file' ->
             # fd 2; but '2 > file' (spaced), "'2'>file"/'\2>file' (quoted/escaped), and 'x2>file' keep it.
@@ -935,14 +1412,17 @@ def _lex_command(command, partial=False):
     return segments
 
 
-def _segments(command):
+def _segments(command, locale=False, skip_empty=False):
     """Compatibility projection over _lex_command: a list of (argv, sep_after) tuples, argv being the
     quote-decoded words with shell REDIRECTION removed (so a leading/interspersed/trailing redirect no
     longer pollutes the token stream) and sep_after the ending operator or "". Raises ValueError on a
     parse error or unsupported construct so callers fall back conservatively. Existing consumers
     (protected_line, gate_weakening, git_explicit_binding, git_discard, find_ai_authorship) read
-    redirect-free argv automatically; diff_source_pretool uses the richer _Segment records directly."""
-    return [(seg.argv, seg.sep_after) for seg in _lex_command(command)]
+    redirect-free argv automatically; diff_source_pretool uses the richer _Segment records directly.
+    locale is passed to _lex_command; only the commit-identity reader (_cmtidn_line_ai) sets it, and it reads
+    each line with it set and unset. skip_empty is passed to _lex_command, for a caller that reads nothing
+    from a segment with no word and no redirect."""
+    return [(seg.argv, seg.sep_after) for seg in _lex_command(command, locale=locale, skip_empty=skip_empty)]
 
 
 # A leading inline shell env-var assignment (FOO=bar or the APPEND form FOO+=bar) that PREFIXES a command,
@@ -952,11 +1432,12 @@ def _segments(command):
 # APPEND '+=' form (OLDPWD+=..) is a real bash assignment prefix too, so it is recognized here; missing it
 # left the append-assignment mistaken for the command word, so the following cd was never examined. The
 # any-segment identity-assignment scan still inspects these same tokens for an AI name
-# (GIT_AUTHOR_NAME=Claude ...). Best-effort, per the manifest residue: the 'env VAR=x git ...' command form
-# and the 'command git ...' builtin remain out of scope. This matches the DECODED token, so an
-# assignment-SHAPED token whose NAME was quoted or escaped ("OLDPWD"=.. -> decoded OLDPWD=..) also matches;
-# bash would treat that as a command, not an assignment, so recognizing it is a deliberate conservative
-# over-fire (disclosed in the manifest residue), never an under-block.
+# (GIT_AUTHOR_NAME=Claude ...). Best-effort, per the manifest residue: for the checks that resolve the
+# command word here, the 'env VAR=x git ...' command form and the 'command git ...' builtin remain out of
+# scope; the commit-identity check reads both through its own finder (_cmtidn_git_commands). This matches
+# the DECODED token, so an assignment-SHAPED token whose NAME was quoted or escaped ("OLDPWD"=.. -> decoded
+# OLDPWD=..) also matches; bash would treat that as a command, not an assignment, so recognizing it is a
+# deliberate conservative over-fire (disclosed in the manifest residue), never an under-block.
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 
 
@@ -1274,10 +1755,39 @@ _DEV_PROC_TARGET_RE = re.compile(r"^/+(?:dev|proc)(?:/|$)")
 # It therefore cannot be proven a plain file lexically, so it is routed OPAQUE (ASK), never a proven
 # real-file ALLOW - matching how a '..' escape (equally cwd-dependent) is handled.
 _REL_DEV_PROC_TARGET_RE = re.compile(r"^(?:dev|proc)(?:/|$)")
+
+
+class _RawSequence:
+    """A raw-text probe whose steps must match IN ORDER: each step is searched once, from the end of the
+    previous step's leftmost match, and search() returns the last step's match or None. It decides the
+    same set as the single regex that joins the steps with a lazy '.*?' under re.DOTALL ('\\bgit\\b.*?\\bpush\\b'
+    and its siblings), at linear cost: that single regex retries the lazy gap from every match of the
+    first step, so on a command with many git words and no verb after them its cost grew with the square
+    of the command length, and with the cube for a three-step pattern (seconds at a few KB, past the hook
+    timeout well under 64 KB). Taking each step's leftmost match loses no solution because every step but
+    the last matches one fixed-length word, so the leftmost match also ends first, and a search started at
+    a position still reads the characters before it, so a word boundary or lookbehind at that position
+    sees the same neighbour it sees in the single regex. tools/selftest_aiqt_hooks.py holds every probe
+    built from this class equal to the single regex it replaced over a generated corpus."""
+    __slots__ = ("steps",)
+
+    def __init__(self, *patterns):
+        self.steps = tuple(re.compile(pattern) for pattern in patterns)
+
+    def search(self, text):
+        found, pos = None, 0
+        for step in self.steps:
+            found = step.search(text, pos)
+            if found is None:
+                return None
+            pos = found.end()
+        return found
+
+
 # Fallback-only broad producer probe over the RAW command, used only when _lex_command cannot parse the
 # command: an apparent 'git ... <producer>' ASKS (never a silent allow, never a regex-earned allow).
-_RAW_DIFF_PRODUCER_RE = re.compile(
-    r"(?is)\bgit\b.*?\b(?:diff|show|range-diff|log|diff-tree|diff-index|diff-files|format-patch)\b")
+_RAW_DIFF_PRODUCER_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\b(?:diff|show|range-diff|log|diff-tree|diff-index|diff-files|format-patch)\b")
 
 
 def _has_patch_flag(tokens):
@@ -1884,8 +2394,17 @@ def diff_source_pretool(data):
 
 # --- cmtidn: AI identity in a git authoring command --------------------------------------------------
 # Quote-aware and token-based. The commit-MESSAGE contexts (a Co-Authored-By trailer, an --author value)
-# are judged only on a segment whose command word is git and whose subcommand is a commit-creating verb,
-# so a read-side use of the same tokens (git log --author=Claude) never trips. Separately, an identity
+# are judged only on a segment that runs a git command whose subcommand is a commit-creating verb (the git
+# command is found behind leading reserved words, a function or coprocess name, VAR=value words and wrapper
+# words, _cmtidn_git_commands), so a read-side use of the same tokens (git log --author=Claude) does not trip,
+# bare or wrapped, and a git word after the subcommand of a read-side git command taken to be the one the
+# segment runs (a held candidate whose subcommand is a git command name) is that command's operand (env git
+# log --grep git commit --author=Claude). A command that git itself runs from its operands (git submodule
+# foreach CMD, git submodule--helper foreach CMD, git bisect run CMD, git rebase --exec CMD) is read as a
+# command line of its own (_cmtidn_run_lines). The read-side forms that still trip are the disclosed over-denies at
+# _CMTIDN_GIT_WRAPPERS: a wrapped git word right after a wrapper option, which the finder cannot tell from that
+# option's value (sudo -E git log --grep git commit --author=Claude), and a wrapped git command whose
+# subcommand is not a git command name (an alias). Separately, an identity
 # ASSIGNMENT (a git-identity env var, or a user.name/user.email config value) is a violation on ANY
 # segment, to harden the common 'set the identity then commit' form. Because the tokens are quote-aware,
 # a trailer hiding inside a quoted -m message (e.g. -m "fix; Co-authored-by: Claude", which the old
@@ -1895,42 +2414,222 @@ AI_IDENTITY_RE = re.compile(
     r"(?i)\b(claude|anthropic|openai|chatgpt|codex|copilot|gemini|gpt-?[0-9o][a-z0-9.-]*)\b"
     r"|@anthropic\.com|@openai\.com")
 COMMIT_VERBS = ("commit", "merge", "cherry-pick", "am", "rebase", "revert", "commit-tree")
-# A Co-Authored-By trailer inside a single token; its value runs to the token end (the token IS the
-# quoted message, so no shell quote can appear within it).
-CO_AUTHOR_RE = re.compile(r"(?i)co[- ]?authored[- ]?by\s*:?\s*([^\n]{1,160})")
+# A Co-Authored-By trailer inside a single token; its value is up to 160 characters, to the end of its line (the
+# token IS the quoted message, so no shell quote can appear within it). The regex matches the trailer name alone
+# and reads the value in a lookahead, so a scan of its matches (_co_author_ai) resumes right after each name and
+# reaches every trailer name in the token, one inside an earlier trailer's value included: a second trailer on the
+# same line, which a regex that consumed the value passed over when its search resumed after that value (a first
+# value of 140 characters ends inside a later 'Co-authored-by: Claude' and names no AI). The only 'c' in a trailer
+# name is its first letter, so two names cannot overlap, and each place a trailer can start is read with the value
+# that the regex consuming the value found there. Each whitespace run is taken whole (\s*+), as in the fallback's
+# co-author context (_RAW_IDENTITY_CONTEXTS): giving a run back one character at a time cost time quadratic in its
+# length when the token ends after it (a message of a trailer name and a long run of newlines). Taking a run whole
+# changes a match only where nothing but whitespace and at most one ':' follows the trailer name to the end of the
+# token: the value found there names no AI identity and no later match can start, so the reader finds the same AI
+# identities. The whitespace runs after a name end before the next name starts, so a token costs time linear in
+# its length.
+CO_AUTHOR_RE = re.compile(r"(?i)co[- ]?authored[- ]?by(?=\s*+:?\s*+([^\n]{1,160}))")
 # Identity-assignment tokens (any segment): a git-identity env var, or a user.name/user.email config
 # value in the '-c user.name=VALUE' inline shape.
 GIT_ENV_RE = re.compile(r"(?is)^GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)=(.*)$")
 USER_CONF_EQ_RE = re.compile(r"(?is)^user\.(?:name|email)=(.*)$")
-# Fallback-only raw-string contexts, used when the shared tokenizer cannot parse the command (see
-# _commit_identity_fallback). A value runs to whitespace or a shell separator/quote.
+# Fallback-only raw-string contexts, used when the shared tokenizer cannot parse the command, when a command
+# line that git runs from its operands is left unread, because the tokenizer cannot parse it or it is past the
+# run-line bounds, and when the command is too long to read and holds no word that can record an identity (see
+# _commit_identity_fallback). A value runs to whitespace or a shell separator/quote. The --author context
+# matches every prefix that git reads as --author (--au, --aut, --auth, --autho, --author; no other git commit
+# option starts with 'au'), with '=' or whitespace before the value, so the fallback is no weaker on that option
+# than the token reader. Like CO_AUTHOR_RE, the co-author context matches the trailer name alone and reads its
+# value, up to 160 characters, in a lookahead, so the scan reaches every trailer name, one inside an earlier
+# trailer's value included, each with the value that the context consuming the value found there. It takes each
+# whitespace run whole (\s*+), since it also judges a command too long to read, of any length: giving a run back
+# one character at a time cost time quadratic in its length when a quote or the end of the command follows it (a
+# run of newlines, which no value can start with). Taking a run whole changes a match only there, and the value
+# that giving part of the run back would find holds only whitespace or a ':', which names no AI identity, and
+# covers no place the context can start, so the context finds the same AI identities. The user.name context takes
+# each whitespace run whole too, since it judges a command the tokenizer cannot parse at any length up to the read
+# limit: splitting a run between two whitespace quantifiers at each space in it cost time quadratic in the run's
+# length when no value can start after it (a run of spaces before a quote that does not close). Its name is
+# followed by a whitespace run, '=' and a whitespace run, or else by a whitespace run that holds a space (the
+# lookahead). No value starts with whitespace, so either way a value starts after the whole run, where it started
+# when the run was split, and when no value starts after the '=', the '=' itself is the value, as it was when a
+# space before it was taken for the separator: the context finds the same values. The identity variable and
+# user.name contexts judge a command too long to read only when it holds none of their names
+# (_cmtidn_identity_word), so there they find no place to start.
 _VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s\"';|&]+)"
 _RAW_IDENTITY_CONTEXTS = (
-    (re.compile(r"(?i)co[- ]?authored[- ]?by\s*:?\s*([^\n\"']{1,160})"), "co-author trailer"),
-    (re.compile(r"(?i)--author[= ]\s*" + _VALUE), "--author value"),
+    (re.compile(r"(?i)co[- ]?authored[- ]?by(?=\s*+:?\s*+([^\n\"']{1,160}))"), "co-author trailer"),
+    (re.compile(r"(?i)--au(?:t(?:h(?:o(?:r)?)?)?)?[=\s]\s*" + _VALUE), "--author value"),
     (re.compile(r"(?i)\bGIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)\s*=\s*" + _VALUE), "git identity variable"),
-    (re.compile(r"(?i)\buser\.(?:name|email)\s*[= ]\s*" + _VALUE), "user.name/user.email value"),
+    (re.compile(r"(?i)\buser\.(?:name|email)(?:\s*+=\s*+|(?=[^\S ]*+ )\s*+)" + _VALUE),
+     "user.name/user.email value"),
 )
 
 
-def _commit_message_and_author_ai(tokens):
+# The options of git commit as git 2.55 lists them (git commit -h, git commit --git-completion-helper-all), so
+# the commit-message reader reads a value-taking option's value word as that value and never as an --author
+# option ('git commit -m --author=X' records the message '--author=X' and no author). Each short letter and
+# long name maps to the kind of value the option takes: 'author' is judged; 'message' (-m) and 'trailer' are
+# message text, which a co-author trailer can live in, so it is scanned for one; 'file' (-F) is the name of the
+# file git reads the message from; 'value' (a commit, a template, a date, a mode or a number) is passed over;
+# None takes no value from the next word (a flag, or -S, -u, --gpg-sign and --untracked-files, whose optional
+# value can only share their own word). A next-word value of any value-taking option that has the form
+# --author=VALUE is still judged as an --author value, and so is the word after a next-word value that is
+# --author or a prefix git reads as --author, a safe-direction over-deny that the maintainer chose to keep,
+# since git takes that word as the option's value and records no author from it
+# (_commit_message_and_author_ai). 'verify' and 'post-rewrite' are the positive spellings git also accepts for
+# --no-verify and --no-post-rewrite. Every long name is listed, since git reads a prefix that only one long name
+# starts with as that option (_cmtidn_option).
+_CMTIDN_COMMIT_SHORT = {"m": "message", "F": "file", "C": "value", "c": "value", "t": "value", "U": "value",
+                        "S": None, "u": None}
+_CMTIDN_COMMIT_LONG = {
+    "author": "author", "message": "message", "trailer": "trailer", "file": "file", "reedit-message": "value",
+    "reuse-message": "value", "fixup": "value", "squash": "value", "date": "value", "cleanup": "value",
+    "template": "value", "pathspec-from-file": "value", "unified": "value", "inter-hunk-context": "value",
+    "quiet": None, "verbose": None, "reset-author": None, "signoff": None, "edit": None, "status": None,
+    "gpg-sign": None, "all": None, "include": None, "interactive": None, "patch": None, "only": None,
+    "verify": None, "dry-run": None, "short": None, "branch": None, "ahead-behind": None, "porcelain": None,
+    "long": None, "null": None, "amend": None, "post-rewrite": None, "untracked-files": None,
+    "pathspec-file-nul": None, "allow-empty": None, "allow-empty-message": None}
+
+
+def _cmtidn_option(tok, short, long):
+    """(kind, value) for the word tok read as an option of a git verb, as git's option parser reads it, where
+    short and long map each short letter and each long name of the verb to the kind of value it takes (None:
+    no value from the next word). A short option cluster ('-am') is read letter by letter up to its first
+    letter in short, whose value is the rest of the word, or the next word when nothing follows that letter
+    ('-am MSG' and '-amMSG' both give -m the value MSG). A long option ('--auth', '--auth=X') is the option of
+    that exact name, else the one option whose name starts with it, as git reads an abbreviation (a prefix two
+    names share is ambiguous, and git refuses it); a '--no-' option takes no value. kind is None when the word
+    takes no value from the next word, and value is None when the value is the next word."""
+    if tok.startswith("--"):
+        name, eq, value = tok[2:].partition("=")
+        if name.startswith("no-"):
+            return None, None
+        if name in long:
+            kind = long[name]
+        else:
+            kinds = [k for opt, k in long.items() if opt.startswith(name)]
+            kind = kinds[0] if len(kinds) == 1 else None
+        return kind, (value if eq else None)
+    if tok.startswith("-"):
+        for k in range(1, len(tok)):
+            if tok[k] in short:
+                return short[tok[k]], (tok[k + 1:] or None)
+    return None, None
+
+
+# The longest name that AI_IDENTITY_RE matches between word boundaries ('anthropic'): a match that a co-author
+# value holds and the shorter value of an earlier trailer that it overlaps does not starts at most this many
+# characters less one before the shorter value's end (_ai_value_match). Each name ends with a word character, so
+# a name match that ends at or before that end lies in the shorter value, whose end is a word boundary after the
+# name's last character, and the match that the shorter value lacks ends past it. The gpt alternative has no
+# length bound, but each of its fixed parts (gpt, an optional '-' and a digit or 'o', at most 5 characters) ends
+# with a word character too, so a gpt match whose fixed part ends at or before that end gives the shorter value a
+# match of its own, which stops at the first character of the tail that is not a word character, or at the
+# shorter value's end after a word character, each a word boundary. Each address alternative holds a name
+# alternative between two characters that are not word characters (@anthropic.com holds anthropic), so it
+# matches only where that name matches too. The self-test (ci-wr-ai-margin) computes the names, every fixed part
+# and the addresses from AI_IDENTITY_RE's own parse, and fails when a name or a fixed part is longer than this
+# constant or can begin or end with a character that is not a word character, when an earlier value that ends
+# exactly at the end of one names no AI identity, or when a scan with this constant one smaller finds the same
+# values on strings whose AI name the end of an earlier value cuts.
+_AI_NAME_LONGEST = 9
+_WORD_CHAR_RE = re.compile(r"\w")
+
+
+def _ai_value_match(regex, text):
+    """The first match of regex in text whose value (group 1) names an AI identity, as AI_IDENTITY_RE.search
+    finds one in the value read alone, else None: the match that the plain scan, which searches each value
+    whole, finds, with each character of text searched a bounded number of times. regex is CO_AUTHOR_RE or a
+    context of _RAW_IDENTITY_CONTEXTS, whose values start in order and end in order. The other contexts consume
+    their values, so no two overlap and each is searched whole. The co-author regexes read each value, of up to
+    160 characters, in a lookahead, so in a word of repeated trailer names each character lies in up to 14
+    values. Once a value is found to name no AI identity, a later value that it overlaps and that ends where it
+    ends can hold a match only at its first character, and one that ends past it only there or in a match that
+    ends past that end, which starts at most _AI_NAME_LONGEST - 1 characters before it; so such a value is
+    searched only from there, with the text before that place read for its word boundary. The value read alone
+    starts a word at its first character where the text has a word character before it (a trailer name with no
+    ':' or space after it), so there that character is matched on the value itself. Each character is so
+    searched at most twice (where a later value ends past an earlier one that it overlaps, the earlier one ends
+    160 characters after its start, and the starts are at least 12 characters apart), and the match at a
+    value's first character reads at most 14 characters, except that a gpt name there reads its tail of letters,
+    digits, hyphens and dots to the end of the run or of the value, as the plain scan does."""
+    reached = 0  # the end of the last value searched
+    for m in regex.finditer(text):
+        start, end = m.span(1)
+        if start >= reached:  # no value searched before overlaps this one, which is searched whole
+            if AI_IDENTITY_RE.search(m.group(1)):
+                return m
+            reached = end
+            continue
+        first = start
+        if _WORD_CHAR_RE.match(text, start - 1):
+            if AI_IDENTITY_RE.match(m.group(1)):
+                return m
+            first = start + 1
+        if end > reached:
+            if AI_IDENTITY_RE.search(text, max(first, reached - _AI_NAME_LONGEST + 1), end):
+                return m
+            reached = end
+    return None
+
+
+def _co_author_ai(tok, judged):
+    """A hit label for the first Co-Authored-By trailer in the word tok whose value names an AI identity, else
+    None. Every trailer name in the word is read, one inside an earlier trailer's value included
+    (CO_AUTHOR_RE), so a word costs time linear in its length, though a word of repeated trailer names reads up
+    to about 13 times as many characters as it holds for the values (each name is at least 12 characters long
+    and has its own value of up to 160); the AI identity search of those values reads each character a bounded
+    number of times (_ai_value_match). judged maps each word already judged for the command to its result, so a
+    word that a run line repeats from the line it is built from, or that both readings of a line hold, is
+    scanned once."""
+    if tok in judged:
+        return judged[tok]
+    m = _ai_value_match(CO_AUTHOR_RE, tok)
+    hit = None if m is None else "co-author trailer {!r}".format(m.group(1).strip()[:80])
+    judged[tok] = hit
+    return hit
+
+
+def _commit_message_and_author_ai(tokens, judged):
     """A hit label if this git commit segment names an AI identity in an --author value or in a
-    Co-Authored-By trailer (scanned as a substring of any token, so the trailer that lives inside the
-    single quoted -m message token is caught), else None. The bare message body is deliberately NOT
-    matched against the identity set: a legitimate message that merely mentions an AI product name
-    (e.g. -m 'fix claude adapter') is not a recorded AI identity, and denying it would be a false
-    positive; only a trailer or an --author value records identity."""
+    Co-Authored-By trailer (scanned as a substring of a token, so the trailer that lives inside the
+    single quoted -m message token is caught), else None. Each word is read as a git commit option
+    (_cmtidn_option), so a value-taking option's value is read as that value before anything else, whether it
+    shares the option's word (--author=X, -mMSG) or is the next word (--author X, -am MSG): an --author value is
+    judged, a message value is scanned for a trailer, and a next-word value is never read as an option. One
+    exception keeps an earlier deny: a next-word value of ANY value-taking option (any spelling _cmtidn_option
+    reads as one) that has the form --author=VALUE is judged as an --author value, and so is the word after a
+    next-word value that is --author or a prefix git reads as --author, though git takes the value word as that
+    option's value and records no author from it (git commit -m --author=X, git commit -C --author=X, git commit
+    -m --author X), a safe-direction over-deny that the maintainer chose to keep. The bare message body is
+    deliberately NOT matched against the identity set: a legitimate message that merely mentions an AI product
+    name (e.g. -m 'fix claude adapter') is not a recorded AI identity, and denying it would be a false positive;
+    only a trailer or an --author value records identity. judged holds the trailer results of the words already
+    judged for the command (_co_author_ai)."""
     n = len(tokens)
-    for i, tok in enumerate(tokens):
-        m = CO_AUTHOR_RE.search(tok)
-        if m and AI_IDENTITY_RE.search(m.group(1)):
-            return "co-author trailer {!r}".format(m.group(1).strip()[:80])
-        if tok.startswith("--author="):
-            value = tok[len("--author="):]
-            if AI_IDENTITY_RE.search(value):
-                return "--author value {!r}".format(value.strip()[:80])
-        elif tok == "--author" and i + 1 < n and AI_IDENTITY_RE.search(tokens[i + 1]):
-            return "--author value {!r}".format(tokens[i + 1].strip()[:80])
+    i = 0
+    while i < n:
+        tok = tokens[i]
+        hit = _co_author_ai(tok, judged)
+        if hit is not None:
+            return hit
+        kind, value = _cmtidn_option(tok, _CMTIDN_COMMIT_SHORT, _CMTIDN_COMMIT_LONG)
+        if kind is not None and value is None and i + 1 < n:
+            i += 1
+            value = tokens[i]  # the option's value word, never read as an option
+            hit = _co_author_ai(value, judged) if kind in ("message", "trailer") else None
+            if hit is not None:
+                return hit
+            if value.startswith("--author="):
+                kind, value = "author", value[len("--author="):]  # the over-deny kept above
+            elif (i + 1 < n and _cmtidn_option(value, {}, _CMTIDN_COMMIT_LONG) == ("author", None)
+                  and AI_IDENTITY_RE.search(tokens[i + 1])):
+                return "--author value {!r}".format(tokens[i + 1].strip()[:80])  # the over-deny kept above
+        if kind == "author" and value is not None and AI_IDENTITY_RE.search(value):
+            return "--author value {!r}".format(value.strip()[:80])
+        i += 1
     return None
 
 
@@ -1952,37 +2651,467 @@ def _identity_assignment_ai(tokens):
     return None
 
 
+# The wrapper words that run the command after them (their own options and operands first) for the
+# commit-identity check: when one is a segment's command word, a later word that is git starts a candidate
+# git command the check reads (_cmtidn_git_commands). One bounded rule rather than an option grammar per
+# wrapper, so a wrapper option or operand that is not git is passed over whatever its arity (sudo -u ci,
+# timeout -s KILL 60, nice -n 10, xargs -I{}), and a wrapper option value spelled git (sudo -u git git commit)
+# starts a candidate that does not hide the git command after it. A candidate whose git word does not stand
+# right after a word that may be an option taking it as a value (a word that starts with '-' other than '-',
+# '--' or an option carrying '=') is held: it may be the git command the segment runs, or a git-named operand
+# of a program off this list that the wrapper runs (sudo flock /var/lock/git env git commit, sudo chroot
+# /srv/git /usr/bin/env git commit). Once a held candidate has a subcommand that is a git command name
+# (_CMTIDN_GIT_SUBCOMMANDS), it is taken to be the git command the segment runs, and a later git word is
+# that command's operand and starts no candidate (env git log --grep git commit); a held candidate whose
+# subcommand is not a git command name (env, /usr/bin/env, an alias) leaves later git words read. The cost
+# is a safe-direction over-deny when a wrapped command that is not git carries git, a commit verb and an AI
+# --author or trailer as its own operands ('xargs echo git commit --author=...'), when a read-side git word
+# stands right after a wrapper option, so the finder cannot tell it from that option's value and keeps
+# reading later git words ('sudo -E git log --grep git commit --author=...'), and when a wrapped read-side
+# git command's subcommand is an alias ('env git lg --grep git commit --author=...'); the remaining gap is a
+# git-named operand of a program off the list followed by a word spelled as a git command name. 'command -v
+# NAME' and 'command -V NAME' only look a name up, so a command word 'command' whose options carry v or V runs
+# no git command. A wrapper off this list (builtin, doas, ionice, ...) is not read. The list and the reserved
+# words below are this check's own (the _CMTIDN_ prefix), so one shared wrapper-aware finder can later replace
+# them.
+_CMTIDN_GIT_WRAPPERS = frozenset((
+    "env", "timeout", "command", "exec", "nohup", "xargs", "sudo", "nice", "setsid", "stdbuf", "time"))
+# The shell reserved words that can stand before a segment's command word ('! git ...', 'if git ...',
+# 'then git ...', '{ git ...; }'); the same words the gate-discipline check passes over (_GATE_RESERVED).
+_CMTIDN_RESERVED = frozenset(("{", "}", "!", "if", "then", "else", "elif", "fi", "for", "while", "until",
+                              "do", "done", "case", "esac", "select", "function", "in", "[[", "]]", "coproc"))
+# The reserved words that open a compound command. 'function NAME' and 'coproc NAME' followed by one of them
+# define a function or start a named coprocess whose body is that compound command, so NAME is a name and the
+# body's command word comes after it (function f { git commit ...; }, coproc C while git commit ...; do :;
+# done). 'coproc NAME' followed by any other word is a simple command whose command word is NAME (coproc C
+# env git ... runs C). A '(' or '((' body ends the segment in the lexer, so that body is judged as a segment
+# of its own.
+_CMTIDN_COMPOUND_OPENERS = frozenset(("{", "if", "while", "until", "for", "case", "select", "[["))
+# The git command names, so a held candidate whose subcommand is one is taken to be the git command the segment
+# runs (_CMTIDN_GIT_WRAPPERS): the git 2.55 built-ins (git --list-cmds=builtins) and the commands of its command
+# list (git --list-cmds=list-mainporcelain and the other command categories, the guides left out), less the
+# internal helpers whose name carries '--' and the separate programs gitk, gitweb and scalar. A git command
+# missing from it only leaves later git words read, a safe-direction over-deny.
+_CMTIDN_GIT_SUBCOMMANDS = frozenset((
+    "add", "am", "annotate", "apply", "archimport", "archive", "backfill", "bisect", "blame", "branch",
+    "bugreport", "bundle", "cat-file", "check-attr", "check-ignore", "check-mailmap", "check-ref-format",
+    "checkout", "checkout-index", "cherry", "cherry-pick", "citool", "clean", "clone", "column", "commit",
+    "commit-graph", "commit-tree", "config", "count-objects", "credential", "credential-cache", "credential-store",
+    "cvsexportcommit", "cvsimport", "cvsserver", "daemon", "describe", "diagnose", "diff", "diff-files",
+    "diff-index", "diff-pairs", "diff-tree", "difftool", "fast-export", "fast-import", "fetch", "fetch-pack",
+    "filter-branch", "fmt-merge-msg", "for-each-ref", "for-each-repo", "format-patch", "format-rev", "fsck",
+    "fsck-objects", "gc", "get-tar-commit-id", "grep", "gui", "hash-object", "help", "history", "hook",
+    "http-backend", "http-fetch", "http-push", "imap-send", "index-pack", "init", "init-db", "instaweb",
+    "interpret-trailers", "last-modified", "log", "ls-files", "ls-remote", "ls-tree", "mailinfo", "mailsplit",
+    "maintenance", "merge", "merge-base", "merge-file", "merge-index", "merge-one-file", "merge-ours",
+    "merge-recursive", "merge-recursive-ours", "merge-recursive-theirs", "merge-subtree", "merge-tree",
+    "mergetool", "mktag", "mktree", "multi-pack-index", "mv", "name-rev", "notes", "p4", "pack-objects",
+    "pack-redundant", "pack-refs", "patch-id", "pickaxe", "prune", "prune-packed", "pull", "push", "quiltimport",
+    "range-diff", "read-tree", "rebase", "receive-pack", "reflog", "refs", "remote", "remote-ext", "remote-fd",
+    "repack", "replace", "replay", "repo", "request-pull", "rerere", "reset", "restore", "rev-list", "rev-parse",
+    "revert", "rm", "send-email", "send-pack", "sh-i18n", "sh-setup", "shell", "shortlog", "show", "show-branch",
+    "show-index", "show-ref", "sparse-checkout", "stage", "stash", "status", "stripspace", "submodule", "svn",
+    "switch", "symbolic-ref", "tag", "unpack-file", "unpack-objects", "update-index", "update-ref",
+    "update-server-info", "upload-archive", "upload-pack", "url-parse", "var", "verify-commit", "verify-pack",
+    "verify-tag", "version", "whatchanged", "worktree", "write-tree"))
+
+
+def _cmtidn_git_commands(tokens):
+    """Yield the index of each word that one segment's git commands may read as their subcommand, in ONE pass
+    over the tokens: no suffix is sliced or re-scanned per git word, so a long wrapped segment costs time
+    linear in its length. Leading reserved words (_CMTIDN_RESERVED) and VAR=value words are passed over to the
+    command word, and so is the NAME after 'function' or 'coproc' when a compound opener follows it
+    (_CMTIDN_COMPOUND_OPENERS). When the command word is git (a path to git included), that one git command
+    is read and the index of its subcommand is yielded. When it is a wrapper (_CMTIDN_GIT_WRAPPERS), the finder
+    yields CANDIDATES: a later word that is git and not a VAR=value word starts a candidate git command, a
+    git-named option value or operand included, until a held candidate (its git word does not stand right
+    after a word that may be an option taking it as a value) has a subcommand that is a git command name
+    (_CMTIDN_GIT_SUBCOMMANDS), so it is taken to be the command the segment runs; a later git word is that
+    command's operand. A held candidate whose subcommand is not a git command name may be a git-named operand
+    of a program off the wrapper list (sudo flock /var/lock/git env git commit), so later git words are still
+    read (the subcommand word itself, when it is git, starts one: sudo flock git git commit runs git commit).
+    The command that a git command runs from its operands is read by find_ai_authorship (_cmtidn_run_lines),
+    not here. A 'command' whose options carry v or V (command -v git, command -V git) is a lookup and runs
+    none; otherwise the segment runs no git command. A git command's subcommand is its first word that is not
+    a git global option, an arg-consuming global option (_GIT_ARG_OPTS: -C DIR, -c NAME=VALUE) passing over
+    its value too, as _git_subcommand_rest reads it. Every
+    candidate still reading its global options sees the same next word, so the pass keeps three flags (the
+    candidates expect an option or their subcommand here, they expect an option value here, one of them is
+    held), and a word that is the subcommand of two candidates is yielded once. Purely lexical: a git word the
+    shell builds at run time is not seen (the residue lists them)."""
+    n = len(tokens)
+    i = 0
+    while i < n and tokens[i] in _CMTIDN_RESERVED:
+        named = tokens[i] in ("function", "coproc")
+        i += 1
+        if named and i + 1 < n and tokens[i + 1] in _CMTIDN_COMPOUND_OPENERS:
+            i += 1  # the NAME of a function definition or a named coprocess, before its compound body
+    while i < n and _ENV_ASSIGN_RE.match(tokens[i]):
+        i += 1
+    if i >= n:
+        return
+    word = tokens[i].rsplit("/", 1)[-1]
+    wrapped = word in _CMTIDN_GIT_WRAPPERS
+    if word != "git" and not wrapped:
+        return
+    i += 1
+    if word == "command":
+        while i < n and tokens[i].startswith("-") and tokens[i] != "--":
+            if "v" in tokens[i] or "V" in tokens[i]:
+                return  # command -v / -V NAME looks NAME up and runs nothing
+            i += 1
+    reading = not wrapped  # the candidates expect a global option or their subcommand at this word
+    value = False          # the candidates expect the value of an arg-consuming global option at this word
+    held = not wrapped     # one of the candidates is held (its git word follows no option that may take it)
+    ended = False          # a held candidate has a git command name as its subcommand, the command run
+    last = tokens[i - 1]
+    while i < n:
+        tok = tokens[i]
+        starts = (wrapped and not ended and tok.rsplit("/", 1)[-1] == "git"
+                  and not _ENV_ASSIGN_RE.match(tok))
+        next_reading = value  # an option value is passed over and its candidates read on
+        next_held = held and value
+        next_value = False
+        if reading:
+            if not tok.startswith("-"):
+                yield i
+                ended = ended or (held and (not wrapped or tok in _CMTIDN_GIT_SUBCOMMANDS))
+            elif tok in _GIT_ARG_OPTS:
+                next_value, next_held = True, held
+            else:
+                next_reading, next_held = True, held
+        if starts:
+            next_reading = True
+            if not last.startswith("-") or last in ("-", "--") or "=" in last:
+                next_held = True  # no option before this git word can take it as its value
+        reading, value, held = next_reading, next_value, next_held
+        if ended and not (reading or value):
+            return  # the git command the segment runs has its subcommand
+        last = tok
+        i += 1
+
+
+# The options of git rebase as git 2.55 lists them (git rebase -h, git rebase --git-completion-helper-all), read
+# like _CMTIDN_COMMIT_SHORT and _CMTIDN_COMMIT_LONG so that the value of --exec or -x, in any spelling git
+# accepts (-x CMD, -xCMD, -ix CMD, --exec=CMD, --ex CMD), is found and the value of another option is not
+# read as one. 'verify', 'stat' and 'ff' are the positive spellings of --no-verify, --no-stat and --no-ff.
+_CMTIDN_REBASE_SHORT = {"x": "exec", "C": "value", "s": "value", "X": "value", "S": None, "r": None}
+_CMTIDN_REBASE_LONG = {
+    "exec": "exec", "onto": "value", "trailer": "value", "whitespace": "value", "empty": "value",
+    "strategy": "value", "strategy-option": "value", "keep-base": None, "verify": None, "quiet": None,
+    "verbose": None, "stat": None, "signoff": None, "committer-date-is-author-date": None,
+    "reset-author-date": None, "ignore-date": None, "ignore-whitespace": None, "force-rebase": None, "ff": None,
+    "continue": None, "skip": None, "abort": None, "quit": None, "edit-todo": None, "show-current-patch": None,
+    "apply": None, "merge": None, "interactive": None, "preserve-merges": None, "rerere-autoupdate": None,
+    "keep-empty": None, "autosquash": None, "update-refs": None, "gpg-sign": None, "autostash": None,
+    "allow-empty-message": None, "rebase-merges": None, "fork-point": None, "root": None,
+    "reschedule-failed-exec": None, "reapply-cherry-picks": None}
+# How deep the command lines that git runs from its operands may nest (a foreach that runs a foreach) and how
+# many characters of such lines one command may make the check read, as a multiple of its own length plus a
+# floor, kept for each reading of the lines and for the lines that only a mix of the readings builds
+# (_cmtidn_line_ai), so a command built to nest or repeat them costs time linear in its length. A line past
+# either bound is left unread, and so is a line, at any depth, that the shared tokenizer cannot parse (an
+# unbalanced quote in a foreach operand or an exec value): every other segment of the command and every other
+# run line within the bounds is still judged, so such a line cannot hide an AI identity that the reader can
+# read. Only when none of them sets one does find_ai_authorship raise ValueError with _CMTIDN_RUN_BOUNDS, so
+# the handler judges the command with its conservative fallback, which then denies an AI identity anywhere in
+# the command once its quotes and backslashes are removed (_commit_identity_fallback).
+_CMTIDN_RUN_DEPTH = 8
+_CMTIDN_RUN_SCALE = 8
+_CMTIDN_RUN_FLOOR = 4096
+_CMTIDN_RUN_BOUNDS = ("git runs a command line that could not be parsed, or command lines nested or repeated past "
+                      "the commit-identity bounds")
+# The longest command, in characters, that find_ai_authorship reads. A hook that runs past its timeout (10
+# seconds, tools/gen_hooks.py TIMEOUT) is stopped before it can deny, and the platform contract this file
+# records (the module docstring) does not say that a stopped hook refuses the call, so the reading of a long
+# command has to end well inside the timeout. The costliest commands measured, repeated wrapped git bisect run
+# words nested up to three deep and ending in a locale quote, which spend all three run-line bounds, took up to
+# about 7.3 microseconds of CPU time per character to read (1.9 s at 256 KiB, 7.1 s at 1 MiB), so a command of
+# this length costs up to about 1 s, a tenth of the timeout; that margin is for a host several times slower than
+# the one measured and for the other PreToolUse hooks the platform runs on the same command at the same time.
+# That bound holds only while each regex the reader runs on a word, and each one the fallback runs on a command of
+# this length that the tokenizer cannot parse, costs time linear in the length it scans: CO_AUTHOR_RE and the
+# user.name context of _RAW_IDENTITY_CONTEXTS take each whitespace run whole, since giving a run back one character
+# at a time cost time quadratic in its length (about 53 s and 130 s of CPU time at this length, for a commit message
+# of a trailer name and a run of newlines and for user.name and a run of spaces before a quote that does not close,
+# against about 0.01 s with each run taken whole). CO_AUTHOR_RE also gives each trailer name in a word its own
+# value of up to 160 characters, so a word of repeated trailer names costs several times one pass over it, though
+# the AI identity search reads only the part of each value past the end of the one before it, less
+# _AI_NAME_LONGEST - 1 characters (_ai_value_match), and each distinct word is scanned once for the command
+# (_co_author_ai): a commit message of repeated trailer names in git rebase -x lines nested seven deep, the
+# innermost ending in a locale quote, took up to about 0.15 s at this length, against 0.41 s with each value
+# searched whole (the highest of three single runs on one host). A longer command raises ValueError with
+# _CMTIDN_TOO_LONG before any reading starts, and the handler's fallback denies it when it names an AI anywhere
+# and holds a word that can record an identity, or when a raw-string context finds an AI identity in it, in time
+# that grows with its length: on the measuring host a command of about 40 to 48 MiB or longer can outlast the
+# timeout, and on a slower host a shorter one can (_commit_identity_fallback).
+_CMTIDN_READ_LIMIT = 128 << 10
+_CMTIDN_TOO_LONG = "the command is longer than the commit-identity check reads within the hook timeout"
+# An AI name as AI_IDENTITY_RE spells it but with no word boundary, so that a name the reader would find in a
+# command too long to read is found by the fallback as well. Each word the reader judges, a word of a run line
+# included, holds the command's characters in order less only quotes, backslashes, the newline of a
+# backslash-newline and the '$' before a quote (a run line adds quotes and backslashes that its own reading drops
+# again), so once every quote, backslash, '$' and newline is dropped from the command (_CMTIDN_UNREAD_CHARS_RE),
+# the letters of any name the reader matches stand together, though the characters around them may no longer
+# leave a word boundary.
+_AI_NAME_ANYWHERE_RE = re.compile(AI_IDENTITY_RE.pattern.replace(r"\b", ""))
+_CMTIDN_UNREAD_CHARS_RE = re.compile(r"[\\\"'$\n]")
+# The words that can record an identity, which a command too long to read must also hold before its AI name
+# denies it (_cmtidn_identity_word): the reader judges an --author value or a trailer only on a segment whose
+# git command it finds by a word that is git or a path ending in /git, and a run line only under such a git
+# command, and it judges an identity assignment only in a word that starts with a GIT_AUTHOR_ or GIT_COMMITTER_
+# variable name, or with user.name or user.email. Each such word holds its letters in the command with only the
+# characters of _CMTIDN_UNREAD_CHARS_RE between them, so the variable and config names are sought in the command
+# once those characters are dropped, as the AI name is. git is sought as a whole word: its letters with only
+# those characters between them (g$'i't), and no letter, digit or underscore directly before or after it in the
+# command as written, so a dropped character counts as a word boundary too. A word of the command starts after
+# a space, a tab, a newline or an operator, and git in a path follows a '/', so a git at the start of a line,
+# whose newline the dropping removes (EOF, a newline, then git commit ...), is still found. A command that runs
+# git under another name (a variable, a function, an alias) is outside the reader too.
+_CMTIDN_GIT_WORD_RE = re.compile(r"(?<!\w)g[\\\"'$\n]*i[\\\"'$\n]*t(?!\w)")
+_CMTIDN_IDENTITY_NAME_RE = re.compile(r"(?i)GIT_(?:AUTHOR|COMMITTER)_|user\.(?:name|email)")
+
+
+def _cmtidn_run_lines(tokens, k, stop):
+    """Yield each command line that the git command whose subcommand is the word at index k runs from its own
+    operands, spelled as the shell reads it, so find_ai_authorship reads it as a command of its own. git
+    submodule foreach CMD runs its first operand as shell text followed by the other operands as its arguments
+    (foreach 'git commit ...' and foreach git commit ... both run git commit); the options of submodule
+    (--quiet, --cached) and of foreach (--quiet, --recursive) take no value, so the first word after them that
+    does not start with '-' is that first operand. git submodule foreach hands its operands to git
+    submodule--helper foreach after a '--', and git runs the helper's operands the same way, after an optional
+    '--', so the helper's foreach is read the same way. git bisect run CMD runs its operands as the words of one
+    command. git rebase runs the value of each --exec or -x as a shell command line (_cmtidn_option reads the
+    rebase options up to '--'). stop is the index of the next rebase subcommand that the segment's git commands
+    read (len(tokens) when there is none), where this rebase's read of its options stops: that subcommand word
+    takes no value, so from the word after it both reads see the same option boundaries and find the same
+    lines, which the next rebase yields. Each word of a segment is so read for one rebase only, and a segment
+    of many wrapped rebase commands costs time linear in its length. Only these forms are read: the residue
+    lists the commands git runs from elsewhere (an interactive rebase's edited todo list, an alias, a configured
+    editor)."""
+    n = len(tokens)
+    verb = tokens[k]
+    j = k + 1
+    if verb in ("submodule", "submodule--helper"):
+        while j < n and tokens[j].startswith("-"):
+            j += 1
+        if j < n and tokens[j] == "foreach":
+            j += 1
+            while j < n and tokens[j].startswith("-"):
+                j += 1
+            if j < n:
+                yield tokens[j] + "".join(" " + shlex.quote(word) for word in tokens[j + 1:])
+    elif verb == "bisect":
+        if j + 1 < n and tokens[j] == "run":
+            yield " ".join(shlex.quote(word) for word in tokens[j + 1:])
+    elif verb == "rebase":
+        while j < stop and tokens[j] != "--":
+            kind, value = _cmtidn_option(tokens[j], _CMTIDN_REBASE_SHORT, _CMTIDN_REBASE_LONG)
+            if kind is not None and value is None and j + 1 < n:
+                j += 1
+                value = tokens[j]  # the option's value word, never read as an option
+            if kind == "exec" and value is not None:
+                yield value
+            j += 1
+
+
 def find_ai_authorship(command):
     """Return '<context> <value>' when a segment sets an AI identity for a recorded change, else None:
     an identity-assignment (env var / git config) on ANY segment, or a commit-message context (co-author
-    trailer, --author value) on a git commit segment. Raises ValueError on a shell parse error (via
-    _segments), which the handler turns into the conservative fallback."""
-    for tokens, _sep in _segments(command):
-        hit = _identity_assignment_ai(tokens)
-        if hit is not None:
-            return hit
-        if _command_word(tokens) == "git" and _git_subcommand(tokens) in COMMIT_VERBS:
-            hit = _commit_message_and_author_ai(tokens)
+    trailer, --author value) on a segment that runs a git commit-family command, found by
+    _cmtidn_git_commands behind leading reserved words, a function or coprocess name, VAR=value words and
+    wrapper words (env, sudo, ...), and the same on each command line that a git command runs from its
+    operands (_cmtidn_run_lines). The command and each run line are judged under two readings, and an AI
+    identity that either finds is returned: bash locale quoting read as double-quoted text (_segments with
+    locale True), so a name that $"" splits inside a word (Cl$""aude) is read joined, as bash joins it, and the
+    literal '$' reading every other guard uses (locale False), so a name followed directly by a locale quote
+    (Claude$"bot", which the first reading joins into Claudebot) still denies as it did before locale quoting
+    was read: a change toward allow is held until the maintainer decides it. The run lines that each reading
+    alone builds are read within a length bound of that reading's own, and those that only a mix of the two
+    builds within a third, so the lines one reading builds cannot spend the bound of the other: every line that
+    one reading alone reads is still read, and no command that one reading alone denies is allowed. Raises
+    ValueError on a shell parse error in the command itself (via _segments; under one reading only, after the
+    other reading has found nothing and left no run line unread), ValueError(_CMTIDN_RUN_BOUNDS) when a run
+    line was left unread, because it could not be parsed or was past the bounds (_CMTIDN_RUN_DEPTH), and
+    nothing read sets an AI identity, and ValueError(_CMTIDN_TOO_LONG) at once, before any reading, when the
+    command is longer than _CMTIDN_READ_LIMIT characters; the handler turns each into the conservative
+    fallback."""
+    if len(command) > _CMTIDN_READ_LIMIT:
+        raise ValueError(_CMTIDN_TOO_LONG)
+    bound = _CMTIDN_RUN_SCALE * len(command) + _CMTIDN_RUN_FLOOR
+    unread = [False]
+    try:
+        hit = _cmtidn_line_ai(command, 0, {True: [bound], False: [bound], None: [bound]}, unread, [True, False],
+                              {})
+    except ValueError:
+        if not unread[0]:
+            raise
+        hit = None  # one reading cannot parse the command, and the other left a run line unread
+    if hit is None and unread[0]:
+        raise ValueError(_CMTIDN_RUN_BOUNDS)
+    return hit
+
+
+def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
+    """find_ai_authorship over one command line at a run-line nesting depth. The line is judged under both
+    readings, the locale reading and the literal '$' reading (the locale flag of _segments True and False),
+    once when they agree, which they do on a line holding no $". paths lists the readings whose own reading of
+    the command and of every run line down to this one builds this line, and is empty when only a mix of the
+    two does. budgets maps each reading, and None for such a mix, to a one-item list of the characters of run
+    lines still to be read within that bound, shared by every nested line of the command: each run line that a
+    reading of this line builds is charged to the bound of each reading in paths that reads this line so, or to
+    the None bound when there is none, and is read while one of those bounds is not spent, so every line that
+    one reading alone reads is read, within that reading's bound, as that reading alone reads it. unread is a
+    one-item list set to True when a run line is left unread: one past a bound, or one (depth above 0) that the
+    shared tokenizer cannot parse under a reading. Such a line is not read, but the other segments of the
+    command and of every line being read still are, and so are the other run lines within the bounds; once the
+    bounds that a reading charges are spent it builds no further run line, and each rebase reads its options
+    only up to the next rebase subcommand (_cmtidn_run_lines), so the cost stays linear. judged maps each word
+    already scanned for a co-author trailer, on this line or another line of the command, to its result
+    (_co_author_ai). A parse error in the command itself (depth 0) raises: at once when neither reading parses
+    it, and otherwise after the other reading has found nothing."""
+    readings = []  # (the readings that read the line so, its segments)
+    error = None
+    for locale in (True, False):
+        if not locale and '$"' not in command:
+            for same, _read in readings:
+                same.append(locale)  # the readings differ only at a $" (_read_word): one serves for both
+            break
+        try:
+            segments = _segments(command, locale=locale)
+        except ValueError as exc:
+            error = error or exc
+            continue
+        for same, read in readings:
+            if read == segments:
+                same.append(locale)
+                break
+        else:
+            readings.append(([locale], segments))
+    if error is not None and depth > 0:
+        unread[0] = True  # a run line that a reading cannot parse is left unread, like one past the bounds
+    elif error is not None and not readings:
+        raise error
+    for same, segments in readings:
+        keys = [reading for reading in paths if reading in same] or [None]
+        for tokens, _sep in segments:
+            hit = _identity_assignment_ai(tokens)
             if hit is not None:
                 return hit
+            subs = list(_cmtidn_git_commands(tokens))
+            if any(tokens[k] in COMMIT_VERBS for k in subs):
+                hit = _commit_message_and_author_ai(tokens, judged)
+                if hit is not None:
+                    return hit
+            rebases = [k for k in subs if tokens[k] == "rebase"]
+            stops = dict(zip(rebases, rebases[1:]))
+            for k in subs:
+                if all(budgets[key][0] < 0 for key in keys):
+                    break  # the length bound is spent: no further run line is built
+                for line in _cmtidn_run_lines(tokens, k, stops.get(k, len(tokens))):
+                    for key in keys:
+                        budgets[key][0] -= len(line)
+                    spent = [budgets[key][0] < 0 for key in keys]
+                    if depth >= _CMTIDN_RUN_DEPTH or any(spent):
+                        unread[0] = True  # left to the conservative fallback unless something read sets an identity
+                        if depth >= _CMTIDN_RUN_DEPTH or all(spent):
+                            break
+                    hit = _cmtidn_line_ai(line, depth + 1, budgets, unread, [key for key in keys if key is not None],
+                                          judged)
+                    if hit is not None:
+                        return hit
+    if error is not None and depth == 0:
+        raise error
     return None
 
 
-def _commit_identity_fallback(command):
-    """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): scan the RAW
-    string for an AI identity in a Co-Authored-By trailer, an --author value, a git-identity env var, or
-    a user.name/user.email value; deny on a hit. Never silent-allow a plausibly-violating command on a
-    parse failure."""
+def _cmtidn_identity_word(command):
+    """A word of command that can record an identity, as a match object: its first git word
+    (_CMTIDN_GIT_WORD_RE), else its first GIT_AUTHOR_, GIT_COMMITTER_, user.name or user.email name once the
+    characters of _CMTIDN_UNREAD_CHARS_RE are dropped (_CMTIDN_IDENTITY_NAME_RE); None when it holds neither."""
+    return (_CMTIDN_GIT_WORD_RE.search(command)
+            or _CMTIDN_IDENTITY_NAME_RE.search(_CMTIDN_UNREAD_CHARS_RE.sub("", command)))
+
+
+def _commit_identity_fallback(command, error):
+    """FAIL-SAFE conservative scan when find_ai_authorship could not read the command in full, error being the
+    text of the ValueError it raised: the shared tokenizer cannot parse the command (an unbalanced quote or an
+    unsupported construct), a command line that git runs from its operands was left unread, because the
+    tokenizer cannot parse it or it is past the run-line bounds, and nothing read set an AI identity
+    (_CMTIDN_RUN_BOUNDS), or the command is longer than the check reads within the hook timeout
+    (_CMTIDN_TOO_LONG). Unless a check below decides first, it scans the RAW string of the whole command for an
+    AI identity in a Co-Authored-By trailer, an --author value (any prefix git reads as --author), a
+    git-identity env var, or a user.name/user.email value (_RAW_IDENTITY_CONTEXTS), and denies on a hit.
+    A command too long to read is first denied when an AI name appears ANYWHERE in it once every quote,
+    backslash, '$' and newline is removed, with no word boundary needed around the name (_AI_NAME_ANYWHERE_RE),
+    and it also holds a word that can record an identity (_cmtidn_identity_word), so a command that the reader
+    would deny is denied; the cost is a disclosed over-deny of such a command whose text merely names an AI
+    product or holds a name inside a longer word (Claudette) and that holds git as a word or an identity
+    variable or config name, a heredoc body included. One that names no AI anywhere is allowed at once, since no
+    raw-string context can find an AI identity in it either. One that names an AI but holds none of those words
+    is judged by the raw-string contexts, as a command the tokenizer cannot parse is, so an AI --author value or
+    co-author trailer in it denies when git runs under another name (gi?, "$G"); a heredoc that writes a file
+    naming an AI product, with no trailer, --author value or identity assignment in it, is allowed. This
+    judgement has no length bound, so its cost grows with the command's length. The costliest shapes measured
+    are commands made of repeated co-author trailer names, since the co-author context reads each name with its
+    own value of up to 160 characters, though the AI identity search reads only the part of each value past the
+    end of the one before it, less _AI_NAME_LONGEST - 1 characters (_ai_value_match): the highest of three
+    single runs on one host took about 0.26 s of CPU time at 1,048,576 characters, 4.0 s at 16,777,216 and 6.3 s
+    at 25,165,824 (with each value searched whole, 0.59 s, 8.7 s and 14.0 s on the same host), and 7.3 s at
+    33,554,432, 8.9 s at 41,943,040 and 10.3 s at 50,331,648, so on the measuring host a command of about 40 to
+    48 MiB or longer can outlast the 10-second hook timeout, and on a slower host a shorter one can. The platform
+    contract this file records (the module docstring) does not say that a hook stopped at its timeout refuses the
+    call, so such a command may run with no deny from this check.
+    With a run line left unread it first denies when an AI identity appears ANYWHERE in the
+    command once every backslash-newline, backslash and quote is removed, since quoting or escaping in the
+    unread line can split or build an option name or value that no raw-string context sees (--"auth"=...,
+    --author=C"laude ...", a backslash-newline before the value), or once the '$' before each double quote is
+    removed as well, since bash drops the '$' of a locale quote $"..." (--author=Cl$""aude ...); the cost is a
+    disclosed over-deny of such a command whose text merely names an AI product, and the second form also joins
+    the text around a '$' that bash keeps (one inside double quotes, or one escaped), the same safe direction.
+    Never silent-allow a plausibly-violating command the check could not read in full."""
+    if error == _CMTIDN_TOO_LONG:
+        match = _AI_NAME_ANYWHERE_RE.search(_CMTIDN_UNREAD_CHARS_RE.sub("", command))
+        if match is None:
+            return _allow()  # no AI name, so no raw-string context below can find one either
+        word = _cmtidn_identity_word(command)
+        if word is not None:
+            reason = ("AIQT rule cmtidn (commit-identity): the command is {} characters long, more than the {} "
+                      "that the check reads within the hook timeout, and it names an AI identity ({!r}) once its "
+                      "quotes, backslashes, '$' signs and newlines are removed, and holds a word that can record one "
+                      "({!r}); failing closed, since the unread command can set an AI --author, trailer or "
+                      "identity. Remove it and commit as the maintainer; a long command that only mentions an AI "
+                      "product can be split into shorter commands."
+                      .format(len(command), _CMTIDN_READ_LIMIT, match.group(0), word.group(0)))
+            return _deny(reason,
+                         "AIQT guardrail: denied a command too long for the commit-identity check to read that "
+                         "names an AI identity (rule cmtidn, fail-safe).")
+        # no word that can record an identity: the raw-string contexts below judge the command
+    if error == _CMTIDN_RUN_BOUNDS:
+        text = command.replace("\\\n", "").replace("\\", "")
+        match = (AI_IDENTITY_RE.search(text.replace('"', "").replace("'", ""))
+                 or AI_IDENTITY_RE.search(text.replace('$"', "").replace('"', "").replace("'", "")))
+        if match:
+            reason = ("AIQT rule cmtidn (commit-identity): git runs a command line that could not be parsed, or "
+                      "command lines nested or repeated past the check's bounds, so a line was left unread, and "
+                      "the command names an AI identity ({!r}) once its quotes and backslashes are removed; "
+                      "failing closed, since quoting or escaping in the unread line can build an AI --author or "
+                      "trailer. Remove it and commit as the maintainer.".format(match.group(0)))
+            return _deny(reason,
+                         "AIQT guardrail: denied a git command with a run line left unread (unparseable or past "
+                         "the commit-identity bounds) that names an AI identity (rule cmtidn, fail-safe).")
     for regex, label in _RAW_IDENTITY_CONTEXTS:
-        for match in regex.finditer(command):
-            if AI_IDENTITY_RE.search(match.group(1)):
-                hit = "{} {!r}".format(label, match.group(1).strip()[:80])
-                reason = ("AIQT rule cmtidn (commit-identity): the command could not be parsed by the "
-                          "shell lexer (likely unbalanced quotes) and it appears to set an AI identity "
-                          "({}); failing closed. Remove it and commit as the maintainer.".format(hit))
-                return _deny(reason,
-                             "AIQT guardrail: denied an unparseable git command that appears to record "
-                             "an AI commit identity (rule cmtidn, fail-safe).")
+        match = _ai_value_match(regex, command)
+        if match is not None:
+            hit = "{} {!r}".format(label, match.group(1).strip()[:80])
+            reason = ("AIQT rule cmtidn (commit-identity): the command could not be read in full (a shell "
+                      "parse error such as unbalanced quotes, a command line that git runs that could not be "
+                      "parsed or was nested or repeated past the check's bounds, or a command longer than the "
+                      "check reads within the hook timeout) and it appears to set an AI identity ({}); failing "
+                      "closed. Remove it and commit as the maintainer.".format(hit))
+            return _deny(reason,
+                         "AIQT guardrail: denied a git command the check could not read in full that "
+                         "appears to record an AI commit identity (rule cmtidn, fail-safe).")
     return _allow()
 
 
@@ -2005,8 +3134,8 @@ def commit_identity(data):
             "AIQT guardrail: denied a Bash call with no readable command (rule cmtidn, fail-closed).")
     try:
         hit = find_ai_authorship(command)
-    except ValueError:
-        return _commit_identity_fallback(command)
+    except ValueError as exc:
+        return _commit_identity_fallback(command, str(exc))
     if hit is None:
         return _allow()
     reason = ("AIQT rule cmtidn (commit-identity): a recorded change carries the human maintainer's "
@@ -2245,7 +3374,8 @@ def bash_absolute_paths(data):
     # cd/redirect in the parseable PREFIX still ASKS. Only a cd/redirect position WITHIN or AFTER the
     # unparseable construct is left to the human's own permission flow (a disclosed residual), rather than
     # over-asking on every such command. This is the conservative-floor boundary, not a proof of safety.
-    segments = _lex_command(command, partial=True)[0]
+    # The loop reads only each segment's words and redirects, so a segment with neither is skipped unbuilt.
+    segments = _lex_command(command, partial=True, skip_empty=True)[0]
     reasons = []       # relative/opaque cd or NON-destructive redirect: an allow-note convention nudge
     deny_reasons = []  # a DESTRUCTIVE truncating redirect to a relative/opaque target: fail-closed deny
     for seg in segments:
@@ -2334,10 +3464,12 @@ def bash_absolute_paths(data):
 # coarse cut (a shell 'if'/'for', a backtick or '$()' substitution, a '|&' or leading/interspersed redirect,
 # and ANY wrapper in front of git - sudo/stdbuf/doas/setsid/eval/sh -c/...: the raw 'git'+work-losing-verb
 # scan is trusted UNCONDITIONALLY, not an enumerated wrapper list, so an un-listed wrapper is caught): ASK.
-# That "cannot slip" is NOT categorical: a wrapper that ALSO fragments the command word 'git' or the verb so
-# neither the token scan nor the raw scan sees a contiguous git+verb keyword reads as "no recognized lossy
-# verb" and is silently ALLOWED (a DISCLOSED best-effort residual, see the module docstring; GD-34
-# do-not-chase). The raw scan also OVER-ASKS in the SAFE direction: a command that merely CONTAINS a git
+# That "cannot slip" is NOT categorical: the raw scan also reads the continuation-joined text and a de-quoted
+# copy, so a command word 'git' or a verb fragmented by quotes or a backslash is caught too,
+# but one built so that no such reading holds a contiguous git+verb keyword (an escape decoded inside $'...',
+# a parameter expansion or command substitution at run time) reads as "no recognized lossy verb" and is
+# silently ALLOWED (a DISCLOSED best-effort residual, see the module docstring; GD-34 do-not-chase). The raw
+# scan also OVER-ASKS in the SAFE direction: a command that merely CONTAINS a git
 # token and a lossy verb as TEXT while running no discard ('echo git branch', 'git log | grep branch') still
 # ASKS; narrowing that is the whack-a-mole GD-34 rejected, so the over-ask is disclosed, not chased.
 # The status probe (git -c status.showUntrackedFiles=all status --porcelain --untracked-files=all) is
@@ -2569,15 +3701,19 @@ _GIT_CONFIG_WRITE_FLAGS = frozenset((
     "-e", "--edit"))
 _EXPBND_WRAPPER_WORDS = frozenset(("command", "exec", "builtin", "env", "sudo"))
 _RAW_EXPBND_CD_RE = re.compile(r"(?i)(?:^|[\s;&|()])(?:cd|pushd|popd)(?=$|[\s;&|()])")
-_RAW_EXPBND_MUTATE_RE = re.compile(
-    r"(?is)\bgit\b.*?\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
+_RAW_EXPBND_MUTATE_RE = _RawSequence(
+    r"(?i)\bgit\b",
+    r"(?i)\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
     r"notes|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|worktree)\b")
-_RAW_EXPBND_PRUNING_FETCH_RE = re.compile(
-    r"(?is)\bgit\b.*?\bfetch\b.*?(?:--prune(?:-tags)?\b|(?<!\S)-[^\s]*p)")
-_RAW_EXPBND_BREADTH_RE = re.compile(
-    r"(?is)\bgit\b.*?(?:\badd\b.*?(?:--all\b|(?<!\S)-[^\s]*A|(?<!\S)(?:\.|:/)(?!\S))|"
-    r"\bcommit\b.*?(?:--all\b|(?<!\S)-[^\s]*a))")
-_RAW_EXPBND_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
+_RAW_EXPBND_PRUNING_FETCH_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\bfetch\b", r"(?i)--prune(?:-tags)?\b|(?<!\S)-[^\s]*p")
+# The whole-tree breadth probe is two sequences, git then add then an add breadth selector, or git then
+# commit then a commit breadth selector; a command shows breadth when either matches.
+_RAW_EXPBND_ADD_BREADTH_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\badd\b", r"(?i)--all\b|(?<!\S)-[^\s]*A|(?<!\S)(?:\.|:/)(?!\S)")
+_RAW_EXPBND_COMMIT_BREADTH_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\bcommit\b", r"(?i)--all\b|(?<!\S)-[^\s]*a")
+_RAW_EXPBND_PUSH_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bpush\b")
 
 
 def _is_abs_binding(value):
@@ -2832,7 +3968,8 @@ def _expbnd_fallback(command):
     if (_RAW_EXPBND_CD_RE.search(command) and
             (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command))):
         return _expbnd_target_ask("mutation")
-    if _RAW_EXPBND_BREADTH_RE.search(command) and _RAW_EXPBND_PUSH_RE.search(command):
+    if ((_RAW_EXPBND_ADD_BREADTH_RE.search(command) or _RAW_EXPBND_COMMIT_BREADTH_RE.search(command))
+            and _RAW_EXPBND_PUSH_RE.search(command)):
         return _expbnd_breadth_publish_deny("breadth operation")  # finding 11: breadth + publish -> deny
     return _allow()
 
@@ -2972,7 +4109,9 @@ def git_stash_ref(data):
             "its git target and scope could not be checked. This is a binding convention, not a hazard, so "
             "it is allowed; prefer an explicit '-C' target and enumerated scope.")
     try:
-        segments = _segments(command)
+        # The loop below passes over a segment with no word (it has no command word), so one with no word
+        # and no redirect is not built at all.
+        segments = _segments(command, skip_empty=True)
     except ValueError:
         return _allow()
 
@@ -3810,9 +4949,13 @@ def _git_discard_fallback(command):
     redirected target the session snapshot does not contain. This fallback cost - every unparseable
     command the raw scan flags is denied, read-only ones included - is disclosed in the manifest
     residue. No override exists on this path (or any other): an unparseable in-scope command DENIES
-    whatever leading prefix it carries."""
-    if not _raw_has_lossy_git(command):
-        return _allow()  # no git + work-losing verb anywhere in the raw text: the true boundary
+    whatever leading prefix it carries. The scope scan also reads the de-quoted copy
+    (_dequoted_text: continuations joined, a '$' before a quote, quote characters and backslashes
+    removed), so a fragmented 're""set' in an unparseable command is flagged and denied like its
+    plain spelling. Every flagged unparseable command denies here, so a redirect a continuation or a
+    quote splits ('-\\<newline>C', '-"C"') can never reach a session-directory snapshot."""
+    if not (_raw_has_lossy_git(command) or _raw_has_lossy_git(_dequoted_text(command))):
+        return _allow()  # no git + work-losing verb in the raw text or its de-quoted copy: the true boundary
     return _deny(
         "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell lexer "
         "(an unbalanced quote or an unsupported construct) and its raw text names git together with a "
@@ -5545,6 +6688,38 @@ _DISCARD_GRAMMAR_DENY_TEXTS = {
 
 
 
+def _uncertain_line_lossy(command):
+    """When _lex_uncertain flags an IN-SCOPE command, the whole-command lex
+    may have swallowed the very line that carries the work-losing verb into an opaque word
+    (gd-uncertain-reset-reason: a commented paren inside a substitution), leaving the reason with only
+    the GENERIC 'a git work-losing verb' wording. bash ends a comment at its newline, so a PHYSICAL LINE
+    is still meaningful there: re-read each raw line on its own and collect the lossy roles of the
+    lines that independently lex as git commands, so the reason names the SPECIFIC verb ('git reset',
+    'git reset --hard'; gd-uncertain-reset-name pins it in the no-session-directory deny). NAMING ONLY: the
+    caller is already in scope via the raw scan and already on the non-pristine path (the closed
+    allowlist grammar or the no-session-directory deny); this re-read changes no decision.
+    A prose line (gd-nested-prose: 'mention git reset --hard ...' inside a heredoc nested in a
+    substitution) does not lex to a 'git' command word, so the generic wording stays there.
+    The lines are read after joining continuations (_join_continuations), so a verb a
+    continuation splits is named too."""
+    found = []
+    for line in _join_continuations(command)[0].split("\n"):
+        try:
+            line_segments = _segments(line, skip_empty=True)  # a segment with no word names no verb
+        except ValueError:
+            continue  # a line the lexer cannot read alone contributes no name
+        for tokens, _sep in line_segments:
+            if _command_word(tokens) != "git":
+                continue
+            sub, args = _git_sub_and_args(tokens)
+            if sub is None:
+                continue
+            role, kind = _discard_role(sub, args)
+            if role != "allow":
+                found.append((role, kind, tokens))
+    return found
+
+
 def git_discard(data):
     """prsunc (integ/preserve-uncommitted-work), PreToolUse/Bash. ULTRA-CONSERVATIVE "recover then allow"
     guard (EN-6). NO-ASK posture: every former ASK is resolved WITHOUT prompting - a recoverable-destructive
@@ -5600,11 +6775,16 @@ def git_discard(data):
     working-tree content (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are
     reflog-recoverable) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
     reserved for the TRUE boundary (a non-Bash or absent tool, a malformed or missing command it cannot read as a discard, a non-git command,
-    or no recognized lossy verb). A wrapper is in scope only while the raw scan still
-    sees a contiguous git verb keyword, so 'any wrapper DENIES' is NOT categorical: a wrapper that ALSO
-    fragments the COMMAND WORD 'git' itself or the verb (env git re'set' --hard / eval git re'set' / command
-    g'it' reset --hard, whose raw string carries no contiguous 'git'+'reset') reads as 'no recognized lossy
-    verb' and is silently ALLOWED - a DISCLOSED best-effort residual, not chased. A real discard whose VERB is
+    or no recognized lossy verb). A wrapper is in scope while the raw scan, the continuation-joined text or
+    the DE-QUOTED copy (_dequoted_text: continuations joined, a '$' before a quote, quote characters and
+    backslashes removed) sees a contiguous git verb keyword. The de-quoted copy is read on a
+    certain lex too, so a wrapper that ALSO fragments the COMMAND WORD 'git' itself or the verb with quotes or
+    a backslash (env git re'set' --hard / eval git re'set' / command g'it' reset --hard / git status; env git
+    re""set --hard) is in scope, where the closed allowlist grammar denies it, no longer a silent allow.
+    'any wrapper DENIES' is still NOT
+    categorical: a command word or verb no raw, joined or de-quoted reading assembles (an escape decoded
+    inside $'...', a word built by a parameter expansion or a command substitution at run time) reads as 'no
+    recognized lossy verb' and is silently ALLOWED - a DISCLOSED best-effort residual. A real discard whose VERB is
     outside the recognized set AND unflagged by the raw scan ('git worktree remove -f' of a dirty linked
     worktree, where 'worktree' matches no lossy keyword) is allowed at the true boundary - disclosed, not
     closed this round. BUT a command the raw scan DOES flag whose resolved subcommand is outside the
@@ -5651,7 +6831,11 @@ def git_discard(data):
     if not isinstance(command, str):
         return _allow()  # boundary: unreadable/malformed command container
     try:
-        segments = _segments(command)
+        # Segments with no word and no redirect are skipped unbuilt: the lossy scan below passes over a
+        # segment with no command word, and _pristine_single_bare_git returns before reading the segments
+        # when the command holds any shell metacharacter (every separator and the newline among them), so
+        # it reads only the single segment that ends the command, and drops that one too when it has no word.
+        segments = _segments(command, skip_empty=True)
     except ValueError:
         # Conservative raw scan, not a silent allow (D-423-NARROW): an unparseable command the raw scan
         # flags is denied outright; only a command the scan clears is allowed at the true boundary.
@@ -5683,7 +6867,25 @@ def git_discard(data):
     # behind nested heredoc data). The cost is disclosed: a lossy keyword quoted inside heredoc prose
     # now brings the harmless outer command in scope, where the positive grammar denies the heredoc
     # operator itself - an over-deny, the safe direction under D-423-NARROW.
-    raw_lossy = _raw_has_lossy_git(command)
+    # Beside the raw text the scope scan reads the JOINED text (_join_continuations,
+    # continuations removed as bash removes them) and the DE-QUOTED copy (_dequoted_text: continuations
+    # joined, a '$' before a quote, quote characters and backslashes removed), unstripped like the raw text
+    # and on a certain and an uncertain lex alike, so a verb or command word that a continuation, a quote
+    # or a backslash fragments under a wrapper ('env git re\<newline>set --hard', 'git status; env git
+    # re""set --hard', "env git re'set' --hard", 'command g""it reset --hard') is in scope, where the
+    # closed allowlist grammar denies it, instead of a silent allow. A work-losing verb behind a commented
+    # heredoc opener is in scope the same way. raw_lossy also feeds the unrecognized-subcommand deny
+    # below, so a pristine 'git "check"out-index -a -f' denies like 'git checkout-index -a -f'.
+    # DISCLOSED over-refusal (the safe direction): the de-quoted copy reads quoted prose too, so
+    # a command that only prints fragmented work-losing prose ("echo 'git re""set --hard'", a quoted printf
+    # argument) is in scope, where the grammar denies it (echo and printf are not accepted command words);
+    # and a read-only subcommand whose quoted argument de-quotes to a work-losing keyword
+    # ('git log --grep="re""set"') denies through that deny like its plain spelling
+    # (gd-dequote-prose-* vectors). The read is kept: quoted text is code under eval, 'bash -c' or
+    # 'sh -c', and this read is what brings a fragmented verb there into scope.
+    raw_lossy = (_raw_has_lossy_git(command)
+                 or _raw_has_lossy_git(_join_continuations(command)[0])
+                 or _raw_has_lossy_git(_dequoted_text(command)))
     if not lossy and not raw_lossy:
         return _allow()  # boundary: no git + work-losing verb anywhere
 
@@ -5692,6 +6894,11 @@ def git_discard(data):
     # the probe.
     pristine = _pristine_single_bare_git(command, segments)
     if pristine is None:
+        # On an UNCERTAIN lex the parsed scan may have swallowed the
+        # work-losing line into an opaque word, leaving only the GENERIC wording; re-read the raw
+        # lines to NAME the specific verb (naming only, see _uncertain_line_lossy).
+        if not lossy and _lex_uncertain(command):
+            lossy = _uncertain_line_lossy(command)
         kind = lossy[0][1] if lossy else "a git work-losing verb"
         # D-423-NARROW ROUND 8: a non-pristine in-scope command is accepted ONLY when its RAW text
         # fits the positive literal grammar (_discard_positive_grammar); anything outside it DENIES with the
@@ -5702,6 +6909,12 @@ def git_discard(data):
         # command, so an in-scope verb that actually acts on the session repository stays recoverable
         # even when no segment resolved it. With NO session cwd every non-pristine in-scope command
         # DENIES (fail closed: the catch-all snapshot base cannot be resolved; ROUND-8).
+        # A quote-fragmented `eval git re'set'` reaches here through the de-quoted scope
+        # scan, and the grammar denies it (eval and a concatenated quote are outside it). A verb
+        # obfuscated so thoroughly that it evades even that scan (built by an escape decoded inside
+        # $'...' or by a parameter expansion at run time, so no raw, joined or de-quoted reading holds a
+        # contiguous `reset` for _raw_has_lossy_git to catch) never reaches here at all: it is ALLOWED at
+        # the in-scope boundary above, a DISCLOSED best-effort residual, not something this path closes.
         np_cwd = data.get("cwd")
         np_base = np_cwd if isinstance(np_cwd, str) and np_cwd else None
         if np_base is None:
@@ -6157,8 +7370,8 @@ _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests bod
 
 # Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct);
 # mirrors the _RAW_DIFF_PRODUCER_RE / _RAW_LOSSY_VERB_RE posture: conservative, over-matching, never
-# a silent allow. _RAW_PUSH_RE/_RAW_COMMIT_RE pair git with the verb in one pattern ((?is): case-fold,
-# '.' spans newlines). _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--for[a-z-]*' covers
+# a silent allow. _RAW_PUSH_RE/_RAW_COMMIT_RE pair git with a LATER verb (a _RawSequence, case-folded,
+# the gap spanning newlines). _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--for[a-z-]*' covers
 # --for/--force/--force-with-lease/--force-if-includes; the short cluster scan now admits a digit
 # ('-[A-Za-z0-9]*f'), so an ipv4/ipv6 '-4f'/'-6f' clustered with force is caught (F-117), and its
 # disclosed false-hit on an attached -o value ending in f ('-of') now also covers '-o4f'; the short
@@ -6183,10 +7396,60 @@ _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests bod
 # (env git push -'f' origin main, \-f, escaped +main) is not matched, because bash quote/escape removal
 # cannot be replicated by a raw-string regex; this is the same inherent lexical boundary as a
 # shell-expanded $VAR, disclosed and not chased (F-117/F-119).
-_RAW_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
-_RAW_PUSH_FORCE_RE = re.compile(r"(?i)--for[a-z-]*|--mirror\b|--all\b|--branches\b|(?:^|[\s'\"])-[A-Za-z0-9]*f|(?:^|[\s'\"])\+\S")
+# Every remote-overwriting long option is matched at EVERY abbreviation git accepts, derived from
+# git push's own long-option set rather than by hand. That set (git 2.55, the option table behind
+# 'git push -h'): verbose, quiet, repo, all, branches, mirror, delete, tags, dry-run, porcelain,
+# force, force-with-lease, force-if-includes, recurse-submodules, thin, receive-pack, exec,
+# set-upstream, progress, prune, no-verify (with its negation verify), follow-tags, signed, atomic,
+# push-option, ipv4, ipv6. git takes a prefix that names exactly ONE option (an exact name wins, and
+# --branches is an alias of --all, so those two never clash). The options that can overwrite, delete
+# or bulk-update remote refs, each with its shortest accepted prefix:
+#   --force              --force    (each shorter prefix also names the two options below)
+#   --force-with-lease   --force-w
+#   --force-if-includes  --force-i
+#   --mirror             --m
+#   --all                --al       (--a also names --atomic)
+#   --branches           --b
+#   --delete             --de       (--d also names --dry-run)
+#   --prune              --pru      (--p and --pr also name --porcelain, --progress or --push-option)
+# --tags and --follow-tags are left out: they add refs under refs/tags only and never update or
+# delete a branch (a force spelling beside them is matched as force); no other option forces,
+# deletes or sweeps. _push_abbrev_alternative turns each row into one alternative that matches every
+# prefix from the shortest to the full name as a whole option word (the full '--all' and '--branches'
+# spellings it replaces also matched a longer hyphenated word such as '--all-targets', which no git
+# push option is); the broader '--for[a-z-]*', '--de[a-z-]*' and
+# '--pru[a-z-]*' spellings beside them also match prefixes git rejects as ambiguous ('--for',
+# '--forc'), an over-match in the safe direction. The parsed classifier (_push_parse) matches every
+# prefix of each name through _has_long_prefix. tools/selftest_aiqt_hooks.py recomputes the shortest
+# prefixes from a recorded copy of the option set above and fails when these rows disagree with it.
+# The three predicate regexes are applied per raw SEGMENT by _raw_push_match (split at newlines and
+# unquoted ;/&/| separators, see _raw_push_segments), so '^' anchors a segment start.
+_PUSH_FORCE_ABBREVS = (
+    ("force", "force"), ("force-with-lease", "force-w"), ("force-if-includes", "force-i"),
+    ("mirror", "m"), ("all", "al"), ("branches", "b"))
+_PUSH_DELETE_ABBREVS = (("delete", "de"), ("prune", "pru"))
+
+
+def _push_abbrev_alternative(name, shortest):
+    """One regex alternative matching '--<prefix>' for every prefix of `name` at least as long as
+    `shortest`, ending where the option word ends (no letter, digit, '_' or '-' follows, so
+    '--force-with' followed by '-x' does not match): ('mirror', 'm') gives
+    '--m(?:i(?:r(?:r(?:o(?:r)?)?)?)?)?(?![\\w-])'."""
+    tail = ""
+    for ch in reversed(name[len(shortest):]):
+        tail = "(?:" + re.escape(ch) + tail + ")?"
+    return "--" + re.escape(shortest) + tail + r"(?![\w-])"
+
+
+_RAW_PUSH_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bpush\b")
+_RAW_PUSH_FORCE_RE = re.compile(
+    r"(?i)--for[a-z-]*|"
+    + "|".join(_push_abbrev_alternative(name, shortest) for name, shortest in _PUSH_FORCE_ABBREVS)
+    + r"|(?:^|[\s'\"])-[A-Za-z0-9]*f|(?:^|[\s'\"])\+\S")
 _RAW_PUSH_DELETE_RE = re.compile(
-    r"(?i)--de[a-z-]*|--pru[a-z-]*|(?:^|[\s'\"])-[A-Za-z0-9]*d[A-Za-z0-9]*|(?:^|[\s'\"]):(?:refs/heads/|heads/)?(?:"
+    r"(?i)--de[a-z-]*|--pru[a-z-]*|"
+    + "|".join(_push_abbrev_alternative(name, shortest) for name, shortest in _PUSH_DELETE_ABBREVS)
+    + r"|(?:^|[\s'\"])-[A-Za-z0-9]*d[A-Za-z0-9]*|(?:^|[\s'\"]):(?:refs/heads/|heads/)?(?:"
     + "|".join(sorted(_PROTECTED)) + r")\b")
 _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")\b")
 # GD-146: the raw-fallback parity for a command-local mirror configuration the parsed path cannot reach
@@ -6197,17 +7460,23 @@ _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")
 # unquoted form, while a push-option value ('-o remote.origin.mirror=true') and prose do not. It matches
 # only the COMMON quoted-argument forms above: a quote or backslash that FRAGMENTS the option token, the
 # key, or the value (-'c', \-c, remote.origin.'mirror'=true which git 2.53 still reconstructs to
-# mirror=true, or a split value) is NOT matched. Arbitrary shell fragmentation of an unparseable or
-# wrapper-prefixed command cannot be robustly matched by a regex (only a shell parser could, which the
-# pack deliberately avoids), so this is an inherent lexical-scan boundary, the same class as the disclosed
-# wrapper/alias/fragmented-command-word residuals; it is DISCLOSED, not chased with more regex variants.
+# mirror=true, or a split value) is NOT matched by this regex on the raw text;
+# _protected_line_fallback also applies it to the DE-QUOTED copy (_dequoted_text), and the
+# raw-text backstop applies it to each segment's de-quoted copy, so a fragment made only of quote
+# characters, backslashes and a '$' before a quote is matched there (the key-fragmented wrapped
+# mirror-config vector, re-expected), while a fragment made another way (an escape decoded inside
+# $'...', an expansion) is not. Arbitrary shell
+# fragmentation of an unparseable or wrapper-prefixed command cannot be robustly matched by a regex (only
+# a shell parser could, which the pack deliberately avoids), so this is an inherent lexical-scan boundary,
+# the same class as the disclosed wrapper/alias/fragmented-command-word residuals; it is DISCLOSED, not
+# chased with more regex variants.
 # The PARSED path is complete for parseable commands (the tokenizer normalizes quotes) and network-side
 # branch protection remains the backstop. It parses NO value: a falsy value over-asks on this path
 # (accepted, documented), mirroring the raw scan's over-matching posture.
 _RAW_PUSH_MIRRORCFG_RE = re.compile(
     r"(?i)(?:^|[\s'\"])-c[\s'\"]+remote\.[^\s=]+\.mirror"
     r"|(?:^|[\s'\"])--config-env[=\s]['\"]*remote\.[^\s=]+\.mirror")
-_RAW_COMMIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
+_RAW_COMMIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
 
 # Commit proof contract. Recognizers establish syntax, never authorization.
 # The ordered evaluator supplies the evidence consumed by _commit_on_protected.
@@ -7206,7 +8475,199 @@ def _commit_denial(detail):
         "AIQT guardrail: denied a protected or unproved direct commit (rule artbr1).")
 
 
-def _protected_line_fallback(command):
+def _raw_push_segments(command):
+    """Split the raw command at newlines and at the shell separators ; & | (covering
+    ;, ;;, &&, ||, |, |& and a background &) that sit OUTSIDE any quoting _skip_quoting can prove,
+    so the backstop judges ONE command segment at a time and an ordinary neighbouring segment (a
+    'rm -rf build', a 'git rebase origin/main', a '--format' or '--depth' value, a 'tail -f' in
+    another pipe stage) no longer supplies the force spelling or the protected name for an unrelated
+    push. An unquoted '#' that STARTS A WORD is a comment;
+    the splitter skips to the end of that line WITHOUT reading any quote or separator in it (bash
+    does not), so a quote or an '&'/';'/'|' sitting in comment text neither opens a quoting context
+    nor splits a segment. The comment TEXT stays in the surrounding segment, still available to the
+    raw matching policy (a commented protected name is still matched, the disclosed over-denial),
+    but a comment quote can no longer mis-pair a later string and sever a wrapped push from its
+    force spelling or protected name (the pl-comment-quote vectors; the old scan let the quote in a
+    '# "' line pair with a later '"' and read 'env git push --force "origin' and 'other" main' as
+    different segments, a silent allow). An '&' or '|' that is part of a REDIRECTION
+    OPERATOR is NOT a separator and never splits - an '&' that follows an UNESCAPED '<' or '>' or is
+    followed by '>' (2>&1, >&2, 1>&2, <&0, 2>&-, &>, &>>) and a '|' that follows an UNESCAPED '>'
+    (the '>|' clobber form) - because bash reads a redirection as part of ONE simple command.
+    Operator membership is read in ESCAPE and LINE-CONTINUATION context: a
+    backslash-newline between the '<'/'>' and the '&' is a line continuation and transparent, so
+    '2>\\<newline>&1' stays one segment, while an ESCAPED '\\>' is a literal character and NOT a
+    redirection operator, so a real '&' or '|' after it splits; an IO number ('12>&1') and an
+    fd-var ('{fd}>&1') redirect stay unsplit, and a plain '&', '|' or '|&' splits. The split is
+    conservative where quoting is readable: a quote, backquote or substitution is consumed as ONE
+    opaque unit, so its content (separators included) stays inside the surrounding segment; a line
+    continuation does not split. On an unterminated or unreadable construct the REST of the command
+    joins the current segment unsplit, degrading toward a whole-text read (over-denial).
+    The splits themselves carry NO one-sided guarantee: a separator inside text bash reads
+    differently (an unquoted-heredoc body line, a construct the quoting model mis-pairs) can still
+    divide a pairing bash would run together, so this segment read stays one layer beside the parsed
+    classifier and the uncertain-lex fallback, never a proof of safety. Heredoc bodies
+    are NOT modelled and split at their newlines like any other text.
+
+    The split runs on the JOINED text (_join_continuations removes every backslash-newline
+    continuation first, as bash does), so a continuation on EITHER side of an operator is transparent:
+    '2>\\<newline>&1' and '&\\<newline>>' (bash's '&>' redirect) both stay in one segment. A comment
+    starts at a word start in the joined text, after a blank, a newline or any shell metacharacter
+    (;&|()<>), so a '(# "' line is comment text too. Each returned segment is the RAW slice of
+    `command` that its joined text came from (continuations included), for diagnostics.
+
+    A word start is tracked as bash tracks it: only an UNESCAPED blank, newline or
+    metacharacter ends a word, so a '#' just past an escaped blank ('x\\ #"'), a closing quote or the
+    ')' that closes a '$(', '<(' or '>(' substitution continues the word and opens no comment, and a
+    '<(' or '>(' process substitution is consumed as one opaque unit like '$('."""
+    joined, raw_index = _join_continuations(command)
+    segments = []
+    start = 0  # the RAW index where the current segment starts (just past the last separator)
+    i = 0
+    n = len(joined)
+    # prev_redir: the previous significant character was an UNESCAPED '<' or '>', so a following
+    # '&'/'|' is part of a redirection operator, not a separator.
+    prev_redir = False
+    # word_start: the next character starts a word (the text start, or just past an UNESCAPED blank,
+    # newline or shell metacharacter), the only place bash opens a comment.
+    word_start = True
+    while i < n:
+        c = joined[i]
+        if c == "#" and word_start:
+            # an unquoted word-start '#' is a comment: skip to end of line without reading quotes or
+            # separators in it, as bash does; the comment text stays in the current segment.
+            nl = joined.find("\n", i)
+            i = n if nl == -1 else nl
+            prev_redir = False
+            continue
+        if c in "\n;&|":
+            nxt = joined[i + 1] if i + 1 < n else ""
+            word_start = True
+            if c == "&" and (prev_redir or nxt == ">"):
+                i += 1  # part of a redirection operator (2>&1, >&2, <&0, 2>&-, &>, &>>): not a separator
+                prev_redir = False
+                continue
+            if c == "|" and prev_redir:
+                i += 1  # the '>|' clobber redirect: not a separator
+                prev_redir = False
+                continue
+            segments.append(command[start:raw_index[i]])
+            start = raw_index[i] + 1
+            i += 1
+            prev_redir = False
+            continue
+        if c == chr(92):
+            if i + 1 < n and joined[i + 1] == "\n":
+                i += 2  # a continuation the join kept (inside quoting it read differently): transparent
+                continue
+            i += 2  # an escaped character is literal: NOT a redirection metacharacter, NOT a word break
+            prev_redir = False
+            word_start = False
+            continue
+        if c == "(" and prev_redir:
+            # a '<(' or '>(' process substitution: skip it as the '$(' it parses like, one opaque unit
+            try:
+                i += _skip_quoting("$" + joined[i:], 0, n - i + 1) - 1
+            except ValueError:
+                break
+            prev_redir = False
+            word_start = False
+            continue
+        if c in ("'", '"', "`") or (c == "$" and i + 1 < n and joined[i + 1] in "({"):
+            try:
+                i = _skip_quoting(joined, i, n)
+            except ValueError:
+                break
+            prev_redir = False
+            word_start = False
+            continue
+        prev_redir = c in ("<", ">")
+        word_start = c in _SHELL_WORD_BREAK
+        i += 1
+    segments.append(command[start:])
+    return segments
+
+
+def _raw_push_match(command):
+    """True when ONE raw command segment pairs a git push with a force, delete or mirror spelling
+    AND a protected branch name: the raw-text backstop predicate, read with no lexing and no
+    stripping, and judging one _raw_push_segments segment at a time so a
+    neighbouring ordinary segment cannot supply the pairing. protected_line tests it on EVERY call
+    and returns _raw_push_guard on a match. Every regex runs on each segment's JOINED
+    text too (_join_continuations of the slice alone, which is sound because each slice starts just
+    past an unquoted separator), so a continuation inside a word ('pu\\<newline>sh',
+    'ma\\<newline>in', '--fo\\<newline>rce') no longer hides the push, the force spelling or the
+    protected name on a certain lex. The raw slice stays the diagnostic, and its own reading is kept
+    beside the joined one (it can only add a match, the safe direction). Every regex also
+    runs on each segment's DE-QUOTED copy (_dequoted_text of the slice: continuations joined, a '$'
+    before a quote, quote characters and backslashes removed), so a quote- or backslash-fragmented
+    word under a command-word wrapper ('pu""sh', "-'f'", "'ma'in", 'ma\\in') beside an ordinary git
+    segment no longer hides a force-push to a protected branch on a certain lex, where the broad
+    fallback does not run. Like the joined reading it can only add a match: a FEATURE-branch force-push
+    spelled in fragments still allows here (the disclosed pl-segment-res1 residual)."""
+    for segment in _raw_push_segments(command):
+        for text in (segment, _join_continuations(segment)[0], _dequoted_text(segment)):
+            if (_RAW_PUSH_RE.search(text)
+                    and (_RAW_PUSH_FORCE_RE.search(text) or _RAW_PUSH_DELETE_RE.search(text)
+                         or _RAW_PUSH_MIRRORCFG_RE.search(text))
+                    and _RAW_PROTECTED_RE.search(text)):
+                return True
+    return False
+
+def _raw_push_guard(command):
+    """The raw-text push backstop, the unconditional deny for a _raw_push_match
+    hit (ONE raw command segment pairing a git push with a force, delete or mirror spelling AND
+    a protected branch name, read with no lexing and no stripping; the read covers one
+    _raw_push_segments segment at a time rather than the whole text, and reads each
+    segment with its continuations joined and de-quoted too, beside the raw slice). protected_line
+    tests the predicate on EVERY call, before the commit-grammar reading and the lexer, so no parse
+    outcome and no harmless git segment elsewhere in the command can stand it down: a
+    shell-quoting model inside a hook cannot track comments, heredoc bodies and nested
+    substitutions the way bash does, so this layer does not depend on
+    one (for the shapes the backstop cannot spell - a hidden push naming no protected branch
+    - the restored nested-quote lexer is the parsed first line ONLY while its reading is certain;
+    on an UNCERTAIN lex (_lex_uncertain: any unquoted '#', '<<', '(' or ')', a lone
+    '{' or '}' word, any backtick or '$(', a continuation the lexer reads differently once joined, or a
+    refused form) protected_line routes to the broader _protected_line_fallback raw scan, which needs
+    no protected name, rather than let a benign lexed git segment vouch for the command).
+    DISCLOSED COST (the safe direction): push-shaped prose naming a
+    protected branch inside a heredoc body line, quoted string, comment or commit message
+    DENIES whenever it shares a segment with a push and force spelling (witnessed by the
+    quoted-heredoc prose vector and the pl-mispair vectors); the per-segment read removes only the
+    CROSS-segment pairings (a rebase
+    origin/main beside a feature force-push, an rm -rf beside a plain push, a --format or
+    --depth value: pl-segflow vectors). A force or delete spelling that names no protected
+    branch is NOT matched here: it is judged by the parsed classifier (force to a feature ref
+    stays allowed) and, for wrapped or unparseable commands, by the broader
+    _protected_line_fallback raw scan."""
+    return _deny(
+            "AIQT rule prtbrn (protected-branch-integrity): the raw command text pairs a git push "
+            "with a force, delete or mirror spelling and a protected branch name within one "
+            "command segment. This backstop reads the submitted text on every call, one "
+            "segment at a time (line continuations joined first, then split at newlines and at ;/&/| "
+            "separators outside any readable quoting and not part of a redirection operator; each "
+            "segment is read as written, with its continuations joined, and with quotes and "
+            "backslashes removed), "
+            "including the quoted strings, comments "
+            "and heredoc body lines inside that segment, because a quoting model inside a hook "
+            "cannot track those the way bash does; push-shaped prose naming a protected branch "
+            "beside a push in one segment is denied too (a disclosed over-denial, the safe "
+            "direction). The protected line changes only through a reviewed, verified merge. "
+            "Re-issue the work without force-push-to-protected text in the command segment. "
+            + _PROTECTED_ALTS,
+            "AIQT guardrail: denied a command whose raw text shows a force, delete or mirror push "
+            "naming a protected branch (rule prtbrn, raw-text backstop); push to a feature branch "
+            "and merge on green.")
+
+
+def _fallback_push_hit(text):
+    """True when `text` holds a git..push spelling together with a force, delete or mirror spelling
+    (the broad fallback predicate: no protected name is required)."""
+    return bool(_RAW_PUSH_RE.search(text) and (_RAW_PUSH_FORCE_RE.search(text)
+                                               or _RAW_PUSH_DELETE_RE.search(text)
+                                               or _RAW_PUSH_MIRRORCFG_RE.search(text)))
+
+
+def _protected_line_fallback(command, wrapped=False):
     """Commit-free push fallback; commit syntax is checked before this path.
 
     R10 (DECIDED item 3): the raw push scan reads the WHOLE command text, with no
@@ -7214,27 +8675,48 @@ def _protected_line_fallback(command):
     only HIDE a live push from this fail-safe scan (the stacked-heredoc and the
     nested-quote command-substitution shapes each erased a real force-push from
     the stripped scan). The disclosed cost is an over-deny: force-push-shaped
-    prose inside a QUOTED heredoc body now denies on this fallback path. Hidden
-    commits are checked independently of other Git segments by the commit recognizer.
+    prose inside a QUOTED heredoc body now denies on this fallback path.
+    Retain conservative raw push coverage over the RAW, unstripped text. The
+    former quoted-heredoc stripping could remove a real line that a mis-paired reading took
+    for body text, so no stripping removes any line from this scan; quoted prose can
+    over-match here (the safe direction). DISCLOSED over-denial, witnessed by
+    pl-fallback-prose: push-shaped prose naming only a FEATURE ref inside a quoted heredoc
+    body therefore denies here when the command is unparseable or wrapper-hidden (the
+    removed quoted-heredoc strip would have removed it; this scan stays unstripped by decision).
+    The scan also reads the DE-QUOTED copy of the whole command (_dequoted_text:
+    continuations joined, a '$' before a quote, quote characters and backslashes removed), so a
+    fragmented spelling ('pu""sh', 'ma""in') that bash assembles into a push is caught; the deny message names the
+    actual reasons the reading is uncertain (_lex_uncertain_causes), plus 'wrapped' when the
+    caller lexed no segment whose command word is git. The pairing is read across the WHOLE
+    text, so a force spelling in one command and a push word in another pair here (a disclosed
+    over-denial, reached only on an uncertain, unparseable or wrapper-hidden command).
+    Hidden commits are checked independently of other Git segments by the commit recognizer.
     """
     syntax = _commit_command_syntax(command)
     if syntax.status != "outside":
         if syntax.status == "help":
             return _allow()
         return _commit_denial("apparent commit lacks complete proof: " + syntax.detail)
-    scan = command  # R10: the fallback scans RAW text; no stripping may remove a line from it
-    if _RAW_PUSH_RE.search(scan) and (_RAW_PUSH_FORCE_RE.search(scan)
-                                      or _RAW_PUSH_DELETE_RE.search(scan)
-                                      or _RAW_PUSH_MIRRORCFG_RE.search(scan)):
-        named = " a protected branch" if _RAW_PROTECTED_RE.search(scan) else " a target this guard cannot read"
+    plain = _dequoted_text(command)
+    # R10: raw and unstripped; stripping could remove a real, mis-paired line. The de-quoted copy
+    # is read beside it, never instead of it.
+    if _fallback_push_hit(command) or _fallback_push_hit(plain):
+        named = (" a protected branch" if (_RAW_PROTECTED_RE.search(command) or _RAW_PROTECTED_RE.search(plain))
+                 else " a target this guard cannot read")
+        causes = [_LEX_UNCERTAIN_CAUSE_TEXT[key] for key in _lex_uncertain_causes(command)]
+        if wrapped:
+            causes.append("no segment whose command word is git, so git sits under a command-word "
+                          "wrapper or inside another command's text")
+        why = "; ".join(causes) if causes else "a form this guard cannot read with certainty"
         return _deny(
-            "AIQT rule prtbrn (protected-branch-integrity): this command could not be fully parsed by the "
-            "shell lexer (unbalanced quotes) or hides git under a command-word wrapper, and it appears to "
-            "force-push or delete{}; it is denied fail-safe because this guard cannot prove it will not "
-            "rewrite the protected line. The protected line changes only through a reviewed, verified merge. "
-            "Re-issue it as a plain, parseable, non-force git command. {}".format(named, _PROTECTED_ALTS),
-            "AIQT guardrail: denied an apparent force-push or branch deletion this guard cannot fully parse "
-            "(rule prtbrn, fail-safe); push to a feature branch and merge on green.")
+            "AIQT rule prtbrn (protected-branch-integrity): this guard cannot read this command's shell "
+            "structure with certainty ({}), and its text, read as written and with quotes and backslashes "
+            "removed, appears to force-push or delete{}; it is denied fail-safe because this guard cannot "
+            "prove it will not rewrite the protected line. The protected line changes only through a "
+            "reviewed, verified merge. Re-issue it as a plain, parseable, non-force git command. {}"
+            .format(why, named, _PROTECTED_ALTS),
+            "AIQT guardrail: denied an apparent force-push or branch deletion this guard cannot read with "
+            "certainty ({}) (rule prtbrn, fail-safe); push to a feature branch and merge on green.".format(why))
     return _allow()
 
 def protected_line(data):
@@ -7246,6 +8728,22 @@ def protected_line(data):
     opaque script or unparseable fragmentation; other commit-producing verbs and
     other tools remain outside this boundary. Server protection does not validate
     this pre-execution proof. Push coverage retains its existing separate limits.
+
+    A raw-text backstop (_raw_push_guard) scans the unmodified command on every
+    call, before any parsing, and denies a force/delete/mirror push spelling paired with a
+    protected branch name inside one command segment (it splits the raw text at
+    newlines and unquoted ;/&/| separators and judges one segment at a time). The shell lexer
+    below carries the restored nested-quoting model (_skip_quoting), so a push hidden
+    behind a nested-substitution heredoc opener is a visible segment again; the lexer remains a
+    best-effort reading of bash, not a guarantee, and the backstop is the second layer.
+    Where that reading is UNCERTAIN (_lex_uncertain, read after joining line
+    continuations: ANY unquoted '#', '<<', '(' or ')', a lone '{' or '}' word, any backtick or '$(',
+    a continuation the lexer reads differently once joined, or anything the full lexer refuses) a
+    benign lexed git segment no longer suppresses the broad raw fallback; the fallback decides from the raw and
+    de-quoted text (a disclosed over-denial, the safe direction). That uncertainty check is a LATER fallback condition,
+    reached only for commit-free commands after the input validation, the raw backstop, the
+    'help' early return and the commit-grammar reading above it; it is not the unconditional
+    backstop.
     """
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: protected_line wired to unexpected event {!r}; failing closed"
@@ -7261,6 +8759,15 @@ def protected_line(data):
             "AIQT rule prtbrn (protected-branch-integrity): the Bash payload carried no readable command "
             "string, so the protected-line check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule prtbrn, fail-closed).")
+    # After the input validation above (the PreToolUse
+    # event, the Bash tool, and a readable command string), the raw-text backstop runs
+    # unconditionally on every call, ahead of the commit-grammar reading and the lexer, so no
+    # parse outcome suppresses it; it judges one raw segment at a time. The uncertainty
+    # check (_lex_uncertain) is NOT here: it is a LATER fallback condition below, reached only
+    # for commit-free commands and only after the 'help' early return (a lone
+    # 'git commit --help' / -h allows before it). _raw_push_guard states the disclosed over-denial.
+    if _raw_push_match(command):
+        return _raw_push_guard(command)
     deadline = time.monotonic() + _COMMIT_SECONDS
     syntax = _commit_command_syntax(command)
     if syntax.status == "help":
@@ -7317,8 +8824,25 @@ def protected_line(data):
                 "(rule prtbrn); push to a feature branch and merge on green.")
     if pending_deny is not None:
         return _deny(*pending_deny)
-    if not saw_git and _RAW_GIT_RE.search(command):
-        return _protected_line_fallback(command)
+    # The BROAD raw fallback (force/delete spellings with NO protected-name requirement) runs
+    # when no git segment was lexed OR the lex is UNCERTAIN: run on
+    # every call it would deny every force-push to a FEATURE branch (pl-b). On an UNCERTAIN lex
+    # (_lex_uncertain: ANY unquoted '#', '<<', '(' or ')', a lone '{' or '}' word, any backtick or
+    # '$(', a continuation the lexer reads differently once joined, or anything the full lexer refuses)
+    # the lexed reading may have swallowed a
+    # real push line into one opaque word, so a benign parsed git segment (a 'git status') must
+    # not vouch for the command: the fallback decides from the raw text (the pl-uncertain
+    # vectors; DISCLOSED over-denial witnessed by pl-uncertain-cost). The protected-name class
+    # does not depend on this gate: _raw_push_guard already scanned the raw text on every call
+    # first, so a harmless earlier or later git segment can no longer suppress that scan
+    # (the old pl-r1/pl-r1b residual, closed for pushes naming a protected branch in the wrapped
+    # segment). The NARROWED residual stays disclosed and witnessed (pl-segment-res1/res1b): a
+    # wrapped force push naming NO protected branch, beside a benign parsed git segment, still
+    # allows on a CERTAIN lex. The git gate reads the de-quoted text too, so a
+    # quote-fragmented 'g""it' under a wrapper still reaches the fallback.
+    if ((not saw_git or _lex_uncertain(command))
+            and (_RAW_GIT_RE.search(command) or _RAW_GIT_RE.search(_dequoted_text(command)))):
+        return _protected_line_fallback(command, wrapped=not saw_git)
     return _allow()
 
 
@@ -7778,14 +9302,17 @@ def branch_root(data):
             "command string, so branch creation could not be checked; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule brnrot, fail-closed).")
     try:
-        segments = _segments(command)
+        # The loop below passes over a segment with no word (it has no command word), so one with no word
+        # and no redirect is not built at all, here or in the partial reread.
+        segments = _segments(command, skip_empty=True)
     except ValueError:
         # An unsupported LATER construct (a heredoc, a process substitution) must not discard a
         # proven-complete creation already recovered in the prefix: partial-lex and judge the recovered
         # segments, so a canonical orphan creation still DENIES (DENY outranks the parse error). A command
         # with no recovered creation falls back to the open-grammar allow (best-effort, disclosed).
         try:
-            segments = [(seg.argv, seg.sep_after) for seg in _lex_command(command, partial=True)[0]]
+            segments = [(seg.argv, seg.sep_after)
+                        for seg in _lex_command(command, partial=True, skip_empty=True)[0]]
         except ValueError:
             return _allow()  # even partial recovery failed: open grammar, best-effort
 
@@ -7972,9 +9499,9 @@ _GATE_ALTS = (
 # mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. '--no-ver'
 # deliberately also hits '--no-verbose' (an over-deny on the unparseable path only); the short cluster
 # probe requires a whitespace-preceded single-dash token so a long option ('--amend') never matches.
-_RAW_NOVERIFY_VERB_RE = re.compile(r"(?is)\bgit\b.*?\b(?:commit|merge|push|pull|rebase|am)\b")
+_RAW_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|merge|push|pull|rebase|am)\b")
 _RAW_NOVERIFY_RE = re.compile(r"(?i)--no-ver")
-_RAW_SHORT_NOVERIFY_VERB_RE = re.compile(r"(?is)\bgit\b.*?\b(?:commit|am)\b")
+_RAW_SHORT_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|am)\b")
 _RAW_SHORT_N_RE = re.compile(r"(?:^|\s)-[A-Za-z]*n\b")
 _RAW_CHECKER_RE = re.compile(
     r"(?i)\b(?:pytest|tox|nox|unittest|mypy|pyright|ruff|flake8|pylint|bandit|eslint|tsc|jest|"
@@ -7987,7 +9514,7 @@ _RAW_TRUNCATE_RE = re.compile(r"\|\s*(?:head|tail)\b")
 # checker's output may reach the sink through it, so the fallback notes it as it notes a raw '| head'.
 _RAW_FLOW_RE = re.compile(r"<<<|<\(|>\(")
 _RAW_SINK_WORD_RE = re.compile(r"\b(?:head|tail|cut)\b")
-_RAW_COMMIT_MSG_GIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
+_RAW_COMMIT_MSG_GIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
 _RAW_COMMIT_MSG_MARKER_RE = re.compile(r"`|\$\(")
 
 
@@ -20337,6 +21864,422 @@ HANDLER_EVENT = {
 }
 
 
+class _HookDeadline(BaseException):
+    """Raised inside a _DeadlineWindow when its deadline passes, carrying that window as its one argument
+    so a catcher can tell its own deadline from an enclosing window's. It derives from BaseException, not
+    Exception, so no handler's own `except Exception` (or narrower) branch, several of which allow on a
+    cannot-evaluate, can catch it and turn an overrun into a decision."""
+
+
+class _DeadlineWindow:
+    """The one shared, nesting-safe borrow of the process real-time timer (ITIMER_REAL and its SIGALRM
+    disposition), used as `with _DeadlineWindow(seconds):` once per instance. Inside the window,
+    _HookDeadline is raised when `seconds` have passed, or earlier when a timer the caller had already
+    set comes due first (the window never outlives the caller's own deadline).
+
+    The caller's timer is restored elapsed-aware, never verbatim: its countdown is taken with
+    setitimer(ITIMER_REAL, 0) and the time of the take is read from time.monotonic, the clock the kernel
+    counts ITIMER_REAL in, so on exit an active caller timer is re-armed with what it had left minus the
+    time the window used (to the microsecond setitimer resolves), keeping its repeat interval; an inactive
+    one stays inactive; one that came due during the window is delivered once its handler is back (a
+    periodic one is first re-armed at the phase it would have reached, its expiries inside the window
+    delivered as the one notification the kernel itself would have left pending). A periodic timer taken
+    between an expiry and the delivery of its signal reads (0, interval), and the kernel no longer re-arms
+    it once taken, so the window counts it as due one interval after the take. A nested window is just
+    such a caller, so nesting restores each level.
+
+    The take and the restore each run with every maskable signal blocked (signal.pthread_sigmask over
+    signal.valid_signals()). A signal sent to the main thread while the mask is held (a caller expiry, an
+    enclosing window's expiry, or any other signal) stays pending until the mask in force before is put
+    back, once the window has fully taken or fully given back: its handler never sees a half-done take or
+    restore, and an exception it raises goes on from there. Two kinds of Python handler can still run while
+    the mask is held: one for a signal that arrived before the mask was set runs inside the call that sets
+    it, once the mask is set and before the take or the restore begins; and one for a signal another thread
+    received runs where the thread limit below says. The mask is put back by a direct call of the C
+    function that the signal module's pthread_sigmask wraps (_SET_MASK), never through that Python wrapper,
+    whose entry is a point where Python can run pending handlers: the call sets the mask before any Python
+    handler can run, so a handler that raises then raises from that call with the mask already back, and a
+    handler left pending behind it runs when Python next runs pending handlers.
+
+    The take (_take) records the caller's disposition, reads the clock, takes the caller's timer, installs
+    the window's handler and arms the window's timer, each once and in that order. A SIGALRM pending once
+    the window's handler is installed, before its timer is armed, cannot be the window's own: the caller's
+    timer came due at or before the take, or the signal was sent while the caller's disposition was in
+    place. The window then counts the caller's timer as due, sets `pending_at_entry`, and ends at once: it
+    gives everything back, the caller's handler receives that SIGALRM once as the mask is put back, and
+    __enter__ raises this window's _HookDeadline (or what that handler raised in its place). An enclosing
+    window's expiry that lands before an inner window's take is such a signal, so its deadline reaches its
+    owner.
+
+    The restore (_give_back) cancels the window's timer, reading what it had left; installs SIG_IGN, which
+    discards a pending SIGALRM, only when that timer had run out and the window's own expiry has not been
+    delivered since the timer was armed (`_unheard`, which _fire clears as below), so the SIGALRM pending is
+    that expiry and it never reaches the caller; reinstalls the caller's disposition; reads the clock and
+    decides, once, whether the caller's timer came due; re-arms the caller's timer; and, for a due expiry,
+    queues a SIGALRM with signal.raise_signal unless one is pending already, so the expiry is delivered
+    once, to the caller's handler, as the mask is put back.
+    Any other SIGALRM pending at the restore (one sent while the mask was held, say) is left pending and
+    reaches the caller's handler the same way, except where the restore takes it for the window's own
+    expiry: when the window's timer had run out, read by a cancel whose first run returned, and `_unheard` is
+    still set, the SIGALRM pending is discarded as that expiry even when it came from elsewhere (the paragraph
+    on _fire's reads below states the residual case). The kernel keeps at most one pending instance of a
+    standard signal, which leaves two merges: a SIGALRM from elsewhere pending with the window's own expiry
+    (in either order) is discarded with it, and a caller expiry that came due and another SIGALRM pending at
+    the restore reach the caller's handler as one delivery. A re-armed periodic timer whose next expiry also
+    falls due before the mask is put back adds no second delivery: the kernel can hold one SIGALRM pending for
+    the process and one for the thread, both are delivered on return from the call that puts the mask back,
+    before Python runs any handler, and Python runs a signal's handler once for all the deliveries it has
+    received since it last ran handlers (observed on Linux with Python 3.14.4: a timer expiry and a
+    raise_signal both pending ran the handler once). An enclosing window's expiry that falls due during the
+    restore is delivered the same way, after the inner window has fully finished. The restore discards nothing
+    in these cases: after an arming setitimer that raised (`_unheard` is set only once it has returned), after
+    a cancel whose first run raised (_twice says why), or after a read in _fire that raised; a window's own
+    expiry then pending reaches the caller's handler. Nothing in the hook installs SIG_DFL for SIGALRM:
+    main(), run as the hook process, runs the window under the disposition that process inherited. Under
+    SIG_DFL, the disposition the hook process normally inherits, that delivery kills the hook process by
+    SIGALRM, so it ends without the exit 2 that fails a PreToolUse call closed. An inherited SIG_IGN stays
+    ignored across exec, and under SIG_IGN the pending signal is discarded (not fatal).
+
+    An operation of the restore that raises (setitimer, signal.signal, sigpending or raise_signal failing)
+    is tried once more inside the same blocked section; the restore then goes on, and the first exception
+    is raised once it has finished. One that raises twice ends the restore there: the window is recorded as
+    broken (`broken` True, `armed` False) and the second exception is raised. Either way the window is
+    closed before the mask is put back, so no restore is left for a later call to finish. A broken window
+    leaves the process where its restore stopped, and nothing restores the caller's state after that: a
+    failed cancel leaves the window's timer running and its handler installed (that expiry then ends
+    nothing), with the caller's disposition and timer not back; a failed discard or reinstall leaves the
+    window's handler, or SIG_IGN, in place of the caller's, with the caller's timer inactive; a failed re-arm
+    leaves the caller's handler back and its timer inactive; and a failed pending check or queue leaves a
+    due expiry undelivered. The ItimerError (an OSError) that a broken window raises therefore reports a
+    timer state that is no longer the caller's, and a caller must let it go on, never swallow it: main()
+    turns it into exit 2 on a PreToolUse mode and a non-blocking warning on a fail-open one.
+
+    The window's own expiry is delivered in whatever frame is running while the window is live, the entry
+    of __exit__ before its first statement included, so _fire closes the window (the restore above) and
+    then raises this window's _HookDeadline. A caller expiry that came due is delivered to the caller's
+    handler as _fire puts the mask back. An enclosing window's _HookDeadline from that handler goes on as
+    it is, to its owner; any other exception it raises is held while the body unwinds on this window's
+    _HookDeadline, so no except branch in the body can catch it and decide on it, and __exit__ (or
+    __enter__'s cleanup) raises it in place of the deadline. Once the window's exit has begun, its own
+    expiry raises no deadline: _fire then only closes the window, if it is still armed.
+
+    Before its close attempts _fire reads whether the SIGALRM it handles is the window's own expiry, and
+    clears `_unheard` only when the window's timer reads as run out and no SIGALRM is pending. A SIGALRM
+    from elsewhere that _fire handles while the window's timer still runs therefore leaves the window's
+    expiry, if it comes pending later in the restore, to be discarded; an expiry already pending when _fire
+    runs inside the call that sets the mask (for a SIGALRM that arrived just before it) is discarded the
+    same way. A read that raises counts the expiry as delivered, and its exception is kept like a close
+    attempt's. Where this read leaves `_unheard` set, one SIGALRM is still taken for that expiry wrongly,
+    and discarded: one sent once the mask is set, when the window's expiry arrived just before the call that
+    sets it and _fire runs inside that call. _fire then reads the timer run out and a SIGALRM pending, as in
+    the ordering the other way round (a SIGALRM from elsewhere just before that call, the window's expiry
+    once the mask is set), so neither of its reads can tell the two apart. This discard is kept as a disclosed
+    residual. It is not the only way a SIGALRM from elsewhere is discarded as the window's expiry; the ways
+    that follow are examples, and the list is not exhaustive. A SIGALRM from elsewhere pending together with
+    the window's expiry merges with it and is discarded with it (the restore above). While the window is live,
+    with _fire installed and the main thread able to run handlers, Python runs _fire once for all the
+    SIGALRMs received since it last ran handlers, so a SIGALRM from elsewhere and the window's expiry that
+    both arrive, in either order, before the main thread next checks for signals (during a long C call, say)
+    are handled as one, and the one from elsewhere never reaches the caller. And the limits below state two
+    more: after a handler that raises at the entry of _fire has taken that expiry with it, and after another
+    thread has taken it.
+
+    CPython runs a Python handler only where it checks for signals: at the entry of a function, at the
+    back edge of a loop, and inside or on return from a call. So a handler can still run before the take or
+    the restore begins: at the entry of _close, and in the calls that read and set the mask (in the one that
+    sets it, once the mask is set). A handler that raises there runs before anything is taken, or before
+    anything is given back (the restore starts only once the call that sets the mask has returned), and
+    leaves the window armed. __exit__, _fire and __enter__'s cleanup therefore each make three close
+    attempts (each a call of _close, which does nothing once the window is closed), one after another with
+    no call, loop or function entry between them, and keep the first exception an attempt (or _fire's read
+    before them) raised, raising it once the attempts are over. The window is left armed only when a
+    raising handler interrupts each of the three attempts before _give_back begins. Its own timer then
+    still runs (only the restore cancels it), and _fire closes the window when that expiry is delivered:
+    once an attempt has marked the exit begun, with three more attempts that raise no deadline of their
+    own, the caller's disposition and timer coming back and an enclosing window's expiry that came due
+    meanwhile reaching its owner as the mask is put back; if none got that far, as the live window's
+    deadline, raised wherever the program is.
+
+    The limits that remain. A handler that raises at the entry of __exit__, before its first statement, or
+    at the return instruction of __enter__, after its last, runs where no code of the window can: the
+    window stays live until its own timer ends it through _fire, which then restores the caller's state and
+    raises its deadline wherever the program is. A handler that raises at the entry of _fire, before its
+    first statement, takes the window's expiry with it: a live window then has no deadline left, and its
+    restore when __exit__ closes it counts a SIGALRM then pending as that expiry and discards it. A window
+    whose three exit attempts are all interrupted, and whose expiry is then lost the same way (at the entry
+    of _fire, or in each of its three attempts), stays armed for good. And the mask is the calling thread's:
+    a signal sent to the process can still be taken by another thread that leaves it unblocked (a worker
+    thread review_dispatch_pin leaves running past its wait is one), and its Python handler then runs in
+    the main thread inside the blocked section, as whichever handler is installed at that moment (so a
+    window's own expiry taken that way can reach the caller's handler, and a SIGALRM from elsewhere then
+    pending at the restore can be discarded as that expiry).
+
+    The borrow is refused, and the window runs with no deadline at all (armed stays False, nothing is
+    changed), where it cannot be done faithfully: no finite positive `seconds` (the fail-open modes pass
+    None), a platform without setitimer, getitimer, pthread_sigmask, sigpending, valid_signals or
+    raise_signal (Windows) or without a callable _SET_MASK (the signal module defines its pthread_sigmask
+    wrapper only when _signal has the C function, so _SET_MASK is there whenever signal.pthread_sigmask is;
+    it is checked as well, so a borrow never starts without it), a thread other than the main thread
+    (Python runs signal handlers only there, and the mask it sets would not be the main thread's), a caller
+    that blocks SIGALRM (a deadline could not fire, and its pending notification could not be kept apart
+    from ours), or a SIGALRM disposition not installed from Python (getsignal returns None, which cannot be
+    reinstalled)."""
+    __slots__ = ("seconds", "armed", "broken", "pending_at_entry", "_live", "_ending", "_unheard", "_handler",
+                 "_timer", "_began", "_held")
+    # Every signal the take and the restore hold back (the kernel never blocks SIGKILL or SIGSTOP).
+    _EVERY_SIGNAL = frozenset(signal.valid_signals()) if hasattr(signal, "valid_signals") else frozenset()
+    # The C function signal.pthread_sigmask wraps, which puts the mask back before any Python handler runs.
+    _SET_MASK = getattr(_signal, "pthread_sigmask", None)
+
+    def __init__(self, seconds):
+        self.seconds = seconds
+        self.armed = self.broken = self.pending_at_entry = self._live = self._ending = self._unheard = False
+        self._handler = self._timer = self._began = self._held = None
+
+    def _fire(self, signum, frame):
+        # Whether the SIGALRM handled is the window's own expiry, read as the class docstring describes: a
+        # read that raises leaves it unknown, counted as delivered, and its exception is kept.
+        heard = True
+        try:
+            heard = (signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+                     and signal.SIGALRM not in signal.sigpending())
+        except BaseException as error:
+            first = error
+        else:
+            first = None
+        if heard:
+            self._unheard = False  # the window's own expiry has been delivered: none is pending for the restore
+        live = self._live
+        if not (live or self._ending):
+            if first is not None:
+                raise first
+            return
+        # The close attempts the class docstring describes, the first exception kept.
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        if not live:
+            # The exit had begun and left the window armed: its expiry only closes it.
+            if first is not None:
+                raise first
+            return
+        if first is None:
+            raise _HookDeadline(self)
+        if isinstance(first, _HookDeadline):
+            raise first  # an enclosing window's deadline, delivered as the caller expiry that came due
+        self._held = first
+        raise _HookDeadline(self) from first
+
+    def _raise_held(self):
+        held, self._held = self._held, None
+        if held is not None:
+            raise held
+
+    @staticmethod
+    def _as_taken(timer):
+        value, interval = timer
+        return (interval, interval) if value <= 0 < interval else timer
+
+    def _can_borrow(self):
+        seconds = self.seconds
+        if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
+                or not math.isfinite(seconds) or seconds <= 0):
+            return False
+        if not all(hasattr(signal, name) for name in (
+                "setitimer", "getitimer", "ITIMER_REAL", "SIGALRM", "pthread_sigmask", "sigpending",
+                "valid_signals", "raise_signal")):
+            return False
+        if not callable(self._SET_MASK):
+            return False  # there whenever signal.pthread_sigmask is (the class docstring says why)
+        if threading.current_thread() is not threading.main_thread():
+            return False
+        if signal.SIGALRM in signal.pthread_sigmask(signal.SIG_BLOCK, ()):
+            return False
+        return signal.getsignal(signal.SIGALRM) is not None
+
+    def __enter__(self):
+        if self.armed or not self._can_borrow():
+            return self
+        # The mask is read first, so a handler already due runs before anything is blocked or taken, and
+        # the mask to put back is known even when a handler raises as the blocking call returns. The return
+        # statement is inside the try, so a handler raising up to it gives everything back (the return
+        # instruction itself is a limit the class docstring states).
+        try:
+            mask = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+            try:
+                signal.pthread_sigmask(signal.SIG_BLOCK, self._EVERY_SIGNAL)
+                self._take()
+            finally:
+                self._SET_MASK(signal.SIG_SETMASK, mask)
+            return self
+        except BaseException:
+            # The take failed, or a handler raised as the mask was set or put back: whatever the window
+            # holds goes back to the caller before the exception goes on, through the close attempts the
+            # class docstring describes, the first exception kept.
+            try:
+                self._ending = True
+                self._live = False
+                self._close()
+            except BaseException as error:
+                first = error
+            else:
+                first = None
+            try:
+                self._close()
+            except BaseException as error:
+                first = error if first is None else first
+            try:
+                self._close()
+            except BaseException as error:
+                first = error if first is None else first
+            if first is not None:
+                raise first
+            self._raise_held()
+            raise
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            # The close attempts the class docstring describes, the first exception kept.
+            self._ending = True
+            self._live = False
+            self._close()
+        except BaseException as error:
+            first = error
+        else:
+            first = None
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        if first is not None:
+            raise first
+        self._raise_held()
+        return False
+
+    def _close(self):
+        """One close attempt: run _give_back with every maskable signal blocked, then put back the mask in
+        force before (through _SET_MASK), which delivers what came pending meanwhile. It marks the exit
+        begun (`_ending` before `_live` goes False, so an armed window that is not live is always one whose
+        exit has begun or whose take is still running). _give_back runs only once the call that sets the
+        mask has returned: a handler that raises before then leaves the window armed and holding everything,
+        and the caller makes its next attempt."""
+        self._ending = True
+        self._live = False
+        if not self.armed:
+            return
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+        try:
+            signal.pthread_sigmask(signal.SIG_BLOCK, self._EVERY_SIGNAL)
+            self._give_back()
+        finally:
+            self._SET_MASK(signal.SIG_SETMASK, mask)
+
+    def _take(self):
+        """The take, run with every maskable signal blocked, in the order the class docstring gives. The
+        clock is read just before the take, so the window's use is never undercounted (a caller timer comes
+        back at most microseconds early, never late). Anything that raises once the timer is taken gives it
+        back, with the disposition, before the exception goes on."""
+        handler = signal.getsignal(signal.SIGALRM)
+        began = time.monotonic()
+        timer = self._as_taken(signal.setitimer(signal.ITIMER_REAL, 0))
+        (self._handler, self._timer, self._began, self.pending_at_entry, self._unheard, self._ending,
+         self.broken, self.armed) = (handler, timer, began, False, False, False, False, True)
+        try:
+            signal.signal(signal.SIGALRM, self._fire)
+            if signal.SIGALRM in signal.sigpending():
+                self.pending_at_entry = True  # not the window's expiry: its timer is not armed yet
+                self._give_back()
+                raise _HookDeadline(self)
+            left = timer[0]
+            signal.setitimer(signal.ITIMER_REAL, self.seconds if left <= 0 else min(self.seconds, left))
+            self._unheard = True  # from here on an expiry of the window's timer can be pending at the restore
+            self._live = True
+        except BaseException:
+            self._give_back()
+            raise
+
+    def _give_back(self):
+        """The restore, run with every maskable signal blocked, in the order the class docstring gives: each
+        operation through _twice, the clock read once to decide whether the caller's timer came due, and a
+        due expiry queued last. `armed` is False when it returns or raises."""
+        self._live = False
+        if not self.armed:
+            return
+        errors = []
+        try:
+            reading = self._twice(errors, signal.setitimer, signal.ITIMER_REAL, 0)
+            if not errors and reading == (0.0, 0.0) and self._unheard:
+                # The window's timer ran out (read by a cancel whose first run returned, as _twice says) and
+                # its expiry has not been delivered since: the SIGALRM pending is its own.
+                self._twice(errors, signal.signal, signal.SIGALRM, signal.SIG_IGN)
+            self._unheard = False
+            self._twice(errors, signal.signal, signal.SIGALRM, self._handler)
+            value, interval = self._timer
+            left = value - (time.monotonic() - self._began)
+            due = self.pending_at_entry or (value > 0 and left <= 0)
+            if left > 0:
+                self._twice(errors, signal.setitimer, signal.ITIMER_REAL, left, interval)
+            elif due and interval > 0:
+                self._twice(errors, signal.setitimer, signal.ITIMER_REAL, interval - (-left % interval), interval)
+            if due and signal.SIGALRM not in self._twice(errors, signal.sigpending):
+                self._twice(errors, signal.raise_signal, signal.SIGALRM)
+        except BaseException:
+            self.broken = True
+            raise
+        finally:
+            self.armed = False
+        if errors:
+            raise errors[0]
+
+    @staticmethod
+    def _twice(errors, operation, *args):
+        """One restore operation, tried once more when it raises, returning what the run that returned gave:
+        the first exception is appended to errors, and a second one goes on. Each operation can run twice
+        with the effect of once: setitimer and signal.signal set the same state again, sigpending only
+        reads, and a second queued SIGALRM joins the one already pending. What the cancel reads is the one
+        exception: a first run that cancels the window's timer and then raises leaves the retry reading an
+        inactive timer that was running, so _give_back counts that timer as run out only from a cancel whose
+        first run returned, and after a retried cancel it discards nothing (it never discards on an
+        unknown)."""
+        try:
+            return operation(*args)
+        except BaseException as exc:
+            errors.append(exc)
+            return operation(*args)
+
+
+def _deadline_message(handler_name, seconds, payload):
+    """The stderr refusal main() writes when a PreToolUse check runs out of its deadline: it names the
+    handler, the budget and the payload size, and the two ways to bring the input inside the budget."""
+    if payload is None:
+        size = "an input it had not finished reading"
+    else:
+        size = "an input of {} bytes".format(len(payload.encode("utf-8", "replace")))
+    return ("AIQT guardrail: the {} check could not reach a decision within its {:g}-second budget on {}; "
+            "failing closed. Split the command into smaller calls, or move long content into a file and "
+            "pass its path.".format(handler_name, seconds, size))
+
+
+def _pending_alarm_message(handler_name, seconds):
+    """The stderr refusal main() writes when the window ends at its entry because a SIGALRM was already
+    pending (pending_at_entry): the check did not run, so nothing about the input or the budget applies."""
+    return ("AIQT guardrail: the {} check did not run: a SIGALRM was already pending when its {:g}-second "
+            "deadline was being set, so the deadline ended at once; failing closed.".format(handler_name, seconds))
+
+
 def _dispatcher_fail_open_warn(handler_name, detail):
     """A fail-open dispatcher-level error for a Stop/SubagentStop/SessionStart/TeammateIdle/
     UserPromptSubmit/PostToolUse handler: a non-blocking systemMessage on exit 0, so no error on
@@ -20368,6 +22311,24 @@ def _stderr_note(line):
         pass
 
 
+def _exception_text(exc):
+    """'<type name>: <message>' for a diagnostic, built so that it cannot raise out of main(): an exception
+    whose str() raises (or whose type name cannot be formatted) gets a placeholder in its place, so main()
+    still returns its mode's exit. A _HookDeadline that comes due while it formats goes on as it is."""
+    try:
+        return "{}: {}".format(type(exc).__name__, exc)
+    except _HookDeadline:
+        raise
+    except BaseException:
+        pass
+    try:
+        return "{}: <its message could not be read>".format(type(exc).__name__)
+    except _HookDeadline:
+        raise
+    except BaseException:
+        return "<an exception whose type and message could not be read>"
+
+
 def main(argv):
     # The MODE (argv[0]) alone decides the error posture, never the payload (which may be unreadable).
     # A genuinely unknown mode is not identifiable as Stop and is a broken install, so it fails closed
@@ -20394,42 +22355,107 @@ def main(argv):
                 return 0
         _stderr_note("aiqt_hooks: {} ({}); failing closed".format(handler_name, detail))
         return 2
+    # The PreToolUse deadline: every mode that is not fail-open reads its payload and runs its handler
+    # inside one _DeadlineWindow of PRETOOL_BUDGET_SECONDS, armed before the read; when the check has not
+    # decided by then the window raises _HookDeadline and the call fails CLOSED with exit 2 and a stderr
+    # line naming the handler, the budget and the input size. The window closes (the timer is cancelled
+    # and any caller timer restored) before the stdout decision below is written; the stderr notes of
+    # the unreadable-payload and handler-crash paths are written inside it, and both paths exit 2 even
+    # when the deadline interrupts the note. A fail-open mode gets a window with no deadline, so its
+    # error posture is unchanged. Any other exception out of the window keeps the mode's posture too.
+    window = _DeadlineWindow(None if is_fail_open else PRETOOL_BUDGET_SECONDS)
+    payload = None
     try:
-        data = json.loads(sys.stdin.read())
-        if not isinstance(data, dict):
-            raise ValueError("payload is not a JSON object")
-    except Exception as exc:  # any failure to read the payload is an unreadable payload
-        # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload, and ALSO a
-        # RecursionError (deeply nested JSON) or a MemoryError: the old narrow except let those escape as a
-        # traceback with exit 1, which the platform treats as non-blocking. Every exception is named.
-        detail = "{}: {}".format(type(exc).__name__, exc)
-        if is_fail_open:
-            # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so no Stop
-            # payload (including a bare '{' or any garbage) can ever wedge the session. The warn print
-            # raising (a stdout that cannot be written or flushed) loses the warning and keeps the 0.
+        with window:
             try:
-                return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(detail))
-            except BaseException:
-                return 0
-        # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
-        # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
-        _stderr_note("aiqt_hooks: unreadable hook payload ({}); failing closed".format(detail))
+                payload = sys.stdin.read()
+                data = json.loads(payload)
+                if not isinstance(data, dict):
+                    raise ValueError("payload is not a JSON object")
+            except Exception as exc:  # any failure to read the payload is an unreadable payload
+                # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload, and
+                # ALSO a RecursionError (deeply nested JSON) or a MemoryError: the old narrow except let those
+                # escape as a traceback with exit 1, which the platform treats as non-blocking. Every exception
+                # is named.
+                detail = _exception_text(exc)
+                if is_fail_open:
+                    # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so
+                    # no Stop payload (including a bare '{' or any garbage) can ever wedge the session. The
+                    # warn print raising (a stdout that cannot be written or flushed) loses the warning and
+                    # keeps the 0.
+                    try:
+                        return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(detail))
+                    except BaseException:
+                        return 0
+                # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
+                # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
+                _stderr_note("aiqt_hooks: unreadable hook payload ({}); failing closed".format(detail))
+                return 2
+            try:
+                code, stdout_obj, stderr_text = HANDLERS[handler_name](data)
+                # The result is checked here, inside the window and this crash branch, so a malformed one
+                # gets the mode's posture: an exit code other than 0 or 2 (one os._exit cannot take, or one
+                # the platform reads as non-blocking) or a stderr text neither a str nor None (whose truth
+                # test below could raise). The stdout object is checked by its json.dumps below.
+                if type(code) is not int or code not in (0, 2) or not (
+                        stderr_text is None or type(stderr_text) is str):
+                    raise TypeError("the handler result is not an exit code of 0 or 2 with a str or None "
+                                    "stderr text")
+            except Exception as exc:  # a handler crash is an unreadable result
+                if is_fail_open:
+                    # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws
+                    # on a pathological message): WARN and exit 0, never exit 2. The warn print raising (a
+                    # stdout that cannot be written or flushed) loses the warning and keeps the 0.
+                    try:
+                        return _dispatcher_fail_open_warn(
+                            handler_name, "handler crash: {}".format(_exception_text(exc)))
+                    except BaseException:
+                        return 0
+                # A PreToolUse handler crash fails closed (block), not pass.
+                _stderr_note("aiqt_hooks: handler {} failed ({}); failing closed".format(
+                    handler_name, _exception_text(exc)))
+                return 2
+    except _HookDeadline as exc:
+        if exc.args[:1] != (window,):
+            raise  # an enclosing window's deadline (an in-process caller's), not this call's
+        # Built inside a guard like the other diagnostics, so a message that cannot be built (a payload
+        # whose encoding raises, a MemoryError) still leaves exit 2, with a fixed note in its place. A
+        # window that ended at its entry on a SIGALRM already pending gets its own note: its budget did
+        # not run out.
+        try:
+            if window.pending_at_entry:
+                note = _pending_alarm_message(handler_name, window.seconds)
+            else:
+                note = _deadline_message(handler_name, window.seconds, payload)
+        except _HookDeadline:
+            raise
+        except BaseException:
+            note = "AIQT guardrail: a PreToolUse check could not reach a decision within its budget; failing closed."
+        _stderr_note(note)
         return 2
-    try:
-        code, stdout_obj, stderr_text = HANDLERS[handler_name](data)
-    except Exception as exc:  # a handler crash is an unreadable result
+    except BaseException as exc:
+        # Anything else out of the window: an error entering or leaving it (an ItimerError, or a caller's
+        # own alarm handler raising when its expiry is delivered during the take or on the way out), or a
+        # BaseException from the read or the handler that no branch above catches. Left to escape, it
+        # would end the run with a traceback and status 1, which the platform treats as non-blocking.
+        if is_fail_open and isinstance(exc, (SystemExit, KeyboardInterrupt)):
+            # A stop (an exit or an interrupt) raised in a fail-open mode ends the hook as it would with no
+            # window, so a binding that sets its own exit status keeps it (the lease-heartbeat bindings,
+            # whose exit-status vectors run this dispatcher in a child process), save a status the
+            # platform reads as blocking: an exit whose status would be 2 (_orch_lease_hb_stop_exits_2,
+            # which judges any SystemExit) goes on as an exit with status 1, so no fail-open mode exits 2
+            # on this path.
+            if isinstance(exc, SystemExit) and _orch_lease_hb_stop_exits_2(exc):
+                raise SystemExit(1) from exc
+            raise
+        detail = _exception_text(exc)
         if is_fail_open:
-            # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws on a
-            # pathological message): WARN and exit 0, never exit 2. The warn print raising (a stdout
-            # that cannot be written or flushed) loses the warning and keeps the 0.
             try:
-                return _dispatcher_fail_open_warn(
-                    handler_name, "handler crash: {}: {}".format(type(exc).__name__, exc))
+                return _dispatcher_fail_open_warn(handler_name, "dispatcher error: {}".format(detail))
             except BaseException:
                 return 0
-        # A PreToolUse handler crash fails closed (block), not pass.
-        _stderr_note("aiqt_hooks: handler {} failed ({}: {}); failing closed".format(
-            handler_name, type(exc).__name__, exc))
+        _stderr_note("aiqt_hooks: {}: the check did not complete ({}); failing closed".format(
+            handler_name, detail))
         return 2
     if stdout_obj is not None:
         try:
@@ -20445,8 +22471,8 @@ def main(argv):
             # so a lost decision blocks rather than allows.
             if is_fail_open:
                 return 0
-            _stderr_note("aiqt_hooks: {}: the decision could not be written to stdout ({}: {}); "
-                         "failing closed".format(handler_name, type(exc).__name__, exc))
+            _stderr_note("aiqt_hooks: {}: the decision could not be written to stdout ({}); "
+                         "failing closed".format(handler_name, _exception_text(exc)))
             return 2
     if stderr_text:
         _stderr_note(stderr_text)

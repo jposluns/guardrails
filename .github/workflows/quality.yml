@@ -79,6 +79,9 @@ jobs:
           tar -xzf gitleaks.tar.gz gitleaks
           ./gitleaks dir . --no-banner --redact --exit-code 1
 
+      - name: Leak denylist self-test
+        shell: bash
+        run: python3 -I -B tools/check_leaks.py --self-test
       - name: Leak denylist
         shell: bash
         run: python3 -I -B tools/check_leaks.py
@@ -536,6 +539,9 @@ jobs:
         shell: bash
         run: python3 -I -B tools/gen_rules.py --check
 
+      - name: Agents self-test
+        shell: bash
+        run: python3 -I -B tools/gen_agents.py --self-test
       - name: Agents drift
         shell: bash
         run: python3 -I -B tools/gen_agents.py --check
@@ -781,6 +787,80 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system
 
+  # The host-patch legs. Every other job of this workflow that sets up Python pins '3.14' (Quality gates
+  # sets up none); with check-latest off, the Python setup action may resolve that pin to a 3.14 already on
+  # the runner rather than the newest patch release. Those jobs stay required. These two run the suites a
+  # newer patch release most often breaks on the exact patch release the maintainer host runs, which
+  # .aiqt/python-host.toml names, so a passing local suite predicts a required CI leg, and a failure on the
+  # '3.14' legs alone is diagnostic evidence of a patch-release difference, not proof that the change is
+  # innocent. tools/check_python_host_pin.py holds this workflow's top-level keys (name, on, permissions,
+  # jobs) and each job whole: runs-on ubuntu-24.04 (on 2026-10-12 the Python versions manifest listed Linux
+  # x64 builds of 3.14.4 for Ubuntu 22.04 and 24.04 only, so ubuntu-latest would fail these jobs on an image
+  # without one), this checkout step as written, no env: on the job or any step, one Python setup step
+  # pinning that release, the gate itself as the next step (it fails when the job does not run that
+  # release) and the job's suites in order, each held step with exactly name, run and shell: bash; its
+  # jobs leg also runs outside these jobs, in the registry job (--jobs-only), so an edit here cannot
+  # silence every CI run of it. Both are required through Quality gates. They run the OPF tooling
+  # self-test and the four git-fixture-env suites a second time in every run, including the run that an
+  # edit to a pull request's title or body starts.
+  opf-host-patch:
+    name: OPF tooling (host patch)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Python host pin self-test
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py --self-test
+
+      - name: OPF tooling self-test (host patch)
+        shell: bash
+        run: python3 -I -B opf/tools/opf.py --self-test
+
+  git-fixture-env-host-patch:
+    name: Git-fixture-env self-test (host patch)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Git-fixture-env core behaviour self-test (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core
+
+      - name: Git-fixture-env combined config-injection lane (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined
+
+      - name: Git-fixture-env malformed-config lane (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed
+
+      - name: Git-fixture-env system-config lane (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system
+
   registry:
     name: Records, manifest and parity
     runs-on: ubuntu-latest
@@ -866,6 +946,14 @@ jobs:
       - name: Python floor
         shell: bash
         run: python3 -I -B tools/check_python_floor.py
+
+      # The host-pin jobs leg, run OUTSIDE the two host-patch jobs it judges, so an edit to those
+      # jobs (a job-level env: or defaults: that silences their own steps among them) cannot silence
+      # every CI run of this gate; this job pins '3.14', not the host patch, so only the source and
+      # jobs legs run (--jobs-only), never the interpreter leg.
+      - name: Python host pin (jobs leg, outside the host-patch jobs)
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py --jobs-only
 
       - name: Renderer declaration self-test
         shell: bash
@@ -1041,6 +1129,8 @@ jobs:
       - git-fixture-env-config-combined
       - git-fixture-env-config-malformed
       - git-fixture-env-config-system
+      - opf-host-patch
+      - git-fixture-env-host-patch
       - registry
       - byte-canon-matrix
     runs-on: ubuntu-latest
