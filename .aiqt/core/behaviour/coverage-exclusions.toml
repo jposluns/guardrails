@@ -1,0 +1,7 @@
+# .aiqt/core/behaviour/coverage-exclusions.toml: obligation rows no case covers, each with its reason.
+#
+# tools/check_rule_behaviour.py fails an obligation row whose clause no case lists unless one [[exclusion]]
+# here names it: clause-id, row-sha256 (the SHA-256 of the row's canonical JSON form, which the gate prints
+# in that failure) and a nonempty reason saying why no case can or need cover it. A row change gives it a
+# new digest, so its exclusion no longer matches and must be reviewed again; an exclusion that names no
+# uncovered row fails too. Every encoded row is covered by a case today, so this file has no rows.

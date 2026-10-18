@@ -6,6 +6,7 @@ delta = ["claim"]
 
 [scenario]
 claim = "completion"
+named-set = { members = ["module-a", "module-b", "module-c"], count = 3 }
 
 [expect]
 head = "REJECT count:reconciled set:enumerated"

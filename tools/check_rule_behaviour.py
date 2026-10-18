@@ -13,23 +13,37 @@ Inputs, all under .aiqt/core/behaviour/ unless named otherwise:
                        row cancels only atoms some exempt row in the same table suppresses.
   cases/<id>.toml      one case or control each: a closed scenario vocabulary and the expected outcome at
                        HEAD (and, for a case, at its base revision); a control differs from its case in
-                       exactly the scenario keys its delta names.
+                       exactly the scenario keys its delta names. A fact that grants an exemption carries
+                       the evidence its clause names: a bounded claim lists its set (named-set: members
+                       and the count the claim states), and a wording fix names the probe that found its
+                       instances (probe: the properties of PROBE_PROPERTIES it has).
   waivers.toml         an append-only log of [[waiver]] rows; a row is live only in the change that
                        appends it.
   waiver-budget.toml   the per-change ceiling on live waiver rows of each kind, always read from the base.
+  coverage-exclusions.toml
+                       one [[exclusion]] per obligation row that no case covers: clause-id, row-sha256
+                       (the digest the gate prints for that row) and a nonempty reason.
 
-The matcher is deterministic and does not depend on row order. Facts come from the scenario; a row
-triggers when its when-set holds; required atoms are the union of the triggered require rows (item and
-instance atoms expanded per item and per instance), minus what triggered exempt rows suppress, plus back
-what triggered limit rows cancel; each remaining atom is met or unmet from the scenario's evidence. The
-outcome is ACCEPT, or REJECT followed by the unmet atoms sorted bytewise; its decision is ACCEPT or REJECT.
+The matcher is deterministic and does not depend on row order. Facts come from the scenario, and a fact
+that grants an exemption counts only with its evidence: claim:bounded holds only when the named set is
+closed (the count the claim states equals the number of members it lists). A row triggers when its
+when-set holds; required atoms are the union of the triggered require rows (item and instance atoms
+expanded per item and per instance), minus what triggered exempt rows suppress, plus back what triggered
+limit rows cancel; each remaining atom is met or unmet from the scenario's evidence. Instance atoms count
+only over a probe that has every property the clause names (otherwise instance:probed is unmet), and an
+exemption label disposes of an instance only when every triggered row requiring instance:dispositioned
+admits it (a row with no exempt-vocab admits none). The outcome is ACCEPT, or REJECT followed by the
+unmet atoms sorted bytewise; its decision is ACCEPT or REJECT.
 
 Legs that always run: SCHEMA (malformed input exits 2; a stale text-sha256, an unknown clause, or a removes
-id still in the HEAD register exits 1), CASES (every outcome matches byte for byte; a control differs from
-its case), ABLATION (each clause a case lists changes that case's outcome when its rows are removed, and
-each row of a listed clause is load bearing for some listing case; a coverage check that never binds),
-ENCODING CHANGED and UNENCODED INVENTORY (reports only), and RETRO (an informational comparison with a
-pinned older revision, checked against git and never read by BINDING).
+id still in the HEAD register exits 1), PREMISE (a bounded claim with no named-set, or a wording fix or a
+listed instance with no probe, exits 1: the scenario would assert what the rule requires proving), CASES
+(every outcome matches byte for byte; a control differs from its case), ABLATION (each clause a case lists
+changes that case's outcome when its rows are removed, each row of a listed clause is load bearing for
+some listing case, and a row whose clause no case lists fails unless an exclusion with a reason names it;
+an exclusion that names no such row fails), ENCODING CHANGED and UNENCODED INVENTORY (reports only), and
+RETRO (an informational comparison with a pinned older revision, checked against git and never read by
+BINDING).
 
 BINDING (--base REF): for every rule file under .aiqt/core/rules/ that differs, difflib.SequenceMatcher
 aligns the base and HEAD bytes. A clause is in the change set C when its canonical text changed, it was
@@ -47,20 +61,28 @@ only when C and the residue are empty.
 
   check_rule_behaviour.py                 the always-run legs; binding is reported not applicable
   check_rule_behaviour.py --base REF      the always-run legs and binding against REF
+  check_rule_behaviour.py --base REF --each-commit
+                                          the push leg: every commit on HEAD's first-parent chain after
+                                          REF, each read from history and judged by every leg against its
+                                          own first parent (the working tree is not read)
   check_rule_behaviour.py --self-test     assert the gate's own vectors, mutants and live legs
   check_rule_behaviour.py [--self-test] --execution-report ABS_PATH
                                           the self-test, also writing its execution report, finalized at
                                           interpreter exit (tools/_selftest_exit_report.py)
 Exit: 0 every leg holds; 1 findings; 2 cannot evaluate (a malformed or missing input, an unresolvable or
-shallow base, missing retro history, or a base with the gate script but no table).
+shallow base, missing retro history, a base with the gate script but no table, or for --each-commit a
+base that is not on HEAD's first-parent chain or that leaves no commit to judge).
 
 It does not show that any encoding means what the prose means or how a model reads it: a wrong encoding
-that review accepted passes, including one landed before the edit it later supports. Clauses without an
-encoding are only listed, unchanged text is never examined, and a change that alters only which
+that review accepted passes, including one landed before the edit it later supports. The matcher checks
+the form of a scenario's evidence (a listed set and its stated count, a probe's named properties), never
+that a scenario describes a real set or probe. An edit to a clause without an encoding fails unless it
+carries an unencoded waiver, unchanged text is never examined, and a change that alters only which
 obligations are unmet binds nothing. Waivers rest on reviewer judgement within ceilings; a new waiver may
-repeat an earlier transition only by naming it. The base leg needs full git history and does not see a
-rewritten base. The span of a clause is located at the first occurrence of its canonical text inside its
-register window; check_clauses.py owns the uniqueness and tightness of that window.
+repeat an earlier transition only by naming it. The base and push legs need full git history and do not
+see a rewritten base; the push leg judges a merged branch's own commits only through their merge commit.
+The span of a clause is located at the first occurrence of its canonical text inside its register window;
+check_clauses.py owns the uniqueness and tightness of that window.
 """
 import sys
 
@@ -105,6 +127,7 @@ CASES_PREFIX = CASES_DIR + "/"
 TABLE_REL = ".aiqt/core/behaviour/obligations.toml"
 WAIVERS_REL = ".aiqt/core/behaviour/waivers.toml"
 BUDGET_REL = ".aiqt/core/behaviour/waiver-budget.toml"
+EXCLUSIONS_REL = ".aiqt/core/behaviour/coverage-exclusions.toml"
 REGISTRY_REL = "tools/selftest_checks.toml"
 SUITE_ID = "rule-behaviour-selftest"
 
@@ -120,13 +143,17 @@ OPS = ("retire", "split", "merge", "remove-items", "wording-fix", "none")
 RECORD_OPS = ("retire", "split", "merge", "remove-items")
 CLAIMS = ("completion", "bounded", "partial", "none")
 EVIDENCE = ("index-enumeration", "id-check", "count-check")
-SCENARIO_KEYS = ("op", "claim", "before", "after", "evidence", "item-evidence", "instances")
+# What evgcmp.15 names for a wording fix's probe: derived from and validated against the correction that
+# names the superseded wording, and matching that wording across line wraps and escapes.
+PROBE_PROPERTIES = ("derived-from-correction", "validated-against-correction", "matches-across-line-wraps",
+                    "matches-across-escapes")
+SCENARIO_KEYS = ("op", "claim", "before", "after", "evidence", "item-evidence", "instances", "named-set", "probe")
 NAME_RE = re.compile(r"[a-z0-9-]+")
 SHA_RE = re.compile(r"[0-9a-f]{64}")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 CLAUSE_ID_RE = re.compile(r"[a-z0-9]{6,}\.[1-9][0-9]*")
-ATOM_RE = re.compile(r"set:enumerated|count:reconciled|item:accounted:[a-z0-9-]+|instance:dispositioned:(?:{})"
-                     .format("|".join(re.escape(w) for w in WHERES)))
+ATOM_RE = re.compile(r"set:enumerated|count:reconciled|item:accounted:[a-z0-9-]+|instance:probed"
+                     r"|instance:dispositioned:(?:{})".format("|".join(re.escape(w) for w in WHERES)))
 CLAUSE_WAIVER_KINDS = ("wording-only", "unencoded", "anchor-only")
 RANGE_WAIVER_KIND = "non-clause-text"
 WAIVER_KINDS = CLAUSE_WAIVER_KINDS + (RANGE_WAIVER_KIND,)
@@ -225,7 +252,7 @@ def worktree_snapshot(root):
     files = {}
     for rel in _walk_files(root, RULES_DIR) + _walk_files(root, CASES_DIR):
         files[rel] = _read_regular(Path(root) / rel, rel)
-    for rel in (INVENTORY_REL, TABLE_REL, WAIVERS_REL, BUDGET_REL, SCRIPT_REL):
+    for rel in (INVENTORY_REL, TABLE_REL, WAIVERS_REL, BUDGET_REL, EXCLUSIONS_REL, SCRIPT_REL):
         data = _read_regular(Path(root) / rel, rel)
         if data is not None:
             files[rel] = data
@@ -271,6 +298,33 @@ class GitHistory:
             raise GateError("HEAD does not resolve to a commit")
         return oid
 
+    def first_parent_range(self, base, head):
+        """The (parent, commit) transitions of HEAD's first-parent chain after base, oldest first, read from
+        the raw parent list of each listed commit; a base off that chain, or no commit after it, cannot be
+        evaluated."""
+        try:
+            listing = subprocess.run(["git", "-C", str(self.root), "--no-replace-objects", "rev-list",
+                                      "--first-parent", "--parents", head, "^" + base], capture_output=True,
+                                     env=_git_env(), timeout=CHILD_TIMEOUT)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise GateError("git is not available ({})".format(type(exc).__name__))
+        if listing.returncode != 0:
+            raise GateError("cannot list the commits from {} to {}".format(base, head))
+        lines = [line.split(" ") for line in listing.stdout.decode("ascii", "replace").splitlines()]
+        if not lines:
+            raise GateError("base {} leaves no commit to judge on HEAD's first-parent chain".format(base))
+        transitions, expected = [], head
+        for fields in lines:
+            if not all(COMMIT_RE.fullmatch(field) for field in fields) or fields[0] != expected:
+                raise GateError("cannot read the first-parent chain from {} to {}".format(base, head))
+            if len(fields) < 2:
+                raise GateError("base {} is not on HEAD's first-parent chain".format(base))
+            transitions.append((fields[1], fields[0]))
+            expected = fields[1]
+        if expected != base:
+            raise GateError("base {} is not on HEAD's first-parent chain".format(base))
+        return list(reversed(transitions))
+
     def require_full_history(self):
         try:
             result = subprocess.run(["git", "-C", str(self.root), "rev-parse", "--is-shallow-repository"],
@@ -299,7 +353,7 @@ class GitHistory:
         try:
             listing = subprocess.run(["git", "-C", str(self.root), "--no-replace-objects", "ls-tree", "-r",
                                       "-z", "--full-tree", oid, "--", RULES_DIR, CASES_DIR, INVENTORY_REL,
-                                      TABLE_REL, WAIVERS_REL, BUDGET_REL, SCRIPT_REL],
+                                      TABLE_REL, WAIVERS_REL, BUDGET_REL, EXCLUSIONS_REL, SCRIPT_REL],
                                      capture_output=True, env=_git_env(), timeout=CHILD_TIMEOUT)
         except (OSError, subprocess.SubprocessError) as exc:
             raise GateError("git is not available ({})".format(type(exc).__name__))
@@ -596,8 +650,26 @@ def parse_scenario(raw, where):
             raise GateError("{}: two instances share where {!r}".format(where, instance["where"]))
         seen.add(instance["where"])
         instances.append((instance["where"], instance["form"], instance["disposition"]))
+    named = _named_set(raw.get("named-set"), where)
+    probe = frozenset(_string_list(raw.get("probe", []), where + " probe", PROBE_PROPERTIES, True))
     return {"op": op, "claim": claim, "before": before, "after": after, "evidence": evidence,
-            "item-evidence": dict(item_evidence), "instances": tuple(instances)}
+            "item-evidence": dict(item_evidence), "instances": tuple(instances), "named-set": named,
+            "probe": probe}
+
+
+def _named_set(value, where):
+    """The set a bounded claim lists: (members, the count the claim states or None), or None when absent."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - {"members", "count"} or "members" not in value:
+        raise GateError("{}: named-set holds members and an optional count".format(where))
+    members = _string_list(value["members"], where + " named-set members")
+    if not all(NAME_RE.fullmatch(member) for member in members):
+        raise GateError("{}: named-set members must match [a-z0-9-]+".format(where))
+    count = value.get("count")
+    if count is not None and (type(count) is not int or count < 1):
+        raise GateError("{}: named-set count must be a positive integer".format(where))
+    return tuple(members), count
 
 
 def parse_case(rel, data):
@@ -701,7 +773,7 @@ def facts(scenario):
         found.add("record:multi-item")
     if scenario["claim"] in ("completion", "bounded"):
         found.add("claim:completion")
-    if scenario["claim"] == "bounded":
+    if scenario["claim"] == "bounded" and _closed(scenario["named-set"]):
         found.add("claim:bounded")
     if scenario["claim"] == "partial":
         found.add("claim:partial")
@@ -710,12 +782,19 @@ def facts(scenario):
     return found
 
 
+def _closed(named):
+    """A named set is closed when the claim states its size and lists exactly that many members."""
+    return named is not None and named[1] == len(named[0])
+
+
 def _exemption_meets(eligible_rows, where, form, label):
     """Whether exempt:<label> disposes of an instance at where in form, under the triggered require rows
-    that carry an exempt vocabulary. All four conditions must hold."""
+    that require instance:dispositioned or carry an exempt vocabulary. A row with no exempt vocabulary
+    admits no label, so it keeps every instance strict. All four conditions must hold."""
     if not eligible_rows:
         return False
-    vocab = frozenset.intersection(*[row.vocab for row in eligible_rows])
+    vocab = frozenset.intersection(*[row.vocab if row.vocab is not None else frozenset()
+                                     for row in eligible_rows])
     pairs = frozenset.intersection(*[row.pairs for row in eligible_rows])
     never = frozenset().union(*[row.never for row in eligible_rows])
     if label not in vocab:
@@ -743,7 +822,8 @@ def outcome(rows, scenario):
         elif row.kind == "limit":
             cancelled |= row.effect
     required -= suppressed - cancelled
-    eligible = [row for row in triggered if row.kind == "require" and row.vocab is not None]
+    eligible = [row for row in triggered if row.kind == "require"
+                and (row.vocab is not None or "instance:dispositioned" in row.effect)]
     evidence = scenario["evidence"]
     unmet = []
     if "set:enumerated" in required and "index-enumeration" not in evidence:
@@ -756,6 +836,8 @@ def outcome(rows, scenario):
             if item not in kept and scenario["item-evidence"].get(item) != "own-evidence":
                 unmet.append("item:accounted:" + item)
     if "instance:dispositioned" in required:
+        if not scenario["probe"] >= frozenset(PROBE_PROPERTIES):
+            unmet.append("instance:probed")
         for where, form, disposition in scenario["instances"]:
             met = disposition == "fixed" or (
                 disposition.startswith("exempt:")
@@ -876,6 +958,38 @@ def parse_budget(data, label):
     return dict((kind, doc.get(key, 0)) for kind, key in BUDGET_KEYS.items())
 
 
+def _row_digest(row):
+    """The digest that names one obligation row in coverage-exclusions.toml: its canonical JSON form."""
+    return _text_sha(row.key)
+
+
+def parse_exclusions(data, label):
+    """(clause-id, row-sha256) -> reason, one per [[exclusion]] row; each carries exactly those three keys."""
+    doc = _toml(data, label)
+    unknown = sorted(set(doc) - {"exclusion"})
+    if unknown:
+        raise GateError("{}: unknown top-level key(s) {}".format(label, ", ".join(unknown)))
+    rows = doc.get("exclusion", [])
+    if not isinstance(rows, list):
+        raise GateError("{}: exclusion is not an array of tables".format(label))
+    out = {}
+    for number, raw in enumerate(rows, 1):
+        where = "{} exclusion {}".format(label, number)
+        if not isinstance(raw, dict) or set(raw) != {"clause-id", "row-sha256", "reason"}:
+            raise GateError("{}: an exclusion carries exactly clause-id, row-sha256 and reason".format(where))
+        if not isinstance(raw["clause-id"], str) or not CLAUSE_ID_RE.fullmatch(raw["clause-id"]):
+            raise GateError("{}: clause-id is not a clause id".format(where))
+        _digest_field(raw["row-sha256"], where, "row-sha256", allow_absent=False)
+        reason = raw["reason"]
+        if not isinstance(reason, str) or not reason.strip():
+            raise GateError("{}: an exclusion's reason must be nonempty".format(where))
+        key = (raw["clause-id"], raw["row-sha256"])
+        if key in out:
+            raise GateError("{}: duplicate exclusion for {}".format(where, raw["clause-id"]))
+        out[key] = reason
+    return out
+
+
 def _category_holds(data, start, end, category):
     """Whether bytes [start, end) of one rule file fall in a non-clause-text category."""
     piece = data[start:end]
@@ -940,6 +1054,20 @@ def check_schema(register, rows, cases, report):
                 report.fail("case {} removes {}, which is still in {}".format(case.cid, cid, INVENTORY_REL))
 
 
+def check_premises(cases, report):
+    """A scenario may not assert the fact a rule requires proving: a bounded claim lists its set, and a
+    wording fix, or any listed instance, names the probe that found its instances. With the evidence
+    present, the matcher decides whether it holds."""
+    for case in cases.values():
+        scenario = case.scenario
+        if scenario["claim"] == "bounded" and scenario["named-set"] is None:
+            report.fail("{} {}: claim = \"bounded\" with no named-set asserts the exemption bare; a bounded "
+                        "claim counts only over the named, closed set it lists".format(case.kind, case.cid))
+        if (scenario["op"] == "wording-fix" or scenario["instances"]) and not scenario["probe"]:
+            report.fail("{} {}: its instances are asserted with no probe; they count only as the findings of a "
+                        "probe with the properties its clause names".format(case.kind, case.cid))
+
+
 def check_cases(rows, cases, report):
     for case in cases.values():
         got = outcome(rows, case.scenario)
@@ -950,7 +1078,7 @@ def check_cases(rows, cases, report):
             report.fail("control {}: its outcome does not differ from case {}".format(case.cid, case.controls))
 
 
-def check_ablation(rows, cases, report):
+def check_ablation(rows, cases, exclusions, report):
     listed = set()
     for case in cases.values():
         if case.kind != "case":
@@ -961,15 +1089,26 @@ def check_ablation(rows, cases, report):
             if outcome(without_clause(rows, cid), case.scenario) == full:
                 report.fail("case {}: listed clause {} is not load bearing (removing its rows leaves the "
                             "outcome unchanged)".format(case.cid, cid))
+    matched = set()
     for index, row in enumerate(rows):
         if row.clause not in listed:
-            report.note("UNCOVERED ROWS", "{} ({} row {})".format(row.clause, row.kind, index + 1))
+            key = (row.clause, _row_digest(row))
+            if key in exclusions:
+                matched.add(key)
+                report.note("UNCOVERED ROWS", "{} ({} row {}) excluded: {}".format(
+                    row.clause, row.kind, index + 1, exclusions[key]))
+            else:
+                report.fail("obligation row {} for {} is uncovered: no case lists {}; add a case that does, or "
+                            "an exclusion with its reason (row-sha256 {})".format(
+                                index + 1, row.clause, row.clause, key[1]))
             continue
         others = rows[:index] + rows[index + 1:]
         if not any(outcome(others, case.scenario) != outcome(rows, case.scenario)
                    for case in cases.values() if case.kind == "case" and row.clause in case.clauses):
             report.fail("obligation row {} for {} is dead: no case listing {} depends on it".format(
                 index + 1, row.clause, row.clause))
+    for clause, digest in sorted(set(exclusions) - matched):
+        report.fail("coverage exclusion for {} (row-sha256 {}) names no uncovered row".format(clause, digest))
 
 
 def check_retro(rows, cases, history, report):
@@ -1155,6 +1294,17 @@ def _changed_cases(cases, base):
     return [case for case in cases.values() if base.read(case.rel) != case.data]
 
 
+def _why_unflipped(base_out, head_out, revert_out, cid):
+    """Why a listing case binds nothing: the same outcome on both sides, outcomes that differ only in their
+    unmet atoms, or a decision flip that restoring the clause's base rows does not undo."""
+    if base_out == head_out:
+        return "its base and HEAD outcomes are both {!r}".format(head_out)
+    if decision(base_out) == decision(head_out):
+        return "unmet atoms differ only (base {!r}, HEAD {!r})".format(base_out, head_out)
+    return "the decision flips, but restoring the base rows of {} leaves {!r}, so the flip is not on {}".format(
+        cid, revert_out, cid)
+
+
 def check_binding(head, base, head_register, rows, cases, waivers, report):
     base_register = load_register(base)
     change = Change(base, head, base_register, head_register)
@@ -1224,7 +1374,7 @@ def check_binding(head, base, head_register, rows, cases, waivers, report):
                 report.note("BOUND", "{} by case {} (unmet base: {}; head: {}; with {} reverted: {})".format(
                     cid, case.cid, base_out, head_out, cid, revert_out))
             else:
-                unflipped.setdefault(cid, case.cid)
+                unflipped.setdefault(cid, (case.cid, _why_unflipped(base_out, head_out, revert_out, cid)))
     waived, repeats = _check_waivers(change, reasons, moved, residue, base_register, head_register, rows,
                                      base_rows, bound, bindable, base, head, waivers, report)
     tiled = waived.pop("__tiled__")
@@ -1235,8 +1385,8 @@ def check_binding(head, base, head_register, rows, cases, waivers, report):
             report.fail("no base encoding for {}: land its registration and encoding in an earlier change "
                         "that alters no rule byte, then edit".format(cid))
         elif cid in unflipped:
-            report.fail("case {} does not flip the decision for {}; unmet atoms differ only".format(
-                unflipped[cid], cid))
+            report.fail("case {} does not flip the decision for {}; {}".format(unflipped[cid][0], cid,
+                                                                                unflipped[cid][1]))
         else:
             report.fail("changed clause {} is not bound: add a new or changed case that lists it, whose base "
                         "and head decisions differ and flip back when its base rows are restored".format(cid))
@@ -1415,13 +1565,15 @@ def evaluate(head, base=None, history=None):
         cases = parse_cases(head)
         waivers = parse_waivers(head.read(WAIVERS_REL), WAIVERS_REL)
         parse_budget(head.read(BUDGET_REL), BUDGET_REL)
+        exclusions = parse_exclusions(head.read(EXCLUSIONS_REL), EXCLUSIONS_REL)
         check_schema(register, rows, cases, report)
         binding = None
         encoded = set(row.clause for row in rows)
         missing = sorted(cid for cid in register if cid not in encoded)
         if not report.findings:
+            check_premises(cases, report)
             check_cases(rows, cases, report)
-            check_ablation(rows, cases, report)
+            check_ablation(rows, cases, exclusions, report)
             report.note("UNENCODED INVENTORY (not a waiver)", "{} clause(s): {}".format(
                 len(missing), " ".join(missing)))
             check_retro(rows, cases, history, report)
@@ -1469,6 +1621,38 @@ def run(root, base_ref=None):
     code, text = evaluate(head, base, history)
     (sys.stderr if code == 2 else sys.stdout).write(text)
     return code
+
+
+def run_each_commit(root, base_ref):
+    """The push leg: every commit on HEAD's first-parent chain after base_ref, oldest first, each read from
+    history and judged by every leg against its own first parent, so a rule edit in any pushed commit needs
+    its own case or waiver. The exit is the worst over the commits."""
+    try:
+        history = GitHistory(root)
+        base = history.resolve(base_ref)
+        history.require_full_history()
+        transitions = history.first_parent_range(base, history.head())
+    except GateError as exc:
+        print("error: rule-behaviour cannot evaluate ({}); fail-closed".format(exc), file=sys.stderr)
+        return 2
+    worst, failed = 0, []
+    for parent, commit in transitions:
+        try:
+            code, text = evaluate(history.snapshot(commit), history.snapshot(parent), history)
+        except GateError as exc:
+            code, text = 2, "error: rule-behaviour cannot evaluate ({}); fail-closed\n".format(exc)
+        print("COMMIT {} against its first parent {}: exit {}".format(commit, parent, code))
+        sys.stdout.write("".join("  " + line + "\n" for line in text.splitlines()))
+        if code != 0:
+            failed.append(commit)
+        worst = max(worst, code)
+    if failed:
+        print("FAIL: rule-behaviour push range {}..{}: {} of {} commit(s) fail: {}".format(
+            base[:12], transitions[-1][1][:12], len(failed), len(transitions), " ".join(failed)))
+    else:
+        print("PASS: rule-behaviour push range {}..{}: {} commit(s), each judged against its first parent".format(
+            base[:12], transitions[-1][1][:12], len(transitions)))
+    return worst
 
 
 # SELF-TEST-BEGINS
@@ -1533,13 +1717,14 @@ class _Fx:
     def __init__(self):
         self.rules, self.clauses, self.rows, self.cases, self.waivers = {}, {}, [], {}, []
         self.budget, self.script, self.table, self.raw = dict(ZEROS), True, True, {}
-        self.born, self.gone = [], []
+        self.born, self.gone, self.exclusions, self.excluded = [], [], [], {}
 
     def copy(self):
         twin = _Fx()
         twin.rules, twin.clauses = dict(self.rules), json.loads(json.dumps(self.clauses))
         twin.rows, twin.cases = json.loads(json.dumps(self.rows)), json.loads(json.dumps(self.cases))
         twin.waivers = json.loads(json.dumps(self.waivers))
+        twin.exclusions, twin.excluded = json.loads(json.dumps(self.exclusions)), dict(self.excluded)
         twin.budget = None if self.budget is None else dict(self.budget)
         twin.script, twin.table, twin.raw = self.script, self.table, dict(self.raw)
         twin.born, twin.gone = list(self.born), list(self.gone)
@@ -1590,6 +1775,7 @@ class _Fx:
                              "start-line": start, "end-line": end, "canonical-text": text,
                              "source-digest": self.file_sha(rel)})
         files[INVENTORY_REL] = _array("clause", register).encode("utf-8")
+        exclusions = list(self.exclusions)
         if self.table:
             rows = []
             for row in self.rows:
@@ -1599,10 +1785,16 @@ class _Fx:
                     row = dict([("clause-id", cid), ("text-sha256", self.sha(cid))]
                                + [(k, v) for k, v in row.items() if k != "clause-id"])
                 rows.append(row)
+                if cid in self.excluded:
+                    # the row's digest, computed here independently of the gate: its canonical JSON form
+                    exclusions.append({"clause-id": cid, "row-sha256": _sha(json.dumps(row, sort_keys=True)
+                                                                            .encode("utf-8")),
+                                       "reason": self.excluded[cid]})
             files[TABLE_REL] = _array("row", rows).encode("utf-8")
         for cid, case in self.cases.items():
             files[CASES_PREFIX + cid + ".toml"] = (case if isinstance(case, str) else _doc(case)).encode("utf-8")
         files[WAIVERS_REL] = ("# log\n" + _array("waiver", self.waivers)).encode("utf-8")
+        files[EXCLUSIONS_REL] = ("# exclusions\n" + _array("exclusion", exclusions)).encode("utf-8")
         if self.budget is not None:
             files[BUDGET_REL] = "".join("{} = {}\n".format(k, v) for k, v in self.budget.items()).encode("utf-8")
         if self.script:
@@ -1918,9 +2110,165 @@ def _v(gate):
     return _expect(gate, fx, code=2, needles=["exempt-vocab without exempt-on"])
 
 
+@_vector("schema/named-set-unknown-key-refused")
+def _v(gate):
+    fx = _schema_head(lambda fx: fx.cases["k-x"]["scenario"].update({"named-set": dict(NAMED, closed=True)}))
+    return _expect(gate, fx, code=2, needles=["named-set holds members and an optional count"])
+
+
+@_vector("schema/named-set-member-malformed-refused")
+def _v(gate):
+    fx = _schema_head(lambda fx: fx.cases["k-x"]["scenario"].update({"named-set": {"members": ["Module A"]}}))
+    return _expect(gate, fx, code=2, needles=["named-set members must match [a-z0-9-]+"])
+
+
+@_vector("schema/named-set-count-not-positive-refused")
+def _v(gate):
+    fx = _schema_head(lambda fx: fx.cases["k-x"]["scenario"].update({"named-set": dict(NAMED, count=0)}))
+    return _expect(gate, fx, code=2, needles=["named-set count must be a positive integer"])
+
+
+@_vector("schema/probe-unknown-property-refused")
+def _v(gate):
+    fx = _schema_head(lambda fx: fx.cases["k-x"]["scenario"].update(probe=["matches-across-tabs"]))
+    return _expect(gate, fx, code=2, needles=["probe: unknown value(s) matches-across-tabs"])
+
+
+def _excluded_head(exclusion):
+    return _schema_head(lambda fx: setattr(fx, "exclusions", [exclusion]))
+
+
+EXCLUSION = {"clause-id": Z, "row-sha256": "0" * 64, "reason": "reviewed: not reached"}
+
+
+@_vector("schema/exclusion-unknown-key-refused")
+def _v(gate):
+    fx = _excluded_head(dict(EXCLUSION, note="extra"))
+    return _expect(gate, fx, code=2, needles=["an exclusion carries exactly clause-id, row-sha256 and reason"])
+
+
+@_vector("schema/exclusion-malformed-clause-id-refused")
+def _v(gate):
+    fx = _excluded_head(dict(EXCLUSION, **{"clause-id": "Z"}))
+    return _expect(gate, fx, code=2, needles=["clause-id is not a clause id"])
+
+
+@_vector("schema/exclusion-malformed-digest-refused")
+def _v(gate):
+    fx = _excluded_head(dict(EXCLUSION, **{"row-sha256": "0" * 63}))
+    return _expect(gate, fx, code=2, needles=["row-sha256 is not 64 lowercase hex"])
+
+
+@_vector("schema/exclusion-without-reason-refused")
+def _v(gate):
+    fx = _excluded_head(dict(EXCLUSION, reason=" "))
+    return _expect(gate, fx, code=2, needles=["an exclusion's reason must be nonempty"])
+
+
+@_vector("schema/exclusion-duplicate-refused")
+def _v(gate):
+    fx = _schema_head(lambda fx: setattr(fx, "exclusions", [EXCLUSION, dict(EXCLUSION, reason="again")]))
+    return _expect(gate, fx, code=2, needles=["duplicate exclusion for fixalpha.3"])
+
+
+@_vector("schema/budget-negative-ceiling-exit-2")
+def _v(gate):
+    fx = _schema_head(lambda fx: fx.budget.update({"wording-only-per-change": -1}))
+    return _expect(gate, fx, code=2, needles=["wording-only-per-change must be a nonnegative integer"])
+
+
+def _write_tree(fx, root):
+    """Write a fixture's files under root, as a working tree the gate reads from disk."""
+    for rel, data in fx.build().files.items():
+        (Path(root) / rel).parent.mkdir(parents=True, exist_ok=True)
+        (Path(root) / rel).write_bytes(data)
+
+
+def _run_root(gate, root, *args):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = gate.run(root, *args)
+    return code, out.getvalue() + err.getvalue()
+
+
+@_vector("schema/worktree-symlink-input-exit-2")
+def _v(gate):
+    with tempfile.TemporaryDirectory(prefix="rule-behaviour-tree-") as directory:
+        _write_tree(_alpha(), directory)
+        table = Path(directory) / TABLE_REL
+        table.rename(table.with_name("obligations-real.toml"))
+        os.symlink("obligations-real.toml", table)
+        got = _run_root(gate, directory)
+    return got[0] == 2 and "obligations.toml: not a regular file" in got[1], got
+
+
+@_vector("schema/worktree-symlink-entry-exit-2")
+def _v(gate):
+    with tempfile.TemporaryDirectory(prefix="rule-behaviour-tree-") as directory:
+        _write_tree(_alpha(), directory)
+        link = Path(directory) / CASES_PREFIX / "k-link.toml"
+        os.symlink("k-x.toml", link)
+        got = _run_root(gate, directory)
+    return got[0] == 2 and "k-link.toml: not a regular file or directory" in got[1], got
+
+
+# ----------------------------------------------------------------------------------------- premise
+
+def _premise_head(row, scenario, head):
+    """X and Y covered by their cases; one more row for Z and a case k-p listing Z over the scenario. The
+    case expects what the scenario asserts, so only the evidence it carries decides whether that holds."""
+    fx = _alpha()
+    fx.rows.append(row)
+    fx.cases["k-p"] = _case("k-p", [Z], scenario, head)
+    return fx
+
+
+BOUNDED_ROW = {"clause-id": Z, "kind": "exempt", "when": ["claim:bounded"], "suppresses": ["count:reconciled"]}
+
+
+def _wf_row():
+    return _req(Z, ["fix:wording"], ["instance:dispositioned"], EVG_PARAMS)
+
+
+@_vector("premise/bounded-without-named-set-fails")
+def _v(gate):
+    fx = _premise_head(BOUNDED_ROW, {"claim": "bounded"}, "ACCEPT")
+    return _expect(gate, fx, code=1, needles=["case k-p: claim = \"bounded\" with no named-set asserts the exemption "
+                                              "bare"])
+
+
+@_vector("premise/bounded-with-named-set-passes")
+def _v(gate):
+    fx = _premise_head(BOUNDED_ROW, BOUNDED, "ACCEPT")
+    return _expect(gate, fx, code=0, absent=["asserts the exemption bare", "FAIL"])
+
+
+@_vector("premise/wording-fix-without-probe-fails")
+def _v(gate):
+    fx = _premise_head(_wf_row(), {"op": "wording-fix", "instances": [
+        {"where": "rule", "form": "operative", "disposition": "fixed"}]}, "ACCEPT")
+    return _expect(gate, fx, code=1, needles=["case k-p: its instances are asserted with no probe"])
+
+
+@_vector("premise/wording-fix-with-probe-passes")
+def _v(gate):
+    fx = _premise_head(_wf_row(), {"op": "wording-fix", "probe": PROBE, "instances": [
+        {"where": "rule", "form": "operative", "disposition": "unfixed"}]}, "REJECT instance:dispositioned:rule")
+    return _expect(gate, fx, code=0, absent=["asserted with no probe", "FAIL"])
+
+
+@_vector("premise/listed-instances-without-probe-fail")
+def _v(gate):
+    fx = _alpha()
+    fx.cases["k-x"]["scenario"]["instances"] = [{"where": "rule", "form": "operative", "disposition": "fixed"}]
+    return _expect(gate, fx, code=1, needles=["case k-x: its instances are asserted with no probe"])
+
+
 # ----------------------------------------------------------------------------------------- matcher
 
 SHA_FILL = "a" * 64
+NAMED = {"members": ["mod-a", "mod-b", "mod-c"], "count": 3}
+PROBE = list(PROBE_PROPERTIES)
 EVG_PARAMS = {"exempt-vocab": ["history", "warning"], "never-exempt": ["register-copy"],
               "exempt-on": [{"label": "history", "where": "changelog-quote"},
                             {"label": "history", "where": "mistakes-register"},
@@ -1948,12 +2296,14 @@ def _scenario(gate, raw):
 
 RETIRE = {"op": "retire", "before": [{"id": "R", "items": ["a", "b"]}], "after": [{"id": "R", "items": ["a", "c"]}],
           "evidence": ["id-check", "count-check"]}
-MERGE = {"op": "merge", "claim": "bounded", "before": [{"id": "R1", "items": ["a", "b"]}, {"id": "R2", "items": ["c"]}],
+MERGE = {"op": "merge", "claim": "bounded", "named-set": NAMED,
+         "before": [{"id": "R1", "items": ["a", "b"]}, {"id": "R2", "items": ["c"]}],
          "after": [{"id": "R3", "items": ["a", "c"]}], "evidence": ["id-check"]}
-WORDING = {"op": "wording-fix", "instances": [
+WORDING = {"op": "wording-fix", "probe": PROBE, "instances": [
     {"where": "rule", "form": "operative", "disposition": "fixed"},
     {"where": "register-copy", "form": "operative", "disposition": "exempt:history"},
     {"where": "changelog-quote", "form": "quotation", "disposition": "exempt:history"}]}
+BOUNDED = {"claim": "bounded", "named-set": NAMED}
 
 
 def _outcome(gate, scenario, raw_rows=SEED_ROWS):
@@ -1974,18 +2324,37 @@ _matcher("retire-in-place-head-rejects", RETIRE, "REJECT item:accounted:b")
 _matcher("retire-own-evidence-accepts", dict(RETIRE, **{"item-evidence": {"b": "own-evidence"}}), "ACCEPT")
 _matcher("merge-bounded-head-rejects", MERGE, "REJECT item:accounted:b")
 _matcher("merge-own-evidence-accepts", dict(MERGE, **{"item-evidence": {"b": "own-evidence"}}), "ACCEPT")
-_matcher("bounded-named-set-accepts", {"claim": "bounded"}, "ACCEPT")
+_matcher("bounded-named-set-accepts", BOUNDED, "ACCEPT")
 _matcher("completion-named-set-rejects", {"claim": "completion"}, "REJECT count:reconciled set:enumerated")
 _matcher("wording-register-copy-head-rejects", WORDING, "REJECT instance:dispositioned:register-copy")
-_matcher("wording-register-copy-fixed-accepts", {"op": "wording-fix", "instances": [
+_matcher("wording-register-copy-fixed-accepts", {"op": "wording-fix", "probe": PROBE, "instances": [
     WORDING["instances"][0], {"where": "register-copy", "form": "operative", "disposition": "fixed"},
     WORDING["instances"][2]]}, "ACCEPT")
-_matcher("bounded-derives-completion", {"claim": "bounded"}, "REJECT set:enumerated",
+_matcher("bounded-derives-completion", BOUNDED, "REJECT set:enumerated",
          [_req("setcmp.1", ["claim:completion"], ["set:enumerated"])])
+# A bounded claim is exempt only over a closed named set: with no set, an open one (no stated count) or a
+# miscounted one, it is a completion claim and carries the whole burden.
+_matcher("bounded-without-named-set-rejects", {"claim": "bounded"}, "REJECT count:reconciled set:enumerated")
+_matcher("bounded-open-set-rejects", {"claim": "bounded", "named-set": {"members": NAMED["members"]}},
+         "REJECT count:reconciled set:enumerated")
+_matcher("bounded-miscounted-set-rejects", {"claim": "bounded", "named-set": dict(NAMED, count=4)},
+         "REJECT count:reconciled set:enumerated")
+# A wording fix's instances count only as the findings of a probe with every property its clause names.
+_matcher("wording-fix-without-probe-rejects", {"op": "wording-fix", "instances": []}, "REJECT instance:probed")
+_matcher("wording-fix-probe-missing-one-property-rejects", {"op": "wording-fix", "probe": PROBE[:-1], "instances": [
+    {"where": "rule", "form": "operative", "disposition": "fixed"}]}, "REJECT instance:probed")
+_matcher("wording-fix-no-instances-with-probe-accepts", {"op": "wording-fix", "probe": PROBE}, "ACCEPT")
+# A require row with no exempt vocabulary stays strict when another triggered row carries one.
+_matcher("strict-row-stays-strict-beside-vocab-row",
+         {"op": "wording-fix", "probe": PROBE, "instances": [
+             {"where": "changelog-quote", "form": "quotation", "disposition": "exempt:history"}]},
+         "REJECT instance:dispositioned:changelog-quote",
+         SEED_ROWS + [_req("evgcmp.16", ["fix:wording"], ["instance:dispositioned"])])
 
 
 def _one_instance(where, form, label):
-    return {"op": "wording-fix", "instances": [{"where": where, "form": form, "disposition": "exempt:" + label}]}
+    return {"op": "wording-fix", "probe": PROBE,
+            "instances": [{"where": where, "form": form, "disposition": "exempt:" + label}]}
 
 
 for _name, _where, _form, _label, _want in (
@@ -2005,8 +2374,8 @@ for _name, _where, _form, _label, _want in (
 
 @_vector("matcher/row-order-independent")
 def _v(gate):
-    scenarios = [RETIRE, MERGE, WORDING, {"claim": "bounded"}, {"claim": "completion"},
-                 dict(MERGE, claim="completion"), dict(RETIRE, claim="bounded")]
+    scenarios = [RETIRE, MERGE, WORDING, BOUNDED, {"claim": "completion"}, {"claim": "bounded"},
+                 dict(MERGE, claim="completion"), dict(RETIRE, claim="bounded", **{"named-set": NAMED})]
     orders = [SEED_ROWS, list(reversed(SEED_ROWS)), SEED_ROWS[3:] + SEED_ROWS[:3], SEED_ROWS[1::2] + SEED_ROWS[::2]]
     table = [[_outcome(gate, scenario, order) for order in orders] for scenario in scenarios]
     return all(len(set(row)) == 1 and not row[0].startswith("crashed") for row in table), table
@@ -2062,12 +2431,45 @@ def _v(gate):
     return _expect(gate, fx, code=1, needles=["obligation row 3 for fixalpha.1 is dead"])
 
 
-@_vector("ablation/every-listed-clause-load-bearing")
-def _v(gate):
+def _uncovered(gate, exclude=True, reason="reviewed: no scenario in this table reaches it yet"):
+    """X and Y covered by their cases; a third row for Z, which no case lists, with or without its exclusion."""
     fx = _alpha()
     fx.rows.append(_req(Z, ["claim:bounded"], ["set:enumerated"]))
-    return _expect(gate, fx, code=0, needles=["UNCOVERED ROWS: fixalpha.3 (require row 3)"],
-                   absent=["not load bearing", "is dead"])
+    digest = gate._row_digest(gate.parse_table(fx.build().read(TABLE_REL), "fixture table")[2])
+    if exclude:
+        fx.exclusions = [{"clause-id": Z, "row-sha256": digest, "reason": reason}]
+    return fx, digest
+
+
+@_vector("ablation/every-listed-clause-load-bearing")
+def _v(gate):
+    fx, _digest = _uncovered(gate)
+    return _expect(gate, fx, code=0, needles=["UNCOVERED ROWS: fixalpha.3 (require row 3) excluded: reviewed: no "
+                                              "scenario"], absent=["not load bearing", "is dead"])
+
+
+@_vector("ablation/uncovered-row-without-exclusion-fails")
+def _v(gate):
+    fx, digest = _uncovered(gate, exclude=False)
+    return _expect(gate, fx, code=1, needles=["obligation row 3 for fixalpha.3 is uncovered: no case lists fixalpha.3",
+                                              "(row-sha256 {})".format(digest)])
+
+
+@_vector("ablation/exclusion-naming-no-uncovered-row-fails")
+def _v(gate):
+    fx = _alpha()
+    digest = gate._row_digest(gate.parse_table(fx.build().read(TABLE_REL), "fixture table")[0])
+    fx.exclusions = [{"clause-id": X, "row-sha256": digest, "reason": "reviewed: stale"}]
+    return _expect(gate, fx, code=1, needles=["coverage exclusion for fixalpha.1 (row-sha256 {}) names no uncovered "
+                                              "row".format(digest)])
+
+
+@_vector("ablation/exclusion-for-changed-row-fails")
+def _v(gate):
+    fx, digest = _uncovered(gate)
+    fx.rows[2] = _req(Z, ["claim:bounded"], ["count:reconciled"])
+    return _expect(gate, fx, code=1, needles=["obligation row 3 for fixalpha.3 is uncovered",
+                                              "coverage exclusion for fixalpha.3 (row-sha256 {})".format(digest)])
 
 
 @_vector("ablation/empty-clauses-removal-case-vacuous")
@@ -2088,6 +2490,7 @@ def _limit_fixture(exempt_atoms):
                {"clause-id": Z, "kind": "limit", "when": ["claim:bounded", "op:record-change"],
                 "cancels": ["item:accounted"]}]
     fx.cases = {"k-merge": _case("k-merge", [Z, Y], MERGE, "REJECT item:accounted:b")}
+    fx.excluded = {X: "reviewed: the requirements this fixture's exemption and limit act on"}
     return fx
 
 
@@ -2573,7 +2976,7 @@ def _flip_pair():
 
 
 FLIP = {"claim": "completion", "evidence": ["count-check"]}
-WF = {"op": "wording-fix"}
+WF = {"op": "wording-fix", "probe": PROBE}
 
 
 @_vector("binding/changed-clause-no-case-fails")
@@ -2596,7 +2999,9 @@ def _v(gate):
     base, head = _flip_pair()
     head.cases["k-f"] = _case("k-f", [X], {"claim": "completion", "evidence": ["index-enumeration"]}, "ACCEPT",
                               base="ACCEPT")
-    return _expect(gate, head, base, code=1, needles=["case k-f does not flip the decision for fixalpha.1"])
+    return _expect(gate, head, base, code=1, needles=[
+        "case k-f does not flip the decision for fixalpha.1; its base and HEAD outcomes are both 'ACCEPT'"],
+        absent=["unmet atoms differ only"])
 
 
 @_vector("binding/discriminating-case-passes")
@@ -2623,8 +3028,10 @@ def _decoy(list_y):
 @_vector("binding/crossed-clause-decoy-fails")
 def _v(gate):
     base, head = _decoy(False)
-    return _expect(gate, head, base, code=1, needles=["case k-f does not flip the decision for fixalpha.1",
-                                                      "changed clause fixalpha.2 is not bound"])
+    return _expect(gate, head, base, code=1, needles=[
+        "case k-f does not flip the decision for fixalpha.1; the decision flips, but restoring the base rows of "
+        "fixalpha.1 leaves 'REJECT set:enumerated', so the flip is not on fixalpha.1",
+        "changed clause fixalpha.2 is not bound"], absent=["unmet atoms differ only"])
 
 
 @_vector("binding/crossed-clause-decoy-separate-case-passes")
@@ -2664,8 +3071,7 @@ def _v(gate):
     _text_edit(head, X, "Alpha must", "Alpha must always")
     _text_edit(head, Y, "Beta must", "Beta must always")
     head.rows[1:] = [exempt(X, "claim:bounded", "set:enumerated"), exempt(Y, "claim:bounded", "count:reconciled")]
-    head.cases["k-j"] = _case("k-j", [X, Y], {"claim": "bounded"}, "ACCEPT",
-                              base="REJECT count:reconciled set:enumerated")
+    head.cases["k-j"] = _case("k-j", [X, Y], BOUNDED, "ACCEPT", base="REJECT count:reconciled set:enumerated")
     return _expect(gate, head, base, code=0, needles=["BOUND: fixalpha.1 by case k-j", "BOUND: fixalpha.2 by case k-j"])
 
 
@@ -2923,6 +3329,7 @@ def _removal(evidence=(), ceiling=3, tiles="exact"):
     base.rows = [_req("fixrmv.1", ["claim:completion"], ["set:enumerated"]),
                  _req("fixkeep.1", ["claim:partial"], ["count:reconciled"])]
     base.budget["non-clause-text-per-change"] = ceiling
+    base.excluded = {"fixkeep.1": "reviewed: the kept clause only carries the surviving rule file"}
     base.born, base.gone = ["fixkeep", "fixkeep.1", "fixrmv", "fixrmv.1"], []
     head = base.copy()
     del head.rules[RMV]
@@ -3549,6 +3956,140 @@ def _v(gate):
     return code == 2 and "does not resolve to a commit" in err.getvalue(), (code, err.getvalue())
 
 
+@_vector("binding/option-like-base-exit-2", git=True)
+def _v(gate):
+    with tempfile.TemporaryDirectory(prefix="rule-behaviour-base-") as directory:
+        root, _oids = _git_fixture(directory, [_alpha().build()])
+        got = _run_root(gate, root, "--all")
+    return got[0] == 2 and "base '--all' is not a revision" in got[1], got
+
+
+@_vector("binding/shallow-history-exit-2", git=True)
+def _v(gate):
+    with tempfile.TemporaryDirectory(prefix="rule-behaviour-base-") as directory:
+        root, oids = _git_fixture(directory, [_alpha().build(), _alpha().build()])
+        (root / ".git" / "shallow").write_text(oids[1] + "\n", encoding="ascii")
+        single = _run_root(gate, root, "HEAD")
+        push = _run_each(gate, root, oids[0])
+    needle = "the history is shallow; the base leg needs full history"
+    return single[0] == 2 and needle in single[1] and push[0] == 2 and needle in push[1], (single, push)
+
+
+def _git_symlink_base(directory):
+    """A repository whose first commit carries a symlink among the rule files and whose second removes it."""
+    from _git_fixture_env import git_fixture_env
+    root = Path(directory) / "repo"
+    root.mkdir()
+    env = git_fixture_env(GIT_AUTHOR_NAME="Rule Behaviour Self-Test", GIT_AUTHOR_EMAIL="selftest@example.invalid",
+                          GIT_COMMITTER_NAME="Rule Behaviour Self-Test",
+                          GIT_COMMITTER_EMAIL="selftest@example.invalid")
+    subprocess.run(["git", "-C", str(root), "init", "-q"], env=env, capture_output=True, check=True,
+                   timeout=CHILD_TIMEOUT)
+    _write_tree(_alpha(), root)
+    link = root / RULES_DIR / "fixlink.md"
+    oids = []
+    for step in ("link", "unlink"):
+        if step == "link":
+            os.symlink("fixalpha.md", link)
+        else:
+            link.unlink()
+        subprocess.run(["git", "-C", str(root), "add", "-A"], env=env, capture_output=True, check=True,
+                       timeout=CHILD_TIMEOUT)
+        subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "fixture " + step], env=env,
+                       capture_output=True, check=True, timeout=CHILD_TIMEOUT)
+        oids.append(subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], env=env, capture_output=True,
+                                   check=True, timeout=CHILD_TIMEOUT).stdout.decode("ascii").strip())
+    return root, oids
+
+
+@_vector("binding/base-tree-symlink-exit-2", git=True)
+def _v(gate):
+    with tempfile.TemporaryDirectory(prefix="rule-behaviour-base-") as directory:
+        root, oids = _git_symlink_base(directory)
+        got = _run_root(gate, root, oids[0])
+    return got[0] == 2 and "{}/fixlink.md at {}: not a regular file".format(RULES_DIR, oids[0]) in got[1], got
+
+
+# ------------------------------------------------------------------- the push leg (git fixtures)
+
+def _run_each(gate, root, base):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = gate.run_each_commit(root, base)
+    return code, out.getvalue() + err.getvalue()
+
+
+def _readme(tree, text):
+    tree.files["README.md"] = text.encode("utf-8")
+    return tree
+
+
+@_vector("binding/push-range-judges-every-commit", git=True)
+def _v(gate):
+    """The first pushed commit adds unregistered rule prose, the second changes only README.md: binding the
+    last commit alone passes, and the push leg fails on the first."""
+    with tempfile.TemporaryDirectory(prefix="rule-behaviour-push-") as directory:
+        edited = _alpha().edit(ALPHA, "Gamma must hold.\n", "Gamma must hold.\n\nOmega may vary.\n")
+        root, oids = _git_fixture(directory, [_alpha().build(), _readme(edited.build(), "one\n"),
+                                              _readme(edited.build(), "two\n")])
+        last_only = _run_root(gate, root, "HEAD^")
+        push = _run_each(gate, root, oids[0])
+    return (last_only[0] == 0 and push[0] == 1
+            and "COMMIT {} against its first parent {}: exit 1".format(oids[1], oids[0]) in push[1]
+            and "COMMIT {} against its first parent {}: exit 0".format(oids[2], oids[1]) in push[1]
+            and "unregistered rule text at {} head".format(ALPHA) in push[1]
+            and "1 of 2 commit(s) fail: {}".format(oids[1]) in push[1]), (last_only, push)
+
+
+@_vector("binding/push-range-each-commit-against-its-parent", git=True)
+def _v(gate):
+    """The first pushed commit raises a ceiling alone and the second spends it: each passes against its own
+    parent, while the second judged against the push's base would exceed the base ceiling."""
+    with tempfile.TemporaryDirectory(prefix="rule-behaviour-push-") as directory:
+        start = _alpha()
+        raised = start.copy()
+        raised.budget["wording-only-per-change"] = 1
+        spent = _text_edit(raised.copy(), X, "Alpha must", "Alpha must always")
+        spent.waivers = [_cw("w-1", "wording-only", X, raised, spent)]
+        root, oids = _git_fixture(directory, [start.build(), raised.build(), spent.build()])
+        push = _run_each(gate, root, oids[0])
+    return push[0] == 0 and "PASS: rule-behaviour push range {}..{}: 2 commit(s)".format(
+        oids[0][:12], oids[2][:12]) in push[1], push
+
+
+def _side_commits(root, oid):
+    """Two commits off HEAD's first-parent chain: a child of oid on no branch, and a parentless one."""
+    from _git_fixture_env import git_fixture_env
+    env = git_fixture_env(GIT_AUTHOR_NAME="Rule Behaviour Self-Test", GIT_AUTHOR_EMAIL="selftest@example.invalid",
+                          GIT_COMMITTER_NAME="Rule Behaviour Self-Test",
+                          GIT_COMMITTER_EMAIL="selftest@example.invalid")
+    tree = subprocess.run(["git", "-C", str(root), "rev-parse", oid + "^{tree}"], env=env, capture_output=True,
+                          check=True, timeout=CHILD_TIMEOUT).stdout.decode("ascii").strip()
+    out = []
+    for parents in (["-p", oid], []):
+        out.append(subprocess.run(["git", "-C", str(root), "commit-tree", tree, *parents, "-m", "side"], env=env,
+                                  capture_output=True, check=True, timeout=CHILD_TIMEOUT).stdout.decode("ascii")
+                   .strip())
+    return out
+
+
+@_vector("binding/push-range-base-off-first-parent-chain-exit-2", git=True)
+def _v(gate):
+    with tempfile.TemporaryDirectory(prefix="rule-behaviour-push-") as directory:
+        root, oids = _git_fixture(directory, [_alpha().build(), _readme(_alpha().build(), "one\n")])
+        sibling, orphan = _side_commits(root, oids[0])
+        got = [_run_each(gate, root, base) for base in (sibling, orphan)]
+    return all(code == 2 and "is not on HEAD's first-parent chain" in text for code, text in got), got
+
+
+@_vector("binding/push-range-empty-exit-2", git=True)
+def _v(gate):
+    with tempfile.TemporaryDirectory(prefix="rule-behaviour-push-") as directory:
+        root, _oids = _git_fixture(directory, [_alpha().build()])
+        got = _run_each(gate, root, "HEAD")
+    return got[0] == 2 and "leaves no commit to judge" in got[1], got
+
+
 # ------------------------------------------------------------- cases, and two more change shapes
 
 @_vector("cases/expect-head-mismatch-fails")
@@ -3842,6 +4383,78 @@ MUTANTS = (
     ("retro-into-binding", '    base_rows = parse_table(base.read(TABLE_REL), "{} at {}".format(TABLE_REL, base.label))',
      '    base_rows = parse_table(base.read(TABLE_REL), "{} at {}".format(TABLE_REL, base.label)) + [row for case in '
      'cases.values() if case.retro for row in case.retro["rows"]]', "retro/never-read-by-binding"),
+    ("premise-bounded", '        if scenario["claim"] == "bounded" and scenario["named-set"] is None:', "        if False:",
+     "premise/bounded-without-named-set-fails"),
+    ("premise-bounded-ignores-set", '        if scenario["claim"] == "bounded" and scenario["named-set"] is None:',
+     '        if scenario["claim"] == "bounded":', "premise/bounded-with-named-set-passes"),
+    ("premise-probe", '        if (scenario["op"] == "wording-fix" or scenario["instances"]) and not scenario["probe"]:',
+     "        if False:", "premise/wording-fix-without-probe-fails"),
+    ("premise-probe-ignores-probe", '        if (scenario["op"] == "wording-fix" or scenario["instances"]) and not '
+     'scenario["probe"]:', '        if scenario["op"] == "wording-fix" or scenario["instances"]:',
+     "premise/wording-fix-with-probe-passes"),
+    ("premise-instances", '        if (scenario["op"] == "wording-fix" or scenario["instances"]) and not scenario["probe"]:',
+     '        if scenario["op"] == "wording-fix" and not scenario["probe"]:', "premise/listed-instances-without-probe-fail"),
+    ("bounded-bare", '    if scenario["claim"] == "bounded" and _closed(scenario["named-set"]):',
+     '    if scenario["claim"] == "bounded":', "matcher/bounded-without-named-set-rejects"),
+    ("closed-needs-count", "    return named is not None and named[1] == len(named[0])",
+     "    return named is not None and named[1] in (None, len(named[0]))", "matcher/bounded-open-set-rejects"),
+    ("closed-count-ignored", "    return named is not None and named[1] == len(named[0])", "    return named is not None",
+     "matcher/bounded-miscounted-set-rejects"),
+    ("probe-ignored", '        if not scenario["probe"] >= frozenset(PROBE_PROPERTIES):', "        if False:",
+     "matcher/wording-fix-without-probe-rejects"),
+    ("probe-any-property", '        if not scenario["probe"] >= frozenset(PROBE_PROPERTIES):', '        if not scenario["probe"]:',
+     "matcher/wording-fix-probe-missing-one-property-rejects"),
+    ("probe-never-met", '        if not scenario["probe"] >= frozenset(PROBE_PROPERTIES):', "        if True:",
+     "matcher/wording-fix-no-instances-with-probe-accepts"),
+    ("strict-rows-ignored", '                and (row.vocab is not None or "instance:dispositioned" in row.effect)]',
+     "                and row.vocab is not None]", "matcher/strict-row-stays-strict-beside-vocab-row"),
+    ("named-set-keys", '    if not isinstance(value, dict) or set(value) - {"members", "count"} or "members" not in value:',
+     '    if not isinstance(value, dict) or "members" not in value:', "schema/named-set-unknown-key-refused"),
+    ("named-set-members", "    if not all(NAME_RE.fullmatch(member) for member in members):", "    if False:",
+     "schema/named-set-member-malformed-refused"),
+    ("named-set-count", "    if count is not None and (type(count) is not int or count < 1):", "    if False:",
+     "schema/named-set-count-not-positive-refused"),
+    ("exclusion-keys", '        if not isinstance(raw, dict) or set(raw) != {"clause-id", "row-sha256", "reason"}:',
+     "        if not isinstance(raw, dict):", "schema/exclusion-unknown-key-refused"),
+    ("exclusion-clause-id", '        if not isinstance(raw["clause-id"], str) or not CLAUSE_ID_RE.fullmatch(raw["clause-id"]):',
+     "        if False:", "schema/exclusion-malformed-clause-id-refused"),
+    ("exclusion-digest", '        _digest_field(raw["row-sha256"], where, "row-sha256", allow_absent=False)', "        pass",
+     "schema/exclusion-malformed-digest-refused"),
+    ("exclusion-reason", "        if not isinstance(reason, str) or not reason.strip():", "        if False:",
+     "schema/exclusion-without-reason-refused"),
+    ("exclusion-duplicate", "        if key in out:", "        if False:", "schema/exclusion-duplicate-refused"),
+    ("uncovered-passes", '                report.fail("obligation row {} for {} is uncovered: no case lists {}; add a case '
+     'that does, or "', "                " + _NOOP + '"obligation row {} for {} is uncovered: no case lists {}; add a '
+     'case that does, or "', "ablation/uncovered-row-without-exclusion-fails"),
+    ("exclusion-ignored", "            if key in exclusions:", "            if False:",
+     "ablation/every-listed-clause-load-bearing"),
+    ("exclusion-stale-unchecked", "    for clause, digest in sorted(set(exclusions) - matched):",
+     "    for clause, digest in []:", "ablation/exclusion-naming-no-uncovered-row-fails"),
+    ("diagnostic-identical", "    if base_out == head_out:", "    if False:", "binding/nondiscriminating-case-fails"),
+    ("diagnostic-revert", "    if decision(base_out) == decision(head_out):", "    if True:",
+     "binding/crossed-clause-decoy-fails"),
+    ("range-last-only", "    for parent, commit in transitions:", "    for parent, commit in transitions[-1:]:",
+     "binding/push-range-judges-every-commit"),
+    ("range-against-before", "            code, text = evaluate(history.snapshot(commit), history.snapshot(parent), history)",
+     "            code, text = evaluate(history.snapshot(commit), history.snapshot(base), history)",
+     "binding/push-range-each-commit-against-its-parent"),
+    ("range-chain-end", "        if expected != base:", "        if False:",
+     "binding/push-range-base-off-first-parent-chain-exit-2"),
+    ("range-root", "            if len(fields) < 2:", "            if False:",
+     "binding/push-range-base-off-first-parent-chain-exit-2"),
+    ("range-empty", "        if not lines:", "        if False:", "binding/push-range-empty-exit-2"),
+    ("range-shallow", "        base = history.resolve(base_ref)\n        history.require_full_history()",
+     "        base = history.resolve(base_ref)", "binding/shallow-history-exit-2"),
+    ("shallow", '        if answer == "true":', "        if False:", "binding/shallow-history-exit-2"),
+    ("option-ref", '        if not isinstance(ref, str) or not ref or ref.startswith("-"):',
+     "        if not isinstance(ref, str) or not ref:", "binding/option-like-base-exit-2"),
+    ("tree-entry-mode", '            if kind != "blob" or mode not in ("100644", "100755"):', "            if False:",
+     "binding/base-tree-symlink-exit-2"),
+    ("worktree-regular", "    if not stat.S_ISREG(mode):", "    if False:", "schema/worktree-symlink-input-exit-2"),
+    ("worktree-entry", '                raise GateError("{}: not a regular file or directory".format(rel))', "                pass",
+     "schema/worktree-symlink-entry-exit-2"),
+    ("budget-values", "        if type(value) is not int or value < 0:", "        if False:",
+     "schema/budget-negative-ceiling-exit-2"),
 )
 # Twins no single-check removal can fail, each with the reason.
 UNMUTATED = {
@@ -3930,6 +4543,23 @@ def self_test(report_path=None):
                 ("schema/exempt-on-unknown-where-refused",),
                 ("schema/exempt-on-duplicate-pair-refused",),
                 ("schema/exempt-vocab-without-exempt-on-refused",),
+                ("schema/named-set-unknown-key-refused",),
+                ("schema/named-set-member-malformed-refused",),
+                ("schema/named-set-count-not-positive-refused",),
+                ("schema/probe-unknown-property-refused",),
+                ("schema/exclusion-unknown-key-refused",),
+                ("schema/exclusion-malformed-clause-id-refused",),
+                ("schema/exclusion-malformed-digest-refused",),
+                ("schema/exclusion-without-reason-refused",),
+                ("schema/exclusion-duplicate-refused",),
+                ("schema/budget-negative-ceiling-exit-2",),
+                ("schema/worktree-symlink-input-exit-2",),
+                ("schema/worktree-symlink-entry-exit-2",),
+                ("premise/bounded-without-named-set-fails",),
+                ("premise/bounded-with-named-set-passes",),
+                ("premise/wording-fix-without-probe-fails",),
+                ("premise/wording-fix-with-probe-passes",),
+                ("premise/listed-instances-without-probe-fail",),
                 ("matcher/row-order-independent",),
                 ("matcher/exemption-eligibility-matrix",),
                 ("matcher/exempt-on-intersection-across-rows",),
@@ -3943,6 +4573,13 @@ def self_test(report_path=None):
                 ("matcher/wording-register-copy-head-rejects",),
                 ("matcher/wording-register-copy-fixed-accepts",),
                 ("matcher/bounded-derives-completion",),
+                ("matcher/bounded-without-named-set-rejects",),
+                ("matcher/bounded-open-set-rejects",),
+                ("matcher/bounded-miscounted-set-rejects",),
+                ("matcher/wording-fix-without-probe-rejects",),
+                ("matcher/wording-fix-probe-missing-one-property-rejects",),
+                ("matcher/wording-fix-no-instances-with-probe-accepts",),
+                ("matcher/strict-row-stays-strict-beside-vocab-row",),
                 ("matcher/rule-quotation-exempt-history-rejects",),
                 ("matcher/rule-operative-exempt-warning-rejects",),
                 ("matcher/register-copy-quotation-exempt-history-rejects",),
@@ -3956,6 +4593,9 @@ def self_test(report_path=None):
                 ("ablation/listed-clause-not-load-bearing-fails",),
                 ("ablation/dead-row-fails",),
                 ("ablation/every-listed-clause-load-bearing",),
+                ("ablation/uncovered-row-without-exclusion-fails",),
+                ("ablation/exclusion-naming-no-uncovered-row-fails",),
+                ("ablation/exclusion-for-changed-row-fails",),
                 ("ablation/empty-clauses-removal-case-vacuous",),
                 ("ablation/atom-only-change-counts-for-coverage-not-binding",),
                 ("cases/expect-head-mismatch-fails",),
@@ -4029,6 +4669,13 @@ def self_test(report_path=None):
                 ("binding/remove-sole-clause-file-residue-over-ceiling-fails",),
                 ("binding/remove-sole-clause-file-untiled-lf-fails",),
                 ("binding/base-unresolvable-exit-2",),
+                ("binding/option-like-base-exit-2",),
+                ("binding/shallow-history-exit-2",),
+                ("binding/base-tree-symlink-exit-2",),
+                ("binding/push-range-judges-every-commit",),
+                ("binding/push-range-each-commit-against-its-parent",),
+                ("binding/push-range-base-off-first-parent-chain-exit-2",),
+                ("binding/push-range-empty-exit-2",),
                 ("waiver/reported-separately-not-bound",),
                 ("waiver/digest-mismatch-fails",),
                 ("waiver/unknown-kind-refused",),
@@ -4131,10 +4778,10 @@ def self_test(report_path=None):
         for check_id, detail in failed:
             print("  {}: {!r}".format(check_id, detail)[:4000])
         return 1
-    print("SELF-TEST PASS: rule-behaviour {} checks ({} vectors over the schema, matcher, ablation, change, binding, "
-          "waiver, inventory and retro legs; {} mutants each caught, every vector but {} twin discriminating; the "
-          "real tree passes in process and on direct launch)".format(len(results), len(VECTORS), len(MUTANTS),
-                                                                    len(UNMUTATED)))
+    print("SELF-TEST PASS: rule-behaviour {} checks ({} vectors over the schema, premise, matcher, ablation, change, "
+          "binding, push, waiver, inventory and retro legs; {} mutants each caught, every vector but {} twin "
+          "discriminating; the real tree passes in process and on direct launch)".format(
+              len(results), len(VECTORS), len(MUTANTS), len(UNMUTATED)))
     return 0
 
 
@@ -4149,8 +4796,10 @@ def main(argv=None):
         return run(ROOT)
     if len(args) == 2 and args[0] == "--base":
         return run(ROOT, args[1])
-    print("usage: check_rule_behaviour.py [--base REF] | [--self-test] [--execution-report ABS_PATH]",
-          file=sys.stderr)
+    if len(args) == 3 and args[0] == "--base" and args[2] == "--each-commit":
+        return run_each_commit(ROOT, args[1])
+    print("usage: check_rule_behaviour.py [--base REF [--each-commit]] | [--self-test] [--execution-report "
+          "ABS_PATH]", file=sys.stderr)
     return 2
 
 

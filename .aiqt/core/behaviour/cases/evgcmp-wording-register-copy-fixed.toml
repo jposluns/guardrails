@@ -6,6 +6,7 @@ delta = ["instances"]
 
 [scenario]
 op = "wording-fix"
+probe = ["derived-from-correction", "validated-against-correction", "matches-across-line-wraps", "matches-across-escapes"]
 instances = [
   { where = "rule", form = "operative", disposition = "fixed" },
   { where = "register-copy", form = "operative", disposition = "fixed" },

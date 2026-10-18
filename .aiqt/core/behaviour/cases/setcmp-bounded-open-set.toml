@@ -1,0 +1,11 @@
+id = "setcmp-bounded-open-set"
+summary = "A bounded claim whose listing states no size is not over a closed set, so it needs the enumeration and the count."
+kind = "case"
+clauses = ["setcmp.1", "setcmp.3"]
+
+[scenario]
+claim = "bounded"
+named-set = { members = ["module-a", "module-b", "module-c"] }
+
+[expect]
+head = "REJECT count:reconciled set:enumerated"

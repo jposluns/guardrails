@@ -1,0 +1,17 @@
+id = "evgcmp-wording-probe-misses-escapes-full"
+summary = "The same wording fix found by a probe with every property its clause names is complete."
+kind = "control"
+controls = "evgcmp-wording-probe-misses-escapes"
+delta = ["probe"]
+
+[scenario]
+op = "wording-fix"
+probe = ["derived-from-correction", "validated-against-correction", "matches-across-line-wraps", "matches-across-escapes"]
+instances = [
+  { where = "rule", form = "operative", disposition = "fixed" },
+  { where = "register-copy", form = "operative", disposition = "fixed" },
+  { where = "changelog-quote", form = "quotation", disposition = "exempt:history" },
+]
+
+[expect]
+head = "ACCEPT"

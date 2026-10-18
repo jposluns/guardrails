@@ -5,6 +5,7 @@ clauses = ["setcmp.11"]
 
 [scenario]
 claim = "bounded"
+named-set = { members = ["module-a", "module-b", "module-c"], count = 3 }
 
 [expect]
 head = "ACCEPT"

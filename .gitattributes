@@ -5,10 +5,15 @@
 .aiqt/core/adapter-blocks.toml text eol=lf
 .aiqt/core/applicability.toml text eol=lf
 .aiqt/core/applies.toml text eol=lf
+.aiqt/core/behaviour/cases/evgcmp-wording-probe-misses-escapes-full.toml text eol=lf
+.aiqt/core/behaviour/cases/evgcmp-wording-probe-misses-escapes.toml text eol=lf
 .aiqt/core/behaviour/cases/evgcmp-wording-register-copy-fixed.toml text eol=lf
 .aiqt/core/behaviour/cases/evgcmp-wording-register-copy.toml text eol=lf
 .aiqt/core/behaviour/cases/setcmp-bounded-named-set-completion.toml text eol=lf
 .aiqt/core/behaviour/cases/setcmp-bounded-named-set.toml text eol=lf
+.aiqt/core/behaviour/cases/setcmp-bounded-open-set-closed.toml text eol=lf
+.aiqt/core/behaviour/cases/setcmp-bounded-open-set.toml text eol=lf
+.aiqt/core/behaviour/coverage-exclusions.toml text eol=lf
 .aiqt/core/behaviour/obligations.toml text eol=lf
 .aiqt/core/behaviour/waiver-budget.toml text eol=lf
 .aiqt/core/behaviour/waivers.toml text eol=lf
