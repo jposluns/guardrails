@@ -394,6 +394,10 @@ ALLOWLIST = (
      " _journal.py beside this file as the close harness"),
     ("opf/tools/check_opf_record.py", "flip_t70", "code", 1,
      _MUTANT + " (the _opf_oplock _acquire_body T70 flip)"),
+    ("opf/tools/check_opf_record.py", "<module>", "deserialize", 1,
+     "self-test rebuild vector (_T87_REBUILDS pickle-round-trip): pickle.loads of the bytes"
+     " pickle.dumps made in the same expression from an injected exception this self-test built"
+     " itself; no external input"),
     ("opf/tools/opf.py", "_watchdog_completion_case", "code", 5,
      "self-test mutants: compile ASTs of the repository's own _opf_emit members with parsed"
      " literal mutations; no external input"),
@@ -426,6 +430,10 @@ ALLOWLIST = (
     ("tools/check_python_floor.py", "_rule_reverts", "code", 1,
      "self-test mutant: exec_module of a copy of this gate's own source with one rule removed"
      " from RULES; no external input"),
+    ("tools/check_python_host_pin.py", "_copy", "code", 1,
+     "self-test mutant loader: exec_module of a copy, written under the self-test's temporary"
+     " directory, of this gate's own source (read from __file__) with reviewed literal"
+     " substitutions, or of the repository's own tools/check_python_floor.py; no external input"),
     ("tools/gen_crosswalk.py", "_fdopen_vectors.flipped", "code", 1,
      _MUTANT + " (each fdopen close revert, loaded by exec_module from a scratch file)"),
     ("tools/_close_selftest.py", "_StCloseFault.__init__", "shell", 1,
@@ -461,13 +469,26 @@ ALLOWLIST = (
      " freshly generated certificate; server-side, so it verifies no peer; no client context"),
     ("tools/check_portability.py", "<module>", "shell", 1,
      _SAVED + " (the injectable runner default of _list_tracked, which passes a git argv list)"),
+    ("tools/check_portability.py", "_not_run_vectors", "shell", 6,
+     _SAVED + " (the depth-refusal spies and the modelled launcher doubles, each restored in a"
+     " finally)"),
+    ("tools/check_portability.py", "_not_run_vectors._drive_cleanup_vector", "shell", 1,
+     _SAVED + " (the real Popen subclassed by the recording double, whose __init__ forwards the"
+     " bounded launcher's own sys.executable argv list)"),
+    ("tools/check_version_monotonicity.py", "_not_run_vectors", "shell", 8,
+     _SAVED + " (the depth-refusal spies, the modelled launcher doubles and the git probe stubs,"
+     " each restored in a finally)"),
+    ("tools/check_version_monotonicity.py", "_not_run_vectors._drive_cleanup_vector", "shell", 1,
+     _SAVED + " (the real Popen subclassed by the recording double, whose __init__ forwards the"
+     " bounded launcher's own sys.executable argv list)"),
     ("tools/check_manifest.py", "_self_test_main_isolated", "shell", 1,
      "self-test precondition: __import__('subprocess').run with a literal git --version argv"
      " list, no shell"),
     ("tools/check_byte_canon.py", "self_test_main", "shell", 1, _SAVED),
     ("tools/check_ci_parity.py", "_stubs_prepared_before_pool", "shell", 1, _SAVED),
     ("tools/check_ci_parity.py", "self_test", "shell", 1, _SAVED),
-    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated", "shell", 1, _SAVED),
+    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._check_no_maintenance", "shell", 1,
+     _SAVED + " (the no-maintenance vector's recorder of the template git argv lists)"),
     ("tools/check_release_build.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_release_delta.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("opf/tools/_opf_adopt_observe.py", "_runner_red_checks", "shell", 2, _SAVED),

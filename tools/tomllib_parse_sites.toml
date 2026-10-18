@@ -887,7 +887,7 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/check_opf_record.py"
-function = "flip_t79.narrow"
+function = "flip_t84.narrow"
 form = "call"
 count = 1
 class = "EXEMPT"
@@ -896,6 +896,14 @@ reason = "test-code"
 [[site]]
 path = "opf/tools/check_opf_record.py"
 function = "model"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "t22_homes2_claim_reserves"
 form = "call"
 count = 1
 class = "EXEMPT"
@@ -912,6 +920,30 @@ reason = "test-code"
 [[site]]
 path = "opf/tools/check_opf_record.py"
 function = "t74_never_seize_dead_run_release"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "t79_kill_after_reserve"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "t80_two_runs_never_same_id"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "t81_cross_kind_reservations"
 form = "call"
 count = 1
 class = "EXEMPT"
