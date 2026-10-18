@@ -18,9 +18,10 @@ config-system suites) launches every suite runner with no arguments, under the c
 injected (and deliberately poisoned) git configuration, and requires a hermetic exit
 0, as the other suite runners give. A bare live run could not meet that: it fetches the real
 remote, and its outcome depends on the remote's state (exit 2 while the base tip carries no
-config, then gh and the open PRs once it does). Live runs still read the operator's global and
-system git configuration, unchanged (the threat model below trusts them); a credential helper
-configured there keeps working for every fetch, ls-remote and push. Transport, plainly: the base
+config, then gh and the open PRs once it does). Live runs read the operator's global and system
+git configuration for the author-side reads and the transport commands (a credential helper
+configured there keeps working for every fetch, ls-remote and push), and NOT in a checkout
+holding PR content (see the configuration isolation below). Transport, plainly: the base
 fetch, the PR-branch fetch, the ls-remote observer and the push all run FROM PRIVATE storage the
 run owns (the per-run private base repository, or the per-PR scratch checkout, named with
 --git-dir, a checkout's work tree pointed at an empty directory with --work-tree, and each
@@ -78,6 +79,36 @@ confinement reads the repository layout from the filesystem, so a git inside a l
 does not model (a core.worktree setting, for one) runs for the three discovery reads before the
 check against the worktree list git reports refuses it.
 
+Configuration isolation, stated exactly. Every git child launched with its working directory
+inside a private checkout or a fresh checkout (see _PR_DIRS and _git: the merge, every
+checkout, diff, status, add, ls-files, ls-tree, cat-file, write-tree, commit-tree, rev-parse,
+rev-list, merge-base and config call there) runs with GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM
+at the null device and GIT_CONFIG_NOSYSTEM=1: the operator's global and system configuration
+files, and every file they include, are not read there, so no merge driver, textconv, filter,
+submodule recursion, include, signing program or helper named there can be selected by an
+attribute the PR commits (a command named relative to the working directory would otherwise
+run a program the PR supplies). _changed_lines also passes --no-textconv. What such a child
+reads instead is passed explicitly or set locally by the tool: the maintenance pins in option
+position on every launch (gc.auto=0, gc.autoDetach=false, maintenance.auto=false), the commit
+identity in the environment for the merge and commit-tree, and the checkout's local
+configuration, which is the --shared clone's own entries plus, in the private checkout,
+core.autocrlf=false, core.eol=lf, core.hooksPath at the null device and core.fsmonitor=false
+(see guard_scratch_setup), and in the fresh checkout core.hooksPath at the null device,
+core.fsmonitor=false and the operator's own core.autocrlf and core.eol values when set (see
+guard_fresh_checkout). The children that still read the operator's configuration, and why:
+the author-side reads (_git_author), none of which merges, diffs, checks out or filters; the
+base fetch, the PR-branch fetch, the ls-remote observer and the push, which need its
+credential helpers, ssh command, http settings and URL rewrites and run from the empty
+transport directory with no work tree of PR content, so no PR attribute is read and a
+command named relative to the working directory finds nothing there (the push also passes
+--no-recurse-submodules); the two --shared clones, which check out nothing and run from that
+same directory; the read of the operator's core.autocrlf and core.eol, from that same
+directory; and the private base repository's own calls (its init, its hooks setting, its
+negotiation refs and its reads of the base tip), which hold no PR content. Remaining route, by
+disclosed design: the configured regenerate and check commands run the merged tree's
+generators, which may include the PR's own code, and a git such a command runs itself reads
+the operator's configuration.
+
 The tool NEVER mutates the author's working tree, index, HEAD or any local branch: that capability
 was removed, not guarded. Per open PR, in PR-number order, every
 merge, conflict resolution, regeneration, check and commit happens in a PRIVATE scratch checkout
@@ -99,7 +130,8 @@ conventional killed-by-signal status (an inherited SIG_IGN disposition, as under
 alone; a group-wide SIGKILL from a supervisor, such as timeout -k or kill -9 on the group, cannot
 be handled and leaves children running in their own sessions); checkout filters, text/eol/autocrlf conversion, ident expansion, the
 working-tree encoding, hooks (core.hooksPath pinned to the null device) and fsmonitor are disabled
-there for every git call. The author's worktree is only READ: the run locates the worktree that has
+there for every git call, and no such call reads the operator's global or system configuration.
+The author's worktree is only READ: the run locates the worktree that has
 the PR branch checked out and re-confirms, against a fresh gh view, that it still names the same
 open PR. That read-only branch-match check is kept because it anchors each PR to one local checkout
 for reporting and refuses a renamed or closed PR; the old busy check and its process scan protected
@@ -122,8 +154,9 @@ the checks read (what was validated is what is pushed; a clean filter or autocrl
 smuggle unvalidated bytes), commits with `git commit-tree` against that validated tree (no commit
 hook runs), verifies the new commit's first parent is the exact PR head this run validated (which
 by itself makes that head an ancestor of the new commit), checks the candidate in a SECOND, normal
-private checkout (the committed attributes and the operator's global and system configuration
-honoured, no local configuration carried over, hooks disabled) and refuses normal-checkout-failed
+private checkout (the committed attributes honoured with the operator's core.autocrlf and core.eol
+carried over, the rest of the operator's configuration not read, no local configuration carried
+over, hooks disabled) and refuses normal-checkout-failed
 when that checkout reports any error or any declared check fails there (regeneration with
 conversions disabled must not publish a
 commit whose own fresh checkout fails its generators), and pushes from the private checkout with an
@@ -177,7 +210,10 @@ failure, a possibly truncated PR list, bad arguments).
 
 THREAT MODEL (cooperative): agents on a single-operator host. The repository's local config, the
 operator's global and system config, hooks and the object store are trusted; the tool guards
-against accidents and odd local state, not hostile repository state. Disclosed residuals: fork PRs
+against accidents and odd local state, not hostile repository state. Trusted configuration is
+still not read in a checkout holding PR content (see the configuration isolation above),
+because a trusted command named relative to the working directory runs whatever program the PR
+places there. Disclosed residuals: fork PRs
 are refused (fork-pr), not supported; v1 supports the remote "origin" and the base "main" only; the
 regenerate and check commands run the merged tree's copy of the generators, which may include the
 PR's own changes; review_carry is information only; the private checkout reuses the repository's
@@ -409,6 +445,23 @@ _PROCESS_STATE_ROOTS = ("/proc", "/dev/fd")
 # of a run and restored on exit (see _child_env).
 _RUN_DIRS = []
 
+# The directories holding PR content while they exist: each private checkout's directory and
+# each fresh checkout's directory, registered by _process_pr and guard_fresh_checkout. Every
+# git child launched with its working directory inside one runs with _PR_GIT_ENV (see _git).
+_PR_DIRS = []
+
+# The operator's global and system configuration files, and every file they include, are not
+# read by a git child working on PR content: an attribute the PR commits can otherwise select a
+# merge driver, textconv or filter they define, and a command named there relative to the
+# working directory runs a program the PR supplies (see the configuration isolation in the
+# module docstring).
+_PR_GIT_ENV = dict(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+                   GIT_CONFIG_NOSYSTEM="1")
+
+# The operator settings a fresh checkout carries over (see guard_fresh_checkout): values that
+# select a built-in conversion, never a command.
+_FRESH_CHECKOUT_KEYS = ("core.autocrlf", "core.eol")
+
 
 def _names_process_state(entry):
     """Whether resolving the absolute PATH entry, component by component with every symlink
@@ -443,20 +496,28 @@ def _child_env(extra=None, cwd=None, confine=()):
     runs, git or any program a configured command or gh runs) can resolve a program from
     repository or checkout content through a PATH entry. Every entry that resolves through
     per-process state (see _names_process_state; /proc/self/cwd and /dev/fd name the child's
-    own working directory there) is dropped, and so is every entry whose realpath lies inside
-    the child's working directory, a directory in confine or a repository directory of the run
-    (_RUN_DIRS). When a directory's realpath cannot be read, every entry is dropped. A PATH
-    with no entry left names the null device, never the empty string, which execvp, the shell
-    and subprocess read as the working directory. The tool's own resolution (_resolve_program)
-    walks _clean_env's PATH, which keeps these entries, so a head or git found there is still
-    refused by name."""
+    own working directory there) is dropped, and so is every entry whose realpath, or whose
+    absolute text (normalized, with no symlink followed), lies inside the child's working
+    directory, a directory in confine or a repository directory of the run (_RUN_DIRS), each
+    such directory compared by its realpath and by its absolute text: an entry that names a
+    run directory in its text but resolves outside it through a symlink the directory holds
+    is dropped too, because the child resolves that symlink again when it walks its PATH. The
+    one error handled is OSError from computing those forms, which for a relative directory
+    means os.getcwd failed (the working directory was removed): every entry is then dropped.
+    os.path.realpath raises nothing for a component this process cannot search (it returns
+    the path resolved up to there), so such a directory is compared by that partial result.
+    A PATH with no entry left names the null device, never the empty string, which execvp,
+    the shell and subprocess read as the working directory. The tool's own resolution
+    (_resolve_program) walks _clean_env's PATH, which keeps these entries, so a head or git
+    found there is still refused by name."""
     env = _clean_env(extra)
     try:
-        bases = [os.path.realpath(str(base)) for base in [cwd] + list(confine) + _RUN_DIRS
-                 if base]
+        bases = [form for base in [cwd] + list(confine) + _RUN_DIRS if base
+                 for form in (os.path.realpath(str(base)), os.path.abspath(str(base)))]
         kept = [entry for entry in env["PATH"].split(os.pathsep)
                 if entry and not _names_process_state(entry)
-                and not any(_inside(os.path.realpath(entry), base) for base in bases)]
+                and not any(_inside(form, base) for base in bases
+                            for form in (os.path.realpath(entry), os.path.normpath(entry)))]
     except OSError:
         kept = []
     env["PATH"] = os.pathsep.join(kept) or os.devnull
@@ -719,7 +780,12 @@ def _git(cwd, *args, extra_env=None, timeout=GIT_TIMEOUT, ok=(0,), push=False, c
     absolute launch path, never a bare name a child resolves; refused, as git-failed, when its
     launch path no longer resolves to the realpath it was checked at, or when it lies inside
     this launch's working directory or a directory in confine), auto-maintenance pinned off in
-    option position, scrubbed GIT_*, the narrowed child PATH (see _child_env), a timeout.
+    option position, scrubbed GIT_*, the narrowed child PATH (see _child_env), a timeout. A
+    launch whose working directory lies inside a directory in _PR_DIRS (compared by realpath,
+    and taken as inside when its realpath cannot be computed) also receives _PR_GIT_ENV, after
+    extra_env, so no caller can lift it: the operator's global and system configuration is
+    not read there. The rule is the launch's location, never a caller's choice, so a git call
+    added in a checkout holding PR content later is isolated as well.
     Returns (returncode, stdout bytes, stderr text); raises Refuse("git-failed") on a refused
     git, a timeout and an exit code outside ok when ok is not None. The audit records every
     attempted argv, a refused one included."""
@@ -731,6 +797,14 @@ def _git(cwd, *args, extra_env=None, timeout=GIT_TIMEOUT, ok=(0,), push=False, c
         raise Refuse("git-failed", refusal)
     argv = [launch, "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"]
     argv += list(args)
+    try:
+        here = os.path.realpath(str(cwd))
+        isolated = any(_inside(here, os.path.realpath(base)) for base in _PR_DIRS)
+    except OSError:
+        isolated = True
+    if isolated:
+        extra_env = dict(extra_env or dict())
+        extra_env.update(_PR_GIT_ENV)
     try:
         proc = _run_child(argv, cwd=str(cwd), env=_child_env(extra_env, cwd, confine),
                           timeout=timeout, push=push, executable=real)
@@ -816,8 +890,9 @@ def _git_author_text(cwd, *args, **kw):
 
 
 def _inside(path, base):
-    """Whether the realpath path is the realpath base or lies below it (a base of "/" holds every
-    path, which a plain base + os.sep prefix test would miss)."""
+    """Whether path is base or lies below it, both given in the same form (realpaths, or
+    normalized absolute text; a base of "/" holds every path, which a plain base + os.sep prefix
+    test would miss)."""
     return path == base or path.startswith(base.rstrip(os.sep) + os.sep)
 
 
@@ -1563,28 +1638,44 @@ def guard_ancestry(scratch, ancestor, descendant):
 def guard_fresh_checkout(ctx, scratch, new):
     """Refuse normal-checkout-failed unless the candidate commit also passes every declared check
     in a SECOND, normal private checkout: a fresh --shared clone of the private checkout with the
-    committed attributes and the operator's global and system configuration honoured, no local
-    configuration carried over, and hooks disabled. The conversion-free private checkout proves
-    the stored bytes are the validated bytes; this proves the commit is also correct the way a
-    consumer using ONLY the operator's global and system configuration materializes it (a
-    committed eol=crlf attribute or an operator core.autocrlf=true would otherwise turn a passing
-    PR into a pushed commit whose own fresh checkout fails its generators). A filter or conversion
-    defined only in a repository's LOCAL configuration is NOT modelled here: this fresh clone
-    carries no local configuration, so a consumer whose checkout depends on a repository-local
-    filter is out of this check's scope. The checkout itself FAILS CLOSED (observed on git
+    committed attributes honoured, the operator's own core.autocrlf and core.eol carried over
+    (read from the operator's global configuration, else its system configuration, includes
+    followed, by git config launched from the empty transport directory, and set in the fresh
+    checkout's local configuration), no other operator setting read (its git children run
+    with _PR_GIT_ENV, see _PR_DIRS), no local configuration carried over, and
+    hooks disabled. The conversion-free private checkout proves the stored bytes are the
+    validated bytes; this proves the commit is also correct the way a consumer materializes it
+    with the built-in conversions the operator configures (a committed eol=crlf attribute or an
+    operator core.autocrlf=true would otherwise turn a passing PR into a pushed commit whose
+    own fresh checkout fails its generators). Those two settings carry values, never a
+    command, so carrying them selects no program. A filter is NOT modelled here, whether a
+    repository's local configuration or the operator's global or system configuration
+    defines it (a global git-lfs filter among them): honouring an operator filter would run
+    its command in a checkout holding PR content, where a command named relative to the
+    working directory runs a program the PR commits, so a consumer whose checkout depends on
+    a filter is out of this check's scope. The checkout itself FAILS CLOSED (observed on git
     2.53.0: with a blob of the candidate missing from, or unreadable in, the shared object
     store, this checkout prints "error: unable to read sha1 file" on stderr, EXITS 0 and leaves
     the path out of the worktree, so the checks would run over an incomplete tree): a nonzero
     exit or ANY stderr output is refused as normal-checkout-failed before any check runs. Each
     check there is accepted only with exit 0 and no fault on stderr (see guard_child_fault)."""
+    carried = []
+    for key in _FRESH_CHECKOUT_KEYS:
+        for scope in ("--global", "--system"):
+            code, out, _err = _git(ctx["transport"], "config", "--includes", scope, "--get", key,
+                                   ok=(0, 1))
+            if code == 0:
+                carried.append((key, out.decode("utf-8", "replace").strip()))
+                break
     fresh_root = tempfile.mkdtemp(prefix="merge-train-fresh-")
     SCRATCHES.append(fresh_root)
     _RUN_DIRS.append(fresh_root)
+    _PR_DIRS.append(fresh_root)
     try:
         fresh = os.path.join(fresh_root, "co")
         _git_transport(ctx["transport"], "clone", "--quiet", "--shared", "--no-checkout",
                        str(scratch), fresh, confine=(str(scratch),))
-        for key, value in (("core.hooksPath", os.devnull), ("core.fsmonitor", "false")):
+        for key, value in [("core.hooksPath", os.devnull), ("core.fsmonitor", "false")] + carried:
             _git(fresh, "config", key, value)
         rc, _out, err = _git(fresh, "checkout", "--quiet", "--detach", new,
                              timeout=ctx["cmd_timeout"], ok=None)
@@ -1603,6 +1694,7 @@ def guard_fresh_checkout(ctx, scratch, new):
     finally:
         _cleanup(lambda: shutil.rmtree(fresh_root, ignore_errors=True))
         _RUN_DIRS.remove(fresh_root)
+        _PR_DIRS.remove(fresh_root)
 
 
 def guard_push_lease(branch, old):
@@ -1851,8 +1943,11 @@ def _index_entries(wt):
 
 def _changed_lines(wt, left, right, generated):
     """Per-file ordered +/- lines of git diff -U0 (line numbers dropped), generated paths excluded;
-    right None compares left with the index."""
-    args = ["diff", "-U0", "--no-color", "--no-ext-diff", "--no-renames"]
+    right None compares left with the index. --no-textconv and --no-ext-diff keep every
+    configured diff program out of the comparison, whatever diff attribute the PR commits; the
+    private checkout's git children do not read the operator's configuration either (see
+    _PR_DIRS)."""
+    args = ["diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames"]
     args += ["--cached", left] if right is None else [left, right]
     args += ["--", "."] + [":(exclude,literal)" + p for p in generated]
     out = _git(wt, *args)[1].decode("utf-8", "replace")
@@ -1886,7 +1981,9 @@ def _push_and_observe(ctx, scratch, scratch_git, old, new):
     push-rejected: the remote's receive-pack may still be running (a slow pre-receive hook) and
     the push can land after this run reports, so the marker is kept for the retry to classify.
     The push names the private checkout's git directory, scratch_git, and is launched from the
-    empty transport directory (see _git_transport)."""
+    empty transport directory (see _git_transport); it reads the operator's configuration for
+    its credentials and passes --no-recurse-submodules, so an operator submodule.recurse or
+    push.recurseSubmodules setting cannot start a push from a submodule the PR names."""
     branch = ctx["branch"]
     indeterminate = False
     try:
@@ -1894,6 +1991,7 @@ def _push_and_observe(ctx, scratch, scratch_git, old, new):
         # receive-pack may still land the push; that outcome is exactly what the marker
         # reconciles on the retry (see _run_child and _end_child).
         _git_transport(ctx["transport"], "push", "--porcelain", "--no-follow-tags",
+                       "--no-recurse-submodules",
                        *_guard("push-lease")(branch, old), "--", ctx["remote_url"],
                        "%s:refs/heads/%s" % (new, branch), git_dir=scratch_git,
                        checkout=scratch, ok=None, timeout=ctx["net_timeout"], push=True)
@@ -2020,6 +2118,7 @@ def _process_pr(ctx, apply):
     scratch_root = tempfile.mkdtemp(prefix="merge-train-scratch-")
     SCRATCHES.append(scratch_root)
     _RUN_DIRS.append(scratch_root)
+    _PR_DIRS.append(scratch_root)
     try:
         scratch = _scratch_checkout(ctx, scratch_root)
         # The scratch's alternates include the author's store, so this fetch carries the same
@@ -2045,6 +2144,7 @@ def _process_pr(ctx, apply):
     finally:
         _cleanup(lambda: shutil.rmtree(scratch_root, ignore_errors=True))
         _RUN_DIRS.remove(scratch_root)
+        _PR_DIRS.remove(scratch_root)
 
 
 def _merge_commit_push(ctx, scratch, old, base, apply):
@@ -3433,6 +3533,48 @@ def case_pathenv(tmp):
             _restore_env(saved_path)
         walked.append((code, "cannot be evaluated" in err))
     check("config/path-walk-entry-boundary", walked, [(0, False), (0, False), (None, True)])
+    # The unlistable-entry branch of the same walk, evaluated without a mode-0 directory, so a
+    # process that reads every directory (root among them) still runs it: os.listdir raises
+    # for one entry, the way it raises EACCES for an unreadable directory, ahead of a
+    # directory holding the program. A configured head and git itself are each refused at
+    # that entry as cannot-evaluate, before the later match. Red with that branch turned into
+    # a pass-over: the head then launched from the later entry, and git resolved there.
+    blocked = Path(tmp) / "injected-unlistable-entry"
+    blocked.mkdir()
+    git_holder = Path(tmp) / "injected-unlistable-git-bin"
+    git_holder.mkdir()
+    os.symlink(shutil.which("git"), git_holder / "git")
+    empty_cwd = Path(tmp) / "injected-unlistable-cwd"
+    empty_cwd.mkdir()
+    real_listdir = os.listdir
+
+    def _refusing_listdir(path="."):
+        if os.fspath(path) == str(blocked):
+            raise PermissionError("listing %s refused for this vector" % blocked)
+        return real_listdir(path)
+
+    saved_pin = list(_GIT_PROGRAM)
+    del _GIT_PROGRAM[:]
+    os.listdir = _refusing_listdir
+    try:
+        saved_path = _put_env(dict(PATH=str(blocked) + os.pathsep + str(outside)))
+        try:
+            code, _out, err = _run_external(["python3", "--version"], unit_dir, 30)
+        finally:
+            _restore_env(saved_path)
+        saved_path = _put_env(dict(PATH=str(blocked) + os.pathsep + str(git_holder)))
+        try:
+            git_got = (_git(empty_cwd, "version", ok=None)[0], "")
+        except Refuse as exc:
+            git_got = (exc.status, exc.reason)
+        finally:
+            _restore_env(saved_path)
+    finally:
+        os.listdir = real_listdir
+        _GIT_PROGRAM[:] = saved_pin
+    check("config/injected-unlistable-path-entry-refused",
+          ((code, "cannot be evaluated" in err), (git_got[0], "cannot be evaluated" in git_got[1])),
+          ((None, True), ("git-failed", True)))
     # The PATH a child RECEIVES is narrower than the one the tool resolves through (see
     # _child_env): an entry that resolves through /proc or /dev/fd (/proc/self/cwd names the
     # child's own working directory once it has changed into it, and so does a symlink to it),
@@ -3462,10 +3604,36 @@ def case_pathenv(tmp):
         globals()["_run_child"] = saved_child
         _restore_env(saved_path)
     check("config/child-path-drops-cwd-confined-and-process-entries", received, [str(outside)])
+    # An entry that names a confined directory in its TEXT but resolves outside it, through a
+    # symlink that directory holds, is dropped as well: the child resolves that symlink again
+    # when it walks its PATH, so one re-pointed after the environment was built would name
+    # content inside. Red while entries were compared by realpath alone: the alias resolved
+    # to the outside directory and was kept.
+    os.symlink(str(outside), confined / "alias-bin")
+    received_alias = []
+
+    def _alias_recording_child(argv, cwd=None, env=None, timeout=None, push=False,
+                               executable=None):
+        received_alias.append((env or dict()).get("PATH"))
+        return subprocess.CompletedProcess(list(argv), 0, b"", b"")
+
+    saved_child = globals()["_run_child"]
+    saved_path = _put_env(dict(PATH=os.pathsep.join([str(confined / "alias-bin"),
+                                                     str(outside)])))
+    globals()["_run_child"] = _alias_recording_child
+    try:
+        _run_external([sys.executable, "--version"], unit_dir, 5, confine=(str(confined),))
+    finally:
+        globals()["_run_child"] = saved_child
+        _restore_env(saved_path)
+    check("config/child-path-drops-entry-named-inside-confined", received_alias,
+          [str(outside)])
     # A #! script head does NOT keep its candidate name: the kernel hands its interpreter the
     # file exec-ed, the checked realpath, so the script sees that realpath as $0 (the scope the
     # _resolve_program docstring states; the Python interpreter reads argv[0] instead, see
-    # config/venv-interpreter-keeps-identity).
+    # config/venv-interpreter-keeps-identity). A compatibility check, never red-on-revert
+    # evidence: any launch that execs the checked realpath satisfies it, whatever argv[0] names,
+    # and the funnel already did so before the child PATH was narrowed.
     script_real = Path(tmp) / "script-real"
     script_real.mkdir()
     (script_real / "probe-script").write_text('#!/bin/sh\nprintf "%s\\n" "$0"\n',
@@ -3793,7 +3961,8 @@ def case_gitpin(tmp):
     # executable= beside argv[0]: with the pin taken through a launch path that is a symlink,
     # the recorded launch names that path as argv[0] and the realpath as the file exec-ed. Red
     # with executable=real dropped from _git: the file exec-ed is then whatever argv[0] names
-    # at exec time, and the recorder sees None.
+    # at exec time, and the recorder sees None. A compatibility check, never red-on-revert
+    # evidence for the child PATH narrowing: _git already passed executable=real before it.
     exec_seen = []
 
     def _exec_recording_child(argv, cwd=None, env=None, timeout=None, push=False,
@@ -3817,7 +3986,9 @@ def case_gitpin(tmp):
             os.path.realpath(real_git))])
     # No git on the sanitized PATH: the run refuses git by name before any git launch and
     # exits 2. Red when that refusal is removed: the first discovery read then fails, and the
-    # fatal message names that read instead.
+    # fatal message names that read instead. A compatibility check, never red-on-revert
+    # evidence for the PATH walk or the child PATH narrowing: the run already refused an
+    # unresolvable git this way before either.
     vacant = Path(tmp) / "gitpin-no-git-bin"
     vacant.mkdir()
     fx_none = _fixture(tmp, "gitpin-missing-git")
@@ -3834,9 +4005,13 @@ def case_gitpin(tmp):
     # Every child of a whole run receives a PATH with no entry inside a repository directory
     # of the run and none resolving through /proc or /dev/fd (see _child_env). Planted here:
     # the main worktree's tools directory, the common git directory, another PR's worktree,
-    # /proc/self/cwd, /dev/fd and, once it exists, the private base repository. None of them
-    # holds a program the tool resolves, so the run goes ahead, and no child's PATH may carry
-    # any of them. Red while every child received the caller's absolute entries.
+    # /proc/self/cwd, /dev/fd and, once each exists, the private base repository, the private
+    # checkout's directory and the fresh checkout's directory (each checkout lies one level
+    # below its directory, so the working-directory rule never drops the directory itself;
+    # only its _RUN_DIRS entry does). None of them holds a program the tool resolves, so the
+    # run goes ahead, and no child's PATH may carry any of them. Red while every child
+    # received the caller's absolute entries, and red with either checkout directory's
+    # _RUN_DIRS append removed.
     fx_paths = _fixture(tmp, "gitpin-child-path")
     fixtures.append(fx_paths)
     _stale_pr(fx_paths)
@@ -3868,10 +4043,20 @@ def case_gitpin(tmp):
         os.environ["PATH"] = fetched[0] + os.pathsep + os.environ.get("PATH", os.defpath)
         return fetched
 
+    real_mkdtemp = tempfile.mkdtemp
+
+    def _checkout_entry_mkdtemp(*args, **kwargs):
+        made = real_mkdtemp(*args, **kwargs)
+        if in_run and kwargs.get("prefix") in ("merge-train-scratch-", "merge-train-fresh-"):
+            planted.append(made)
+            os.environ["PATH"] = made + os.pathsep + os.environ.get("PATH", os.defpath)
+        return made
+
     saved_path = _put_env(dict(PATH=os.environ.get("PATH", os.defpath)))
     globals()["_run_child"] = _path_seeing_child
     globals()["_base_fetch"] = _base_entry_fetch
     globals()["run_train"] = _flagged_run_train
+    tempfile.mkdtemp = _checkout_entry_mkdtemp
     try:
         os.chdir(str(empty))
         rc, reports, _fatal = fx_paths.run(only=set([1]))
@@ -3880,11 +4065,12 @@ def case_gitpin(tmp):
         globals()["_run_child"] = real_child
         globals()["_base_fetch"] = real_base_fetch
         globals()["run_train"] = real_run_train
+        tempfile.mkdtemp = real_mkdtemp
         _restore_env(saved_path)
     check("git/child-path-drops-repository-and-process-entries",
           (rc, _result(reports, 1), len(planted), len(child_paths) > 0,
            sorted(set(e for path in child_paths for e in path if e in planted))),
-          (0, "would-merge", 6, True, []))
+          (0, "would-merge", 8, True, []))
     # Every transport command of an --apply run (the base fetch, each ls-remote, both
     # --shared clones, the PR-branch fetch and the push) is launched from an empty directory,
     # and every one but the clones names its repository with --git-dir (see _git_transport),
@@ -6979,8 +7165,9 @@ def case_crlf(tmp):
           ([], old, [], False, []))
     # Second reproduction: an operator-global core.autocrlf=true. The suite's HOME is the scrubbed
     # scratch home, so the case may own its .gitconfig for the run's duration; the private
-    # checkout pins the conversions off, but the fresh NORMAL checkout honours the global setting,
-    # materializes CRLF, fails the check, and the candidate is refused.
+    # checkout pins the conversions off, but the fresh NORMAL checkout carries the operator's
+    # core.autocrlf (it reads no other operator setting), materializes CRLF, fails the check,
+    # and the candidate is refused. Red with that carry removed.
     fx2 = _fixture(tmp, "autocrlf")
     wt2 = _stale_pr(fx2)
     old2 = fx2.remote_ref("feat/x")
@@ -6996,7 +7183,174 @@ def case_crlf(tmp):
     check("fresh/autocrlf-refused",
           (rc, _result(reports, 1), fx2.remote_ref("feat/x"), _has_marker(wt2), fx2.pushes()),
           (1, "normal-checkout-failed", old2, False, []))
-    check("fresh/invariants", _invariants(fx, fx2), [])
+    # Third reproduction: an operator-global core.eol=crlf with a committed `text` attribute and
+    # no eol attribute. The fresh checkout carries the operator's core.eol, materializes CRLF,
+    # fails the check, and the candidate is refused. A compatibility check for the operator
+    # settings the fresh checkout honoured before its configuration was isolated; red with the
+    # core.eol carry removed.
+    fx3 = _fixture(tmp, "operator-eol")
+    wt3 = fx3.add_pr(1, "feat/x", dict([
+        ("src/b.txt", "bravo\n"), (".gitattributes", "src/b.txt text\n")]))
+    old3 = fx3.remote_ref("feat/x")
+    fx3.advance_main(dict([("src/c.txt", "charlie\n")]))
+    gitconfig.write_text("[core]\n\teol = crlf\n", encoding="utf-8")
+    try:
+        rc, reports, _fatal = fx3.run()
+    finally:
+        try:
+            os.unlink(str(gitconfig))
+        except FileNotFoundError:
+            pass
+    check("fresh/operator-eol-carried",
+          (rc, _result(reports, 1), fx3.remote_ref("feat/x"), _has_marker(wt3), fx3.pushes()),
+          (1, "normal-checkout-failed", old3, False, []))
+    check("fresh/invariants", _invariants(fx, fx2, fx3), [])
+
+
+def _scripted_pr(fx, attributes, scripts):
+    """PR 1 on feat/x committing a .gitattributes and executable scripts at its tree root, with
+    the base then advanced so the generated digest conflicts; returns the PR worktree."""
+    wt = Path(fx.add_pr(1, "feat/x", dict([("src/b.txt", "bravo\n")])))
+    fx.write(wt, ".gitattributes", attributes)
+    for rel, text in scripts.items():
+        fx.write(wt, rel, text)
+        (wt / rel).chmod(0o755)
+    head = fx.commit(wt, "pr commits scripts and the attributes naming them")
+    _git(wt, "push", "-q", "origin", "%s:refs/heads/feat/x" % head)
+    fx.prs[0]["headRefOid"] = head
+    fx.set_gh()
+    fx.advance_main(dict([("src/c.txt", "charlie\n")]))
+    return wt
+
+
+def case_isolation(tmp):
+    # No git child working in a checkout that holds PR content (the private checkout and the
+    # fresh checkout) reads the operator's global or system configuration (see _PR_DIRS and
+    # _PR_GIT_ENV). The suite's HOME is the scrubbed scratch home, so the case owns its
+    # .gitconfig for each run's duration, as case_crlf does. Each PR here commits, at its tree
+    # root, a script that records that it ran, and an attribute selecting a driver the
+    # operator's global configuration defines with a command relative to the working
+    # directory. Red while those children read that configuration: git then ran the PR's
+    # script from the checkout. Each vector also runs the same configuration outside the
+    # tool, where the script does run, so a green vector cannot come from a dead script or a
+    # configuration that never took effect.
+    gitconfig = Path(os.environ["HOME"]) / ".gitconfig"
+
+    def recorder(name, tail):
+        sentinel = Path(tmp) / ("isolation-%s-ran" % name)
+        return sentinel, "#!/bin/sh\n: > '%s'\n%s" % (sentinel, tail)
+
+    def configured(text):
+        gitconfig.write_text(text, encoding="utf-8")
+
+    def unconfigured():
+        try:
+            os.unlink(str(gitconfig))
+        except FileNotFoundError:
+            pass
+
+    # A merge driver and a textconv. The merge of the conflicting digest runs the merge
+    # driver; the review_carry comparison (_changed_lines) runs the textconv.
+    fx = _fixture(tmp, "isolation-drivers")
+    merge_ran, merge_script = recorder("merge-driver", "exit 1\n")
+    diff_ran, diff_script = recorder("textconv", "exec cat \"$1\"\n")
+    wt = _scripted_pr(fx, "* merge=prdriver diff=prdiff\n",
+                      dict([("prdriver.sh", merge_script), ("prdiff.sh", diff_script)]))
+    configured("[merge \"prdriver\"]\n\tdriver = ./prdriver.sh %O %A %B\n"
+               "[diff \"prdiff\"]\n\ttextconv = ./prdiff.sh\n")
+    try:
+        rc, reports, _fatal = fx.run()
+        in_run = (merge_ran.exists(), diff_ran.exists())
+        # _changed_lines itself, over the author's PR worktree (no checkout of the run, so
+        # the configuration is read there): --no-textconv alone keeps the textconv out. Red
+        # with that option dropped.
+        if diff_ran.exists():
+            diff_ran.unlink()
+        _changed_lines(wt, "HEAD~1", "HEAD", [])
+        unit_textconv = diff_ran.exists()
+        # Outside the tool, the same configuration runs both scripts: a plain diff in the PR
+        # worktree runs the textconv, and a merge of the base in a plain clone of the PR
+        # runs the merge driver.
+        _git(wt, "diff", "--no-color", "HEAD~1", "HEAD")
+        probe = Path(tmp) / "isolation-drivers-control"
+        _git(fx.base, "clone", "--quiet", "--no-local", "-b", "feat/x", str(fx.remote),
+             str(probe))
+        _git(probe, "merge", "--no-commit", "--no-ff", "--no-edit", "origin/main",
+             extra_env=FIXTURE_IDENT, ok=None)
+        control = (merge_ran.exists(), diff_ran.exists())
+    finally:
+        unconfigured()
+    check("isolation/pr-merge-driver-never-runs",
+          (rc, _result(reports, 1), in_run[0], control[0]), (0, "would-merge", False, True))
+    check("isolation/pr-textconv-never-runs",
+          (rc, _result(reports, 1), in_run[1], control[1]), (0, "would-merge", False, True))
+    check("isolation/changed-lines-passes-no-textconv", (unit_textconv, control[1]),
+          (False, True))
+    # A filter in the fresh checkout: the private checkout unsets every filter attribute, so
+    # only the fresh checkout could run it. The control is a plain clone of the PR, whose
+    # checkout runs the smudge filter.
+    fx2 = _fixture(tmp, "isolation-filter")
+    filter_ran, filter_script = recorder("filter", "exec cat\n")
+    _scripted_pr(fx2, "src/b.txt filter=prfilter\n", dict([("prfilter.sh", filter_script)]))
+    configured("[filter \"prfilter\"]\n\tsmudge = ./prfilter.sh\n")
+    try:
+        rc, reports, _fatal = fx2.run()
+        in_run = filter_ran.exists()
+        _git(fx2.base, "clone", "--quiet", "--no-local", "-b", "feat/x", str(fx2.remote),
+             str(Path(tmp) / "isolation-filter-control"))
+        control = filter_ran.exists()
+    finally:
+        unconfigured()
+    check("isolation/fresh-checkout-operator-filter-never-runs",
+          (rc, _result(reports, 1), in_run, control), (0, "would-merge", False, True))
+    # The configuration each git child sees, read at every launch in the run's private
+    # directories by git config with that launch's own environment (the git its PATH names)
+    # and working directory: a global submodule.recurse, and a key set only in a file a global
+    # include names. The children in the private base repository and the transport directory
+    # read the operator's configuration by design and are the control.
+    fx3 = _fixture(tmp, "isolation-config-view")
+    _stale_pr(fx3)
+    included = Path(tmp) / "isolation-included.gitconfig"
+    included.write_text("[mergetrainprobe]\n\tincluded = yes\n", encoding="utf-8")
+    views = []
+    real_child = globals()["_run_child"]
+    pins = ["-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"]
+
+    def _config_view_child(argv, cwd=None, env=None, timeout=None, push=False, executable=None):
+        # Only the run's git launches (their argv carries the maintenance pins), never a
+        # configured command launched in the same directories.
+        where = os.path.basename(os.path.dirname(str(cwd)))
+        for kind in ("scratch", "fresh", "base"):
+            if where.startswith("merge-train-%s-" % kind) and list(argv[1:7]) == pins:
+                values = []
+                for key in ("submodule.recurse", "mergetrainprobe.included"):
+                    read = subprocess.run(["git", "config", "--get", key], cwd=str(cwd),
+                                          env=env, timeout=60, stdout=subprocess.PIPE,
+                                          stderr=subprocess.DEVNULL)
+                    values.append(read.stdout.decode("utf-8", "replace").strip())
+                views.append((kind, values[0], values[1]))
+        return real_child(argv, cwd=cwd, env=env, timeout=timeout, push=push,
+                          executable=executable)
+
+    configured("[submodule]\n\trecurse = true\n[include]\n\tpath = %s\n" % included)
+    globals()["_run_child"] = _config_view_child
+    try:
+        rc, reports, _fatal = fx3.run()
+    finally:
+        globals()["_run_child"] = real_child
+        unconfigured()
+    kinds = sorted(set(row[0] for row in views))
+
+    def seen(column, private):
+        return sorted(set(row[column] for row in views if (row[0] != "base") == private))
+
+    check("isolation/global-submodule-recurse-not-read",
+          (rc, _result(reports, 1), kinds, seen(1, True), seen(1, False)),
+          (0, "would-merge", ["base", "fresh", "scratch"], [""], ["true"]))
+    check("isolation/global-include-not-read",
+          (rc, _result(reports, 1), kinds, seen(2, True), seen(2, False)),
+          (0, "would-merge", ["base", "fresh", "scratch"], [""], ["yes"]))
+    check("isolation/invariants", _invariants(fx, fx2, fx3), [])
 
 
 def case_latepush(tmp):
@@ -7258,7 +7612,8 @@ CASES = dict([
     ("fetch-failure", case_fetch_failure), ("state-mismatch", case_state_mismatch),
     ("cli", case_cli), ("refmap", case_refmap), ("basefetch", case_basefetch),
     ("leak", case_leak), ("partial", case_partial), ("signal", case_signal),
-    ("crlf", case_crlf), ("latepush", case_latepush), ("rename", case_rename),
+    ("crlf", case_crlf), ("isolation", case_isolation), ("latepush", case_latepush),
+    ("rename", case_rename),
     ("gitread", case_gitread), ("ancestry", case_ancestry), ("rootskip", case_rootskip),
     ("faultscan", case_faultscan), ("childfault", case_childfault),
     ("harness", case_harness),
