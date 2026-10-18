@@ -40,7 +40,12 @@ then reproduces it rather than re-judging relatedness from its own reading of th
 treats a live result exceeding the recorded one as a fresh, unaddressed finding. Fixing only
 the cited instance while a sibling of the same class survives unaddressed is an incomplete fix,
 the completeness-claim-enumerates-its-set discipline applied to a defect class standing in for
-the registry that class otherwise lacks.
+the registry that class otherwise lacks. For example, a wording fix is a defect class whose
+probe is derived from and validated against the correction that names the superseded wording, and
+matches that wording across line wraps and escapes. Each instance the probe finds is fixed
+or carries one of exactly two named exemptions: history (a quotation recording the superseded
+wording) or warning (a correction that warns against it). A copy that must change with the
+wording, such as a clause register's canonical text, is in scope, never exempt.
 
 After an edit applied by a script, a bulk operation, or a subagent, the claim that it landed rests on
 re-reading the resulting source and confirming the intended change is present in it, never on the applier's

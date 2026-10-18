@@ -131,7 +131,7 @@ RELEASE_ROW_ALLOWED = frozenset({"version", "commit_sha", "tag", "tag_object_sha
 
 RELEASE_CLASSES = ("pack-immutable", "derived", "manifest-self", "managed-block")
 NAMESPACE_CLASSES = ("adopter-state", "archive")
-# EN-8 write-scope frozen floor: the Architect-bound operational frozen class set (2026-08-31). A guarded
+# EN-8 write-scope frozen floor: the maintainer-bound operational frozen class set (2026-08-31). A guarded
 # Write/Edit/MultiEdit whose target resolves into one of these classes is hard-denied by write_scope_guard
 # (.aiqt/core/hooks/scripts/aiqt_hooks.py), un-lowerable by the per-slice scope declaration. This is the ONE
 # place the manifest-class -> frozen mapping is bound, recorded, and reviewed; the hook never reimplements
