@@ -10947,16 +10947,19 @@ def heredoc_terminator(data):
         if "<<" not in command.replace("\\\n", ""):
             return _allow()
         return _deny(
-            "AIQT rule sectvl (tool-argument-validation): the command joins lines with a backslash-newline "
-            "line continuation and, once every continuation is removed as bash removes it, holds a << "
-            "heredoc operator. A line continuation can split or move what bash reads as the << operator, "
-            "the heredoc's delimiter word, or a body line, so whether every heredoc here is terminated "
-            "cannot be verified; the command is denied fail-safe before anything runs. Re-issue it with "
-            "the heredoc written without line continuations: no line of the command may end in a "
-            "backslash.",
-            "AIQT guardrail: denied a Bash command that mixes a backslash-newline line continuation with a "
-            "<< heredoc operator, which this check cannot verify (rule sectvl, fail-safe); re-issue it "
-            "without line continuations.")
+            "AIQT rule sectvl (tool-argument-validation): the command holds a backslash-newline pair, and "
+            "it still holds a << once every such pair is removed. The pairs are removed from the text "
+            "regardless of quoting, which removes at least every line continuation bash removes, and the "
+            "<< that remains may be a heredoc operator, a here-string or a shift; this check does not "
+            "decide which. Because a line continuation can split or move what bash reads as the << "
+            "operator, a heredoc's delimiter word, or a body line, whether every heredoc here is "
+            "terminated cannot be verified, so the command is denied fail-safe before anything runs; the "
+            "refusal is deliberately wider than bash and also denies a command bash runs correctly, such "
+            "as a pair bash keeps literal inside single quotes. Re-issue it without line continuations: "
+            "write the command so that no line ends in a backslash.",
+            "AIQT guardrail: denied a Bash command that holds a backslash-newline pair and still holds a "
+            "<< once every pair is removed from the text regardless of quoting, which this check cannot "
+            "verify (rule sectvl, fail-safe); re-issue it without line continuations.")
     if "<<" not in command:
         return _allow()
     bad = [op for op in _heredoc_openers(command) if not op.terminated]

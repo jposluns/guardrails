@@ -2433,64 +2433,97 @@ def _test_git_stash_ref(failures):
 # shape as arithmetic too (the disclosed residual for a (( that opens nested subshells), and this oracle
 # cannot see the difference.
 _HD_BASH_MIN = (5, 3)
-# The closed table of cases that need not agree with bash, each with its reason. An id here that names no hd
-# case, or whose case does agree with bash, fails the check, so no entry outlives its reason.
+# The closed table of cases that need not agree with bash, each with the OUTCOME bash -n was observed to
+# produce and the reason the oracle cannot corroborate the case. Each value is (kind, wanted, reason).
+# The oracle asserts the kind against bash's actual exit status and diagnostics on every run, so an
+# exception never turns off checking: a recorded outcome bash does not reproduce fails the check, as does
+# an id that names no hd case or whose case comes to agree with bash; no entry outlives its reason. The
+# closed kinds (wanted is a delimiter string for "wants" and None for every other kind):
+#   clean            bash -n exits 0 with no here-document diagnostic (bash parses the command cleanly)
+#   syntax           bash -n exits 2 (a syntax error) with no here-document diagnostic
+#   wants            bash -n exits 0 and its single-line end-of-file warning names exactly the delimiter
+#                    in wanted, which the guard's unjoined scan does not name
+#   wants-multiline  bash -n exits 0 and emits an end-of-file warning whose wanted delimiter spans lines,
+#                    which the oracle's single-line pattern cannot read
+#   warns-runs       bash -n exits 0 and warns of an unterminated here-document in a command substitution,
+#                    naming no wanted delimiter (bash then reads the body late and runs the command)
 _HD_BASH_EXCEPTIONS = {
     # A substitution closes with a body unread: bash warns "command substitution: 1 unterminated
     # here-document", then reads that body from the line after, where these cases close it. The guard models
     # that reading (the documented command-substitution model), so it allows them.
-    "hd-a30": "bash warns of a body unread when its substitution closes, then reads it as the guard models",
-    "hd-a31": "bash warns of a body unread when its substitution closes, then reads it as the guard models",
-    "hd-a32": "bash warns of a body unread when its substitution closes, then reads it as the guard models",
+    "hd-a30": ("warns-runs", None,
+               "bash warns of a body unread when its substitution closes, then reads it as the guard models"),
+    "hd-a31": ("warns-runs", None,
+               "bash warns of a body unread when its substitution closes, then reads it as the guard models"),
+    "hd-a32": ("warns-runs", None,
+               "bash warns of a body unread when its substitution closes, then reads it as the guard models"),
     # Delimiters the guard cannot read, which it denies fail-safe.
-    "hd-d12": "bash refuses a << with no delimiter word as a syntax error, so it reports no here-document",
-    "hd-d16": "bash decodes the ANSI-C delimiter $'E\\x4fF' to EOF, which closes the body; the guard does not "
-              "decode an escape in a delimiter",
+    "hd-d12": ("syntax", None,
+               "bash refuses a << with no delimiter word as a syntax error, so it reports no here-document"),
+    "hd-d16": ("clean", None,
+               "bash decodes the ANSI-C delimiter $'E\\x4fF' to EOF, which closes the body; the guard does "
+               "not decode an escape in a delimiter"),
     # Continuation refusals (hd-d57 to hd-d77): the guard denies each of these as unverifiable, without
     # modelling the joining bash applies to its backslash-newline pairs, so the oracle cannot corroborate
     # the deny: either bash parses the command cleanly (the refusal by design), or bash does read an
     # unterminated heredoc but its wanted delimiter is not one the guard's unjoined scan names (the pair
     # hides or reshapes the opener for that scan), or bash emits no single-line wanted diagnostic at all.
     # hd-d13 is NOT here: bash wants EOF and the unjoined scan names EOF, so that case agrees.
-    "hd-d57": "bash wants PY from the joined <<; the unjoined scan sees no << and names no opener",
-    "hd-d58": "bash wants PY from the joined <<; the unjoined scan sees only the closed <<A",
-    "hd-d59": "bash wants EOF from the << joined across two pairs; the unjoined scan names no opener",
-    "hd-d60": "bash wants EOF after joining the delimiter; the unjoined scan reads the delimiter as "
-              "backslash-escaped text, so it names another delimiter",
-    "hd-d61": "bash wants EOF from the heredoc in the joined $(; the pair leaves the unjoined scan inside "
-              "double quotes, so it names no opener",
-    "hd-d62": "bash refuses the joined form as a syntax error (a comment where the delimiter word must "
-              "stand), so it reports no here-document",
-    "hd-d63": "bash's wanted delimiter keeps the quoted pair and spans two lines, which the oracle's "
-              "single-line pattern cannot read; the unjoined scan reads that same two-line delimiter",
-    "hd-d64": "bash's wanted delimiter keeps the pair and spans two lines, which the oracle's single-line "
-              "pattern cannot read; the unjoined scan cannot read the ANSI-C delimiter at all",
-    "hd-d65": "bash wants 2]=3 from the joined &> resetting the command position; the unjoined scan reads "
-              "a subscript shift and names no opener",
-    "hd-d66": "bash wants X past the joined $'; the unjoined scan reads the quotes differently and names "
-              "no opener",
-    "hd-d67": "refused by design: bash removes the pair inside the double-quoted delimiter and the heredoc "
-              "closes, so bash parses the command cleanly",
-    "hd-d68": "refused by design: bash joins the delimiter to EOFX and the heredoc closes, so bash parses "
-              "the command cleanly",
-    "hd-d69": "refused by design: bash removes the pair before the delimiter and the heredoc closes, so "
-              "bash parses the command cleanly",
-    "hd-d70": "refused by design: bash removes the pair inside the delimiter and the heredoc closes, so "
-              "bash parses the command cleanly",
-    "hd-d71": "refused by design: bash joins each <<< to a here-string with no terminator line, so bash "
-              "parses the command cleanly",
-    "hd-d72": "refused by design: bash joins the continued body line onto the delimiter, which closes the "
-              "heredoc, so bash parses the command cleanly",
-    "hd-d73": "refused by design: the quoted body is read verbatim and its EOF line closes the heredoc, so "
-              "bash parses the command cleanly",
-    "hd-d74": "refused by design: the even run of backslashes continues no line and the heredoc closes, so "
-              "bash parses the command cleanly (the rule matches the pair's two characters textually)",
-    "hd-d75": "refused by design: the continued line is command text and the heredoc closes, so bash "
-              "parses the command cleanly",
-    "hd-d76": "refused by design: bash warns of a body unread when the substitution closes, then reads "
-              "every body and runs the command; that warning carries no wanted delimiter",
-    "hd-d77": "refused by design: the << is a shift in the assignment subscript, so bash parses the "
-              "command cleanly",
+    "hd-d57": ("wants", "PY", "bash wants PY from the joined <<; the unjoined scan sees no << and names no "
+               "opener"),
+    "hd-d58": ("wants", "PY", "bash wants PY from the joined <<; the unjoined scan sees only the closed <<A"),
+    "hd-d59": ("wants", "EOF", "bash wants EOF from the << joined across two pairs; the unjoined scan names "
+               "no opener"),
+    "hd-d60": ("wants", "EOF", "bash wants EOF after joining the delimiter; the unjoined scan reads the "
+               "delimiter as backslash-escaped text, so it names another delimiter"),
+    "hd-d61": ("wants", "EOF", "bash wants EOF from the heredoc in the joined $(; the pair leaves the "
+               "unjoined scan inside double quotes, so it names no opener"),
+    "hd-d62": ("syntax", None,
+               "bash refuses the joined form as a syntax error (a comment where the delimiter word must "
+               "stand), so it reports no here-document"),
+    "hd-d63": ("wants-multiline", None,
+               "bash's wanted delimiter keeps the quoted pair and spans two lines, which the oracle's "
+               "single-line pattern cannot read; the unjoined scan reads that same two-line delimiter"),
+    "hd-d64": ("wants-multiline", None,
+               "bash's wanted delimiter keeps the pair and spans two lines, which the oracle's single-line "
+               "pattern cannot read; the unjoined scan cannot read the ANSI-C delimiter at all"),
+    "hd-d65": ("wants", "2]=3", "bash wants 2]=3 from the joined &> resetting the command position; the "
+               "unjoined scan reads a subscript shift and names no opener"),
+    "hd-d66": ("wants", "X", "bash wants X past the joined $'; the unjoined scan reads the quotes "
+               "differently and names no opener"),
+    "hd-d67": ("clean", None,
+               "refused by design: bash removes the pair inside the double-quoted delimiter and the heredoc "
+               "closes, so bash parses the command cleanly"),
+    "hd-d68": ("clean", None,
+               "refused by design: bash joins the delimiter to EOFX and the heredoc closes, so bash parses "
+               "the command cleanly"),
+    "hd-d69": ("clean", None,
+               "refused by design: bash removes the pair before the delimiter and the heredoc closes, so "
+               "bash parses the command cleanly"),
+    "hd-d70": ("clean", None,
+               "refused by design: bash removes the pair inside the delimiter and the heredoc closes, so "
+               "bash parses the command cleanly"),
+    "hd-d71": ("clean", None,
+               "refused by design: bash joins each <<< to a here-string with no terminator line, so bash "
+               "parses the command cleanly"),
+    "hd-d72": ("clean", None,
+               "refused by design: bash joins the continued body line onto the delimiter, which closes the "
+               "heredoc, so bash parses the command cleanly"),
+    "hd-d73": ("clean", None,
+               "refused by design: the quoted body is read verbatim and its EOF line closes the heredoc, so "
+               "bash parses the command cleanly"),
+    "hd-d74": ("clean", None,
+               "refused by design: the even run of backslashes continues no line and the heredoc closes, so "
+               "bash parses the command cleanly (the rule matches the pair's two characters textually)"),
+    "hd-d75": ("clean", None,
+               "refused by design: the continued line is command text and the heredoc closes, so bash "
+               "parses the command cleanly"),
+    "hd-d76": ("warns-runs", None,
+               "refused by design: bash warns of a body unread when the substitution closes, then reads "
+               "every body and runs the command; that warning carries no wanted delimiter"),
+    "hd-d77": ("clean", None,
+               "refused by design: the << is a shift in the assignment subscript, so bash parses the "
+               "command cleanly"),
 }
 
 
@@ -2503,8 +2536,10 @@ def _hd_unterminated_delimiters(command):
 def _hd_bash_oracle(vectors, failures, exceptions, search_path, unterminated=_hd_unterminated_delimiters):
     """(hd-bash) Parse the command of each (label, command, want) case with bash -n -c (nothing runs; the
     environment is pinned and no startup file is read) and require bash to agree with want, unless the case's
-    id is in exceptions (see _HD_BASH_EXCEPTIONS). bash is looked up on search_path, the only PATH the pinned
-    environment holds. A deny case agrees only when bash's end-of-file warning names a delimiter in
+    id is in exceptions (see _HD_BASH_EXCEPTIONS): a case under a (kind, wanted, reason) exception must NOT
+    agree, and bash's exit status and diagnostics must then match the recorded kind, so an exception's
+    explanatory text is asserted, never taken on trust. bash is looked up on search_path, the only PATH the
+    pinned environment holds. A deny case agrees only when bash's end-of-file warning names a delimiter in
     unterminated(command). Returns True when every case was parsed, False after recording a NOT RUN failure."""
     env = {"PATH": search_path, "LC_ALL": "C"}  # no BASH_ENV, ENV or HOME; --norc and --noprofile below
     try:
@@ -2538,9 +2573,9 @@ def _hd_bash_oracle(vectors, failures, exceptions, search_path, unterminated=_hd
             failures.append("(hd-bash-run) NOT RUN: bash -n could not parse {}: {!r}".format(label, exc))
             return False
         rc, err = proc.returncode, proc.stderr.decode("utf-8", "replace")
+        wanted = set(re.findall(r"delimited by end-of-file \(wanted `(.*)'\)$", err, re.MULTILINE))
         if want == "deny":
             named = unterminated(command)
-            wanted = set(re.findall(r"delimited by end-of-file \(wanted `(.*)'\)$", err, re.MULTILINE))
             agrees = rc in (0, 2) and bool(named & wanted)
         else:
             named = set()
@@ -2552,6 +2587,29 @@ def _hd_bash_oracle(vectors, failures, exceptions, search_path, unterminated=_hd
             expected = want + (" naming one of {}".format(sorted(named)) if want == "deny" else "")
             failures.append("(hd-bash-agree) {}: expected {}, but bash -n exits {} with {!r}"
                             .format(label, expected, rc, err.strip()))
+        elif not agrees:
+            # the recorded outcome is asserted against bash's actual result, so the exception documents
+            # bash's behaviour instead of switching the case's checking off
+            kind, delim, _reason = exceptions[vid]
+            if kind == "clean":
+                matches = rc == 0 and "here-document" not in err
+            elif kind == "syntax":
+                matches = rc == 2 and "here-document" not in err
+            elif kind == "wants":
+                matches = rc == 0 and wanted == {delim}
+            elif kind == "wants-multiline":
+                matches = rc == 0 and not wanted and "delimited by end-of-file (wanted `" in err
+            elif kind == "warns-runs":
+                matches = rc == 0 and not wanted and "unterminated here-document" in err
+            else:
+                failures.append("(hd-bash-kind) {} records unknown outcome kind {!r}; the closed kinds are "
+                                "clean, syntax, wants, wants-multiline and warns-runs".format(vid, kind))
+                continue
+            if not matches:
+                failures.append("(hd-bash-outcome) {}: the exception table records outcome {}, but bash -n "
+                                "exits {} with {!r}"
+                                .format(label, kind if delim is None else "{} `{}'".format(kind, delim),
+                                        rc, err.strip()))
     for vid in sorted(set(exceptions) - seen):
         failures.append("(hd-bash-table) the exception table names {}, which is no hd case".format(vid))
     return True
@@ -2806,10 +2864,11 @@ def _test_heredoc_terminator(failures):
     # split or move a << operator, a delimiter word, another operator or a body line, and the scan does not
     # model that joining. Any command that holds a pair and still holds a << once every pair is removed
     # (regardless of quoting) therefore denies as unverifiable, with the same reason, without being
-    # scanned; every case in this block carries that reason's text. Where the label says "refused by
+    # scanned; every deny case in this block carries that reason's text. Where the label says "refused by
     # design", bash parses and runs the command correctly (or, for hd-d76, warns and then runs it) and the
-    # deny is the rule's deliberate over-refusal; the other cases hide a heredoc bash does read. All but
-    # hd-d13 above are in _HD_BASH_EXCEPTIONS, each with the reason the oracle cannot corroborate it.
+    # deny is the rule's deliberate over-refusal; the other deny cases hide a heredoc bash does read. Every
+    # deny case here but hd-d13 above is in _HD_BASH_EXCEPTIONS, with the outcome bash -n was observed to
+    # produce and the reason the oracle cannot corroborate it.
     continuation = ("backslash-newline", "without line continuations")
     hdexpect("(hd-d57) a << split by a backslash-newline pair denies as unverifiable",
              "python3 - <\\\n<'PY'\nprint(1)\nPYX\necho after", "deny", has=continuation)
@@ -2853,6 +2912,9 @@ def _test_heredoc_terminator(failures):
              "cat $(cat <<B) \\\nx <<Q\nB\n| cat\n", "deny", has=continuation)
     hdexpect("(hd-d77) a continuation between assignments beside a subscript shift denies, refused by design",
              "a=1 \\\nb[1<<2]=3", "deny", has=continuation)
+    # The allow-side control for the rule: a mutant that denies every pair-bearing command fails it. Its
+    # command holds no << at all, so it also allowed before the rule existed (regression coverage, not
+    # evidence the rule was needed) and it agrees with bash, needing no exception entry.
     hdexpect("(hd-a48) a pair with no << after joining allows: no opener can form at a join",
              "echo one \\\ntwo; echo 'a\\\nb'", "allow")
 
@@ -2946,12 +3008,38 @@ def _test_heredoc_terminator(failures):
                             .format(probe))
         # an exception for a case that agrees with bash is stale, and one naming no case is refused
         stale, unknown = [], []
-        _hd_bash_oracle(vectors[:1], stale, {"hd-a1": "probe"}, search_path)
-        _hd_bash_oracle(vectors[:1], unknown, {"hd-zz0": "probe"}, search_path)
+        _hd_bash_oracle(vectors[:1], stale, {"hd-a1": ("clean", None, "probe")}, search_path)
+        _hd_bash_oracle(vectors[:1], unknown, {"hd-zz0": ("clean", None, "probe")}, search_path)
         if ([message.partition(" ")[0] for message in stale] != ["(hd-bash-stale)"]
                 or [message.partition(" ")[0] for message in unknown] != ["(hd-bash-table)"]):
             failures.append("(hd-bash-table-probe) a stale and an unknown exception must each be refused; got {!r}"
                             .format((stale, unknown)))
+        # the recorded outcome of an exception is asserted against bash's actual result: for each outcome
+        # kind, a probe case bash cannot corroborate accepts the kind bash reproduces and refuses a kind it
+        # does not, so a wrong explanatory recording cannot persist unnoticed
+        outcome_probes = (
+            # (kind bash reproduces, kind bash refutes, command, want)
+            (("clean", None), ("syntax", None), "echo ok", "deny"),
+            (("syntax", None), ("clean", None), "cat <<", "deny"),
+            (("wants", "EOF"), ("wants", "OTHER"), "cat <\\\n<EOF\nx\n", "deny"),
+            (("wants-multiline", None), ("warns-runs", None), "cat <<'E\\\nOF'\nbody\nEOF\n", "deny"),
+            (("warns-runs", None), ("clean", None), 'cat "$(cat <<B)" <<A\nB\nA\n', "allow"),
+        )
+        for right, wrong, probe_command, probe_want in outcome_probes:
+            case = [("(hd-probe-outcome) an exception's recorded outcome", probe_command, probe_want)]
+            matched, refuted = [], []
+            _hd_bash_oracle(case, matched, {"hd-probe-outcome": right + ("probe",)}, search_path)
+            _hd_bash_oracle(case, refuted, {"hd-probe-outcome": wrong + ("probe",)}, search_path)
+            if matched or [message.partition(" ")[0] for message in refuted] != ["(hd-bash-outcome)"]:
+                failures.append("(hd-bash-outcome-probe) outcome {!r} must be accepted and {!r} refused for "
+                                "{!r}; got {!r}".format(right, wrong, probe_command, (matched, refuted)))
+        # an unknown outcome kind is refused outright
+        bad_kind = []
+        _hd_bash_oracle([("(hd-probe-kind) an unknown outcome kind", "echo ok", "deny")], bad_kind,
+                        {"hd-probe-kind": ("mystery", None, "probe")}, search_path)
+        if [message.partition(" ")[0] for message in bad_kind] != ["(hd-bash-kind)"]:
+            failures.append("(hd-bash-kind-probe) an unknown outcome kind must be refused; got {!r}"
+                            .format(bad_kind))
     # with no bash to find (an empty directory is the whole PATH) the oracle records a NOT RUN failure
     absent = []
     with tempfile.TemporaryDirectory() as empty:
