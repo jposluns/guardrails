@@ -3020,7 +3020,12 @@ _DEADLINE_SHAPES = {
 # the (handler, shape, size): protected_line denies seps_hash5 past 64 KB, where the size cap of its commit
 # reading denies a command longer than 65,536 characters. Before the readings resumed where an earlier reading
 # stopped, four handlers took 10 to 12 s on seps_hash at 1 MB, past the hook timeout, and lexing
-# seps_hash_lines took about 30 s.
+# seps_hash_lines took about 30 s. With the long separator runs these shapes hold built in one batch, the
+# sink check on a failed lex resuming where the lex stopped, and the commit-identity reader skipping records
+# with no word and no redirect, the two costliest cases measured on one host (max of five runs) are
+# gate_weakening on seps_hash5 at 1 MB, 0.63 s against the 7 s bound, and commit_identity on seps_hash_lines
+# at 64 KB, under 0.01 s against the 1.5 s bound; before those changes they measured 3.1 s and 0.7 s on the
+# same host, which overran those bounds on hosts 3 to 4.5 times slower.
 _DEADLINE_HASH_SHAPES = ("seps_hash", "seps_hash_lines", "seps_hash_nested", "paren_hash4", "seps_hash5")
 _DEADLINE_HASH_DECISIONS = {
     ("orch_truncation_guard", "seps_hash"): "deny", ("orch_truncation_guard", "seps_hash_lines"): "deny",
@@ -11844,23 +11849,33 @@ def _main_isolated(monitor):
         # inside a double-quoted substitution, where the substitution skip searched to the end of the line from
         # every '#', and a 128 KiB run of open parentheses and backquote substitutions, where the nesting stack
         # was searched or copied for every word, skip and backquote. Each must take under 1 s of CPU. Measured
-        # on one host, this code took at most 0.074 s on the first input and 0.151 s on the second (in
-        # bash_absolute_paths), a margin of about six times, and the code before the linear skip and the counted
+        # on one host as the max of five runs per guard, this code took at most 0.051 s on the first input
+        # (protected_line) and 0.049 s on the second (gate_weakening), a margin of about nineteen times, and
+        # the code before the linear skip and the counted
         # nesting stack took 14.4 s, 30.4 s and 15.2 s on the first and 9.3 s and 18.4 s on the second in
         # gate_weakening, bash_absolute_paths and protected_line. protected_line took 0.09 s on the second
         # input there too, so that row is a REGRESSION GUARD that does not tell the two apart; the other five
-        # rows fail on that code. The orch self-test checks the cost of the poll-loop classifier, the raw word
+        # rows fail on that code. With the counted stack put back to a plain list on this code, the second
+        # input takes 8.4 s in gate_weakening and 8.6 s in bash_absolute_paths (one run each), so those rows
+        # still fail such a stack. The orch self-test checks the cost of the poll-loop classifier, the raw word
         # scan and the foreground detach scan on the same inputs. The retry rows put the commit message form
         # before each input, so each lex reads the body, meets a later substitution and starts again reading
         # none (two passes); the floor row puts it before 128 Ki plain words, so the body read stands, main's
         # reading (one more pass) fails, and each guard also takes its failed-lex path (MAIN'S DECISION AS A
         # FLOOR); the main-reading row puts a body main reads to an earlier ')' before them, so main's reading
-        # lexes and each guard judges both readings' segments. Measured on one host as the max of three runs
-        # per guard, this code took at most 0.541 s (gate_weakening on retry-deep-nesting, a margin of about 1.8
-        # times against the 1 s bound), 0.062 s on retry-long-comment-line, 0.183 s on floor-long-words and
-        # 0.238 s on main-reading-long-words (bash_absolute_paths). These rows are REGRESSION GUARDS for the
-        # two-pass bound and the floor's cost: the code before main's reading took 0.557 s, 0.063 s, 0.182 s and
-        # 0.200 s on them, so they pass there too.
+        # lexes and each guard judges both readings' segments. Measured on one host as the max of five runs
+        # per guard, this code took at most 0.033 s on retry-long-comment-line, 0.099 s on retry-deep-nesting,
+        # 0.162 s on floor-long-words (gate_weakening) and 0.122 s on main-reading-long-words
+        # (bash_absolute_paths), a margin of
+        # about six times against the 1 s bound: a long run of one separator character builds its records in
+        # one batch (_lex_pass), the sink check gate_weakening runs on a lex that fails resumes where that lex
+        # stopped (_gate_recovered_sink), and bash_absolute_paths reads its full lex's segments where a
+        # second, partial lex could recover nothing more. These rows are REGRESSION GUARDS for the
+        # two-pass bound and the floor's cost: before those three changes this code took at most 0.062 s,
+        # 0.541 s, 0.183 s and 0.238 s on them, the code before main's reading took 0.063 s, 0.557 s, 0.182 s
+        # and 0.200 s, so they pass there too, and with the counted nesting stack put back to a plain list
+        # retry-deep-nesting takes 8.7 s in gate_weakening (one run), so that row still fails superlinear
+        # nesting code.
         _cost_form = "git commit -m \"$(cat <<'EOF'\n# Don't\nEOF\n)\"\n"
         _cost_inputs = (("long-comment-line", 'echo "$(echo ' + "# " * (128 * 1024) + '\n)"\ngit status'),
                         ("deep-nesting", "(" * 56000 + " `a`" * (56000 // 3)),

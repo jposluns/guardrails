@@ -575,7 +575,7 @@ class _NestStack(list):
     """A comment-rule nesting stack (_nest_track) that counts its entries, so the tests the scanners make for
     a word or a backquote ("${" in nest, "`" in nest) take the same time however deep the stack is, where a
     plain list's test reads every entry: a list of "(", "${" and "`" entries changed only through append,
-    pop and clear."""
+    extend, pop and clear."""
 
     def __init__(self):
         super().__init__()
@@ -584,6 +584,11 @@ class _NestStack(list):
     def append(self, item):
         super().append(item)
         self._open[item] += 1
+
+    def extend(self, items):
+        items = list(items)
+        super().extend(items)
+        self._open.update(items)
 
     def pop(self):
         item = super().pop()
@@ -1968,14 +1973,25 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False):
     except _UncertainHashError as exc:
         if not partial:
             raise
-        # A lex under no reading makes the first reading's lex up to the first uncertain '#', where it
-        # recovers what it read, so it resumes where that reading stopped (exc.first, when there is one).
-        lexed, misread = _lex_reading(command, True, None, locale, skip_empty, exc.first)
-        readings = _beside_main_reading(command, True, locale, [lexed], skip_empty) if misread else [lexed]
+        return _lex_resume_partial(command, exc, locale, skip_empty)
     if partial:
         return ([seg for segs, _complete, _open in readings for seg in segs],
                 all(done for _segs, done, _open in readings), readings[-1][2])
     return [seg for segs in readings for seg in segs]
+
+
+def _lex_resume_partial(command, exc, locale=False, skip_empty=False):
+    """The partial lex of command after _lex_readings raised the _UncertainHashError exc (the readings could
+    not be judged): a lex under no reading makes the first reading's lex up to the first uncertain '#', where
+    it recovers what it read, so it resumes where that reading stopped (exc.first, when there is one) instead
+    of lexing the text before it again. Returns the partial-mode (segments, complete, in_progress) of
+    _lex_command. A caller that itself caught that error from a full lex passes it here to read the recovered
+    prefix without a second pass over that text (_gate_recovered_sink); exc must come from a lex of this same
+    command with this locale and skip_empty, whose state the fork carries."""
+    lexed, misread = _lex_reading(command, True, None, locale, skip_empty, exc.first)
+    readings = _beside_main_reading(command, True, locale, [lexed], skip_empty) if misread else [lexed]
+    return ([seg for segs, _complete, _open in readings for seg in segs],
+            all(done for _segs, done, _open in readings), readings[-1][2])
 
 
 def _lex_readings(command, partial=False, locale=False, skip_empty=False):
@@ -2249,6 +2265,38 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                         before = "break"
                     end_segment(op, i, i + oplen)
                     i += oplen
+                    if oplen == 1 and op in ";()" and i < n and command[i] == op:
+                        # A run of one same one-character separator. After end_segment, argv and redirects
+                        # are empty, so each further character of the run ends one more EMPTY segment with
+                        # this op as its separator and an empty raw slice, moves the nesting stack the way
+                        # _nest_track moves it for that character, and leaves before (set above, the same
+                        # for every character of the run) and, for ')', glued_at just past it. Building
+                        # those records in one batch leaves every record and every piece of state exactly
+                        # as the one-character-per-loop-step path leaves them, without one full loop step
+                        # (operator match, closure calls) per character, so a long run costs little more
+                        # than its length in list appends.
+                        run = i
+                        while run < n and command[run] == op:
+                            run += 1
+                        count = run - i
+                        if op == "(":
+                            nest.extend("(" * count)
+                        elif op == ")":
+                            pops = count
+                            while pops and nest and nest[-1] == "(":
+                                nest.pop()
+                                pops -= 1
+                            glued_at = run
+                        if not skip_empty:
+                            # One record per character, as on the per-character path; the records are
+                            # identical and every consumer reads a record without changing it (none
+                            # assigns to or extends a field), so they share one empty list for their
+                            # word and redirect fields rather than allocating four lists each.
+                            empty = []
+                            segments.extend([_Segment(empty, op, empty, "", False, empty, empty)
+                                             for _ in range(count)])
+                        seg_start[0] = run
+                        i = run
                     continue
                 if kind == "cannot":
                     if op == "<<":
@@ -3923,7 +3971,10 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
                 same.append(locale)  # the readings differ only at a $" (_read_word): one serves for both
             break
         try:
-            segments = _segments(command, locale=locale)
+            # skip_empty: this reader takes only each segment's words (never its separator, raw slice or
+            # place in the list), and a segment with no word and no redirect has none, so a long run of
+            # separators builds and feeds it no record.
+            segments = _segments(command, locale=locale, skip_empty=True)
         except ValueError as exc:
             error = error or exc
             continue
@@ -4325,9 +4376,11 @@ def bash_absolute_paths(data):
     and otherwise a cd or pushd word or a '<' in that text ALLOWS WITH THE NOTE, since a relative cd or
     redirect may sit there, as does text holding quoting that scan does not decode (_hash_doubt_opaque), where
     a cd cannot be ruled out. A redirect operator is never quoted, so the '>' test reads the text as written.
-    The guard lexes the command twice (the full lex that finds the fallback, then the partial lex below), so
-    on a command holding uncertain '#' characters it can make twice the thirty-one lexes of one _lex_readings
-    call, each taking time linear in the command's length. Where a lex read a quoted here-document's body
+    The guard reads the segments of its full lex where that lex parses the whole command and no floor moved,
+    and lexes the command a second time, partially, only where the full lex raises past the uncertain-'#'
+    fallback or main's reading of a body a lex read fails (the floor below), so on a command holding
+    uncertain '#' characters it can make up to twice the thirty-one lexes of one
+    _lex_readings call, each taking time linear in the command's length. Where a lex read a quoted here-document's body
     that main's lexer reads otherwise (MAIN'S DECISION AS A FLOOR, above _MainHashReading), the partial lex
     below returns main's partial reading beside its own, the segments main's lex holds where it lexes and
     those its partial lex recovers past the body where it fails, so a reason either list carries counts."""
@@ -4358,10 +4411,16 @@ def bash_absolute_paths(data):
     # follow it) denies, and one whose text names cd or pushd or carries a '<' notes, as does one whose
     # quoting the fallback text does not decode (a cd may be spelled in it). This full lex and the partial
     # lex below each make up to thirty-one lexes, each linear in the command's length, on a command with
-    # uncertain '#' characters. Only whether this full lex raises is read, so it skips segments with no word
-    # and no redirect unbuilt, as the partial lex does.
+    # uncertain '#' characters, and both skip segments with no word and no redirect unbuilt. Where this full
+    # lex parses the whole command and main's reading of a body a lex read did not fail
+    # (_SubstHeredocs.reads still, the floor signal gate_weakening also reads), a partial lex of it would
+    # recover nothing more and return the same segments, so they are read directly; a command this lex raises
+    # on, or one whose failed main's reading leaves segments only a partial lex recovers (MAIN'S DECISION AS
+    # A FLOOR), is lexed again below.
+    segments = None
+    reads = _SubstHeredocs.reads
     try:
-        _lex_command(command, skip_empty=True)
+        segments = _lex_command(command, skip_empty=True)
     except _UncertainHashError:
         scan = _hash_doubt_scan(command)
         if ">" in scan:
@@ -4392,7 +4451,8 @@ def bash_absolute_paths(data):
         pass
     # The loop reads only each segment's words and redirects, so a segment with neither is skipped unbuilt.
     # With main's segments, where a reading read a body main reads otherwise.
-    segments = _lex_command(command, partial=True, skip_empty=True)[0]
+    if segments is None or _SubstHeredocs.reads != reads:
+        segments = _lex_command(command, partial=True, skip_empty=True)[0]
     reasons = []       # relative/opaque cd or NON-destructive redirect: an allow-note convention nudge
     deny_reasons = []  # a DESTRUCTIVE truncating redirect to a relative/opaque target: fail-closed deny
     for seg in segments:
@@ -11426,12 +11486,18 @@ def _gate_weakening_fallback_kind(command):
     return None
 
 
-def _gate_recovered_sink(command):
+def _gate_recovered_sink(command, doubt=None):
     """The verification run piped into a truncating sink (_verification_sink) that the complete segments a
     partial lex of command recovers prove, or None: gate_weakening's first check on a lex that fails, before
     its raw fallback. The in-progress segment the lexer was inside is dropped, since its unseen tokens could
-    change it; a construct that begins a new segment leaves every recovered segment complete."""
-    recovered, _complete, in_progress = _lex_command(command, partial=True)
+    change it; a construct that begins a new segment leaves every recovered segment complete. doubt, when
+    given, is the _UncertainHashError the caller's own full lex of command just raised: the partial lex then
+    resumes from the fork it carries (_lex_resume_partial) instead of lexing the text before the command's
+    first uncertain '#' a second time."""
+    if doubt is not None:
+        recovered, _complete, in_progress = _lex_resume_partial(command, doubt)
+    else:
+        recovered, _complete, in_progress = _lex_command(command, partial=True)
     if in_progress:
         recovered = recovered[:-1]
     return _verification_sink(recovered)
@@ -11504,7 +11570,7 @@ def gate_weakening(data):
         # otherwise the raw fallback stands. Only the in-progress segment the lexer was inside is dropped,
         # since its unseen tokens could change it; a construct that begins a new segment (a lone quote after
         # 'pytest | head;') leaves every recovered segment complete, so none is dropped.
-        hit = _gate_recovered_sink(command)
+        hit = _gate_recovered_sink(command, exc if isinstance(exc, _UncertainHashError) else None)
         if hit is not None:
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
