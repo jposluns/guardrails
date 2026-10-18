@@ -4129,6 +4129,203 @@ def git_stash_ref(data):
     return _allow()
 
 
+# --- inline-errexit (nocncl): errexit turned on inline before steps joined by ; or a newline ------------
+# How the errexit walker reads each separator the shared lexer reports. "and-or" (&&, ||) and "pipe" (|,
+# |&) keep a statement going; "list" (; and a newline, which the lexer reports as "", as it does the end of
+# the command) ends it, and the next statement runs whatever its status; "background" (&) ends it without
+# waiting on its status; "open" and "close" bound a (...) subshell, whose errexit setting ends with it.
+_ERREXIT_JOINS = {"&&": "and-or", "||": "and-or", "|": "pipe", "|&": "pipe", ";": "list", "": "list",
+                  "&": "background", "(": "open", ")": "close"}
+# Reserved words the walker reads at the start of a segment. bash ignores errexit in a condition (after if,
+# elif, while or until) and in a pipeline negated by !, so a statement opened by one is no step whose failure
+# errexit would stop at. then, do, else and { open a body whose first command follows them; else and elif
+# open another branch, which no step of the branch before it runs on into. fi, done, esac and } only close a
+# construct and run nothing of their own. for, select, case and function open a header that runs no command
+# that can fail.
+_ERREXIT_CONDITION_WORDS = frozenset(("if", "elif", "while", "until", "!"))
+_ERREXIT_BODY_WORDS = frozenset(("then", "do", "else", "{"))
+_ERREXIT_BRANCH_WORDS = frozenset(("else", "elif"))
+_ERREXIT_CLOSER_WORDS = frozenset(("fi", "done", "esac", "}"))
+_ERREXIT_HEADER_WORDS = frozenset(("for", "select", "case", "function"))
+# An UNQUOTED heredoc operator and its plain delimiter word (<<EOF, <<-EOF, << END), never a <<< here-string.
+# The shared lexer refuses an unquoted heredoc, so on a command it cannot read in full the walker reads it
+# again with each such delimiter quoted, which makes the lexer skip the body as data: a best-effort reading.
+_ERREXIT_UNQUOTED_HEREDOC_RE = re.compile(r"(?<!<)<<(-?)([ \t]*)([A-Za-z0-9_][A-Za-z0-9_.-]*)")
+_ERREXIT_NOTE = (
+    "AIQT guardrail (rule nocncl): this command turns errexit on inline (set -e, set -o errexit or shopt -s "
+    "-o errexit) and then runs a later step after a ; or a newline. In this tool an inline set -e has been "
+    "seen not to stop a later step after an earlier one failed, so the failure can be followed by more steps "
+    "and hidden behind them. A script file run with bash, or steps joined with &&, stops at the failure: put "
+    "the steps in a script file and run it with bash, join them with &&, or end each step whose failure must "
+    "stop the run with || exit 1.")
+_ERREXIT_PARTIAL_NOTE = " (The command could not be fully parsed; this is a best-effort reading.)"
+
+
+def _errexit_set_effect(words):
+    """Whether the simple command `words` (its command word first) turns errexit on (True) or off (False),
+    or leaves it alone (None). set with e in an option cluster (-e, -eu, -Eeuo) or -o errexit turns it on,
+    and +e or +o errexit turns it off, the last such option winning; options are read up to '--', a lone '-'
+    or the first operand, since what follows them is positional parameters (set -- -e). shopt -s -o errexit
+    turns it on and shopt -u -o errexit turns it off, the s, u and o letters in one cluster or several."""
+    if words[0] == "shopt":
+        letters = ""
+        names = []
+        for arg in words[1:]:
+            if arg[:1] == "-" and len(arg) > 1 and not names:
+                letters += arg[1:]
+            else:
+                names.append(arg)
+        if "o" not in letters or "errexit" not in names:
+            return None
+        if "s" in letters:
+            return True
+        if "u" in letters:
+            return False  # shopt -u -o errexit turns errexit off
+        return None
+    if words[0] != "set":
+        return None
+    effect = None
+    args = words[1:]
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        i += 1
+        if arg in ("-", "--"):
+            break  # '--' or a lone '-' ends the options: what follows is positional parameters
+        if arg[:1] not in ("-", "+") or len(arg) < 2:
+            break  # so does the first operand
+        on = arg[0] == "-"
+        for letter in arg[1:]:
+            if letter == "e":
+                effect = on
+            elif letter == "o" and i < len(args):
+                if args[i] == "errexit":
+                    effect = on
+                i += 1  # -o and +o take their option name from the next word
+    return effect
+
+
+def _errexit_statements(command):
+    """(pairs, tail, exact) for the errexit walker: pairs are the (argv, sep_after) of each segment the
+    shared lexer read in full, in order; tail is the argv of the segment it stopped inside (_lex_command's
+    in_progress segment, [] when there is none), whose unread words could change it; exact is False when the
+    lexer could not read the whole command. On such a command, one that holds an unquoted heredoc is read
+    again with its delimiters quoted (_ERREXIT_UNQUOTED_HEREDOC_RE), so the body is skipped as data and the
+    statements after it are read."""
+    segments, exact, in_progress = _lex_command(command, partial=True)
+    if not exact:
+        quoted = _ERREXIT_UNQUOTED_HEREDOC_RE.sub(r"<<\1\2'\3'", command)
+        if quoted != command:
+            segments, _complete, in_progress = _lex_command(quoted, partial=True)
+    pairs = [(seg.argv, seg.sep_after) for seg in segments]
+    tail = pairs.pop()[0] if in_progress else []
+    return pairs, tail, exact
+
+
+def _errexit_hazard(pairs, tail):
+    """True when errexit is on at a statement whose failure nothing handles and a later statement of the same
+    (...) scope follows it after a ; or a newline (_ERREXIT_JOINS): the shape whose later steps an inline set
+    -e has been seen not to stop in this tool. pairs and tail are _errexit_statements' reading; the tail
+    counts only as a later statement, never as a set or as a step that can fail. Option changes are tracked
+    in order (_errexit_set_effect), and one made inside a (...) subshell ends with it. A statement is no step
+    that can fail when errexit is off as its last command starts, when that command is a set or shopt (an
+    option change) or an exit or return after || (it stops at a failure itself), when the statement is a
+    condition, a negated pipeline or a loop or case header (_ERREXIT_CONDITION_WORDS, _ERREXIT_HEADER_WORDS),
+    or when it ends with & (nothing waits on its status). A newline after &&, || or a pipe continues the
+    statement."""
+    on = False  # errexit starts off: only a set or shopt in the command turns it on
+    armed = False  # a statement that can fail unhandled under errexit has ended with ; or a newline
+    scopes = []  # (on, armed, exempt_statement, joiner) outside each open (...) subshell
+    last = None  # (errexit on as it started, failure exempt) for the open statement's last command
+    exempt_statement = False  # the open statement is a condition, a negated pipeline or a header
+    joiner = None  # the && or || before the open statement's next command
+    continued = False  # the open statement's last segment ended with &&, || or a pipe
+    for argv, sep in pairs:
+        kind = _ERREXIT_JOINS.get(sep, "list")
+        words = argv[_command_word_index(argv):]
+        k = 0
+        while k < len(words) and (words[k] in _ERREXIT_CONDITION_WORDS or words[k] in _ERREXIT_BODY_WORDS):
+            if words[k] in _ERREXIT_BRANCH_WORDS:
+                armed = False  # else and elif open another branch, which the branch before does not run on into
+            if words[k] in _ERREXIT_CONDITION_WORDS:
+                exempt_statement = True
+            k += 1
+        words = words[k:]
+        if all(word in _ERREXIT_CLOSER_WORDS for word in words):
+            words = []
+        if words:
+            if armed:
+                return True  # a later statement runs after one that failed with nothing to stop it
+            if words[0] in _ERREXIT_HEADER_WORDS:
+                exempt_statement = True
+            effect = _errexit_set_effect(words)
+            exempt = words[0] in ("set", "shopt")  # an option change is no step whose failure matters
+            if joiner == "||" and words[0] in ("exit", "return"):
+                exempt = True  # 'a || exit 1' stops at a failure itself
+            last = (on, exempt)
+            if effect is not None:
+                on = effect
+            continued = False
+        if kind in ("and-or", "pipe"):
+            joiner = sep if kind == "and-or" else None
+            continued = True
+        elif kind == "open":
+            if armed:
+                return True  # the subshell is a later statement
+            scopes.append((on, armed, exempt_statement, joiner))
+            armed = False
+            last, exempt_statement, joiner, continued = None, False, None, False
+        elif kind == "close":
+            saved = scopes.pop() if scopes else (on, armed, exempt_statement, joiner)
+            on = saved[0]  # an errexit setting made inside (...) ends with the subshell
+            armed = saved[1]  # and so does a step inside it: what follows the subshell runs either way
+            exempt_statement, joiner = saved[2], saved[3]
+            last = (on, False)  # the subshell is the open statement's last command
+            continued = False
+        elif kind == "list" and not words and continued:
+            continue  # a newline after &&, || or a pipe continues the statement
+        else:
+            if kind == "list" and last is not None and last[0] and not last[1] and not exempt_statement:
+                armed = True  # a later statement of this scope would run after this one failed
+            last, exempt_statement, joiner, continued = None, False, None, False
+    return armed and bool(tail)
+
+
+def inline_errexit(data):
+    """nocncl (integ/no-concealed-failure), PreToolUse/Bash. NOTE-ONLY: it never asks and never denies. A
+    Bash command that turns errexit on inline (set -e, set -o errexit, shopt -s -o errexit) and then runs a
+    later step after a ; or a newline, past an earlier step whose failure nothing handles, ALLOWS with one
+    informational note (_errexit_hazard): in this tool an inline set -e has been seen not to stop such a later
+    step, while a script file run with bash, or steps joined with &&, stops at the failure. Steps joined by &&,
+    a step ending in || exit or || return, and a chain inside bash -c '...' or a script file run with bash
+    (quoted text and a quoted heredoc body are data to the shared lexer) do not fire.
+
+    HONEST RESIDUAL: it reads the command text only and cannot see how the tool evaluates it, so where an
+    inline set -e does stop at a failure the note is a false alarm, and the note never says a step failed.
+    errexit turned on another way (bash -e, a sourced file, SHELLOPTS, an alias, a function, eval, an earlier
+    call) is not seen, and neither is a set reached through a wrapper (builtin set -e). It does not judge
+    whether a step can fail or whether a later step depends on it. A step whose failure a || branch other
+    than exit or return handles ('a || recover; b'), or a guard inside a { ...; exit 1; } group, still notes.
+    case patterns, function bodies and other compound commands are read only through the reserved words
+    above. An unquoted heredoc is read again with its delimiter quoted, a best-effort reading the note says it
+    is; nothing after any other construct the lexer refuses is read. A missing tool_name, another tool, and an
+    absent or unreadable command silently allow; a miswired event hard-blocks, as every sibling does, and
+    dispatcher errors keep the manifest's fail-closed posture."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: inline_errexit wired to unexpected event {!r}; failing "
+                           "closed".format(data.get("hook_event_name")))
+    if data.get("tool_name") != "Bash":
+        return _allow()  # a missing tool_name included: this note-only guard never denies
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str) or not command:
+        return _allow()
+    pairs, tail, exact = _errexit_statements(command)
+    if not _errexit_hazard(pairs, tail):
+        return _allow()
+    return _allow_note(_ERREXIT_NOTE if exact else _ERREXIT_NOTE + _ERREXIT_PARTIAL_NOTE)
+
+
 def _has_short(tokens, ch):
     """True when a clustered short-flag token (a single '-' then letters, e.g. '-fd') carries the letter
     ch. Spots '-f' inside a cluster (checkout '-f', clean '-fd'), '-p', '-S'/'-W' (restore)."""
@@ -21801,6 +21998,7 @@ HANDLERS = {
     "bash_absolute_paths": bash_absolute_paths,
     "git_explicit_binding": git_explicit_binding,
     "git_stash_ref": git_stash_ref,
+    "inline_errexit": inline_errexit,
     "git_discard": git_discard,
     "protected_line": protected_line,
     "branch_root": branch_root,
@@ -21840,6 +22038,7 @@ HANDLER_EVENT = {
     "bash_absolute_paths": PRETOOL,
     "git_explicit_binding": PRETOOL,
     "git_stash_ref": PRETOOL,
+    "inline_errexit": PRETOOL,
     "git_discard": PRETOOL,
     "protected_line": PRETOOL,
     "branch_root": PRETOOL,

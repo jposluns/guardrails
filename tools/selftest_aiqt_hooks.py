@@ -154,6 +154,7 @@ import contextlib
 import datetime
 import dis
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -2404,6 +2405,244 @@ def _test_git_stash_ref(failures):
         failures.append("(sr-wiring) git_stash_ref handler/event wiring is missing or wrong")
 
 
+# The inline_errexit mutants: each is the live hook source with one rule removed by exact source edits
+# ((anchor, replacement) pairs, each anchor occurring once), loaded from tmp with importlib. A row that the
+# real handler passes and its mutant fails shows that the removed rule is what decides that row.
+_IE_MUTANTS = {
+    "e-cluster": (('if letter == "e":', 'if arg == "-e":'),),
+    "o-option": (('elif letter == "o" and i < len(args):', 'elif False:'),),
+    "o-name": (('if args[i] == "errexit":', 'if True:'),),
+    "plus-sign": (('on = arg[0] == "-"', 'on = True'),),
+    "dashdash": (('if arg in ("-", "--"):', 'if False:'),),
+    "operand": (('if arg[:1] not in ("-", "+") or len(arg) < 2:', 'if False:'),),
+    "shopt": (('if words[0] == "shopt":', 'if False:'),),
+    "shopt-unset": (("return False  # shopt -u -o errexit turns errexit off", "return True"),),
+    "no-fallback": ((r"""quoted = _ERREXIT_UNQUOTED_HEREDOC_RE.sub(r"<<\1\2'\3'", command)""",
+                     "quoted = command"),),
+    "unquoted-body": ((r"""quoted = _ERREXIT_UNQUOTED_HEREDOC_RE.sub(r"<<\1\2'\3'", command)""",
+                       'quoted = _ERREXIT_UNQUOTED_HEREDOC_RE.sub("", command)'),),
+    "quoted-body": (("i = _skip_heredoc_bodies(command, i, n, pending_heredocs)", "i = i"),),
+    "quoted-body-end": (("if cand == delim:", "if False:"),),
+    "raw-text": (("segments, exact, in_progress = _lex_command(command, partial=True)",
+                  "segments, exact, in_progress = _lex_command(_dequoted_text(command), partial=True)"),
+                 ("effect = _errexit_set_effect(words)",
+                  'effect = _errexit_set_effect(words[words.index("set"):] if "set" in words else words)')),
+    "initial-on": (("on = False  # errexit starts off: only a set or shopt in the command turns it on",
+                    "on = True"),),
+    "condition": (('_ERREXIT_CONDITION_WORDS = frozenset(("if", "elif", "while", "until", "!"))',
+                   "_ERREXIT_CONDITION_WORDS = frozenset()"),),
+    "branch": (("armed = False  # else and elif open another branch, which the branch before does not run on "
+                "into", "pass"),),
+    "closer": (('_ERREXIT_CLOSER_WORDS = frozenset(("fi", "done", "esac", "}"))',
+                "_ERREXIT_CLOSER_WORDS = frozenset()"),),
+    "header": (('_ERREXIT_HEADER_WORDS = frozenset(("for", "select", "case", "function"))',
+                "_ERREXIT_HEADER_WORDS = frozenset()"),),
+    "set-exempt": (('exempt = words[0] in ("set", "shopt")  # an option change is no step whose failure '
+                    'matters', "exempt = False"),),
+    "exit-guard": (("exempt = True  # 'a || exit 1' stops at a failure itself", "pass"),),
+    "any-or-guard": (('if joiner == "||" and words[0] in ("exit", "return"):', "if joiner is not None:"),),
+    "statement-start": (("last = (on, exempt)", "last = (last[0] if last else on, exempt)"),),
+    "and-or": (('{"&&": "and-or", "||": "and-or",', '{"&&": "list", "||": "list",'),),
+    "newline": (('";": "list", "": "list",', '";": "list", "": "pipe",'),),
+    "background": (('"&": "background",', '"&": "list",'),),
+    "continuation": (('elif kind == "list" and not words and continued:', "elif False:"),),
+    "subshell-later": (("return True  # the subshell is a later statement", "pass"),),
+    "subshell-open": (("scopes.append((on, armed, exempt_statement, joiner))", "return False"),),
+    "subshell-errexit": (("on = saved[0]  # an errexit setting made inside (...) ends with the subshell",
+                          "pass"),),
+    "subshell-step": (("armed = saved[1]  # and so does a step inside it: what follows the subshell runs "
+                       "either way", "pass"),),
+    "later-step": (("armed = True  # a later statement of this scope would run after this one failed",
+                    "return True"),),
+    "tail": (("return armed and bool(tail)", "return False"),),
+}
+
+# (label, command, mutant): rows the real handler must note, each silent under its mutant.
+_IE_FIRE_ROWS = (
+    ("(ie-f1) the reported incident shape", "set -euo pipefail; false; echo after", "e-cluster"),
+    ("(ie-f2) newline joins", "set -e\ngit apply /abs/p.diff\nmake test", "newline"),
+    ("(ie-f3) set -o errexit", "set -o errexit; a; b", "o-option"),
+    ("(ie-f4a) e in a cluster", "set -eu; a; b", "e-cluster"),
+    ("(ie-f4b) e after another letter", "set -xe; a; b", "e-cluster"),
+    ("(ie-f4c) e inside a long cluster with -o", "set -Eeuo pipefail; a; b", "e-cluster"),
+    ("(ie-f5) errexit on inside an and-or list", "set -e && git apply /abs/p.diff; make", "statement-start"),
+    ("(ie-f6) an && list is still a step that can fail", "set -e; a && b; c", "any-or-guard"),
+    ("(ie-f7) inside a subshell", "(set -e; a; b)", "subshell-open"),
+    ("(ie-f8) after a quoted heredoc that writes a file",
+     "cat <<'EOF' > /abs/s.sh\nx\nEOF\nset -e; a; b", "quoted-body-end"),
+    ("(ie-f9) after an unquoted heredoc (best-effort reading)",
+     "cat <<EOF > /abs/out.txt\nbody $X\nEOF\nset -e; a; b", "no-fallback"),
+    ("(ie-f10) shopt -so errexit", "shopt -so errexit; a; b", "shopt"),
+    ("(ie-f11) shopt -s -o errexit", "shopt -s -o errexit; a; b", "shopt"),
+    ("(ie-f12) a || branch other than exit or return is no guard", "set -e; a || recover; b", "any-or-guard"),
+    ("(ie-f13) a later statement the lexer stopped inside", "set -e; a; b <(true)", "tail"),
+    ("(ie-f14) a subshell is a later statement", "set -e; a; (b)", "subshell-later"),
+    ("(ie-f15) a multi-line if body", "set -e\nif a\nthen\n  b\n  c\nfi", "newline"),
+)
+
+# (label, command, mutant): rows the real handler must leave silent, each noted by its mutant. "over-broad"
+# is the stub that notes whenever the raw text holds set -e or errexit, for the rows whose rule is that no
+# later step exists to run at all.
+_IE_SILENT_ROWS = (
+    ("(ie-n1) a ; chain with no inline errexit", "bash /abs/s.sh; echo done", "initial-on"),
+    ("(ie-n2) a script file run with bash after set -e", "set -e; bash /abs/s.sh", "later-step"),
+    ("(ie-n3) the chain inside bash -c", "bash -c 'set -e; a; b'", "raw-text"),
+    ("(ie-n4) a lone set -e", "set -e", "over-broad"),
+    ("(ie-n5) a lone set -euo pipefail", "set -euo pipefail", "over-broad"),
+    ("(ie-n6) set -e joined by &&", "set -e && a && b", "and-or"),
+    ("(ie-n7) one && statement after set -e", "set -e; a && b", "and-or"),
+    ("(ie-n8) one step after set -e", "set -e; a", "later-step"),
+    ("(ie-n9) one step and a trailing ;", "set -e; a;", "later-step"),
+    ("(ie-n10) set +e", "set +e; a; b", "plus-sign"),
+    ("(ie-n11) errexit turned off again", "set -e; set +e; a; b", "plus-sign"),
+    ("(ie-n12) set +o errexit", "set -e; set +o errexit; a; b", "plus-sign"),
+    ("(ie-n13) -o names another option", "set -o pipefail; a; b", "o-name"),
+    ("(ie-n14) -e after -- is a positional parameter", "set -- -e; a; b", "dashdash"),
+    ("(ie-n15) -e after an operand is a positional parameter", "set x -e; a; b", "operand"),
+    ("(ie-n16) set -e in an echo string", 'echo "set -e; a; b"', "raw-text"),
+    ("(ie-n17) set -e in a commit message", 'git commit -m "set -e; a; b"', "raw-text"),
+    ("(ie-n18) set -e in a quoted heredoc that writes a script",
+     "cat <<'EOF' > /abs/s.sh\nset -e\na\nb\nEOF\nbash /abs/s.sh", "quoted-body"),
+    ("(ie-n19) set -e only in an unquoted heredoc body",
+     "cat <<EOF > /abs/out.txt\nset -e\na\nb\nEOF\necho done", "unquoted-body"),
+    ("(ie-n20) a step guarded by || exit", "set -e; a || exit 1; b", "exit-guard"),
+    ("(ie-n21) a step guarded by || return", "set -e; a || return 1; b", "exit-guard"),
+    ("(ie-n22) every earlier step guarded", "set -e; a || exit; b || exit 1; c", "exit-guard"),
+    ("(ie-n23) an option change is no step that can fail", "set -e; set -u; a", "set-exempt"),
+    ("(ie-n24) a background step", "set -e; a & b", "background"),
+    ("(ie-n25) errexit set inside a subshell ends with it", "(set -e; a); b; c", "subshell-errexit"),
+    ("(ie-n26) a step inside a subshell is not followed by what comes after it", "(set -e; a;); b",
+     "subshell-step"),
+    ("(ie-n27) a newline after && continues the statement",
+     "set -e\ngit apply /abs/p.diff &&\nmake test\n", "continuation"),
+    ("(ie-n28) a loop condition", "set -e; while a; do :; done", "condition"),
+    ("(ie-n29) a negated pipeline", "set -e; ! a; b", "condition"),
+    ("(ie-n30) fi runs nothing", "set -e; if a; then b; fi", "closer"),
+    ("(ie-n31) a loop header", "set -e; for f in x y; do a; done", "header"),
+    ("(ie-n32) else opens another branch", "set -e; if a; then b; else c; fi", "branch"),
+    ("(ie-n33) shopt -u -o errexit", "shopt -so errexit; shopt -uo errexit; a; b", "shopt-unset"),
+    ("(ie-n34) set -o errexit turned off by +o", "set -o errexit; set +o errexit; a; b", "plus-sign"),
+    ("(ie-n35) nothing after a construct the lexer refuses is read (disclosed bound)",
+     "set -e <(true); a; b", "over-broad"),
+)
+
+
+def _ie_mutant_handlers(failures, tmp):
+    """{mutant name: its inline_errexit} for each _IE_MUTANTS entry whose anchors each occur once in the live
+    hook source (an entry whose anchor does not is a failure and builds no handler), plus "over-broad"."""
+    source = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
+    base = tmp / "inline-errexit-mutants"
+    base.mkdir()
+    handlers = {}
+    for name, edits in sorted(_IE_MUTANTS.items()):
+        text = source
+        for anchor, replacement in edits:
+            if text.count(anchor) != 1:
+                failures.append("(ie-anchor-{}) the mutant anchor {!r} occurs {} times in the hook source, "
+                                "expected once".format(name, anchor, text.count(anchor)))
+                break
+            text = text.replace(anchor, replacement)
+        else:
+            module_name = "ie_mutant_" + name.replace("-", "_")
+            path = base / (module_name + ".py")
+            path.write_text(text, encoding="utf-8")
+            spec = importlib.util.spec_from_file_location(module_name, str(path))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            handlers[name] = module.inline_errexit
+
+    def over_broad(data):
+        command = data["tool_input"]["command"]
+        if "set -e" in command or "errexit" in command:
+            return aiqt_hooks._allow_note(aiqt_hooks._ERREXIT_NOTE)
+        return aiqt_hooks._allow()
+
+    handlers["over-broad"] = over_broad
+    return handlers
+
+
+def _test_inline_errexit(failures, tmp):
+    """(ie-*) inline_errexit, called directly; no submitted Bash command is executed. Each fire row must
+    allow with the note and no decision, and each silent row must allow silently; each row must then flip
+    under its own mutant (_IE_MUTANTS), so every row is red when the rule it tests is removed."""
+    handler = aiqt_hooks.inline_errexit
+    mutants = _ie_mutant_handlers(failures, tmp)
+    used = set()
+
+    def payload(command):
+        return {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                "tool_input": {"command": command}}
+
+    def noted(result):
+        code, stdout_obj, stderr = result
+        return (code == 0 and isinstance(stdout_obj, dict) and set(stdout_obj) == {"systemMessage"} and
+                "rule nocncl" in stdout_obj["systemMessage"] and stderr is None)
+
+    for rows, want_note in ((_IE_FIRE_ROWS, True), (_IE_SILENT_ROWS, False)):
+        for label, command, mutant in rows:
+            used.add(mutant)
+            result = handler(payload(command))
+            if (noted(result) if want_note else result == (0, None, None)) is not True:
+                failures.append("{}: expected {} from the real handler, got {!r}".format(
+                    label, "the note" if want_note else "a silent allow", result))
+            if mutant not in mutants:
+                failures.append("{}: its mutant {} was not built".format(label, mutant))
+                continue
+            flipped = mutants[mutant](payload(command))
+            if (flipped == (0, None, None) if want_note else noted(flipped)) is not True:
+                failures.append("{}: the {} mutant must {} this row, so the row shows the rule decides it; got "
+                                "{!r}".format(label, mutant, "silence" if want_note else "note", flipped))
+    unused = sorted(set(_IE_MUTANTS) - used)
+    if unused:
+        failures.append("(ie-mutant-unused) mutants no row uses: {}".format(", ".join(unused)))
+
+    # The note is the exact constant, with the best-effort suffix only on a command the lexer could not
+    # read in full.
+    for label, command, partial in (("(ie-note-exact)", "set -euo pipefail; false; echo after", False),
+                                    ("(ie-note-heredoc)", "cat <<EOF > /abs/out.txt\nbody $X\nEOF\nset -e; a; b",
+                                     True),
+                                    ("(ie-note-tail)", "set -e; a; b <(true)", True)):
+        want = aiqt_hooks._ERREXIT_NOTE + (aiqt_hooks._ERREXIT_PARTIAL_NOTE if partial else "")
+        if handler(payload(command)) != aiqt_hooks._allow_note(want):
+            failures.append("{} expected the note {!r} for {!r}".format(label, want, command))
+
+    # _lex_command's real partial return shape: the segment it stopped inside is the tail, never a set.
+    for label, command, want in (
+            ("(ie-lex-tail)", "set -e; a; b <(true)", ([(["set", "-e"], ";"), (["a"], ";")], ["b"], False)),
+            ("(ie-lex-set-unread)", "set -e <(true); a; b", ([], ["set", "-e"], False)),
+            ("(ie-lex-complete)", "set -e; a", ([(["set", "-e"], ";"), (["a"], "")], [], True))):
+        got = aiqt_hooks._errexit_statements(command)
+        if got != want:
+            failures.append("{} _errexit_statements({!r}) gave {!r}, want {!r}".format(label, command, got, want))
+
+    # Note-only: a missing tool_name, another tool and an unreadable command all allow silently.
+    for label, data in (
+            ("(ie-m1) missing tool_name", {"hook_event_name": aiqt_hooks.PRETOOL,
+                                           "tool_input": {"command": "set -e; a; b"}}),
+            ("(ie-m2) None tool_name", {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": None,
+                                        "tool_input": {"command": "set -e; a; b"}}),
+            ("(ie-other-tool)", {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Read",
+                                 "tool_input": {"command": "set -e; a; b"}})):
+        if handler(data) != (0, None, None):
+            failures.append("{}: a note-only guard must allow silently, got {!r}".format(label, handler(data)))
+    for tool_input in (None, [], {}, {"command": None}, {"command": 42}, {"command": ""}):
+        data = {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash", "tool_input": tool_input}
+        if handler(data) != (0, None, None):
+            failures.append("(ie-unreadable) expected a silent allow for {!r}, got {!r}".format(
+                tool_input, handler(data)))
+
+    data = payload("set -e; a; b")
+    data["hook_event_name"] = "Stop"
+    code, stdout_obj, stderr = handler(data)
+    if not (code == 2 and stdout_obj is None and isinstance(stderr, str) and
+            "inline_errexit wired to unexpected event" in stderr):
+        failures.append("(ie-event) an unexpected event must use the sibling hard-block contract")
+
+    if (aiqt_hooks.HANDLERS.get("inline_errexit") is not aiqt_hooks.inline_errexit or
+            aiqt_hooks.HANDLER_EVENT.get("inline_errexit") != aiqt_hooks.PRETOOL):
+        failures.append("(ie-wiring) inline_errexit handler/event wiring is missing or wrong")
+
+
 # === PreToolUse deadline posture ======================================================================
 # main() runs every PreToolUse mode that is not fail-open inside one aiqt_hooks._DeadlineWindow of
 # PRETOOL_BUDGET_SECONDS and fails closed (exit 2) when its check has not decided by then, and the raw
@@ -2788,6 +3027,7 @@ _DEADLINE_CASES = {
     "git_discard": ("git_segments_reset", "nest_parens"),
     "git_explicit_binding": ("git_add_unbal", "cd_git_fetch_unbal", "breadth_push_after_unbal"),
     "git_stash_ref": ("sep_semicolon", "cd_git_fetch_unbal", "nest_parens"),
+    "inline_errexit": ("sep_semicolon", "heredocs", "nest_parens", "cd_git_fetch_unbal"),
     "orch_ask_guard": ("ask_long",),
     "orch_resume_barrier": ("git_words", "write_content"),
     "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
@@ -16942,6 +17182,7 @@ def _main_isolated(monitor):
                             "HANDLER_EVENT {!r}".format(aiqt_hooks.FLOOR_FAIL_OPEN_MODES, _pf_want))
 
         _test_git_stash_ref(failures)
+        _test_inline_errexit(failures, tmp)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)

@@ -46,7 +46,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Gate discipline | `gatdis` | Enforced | `gate:ci-parity`, class c; `hook:gate-weakening-guard`, class b |
 | A generated artefact is changed only through its source | `gensrc` | Enforced | `gate:adapters-drift`, class a; `gate:agents-drift`, class a; `gate:changelog-drift`, class a; `gate:char-policy-drift`, class a; `gate:claude-drift`, class a; `gate:crosswalk-schema-drift`, class a; `gate:cursor-drift`, class a; `gate:disclosure-drift`, class a; `gate:enforceability-drift`, class a; `gate:enforcement-register-drift`, class a; `gate:first-pin-demo-drift`, class a; `gate:gensrc-failclose`, class a; `gate:gensrc-registry-drift`, class a; `gate:hooks-drift`, class a; `gate:install-drift`, class a; `gate:manifest-gen-drift`, class a; `gate:mappings-page-drift`, class a; `gate:notice-drift`, class a; `gate:reference-roster-drift`, class a; `gate:renderers-drift`, class a; `gate:roadmap-drift`, class a; `gate:rules-drift`, class a; `gate:secret-patterns-drift`, class a; `gate:skill-drift`, class a; `gate:worker-pack-drift`, class a; `hook:gensrc-edit-guard`, class c |
 | Verify licence compatibility before introducing third-party material | `liccmp` | None | Enforcement has not been built yet. |
-| No concealed failure | `nocncl` | Enforced | `hook:orch-truncation-guard`, class b |
+| No concealed failure | `nocncl` | Enforced | `hook:inline-errexit`, class b; `hook:orch-truncation-guard`, class b |
 | Preserve uncommitted work | `prsunc` | Enforced | `hook:git-discard`, class b |
 | Protected-branch integrity | `prtbrn` | Enforced | `hook:protected-line-guard`, class b |
 | A required step remains required under friction | `reqstp` | None | Enforcement has not been built yet. |
@@ -856,6 +856,35 @@ STACK-BLIND: no git calls or filesystem probes. Every recognized bare pop/apply 
 FAIL POSTURE: a tokenizer ValueError silently allows because unparsed text supplies no sound basis for this stash note. An absent/unreadable command emits the sibling's exact binding-convention note. Only the shared missing-tool_name contract returns a structured deny; an unexpected event hard-blocks and dispatcher errors retain the fail-closed manifest default.
 
 DEADLINE: main() gives this check 8 seconds (the 10-second hook timeout less 2), counted from before its payload read, and fails closed with exit 2 when it has not decided by then; on the worst shapes the hooks self-test times, up to 1 MB, its slowest call took about 1.72 s in-process on a 24-core host with Python 3.14.4 (2026-10-15). Interpreter start-up and a wait the interpreter cannot interrupt (a read from a hung mount, a long call into C code) fall outside that deadline, and whether the platform blocks a call whose hook it stops at its own timeout is unverified. Where SIGALRM, setitimer or the main thread is unavailable, or SIGALRM is blocked, the check runs with no deadline; cleanup that runs while the deadline unwinds is outside it.
+
+```
+
+### `hook:inline-errexit`
+
+- Platform: `claude-code`
+- Default: `block`
+- Entry point: `PreToolUse on Bash`
+- Class: `b`
+- Channel: `plugin`
+
+Technical limits (from the enforcement ledger):
+
+```
+NOTE-ONLY by design (NO-ASK, NO-DENY): a Bash command that turns errexit on inline (set -e, an e in a set option cluster such as -eu or -Eeuo, set -o errexit, or shopt -s -o errexit) and then runs a later step after a ; or a newline, past an earlier step whose failure nothing handles, emits one informational systemMessage with no permissionDecision; every other command silently allows. The manifest block default is the fail-closed handler-error class marker, not a blocking verdict on any command.
+
+COMMAND TEXT ONLY: the hook reads the command text and cannot see how the tool evaluates it. The note rests on a reported observation: in this tool an inline set -e was seen not to stop a later step after an earlier one failed, on the incident shape, while bash -c with the same steps stopped at the failure. A script file run with bash is expected to stop the same way, but was not separately observed, and the observation was made on that one shape only: a subshell, a multi-line body and a command after a heredoc, which this hook also notes, were not tried. Where the tool does honour an inline set -e, the note is a false alarm, and the note never says that any step failed. On another platform or shell (zsh included) the behaviour is unverified, so the hook ships for claude-code only.
+
+WHAT IT TRACKS: set and shopt option changes in command order, so a later set +e, set +o errexit or shopt -u -o errexit turns the note off again; set options are read up to --, a lone - or the first operand (set -- -e and set x -e set positional parameters, not errexit). A setting made inside a (...) subshell ends with it, and a step inside a subshell is not followed by what comes after the subshell. A statement whose failure is handled or not waited on does not count: a step ending in || exit or || return, an option change itself, a condition (after if, elif, while or until), a negated pipeline (!), a loop or case header, and a step sent to the background with &. Steps joined by && or || form one statement, and a newline after &&, || or a pipe continues it, so set -e && a && b and set -e; a && b do not note. The last statement never notes, since nothing runs after it. Quoted text and a quoted heredoc body are data to the shared lexer, so a set -e inside an echo string, a commit message, bash -c '...', or a heredoc that writes a script does not note.
+
+NOT SEEN: errexit turned on another way (bash -e, a sourced file, SHELLOPTS, an alias, a function, eval, or a set in an earlier call), a set reached through a wrapper (builtin set -e, command set -e), and an option change spelled through an expansion. It does not judge whether a step can fail (set -e; echo start; make notes) or whether a later step depends on an earlier one.
+
+ACCEPTED OVER-NOTING: a step handled by a || branch other than exit or return (set -e; a || recover; b) still notes, as does a guard inside a brace group (a || { echo x; exit 1; }), because the shared segmenter does not parse brace groups. case patterns, function definitions and other compound commands are read only through the reserved words above, so a step in their bodies can note, or stay silent, where a shell parser would decide otherwise.
+
+PARSE LIMITS: an unquoted heredoc, which the shared lexer refuses, is read again with its delimiter quoted so its body is skipped as data; that is a best-effort reading, and the note says so. Nothing after any other construct the lexer refuses (a process substitution, a here-string, an unbalanced quote) is read, so a set -e or a later step there is unseen; a segment the lexer stopped inside counts as a later statement but is never read as a set.
+
+FAIL POSTURE: a missing tool_name, another tool, and an absent or unreadable command silently allow, since this hook never denies on a payload; an unexpected event hard-blocks, as every sibling does, and dispatcher errors retain the fail-closed manifest default.
+
+DEADLINE: main() gives this check 8 seconds (the 10-second hook timeout less 2), counted from before its payload read, and fails closed with exit 2 when it has not decided by then; on the worst shapes the hooks self-test times, up to 1 MB, its slowest call took about 1.59 s in-process on a 24-core host with Python 3.14.4 (2026-10-17). Interpreter start-up and a wait the interpreter cannot interrupt (a read from a hung mount, a long call into C code) fall outside that deadline, and whether the platform blocks a call whose hook it stops at its own timeout is unverified. Where SIGALRM, setitimer or the main thread is unavailable, or SIGALRM is blocked, the check runs with no deadline; cleanup that runs while the deadline unwinds is outside it.
 
 ```
 
