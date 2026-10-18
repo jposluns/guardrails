@@ -983,6 +983,13 @@ def _skip_quoting(command, i, n, nest=None, hash_reading=None, heredoc=None):
         if c == chr(92):
             if i + 1 >= n:
                 raise ValueError("unterminated escape")
+            if command[i + 1] == "\n":
+                # A backslash-newline is a line continuation: bash removes the pair before it reads the
+                # line, so a '#' or quote after it keeps the classification that came before the pair.
+                # Leave prev unchanged and advance past the pair; several consecutive pairs each leave it
+                # unchanged as the loop re-enters this branch.
+                i += 2
+                continue
             prev = "backquote" if command[i + 1] == "`" and (nest is None or "`" in nest) else "word"
             i += 2
             continue

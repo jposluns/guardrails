@@ -2593,8 +2593,13 @@ def _join_fast_failures(count=4000, seed=20261017):
 _LEX_SKIP_TEXTS = (
     "", "((((true))))", "true;;", ";(;)", "a; ;b", "a &&\n\n b", "# c\ngit status", "> out; ;", "( > out )",
     "cat <<'E'\nx\nE\n;", "<<'E'\nx\nE\n(a)", "a | (b) || c", "x 'y", ";;; 'y", "> o 'y", "a\n#c\n\n",
-    "(cd /x && git reset --hard)", "((true)) <(x)", "git stash pop; ;", "\t;\t")
-_LEX_SKIP_ALPHABET = ("(", ")", ";", "&", "|", " ", "\n", "a", ">", "'", "#", "x\t", "<<'E'\nE\n", "{", "$", "<(")
+    "(cd /x && git reset --hard)", "((true)) <(x)", "git stash pop; ;", "\t;\t",
+    # A '#' inside a double-quoted command substitution, with and without a backslash-newline before it: the
+    # pair is removed before bash reads the line, so the '#' keeps its word-boundary class and opens a comment
+    # under both readings (the skip-empty equivalence must hold either way).
+    'echo "$(echo a \\\n#b\nc\n)"', 'echo "$(echo a #b\nc\n)"', 'echo "$(echo a \\\n\\\n#b\n)"')
+_LEX_SKIP_ALPHABET = ("(", ")", ";", "&", "|", " ", "\n", "a", ">", "'", '"', "#", "x\t", "<<'E'\nE\n", "{", "$",
+                      "<(", '"$(a \\\n#b\n)"')
 
 
 def _lex_outcome(call):
@@ -13433,6 +13438,35 @@ def _main_isolated(monitor):
         # bypass subcommand from the gate-weakening scan -> DENY.
         gexpect("(qa-b1-gw) backslash-newline no-verify does not slip via an empty argv element, denies",
                 "git \\\n commit --no-verify -m x", "deny")
+
+        # A backslash-newline before a '#' inside a double-quoted command substitution is removed by bash
+        # before it reads the line, so the '#' keeps the classification from before the pair: a '#' at a word
+        # boundary there opens a comment to end of line. _skip_quoting formerly set the class to "word" for the
+        # pair, so the '#' was read as word text and the apostrophe after it opened a single quote that ran on
+        # and hid the later 'git commit --no-verify' (allow). Each vector below denies: the bypass or the
+        # verification run into a truncating sink is no longer concealed. The no-continuation twin denies too,
+        # so the pair changes nothing (the equivalence the pin broke).
+        gexpect("(gw-bsnl-finding) a backslash-newline before a '#' in a double-quoted substitution does not "
+                "hide the trailing --no-verify, denies",
+                'echo "$(echo a \\\n# it\'s\n)"; git commit --no-verify -m x # \')"', "deny")
+        gexpect("(gw-bsnl-twin) the no-continuation twin denies too (the pair changes nothing)",
+                'echo "$(echo a # it\'s\n)"; git commit --no-verify -m x # \')"', "deny")
+        gexpect("(gw-bsnl-sink) the same pair before a '#' does not hide a verification run into a truncating "
+                "sink, denies",
+                'echo "$(echo a \\\n# it\'s\n)"; pytest | head', "deny")
+        gexpect("(gw-bsnl-two) two consecutive backslash-newline pairs before the '#' deny",
+                'echo "$(echo a \\\n\\\n# it\'s\n)"; git commit --no-verify -m x # \')"', "deny")
+        gexpect("(gw-bsnl-three) three consecutive pairs before the '#' deny",
+                'echo "$(echo a \\\n\\\n\\\n# it\'s\n)"; git commit --no-verify -m x # \')"', "deny")
+        gexpect("(gw-bsnl-early) a pair before the '#' at the start of the substitution body denies",
+                'echo "$( \\\n# it\'s\necho a\n)"; git commit --no-verify -m x # \')"', "deny")
+        gexpect("(gw-bsnl-late) a pair before a '#' deeper in the substitution body denies",
+                'echo "$(echo a; echo b \\\n# it\'s\n)"; git commit --no-verify -m x # \')"', "deny")
+        gexpect("(gw-bsnl-wrapped) a pair before the '#' in a substitution inside surrounding double-quoted "
+                "text denies",
+                'echo "pre $(echo a \\\n# it\'s\n) post"; git commit --no-verify -m x # \')"', "deny")
+        gexpect("(gw-bsnl-blank) a blank line before the pair, the pair immediately before the '#', denies",
+                'echo "$(echo a\n\\\n# it\'s\n)"; git commit --no-verify -m x # \')"', "deny")
 
         # === gatdis deny tier: a VERIFICATION RUN whose output reaches a truncating sink =====================
         # Two tiers: the narrow verification-run predicate piped into a truncating sink DENIES; everything else
