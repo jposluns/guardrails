@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "818fabd248b2f6ec6d65d58f45485559b149587512b130b047114481fdb4f73e"
+tree-sha256 = "46a06d808d38850c60992b33379f9e48cbe3c7e561bd2c381e98d0435a470019"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -821,8 +821,8 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 10833
-sha256 = "036b7d9fa713e424f5555c1674b6398e2253bf512b108375c407e1b44244f3c2"
+bytes = 11151
+sha256 = "1af3e3f38d727b3ff57790df0440829d0253b584ca8fd37bfa0718b6d7acdff7"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -2371,8 +2371,8 @@ sha256 = "aaf972bbdd8b8520076c1bb6f9d701fab580ed6fd34a91c2ba125d39d463aa11"
 
 [[sources]]
 path = "README.md"
-bytes = 5065
-sha256 = "696054a84813b5ac285d5086cfdc132d3d1bd5c6754e951609064b75171b59a0"
+bytes = 5197
+sha256 = "eba8940b2f426b60b099e7bb282981aab99c887847c4b5b199f7e544fd22b113"
 
 [[sources]]
 path = "RELEASING.md"
@@ -3476,8 +3476,8 @@ sha256 = "0446386ea3b2d5f4b6dafefe6f56905661f775e9b926271b465de2e70445a195"
 
 [[sources]]
 path = "tools/check_reference_facts.py"
-bytes = 203407
-sha256 = "59beabcaa121edc4450c465e2cc776b847e193536ad18b18c851a55acfa332a4"
+bytes = 204222
+sha256 = "4a8e5f74f58f84756c224f767d74e62e311156c9d5eed78864079971cb36a4a8"
 
 [[sources]]
 path = "tools/check_release_build.py"
@@ -3646,8 +3646,8 @@ sha256 = "87ae9d0e400cca86d0a583f7f0e99271efce494255abddc76d85c51ac836bfaf"
 
 [[sources]]
 path = "tools/gen_reference_facts.py"
-bytes = 11675
-sha256 = "26ead77672a53c0477ef6f4ed11c459c3a41a9278f64b381c4e258b965c92e14"
+bytes = 23671
+sha256 = "230a95acd48e0edeec88fceb17fef4789376ccc8d690d133ea9338baa1f16bb1"
 
 [[sources]]
 path = "tools/gen_renderers.py"
