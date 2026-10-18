@@ -237,6 +237,10 @@ path = "GEMINI.md"
 class = "pack-immutable"
 
 [[release-class]]
+path = "INSTRUCTION-BUDGET.md"
+class = "pack-immutable"
+
+[[release-class]]
 path = "LICENSE"
 class = "pack-immutable"
 
