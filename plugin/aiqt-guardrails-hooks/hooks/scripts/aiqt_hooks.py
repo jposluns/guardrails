@@ -168,6 +168,9 @@ DELIBERATE decision where the platform documents exit 2 as the block (the orches
 manufactured wind-down that way, doc-confirmed 2026-08-29, bounded by its own loop bound so it cannot wedge
 the chain). Outside that deliberate deny, only a PreToolUse handler fails closed via exit 2, and only a
 genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on a bad invocation.
+A handler result whose exit code is not 0 or 2, or whose stderr text is neither a str nor None, is a
+handler crash with that same posture, and an exception's text in a diagnostic is built so that its own
+str() raising cannot end main() early.
 
 These exits, and the floor guard's on an older interpreter that can start this file, hold even when a
 standard stream cannot be written or flushed (a closed descriptor, a full
@@ -183,6 +186,39 @@ decision whose stdout write failed exited 0, which allows. The floor guard above
 write-flush-os._exit shape inline, since it runs before any helper exists.
 The PYTHON-FLOOR comment below gives the floor guard's exits and the exit of an interpreter that cannot
 start this file, which fails first with Python's own exit.
+
+DEADLINE (PreToolUse): every PreToolUse mode that is not fail-open reads its payload and runs its check
+inside one _DeadlineWindow of PRETOOL_BUDGET_SECONDS (8 seconds: HOOK_TIMEOUT_SECONDS, the 10-second
+hooks.json timeout tools/gen_hooks.py renders, less 2), armed before the payload read. A check that has
+not decided by then is interrupted by _HookDeadline, a BaseException that no handler's except Exception
+branch catches, and the call fails CLOSED with exit 2 and a stderr line naming the handler, the budget and
+the input size and asking for smaller calls or long content moved into a file; the timer is cancelled
+before the decision is written to stdout. Any other exception out of the window (an error entering or
+leaving it, or an in-process caller's own alarm handler raising when its expiry is delivered) fails
+closed with exit 2 as well, and a fail-open mode warns on exit 0 instead, except for a stop (an exit
+or an interrupt) raised in a fail-open mode, which ends the hook as it would with no window, save that
+an exit whose status would be 2 ends it with status 1. The raw 'git ... <verb>'
+fallback scans are _RawSequence probes of linear cost: the single regexes they replaced grew with the
+square or the cube of the command length, and five guards ran past the hook timeout on some shape at or
+below 64 KB. Measured in-process on a 24-core host with Python 3.14.4 over runs on 2026-10-15 and
+2026-10-16, the slowest PreToolUse handler call on the worst shapes tools/selftest_aiqt_hooks.py times
+took at most 0.10 s of wall-clock time at 64 KB, 0.49 s at 256 KB and 2.07 s at 1 MB (nest_parens under
+git_stash_ref). With the raw-text push backstop and the joined and de-quoted readings of the command,
+runs on 2026-10-17 on a 24-core host with Python 3.14.4 that was running other work measured at most
+0.13 s at 64 KB (protected_line, whose backstop reads the whole command before its 65,536-character
+commit size cap), 0.55 s at 256 KB and 2.17 s at 1 MB (nest_parens under git_discard). Interpreter
+start-up adds about 0.1 to 0.2 s to each call. Outside the deadline: interpreter start-up and
+module import, which run before main(); a wait the interpreter cannot interrupt (a system call in
+uninterruptible sleep, such as a read from a hung network mount, or a long call into C code that does not
+check for signals), which holds the deadline back until it returns, as does review_dispatch_pin's wait for
+its worker thread when the kernel delivers the alarm to that thread (the wait ends within that guard's
+own 8-second budget plus a quarter second); cleanup that runs while the deadline
+unwinds (a finally block, killing and reaping a child process), which still counts against the platform's
+timeout; and a platform without SIGALRM and setitimer (Windows), a caller that blocks SIGALRM, or a call
+off the main thread, which run with no deadline. Whether the platform blocks or allows a PreToolUse call
+whose hook it stops at its own timeout has not been verified; the deadline makes the decision the
+dispatcher's own exit 2 instead. An interrupted git_discard recovery snapshot can leave a temporary index
+or unreferenced objects behind.
 """
 import sys
 
@@ -237,6 +273,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         os._exit(0)
     os._exit(2)
 
+import _signal
 import collections
 import datetime
 import errno
@@ -254,6 +291,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 
 PRETOOL = "PreToolUse"
@@ -263,6 +301,14 @@ STOP_EVENTS = ("Stop", "SubagentStop")
 # cannot block at all; an errored UserPromptSubmit stamp must never block a human prompt; a
 # PostToolUse recorder error must surface as a warning, not a tool failure. Doc-confirmed 2026-08-29.
 FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSubmit", "PostToolUse")
+# The platform stops a hook command at the timeout tools/gen_hooks.py writes into hooks.json (its
+# TIMEOUT); HOOK_TIMEOUT_SECONDS mirrors that value, and gen_hooks refuses to render (exit 2) when the two
+# differ, so both numbers come from that one source. main() gives every PreToolUse mode that is not
+# fail-open PRETOOL_BUDGET_SECONDS, counted from before the payload read, and fails closed with exit 2
+# when its check has not decided by then, so the refusal is written before the platform's own timeout.
+# gen_hooks also refuses a budget that is not at least one second below the timeout or not positive.
+HOOK_TIMEOUT_SECONDS = 10
+PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - 2.0
 
 
 # --- decision constructors ---------------------------------------------------------------------------
@@ -1524,7 +1570,22 @@ def _join_continuations(command):
     quotes nest, as in _skip_quoting. DISCLOSED divergences: inside a QUOTED heredoc body bash keeps the
     pair and this join removes it (heredocs are not modelled; any '<<' marks the lex uncertain anyway),
     and a 'case' pattern ')' inside a substitution is read as closing it (any '$(' or backtick marks the
-    lex uncertain anyway). Linear, never raises."""
+    lex uncertain anyway). Linear, never raises.
+
+    A command that holds no backslash immediately followed by a newline returns (command, the identity
+    index) at once, without the context walk (_join_continuations_walk). The result is identical: the
+    walk removes characters only at a backslash whose next character is a newline, and every other step
+    copies the characters it passes in order, so with no such pair nothing is removed in any context and
+    the walk returns the command unchanged with raw_index[k] == k. The pair test is a plain substring
+    test, so a pair the walk keeps (inside single quotes or a comment) still takes the walk."""
+    if chr(92) + "\n" not in command:
+        return command, list(range(len(command) + 1))
+    return _join_continuations_walk(command)
+
+
+def _join_continuations_walk(command):
+    """The context walk behind _join_continuations, with no fast path: the same (joined, raw_index)
+    for every command. The self-test compares the two on commands with and without a continuation."""
     n = len(command)
     out = []
     raw_index = []
@@ -1779,7 +1840,7 @@ def _lex_uncertain(command):
     return bool(_lex_uncertain_causes(command))
 
 
-def _lex_command(command, partial=False, locale=False):
+def _lex_command(command, partial=False, locale=False, skip_empty=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
     '{fd}>' redirect, or a malformed redirect), so the caller falls back conservatively rather than acting on
@@ -1822,27 +1883,33 @@ def _lex_command(command, partial=False, locale=False):
     moves instead (MAIN'S DECISION AS A FLOOR, above _MainHashReading, and _beside_main_reading).
 
     locale is passed to _read_word for every word, under every reading: True reads a bash locale quote
-    $"..." as a double-quoted string, and the default False keeps the reading every other caller relies on."""
+    $"..." as a double-quoted string, and the default False keeps the reading every other caller relies on.
+
+    skip_empty True leaves out, under every reading, every segment with no word and no redirect, whose record
+    would be _Segment([], sep, [], raw, False, [], []), so a long run of separators ('((((', ';;;;') builds no
+    record, list or tuple for it; every other record, its order and the partial-mode flags are unchanged. Only
+    a caller that reads nothing from such a segment (not its sep_after, its raw slice, or its place in the
+    list) passes it; the default False keeps every record."""
     try:
-        readings = _lex_readings(command, partial, locale)
+        readings = _lex_readings(command, partial, locale, skip_empty)
     except _UncertainHashError:
         if not partial:
             raise
-        lexed, misread = _lex_reading(command, True, None, locale)
-        readings = _beside_main_reading(command, True, locale, [lexed]) if misread else [lexed]
+        lexed, misread = _lex_reading(command, True, None, locale, skip_empty)
+        readings = _beside_main_reading(command, True, locale, [lexed], skip_empty) if misread else [lexed]
     if partial:
         return ([seg for segs, _complete, _open in readings for seg in segs],
                 all(done for _segs, done, _open in readings), readings[-1][2])
     return [seg for segs in readings for seg in segs]
 
 
-def _lex_readings(command, partial=False, locale=False):
+def _lex_readings(command, partial=False, locale=False, skip_empty=False):
     """The lex of command under every reading of its uncertain '#' characters (the comment above
     _nest_track): a list with one _lex_reading result per reading, a single entry for a command with none.
     Each reading maps the index of each uncertain '#' the lex meets (one inside a substitution or expansion
     that a double-quoted string holds included, _skip_quoting) to True (a comment to the end of its line) or
     False (word text), and each is a normal lex of the whole command, with locale passed to every word read
-    (_read_word). The readings are enumerated
+    (_read_word) and skip_empty to every pass (_lex_command). The readings are enumerated
     depth first, the comment reading of a '#' before its word-text reading, and stop at
     _HASH_READING_LIMIT uncertain '#' characters per reading, so at most sixteen readings and thirty-one
     lexes per call. That bounds how many lexes a call makes, not how long they take: each lex makes at most
@@ -1857,14 +1924,14 @@ def _lex_readings(command, partial=False, locale=False):
     plain lex raises before any uncertain '#' propagates unchanged); in partial mode a reading that fails for
     another reason returns its recovered segments, as a partial lex does."""
     if _SubstHeredocs.main_lex:
-        return [_main_reading(command, partial, locale)]
+        return [_main_reading(command, partial, locale, skip_empty)]
     readings = []
     misread = False
     pending = [{}]
     while pending:
         reading = pending.pop()
         try:
-            lexed, body = _lex_reading(command, partial, reading, locale)
+            lexed, body = _lex_reading(command, partial, reading, locale, skip_empty)
         except _UncertainHashError as exc:
             if exc.backquote or exc.at is None or exc.at in reading or len(reading) >= _HASH_READING_LIMIT:
                 raise
@@ -1878,7 +1945,7 @@ def _lex_readings(command, partial=False, locale=False):
         else:
             readings.append(lexed)
             misread = misread or body
-    return _beside_main_reading(command, partial, locale, readings) if misread else readings
+    return _beside_main_reading(command, partial, locale, readings, skip_empty) if misread else readings
 
 
 def _hash_reading_with(reading, at, comment):
@@ -1888,8 +1955,9 @@ def _hash_reading_with(reading, at, comment):
     return out
 
 
-def _lex_reading(command, partial, hash_reading, locale=False):
-    """One lex of command (see _lex_command for the segments it returns, the partial contract and locale) with
+def _lex_reading(command, partial, hash_reading, locale=False, skip_empty=False):
+    """One lex of command (see _lex_command for the segments it returns, the partial contract, locale and
+    skip_empty) with
     each uncertain '#' read as hash_reading maps its index (True a comment to the end of its line, False word
     text). An uncertain '#' that hash_reading does not map, or any uncertain '#' when hash_reading is None,
     raises _UncertainHashError carrying its index; in partial mode it does so too, unless hash_reading is
@@ -1901,37 +1969,38 @@ def _lex_reading(command, partial, hash_reading, locale=False):
     caller adds main's reading (_beside_main_reading, MAIN'S DECISION AS A FLOOR above _MainHashReading)."""
     heredocs = _SubstHeredocs()
     try:
-        lexed = _lex_pass(command, partial, hash_reading, locale, heredocs)
+        lexed = _lex_pass(command, partial, hash_reading, locale, heredocs, skip_empty)
     except _SubstHeredocRetry:
-        return _lex_pass(command, partial, hash_reading, locale, None), False
+        return _lex_pass(command, partial, hash_reading, locale, None, skip_empty), False
     return lexed, heredocs.floor
 
 
-def _main_reading(command, partial, locale=False):
+def _main_reading(command, partial, locale=False, skip_empty=False):
     """Main's reading of command (MAIN'S DECISION AS A FLOOR, above _MainHashReading): one lex that reads no
     here-document body in a substitution and reads each '#' as main's lexer reads it (_MAIN_HASH_READING), so
     it makes one pass and raises no _UncertainHashError; see _lex_command for what it returns, the partial
-    contract and locale."""
-    return _lex_pass(command, partial, _MAIN_HASH_READING, locale, None)
+    contract, locale and skip_empty."""
+    return _lex_pass(command, partial, _MAIN_HASH_READING, locale, None, skip_empty)
 
 
-def _beside_main_reading(command, partial, locale, readings):
+def _beside_main_reading(command, partial, locale, readings, skip_empty=False):
     """readings, a lex's own readings of command, one of which read a body in a substitution that main's skip
     reads otherwise, with main's reading of command (_main_reading) after them where it lexes; a partial lex
     of main's reading always does, with the segments it recovers past the body. Where a full lex of main's
     reading fails, readings alone, and _SubstHeredocs.reads moves, so each guard also takes the decision of its
     path for a lex that fails (MAIN'S DECISION AS A FLOOR, above _MainHashReading)."""
     try:
-        mains = _main_reading(command, partial, locale)
+        mains = _main_reading(command, partial, locale, skip_empty)
     except ValueError:
         _SubstHeredocs.reads += 1
         return readings
     return readings + [mains]
 
 
-def _lex_pass(command, partial, hash_reading, locale, subst_heredocs):
+def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty=False):
     """One pass of _lex_reading, reading a quoted here-document's body inside a command substitution through
-    subst_heredocs (a _SubstHeredocs shared by the pass's substitution skips), or no body when it is None."""
+    subst_heredocs (a _SubstHeredocs shared by the pass's substitution skips), or no body when it is None.
+    skip_empty True leaves out every segment with no word and no redirect (_lex_command)."""
     n = len(command)
     segments = []
     argv = []
@@ -1944,14 +2013,17 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs):
     nest = _NestStack()  # the nesting stack of the '#' comment rule (see the comment above _nest_track)
 
     def end_segment(sep, op_start, next_start):
-        segments.append(_Segment(list(argv), sep, list(redirects),
-                                  command[seg_start[0]:op_start], opaque[0], list(argv_opaque),
-                                  list(argv_leading_tilde)))
-        del argv[:]
-        del argv_opaque[:]
-        del argv_leading_tilde[:]
-        del redirects[:]
-        opaque[0] = False
+        # With no word and no redirect there is nothing to reset: argv_opaque, argv_leading_tilde and opaque
+        # change only together with argv, so a skipped segment leaves them empty and False as well.
+        if argv or redirects or not skip_empty:
+            segments.append(_Segment(list(argv), sep, list(redirects),
+                                      command[seg_start[0]:op_start], opaque[0], list(argv_opaque),
+                                      list(argv_leading_tilde)))
+            del argv[:]
+            del argv_opaque[:]
+            del argv_leading_tilde[:]
+            del redirects[:]
+            opaque[0] = False
         seg_start[0] = next_start
 
     def consume_redirect(op, oplen, at, src_fd):
@@ -2096,7 +2168,7 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs):
     return segments
 
 
-def _segments(command, locale=False):
+def _segments(command, locale=False, skip_empty=False):
     """Compatibility projection over _lex_command: a list of (argv, sep_after) tuples, argv being the
     quote-decoded words with shell REDIRECTION removed (so a leading/interspersed/trailing redirect no
     longer pollutes the token stream) and sep_after the ending operator or "". Raises ValueError on a
@@ -2104,8 +2176,9 @@ def _segments(command, locale=False):
     (protected_line, gate_weakening, git_explicit_binding, git_discard, find_ai_authorship) read
     redirect-free argv automatically; diff_source_pretool uses the richer _Segment records directly.
     locale is passed to _lex_command; only the commit-identity reader (_cmtidn_line_ai) sets it, and it reads
-    each line with it set and unset."""
-    return [(seg.argv, seg.sep_after) for seg in _lex_command(command, locale=locale)]
+    each line with it set and unset. skip_empty is passed to _lex_command, for a caller that reads nothing
+    from a segment with no word and no redirect."""
+    return [(seg.argv, seg.sep_after) for seg in _lex_command(command, locale=locale, skip_empty=skip_empty)]
 
 
 # A leading inline shell env-var assignment (FOO=bar or the APPEND form FOO+=bar) that PREFIXES a command,
@@ -2438,10 +2511,39 @@ _DEV_PROC_TARGET_RE = re.compile(r"^/+(?:dev|proc)(?:/|$)")
 # It therefore cannot be proven a plain file lexically, so it is routed OPAQUE (ASK), never a proven
 # real-file ALLOW - matching how a '..' escape (equally cwd-dependent) is handled.
 _REL_DEV_PROC_TARGET_RE = re.compile(r"^(?:dev|proc)(?:/|$)")
+
+
+class _RawSequence:
+    """A raw-text probe whose steps must match IN ORDER: each step is searched once, from the end of the
+    previous step's leftmost match, and search() returns the last step's match or None. It decides the
+    same set as the single regex that joins the steps with a lazy '.*?' under re.DOTALL ('\\bgit\\b.*?\\bpush\\b'
+    and its siblings), at linear cost: that single regex retries the lazy gap from every match of the
+    first step, so on a command with many git words and no verb after them its cost grew with the square
+    of the command length, and with the cube for a three-step pattern (seconds at a few KB, past the hook
+    timeout well under 64 KB). Taking each step's leftmost match loses no solution because every step but
+    the last matches one fixed-length word, so the leftmost match also ends first, and a search started at
+    a position still reads the characters before it, so a word boundary or lookbehind at that position
+    sees the same neighbour it sees in the single regex. tools/selftest_aiqt_hooks.py holds every probe
+    built from this class equal to the single regex it replaced over a generated corpus."""
+    __slots__ = ("steps",)
+
+    def __init__(self, *patterns):
+        self.steps = tuple(re.compile(pattern) for pattern in patterns)
+
+    def search(self, text):
+        found, pos = None, 0
+        for step in self.steps:
+            found = step.search(text, pos)
+            if found is None:
+                return None
+            pos = found.end()
+        return found
+
+
 # Fallback-only broad producer probe over the RAW command, used only when _lex_command cannot parse the
 # command: an apparent 'git ... <producer>' ASKS (never a silent allow, never a regex-earned allow).
-_RAW_DIFF_PRODUCER_RE = re.compile(
-    r"(?is)\bgit\b.*?\b(?:diff|show|range-diff|log|diff-tree|diff-index|diff-files|format-patch)\b")
+_RAW_DIFF_PRODUCER_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\b(?:diff|show|range-diff|log|diff-tree|diff-index|diff-files|format-patch)\b")
 
 
 def _has_patch_flag(tokens):
@@ -4093,9 +4195,10 @@ def bash_absolute_paths(data):
     # follow it) denies, and one whose text names cd or pushd or carries a '<' notes, as does one whose
     # quoting the fallback text does not decode (a cd may be spelled in it). This full lex and the partial
     # lex below each make up to thirty-one lexes, each linear in the command's length, on a command with
-    # uncertain '#' characters.
+    # uncertain '#' characters. Only whether this full lex raises is read, so it skips segments with no word
+    # and no redirect unbuilt, as the partial lex does.
     try:
-        _lex_command(command)
+        _lex_command(command, skip_empty=True)
     except _UncertainHashError:
         scan = _hash_doubt_scan(command)
         if ">" in scan:
@@ -4124,7 +4227,9 @@ def bash_absolute_paths(data):
                 "blank before such a '#' outside any grouping or substitution.")
     except ValueError:
         pass
-    segments = _lex_command(command, partial=True)[0]  # with main's, where it read a body main reads otherwise
+    # The loop reads only each segment's words and redirects, so a segment with neither is skipped unbuilt.
+    # With main's segments, where a reading read a body main reads otherwise.
+    segments = _lex_command(command, partial=True, skip_empty=True)[0]
     reasons = []       # relative/opaque cd or NON-destructive redirect: an allow-note convention nudge
     deny_reasons = []  # a DESTRUCTIVE truncating redirect to a relative/opaque target: fail-closed deny
     for seg in segments:
@@ -4450,15 +4555,19 @@ _GIT_CONFIG_WRITE_FLAGS = frozenset((
     "-e", "--edit"))
 _EXPBND_WRAPPER_WORDS = frozenset(("command", "exec", "builtin", "env", "sudo"))
 _RAW_EXPBND_CD_RE = re.compile(r"(?i)(?:^|[\s;&|()])(?:cd|pushd|popd)(?=$|[\s;&|()])")
-_RAW_EXPBND_MUTATE_RE = re.compile(
-    r"(?is)\bgit\b.*?\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
+_RAW_EXPBND_MUTATE_RE = _RawSequence(
+    r"(?i)\bgit\b",
+    r"(?i)\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
     r"notes|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|worktree)\b")
-_RAW_EXPBND_PRUNING_FETCH_RE = re.compile(
-    r"(?is)\bgit\b.*?\bfetch\b.*?(?:--prune(?:-tags)?\b|(?<!\S)-[^\s]*p)")
-_RAW_EXPBND_BREADTH_RE = re.compile(
-    r"(?is)\bgit\b.*?(?:\badd\b.*?(?:--all\b|(?<!\S)-[^\s]*A|(?<!\S)(?:\.|:/)(?!\S))|"
-    r"\bcommit\b.*?(?:--all\b|(?<!\S)-[^\s]*a))")
-_RAW_EXPBND_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
+_RAW_EXPBND_PRUNING_FETCH_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\bfetch\b", r"(?i)--prune(?:-tags)?\b|(?<!\S)-[^\s]*p")
+# The whole-tree breadth probe is two sequences, git then add then an add breadth selector, or git then
+# commit then a commit breadth selector; a command shows breadth when either matches.
+_RAW_EXPBND_ADD_BREADTH_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\badd\b", r"(?i)--all\b|(?<!\S)-[^\s]*A|(?<!\S)(?:\.|:/)(?!\S)")
+_RAW_EXPBND_COMMIT_BREADTH_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\bcommit\b", r"(?i)--all\b|(?<!\S)-[^\s]*a")
+_RAW_EXPBND_PUSH_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bpush\b")
 
 
 def _is_abs_binding(value):
@@ -4715,7 +4824,8 @@ def _expbnd_fallback_kind(command):
     if (_RAW_EXPBND_CD_RE.search(command) and
             (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command))):
         return "target"
-    if _RAW_EXPBND_BREADTH_RE.search(command) and _RAW_EXPBND_PUSH_RE.search(command):
+    if ((_RAW_EXPBND_ADD_BREADTH_RE.search(command) or _RAW_EXPBND_COMMIT_BREADTH_RE.search(command))
+            and _RAW_EXPBND_PUSH_RE.search(command)):
         return "publish"
     return None
 
@@ -4842,8 +4952,9 @@ def _stash_pop_apply_bare(sub, args):
 
 
 # git and then stash anywhere in a command's text: git_stash_ref's subject test when a '#' whose comment
-# reading the lexer cannot judge under both readings stops it (_hash_doubt_names).
-_STASH_WORD_RE = re.compile(r"(?is)\bgit\b.*?\bstash\b")
+# reading the lexer cannot judge under both readings stops it (_hash_doubt_names). A _RawSequence, so the
+# test is linear in the command's length.
+_STASH_WORD_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bstash\b")
 
 
 def git_stash_ref(data):
@@ -4897,7 +5008,9 @@ def git_stash_ref(data):
             "its git target and scope could not be checked. This is a binding convention, not a hazard, so "
             "it is allowed; prefer an explicit '-C' target and enumerated scope.")
     try:
-        segments = _segments(command)
+        # The loop below passes over a segment with no word (it has no command word), so one with no word
+        # and no redirect is not built at all.
+        segments = _segments(command, skip_empty=True)
     except _UncertainHashError:
         # Unlike other unparseable text, which silently allows, a stash verb behind a '#' whose comment
         # reading the lexer could not judge under both readings keeps the note it would earn, and so does a
@@ -7512,7 +7625,7 @@ def _uncertain_line_lossy(command):
     found = []
     for line in _join_continuations(command)[0].split("\n"):
         try:
-            line_segments = _segments(line)
+            line_segments = _segments(line, skip_empty=True)  # a segment with no word names no verb
         except ValueError:
             continue  # a line the lexer cannot read alone contributes no name
         for tokens, _sep in line_segments:
@@ -7652,7 +7765,11 @@ def git_discard(data):
     if not isinstance(command, str):
         return _allow()  # boundary: unreadable/malformed command container
     try:
-        segments = _segments(command)
+        # Segments with no word and no redirect are skipped unbuilt: the lossy scan below passes over a
+        # segment with no command word, and _pristine_single_bare_git returns before reading the segments
+        # when the command holds any shell metacharacter (every separator and the newline among them), so
+        # it reads only the single segment that ends the command, and drops that one too when it has no word.
+        segments = _segments(command, skip_empty=True)
     except _UncertainHashError:
         # The same raw scan, also run on the text with its backslash-newlines and then its quote characters
         # and backslashes removed: the lexer saw nothing past a '#' whose comment reading it could not judge
@@ -8204,8 +8321,8 @@ _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests bod
 
 # Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct);
 # mirrors the _RAW_DIFF_PRODUCER_RE / _RAW_LOSSY_VERB_RE posture: conservative, over-matching, never
-# a silent allow. _RAW_PUSH_RE/_RAW_COMMIT_RE pair git with the verb in one pattern ((?is): case-fold,
-# '.' spans newlines). _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--for[a-z-]*' covers
+# a silent allow. _RAW_PUSH_RE/_RAW_COMMIT_RE pair git with a LATER verb (a _RawSequence, case-folded,
+# the gap spanning newlines). _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--for[a-z-]*' covers
 # --for/--force/--force-with-lease/--force-if-includes; the short cluster scan now admits a digit
 # ('-[A-Za-z0-9]*f'), so an ipv4/ipv6 '-4f'/'-6f' clustered with force is caught (F-117), and its
 # disclosed false-hit on an attached -o value ending in f ('-of') now also covers '-o4f'; the short
@@ -8275,7 +8392,7 @@ def _push_abbrev_alternative(name, shortest):
     return "--" + re.escape(shortest) + tail + r"(?![\w-])"
 
 
-_RAW_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
+_RAW_PUSH_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bpush\b")
 _RAW_PUSH_FORCE_RE = re.compile(
     r"(?i)--for[a-z-]*|"
     + "|".join(_push_abbrev_alternative(name, shortest) for name, shortest in _PUSH_FORCE_ABBREVS)
@@ -8310,7 +8427,7 @@ _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")
 _RAW_PUSH_MIRRORCFG_RE = re.compile(
     r"(?i)(?:^|[\s'\"])-c[\s'\"]+remote\.[^\s=]+\.mirror"
     r"|(?:^|[\s'\"])--config-env[=\s]['\"]*remote\.[^\s=]+\.mirror")
-_RAW_COMMIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
+_RAW_COMMIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
 
 # Commit proof contract. Recognizers establish syntax, never authorization.
 # The ordered evaluator supplies the evidence consumed by _commit_on_protected.
@@ -10164,8 +10281,9 @@ def _branch_root_probe(repo, start):
 
 
 # git and then a verb that can create a branch anywhere in a command's text: branch_root's subject test when
-# a '#' whose comment reading the lexer cannot judge under both readings stops it (_hash_doubt_names).
-_BRANCH_CREATE_WORD_RE = re.compile(r"(?is)\bgit\b.*?\b(?:checkout|switch|branch|worktree)\b")
+# a '#' whose comment reading the lexer cannot judge under both readings stops it (_hash_doubt_names). A
+# _RawSequence, so the test is linear in the command's length.
+_BRANCH_CREATE_WORD_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:checkout|switch|branch|worktree)\b")
 
 
 def branch_root(data):
@@ -10212,7 +10330,9 @@ def branch_root(data):
             "AIQT guardrail: denied a Bash call with no readable command (rule brnrot, fail-closed).")
     reads = _SubstHeredocs.reads
     try:
-        segments = _segments(command)
+        # The loop below passes over a segment with no word (it has no command word), so one with no word
+        # and no redirect is not built at all, here, in the partial reread or in main's floor reread.
+        segments = _segments(command, skip_empty=True)
     except ValueError as exc:
         # The lexer saw nothing past a '#' whose comment reading it could not judge under both readings, so
         # a branch-creating git verb its text names cannot be proven rooted: it denies rather than take the
@@ -10233,14 +10353,16 @@ def branch_root(data):
         # segments, so a canonical orphan creation still DENIES (DENY outranks the parse error). A command
         # with no recovered creation falls back to the open-grammar allow (best-effort, disclosed).
         try:
-            segments = [(seg.argv, seg.sep_after) for seg in _lex_command(command, partial=True)[0]]
+            segments = [(seg.argv, seg.sep_after)
+                        for seg in _lex_command(command, partial=True, skip_empty=True)[0]]
         except ValueError:
             return _allow()  # even partial recovery failed: open grammar, best-effort
     if _SubstHeredocs.reads != reads:
         # A lex read a here-document body that main's lexer reads otherwise, and main's reading fails: the
         # segments main's partial lex recovers, past the body, are judged too.
         with _SubstHeredocFloor():
-            segments = segments + [(seg.argv, seg.sep_after) for seg in _lex_command(command, partial=True)[0]]
+            segments = segments + [(seg.argv, seg.sep_after)
+                                   for seg in _lex_command(command, partial=True, skip_empty=True)[0]]
 
     # No-ask posture: branch rooting is a HAZARD class (an orphan/unrooted branch dispatches work onto a
     # retired root), so a case this guard cannot prove rooted DENIES-and-educates, naming the reachable
@@ -10425,9 +10547,9 @@ _GATE_ALTS = (
 # mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. '--no-ver'
 # deliberately also hits '--no-verbose' (an over-deny on the unparseable path only); the short cluster
 # probe requires a whitespace-preceded single-dash token so a long option ('--amend') never matches.
-_RAW_NOVERIFY_VERB_RE = re.compile(r"(?is)\bgit\b.*?\b(?:commit|merge|push|pull|rebase|am)\b")
+_RAW_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|merge|push|pull|rebase|am)\b")
 _RAW_NOVERIFY_RE = re.compile(r"(?i)--no-ver")
-_RAW_SHORT_NOVERIFY_VERB_RE = re.compile(r"(?is)\bgit\b.*?\b(?:commit|am)\b")
+_RAW_SHORT_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|am)\b")
 _RAW_SHORT_N_RE = re.compile(r"(?:^|\s)-[A-Za-z]*n\b")
 _RAW_CHECKER_RE = re.compile(
     r"(?i)\b(?:pytest|tox|nox|unittest|mypy|pyright|ruff|flake8|pylint|bandit|eslint|tsc|jest|"
@@ -10444,7 +10566,7 @@ _RAW_SINK_WORD_RE = re.compile(r"\b(?:head|tail|cut)\b")
 # (_truncating_sink_kind): gate_weakening's deny test when a '#' whose comment reading the lexer cannot judge
 # under both readings stops it (read over _hash_doubt_scan).
 _GATE_DOUBT_SINK_RE = re.compile(r"\|&?[^|;&\n]*\b(?:head|tail|grep|egrep|fgrep|rg)\b")
-_RAW_COMMIT_MSG_GIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
+_RAW_COMMIT_MSG_GIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
 _RAW_COMMIT_MSG_MARKER_RE = re.compile(r"`|\$\(")
 
 
@@ -23040,6 +23162,422 @@ HANDLER_EVENT = {
 }
 
 
+class _HookDeadline(BaseException):
+    """Raised inside a _DeadlineWindow when its deadline passes, carrying that window as its one argument
+    so a catcher can tell its own deadline from an enclosing window's. It derives from BaseException, not
+    Exception, so no handler's own `except Exception` (or narrower) branch, several of which allow on a
+    cannot-evaluate, can catch it and turn an overrun into a decision."""
+
+
+class _DeadlineWindow:
+    """The one shared, nesting-safe borrow of the process real-time timer (ITIMER_REAL and its SIGALRM
+    disposition), used as `with _DeadlineWindow(seconds):` once per instance. Inside the window,
+    _HookDeadline is raised when `seconds` have passed, or earlier when a timer the caller had already
+    set comes due first (the window never outlives the caller's own deadline).
+
+    The caller's timer is restored elapsed-aware, never verbatim: its countdown is taken with
+    setitimer(ITIMER_REAL, 0) and the time of the take is read from time.monotonic, the clock the kernel
+    counts ITIMER_REAL in, so on exit an active caller timer is re-armed with what it had left minus the
+    time the window used (to the microsecond setitimer resolves), keeping its repeat interval; an inactive
+    one stays inactive; one that came due during the window is delivered once its handler is back (a
+    periodic one is first re-armed at the phase it would have reached, its expiries inside the window
+    delivered as the one notification the kernel itself would have left pending). A periodic timer taken
+    between an expiry and the delivery of its signal reads (0, interval), and the kernel no longer re-arms
+    it once taken, so the window counts it as due one interval after the take. A nested window is just
+    such a caller, so nesting restores each level.
+
+    The take and the restore each run with every maskable signal blocked (signal.pthread_sigmask over
+    signal.valid_signals()). A signal sent to the main thread while the mask is held (a caller expiry, an
+    enclosing window's expiry, or any other signal) stays pending until the mask in force before is put
+    back, once the window has fully taken or fully given back: its handler never sees a half-done take or
+    restore, and an exception it raises goes on from there. Two kinds of Python handler can still run while
+    the mask is held: one for a signal that arrived before the mask was set runs inside the call that sets
+    it, once the mask is set and before the take or the restore begins; and one for a signal another thread
+    received runs where the thread limit below says. The mask is put back by a direct call of the C
+    function that the signal module's pthread_sigmask wraps (_SET_MASK), never through that Python wrapper,
+    whose entry is a point where Python can run pending handlers: the call sets the mask before any Python
+    handler can run, so a handler that raises then raises from that call with the mask already back, and a
+    handler left pending behind it runs when Python next runs pending handlers.
+
+    The take (_take) records the caller's disposition, reads the clock, takes the caller's timer, installs
+    the window's handler and arms the window's timer, each once and in that order. A SIGALRM pending once
+    the window's handler is installed, before its timer is armed, cannot be the window's own: the caller's
+    timer came due at or before the take, or the signal was sent while the caller's disposition was in
+    place. The window then counts the caller's timer as due, sets `pending_at_entry`, and ends at once: it
+    gives everything back, the caller's handler receives that SIGALRM once as the mask is put back, and
+    __enter__ raises this window's _HookDeadline (or what that handler raised in its place). An enclosing
+    window's expiry that lands before an inner window's take is such a signal, so its deadline reaches its
+    owner.
+
+    The restore (_give_back) cancels the window's timer, reading what it had left; installs SIG_IGN, which
+    discards a pending SIGALRM, only when that timer had run out and the window's own expiry has not been
+    delivered since the timer was armed (`_unheard`, which _fire clears as below), so the SIGALRM pending is
+    that expiry and it never reaches the caller; reinstalls the caller's disposition; reads the clock and
+    decides, once, whether the caller's timer came due; re-arms the caller's timer; and, for a due expiry,
+    queues a SIGALRM with signal.raise_signal unless one is pending already, so the expiry is delivered
+    once, to the caller's handler, as the mask is put back.
+    Any other SIGALRM pending at the restore (one sent while the mask was held, say) is left pending and
+    reaches the caller's handler the same way, except where the restore takes it for the window's own
+    expiry: when the window's timer had run out, read by a cancel whose first run returned, and `_unheard` is
+    still set, the SIGALRM pending is discarded as that expiry even when it came from elsewhere (the paragraph
+    on _fire's reads below states the residual case). The kernel keeps at most one pending instance of a
+    standard signal, which leaves two merges: a SIGALRM from elsewhere pending with the window's own expiry
+    (in either order) is discarded with it, and a caller expiry that came due and another SIGALRM pending at
+    the restore reach the caller's handler as one delivery. A re-armed periodic timer whose next expiry also
+    falls due before the mask is put back adds no second delivery: the kernel can hold one SIGALRM pending for
+    the process and one for the thread, both are delivered on return from the call that puts the mask back,
+    before Python runs any handler, and Python runs a signal's handler once for all the deliveries it has
+    received since it last ran handlers (observed on Linux with Python 3.14.4: a timer expiry and a
+    raise_signal both pending ran the handler once). An enclosing window's expiry that falls due during the
+    restore is delivered the same way, after the inner window has fully finished. The restore discards nothing
+    in these cases: after an arming setitimer that raised (`_unheard` is set only once it has returned), after
+    a cancel whose first run raised (_twice says why), or after a read in _fire that raised; a window's own
+    expiry then pending reaches the caller's handler. Nothing in the hook installs SIG_DFL for SIGALRM:
+    main(), run as the hook process, runs the window under the disposition that process inherited. Under
+    SIG_DFL, the disposition the hook process normally inherits, that delivery kills the hook process by
+    SIGALRM, so it ends without the exit 2 that fails a PreToolUse call closed. An inherited SIG_IGN stays
+    ignored across exec, and under SIG_IGN the pending signal is discarded (not fatal).
+
+    An operation of the restore that raises (setitimer, signal.signal, sigpending or raise_signal failing)
+    is tried once more inside the same blocked section; the restore then goes on, and the first exception
+    is raised once it has finished. One that raises twice ends the restore there: the window is recorded as
+    broken (`broken` True, `armed` False) and the second exception is raised. Either way the window is
+    closed before the mask is put back, so no restore is left for a later call to finish. A broken window
+    leaves the process where its restore stopped, and nothing restores the caller's state after that: a
+    failed cancel leaves the window's timer running and its handler installed (that expiry then ends
+    nothing), with the caller's disposition and timer not back; a failed discard or reinstall leaves the
+    window's handler, or SIG_IGN, in place of the caller's, with the caller's timer inactive; a failed re-arm
+    leaves the caller's handler back and its timer inactive; and a failed pending check or queue leaves a
+    due expiry undelivered. The ItimerError (an OSError) that a broken window raises therefore reports a
+    timer state that is no longer the caller's, and a caller must let it go on, never swallow it: main()
+    turns it into exit 2 on a PreToolUse mode and a non-blocking warning on a fail-open one.
+
+    The window's own expiry is delivered in whatever frame is running while the window is live, the entry
+    of __exit__ before its first statement included, so _fire closes the window (the restore above) and
+    then raises this window's _HookDeadline. A caller expiry that came due is delivered to the caller's
+    handler as _fire puts the mask back. An enclosing window's _HookDeadline from that handler goes on as
+    it is, to its owner; any other exception it raises is held while the body unwinds on this window's
+    _HookDeadline, so no except branch in the body can catch it and decide on it, and __exit__ (or
+    __enter__'s cleanup) raises it in place of the deadline. Once the window's exit has begun, its own
+    expiry raises no deadline: _fire then only closes the window, if it is still armed.
+
+    Before its close attempts _fire reads whether the SIGALRM it handles is the window's own expiry, and
+    clears `_unheard` only when the window's timer reads as run out and no SIGALRM is pending. A SIGALRM
+    from elsewhere that _fire handles while the window's timer still runs therefore leaves the window's
+    expiry, if it comes pending later in the restore, to be discarded; an expiry already pending when _fire
+    runs inside the call that sets the mask (for a SIGALRM that arrived just before it) is discarded the
+    same way. A read that raises counts the expiry as delivered, and its exception is kept like a close
+    attempt's. Where this read leaves `_unheard` set, one SIGALRM is still taken for that expiry wrongly,
+    and discarded: one sent once the mask is set, when the window's expiry arrived just before the call that
+    sets it and _fire runs inside that call. _fire then reads the timer run out and a SIGALRM pending, as in
+    the ordering the other way round (a SIGALRM from elsewhere just before that call, the window's expiry
+    once the mask is set), so neither of its reads can tell the two apart. This discard is kept as a disclosed
+    residual. It is not the only way a SIGALRM from elsewhere is discarded as the window's expiry; the ways
+    that follow are examples, and the list is not exhaustive. A SIGALRM from elsewhere pending together with
+    the window's expiry merges with it and is discarded with it (the restore above). While the window is live,
+    with _fire installed and the main thread able to run handlers, Python runs _fire once for all the
+    SIGALRMs received since it last ran handlers, so a SIGALRM from elsewhere and the window's expiry that
+    both arrive, in either order, before the main thread next checks for signals (during a long C call, say)
+    are handled as one, and the one from elsewhere never reaches the caller. And the limits below state two
+    more: after a handler that raises at the entry of _fire has taken that expiry with it, and after another
+    thread has taken it.
+
+    CPython runs a Python handler only where it checks for signals: at the entry of a function, at the
+    back edge of a loop, and inside or on return from a call. So a handler can still run before the take or
+    the restore begins: at the entry of _close, and in the calls that read and set the mask (in the one that
+    sets it, once the mask is set). A handler that raises there runs before anything is taken, or before
+    anything is given back (the restore starts only once the call that sets the mask has returned), and
+    leaves the window armed. __exit__, _fire and __enter__'s cleanup therefore each make three close
+    attempts (each a call of _close, which does nothing once the window is closed), one after another with
+    no call, loop or function entry between them, and keep the first exception an attempt (or _fire's read
+    before them) raised, raising it once the attempts are over. The window is left armed only when a
+    raising handler interrupts each of the three attempts before _give_back begins. Its own timer then
+    still runs (only the restore cancels it), and _fire closes the window when that expiry is delivered:
+    once an attempt has marked the exit begun, with three more attempts that raise no deadline of their
+    own, the caller's disposition and timer coming back and an enclosing window's expiry that came due
+    meanwhile reaching its owner as the mask is put back; if none got that far, as the live window's
+    deadline, raised wherever the program is.
+
+    The limits that remain. A handler that raises at the entry of __exit__, before its first statement, or
+    at the return instruction of __enter__, after its last, runs where no code of the window can: the
+    window stays live until its own timer ends it through _fire, which then restores the caller's state and
+    raises its deadline wherever the program is. A handler that raises at the entry of _fire, before its
+    first statement, takes the window's expiry with it: a live window then has no deadline left, and its
+    restore when __exit__ closes it counts a SIGALRM then pending as that expiry and discards it. A window
+    whose three exit attempts are all interrupted, and whose expiry is then lost the same way (at the entry
+    of _fire, or in each of its three attempts), stays armed for good. And the mask is the calling thread's:
+    a signal sent to the process can still be taken by another thread that leaves it unblocked (a worker
+    thread review_dispatch_pin leaves running past its wait is one), and its Python handler then runs in
+    the main thread inside the blocked section, as whichever handler is installed at that moment (so a
+    window's own expiry taken that way can reach the caller's handler, and a SIGALRM from elsewhere then
+    pending at the restore can be discarded as that expiry).
+
+    The borrow is refused, and the window runs with no deadline at all (armed stays False, nothing is
+    changed), where it cannot be done faithfully: no finite positive `seconds` (the fail-open modes pass
+    None), a platform without setitimer, getitimer, pthread_sigmask, sigpending, valid_signals or
+    raise_signal (Windows) or without a callable _SET_MASK (the signal module defines its pthread_sigmask
+    wrapper only when _signal has the C function, so _SET_MASK is there whenever signal.pthread_sigmask is;
+    it is checked as well, so a borrow never starts without it), a thread other than the main thread
+    (Python runs signal handlers only there, and the mask it sets would not be the main thread's), a caller
+    that blocks SIGALRM (a deadline could not fire, and its pending notification could not be kept apart
+    from ours), or a SIGALRM disposition not installed from Python (getsignal returns None, which cannot be
+    reinstalled)."""
+    __slots__ = ("seconds", "armed", "broken", "pending_at_entry", "_live", "_ending", "_unheard", "_handler",
+                 "_timer", "_began", "_held")
+    # Every signal the take and the restore hold back (the kernel never blocks SIGKILL or SIGSTOP).
+    _EVERY_SIGNAL = frozenset(signal.valid_signals()) if hasattr(signal, "valid_signals") else frozenset()
+    # The C function signal.pthread_sigmask wraps, which puts the mask back before any Python handler runs.
+    _SET_MASK = getattr(_signal, "pthread_sigmask", None)
+
+    def __init__(self, seconds):
+        self.seconds = seconds
+        self.armed = self.broken = self.pending_at_entry = self._live = self._ending = self._unheard = False
+        self._handler = self._timer = self._began = self._held = None
+
+    def _fire(self, signum, frame):
+        # Whether the SIGALRM handled is the window's own expiry, read as the class docstring describes: a
+        # read that raises leaves it unknown, counted as delivered, and its exception is kept.
+        heard = True
+        try:
+            heard = (signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+                     and signal.SIGALRM not in signal.sigpending())
+        except BaseException as error:
+            first = error
+        else:
+            first = None
+        if heard:
+            self._unheard = False  # the window's own expiry has been delivered: none is pending for the restore
+        live = self._live
+        if not (live or self._ending):
+            if first is not None:
+                raise first
+            return
+        # The close attempts the class docstring describes, the first exception kept.
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        if not live:
+            # The exit had begun and left the window armed: its expiry only closes it.
+            if first is not None:
+                raise first
+            return
+        if first is None:
+            raise _HookDeadline(self)
+        if isinstance(first, _HookDeadline):
+            raise first  # an enclosing window's deadline, delivered as the caller expiry that came due
+        self._held = first
+        raise _HookDeadline(self) from first
+
+    def _raise_held(self):
+        held, self._held = self._held, None
+        if held is not None:
+            raise held
+
+    @staticmethod
+    def _as_taken(timer):
+        value, interval = timer
+        return (interval, interval) if value <= 0 < interval else timer
+
+    def _can_borrow(self):
+        seconds = self.seconds
+        if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
+                or not math.isfinite(seconds) or seconds <= 0):
+            return False
+        if not all(hasattr(signal, name) for name in (
+                "setitimer", "getitimer", "ITIMER_REAL", "SIGALRM", "pthread_sigmask", "sigpending",
+                "valid_signals", "raise_signal")):
+            return False
+        if not callable(self._SET_MASK):
+            return False  # there whenever signal.pthread_sigmask is (the class docstring says why)
+        if threading.current_thread() is not threading.main_thread():
+            return False
+        if signal.SIGALRM in signal.pthread_sigmask(signal.SIG_BLOCK, ()):
+            return False
+        return signal.getsignal(signal.SIGALRM) is not None
+
+    def __enter__(self):
+        if self.armed or not self._can_borrow():
+            return self
+        # The mask is read first, so a handler already due runs before anything is blocked or taken, and
+        # the mask to put back is known even when a handler raises as the blocking call returns. The return
+        # statement is inside the try, so a handler raising up to it gives everything back (the return
+        # instruction itself is a limit the class docstring states).
+        try:
+            mask = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+            try:
+                signal.pthread_sigmask(signal.SIG_BLOCK, self._EVERY_SIGNAL)
+                self._take()
+            finally:
+                self._SET_MASK(signal.SIG_SETMASK, mask)
+            return self
+        except BaseException:
+            # The take failed, or a handler raised as the mask was set or put back: whatever the window
+            # holds goes back to the caller before the exception goes on, through the close attempts the
+            # class docstring describes, the first exception kept.
+            try:
+                self._ending = True
+                self._live = False
+                self._close()
+            except BaseException as error:
+                first = error
+            else:
+                first = None
+            try:
+                self._close()
+            except BaseException as error:
+                first = error if first is None else first
+            try:
+                self._close()
+            except BaseException as error:
+                first = error if first is None else first
+            if first is not None:
+                raise first
+            self._raise_held()
+            raise
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            # The close attempts the class docstring describes, the first exception kept.
+            self._ending = True
+            self._live = False
+            self._close()
+        except BaseException as error:
+            first = error
+        else:
+            first = None
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        if first is not None:
+            raise first
+        self._raise_held()
+        return False
+
+    def _close(self):
+        """One close attempt: run _give_back with every maskable signal blocked, then put back the mask in
+        force before (through _SET_MASK), which delivers what came pending meanwhile. It marks the exit
+        begun (`_ending` before `_live` goes False, so an armed window that is not live is always one whose
+        exit has begun or whose take is still running). _give_back runs only once the call that sets the
+        mask has returned: a handler that raises before then leaves the window armed and holding everything,
+        and the caller makes its next attempt."""
+        self._ending = True
+        self._live = False
+        if not self.armed:
+            return
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+        try:
+            signal.pthread_sigmask(signal.SIG_BLOCK, self._EVERY_SIGNAL)
+            self._give_back()
+        finally:
+            self._SET_MASK(signal.SIG_SETMASK, mask)
+
+    def _take(self):
+        """The take, run with every maskable signal blocked, in the order the class docstring gives. The
+        clock is read just before the take, so the window's use is never undercounted (a caller timer comes
+        back at most microseconds early, never late). Anything that raises once the timer is taken gives it
+        back, with the disposition, before the exception goes on."""
+        handler = signal.getsignal(signal.SIGALRM)
+        began = time.monotonic()
+        timer = self._as_taken(signal.setitimer(signal.ITIMER_REAL, 0))
+        (self._handler, self._timer, self._began, self.pending_at_entry, self._unheard, self._ending,
+         self.broken, self.armed) = (handler, timer, began, False, False, False, False, True)
+        try:
+            signal.signal(signal.SIGALRM, self._fire)
+            if signal.SIGALRM in signal.sigpending():
+                self.pending_at_entry = True  # not the window's expiry: its timer is not armed yet
+                self._give_back()
+                raise _HookDeadline(self)
+            left = timer[0]
+            signal.setitimer(signal.ITIMER_REAL, self.seconds if left <= 0 else min(self.seconds, left))
+            self._unheard = True  # from here on an expiry of the window's timer can be pending at the restore
+            self._live = True
+        except BaseException:
+            self._give_back()
+            raise
+
+    def _give_back(self):
+        """The restore, run with every maskable signal blocked, in the order the class docstring gives: each
+        operation through _twice, the clock read once to decide whether the caller's timer came due, and a
+        due expiry queued last. `armed` is False when it returns or raises."""
+        self._live = False
+        if not self.armed:
+            return
+        errors = []
+        try:
+            reading = self._twice(errors, signal.setitimer, signal.ITIMER_REAL, 0)
+            if not errors and reading == (0.0, 0.0) and self._unheard:
+                # The window's timer ran out (read by a cancel whose first run returned, as _twice says) and
+                # its expiry has not been delivered since: the SIGALRM pending is its own.
+                self._twice(errors, signal.signal, signal.SIGALRM, signal.SIG_IGN)
+            self._unheard = False
+            self._twice(errors, signal.signal, signal.SIGALRM, self._handler)
+            value, interval = self._timer
+            left = value - (time.monotonic() - self._began)
+            due = self.pending_at_entry or (value > 0 and left <= 0)
+            if left > 0:
+                self._twice(errors, signal.setitimer, signal.ITIMER_REAL, left, interval)
+            elif due and interval > 0:
+                self._twice(errors, signal.setitimer, signal.ITIMER_REAL, interval - (-left % interval), interval)
+            if due and signal.SIGALRM not in self._twice(errors, signal.sigpending):
+                self._twice(errors, signal.raise_signal, signal.SIGALRM)
+        except BaseException:
+            self.broken = True
+            raise
+        finally:
+            self.armed = False
+        if errors:
+            raise errors[0]
+
+    @staticmethod
+    def _twice(errors, operation, *args):
+        """One restore operation, tried once more when it raises, returning what the run that returned gave:
+        the first exception is appended to errors, and a second one goes on. Each operation can run twice
+        with the effect of once: setitimer and signal.signal set the same state again, sigpending only
+        reads, and a second queued SIGALRM joins the one already pending. What the cancel reads is the one
+        exception: a first run that cancels the window's timer and then raises leaves the retry reading an
+        inactive timer that was running, so _give_back counts that timer as run out only from a cancel whose
+        first run returned, and after a retried cancel it discards nothing (it never discards on an
+        unknown)."""
+        try:
+            return operation(*args)
+        except BaseException as exc:
+            errors.append(exc)
+            return operation(*args)
+
+
+def _deadline_message(handler_name, seconds, payload):
+    """The stderr refusal main() writes when a PreToolUse check runs out of its deadline: it names the
+    handler, the budget and the payload size, and the two ways to bring the input inside the budget."""
+    if payload is None:
+        size = "an input it had not finished reading"
+    else:
+        size = "an input of {} bytes".format(len(payload.encode("utf-8", "replace")))
+    return ("AIQT guardrail: the {} check could not reach a decision within its {:g}-second budget on {}; "
+            "failing closed. Split the command into smaller calls, or move long content into a file and "
+            "pass its path.".format(handler_name, seconds, size))
+
+
+def _pending_alarm_message(handler_name, seconds):
+    """The stderr refusal main() writes when the window ends at its entry because a SIGALRM was already
+    pending (pending_at_entry): the check did not run, so nothing about the input or the budget applies."""
+    return ("AIQT guardrail: the {} check did not run: a SIGALRM was already pending when its {:g}-second "
+            "deadline was being set, so the deadline ended at once; failing closed.".format(handler_name, seconds))
+
+
 def _dispatcher_fail_open_warn(handler_name, detail):
     """A fail-open dispatcher-level error for a Stop/SubagentStop/SessionStart/TeammateIdle/
     UserPromptSubmit/PostToolUse handler: a non-blocking systemMessage on exit 0, so no error on
@@ -23071,6 +23609,24 @@ def _stderr_note(line):
         pass
 
 
+def _exception_text(exc):
+    """'<type name>: <message>' for a diagnostic, built so that it cannot raise out of main(): an exception
+    whose str() raises (or whose type name cannot be formatted) gets a placeholder in its place, so main()
+    still returns its mode's exit. A _HookDeadline that comes due while it formats goes on as it is."""
+    try:
+        return "{}: {}".format(type(exc).__name__, exc)
+    except _HookDeadline:
+        raise
+    except BaseException:
+        pass
+    try:
+        return "{}: <its message could not be read>".format(type(exc).__name__)
+    except _HookDeadline:
+        raise
+    except BaseException:
+        return "<an exception whose type and message could not be read>"
+
+
 def main(argv):
     # The MODE (argv[0]) alone decides the error posture, never the payload (which may be unreadable).
     # A genuinely unknown mode is not identifiable as Stop and is a broken install, so it fails closed
@@ -23097,42 +23653,107 @@ def main(argv):
                 return 0
         _stderr_note("aiqt_hooks: {} ({}); failing closed".format(handler_name, detail))
         return 2
+    # The PreToolUse deadline: every mode that is not fail-open reads its payload and runs its handler
+    # inside one _DeadlineWindow of PRETOOL_BUDGET_SECONDS, armed before the read; when the check has not
+    # decided by then the window raises _HookDeadline and the call fails CLOSED with exit 2 and a stderr
+    # line naming the handler, the budget and the input size. The window closes (the timer is cancelled
+    # and any caller timer restored) before the stdout decision below is written; the stderr notes of
+    # the unreadable-payload and handler-crash paths are written inside it, and both paths exit 2 even
+    # when the deadline interrupts the note. A fail-open mode gets a window with no deadline, so its
+    # error posture is unchanged. Any other exception out of the window keeps the mode's posture too.
+    window = _DeadlineWindow(None if is_fail_open else PRETOOL_BUDGET_SECONDS)
+    payload = None
     try:
-        data = json.loads(sys.stdin.read())
-        if not isinstance(data, dict):
-            raise ValueError("payload is not a JSON object")
-    except Exception as exc:  # any failure to read the payload is an unreadable payload
-        # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload, and ALSO a
-        # RecursionError (deeply nested JSON) or a MemoryError: the old narrow except let those escape as a
-        # traceback with exit 1, which the platform treats as non-blocking. Every exception is named.
-        detail = "{}: {}".format(type(exc).__name__, exc)
-        if is_fail_open:
-            # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so no Stop
-            # payload (including a bare '{' or any garbage) can ever wedge the session. The warn print
-            # raising (a stdout that cannot be written or flushed) loses the warning and keeps the 0.
+        with window:
             try:
-                return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(detail))
-            except BaseException:
-                return 0
-        # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
-        # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
-        _stderr_note("aiqt_hooks: unreadable hook payload ({}); failing closed".format(detail))
+                payload = sys.stdin.read()
+                data = json.loads(payload)
+                if not isinstance(data, dict):
+                    raise ValueError("payload is not a JSON object")
+            except Exception as exc:  # any failure to read the payload is an unreadable payload
+                # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload, and
+                # ALSO a RecursionError (deeply nested JSON) or a MemoryError: the old narrow except let those
+                # escape as a traceback with exit 1, which the platform treats as non-blocking. Every exception
+                # is named.
+                detail = _exception_text(exc)
+                if is_fail_open:
+                    # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so
+                    # no Stop payload (including a bare '{' or any garbage) can ever wedge the session. The
+                    # warn print raising (a stdout that cannot be written or flushed) loses the warning and
+                    # keeps the 0.
+                    try:
+                        return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(detail))
+                    except BaseException:
+                        return 0
+                # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
+                # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
+                _stderr_note("aiqt_hooks: unreadable hook payload ({}); failing closed".format(detail))
+                return 2
+            try:
+                code, stdout_obj, stderr_text = HANDLERS[handler_name](data)
+                # The result is checked here, inside the window and this crash branch, so a malformed one
+                # gets the mode's posture: an exit code other than 0 or 2 (one os._exit cannot take, or one
+                # the platform reads as non-blocking) or a stderr text neither a str nor None (whose truth
+                # test below could raise). The stdout object is checked by its json.dumps below.
+                if type(code) is not int or code not in (0, 2) or not (
+                        stderr_text is None or type(stderr_text) is str):
+                    raise TypeError("the handler result is not an exit code of 0 or 2 with a str or None "
+                                    "stderr text")
+            except Exception as exc:  # a handler crash is an unreadable result
+                if is_fail_open:
+                    # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws
+                    # on a pathological message): WARN and exit 0, never exit 2. The warn print raising (a
+                    # stdout that cannot be written or flushed) loses the warning and keeps the 0.
+                    try:
+                        return _dispatcher_fail_open_warn(
+                            handler_name, "handler crash: {}".format(_exception_text(exc)))
+                    except BaseException:
+                        return 0
+                # A PreToolUse handler crash fails closed (block), not pass.
+                _stderr_note("aiqt_hooks: handler {} failed ({}); failing closed".format(
+                    handler_name, _exception_text(exc)))
+                return 2
+    except _HookDeadline as exc:
+        if exc.args[:1] != (window,):
+            raise  # an enclosing window's deadline (an in-process caller's), not this call's
+        # Built inside a guard like the other diagnostics, so a message that cannot be built (a payload
+        # whose encoding raises, a MemoryError) still leaves exit 2, with a fixed note in its place. A
+        # window that ended at its entry on a SIGALRM already pending gets its own note: its budget did
+        # not run out.
+        try:
+            if window.pending_at_entry:
+                note = _pending_alarm_message(handler_name, window.seconds)
+            else:
+                note = _deadline_message(handler_name, window.seconds, payload)
+        except _HookDeadline:
+            raise
+        except BaseException:
+            note = "AIQT guardrail: a PreToolUse check could not reach a decision within its budget; failing closed."
+        _stderr_note(note)
         return 2
-    try:
-        code, stdout_obj, stderr_text = HANDLERS[handler_name](data)
-    except Exception as exc:  # a handler crash is an unreadable result
+    except BaseException as exc:
+        # Anything else out of the window: an error entering or leaving it (an ItimerError, or a caller's
+        # own alarm handler raising when its expiry is delivered during the take or on the way out), or a
+        # BaseException from the read or the handler that no branch above catches. Left to escape, it
+        # would end the run with a traceback and status 1, which the platform treats as non-blocking.
+        if is_fail_open and isinstance(exc, (SystemExit, KeyboardInterrupt)):
+            # A stop (an exit or an interrupt) raised in a fail-open mode ends the hook as it would with no
+            # window, so a binding that sets its own exit status keeps it (the lease-heartbeat bindings,
+            # whose exit-status vectors run this dispatcher in a child process), save a status the
+            # platform reads as blocking: an exit whose status would be 2 (_orch_lease_hb_stop_exits_2,
+            # which judges any SystemExit) goes on as an exit with status 1, so no fail-open mode exits 2
+            # on this path.
+            if isinstance(exc, SystemExit) and _orch_lease_hb_stop_exits_2(exc):
+                raise SystemExit(1) from exc
+            raise
+        detail = _exception_text(exc)
         if is_fail_open:
-            # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws on a
-            # pathological message): WARN and exit 0, never exit 2. The warn print raising (a stdout
-            # that cannot be written or flushed) loses the warning and keeps the 0.
             try:
-                return _dispatcher_fail_open_warn(
-                    handler_name, "handler crash: {}: {}".format(type(exc).__name__, exc))
+                return _dispatcher_fail_open_warn(handler_name, "dispatcher error: {}".format(detail))
             except BaseException:
                 return 0
-        # A PreToolUse handler crash fails closed (block), not pass.
-        _stderr_note("aiqt_hooks: handler {} failed ({}: {}); failing closed".format(
-            handler_name, type(exc).__name__, exc))
+        _stderr_note("aiqt_hooks: {}: the check did not complete ({}); failing closed".format(
+            handler_name, detail))
         return 2
     if stdout_obj is not None:
         try:
@@ -23148,8 +23769,8 @@ def main(argv):
             # so a lost decision blocks rather than allows.
             if is_fail_open:
                 return 0
-            _stderr_note("aiqt_hooks: {}: the decision could not be written to stdout ({}: {}); "
-                         "failing closed".format(handler_name, type(exc).__name__, exc))
+            _stderr_note("aiqt_hooks: {}: the decision could not be written to stdout ({}); "
+                         "failing closed".format(handler_name, _exception_text(exc)))
             return 2
     if stderr_text:
         _stderr_note(stderr_text)
