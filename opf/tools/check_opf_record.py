@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T87)
+  check_opf_record.py --self-test                    the fixture suite (T1-T88)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
                                                      through an assertion (_discriminate)
 
@@ -105,10 +105,15 @@ Each case runs on its own copy of that template; the root is removed in a finall
       .aiqt (flip: route homes 2 to the legacy journal root)
   T22 on a homes-2 store the verb claims through the live reservation seam: create records end to end
       with ONE irrevocable id reservation published under the COMPLETE transaction's own run id, its
-      claims exactly the counters advance, and an unreadable, malformed, conflicting or misnamed
+      claims exactly the counters advance, and a non-regular, unreadable (an injected permission
+      error), malformed, wrong-type (a string or a boolean claims value), conflicting or misnamed
       reservation refuses exit 2 with every byte untouched, never a silent fallback to the homes-1
       counters (flips: the reviewed head's refusing seam; a publication that skips the reservation;
-      the retired validate_manifest patch, under which the run refuses at the manifest)
+      the retired validate_manifest patch, under which the run refuses at the manifest; and one flip
+      per new case, each disabling that case's branch alone: an entry whose open fails read as holding
+      no reservation, a decimal-string claims value checked as its integer (whose run then crashes at
+      the scan's high-water comparison, the injection that flip declares), a boolean claims value
+      checked as an integer; the refusal cases run before the create, so each flip reaches its case)
   T23 a homes-2 publication killed at each journal step leaves the typed journal reconcilable: the next
       run reconciles it under the operation capability (the confirmed-dead gate clears the dead run's
       lease and active record), the operands end exactly at the prestate or exactly at the poststate,
@@ -381,16 +386,65 @@ Each case runs on its own copy of that template; the root is removed in a finall
       retired HOMES2_SPEC_VERSION patch, under which the verb reads that store as generation 2 and
       chooses the typed journal home; the generation-only probe of T30, under which the run publishes
       into the legacy journal on the fresh store and reconciles the leftover in place)
-  T79 a leftover lease whose payload tomllib refuses with RecursionError (a deeply nested value, and a
+  T79 a homes-2 run killed after its reservation and before its publication leaves the reservation
+      standing and the operands at the prestate; after the confirmed-dead reclaim, the next create
+      derives ABOVE the orphaned reservation (the reserved numbers are never issued again), its own
+      reservation says so, and the run records, exit 0: the final doctor treats the orphaned numbers
+      as issued, never as missing records (flips: a derivation that ignores the reservation scan,
+      under which the reserved ids are issued again; a doctor that reads no reservation, under which
+      the run is held at the post-publication gate)
+  T80 two runs claiming the same kind never receive the same id: two runs planned before either
+      reserves derive the same numbers; the first reserves through the production claim-and-reserve
+      path, and the second is refused at the held revalidation with no reservation of its own, no
+      transaction and no operand published; re-planned, it derives the next numbers, both
+      reservations standing disjoint (flips: the derivation flip of T79; a reservation step with no
+      fresh scan and no stale-plan comparison)
+  T81 the homes-2 high-water reads every journal kind's reservations, the homes enumerated from
+      JOURNAL_KINDS: an import-kind reservation of BI-1 and WL-1 moves the next create to BI-2 and
+      WL-2, which records, exit 0, the final doctor reading that reservation too, and a malformed
+      reservation in each other kind's home, plus a non-regular, an unreadable
+      (an injected permission error), a wrong-type (a string or a boolean claims value), a conflicting
+      (another kind's payload) and a misnamed entry in the import home, refuse exit 2 with every byte
+      untouched (flips: the reviewed head's single record home; a doctor that reads only the record
+      kind reservation home, under which the run is held at the post-publication gate; and T22's three
+      flips of the unreadable, string and boolean branches; the refusal cases run before the
+      cross-kind create)
+  T82 the homes-2 publication boundary requires the reservation of the run id it publishes under: a
+      direct _publish naming no run id, one with no reservation, and one whose reservation claims other
+      numbers each refuse before any transaction opens (flip: the reviewed head's minted run id with
+      no reservation evidence)
+  T83 the harness's journal reader reads an empty journal only for confirmed absence: a regular file,
+      a symlink, a dangling symlink and an unreadable journal home are harness faults (flip: the
+      reviewed head's not-a-directory shortcut)
+  T84 a leftover lease whose payload tomllib refuses with RecursionError (a deeply nested value, and a
       1001-part key under the emulated 3.14.8 key-part cap) is malformed: recovery refuses it with the
       held-lease refusal, every byte untouched (flip: the pre-fix lease parse, under which the
       RecursionError escapes to the record verb's unexpected-error backstop)
-  T80 the discriminator binds each flip to an assertion: a flipped run that goes red only through a
+  T85 a broken allocations home refuses the homes-2 reservation scan, never read as holding no
+      reservations, each leg its own test, for the import kind and for the record kind: the home a
+      symlink, a regular file, under a parent that is a regular file, a mode-0 directory, a directory
+      whose listing fails (an injected EIO), and a kind whose home cannot be derived (_allocations_rel
+      raising) each refuse exit 2 with every entry of the store unchanged (snapshot: every entry beneath
+      the root except .git, by content, symlink target, type and mode; a directory it cannot list is a
+      harness fault, so the mode-0 legs snapshot before the chmod and after the mode is restored, and
+      check the home's mode is still 0 when the run returns). Every leg but one refuses end to end with
+      the scan's own message; the record kind's file-parent leg refuses end to end at the record journal
+      inspection, and its direct scan call shows the scan's message. The mode-0 guard tests the
+      effective uid alone: under uid 0 the mode-0 legs are named as not evaluated, never a pass, and the
+      run exits 2 only when no other check failed (1 otherwise); a process that is not uid 0 but holds a
+      read-override capability (CAP_DAC_OVERRIDE or CAP_DAC_READ_SEARCH) makes those legs fail (exit 1),
+      fail-closed but reported as a failure (flips, one per scan handler, each turning that handler
+      alone into return {}, each leg registered against the flip of the handler it reaches: the walk to
+      the home's parent, the file-parent legs; the home's own no-follow open, the symlink, regular-file
+      and mode-0 legs; the listing, the unlistable legs; the derivation of a kind's home, the
+      underivable legs, the record kind's leg through a flip of its own that declares the crash its run
+      then meets, the leg's own error raised again at the publication boundary's reservation read)
+  T86 the discriminator binds each flip to an assertion: a flipped run that goes red only through a
       cannot-evaluate backstop (a crash the CLI turned into exit 2) or a harness exception never counts
       as discriminating, while an assertion red, or a backstop caused by a recorded injection the flip
       declares, does (flip: a discriminator that refuses only a signature TypeError at the backstop and
       lets a harness exception escape)
-  T81 a declared backstop is bound to the recorded injection that must cause it, and the binding is
+  T87 a declared backstop is bound to the recorded injection that must cause it, and the binding is
       decided out of process: the flipped run executes in a forked child of this gate (the gate's own
       interpreter and flags, so isolated by -I when the gate itself runs with -I), the child's stderr
       is an OS pipe, and the parent decides from bytes it read from that pipe itself which recorded
@@ -437,7 +491,7 @@ Each case runs on its own copy of that template; the root is removed in a finall
       the backstop's own emission of it. The parent-held tokens and parent-computed reprs guard against
       accidental and unrecorded faults, never against a test author deliberately forging its own
       injection's output.
-  T82 a flip's assertion red counts only when every injection the flip expects fired in the flipped run
+  T88 a flip's assertion red counts only when every injection the flip expects fired in the flipped run
       and each one that fired was seen at its backstop, on every path the test took: the child's
       verdict lists each injection it raised, and the parent requires each fired injection of an
       expected label to have its token consumed by a bound line and each expected label to have fired.
@@ -450,36 +504,11 @@ Each case runs on its own copy of that template; the root is removed in a finall
       once on every path. Accepted: the declared injection reaching its own backstop (flips: a
       discriminator that refuses only stray backstop lines; T75's earlier collection, which drops
       each child's stderr when an assertion fails before its verdict reads)
-  T83 a homes-2 run killed after its reservation and before its publication leaves the reservation
-      standing and the operands at the prestate; after the confirmed-dead reclaim, the next create
-      derives ABOVE the orphaned reservation (the reserved numbers are never issued again), its own
-      reservation says so, and the run records, exit 0: the final doctor treats the orphaned numbers
-      as issued, never as missing records (flips: a derivation that ignores the reservation scan,
-      under which the reserved ids are issued again; a doctor that reads no reservation, under which
-      the run is held at the post-publication gate)
-  T84 two runs claiming the same kind never receive the same id: two runs planned before either
-      reserves derive the same numbers; the first reserves through the production claim-and-reserve
-      path, and the second is refused at the held revalidation with no reservation of its own, no
-      transaction and no operand published; re-planned, it derives the next numbers, both
-      reservations standing disjoint (flips: the derivation flip of T83; a reservation step with no
-      fresh scan and no stale-plan comparison)
-  T85 the homes-2 high-water reads every journal kind's reservations, the homes enumerated from
-      JOURNAL_KINDS: an import-kind reservation of BI-1 and WL-1 moves the next create to BI-2 and
-      WL-2, which records, exit 0, the final doctor reading that reservation too, and a malformed
-      reservation in each other kind's home, plus an unreadable, a conflicting
-      (another kind's payload) and a misnamed entry in the import home, refuse exit 2 with every byte
-      untouched (flips: the single record home of the reviewed head; a doctor that reads only the record
-      kind reservation home, under which the run is held at the post-publication gate)
-  T86 the homes-2 publication boundary requires the reservation of the run id it publishes under: a
-      direct _publish naming no run id, one with no reservation, and one whose reservation claims other
-      numbers each refuse before any transaction opens (flip: the reviewed head's minted run id with
-      no reservation evidence)
-  T87 the harness's journal reader reads an empty journal only for confirmed absence: a regular file,
-      a symlink, a dangling symlink and an unreadable journal home are harness faults (flip: the
-      reviewed head's not-a-directory shortcut)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
-or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
+or unusable, temporary storage unusable, or any unexpected harness fault), or, when no assertion fails, a
+check this environment cannot build (T85's mode-0 legs under uid 0) is named as not evaluated; never a
+clean skip.
 """
 import sys
 
@@ -563,6 +592,11 @@ class Harness(Exception):
     """A harness fault: the gate cannot evaluate (exit 2), never an assertion verdict."""
 
 
+class CannotEvaluate(Exception):
+    """One check this environment cannot build (a mode-bit vector under uid 0): the check is named as not
+    evaluated and the run exits 2 (1 when another check failed), never a pass; the other checks still run."""
+
+
 class Env:
     """The scrubbed environment every git and opf call in this gate runs under."""
 
@@ -636,7 +670,7 @@ def assert_no_auto_maintenance(env, base):
 # verdict reads included) copy the stderr of the processes they ran onto it (_oop_forward), and the
 # parent scans the bytes it read itself for every backstop occurrence, so the flipped run's red is
 # judged with every backstop it met in view. While one of the looser in-process discriminators that
-# serve as T80 and T81 flips runs a flip, it pushes a list here instead, and the same readers add each
+# serve as T86 and T87 flips runs a flip, it pushes a list here instead, and the same readers add each
 # backstop occurrence in the stderr they read to the innermost list (_note_backstops). A crash that
 # production code swallows, or wraps in a refusal of any other wording, prints no such line and is not
 # seen either way; when that crash is an injection the flip expects, _discriminate still refuses the
@@ -661,7 +695,7 @@ _flip_watch = []
 # can require every injection its flip expects to have fired and each one that fired to have its own
 # line bound (_unseen_injections): a declared injection that is caught, swallowed, or printed out of
 # view, followed by an unrelated assertion, never counts as the flip's red.
-# The in-process T81 flips _discriminate_token_only, _discriminate_any_write and
+# The in-process T87 flips _discriminate_token_only, _discriminate_any_write and
 # _discriminate_in_process push a dict here instead, {token: (label, exception object)}, minting a
 # fresh token per injection in-process; _discriminate_substring, _discriminate_runwide and
 # _discriminate_write_call push a list and record (label, exception object) with the message untouched.
@@ -698,9 +732,9 @@ _OOP_TIMEOUT = 600.0
 # copy.deepcopy or pickle round trip (each rebuilt through cls(*args) and then the __dict__) and every
 # cls(*injected.args) rebuild, the private class's own included, print a fresh built serial; an instance
 # made without __init__ prints "unbuilt"; an args copy rebuilt as the plain base type, or as a local
-# class of the same name, prints no serial at all. _oop_private[0] is False only under the T81 flip
+# class of the same name, prints no serial at all. _oop_private[0] is False only under the T87 flip
 # _discriminate_plain_type, which raises each injection as its plain base type; _oop_exact[0] is False
-# under the T81 flips _discriminate_plain_type and _discriminate_repr_substring, which show no serial
+# under the T87 flips _discriminate_plain_type and _discriminate_repr_substring, which show no serial
 # and bind a line by a substring.
 _oop_built = [0]
 _oop_private = [True]
@@ -710,7 +744,7 @@ _oop_exact = [True]
 class _OpfInjection:
     """The serial the private fault classes share: __init__ draws the next built serial into the
     class's _opf_serial slot, and the repr is the base's followed by that serial (with no serial under
-    the T81 flips _discriminate_plain_type and _discriminate_repr_substring, _oop_exact)."""
+    the T87 flips _discriminate_plain_type and _discriminate_repr_substring, _oop_exact)."""
     __slots__ = ()
 
     def __init__(self, *args, **kwargs):
@@ -760,10 +794,21 @@ class _OpfInjectedRecursionError(_OpfInjection, RecursionError):
     __slots__ = ("_opf_serial",)
 
 
+class _OpfInjectedTypeError(_OpfInjection, TypeError):
+    """A declared TypeError injection of a discriminated child run."""
+    __slots__ = ("_opf_serial",)
+
+
+class _OpfInjectedValueError(_OpfInjection, ValueError):
+    """A declared ValueError injection of a discriminated child run."""
+    __slots__ = ("_opf_serial",)
+
+
 _PRIVATE_INJECTIONS = {NameError: _OpfInjectedNameError, KeyError: _OpfInjectedKeyError,
                        OSError: _OpfInjectedOSError, BrokenPipeError: _OpfInjectedBrokenPipeError,
                        MemoryError: _OpfInjectedMemoryError, RuntimeError: _OpfInjectedRuntimeError,
-                       RecursionError: _OpfInjectedRecursionError}
+                       RecursionError: _OpfInjectedRecursionError, TypeError: _OpfInjectedTypeError,
+                       ValueError: _OpfInjectedValueError}
 # The attributes of a base type kept outside its args, carried over to its private rebuild.
 _INJECTION_ATTRIBUTES = {NameError: ("name",),
                          OSError: ("errno", "strerror", "filename", "filename2"),
@@ -774,7 +819,7 @@ def _private_injection(exc):
     """exc rebuilt from its args as the private fault class of its exact type (_PRIVATE_INJECTIONS),
     with the attributes the base keeps outside its args (_INJECTION_ATTRIBUTES: NameError.name; an
     OSError's errno, strerror, filename and filename2) and its __dict__ (notes included) carried over;
-    under the T81 flip _discriminate_plain_type (_oop_private[0] False) exc unchanged. A type with no
+    under the T87 flip _discriminate_plain_type (_oop_private[0] False) exc unchanged. A type with no
     private class is a harness fault, never a silent plain injection."""
     if not _oop_private[0]:
         return exc
@@ -790,7 +835,7 @@ def _private_injection(exc):
 
 def _serialed(exc, serial):
     """exc, a private injection, holding serial in place of its built one, so that its repr is the one
-    the parent computed for its token; under the T81 flips _discriminate_plain_type and
+    the parent computed for its token; under the T87 flips _discriminate_plain_type and
     _discriminate_repr_substring (no private class, or no serial shown) exc unchanged."""
     if _oop_private[0] and _oop_exact[0]:
         exc._opf_serial = serial
@@ -851,7 +896,7 @@ def _injected(label, exc):
     printing it carries a token and a serial the parent recorded before the fork; a label the flip
     never declared, or an event past the pool, gets neither and its line binds nothing (fail closed).
     Either way the child records the event, label and token or None, in _oop_fired, which its verdict
-    carries to the parent. Under an in-process T81 flip that pushes a dict a fresh token is minted and
+    carries to the parent. Under an in-process T87 flip that pushes a dict a fresh token is minted and
     recorded in-process, and under one that pushes a list exc is recorded untouched; outside any
     discriminated run exc is returned unchanged. In a discriminated child the exception returned is exc
     rebuilt as its private fault class (_private_injection), not exc itself, so the caller raises what
@@ -915,7 +960,7 @@ class _EmissionStderr(io.StringIO):
     Which recorded exception a line names is read from the token its text carries. The capture also
     tracks whether its contents are the run's output as appended: a write anywhere but the end (after a
     seek, or over an initial value) and any truncate mark it mutated, and a mutated capture binds none of
-    its lines (fail closed), so a capture cleared and written again (T81's clear-reprint) stays refused
+    its lines (fail closed), so a capture cleared and written again (T87's clear-reprint) stays refused
     rather than trusted."""
 
     def __init__(self, *args, **kwargs):
@@ -986,16 +1031,26 @@ def record_cli(env, root, args):
 
 
 def snapshot(root):
-    """Every file and directory beneath root except .git, by content and mode."""
+    """Every entry beneath root except .git, each with its mode bits: a regular file by content, a symlink
+    by its target text (never followed), a directory and any other type by its type. A directory the walk
+    cannot list (root included) is a harness fault, never an entry silently left out of the comparison."""
+    def unlistable(exc):
+        raise Harness("snapshot cannot list the directory {!r} ({})".format(exc.filename, exc))
     result = {}
-    for directory, dirs, files in os.walk(root):
+    for directory, dirs, files in os.walk(root, onerror=unlistable):
         dirs[:] = [d for d in dirs if not (Path(directory) == Path(root) and d == ".git")]
         for name in sorted(dirs + files):
             path = Path(directory) / name
             st = path.lstat()
             rel = path.relative_to(root).as_posix()
-            kind = ("file", path.read_bytes()) if stat.S_ISREG(st.st_mode) else (
-                "dir",) if stat.S_ISDIR(st.st_mode) else ("other", stat.S_IFMT(st.st_mode))
+            if stat.S_ISREG(st.st_mode):
+                kind = ("file", path.read_bytes())
+            elif stat.S_ISDIR(st.st_mode):
+                kind = ("dir",)
+            elif stat.S_ISLNK(st.st_mode):
+                kind = ("symlink", os.readlink(path))
+            else:
+                kind = ("other", stat.S_IFMT(st.st_mode))
             result[rel] = (stat.S_IMODE(st.st_mode), kind)
     return result
 
@@ -2921,7 +2976,7 @@ def flip_t20():
 def t21_homes2_publish(fx):
     """A direct homes-2 publication (the claim through the live homes-2 seam, over an empty reservation
     scan, its reservation published by _reserve_claim under the held capability the publication then
-    runs under, with the same run id, as _run_operation does: the boundary requires it, T86) lands ONE
+    runs under, with the same run id, as _run_operation does: the boundary requires it, T82) lands ONE
     capability-bound transaction in the typed journal home under that run id with its terminal
     projection, rewrites exactly the planned operands, and touches nothing under .aiqt."""
     env = fx.env
@@ -2974,13 +3029,41 @@ def t22_homes2_claim_reserves(fx):
     """On a homes-2 store the verb claims through the live reservation seam: create records end to
     end, publishing ONE irrevocable id reservation at the allocation record of the COMPLETE
     transaction's own run id, byte-exact (reservation_payload) with claims equal to exactly the
-    counters advance; no legacy journal home is created. Fail-closed: an unreadable (non-regular),
-    a malformed, and a conflicting (content not the canonical reservation its name declares)
-    reservation each refuse exit 2 with every byte untouched, never a silent fallback to the
-    homes-1 counters path."""
+    counters advance; no legacy journal home is created. Fail-closed, in seven cases: a non-regular
+    entry (a directory), an unreadable one (a regular file holding a canonical reservation whose open
+    fails with an injected permission error), a malformed one, a claims value of the wrong type (a
+    string, and separately a boolean), a conflicting one (content not the canonical reservation its
+    name declares), and a misnamed entry each refuse exit 2 with every byte untouched, never a silent
+    fallback to the homes-1 counters path. The refusal cases run before the end-to-end create, so a flip
+    of one case's branch reaches that case without an earlier success assertion ending the run first."""
     env = fx.env
     base = fx.case("t22-homes2-base")
     with _self_test_homes2_active(base):
+        damaged_run = "record-20260927T000009Z-0000000000000009"
+        damaged = damaged_run + ".toml"
+        rel = "{}/{}".format(record._ALLOCATIONS_REL, damaged)
+        canonical = record._opf_journal.reservation_payload("record", damaged_run, "op", {"BI": 1})
+        for label, plant, needle in (
+                ("non-regular", lambda d: d.mkdir(), "cannot read the id reservation {} (contained path {!r} "
+                 "is not a regular file)".format(rel, rel)),
+                ("unreadable", lambda d: d.write_bytes(canonical), "cannot read the id reservation {} ([Errno {}] "
+                 "{}".format(rel, errno.EACCES, UNREADABLE_RESERVATION)),
+                ("malformed", lambda d: d.write_bytes(b"not toml ["), "is malformed"),
+                ("wrong-type-string", lambda d: d.write_bytes(_claims_retyped(canonical, b'"1"')),
+                 "the id reservation {} is malformed (id reservation claims must be".format(rel)),
+                ("wrong-type-boolean", lambda d: d.write_bytes(_claims_retyped(canonical, b"true")),
+                 "the id reservation {} is malformed (id reservation claims must be".format(rel)),
+                ("conflicting", lambda d: d.write_bytes(record._opf_journal.reservation_payload(
+                    "record", "record-20260927T000008Z-0000000000000008", "op", {"BI": 1})),
+                 "conflicts with the exact canonical reservation"),
+                ("misnamed", lambda d: d.write_bytes(b"x"), "is not an id reservation")):
+            sub = fx.case("t22-homes2-" + label, base)
+            target = Path(sub) / record._ALLOCATIONS_REL / (
+                "junk.txt" if label == "misnamed" else damaged)
+            target.parent.mkdir(parents=True)
+            plant(target)
+            with _unreadable_entry(damaged) if label == "unreadable" else contextlib.nullcontext():
+                refused_untouched(env, sub, CREATE, needle)
         root = fx.case("t22-homes2-reserves", base)
         pre_counters = model(root, COUNTERS)["counters"]
         result = record_cli(env, root, CREATE)
@@ -2999,20 +3082,35 @@ def t22_homes2_claim_reserves(fx):
                                                "WL": pre_counters["WL"] + 1}, (payload, advance)
         assert reservation.read_bytes() == record._opf_journal.reservation_payload(
             "record", run_id, payload["operation_id"], payload["claims"]), "T22 canonical payload"
-        damaged = "record-20260927T000009Z-0000000000000009.toml"
-        for label, plant, needle in (
-                ("unreadable", lambda d: d.mkdir(), "cannot read the id reservation"),
-                ("malformed", lambda d: d.write_bytes(b"not toml ["), "is malformed"),
-                ("conflicting", lambda d: d.write_bytes(record._opf_journal.reservation_payload(
-                    "record", "record-20260927T000008Z-0000000000000008", "op", {"BI": 1})),
-                 "conflicts with the exact canonical reservation"),
-                ("misnamed", lambda d: d.write_bytes(b"x"), "is not an id reservation")):
-            sub = fx.case("t22-homes2-" + label, base)
-            target = Path(sub) / record._ALLOCATIONS_REL / (
-                "junk.txt" if label == "misnamed" else damaged)
-            target.parent.mkdir(parents=True)
-            plant(target)
-            refused_untouched(env, sub, CREATE, needle)
+
+
+UNREADABLE_RESERVATION = "synthetic unreadable id reservation"
+
+
+@contextlib.contextmanager
+def _unreadable_entry(name):
+    """os.open raising EACCES for a reservation entry `name` opened beneath a directory descriptor, every
+    other open unchanged: the entry is a regular file, unreadable only through the injected error. The
+    wrapper forwards dir_fd, so it is listed in os.supports_dir_fd while it stands, as the containment
+    probe requires of os.open."""
+    real = os.open
+
+    def opening(path, flags, *args, **kwargs):
+        if path == name and kwargs.get("dir_fd") is not None:
+            raise PermissionError(errno.EACCES, UNREADABLE_RESERVATION, name)
+        return real(path, flags, *args, **kwargs)
+    with patch.object(os, "open", opening), \
+            patch.object(os, "supports_dir_fd", set(os.supports_dir_fd) | {opening}):
+        yield
+
+
+def _claims_retyped(payload, literal):
+    """`payload`, a canonical reservation claiming BI = 1, with that claims value re-spelled as the TOML
+    `literal` (a value of the wrong type)."""
+    retyped = payload.replace(b"\nBI = 1\n", b"\nBI = " + literal + b"\n")
+    if retyped == payload:
+        raise Harness("the canonical reservation payload carries no BI = 1 claim to retype")
+    return retyped
 
 
 def flip_t22_refuse():
@@ -3048,6 +3146,60 @@ def flip_t22_validator():
             result.base = dict(result.base, homes=opf["homes"])
         return result
     return patch.object(_opf_store, "validate_manifest", homes_stripped)
+
+
+# One flip per reservation-entry branch the unreadable and wrong-type cases of T22 and T81 test, each
+# disabling that branch alone.
+
+@contextlib.contextmanager
+def flip_unreadable_reservation_skipped():
+    """The reservation reader's read-failure handler turned into a skip for an OS-level error: an entry
+    whose open fails (an OSError) reads as holding no reservation. A read failure the journal layer
+    reports (a JournalError, such as a non-regular entry) still refuses."""
+    real = record._read_reservation
+
+    def skipping(afd, kind, entry):
+        try:
+            return real(afd, kind, entry)
+        except record.RecordError as exc:
+            if str(exc).startswith("cannot read the id reservation ") and isinstance(exc.__context__, OSError):
+                return {}
+            raise
+    with patch.object(record, "_read_reservation", skipping):
+        yield
+
+
+@contextlib.contextmanager
+def flip_string_claims_admitted():
+    """The reservation claims check without its type test for a string: a claims value that is a decimal
+    string is checked as the integer it spells, so the reader no longer refuses it as malformed, and the
+    scan's high-water comparison of that string with an integer crashes (the injection its declared
+    backstop is bound to, recorded where it leaves _kind_reservation_high; T22 and T81 both reach it)."""
+    real = record._opf_journal._check_claims
+
+    def lenient(kind, claims):
+        if isinstance(claims, dict):
+            claims = dict((ns, int(n) if isinstance(n, str) and n.isdecimal() else n)
+                          for ns, n in claims.items())
+        return real(kind, claims)
+    with patch.object(record._opf_journal, "_check_claims", lenient), \
+            _crash_point("t22-t81-string-claims", record, "_kind_reservation_high",
+                         TypeError("'>' not supported between instances of 'str' and 'int'")):
+        yield
+
+
+@contextlib.contextmanager
+def flip_boolean_claims_admitted():
+    """The reservation claims check reading a boolean as the integer it subclasses (isinstance in place of
+    the exact type test), so the reader no longer refuses a boolean claims value as malformed."""
+    real = record._opf_journal._check_claims
+
+    def lenient(kind, claims):
+        if isinstance(claims, dict):
+            claims = dict((ns, int(n) if type(n) is bool else n) for ns, n in claims.items())
+        return real(kind, claims)
+    with patch.object(record._opf_journal, "_check_claims", lenient):
+        yield
 
 
 def t23_homes2_crash(fx):
@@ -4586,7 +4738,7 @@ def t52_publication_refused_before_intent(fx):
     lowered to one byte) leaves no transaction and releases its own capability: its refusal says any
     journal work left is for the next trigger, none when it failed before its transaction opened, and
     the next run reconciles nothing (the publication's id reservation, published first as the boundary
-    requires, stands, so that run derives above it and records, exit 0, as T83).
+    requires, stands, so that run derives above it and records, exit 0, as T79).
     The reviewed head promised the next run reconciles the typed journal."""
     module, guard = residual_texts()
     for text, where in ((module, "module"), (guard, "guard")):
@@ -4638,7 +4790,7 @@ def t52_publication_refused_before_intent(fx):
         rc, out, err = record_cli(env, root, CREATE)
         assert "was reconciled" not in err and "were reclaimed" not in err, \
             ("T52 the next run reconciles nothing", err[-800:])
-        # The refused publication's reservation stands (T83's orphan shape): the next run derives above
+        # The refused publication's reservation stands (T79's orphan shape): the next run derives above
         # it and records, the final doctor treating the reserved numbers as issued (no commit held them).
         assert RECORDED_EVENT in out and rc == 0, \
             ("T52 the next run records above the standing reservation", rc, err[-1600:])
@@ -6412,20 +6564,20 @@ def flip_t77():
     return patch.object(guard, "_claim_after_release", narrow)
 
 
-# --- T79: a leftover lease tomllib refuses with RecursionError is malformed, refused as held (spec 5.7) ------
+# --- T84: a leftover lease tomllib refuses with RecursionError is malformed, refused as held (spec 5.7) ------
 
-def t79_recursion_lease_refused_as_held(fx):
+def t84_recursion_lease_refused_as_held(fx):
     """A leftover lease whose payload tomllib refuses with RecursionError (a deeply nested value, and a
     1001-part key under the emulated 3.14.8 key-part cap) is a malformed lease like any other: recovery
     refuses it with the held-lease refusal and its remedy, every byte untouched, never the verb backstop's
     unexpected error."""
-    _t74_refused_leg(fx, "t79-deep-lease", _opf_store._ST_DEEP_TOML.encode("utf-8"))
+    _t74_refused_leg(fx, "t84-deep-lease", _opf_store._ST_DEEP_TOML.encode("utf-8"))
     with _opf_store._StKeyPartCap():
-        _t74_refused_leg(fx, "t79-long-key-lease", _opf_store._ST_LONG_KEY_TOML.encode("utf-8"))
+        _t74_refused_leg(fx, "t84-long-key-lease", _opf_store._ST_LONG_KEY_TOML.encode("utf-8"))
 
 
 @contextlib.contextmanager
-def flip_t79():
+def flip_t84():
     """The pre-fix lease parse, catching UnicodeDecodeError and ValueError only: a RecursionError escapes
     _closed_lease_model to the record verb's backstop (the injection its declared backstop is bound to:
     the deeply nested payload's RecursionError, which turns the first leg red)."""
@@ -6438,7 +6590,7 @@ def flip_t79():
             pass
         return original(raw)
     with patch.object(guard, "_closed_lease_model", narrow), \
-            _crash_point("t79-recursion", guard, "_closed_lease_model",
+            _crash_point("t84-recursion", guard, "_closed_lease_model",
                          RecursionError("maximum recursion depth exceeded")):
         yield
 
@@ -6504,7 +6656,588 @@ def flip_t78():
     return patch.object(_opf_store, "HOMES2_SPEC_VERSION", _opf_store.SUPPORTED_SPEC_VERSION)
 
 
-# --- T80: the discriminator binds each flip to an assertion, never a backstop or harness fault ---------
+# --- T79, T80: the homes-2 reservation vectors (spec 8.2; homes plan PR-4) -----------------------------
+
+# Inside the killed child: the run dies immediately after its irrevocable id reservation is
+# published, before its journaled publication begins.
+DIE_AFTER_RESERVE = """
+import os
+_real_reserve = record._reserve_claim
+def _die_after_reserve(ctx, plan, cap, run_id):
+    _real_reserve(ctx, plan, cap, run_id)
+    os._exit(137)
+record._reserve_claim = _die_after_reserve
+"""
+
+
+def t79_kill_after_reserve(fx):
+    """A homes-2 run killed after reserving and before publishing leaves its reservation standing
+    and every operand at the prestate, and the reserved numbers are never issued again: after the
+    confirmed-dead reclaim refusal, the next create derives ABOVE the orphan (its own reservation
+    claims the next numbers), publishes them and records, exit 0: the prior commit (HEAD) held no
+    record with an orphaned number, so the final doctor treats those numbers as issued and the store
+    carrying the orphan is VALID."""
+    env = fx.env
+    base = fx.case("t79-homes2-base")
+    with _self_test_homes2_active(base):
+        root = fx.case("t79-homes2-killed", base)
+        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+        counters0 = model(root, COUNTERS)["counters"]
+        proc = child(env, root, CREATE, flip=HOMES2_CHILD_FLIP + DIE_AFTER_RESERVE)
+        assert proc.returncode == 137, ("T79 the child is killed after reserving", proc.returncode,
+                                        proc.stderr[-800:])
+        assert RECORDED_EVENT not in proc.stdout, "T79 a killed run reports no id"
+        alloc_dir = Path(root) / record._ALLOCATIONS_REL
+        names = sorted(os.listdir(alloc_dir))
+        assert len(names) == 1, ("T79 the reservation is standing", names)
+        first = (alloc_dir / names[0]).read_bytes()
+        first_claims = tomllib.loads(first.decode("utf-8"))["claims"]
+        assert first_claims == {"BI": counters0["BI"] + 1, "WL": counters0["WL"] + 1}, first_claims
+        assert journal_states(root, TYPED_JOURNAL) == {}, "T79 nothing was journaled"
+        assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, \
+            "T79 the operands end at the prestate"
+        refused(record_cli(env, root, CREATE), "were reclaimed before this operation")
+        assert (alloc_dir / names[0]).read_bytes() == first, "T79 the reclaim never touches the reservation"
+        rc, out, err = record_cli(env, root, CREATE)
+        assert rc == 0 and RECORDED_EVENT in out, ("T79 the run above the orphan records, doctor VALID", rc,
+                                                   err[-1600:])
+        names2 = sorted(os.listdir(alloc_dir))
+        assert len(names2) == 2 and names[0] in names2, ("T79 both reservations standing", names2)
+        (second_name,) = [n for n in names2 if n != names[0]]
+        second_claims = tomllib.loads((alloc_dir / second_name).read_bytes().decode("utf-8"))["claims"]
+        assert second_claims == {"BI": first_claims["BI"] + 1,
+                                 "WL": first_claims["WL"] + 1}, \
+            ("T79 the re-run derives above the orphaned reservation", first_claims, second_claims)
+        assert (alloc_dir / names[0]).read_bytes() == first, "T79 the orphan is never rewritten"
+        counters2 = model(root, COUNTERS)["counters"]
+        assert counters2["BI"] == second_claims["BI"] and counters2["WL"] == second_claims["WL"], counters2
+        rows = [r["id"] for r in model(root, BI_INDEX)["record"]]
+        reserved_id = "BI-{}".format(first_claims["BI"])
+        issued_id = "BI-{}".format(second_claims["BI"])
+        assert issued_id in rows and reserved_id not in rows, \
+            ("T79 the reserved id is never issued again", rows)
+
+
+def flip_t79():
+    """A derivation that ignores the reservation scan: an orphaned reservation gets its numbers
+    issued again."""
+    return patch.object(record, "_reservation_high", lambda ctx: {})
+
+
+def flip_t79_doctor():
+    """A doctor that reads no reservation: the orphaned numbers grade as missing records, so the run
+    above them is held at the post-publication gate, exit 2."""
+    return patch.object(opf_check, "_reserved_numbers", lambda root_fd, rep: ({}, True))
+
+
+def t80_two_runs_never_same_id(fx):
+    """Two runs claiming the same kind never receive the same id, whatever their interleaving: two
+    contexts planned BEFORE either reserves derive the same numbers; the first reserves through the
+    production claim-and-reserve path (_reserve_claim under its own held capability, nothing
+    published to the store), and the second, reserving after it, is refused by the held
+    revalidation with no reservation file of its own, no transaction and every operand at the
+    prestate; re-planned, the second run derives the next numbers, both reservations standing
+    disjoint and the first never rewritten."""
+    base = fx.case("t80-homes2-base")
+    with _self_test_homes2_active(base):
+        root = fx.case("t80-homes2-two-runs", base)
+        res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
+        assert res.status == record._opf_store.RESOLVED, res
+        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+        stamps = ("record-20260927T000101Z-" + "a" * 16,
+                  "record-20260927T000102Z-" + "b" * 16)
+        reservations = [Path(root) / record._opf_store.allocation_record("record", s) for s in stamps]
+        fds = []
+
+        def planned():
+            root_fd = record._opf_store._open_dir_nofollow(res.store_root)
+            fds.append(root_fd)
+            ctx = record.Context(res, str(root), root_fd)
+            ctx.journal_rel = record._record_journal_rel(record._probe_homes(ctx))
+            record._load_manifest(ctx)
+            assert ctx.homes == 2, ("T80 the validated generation", ctx.homes)
+            ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
+            return ctx, record._claim(ctx, ["BI", "WL"])
+
+        def reserve(ctx, ids, stamp):
+            cap = record._opf_oplock.acquire_operation(str(res.store_root), record.VERB)
+            try:
+                record._reserve_claim(ctx, record.Plan([], ids), cap, stamp)
+            finally:
+                record._opf_oplock.release_operation(cap)
+        try:
+            (ctx1, ids1), (ctx2, ids2) = planned(), planned()
+            assert ids1 == ids2 == ["BI-1", "WL-1"], ("T80 both plans derive the same numbers", ids1, ids2)
+            reserve(ctx1, ids1, stamps[0])
+            first = reservations[0].read_bytes()
+            try:
+                reserve(ctx2, ids2, stamps[1])
+            except record.RecordError as exc:
+                message = str(exc)
+            else:
+                raise AssertionError("T80 the second, stale plan must refuse at the held revalidation")
+            assert "changed between planning and the held capability" in message, message
+            assert not reservations[1].exists(), "T80 the refused run publishes no reservation"
+            assert journal_states(root, TYPED_JOURNAL) == {}, "T80 no transaction is opened"
+            assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, \
+                "T80 no operand is published"
+            ctx3, ids3 = planned()
+            assert ids3 == ["BI-2", "WL-2"], ("T80 the re-planned run derives the next numbers", ids3)
+            reserve(ctx3, ids3, stamps[1])
+        finally:
+            for fd in fds:
+                os.close(fd)
+        assert reservations[0].read_bytes() == first, "T80 the first reservation is never rewritten"
+        for reservation, claimed in zip(reservations, ({"BI": 1, "WL": 1}, {"BI": 2, "WL": 2})):
+            payload = tomllib.loads(reservation.read_bytes().decode("utf-8"))
+            assert payload["claims"] == claimed, ("T80 the reservations stand disjoint", reservation, payload)
+
+
+def flip_t80_no_recheck():
+    """A held reservation step with no fresh scan and no stale-plan comparison: the planned claims are
+    reserved as they stand, so a reservation landing after planning is never noticed."""
+    def no_recheck(ctx, plan, cap, run_id):
+        record._opf_journal.reserve_allocation(cap, "record", run_id, ctx.claims)
+    return patch.object(record, "_reserve_claim", no_recheck)
+
+
+# --- T81-T83: the cross-kind high-water, the publication boundary, the journal-home reader ---------------
+
+T81_IMPORT_RUN = "imp-20260927T000101Z-" + "a" * 16
+
+
+def t81_cross_kind_reservations(fx):
+    """The homes-2 high-water reads EVERY journal kind's reservations (spec 8.2: every reservation's
+    [claims] value for the counter key), the homes enumerated from the JOURNAL_KINDS registry: an
+    import-kind reservation of {BI: 1, WL: 1} moves the next create to BI-2 and WL-2 (its own
+    reservation says so, the import one is never touched), and that run records, exit 0,
+    as in T79. Fail-closed in every other kind's home: a malformed
+    reservation in each non-record kind's home, and in the import home a non-regular entry (a
+    directory), an unreadable one (a regular file holding a canonical import reservation whose open
+    fails with an injected permission error), a claims value of the wrong type (a string, and
+    separately a boolean), an ingest payload under an import name, and a record-grammar name, each
+    refuse exit 2 with every byte untouched. A broken import home itself is T85's. The refusal cases run
+    before the cross-kind create, so a flip of one case's branch reaches that case without an earlier
+    success assertion ending the run first."""
+    env = fx.env
+    base = fx.case("t81-homes2-base")
+    with _self_test_homes2_active(base):
+        stamp = "-20260927T000009Z-" + "9" * 16
+        for kind in record._opf_store.JOURNAL_KINDS:
+            if kind == "record":
+                continue
+            sub = fx.case("t81-homes2-malformed-" + kind, base)
+            target = Path(sub) / record._opf_store.allocation_record(
+                kind, record._opf_store._HOME_RUN_PREFIXES[kind] + stamp)
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"not toml [")
+            refused_untouched(env, sub, CREATE, "is malformed")
+        damaged = "imp" + stamp + ".toml"
+        rel = "{}/{}".format(record._allocations_rel("import"), damaged)
+        canonical = record._opf_journal.reservation_payload("import", "imp" + stamp, "op", {"BI": 1})
+        for label, name, plant, needle in (
+                ("non-regular", damaged, lambda d: d.mkdir(), "cannot read the id reservation {} (contained "
+                 "path {!r} is not a regular file)".format(rel, rel)),
+                ("unreadable", damaged, lambda d: d.write_bytes(canonical), "cannot read the id reservation "
+                 "{} ([Errno {}] {}".format(rel, errno.EACCES, UNREADABLE_RESERVATION)),
+                ("wrong-type-string", damaged, lambda d: d.write_bytes(_claims_retyped(canonical, b'"1"')),
+                 "the id reservation {} is malformed (id reservation claims must be".format(rel)),
+                ("wrong-type-boolean", damaged, lambda d: d.write_bytes(_claims_retyped(canonical, b"true")),
+                 "the id reservation {} is malformed (id reservation claims must be".format(rel)),
+                ("conflicting", damaged, lambda d: d.write_bytes(record._opf_journal.reservation_payload(
+                    "ingest", "imp" + stamp, "op", {"BI": 1})),
+                 "conflicts with the exact canonical reservation"),
+                ("misnamed", "record" + stamp + ".toml", lambda d: d.write_bytes(
+                    record._opf_journal.reservation_payload("record", "record" + stamp, "op", {"BI": 1})),
+                 "is not an id reservation")):
+            sub = fx.case("t81-homes2-import-" + label, base)
+            target = Path(sub) / record._allocations_rel("import") / name
+            target.parent.mkdir(parents=True)
+            plant(target)
+            with _unreadable_entry(damaged) if label == "unreadable" else contextlib.nullcontext():
+                refused_untouched(env, sub, CREATE, needle)
+        root = fx.case("t81-homes2-import-reserved", base)
+        cap = record._opf_oplock.acquire_operation(str(root), "import")
+        try:
+            record._opf_journal.reserve_allocation(cap, "import", T81_IMPORT_RUN, {"BI": 1, "WL": 1})
+        finally:
+            record._opf_oplock.release_operation(cap)
+        imported = Path(root) / record._opf_store.allocation_record("import", T81_IMPORT_RUN)
+        planted = imported.read_bytes()
+        rc, out, err = record_cli(env, root, CREATE)
+        rows = [r["id"] for r in model(root, BI_INDEX)["record"]]
+        assert rows == ["BI-2"], ("T81 the import-kind reservation's numbers are never issued", rows, rc,
+                                  err[-1200:])
+        own = sorted(os.listdir(Path(root) / record._ALLOCATIONS_REL))
+        assert len(own) == 1, ("T81 one record reservation", own)
+        claims = tomllib.loads((Path(root) / record._ALLOCATIONS_REL / own[0]).read_bytes()
+                               .decode("utf-8"))["claims"]
+        assert claims == {"BI": 2, "WL": 2}, ("T81 the record reservation claims above the import one", claims)
+        assert imported.read_bytes() == planted, "T81 the import reservation is never touched"
+        assert RECORDED_EVENT in out and rc == 0, ("T81 the run above the import reservation records, as T79",
+                                                  rc, err[-1600:])
+
+
+def flip_t81():
+    """The reviewed head's single hard-coded home: only the record kind's reservations are read."""
+    return patch.object(record, "_reservation_high",
+                        lambda ctx: record._kind_reservation_high(ctx, "record", record._ALLOCATIONS_REL))
+
+
+def flip_t81_doctor():
+    """A doctor that reads only the record kind reservation home: the import-kind reservation is
+    unread, so its numbers grade as missing records and the run above them is held."""
+    real = opf_check._reserved_numbers
+
+    def record_only(root_fd, rep):
+        with patch.object(opf_check._opf_store, "JOURNAL_KINDS", ("record",)):
+            return real(root_fd, rep)
+    return patch.object(opf_check, "_reserved_numbers", record_only)
+
+
+def t82_publication_requires_reservation(fx):
+    """The homes-2 publication boundary requires reservation evidence for the run id it publishes
+    under: a direct _publish naming no run id, one whose run id has no reservation (under a held
+    capability), and one whose reservation claims other numbers each refuse before any transaction
+    opens, with no journal transaction, every operand at the prestate and the capability released."""
+    root = fx.case("t82-homes2-boundary")
+    with _self_test_homes2_active(root):
+        req = record.parse_request(CREATE + ["--root", str(root)])
+        res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
+        assert res.status == record._opf_store.RESOLVED, res
+        root_fd = record._opf_store._open_dir_nofollow(res.store_root)
+        try:
+            ctx = record.Context(res, str(root), root_fd)
+            ctx.journal_rel = record._record_journal_rel(record._probe_homes(ctx))
+            assert ctx.journal_rel == TYPED_JOURNAL, ("T82 the probed journal home", ctx.journal_rel)
+            record._load_manifest(ctx)
+            ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
+            ctx.version = record._read_operand(root_fd, ctx.rel(opf_check.VERSION_NAME)).model
+            ctx.worklog = record._read_operand(root_fd, ctx.rel(opf_check.WORKLOG_NAME))
+            operand = record._read_operand(root_fd, record._operand_rel(req, ctx))
+            plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
+            for op in plan.operands:
+                op.new_raw = record._emit_bytes(op.new_model)
+            pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+            unreserved = "record-20260927T000201Z-" + "c" * 16
+            other = "record-20260927T000202Z-" + "d" * 16
+
+            def held_publish(run_id, reserve=None):
+                cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+                try:
+                    if reserve is not None:
+                        record._opf_journal.reserve_allocation(cap, "record", run_id, reserve)
+                    record._publish(ctx, plan, "create", cap=cap, run_id=run_id)
+                finally:
+                    record._opf_oplock.release_operation(cap)
+            for label, call, needle in (
+                    ("no run id", lambda: record._publish(ctx, plan, "create"),
+                     "requires the run id its irrevocable id reservation"),
+                    ("no reservation", lambda: held_publish(unreserved), "requires its id reservation"),
+                    ("other claims", lambda: held_publish(other, {"BI": 7, "WL": 7}),
+                     "to claim exactly this plan's numbers")):
+                try:
+                    call()
+                except record.RecordError as exc:
+                    assert needle in str(exc) and "no transaction is opened" in str(exc), (label, str(exc))
+                else:
+                    raise AssertionError("T82 a publication with {} must refuse".format(label))
+                assert journal_states(root, TYPED_JOURNAL) == {}, ("T82 no transaction", label)
+                assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, \
+                    ("T82 the operands are untouched", label)
+                assert capability_records(root) == (False, False), ("T82 the capability is released", label)
+        finally:
+            os.close(root_fd)
+        assert not (Path(root) / record._opf_store.allocation_record("record", unreserved)).exists(), \
+            "T82 the boundary never reserves on its own"
+
+
+@contextlib.contextmanager
+def flip_t82():
+    """The reviewed head's boundary: a direct call naming no run id gets a freshly minted one, and no
+    reservation evidence is required."""
+    original = record._publish_homes2
+
+    def minting(ctx, plan, subcommand, cap=None, run_id=None):
+        if run_id is None:
+            run_id = record._record_run_id(os.urandom(16).hex())
+        return original(ctx, plan, subcommand, cap, run_id)
+    with patch.object(record, "_publish_homes2", minting), \
+            patch.object(record, "_require_reservation", lambda ctx, run_id: None):
+        yield
+
+
+def t83_journal_states_confirmed_absence(fx):
+    """The harness's journal reader reads an empty journal ONLY for confirmed absence: an absent home
+    reads {}, while a regular file, a symlink to a directory, a dangling symlink, and an unreadable
+    home (the opener's PermissionError) are each a harness fault, never apparent emptiness; a real
+    empty home reads {}."""
+    root = fx.case("t83-journal-home")
+    home = Path(root) / TYPED_JOURNAL
+    assert journal_states(root, TYPED_JOURNAL) == {}, "T83 an absent home reads empty"
+    home.parent.mkdir(parents=True)
+    (home.parent / "elsewhere").mkdir()
+
+    def faults(label):
+        try:
+            got = journal_states(root, TYPED_JOURNAL)
+        except Harness:
+            return
+        raise AssertionError("T83 a {} journal home must be a harness fault, not {!r}".format(label, got))
+    home.write_bytes(b"")
+    faults("regular-file")
+    home.unlink()
+    home.symlink_to("elsewhere")
+    faults("symlinked")
+    home.unlink()
+    home.symlink_to("absent")
+    faults("dangling-symlink")
+    home.unlink()
+    home.mkdir()
+
+    def unreadable(root_path, rel):
+        raise PermissionError(errno.EACCES, "synthetic unreadable journal home", rel)
+    with patch.object(journal, "open_journal_root_from_path", unreadable):
+        faults("unreadable")
+    assert journal_states(root, TYPED_JOURNAL) == {}, "T83 an empty home reads empty"
+
+
+def flip_t83():
+    """The reviewed head's shortcut: anything that is not a directory reads as an empty journal."""
+    original = journal_states
+
+    def shortcut(root, rel=None):
+        if not (Path(root) / (record.JOURNAL_REL if rel is None else rel)).is_dir():
+            return {}
+        return original(root, rel)
+    return patch.object(sys.modules[__name__], "journal_states", shortcut)
+
+
+# --- T85: a broken allocations home refuses the reservation scan (spec 8.2) ------------------------------
+
+@contextlib.contextmanager
+def _t85_unlistable(home):
+    """os.listdir raising EIO for a descriptor of `home` alone (matched by device and inode on the
+    descriptor), every other listing unchanged: the scan's open succeeds and its listing fails. The
+    wrapper takes a descriptor as os.listdir does, so it is listed in os.supports_fd while it stands."""
+    st = home.stat()
+    ident = (st.st_dev, st.st_ino)
+    real = os.listdir
+
+    def listdir(*args, **kwargs):
+        target = args[0] if args else kwargs.get("path")
+        if isinstance(target, int):
+            fst = os.fstat(target)
+            if (fst.st_dev, fst.st_ino) == ident:
+                raise OSError(errno.EIO, "synthetic unlistable allocations home")
+        return real(*args, **kwargs)
+    with patch.object(os, "listdir", listdir), \
+            patch.object(os, "supports_fd", set(os.supports_fd) | {listdir}):
+        yield
+
+
+def _t85_scan_refuses(root, needle):
+    """The reservation scan itself, called over the resolved store as the planner calls it: it must
+    refuse with `needle`, every byte of the store unchanged."""
+    before = snapshot(root)
+    res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
+    assert res.status == record._opf_store.RESOLVED, res
+    root_fd = record._opf_store._open_dir_nofollow(res.store_root)
+    try:
+        try:
+            high = record._reservation_high(record.Context(res, str(root), root_fd))
+        except record.RecordError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError(("the reservation scan refuses", needle, high))
+    finally:
+        os.close(root_fd)
+    assert snapshot(root) == before, ("bytes untouched by the scan", needle)
+    assert needle in message, ("the scan's refusal text", needle, message)
+
+
+def _t85_leg(fx, kind, shape):
+    """One T85 leg: the `kind` allocations home is broken as `shape` on a homes-2 store, and a create
+    refuses exit 2 with every entry of the store unchanged (snapshot), never reading the broken home as
+    holding no reservations. Every leg but one refuses end to end with the scan's own message; the
+    record kind's file-parent leg refuses end to end at the record journal inspection, and its direct
+    scan call (_t85_scan_refuses) shows the scan's message. symlink, regular-file and mode-0 refuse at
+    the home's own no-follow directory open (a mode-0 directory cannot be opened for reading, so it
+    refuses there, never at the listing); file-parent refuses at the contained walk to the home's parent
+    (the record kind's home shares that parent with the record journal home, whose inspection refuses
+    first); unlistable refuses at the listing (an injected EIO after a successful open); underivable
+    refuses before any home is opened (_allocations_rel patched to raise, KeyError for the import kind
+    and ValueError for the record kind, so both caught classes are exercised). snapshot refuses a
+    directory it cannot list, so the mode-0 leg snapshots the store before the chmod and after the mode
+    is restored, and checks the home's mode is still 0 when the run returns. The mode-0 guard tests the
+    effective uid alone: under uid 0 the leg is reported as cannot-evaluate, never a pass, while a
+    process that is not uid 0 but holds a read-override capability (CAP_DAC_OVERRIDE or
+    CAP_DAC_READ_SEARCH) can open the home, so the leg fails (exit 1): fail-closed, but reported as a
+    failure rather than as not evaluated."""
+    if shape == "mode-0" and os.geteuid() == 0:
+        raise CannotEvaluate("uid 0 is not bound by mode bits, so a mode-0 {} allocations home cannot be "
+                             "made unreadable".format(kind))
+    env = fx.env
+    rel = record._allocations_rel(kind)
+    root = fx.case("t85-{}-{}".format(kind, shape))
+    home = Path(root) / rel
+    opened = "cannot open the {} allocations home {} (".format(kind, rel)
+    with _self_test_homes2_active(root):
+        if shape == "symlink":
+            home.parent.mkdir(parents=True, exist_ok=True)
+            (home.parent / "elsewhere").mkdir()
+            home.symlink_to("elsewhere")
+            refused_untouched(env, root, CREATE, opened + "[Errno ")
+        elif shape == "regular-file":
+            home.parent.mkdir(parents=True, exist_ok=True)
+            home.write_bytes(b"")
+            refused_untouched(env, root, CREATE, opened + "[Errno ")
+        elif shape == "file-parent":
+            home.parent.parent.mkdir(parents=True, exist_ok=True)
+            home.parent.write_bytes(b"")
+            walk = opened + "cannot open contained directory component"
+            if kind == "record":
+                # The record kind's home shares its parent with the record journal home, whose
+                # inspection refuses first end to end; the scan's own refusal is pinned directly.
+                refused_untouched(env, root, CREATE, "cannot inspect the record journal")
+                _t85_scan_refuses(root, walk)
+            else:
+                refused_untouched(env, root, CREATE, walk)
+        elif shape == "mode-0":
+            home.mkdir(parents=True)
+            before = snapshot(root)
+            readable = stat.S_IMODE(home.lstat().st_mode)
+            os.chmod(home, 0)
+            try:
+                result = record_cli(env, root, CREATE)
+                mode = stat.S_IMODE(home.lstat().st_mode)
+            finally:
+                os.chmod(home, readable)
+            assert snapshot(root) == before and mode == 0, ("bytes untouched on refusal", CREATE, mode,
+                                                            result[0], result[2][-800:])
+            refused(result, opened + "[Errno {}]".format(errno.EACCES))
+        elif shape == "unlistable":
+            home.mkdir(parents=True)
+            with _t85_unlistable(home):
+                refused_untouched(env, root, CREATE, "cannot list the {} allocations home {} ([Errno {}] "
+                                  "synthetic unlistable allocations home".format(kind, rel, errno.EIO))
+        elif shape == "underivable":
+            real = record._allocations_rel
+            error = KeyError if kind == "import" else ValueError
+
+            def underivable(k):
+                if k == kind:
+                    raise error("synthetic underivable {} home".format(kind))
+                return real(k)
+            with patch.object(record, "_allocations_rel", underivable):
+                refused_untouched(env, root, CREATE, "the journal kind {!r} has no reservation home this "
+                                  "build can derive (".format(kind))
+        else:
+            raise Harness("T85 has no leg {!r}".format(shape))
+
+
+def _t85(kind, shape):
+    def test(fx):
+        _t85_leg(fx, kind, shape)
+    test.__name__ = "t85_{}_{}".format(kind, shape.replace("-", "_"))
+    return test
+
+
+# The reservation scan's four broken-home handlers, each with its own flip that turns that handler alone
+# into `return {}`: in _kind_reservation_high, the walk to the home's parent (_journal._open_parent), the
+# home's own no-follow open, and its listing; in _reservation_high, the derivation of a kind's home (two
+# flips, one per underivable leg, because only the record kind's leg then crashes past the scan, so only
+# its flip expects that crash, _INTENDED_BACKSTOPS). A
+# wrapper returns {} exactly where its handler raises, which is where the handler would have returned,
+# and leaves every other outcome as it is. The refusals are told apart by message (no entry refusal
+# shares one), and the two open handlers, which share theirs, by where the error they handled was raised.
+T85_DERIVE_REFUSAL = "has no reservation home this build can derive"
+
+
+def _t85_home_handler(exc):
+    """The _kind_reservation_high handler that raised the RecordError `exc`: "open-parent" when the error it
+    handled was raised inside _journal._open_parent, "open" for the home's own open, "listing", or None
+    for any other refusal."""
+    message = str(exc)
+    if message.startswith("cannot list the "):
+        return "listing"
+    if not message.startswith("cannot open the "):
+        return None
+    tb = exc.__context__.__traceback__ if exc.__context__ is not None else None
+    while tb is not None:
+        if tb.tb_frame.f_code is record._journal._open_parent.__code__:
+            return "open-parent"
+        tb = tb.tb_next
+    return "open"
+
+
+@contextlib.contextmanager
+def _t85_home_handler_returns_empty(handler):
+    """_kind_reservation_high with its `handler` (as _t85_home_handler names it) turned into return {}."""
+    kind_high = record._kind_reservation_high
+
+    def returning_empty(ctx, kind, home):
+        try:
+            return kind_high(ctx, kind, home)
+        except record.RecordError as exc:
+            if _t85_home_handler(exc) == handler:
+                return {}
+            raise
+    with patch.object(record, "_kind_reservation_high", returning_empty):
+        yield
+
+
+def flip_t85_open_parent():
+    """The handler of the walk to the allocations home's parent turned into return {}: a home whose
+    parent cannot be opened reads as holding no reservations (the file-parent legs)."""
+    return _t85_home_handler_returns_empty("open-parent")
+
+
+def flip_t85_open():
+    """The handler of the allocations home's own no-follow open turned into return {}: a home that is a
+    symlink, a regular file or unreadable reads as holding no reservations (the symlink, regular-file
+    and mode-0 legs)."""
+    return _t85_home_handler_returns_empty("open")
+
+
+def flip_t85_listing():
+    """The handler of the allocations home's listing turned into return {}: a home that opens but cannot
+    be listed reads as holding no reservations (the unlistable legs)."""
+    return _t85_home_handler_returns_empty("listing")
+
+
+@contextlib.contextmanager
+def flip_t85_derive():
+    """The derivation handler of _reservation_high turned into return {}: a kind whose home cannot be
+    derived ends the scan with no reservations, every kind's included (the import kind's underivable
+    leg, which then records)."""
+    high = record._reservation_high
+
+    def returning_empty(ctx):
+        try:
+            return high(ctx)
+        except record.RecordError as exc:
+            if T85_DERIVE_REFUSAL in str(exc):
+                return {}
+            raise
+    with patch.object(record, "_reservation_high", returning_empty):
+        yield
+
+
+@contextlib.contextmanager
+def flip_t85_derive_record():
+    """flip_t85_derive for the record kind's underivable leg, a flip of its own so that it expects the one
+    injection that leg raises: with the scan ended empty, the run reaches the publication boundary, whose
+    read of its own reservation derives the record kind's home again (_read_reservation), and the leg's
+    ValueError escapes there to the record verb's backstop (the injection its declared backstop is bound
+    to, recorded where it leaves _read_reservation)."""
+    with flip_t85_derive(), \
+            _crash_point("t85-record-underivable", record, "_read_reservation",
+                         ValueError("synthetic underivable record home")):
+        yield
+
+
+# --- T86: the discriminator binds each flip to an assertion, never a backstop or harness fault ---------
 
 
 def _bound_injection(line, printed, injections, consumed, allowed):
@@ -6578,7 +7311,7 @@ def _bound_injection_oop(line, records, consumed, allowed):
     printed from it; an args copy of it rebuilt as its plain base type or as a same-named local class;
     a copy, deep copy, pickle round trip or cls(*args) rebuild of it as its own private class, each
     showing a fresh built serial), or a second line carrying an already consumed token (a cleared and
-    reprinted capture) binds none: None. Each token accounts for one line only. Under the T81 flips
+    reprinted capture) binds none: None. Each token accounts for one line only. Under the T87 flips
     _discriminate_plain_type and _discriminate_repr_substring (_oop_exact[0] False) a line binds when a
     computed repr occurs anywhere in it."""
     tokens = set(_INJECTION_TOKEN.findall(line)) & records.keys()
@@ -6769,7 +7502,7 @@ def _unseen_injections(fired, consumed, expected):
 
 
 def _discriminate_plain_type(name, test, flip, current=_discriminate):
-    """A T81 flip: the _discriminate_repr_substring binding, with each injection raised and declared as
+    """A T87 flip: the _discriminate_repr_substring binding, with each injection raised and declared as
     its plain base type rather than its private fault class (_oop_private), so an args copy of the
     injection rebuilt as that type (NameError(*injected.args)) prints the injection's line byte for byte
     and binds."""
@@ -6779,7 +7512,7 @@ def _discriminate_plain_type(name, test, flip, current=_discriminate):
 
 
 def _discriminate_repr_substring(name, test, flip, current=_discriminate):
-    """A T81 flip: the out-of-process run of _discriminate with private fault classes, but no serial in
+    """A T87 flip: the out-of-process run of _discriminate with private fault classes, but no serial in
     their reprs and a line bound when a parent-computed repr occurs anywhere in it (_oop_exact), so an
     exception wrapping the injection or its repr, an exception group holding it, and a copy, pickle
     round trip or class rebuild of it bind."""
@@ -6788,7 +7521,7 @@ def _discriminate_repr_substring(name, test, flip, current=_discriminate):
 
 
 def _discriminate_in_process(name, test, flip):
-    """A T81 flip: the flipped run stays in this process, and a backstop line binds when, read from the
+    """A T87 flip: the flipped run stays in this process, and a backstop line binds when, read from the
     final contents of an intact capture, it carries the token of exactly one recorded injection the
     flip declares and one record CLI backstop frame holding that same object wrote that whole line into
     that capture, each token binding one line only
@@ -6830,7 +7563,7 @@ _FLIP_ARITY_ONLY = re.compile(r"cannot evaluate: unexpected error[^\n]*TypeError
 
 
 def _discriminate_arity_only(name, test, flip):
-    """The T80 flip: a flipped run's red is refused only for a signature TypeError at the backstop, and
+    """The T86 flip: a flipped run's red is refused only for a signature TypeError at the backstop, and
     a harness exception escapes as itself."""
     test()
     faults = []
@@ -6849,67 +7582,67 @@ def _discriminate_arity_only(name, test, flip):
     test()
 
 
-def _t80_crash(*_args):
-    raise NameError("t80 broken flip fixture")
+def _t86_crash(*_args):
+    raise NameError("t86 broken flip fixture")
 
 
-def _t80_backstop_flip():
+def _t86_backstop_flip():
     """A flip whose replacement crashes inside the CLI: the record backstop exits 2."""
-    return patch.object(guard, "acquire_lease", _t80_crash)
+    return patch.object(guard, "acquire_lease", _t86_crash)
 
 
-def _t80_declared_crash(*_args):
-    raise _injected("t80-declared", NameError("t80 broken flip fixture"))
+def _t86_declared_crash(*_args):
+    raise _injected("t86-declared", NameError("t86 broken flip fixture"))
 
 
-def _t80_declared_flip():
+def _t86_declared_flip():
     """The same crash, recorded as an injection this flip declares in _INTENDED_BACKSTOPS."""
-    return patch.object(guard, "acquire_lease", _t80_declared_crash)
+    return patch.object(guard, "acquire_lease", _t86_declared_crash)
 
 
-def _t80_harness_flip():
+def _t86_harness_flip():
     """A flip whose replacement crashes the test itself, outside any CLI run."""
-    return patch.object(sys.modules[__name__], "recorded", _t80_crash)
+    return patch.object(sys.modules[__name__], "recorded", _t86_crash)
 
 
-def _t80_held(*_args):
-    raise guard.LeaseHeldError("t80 a held lease refuses")
+def _t86_held(*_args):
+    raise guard.LeaseHeldError("t86 a held lease refuses")
 
 
-def _t80_assertion_flip():
+def _t86_assertion_flip():
     """A flip the CLI meets as an ordinary refusal: the test's own assertion turns red."""
-    return patch.object(guard, "acquire_lease", _t80_held)
+    return patch.object(guard, "acquire_lease", _t86_held)
 
 
-def t80_discrimination_bound(fx):
+def t86_discrimination_bound(fx):
     """The discriminator counts a flipped run as discriminating only when it goes red through an
     assertion: a red met only through the CLI's cannot-evaluate backstop, or through a harness exception,
     fails the discrimination naming which, while an assertion red, and a backstop caused by a recorded
     injection the flip declares, discriminate."""
     def test():
-        recorded(record_cli(fx.env, fx.case("t80-create"), CREATE))
-    for label, flip, needle in (("backstop", _t80_backstop_flip, "unexpected-error backstop"),
-                                ("harness", _t80_harness_flip, "harness exception"),
-                                ("assertion", _t80_assertion_flip, None),
-                                ("declared", _t80_declared_flip, None)):
+        recorded(record_cli(fx.env, fx.case("t86-create"), CREATE))
+    for label, flip, needle in (("backstop", _t86_backstop_flip, "unexpected-error backstop"),
+                                ("harness", _t86_harness_flip, "harness exception"),
+                                ("assertion", _t86_assertion_flip, None),
+                                ("declared", _t86_declared_flip, None)):
         outcome = None
         try:
-            sys.modules[__name__]._discriminate("t80-" + label, test, flip)
+            sys.modules[__name__]._discriminate("t86-" + label, test, flip)
         except Exception as exc:  # noqa: BLE001  the verdict below reads which outcome was reached
             outcome = exc
         if needle is None:
-            assert outcome is None, ("T80 an intended red discriminates", label, repr(outcome))
+            assert outcome is None, ("T86 an intended red discriminates", label, repr(outcome))
         else:
             assert isinstance(outcome, AssertionError) and needle in str(outcome), (
-                "T80 a red through no assertion never discriminates", label, repr(outcome))
+                "T86 a red through no assertion never discriminates", label, repr(outcome))
 
 
-def flip_t80():
+def flip_t86():
     """A discriminator that refuses only a signature TypeError at the backstop."""
     return patch.object(sys.modules[__name__], "_discriminate", _discriminate_arity_only)
 
 
-# --- T81: a declared backstop is bound to the recorded injection that must cause it ---------------------
+# --- T87: a declared backstop is bound to the recorded injection that must cause it ---------------------
 
 
 # The declarations of _discriminate_substring: backstop texts each matched as a substring of any
@@ -6917,6 +7650,7 @@ def flip_t80():
 _SUBSTRING_BACKSTOPS = {
     flip_t18_requires: ("KeyError('--decision')",),
     flip_t18_together: ("KeyError('--decided-by')",),
+    flip_string_claims_admitted: ("TypeError(\"'>' not supported between instances of 'str' and 'int'\")",),
     flip_t62: ("BrokenPipeError(32, 'synthetic output failure after the lease release')",),
     flip_t64_conclude: ("OSError(5, 'synthetic stderr failure')",),
     flip_t64_recovery: ("BrokenPipeError(32, 'synthetic emission failure')",),
@@ -6924,14 +7658,15 @@ _SUBSTRING_BACKSTOPS = {
     flip_t69_release: ("RuntimeError('fd release witness')",),
     flip_t69_token: ("MemoryError('synthetic token allocation failure')",),
     flip_t77: ("OSError({}, ".format(errno.EMFILE),),
-    flip_t79: ("RecursionError('maximum recursion depth exceeded')",),
-    _t80_declared_flip: ("NameError('t80 broken flip fixture')",),
+    flip_t84: ("RecursionError('maximum recursion depth exceeded')",),
+    flip_t85_derive_record: ("ValueError('synthetic underivable record home')",),
+    _t86_declared_flip: ("NameError('t86 broken flip fixture')",),
 }
 _BACKSTOP_SUBSTRING = re.compile(r"(?:cannot evaluate|harness error): unexpected error")
 
 
 def _discriminate_substring(name, test, flip):
-    """A T81 flip: a declared text accepts any backstop line containing it, a store-resolution refusal
+    """A T87 flip: a declared text accepts any backstop line containing it, a store-resolution refusal
     is not a backstop, and a BaseException escapes as itself. Its flipped run's injections are recorded
     untokenised, in a list it never reads."""
     test()
@@ -6959,77 +7694,77 @@ def _discriminate_substring(name, test, flip):
     test()
 
 
-def _t81_unrelated_eio(*_args):
+def _t87_unrelated_eio(*_args):
     raise OSError(errno.EIO, "UNRELATED crash in a broken flip; intended injection never reached")
 
 
-def _t81_unrelated_flip():
+def _t87_unrelated_flip():
     """A broken flip whose replacement crashes before its test's injection is reached."""
-    return patch.object(guard, "_claim_after_release", _t81_unrelated_eio)
+    return patch.object(guard, "_claim_after_release", _t87_unrelated_eio)
 
 
-def _t81_mimic_crash(*_args):
-    raise RuntimeError("NameError('t80 broken flip fixture')")
+def _t87_mimic_crash(*_args):
+    raise RuntimeError("NameError('t86 broken flip fixture')")
 
 
-def _t81_twin_crash(*_args):
-    _injected("t80-declared", NameError("t80 broken flip fixture"))
-    raise NameError("t80 broken flip fixture")
+def _t87_twin_crash(*_args):
+    _injected("t86-declared", NameError("t86 broken flip fixture"))
+    raise NameError("t86 broken flip fixture")
 
 
-def _t81_print_twin(*_args, **_kwargs):
-    raise NameError("t80 broken flip fixture")
+def _t87_print_twin(*_args, **_kwargs):
+    raise NameError("t86 broken flip fixture")
 
 
 @contextlib.contextmanager
-def _t81_print_twin_flip():
+def _t87_print_twin_flip():
     """The declared crash, whose diagnostic print in record.cli's backstop raises a twin of it (same type
     and message, a distinct object) that opf._cmd_record's backstop then prints: the declared line, printed
     from an object no injection recorded."""
-    with _t80_declared_flip(), patch.object(record, "print", _t81_print_twin, create=True):
+    with _t86_declared_flip(), patch.object(record, "print", _t87_print_twin, create=True):
         yield
 
 
-def _t81_resolver_crash(*_args):
-    raise NameError("t81 crash in the store resolver")
+def _t87_resolver_crash(*_args):
+    raise NameError("t87 crash in the store resolver")
 
 
-def _t81_resolver_flip():
+def _t87_resolver_flip():
     """A crash the record CLI turns into an unexpected-error refusal, never its cannot-evaluate line."""
-    return patch.object(record._opf_store, "resolve_store", _t81_resolver_crash)
+    return patch.object(record._opf_store, "resolve_store", _t87_resolver_crash)
 
 
-def _t81_exit(*_args):
+def _t87_exit(*_args):
     raise SystemExit(0)
 
 
-def _t81_exit_flip():
+def _t87_exit_flip():
     """A flip whose replacement raises SystemExit(0) in the test itself."""
-    return patch.object(sys.modules[__name__], "recorded", _t81_exit)
+    return patch.object(sys.modules[__name__], "recorded", _t87_exit)
 
 
-def _t81_args_copy_crash(*_args):
+def _t87_args_copy_crash(*_args):
     """A recorded injection, never raised: an unrecorded plain NameError built from its args (token
     included, the private class's name not) is raised in its place."""
-    injected = _injected("t80-declared", NameError("t80 broken flip fixture"))
+    injected = _injected("t86-declared", NameError("t86 broken flip fixture"))
     raise NameError(*injected.args)
 
 
-def _t81_replaced(rebuild):
+def _t87_replaced(rebuild):
     """A crash recording the declared injection, never raised: rebuild(injected) is raised in its
     place."""
     def crash(*_args):
-        raise rebuild(_injected("t80-declared", NameError("t80 broken flip fixture")))
+        raise rebuild(_injected("t86-declared", NameError("t86 broken flip fixture")))
     return crash
 
 
-def _t81_subclass_rebuild(injected):
+def _t87_subclass_rebuild(injected):
     """The private class found among NameError's subclasses by its name, rebuilt from the args."""
     found = next(cls for cls in NameError.__subclasses__() if cls.__name__ == "_OpfInjectedNameError")
     return found(*injected.args)
 
 
-def _t81_caught_rebuild(injected):
+def _t87_caught_rebuild(injected):
     """The injection raised and caught, then the caught exception's class rebuilt from its args."""
     try:
         raise injected
@@ -7037,7 +7772,7 @@ def _t81_caught_rebuild(injected):
         return caught.__class__(*caught.args)
 
 
-def _t81_same_name_rebuild(injected):
+def _t87_same_name_rebuild(injected):
     """A local class of the private class's name over the plain base, rebuilt from the args."""
     class _OpfInjectedNameError(NameError):
         """A same-named stand-in for the private class, local to this rebuild."""
@@ -7047,7 +7782,7 @@ def _t81_same_name_rebuild(injected):
 # The objects raised in place of a recorded, never raised injection: each repeats or contains the
 # injection's repr, class name and token, but is not the injection object (a copy or rebuild shows a
 # fresh built serial; a wrapper's repr only contains the injection's), so none binds.
-_T81_REBUILDS = (
+_T87_REBUILDS = (
     ("deliberate-type-copy", lambda injected: type(injected)(*injected.args)),
     ("wrapped-repr", lambda injected: RuntimeError(repr(injected))),
     ("wrapped-object", RuntimeError),
@@ -7056,48 +7791,48 @@ _T81_REBUILDS = (
     ("copy", copy.copy),
     ("deepcopy", copy.deepcopy),
     ("pickle-round-trip", lambda injected: pickle.loads(pickle.dumps(injected))),
-    ("subclass-lookup", _t81_subclass_rebuild),
-    ("caught-class", _t81_caught_rebuild),
-    ("same-name-class", _t81_same_name_rebuild),
+    ("subclass-lookup", _t87_subclass_rebuild),
+    ("caught-class", _t87_caught_rebuild),
+    ("same-name-class", _t87_same_name_rebuild),
 )
 
 
-def _t81_formatted_crash(*_args):
+def _t87_formatted_crash(*_args):
     """A recorded injection, never raised: an unrelated AttributeError whose message is the injection's
     (token included) is raised in its place."""
-    injected = _injected("t80-declared", NameError("t80 broken flip fixture"))
+    injected = _injected("t86-declared", NameError("t86 broken flip fixture"))
     getattr(object(), str(injected))
 
 
 # A child process that prints, in the record backstop's words, a new RuntimeError made from its argument.
-_T81_CHILD = ("import sys\n"
+_T87_CHILD = ("import sys\n"
               "print('opf record: cannot evaluate: unexpected error ({!r}); failing closed to exit 2'"
               ".format(RuntimeError(sys.argv[1])), file=sys.stderr)\n")
 
 
-def _t81_child_parse(_argv):
+def _t87_child_parse(_argv):
     """A recorded injection, never raised: its message (token included) is passed to a child process
     whose stderr, a backstop line printing a new RuntimeError, is read as a child's is; the run then
     refuses as an ordinary refusal."""
-    injected = _injected("t80-declared", NameError("t80 broken flip fixture"))
-    proc = subprocess.run([sys.executable, "-I", "-B", "-c", _T81_CHILD, str(injected)],
+    injected = _injected("t86-declared", NameError("t86 broken flip fixture"))
+    proc = subprocess.run([sys.executable, "-I", "-B", "-c", _T87_CHILD, str(injected)],
                           capture_output=True, text=True, timeout=180, env={})
     _note_backstops(proc.stderr)
     _oop_forward(proc.stderr)
-    raise record.RecordError("t81 the run refuses after its child")
+    raise record.RecordError("t87 the run refuses after its child")
 
 
-def _t81_child_flip():
+def _t87_child_flip():
     """The parse records the declared injection, hands its message to a child, and refuses."""
-    return patch.object(record, "parse_request", _t81_child_parse)
+    return patch.object(record, "parse_request", _t87_child_parse)
 
 
-def _t81_forward_print(*args, **kwargs):
+def _t87_forward_print(*args, **kwargs):
     """The backstop's diagnostic, forwarded unchanged into a private capture no CLI run reads."""
     print(*args, **dict(kwargs, file=_EmissionStderr()))
 
 
-def _t81_clear_print(*args, **kwargs):
+def _t87_clear_print(*args, **kwargs):
     """The backstop's diagnostic, printed to its stream, which is then cleared."""
     print(*args, **kwargs)
     stream = kwargs.get("file") or sys.stderr
@@ -7105,13 +7840,13 @@ def _t81_clear_print(*args, **kwargs):
     stream.truncate(0)
 
 
-def _t81_reprint_print(*args, **kwargs):
+def _t87_reprint_print(*args, **kwargs):
     """The backstop's diagnostic, printed, cleared, and printed again to the same stream."""
-    _t81_clear_print(*args, **kwargs)
+    _t87_clear_print(*args, **kwargs)
     print(*args, **kwargs)
 
 
-def _t81_nested_print(*_args, **kwargs):
+def _t87_nested_print(*_args, **kwargs):
     """In place of the backstop's diagnostic, a nested record CLI run (whose parse meets an unrecorded
     twin) with its stderr captured privately; its diagnostic is then appended to the outer stream."""
     private = io.StringIO()
@@ -7120,7 +7855,7 @@ def _t81_nested_print(*_args, **kwargs):
     (kwargs.get("file") or sys.stderr).write(private.getvalue())
 
 
-def _t81_nested_copy_print(preamble):
+def _t87_nested_copy_print(preamble):
     """A print that sends the backstop's diagnostic to a private capture, writes preamble (None: nothing)
     to the backstop's own stream, then runs a nested record CLI whose parse raises an unrecorded plain
     NameError from the injection's args; the nested backstop prints that copy, the injection's token
@@ -7133,28 +7868,28 @@ def _t81_nested_copy_print(preamble):
     return nested_print
 
 
-def _t81_chunks(args, kwargs):
+def _t87_chunks(args, kwargs):
     """The text print(*args, **kwargs) would write, cut inside its word 'unexpected'."""
     text = kwargs.get("sep", " ").join(map(str, args)) + kwargs.get("end", "\n")
     cut = text.index("unexpected") + len("unexp")
     return text[:cut], text[cut:]
 
 
-def _t81_split_print(*args, **kwargs):
+def _t87_split_print(*args, **kwargs):
     """The backstop's diagnostic, written to its stream in two calls split inside 'unexpected'."""
     stream = kwargs.get("file") or sys.stderr
-    for chunk in _t81_chunks(args, kwargs):
+    for chunk in _t87_chunks(args, kwargs):
         stream.write(chunk)
 
 
-def _t81_writelines_print(*args, **kwargs):
+def _t87_writelines_print(*args, **kwargs):
     """The backstop's diagnostic, written to its stream through writelines in the same two chunks."""
-    (kwargs.get("file") or sys.stderr).writelines(_t81_chunks(args, kwargs))
+    (kwargs.get("file") or sys.stderr).writelines(_t87_chunks(args, kwargs))
 
 
 @contextlib.contextmanager
-def _t81_capture_flip(first_print, twin):
-    """The first record CLI run's parse_request raises a recorded t80-declared injection whose backstop
+def _t87_capture_flip(first_print, twin):
+    """The first record CLI run's parse_request raises a recorded t86-declared injection whose backstop
     diagnostic goes through first_print; a later run's raises an unrecorded twin of it (same type and
     message, a distinct object) when twin, an unrecorded plain NameError raised from the injection's own
     args (token included, the private class's name not) when twin is "args-copy", else runs
@@ -7164,12 +7899,12 @@ def _t81_capture_flip(first_print, twin):
     def parse(argv):
         calls.append(None)
         if len(calls) == 1:
-            first.append(_injected("t80-declared", NameError("t80 broken flip fixture")))
+            first.append(_injected("t86-declared", NameError("t86 broken flip fixture")))
             raise first[0]
         if twin == "args-copy":
             raise NameError(*first[0].args)
         if twin:
-            raise NameError("t80 broken flip fixture")
+            raise NameError("t86 broken flip fixture")
         return real_parse(argv)
 
     def first_then_plain(*args, **kwargs):
@@ -7180,67 +7915,67 @@ def _t81_capture_flip(first_print, twin):
         yield
 
 
-def _t81_forward_flip():
+def _t87_forward_flip():
     """The injection's line reaches only a private capture; the twin's reaches the inspected one."""
-    return _t81_capture_flip(_t81_forward_print, True)
+    return _t87_capture_flip(_t87_forward_print, True)
 
 
-def _t81_clear_flip():
+def _t87_clear_flip():
     """The injection's line is cleared from its own capture; the twin's reaches a later one."""
-    return _t81_capture_flip(_t81_clear_print, True)
+    return _t87_capture_flip(_t87_clear_print, True)
 
 
-def _t81_reprint_flip():
+def _t87_reprint_flip():
     """The injection's line is cleared and printed again into its own capture, a mutated capture."""
-    return _t81_capture_flip(_t81_reprint_print, False)
+    return _t87_capture_flip(_t87_reprint_print, False)
 
 
-def _t81_own_flip():
+def _t87_own_flip():
     """The injection's line reaches its own capture, which is inspected (the accepted control)."""
-    return _t81_capture_flip(print, False)
+    return _t87_capture_flip(print, False)
 
 
-def _t81_truncate_flip():
+def _t87_truncate_flip():
     """The injection's line is cleared from its own capture and nothing else is printed (the accepted
     control: no occurrence is inspected, and the red is the assertion's)."""
-    return _t81_capture_flip(_t81_clear_print, False)
+    return _t87_capture_flip(_t87_clear_print, False)
 
 
-def _t81_nested_flip():
+def _t87_nested_flip():
     """The injection's backstop runs a nested record CLI whose unrecorded twin's diagnostic, captured
     privately, is copied into the injection's own capture in place of the injection's line."""
-    return _t81_capture_flip(_t81_nested_print, True)
+    return _t87_capture_flip(_t87_nested_print, True)
 
 
-def _t81_empty_nested_flip():
+def _t87_empty_nested_flip():
     """The injection's backstop writes nothing ("") into its own capture, then a nested run's backstop
     prints an args copy of the injection there."""
-    return _t81_capture_flip(_t81_nested_copy_print(""), "args-copy")
+    return _t87_capture_flip(_t87_nested_copy_print(""), "args-copy")
 
 
-def _t81_preamble_nested_flip():
+def _t87_preamble_nested_flip():
     """The injection's backstop writes a preamble without its token into its own capture, then a nested
     run's backstop prints an args copy of the injection there."""
-    return _t81_capture_flip(_t81_nested_copy_print("t81 a preamble that carries no token\n"), "args-copy")
+    return _t87_capture_flip(_t87_nested_copy_print("t87 a preamble that carries no token\n"), "args-copy")
 
 
-def _t81_unwritten_nested_flip():
+def _t87_unwritten_nested_flip():
     """The injection's backstop makes no write to its own capture, then a nested run's backstop prints an
     args copy of the injection there."""
-    return _t81_capture_flip(_t81_nested_copy_print(None), "args-copy")
+    return _t87_capture_flip(_t87_nested_copy_print(None), "args-copy")
 
 
-def _t81_split_flip():
+def _t87_split_flip():
     """The injection's line reaches its own capture in two writes (accepted)."""
-    return _t81_capture_flip(_t81_split_print, False)
+    return _t87_capture_flip(_t87_split_print, False)
 
 
-def _t81_writelines_flip():
+def _t87_writelines_flip():
     """The injection's line reaches its own capture through writelines (accepted)."""
-    return _t81_capture_flip(_t81_writelines_print, False)
+    return _t87_capture_flip(_t87_writelines_print, False)
 
 
-class _T81LyingLen(str):
+class _T87LyingLen(str):
     """A str that lies in __len__ (one way to forge in-process attribution): in-process span arithmetic
     reads a length the buffer does not have, while the bytes on the pipe stay the truth."""
 
@@ -7248,37 +7983,37 @@ class _T81LyingLen(str):
         return 0
 
 
-def _t81_lying_len_print(*args, **kwargs):
+def _t87_lying_len_print(*args, **kwargs):
     """The diagnostic of the backstop, written as one str subclass lying in __len__."""
     text = kwargs.get("sep", " ").join(map(str, args)) + kwargs.get("end", "\n")
-    (kwargs.get("file") or sys.stderr).write(_T81LyingLen(text))
+    (kwargs.get("file") or sys.stderr).write(_T87LyingLen(text))
 
 
-_T81_TWIN_LINE = ("opf record: cannot evaluate: unexpected error (NameError('t80 broken flip "
+_T87_TWIN_LINE = ("opf record: cannot evaluate: unexpected error (NameError('t86 broken flip "
                   "fixture')); failing closed to exit 2\n")
 
 
-def _t81_thread_twin_print(*args, **kwargs):
+def _t87_thread_twin_print(*args, **kwargs):
     """The diagnostic of the backstop, written in two chunks with a second thread writing a twin
     backstop line into the same stream between them (an interleaving that forges in-process
     attribution, run here against the pipe): the token-bearing bytes never form a complete backstop
     line of their own, and the twin text carries no recorded token."""
     stream = kwargs.get("file") or sys.stderr
-    first, second = _t81_chunks(args, kwargs)
+    first, second = _t87_chunks(args, kwargs)
     stream.write(first)
-    twin = threading.Thread(target=stream.write, args=(_T81_TWIN_LINE,))
+    twin = threading.Thread(target=stream.write, args=(_T87_TWIN_LINE,))
     twin.start()
     twin.join(timeout=60)
-    assert not twin.is_alive(), "T81 the twin thread never finished its write"
+    assert not twin.is_alive(), "T87 the twin thread never finished its write"
     stream.write(second)
 
 
-def _t81_settrace_twin_print(*args, **kwargs):
+def _t87_settrace_twin_print(*args, **kwargs):
     """The diagnostic of the backstop, written around a twin line from a second thread that a trace
     function holds paused until the first chunk is written (a pausing that forges in-process
     attribution, run here against the pipe)."""
     stream = kwargs.get("file") or sys.stderr
-    first, second = _t81_chunks(args, kwargs)
+    first, second = _t87_chunks(args, kwargs)
     paused, release = threading.Event(), threading.Event()
 
     def pausing(frame, event, arg):
@@ -7290,20 +8025,20 @@ def _t81_settrace_twin_print(*args, **kwargs):
     def twin():
         sys.settrace(pausing)
         try:
-            stream.write(_T81_TWIN_LINE)
+            stream.write(_T87_TWIN_LINE)
         finally:
             sys.settrace(None)
     worker = threading.Thread(target=twin)
     worker.start()
-    assert paused.wait(timeout=60), "T81 the traced twin thread never paused"
+    assert paused.wait(timeout=60), "T87 the traced twin thread never paused"
     stream.write(first)
     release.set()
     worker.join(timeout=60)
-    assert not worker.is_alive(), "T81 the traced twin thread never finished its write"
+    assert not worker.is_alive(), "T87 the traced twin thread never finished its write"
     stream.write(second)
 
 
-def _t81_wrapped_print(*args, **kwargs):
+def _t87_wrapped_print(*args, **kwargs):
     """The diagnostic of the backstop, written by the backstop frame holding the injection, with the
     exception repr in it wrapped as a RuntimeError's: in-process frame attribution, and every binding
     by substring, accept the line; it is not the backstop's own diagnostic of the injection."""
@@ -7314,92 +8049,92 @@ def _t81_wrapped_print(*args, **kwargs):
     print(text, **kwargs)
 
 
-def _t81_wrapped_flip():
+def _t87_wrapped_flip():
     """The line of the injection, rewritten by its own backstop frame to wrap the repr."""
-    return _t81_capture_flip(_t81_wrapped_print, False)
+    return _t87_capture_flip(_t87_wrapped_print, False)
 
 
-def _t81_lying_len_flip():
+def _t87_lying_len_flip():
     """The line of the injection written under a lying __len__ in its first run; the line of an
     unrecorded twin in the capture of a later run."""
-    return _t81_capture_flip(_t81_lying_len_print, True)
+    return _t87_capture_flip(_t87_lying_len_print, True)
 
 
-def _t81_thread_twin_flip():
+def _t87_thread_twin_flip():
     """The line of the injection interleaved with a twin line a second thread wrote."""
-    return _t81_capture_flip(_t81_thread_twin_print, False)
+    return _t87_capture_flip(_t87_thread_twin_print, False)
 
 
-def _t81_settrace_twin_flip():
+def _t87_settrace_twin_flip():
     """The line of the injection interleaved with a twin line from a thread paused under settrace."""
-    return _t81_capture_flip(_t81_settrace_twin_print, False)
+    return _t87_capture_flip(_t87_settrace_twin_print, False)
 
 
 @contextlib.contextmanager
-def _t81_declared_as(probe, model):
+def _t87_declared_as(probe, model):
     """probe carries model's declarations, in _INTENDED_BACKSTOPS and in _SUBSTRING_BACKSTOPS."""
     with patch.dict(_INTENDED_BACKSTOPS, {probe: _INTENDED_BACKSTOPS[model]}), \
             patch.dict(_SUBSTRING_BACKSTOPS, {probe: _SUBSTRING_BACKSTOPS[model]}):
         yield
 
 
-def _t81_legs(fx):
-    """T81's legs, each (label, test, flip, setup, needle): needle names how a required-reject leg must
+def _t87_legs(fx):
+    """T87's legs, each (label, test, flip, setup, needle): needle names how a required-reject leg must
     fail, and None marks a required-accept control."""
     me = sys.modules[__name__]
 
     def create():
-        recorded(record_cli(fx.env, fx.case("t81-create"), CREATE))
+        recorded(record_cli(fx.env, fx.case("t87-create"), CREATE))
 
     def create_twice():
-        first = record_cli(fx.env, fx.case("t81-first"), CREATE)
-        second = record_cli(fx.env, fx.case("t81-second"), CREATE)
+        first = record_cli(fx.env, fx.case("t87-first"), CREATE)
+        second = record_cli(fx.env, fx.case("t87-second"), CREATE)
         recorded(first)
         recorded(second)
 
     def declared(probe):
-        return lambda: _t81_declared_as(probe, _t80_declared_flip)
+        return lambda: _t87_declared_as(probe, _t86_declared_flip)
     backstop, harness = "unexpected-error backstop", "harness exception"
-    legs = (("unrelated-eio", lambda: t77_report_every_failure(fx), _t81_unrelated_flip,
-             lambda: _t81_declared_as(_t81_unrelated_flip, flip_t77), backstop),
-            ("mimic-type", create, _t80_declared_flip,
-             lambda: patch.object(me, "_t80_declared_crash", _t81_mimic_crash), backstop),
-            ("twin-object", create, _t80_declared_flip,
-             lambda: patch.object(me, "_t80_declared_crash", _t81_twin_crash), backstop),
-            ("print-twin", create, _t81_print_twin_flip,
-             lambda: _t81_declared_as(_t81_print_twin_flip, _t80_declared_flip), backstop),
-            ("resolver-refusal", create, _t81_resolver_flip, contextlib.nullcontext, backstop),
-            ("system-exit", create, _t81_exit_flip, contextlib.nullcontext, harness),
-            ("private-capture", create_twice, _t81_forward_flip, declared(_t81_forward_flip), backstop),
-            ("clear-then-twin", create_twice, _t81_clear_flip, declared(_t81_clear_flip), backstop),
-            ("clear-reprint", create_twice, _t81_reprint_flip, declared(_t81_reprint_flip), backstop),
-            ("copied-nested", create, _t81_nested_flip, declared(_t81_nested_flip), backstop),
-            ("args-copy", create, _t80_declared_flip,
-             lambda: patch.object(me, "_t80_declared_crash", _t81_args_copy_crash), backstop),
-            ("formatted-unrelated", create, _t80_declared_flip,
-             lambda: patch.object(me, "_t80_declared_crash", _t81_formatted_crash), backstop),
-            ("child-message", create, _t81_child_flip, declared(_t81_child_flip), backstop),
-            ("empty-write-nested-args-copy", create, _t81_empty_nested_flip,
-             declared(_t81_empty_nested_flip), backstop),
-            ("preamble-write-nested-args-copy", create, _t81_preamble_nested_flip,
-             declared(_t81_preamble_nested_flip), backstop),
-            ("no-write-nested-args-copy", create, _t81_unwritten_nested_flip,
-             declared(_t81_unwritten_nested_flip), backstop),
-            ("len-override", create_twice, _t81_lying_len_flip, declared(_t81_lying_len_flip), backstop),
-            ("thread-interleaving", create, _t81_thread_twin_flip, declared(_t81_thread_twin_flip),
+    legs = (("unrelated-eio", lambda: t77_report_every_failure(fx), _t87_unrelated_flip,
+             lambda: _t87_declared_as(_t87_unrelated_flip, flip_t77), backstop),
+            ("mimic-type", create, _t86_declared_flip,
+             lambda: patch.object(me, "_t86_declared_crash", _t87_mimic_crash), backstop),
+            ("twin-object", create, _t86_declared_flip,
+             lambda: patch.object(me, "_t86_declared_crash", _t87_twin_crash), backstop),
+            ("print-twin", create, _t87_print_twin_flip,
+             lambda: _t87_declared_as(_t87_print_twin_flip, _t86_declared_flip), backstop),
+            ("resolver-refusal", create, _t87_resolver_flip, contextlib.nullcontext, backstop),
+            ("system-exit", create, _t87_exit_flip, contextlib.nullcontext, harness),
+            ("private-capture", create_twice, _t87_forward_flip, declared(_t87_forward_flip), backstop),
+            ("clear-then-twin", create_twice, _t87_clear_flip, declared(_t87_clear_flip), backstop),
+            ("clear-reprint", create_twice, _t87_reprint_flip, declared(_t87_reprint_flip), backstop),
+            ("copied-nested", create, _t87_nested_flip, declared(_t87_nested_flip), backstop),
+            ("args-copy", create, _t86_declared_flip,
+             lambda: patch.object(me, "_t86_declared_crash", _t87_args_copy_crash), backstop),
+            ("formatted-unrelated", create, _t86_declared_flip,
+             lambda: patch.object(me, "_t86_declared_crash", _t87_formatted_crash), backstop),
+            ("child-message", create, _t87_child_flip, declared(_t87_child_flip), backstop),
+            ("empty-write-nested-args-copy", create, _t87_empty_nested_flip,
+             declared(_t87_empty_nested_flip), backstop),
+            ("preamble-write-nested-args-copy", create, _t87_preamble_nested_flip,
+             declared(_t87_preamble_nested_flip), backstop),
+            ("no-write-nested-args-copy", create, _t87_unwritten_nested_flip,
+             declared(_t87_unwritten_nested_flip), backstop),
+            ("len-override", create_twice, _t87_lying_len_flip, declared(_t87_lying_len_flip), backstop),
+            ("thread-interleaving", create, _t87_thread_twin_flip, declared(_t87_thread_twin_flip),
              backstop),
-            ("settrace-pause", create, _t81_settrace_twin_flip, declared(_t81_settrace_twin_flip),
+            ("settrace-pause", create, _t87_settrace_twin_flip, declared(_t87_settrace_twin_flip),
              backstop),
-            ("print-wrapped", create_twice, _t81_wrapped_flip, declared(_t81_wrapped_flip), backstop),
-            ("own-capture", create_twice, _t81_own_flip, declared(_t81_own_flip), None),
-            ("truncate-alone", create_twice, _t81_truncate_flip, declared(_t81_truncate_flip), None),
-            ("split-write", create, _t81_split_flip, declared(_t81_split_flip), None),
-            ("writelines", create, _t81_writelines_flip, declared(_t81_writelines_flip), None))
-    return legs + tuple((label, create, _t80_declared_flip, lambda rebuild=rebuild: patch.object(
-        me, "_t80_declared_crash", _t81_replaced(rebuild)), backstop) for label, rebuild in _T81_REBUILDS)
+            ("print-wrapped", create_twice, _t87_wrapped_flip, declared(_t87_wrapped_flip), backstop),
+            ("own-capture", create_twice, _t87_own_flip, declared(_t87_own_flip), None),
+            ("truncate-alone", create_twice, _t87_truncate_flip, declared(_t87_truncate_flip), None),
+            ("split-write", create, _t87_split_flip, declared(_t87_split_flip), None),
+            ("writelines", create, _t87_writelines_flip, declared(_t87_writelines_flip), None))
+    return legs + tuple((label, create, _t86_declared_flip, lambda rebuild=rebuild: patch.object(
+        me, "_t86_declared_crash", _t87_replaced(rebuild)), backstop) for label, rebuild in _T87_REBUILDS)
 
 
-def t81_backstop_bound_to_injection(fx):
+def t87_backstop_bound_to_injection(fx):
     """A declared backstop is accepted only when, in the bytes the discriminating parent read from the
     pipe of the flipped child run, its line carries exactly one parent-minted, unconsumed token of a
     label the flip declares and is the shared backstop envelope around a repr EQUAL to one the parent
@@ -7420,7 +8155,7 @@ def t81_backstop_bound_to_injection(fx):
     into the stderr of the run; an args copy of the injection rebuilt as the plain base type
     (NameError(*injected.args)) raised or printed in its place, alone, after an empty write, after a
     token-free preamble, or with no write from the backstop of the injection; and each object of
-    _T81_REBUILDS raised in its place: a rebuild of its own private class from its args (deliberately,
+    _T87_REBUILDS raised in its place: a rebuild of its own private class from its args (deliberately,
     found among NameError's subclasses, or from a caught frame), a copy, deep copy or pickle round trip
     of it (each showing a fresh built serial, not the minted one), a same-named local class, a
     RuntimeError wrapping it, its repr, or a message formatted with its repr, and an ExceptionGroup
@@ -7432,26 +8167,26 @@ def t81_backstop_bound_to_injection(fx):
     pipe: the line printed whole, written in two chunks, or through writelines; and a cleared capture
     with no twin (the red then being the assertion, nothing straying)."""
     me = sys.modules[__name__]
-    for label, test, flip, setup, needle in _t81_legs(fx):
+    for label, test, flip, setup, needle in _t87_legs(fx):
         outcome = None
         try:
             with setup():
-                me._discriminate("t81-" + label, test, flip)
+                me._discriminate("t87-" + label, test, flip)
         except KeyboardInterrupt:
             raise
         except BaseException as exc:  # noqa: BLE001  the verdict below reads which outcome was reached
             outcome = exc
         if needle is None:
             assert outcome is None, (
-                "T81 a backstop carrying the declared injection's own exact repr discriminates",
+                "T87 a backstop carrying the declared injection's own exact repr discriminates",
                 label, repr(outcome))
             continue
         assert isinstance(outcome, AssertionError) and needle in str(outcome), (
-            "T81 a backstop or exception no declared injection caused never discriminates", label,
+            "T87 a backstop or exception no declared injection caused never discriminates", label,
             repr(outcome))
 
 
-def flip_t81_substring():
+def flip_t87_substring():
     """A discriminator matching each declared text as a substring of any backstop line."""
     return patch.object(sys.modules[__name__], "_discriminate", _discriminate_substring)
 
@@ -7472,7 +8207,7 @@ def _bound_injection_token_only(line, intact, injections, consumed, allowed):
 
 
 def _discriminate_token_only(name, test, flip):
-    """A T81 flip: each backstop line binds by the token its text carries alone, so an unrecorded
+    """A T87 flip: each backstop line binds by the token its text carries alone, so an unrecorded
     exception carrying the token (raised from the injection's args, an unrelated error formatted with
     its message, a child's new exception) is credited to the injection."""
     test()
@@ -7505,7 +8240,7 @@ def _discriminate_token_only(name, test, flip):
     test()
 
 
-def flip_t81_token_only():
+def flip_t87_token_only():
     """A discriminator binding each backstop line by its token alone."""
     return patch.object(sys.modules[__name__], "_discriminate", _discriminate_token_only)
 
@@ -7547,7 +8282,7 @@ def _note_backstops_any_write(text, printed=()):
 
 
 def _discriminate_any_write(name, test, flip, current=_discriminate_in_process):
-    """A T81 flip: the _discriminate_in_process binding over _AnyWriteStderr, whose printed set takes
+    """A T87 flip: the _discriminate_in_process binding over _AnyWriteStderr, whose printed set takes
     in the injection a backstop frame holds on any write from that frame, read for every line of the
     capture, so a nested run's args copy of the injection printed after that frame wrote nothing, or a
     preamble, binds."""
@@ -7556,22 +8291,22 @@ def _discriminate_any_write(name, test, flip, current=_discriminate_in_process):
         current(name, test, flip)
 
 
-def flip_t81_any_write():
+def flip_t87_any_write():
     """A discriminator counting an injection printed on any write its backstop frame made."""
     return patch.object(sys.modules[__name__], "_discriminate", _discriminate_any_write)
 
 
-def flip_t81_in_process():
+def flip_t87_in_process():
     """A discriminator binding each line by in-process attribution."""
     return patch.object(sys.modules[__name__], "_discriminate", _discriminate_in_process)
 
 
-def flip_t81_plain_type():
+def flip_t87_plain_type():
     """A discriminator raising each injection as its plain base type."""
     return patch.object(sys.modules[__name__], "_discriminate", _discriminate_plain_type)
 
 
-def flip_t81_repr_substring():
+def flip_t87_repr_substring():
     """A discriminator binding a line when a serial-free computed repr occurs anywhere in it."""
     return patch.object(sys.modules[__name__], "_discriminate", _discriminate_repr_substring)
 
@@ -7629,7 +8364,7 @@ def _bound_injection_write_call(printed, injections, allowed):
 
 
 def _discriminate_write_call(name, test, flip):
-    """A T81 flip: each backstop line is bound to the exception the nearest record CLI frame held when
+    """A T87 flip: each backstop line is bound to the exception the nearest record CLI frame held when
     the one write call containing the whole line ran, so a nested run's copied diagnostic binds to the
     outer injection and a line split across writes binds nothing."""
     test()
@@ -7661,7 +8396,7 @@ def _discriminate_write_call(name, test, flip):
     test()
 
 
-def flip_t81_write_call():
+def flip_t87_write_call():
     """A discriminator binding each line to the frame of the one write call that held it."""
     return patch.object(sys.modules[__name__], "_discriminate", _discriminate_write_call)
 
@@ -7699,7 +8434,7 @@ def _bound_injection_runwide(line, emissions, injections, allowed):
 
 
 def _discriminate_runwide(name, test, flip):
-    """A T81 flip: each backstop line is matched by its text alone to an emission from the run-wide
+    """A T87 flip: each backstop line is matched by its text alone to an emission from the run-wide
     list, never to the capture or the occurrence it was read from."""
     test()
     faults, injections, emissions = [], [], []
@@ -7732,74 +8467,74 @@ def _discriminate_runwide(name, test, flip):
     test()
 
 
-def flip_t81_runwide():
+def flip_t87_runwide():
     """A discriminator matching each line by text to an emission from one run-wide list."""
     return patch.object(sys.modules[__name__], "_discriminate", _discriminate_runwide)
 
 
-# --- T82: each injection a flip expects fired and was seen at its backstop, on every path --------------
+# --- T88: each injection a flip expects fired and was seen at its backstop, on every path --------------
 
 
-def _t82_caught_crash(*_args):
+def _t88_caught_crash(*_args):
     """The declared injection raised and caught at its own site, so no backstop prints it; the run then
     refuses as an ordinary held lease, and the test's own assertion turns red."""
     try:
-        raise _injected("t80-declared", NameError("t80 broken flip fixture"))
+        raise _injected("t86-declared", NameError("t86 broken flip fixture"))
     except NameError:
         pass
-    raise guard.LeaseHeldError("t82 a held lease refuses after the caught injection")
+    raise guard.LeaseHeldError("t88 a held lease refuses after the caught injection")
 
 
-def _t82_caught_then_raised(*_args):
+def _t88_caught_then_raised(*_args):
     """The declared injection raised and caught once, then raised again: the second reaches the
     backstop and its line binds, the first is never seen."""
     try:
-        raise _injected("t80-declared", NameError("t80 broken flip fixture"))
+        raise _injected("t86-declared", NameError("t86 broken flip fixture"))
     except NameError:
         pass
-    raise _injected("t80-declared", NameError("t80 broken flip fixture"))
+    raise _injected("t86-declared", NameError("t86 broken flip fixture"))
 
 
 # A broken T75 flip, applied inside both children: the examination lock replaced by a stand-in of the
 # wrong arity, so recovery A crashes into the record backstop (exit 2) before it reaches the leftover
 # unlink, and T75's first assertion turns red before its verdict reads either child's stderr.
-FLIP_T82_WRONG_ARITY = """
+FLIP_T88_WRONG_ARITY = """
 import _opf_write_guard as _t75_guard
 _t75_guard._exclusive_examination = lambda pfd: None
 """
 
 
 @contextlib.contextmanager
-def _t82_wrong_arity_flip():
+def _t88_wrong_arity_flip():
     """The broken T75 flip as a context: while active, the T75 recovery children run with
-    FLIP_T82_WRONG_ARITY."""
-    _t75_flip[0] = FLIP_T82_WRONG_ARITY
+    FLIP_T88_WRONG_ARITY."""
+    _t75_flip[0] = FLIP_T88_WRONG_ARITY
     try:
         yield
     finally:
         _t75_flip[0] = ""
 
 
-def _t82_legs(fx):
-    """T82's legs, each (label, test, flip, setup, needle): needle names how a required-reject leg must
+def _t88_legs(fx):
+    """T88's legs, each (label, test, flip, setup, needle): needle names how a required-reject leg must
     fail, and None marks the required-accept control."""
     me = sys.modules[__name__]
 
     def create():
-        recorded(record_cli(fx.env, fx.case("t82-create"), CREATE))
+        recorded(record_cli(fx.env, fx.case("t88-create"), CREATE))
 
     def crash(stand_in):
-        return lambda: patch.object(me, "_t80_declared_crash", stand_in)
+        return lambda: patch.object(me, "_t86_declared_crash", stand_in)
     unseen, unfired = "fired without its backstop line in view", "never fired"
-    return (("caught-injection", create, _t80_declared_flip, crash(_t82_caught_crash), unseen),
-            ("caught-then-raised", create, _t80_declared_flip, crash(_t82_caught_then_raised), unseen),
-            ("never-fired", create, _t80_declared_flip, crash(_t80_held), unfired),
-            ("declared-seen", create, _t80_declared_flip, contextlib.nullcontext, None),
-            ("t75-early-assertion", lambda: t75_concurrent_recovery(fx), _t82_wrong_arity_flip,
+    return (("caught-injection", create, _t86_declared_flip, crash(_t88_caught_crash), unseen),
+            ("caught-then-raised", create, _t86_declared_flip, crash(_t88_caught_then_raised), unseen),
+            ("never-fired", create, _t86_declared_flip, crash(_t86_held), unfired),
+            ("declared-seen", create, _t86_declared_flip, contextlib.nullcontext, None),
+            ("t75-early-assertion", lambda: t75_concurrent_recovery(fx), _t88_wrong_arity_flip,
              contextlib.nullcontext, "unexpected-error backstop"))
 
 
-def t82_expected_injection_seen(fx):
+def t88_expected_injection_seen(fx):
     """A flipped run that goes red through an assertion discriminates only when every injection its flip
     expects fired and each one that fired was seen at its backstop, whatever path the test took to its
     red. Rejected: the declared injection raised and caught at its own site, so no backstop prints it,
@@ -7810,24 +8545,24 @@ def t82_expected_injection_seen(fx):
     red before its verdict reads, where A's backstop line must still reach the parent. Accepted: the
     declared injection reaching its own backstop."""
     me = sys.modules[__name__]
-    for label, test, flip, setup, needle in _t82_legs(fx):
+    for label, test, flip, setup, needle in _t88_legs(fx):
         outcome = None
         try:
             with setup():
-                me._discriminate("t82-" + label, test, flip)
+                me._discriminate("t88-" + label, test, flip)
         except KeyboardInterrupt:
             raise
         except BaseException as exc:  # noqa: BLE001  the verdict below reads which outcome was reached
             outcome = exc
         if needle is None:
             assert outcome is None, (
-                "T82 an expected injection seen at its backstop discriminates", label, repr(outcome))
+                "T88 an expected injection seen at its backstop discriminates", label, repr(outcome))
             continue
         assert isinstance(outcome, AssertionError) and needle in str(outcome), (
-            "T82 an expected injection unseen, or never fired, never discriminates", label, repr(outcome))
+            "T88 an expected injection unseen, or never fired, never discriminates", label, repr(outcome))
 
 
-def flip_t82_unchecked():
+def flip_t88_unchecked():
     """A discriminator that refuses only stray backstop lines: an expected injection that fired unseen, or
     never fired, before an unrelated assertion still counts as the flip's red."""
     return patch.object(sys.modules[__name__], "_unseen_injections", lambda fired, consumed, expected: [])
@@ -7848,7 +8583,7 @@ def _t75_collect_head(proc, collected, unwinding=False):
     return output
 
 
-def flip_t82_t75_unwinding():
+def flip_t88_t75_unwinding():
     """T75's earlier collection, which drops each child's stderr when an assertion fails before the
     verdict reads it."""
     return patch.object(sys.modules[__name__], "_t75_collect", _t75_collect_head)
@@ -7862,6 +8597,7 @@ def flip_t82_t75_unwinding():
 _DECLARED_INJECTIONS = {
     "t18-requires": (lambda: KeyError("--decision"),),
     "t18-together": (lambda: KeyError("--decided-by"),),
+    "t22-t81-string-claims": (lambda: TypeError("'>' not supported between instances of 'str' and 'int'"),),
     "t62-emit": (lambda: BrokenPipeError(32, "synthetic output failure after the lease release"),),
     "t64-stderr": (lambda: OSError(5, T64_STDERR),),
     "t64-emit": (lambda: BrokenPipeError(32, "synthetic emission failure"),),
@@ -7869,8 +8605,9 @@ _DECLARED_INJECTIONS = {
     "t69-release": (lambda: RuntimeError("fd release witness"),),
     "t69-token": (lambda: MemoryError("synthetic token allocation failure"),),
     "t77-emfile": (lambda: OSError(errno.EMFILE, "T77 injected: EMFILE on the retried claim"),),
-    "t79-recursion": (lambda: RecursionError("maximum recursion depth exceeded"),),
-    "t80-declared": (lambda: NameError("t80 broken flip fixture"),),
+    "t84-recursion": (lambda: RecursionError("maximum recursion depth exceeded"),),
+    "t85-record-underivable": (lambda: ValueError("synthetic underivable record home"),),
+    "t86-declared": (lambda: NameError("t86 broken flip fixture"),),
 }
 
 # The flips whose intended red is reached through a CLI backstop, each with the labels of the injections it
@@ -7879,22 +8616,30 @@ _DECLARED_INJECTIONS = {
 # backstop line is accepted only when a recorded injection of an expected label is its cause: the line, in the
 # bytes the discriminating parent read from the pipe itself, carries exactly one recorded, unconsumed token of
 # an expected label and is the shared backstop envelope around exactly a repr the parent computed for that
-# injection before the child ran (_oop_declared, _bound_injection_oop; under the T81 flip
+# injection before the child ran (_oop_declared, _bound_injection_oop; under the T87 flip
 # _discriminate_in_process: the in-process _injected, _EmissionStderr, _note_backstops and _bound_injection);
-# any other backstop or exception in the flipped run fails the discrimination. The labels of T18 to T79 are
+# any other backstop or exception in the flipped run fails the discrimination. The labels of T18 to T85 are
 # each recorded by one test's injection site alone, so each of those declarations binds the test, the flip
 # and the injection together (T69's two tests share one reverted _publish, so each has a flip of its own that
-# expects its own test's injection). t80-declared is recorded at several sites: the T80 declared crash, the
-# T81 and T82 stand-ins patched over that crash, and the record parse that T81's child and capture flips
-# replace (_t81_child_parse, _t81_capture_flip); each leg declares it through _t80_declared_flip's entry (used
-# as it is, or copied to the leg's own flip by _t81_declared_as). Most label the synthetic failure their test
+# expects its own test's injection, and so has the record kind's underivable leg of T85), except
+# t22-t81-string-claims, which T22 and T81 record at the one site their shared string-claims flip lets a
+# string claims value reach (both tests reach it, so that one declaration fits both). t86-declared is
+# recorded at several sites: the T86 declared crash, the
+# T87 and T88 stand-ins patched over that crash, and the record parse that T87's child and capture flips
+# replace (_t87_child_parse, _t87_capture_flip); each leg declares it through _t86_declared_flip's entry (used
+# as it is, or copied to the leg's own flip by _t87_declared_as). Most label the synthetic failure their test
 # injects, which the reverted handling lets reach the backstop; the T18 flips drop an option guard and record
 # the crash the planner then meets reading the missing option; T64's emission leg reaches the backstop in every
-# run, so its recovery flip meets it too; the T79 flip restores a lease parse that lets the RecursionError of a
-# deeply nested payload reach the backstop, recorded where it leaves _closed_lease_model.
+# run, so its recovery flip meets it too; the T84 flip restores a lease parse that lets the RecursionError of a
+# deeply nested payload reach the backstop, recorded where it leaves _closed_lease_model; the string-claims
+# flip of T22 and T81 admits a string claims value, and the TypeError the scan's high-water comparison then
+# raises is recorded where it leaves _kind_reservation_high; and the T85 record-kind derivation flip ends the
+# scan empty, so the leg's own ValueError is raised again at the publication boundary's reservation read,
+# recorded where it leaves _read_reservation.
 _INTENDED_BACKSTOPS = {
     flip_t18_requires: ("t18-requires",),
     flip_t18_together: ("t18-together",),
+    flip_string_claims_admitted: ("t22-t81-string-claims",),
     flip_t62: ("t62-emit",),
     flip_t64_conclude: ("t64-stderr",),
     flip_t64_recovery: ("t64-emit",),
@@ -7902,352 +8647,10 @@ _INTENDED_BACKSTOPS = {
     flip_t69_release: ("t69-release",),
     flip_t69_token: ("t69-token",),
     flip_t77: ("t77-emfile",),
-    flip_t79: ("t79-recursion",),
-    _t80_declared_flip: ("t80-declared",),
+    flip_t84: ("t84-recursion",),
+    flip_t85_derive_record: ("t85-record-underivable",),
+    _t86_declared_flip: ("t86-declared",),
 }
-
-
-# --- T83, T84: the homes-2 reservation vectors (spec 8.2; homes plan PR-4) -----------------------------
-
-# Inside the killed child: the run dies immediately after its irrevocable id reservation is
-# published, before its journaled publication begins.
-DIE_AFTER_RESERVE = """
-import os
-_real_reserve = record._reserve_claim
-def _die_after_reserve(ctx, plan, cap, run_id):
-    _real_reserve(ctx, plan, cap, run_id)
-    os._exit(137)
-record._reserve_claim = _die_after_reserve
-"""
-
-
-def t83_kill_after_reserve(fx):
-    """A homes-2 run killed after reserving and before publishing leaves its reservation standing
-    and every operand at the prestate, and the reserved numbers are never issued again: after the
-    confirmed-dead reclaim refusal, the next create derives ABOVE the orphan (its own reservation
-    claims the next numbers), publishes them and records, exit 0: the prior commit (HEAD) held no
-    record with an orphaned number, so the final doctor treats those numbers as issued and the store
-    carrying the orphan is VALID."""
-    env = fx.env
-    base = fx.case("t83-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t83-homes2-killed", base)
-        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-        counters0 = model(root, COUNTERS)["counters"]
-        proc = child(env, root, CREATE, flip=HOMES2_CHILD_FLIP + DIE_AFTER_RESERVE)
-        assert proc.returncode == 137, ("T83 the child is killed after reserving", proc.returncode,
-                                        proc.stderr[-800:])
-        assert RECORDED_EVENT not in proc.stdout, "T83 a killed run reports no id"
-        alloc_dir = Path(root) / record._ALLOCATIONS_REL
-        names = sorted(os.listdir(alloc_dir))
-        assert len(names) == 1, ("T83 the reservation is standing", names)
-        first = (alloc_dir / names[0]).read_bytes()
-        first_claims = tomllib.loads(first.decode("utf-8"))["claims"]
-        assert first_claims == {"BI": counters0["BI"] + 1, "WL": counters0["WL"] + 1}, first_claims
-        assert journal_states(root, TYPED_JOURNAL) == {}, "T83 nothing was journaled"
-        assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, \
-            "T83 the operands end at the prestate"
-        refused(record_cli(env, root, CREATE), "were reclaimed before this operation")
-        assert (alloc_dir / names[0]).read_bytes() == first, "T83 the reclaim never touches the reservation"
-        rc, out, err = record_cli(env, root, CREATE)
-        assert rc == 0 and RECORDED_EVENT in out, ("T83 the run above the orphan records, doctor VALID", rc,
-                                                   err[-1600:])
-        names2 = sorted(os.listdir(alloc_dir))
-        assert len(names2) == 2 and names[0] in names2, ("T83 both reservations standing", names2)
-        (second_name,) = [n for n in names2 if n != names[0]]
-        second_claims = tomllib.loads((alloc_dir / second_name).read_bytes().decode("utf-8"))["claims"]
-        assert second_claims == {"BI": first_claims["BI"] + 1,
-                                 "WL": first_claims["WL"] + 1}, \
-            ("T83 the re-run derives above the orphaned reservation", first_claims, second_claims)
-        assert (alloc_dir / names[0]).read_bytes() == first, "T83 the orphan is never rewritten"
-        counters2 = model(root, COUNTERS)["counters"]
-        assert counters2["BI"] == second_claims["BI"] and counters2["WL"] == second_claims["WL"], counters2
-        rows = [r["id"] for r in model(root, BI_INDEX)["record"]]
-        reserved_id = "BI-{}".format(first_claims["BI"])
-        issued_id = "BI-{}".format(second_claims["BI"])
-        assert issued_id in rows and reserved_id not in rows, \
-            ("T83 the reserved id is never issued again", rows)
-
-
-def flip_t83():
-    """A derivation that ignores the reservation scan: an orphaned reservation gets its numbers
-    issued again."""
-    return patch.object(record, "_reservation_high", lambda ctx: {})
-
-
-def flip_t83_doctor():
-    """A doctor that reads no reservation: the orphaned numbers grade as missing records, so the run
-    above them is held at the post-publication gate, exit 2."""
-    return patch.object(opf_check, "_reserved_numbers", lambda root_fd, rep: ({}, True))
-
-
-def t84_two_runs_never_same_id(fx):
-    """Two runs claiming the same kind never receive the same id, whatever their interleaving: two
-    contexts planned BEFORE either reserves derive the same numbers; the first reserves through the
-    production claim-and-reserve path (_reserve_claim under its own held capability, nothing
-    published to the store), and the second, reserving after it, is refused by the held
-    revalidation with no reservation file of its own, no transaction and every operand at the
-    prestate; re-planned, the second run derives the next numbers, both reservations standing
-    disjoint and the first never rewritten."""
-    base = fx.case("t84-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t84-homes2-two-runs", base)
-        res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
-        assert res.status == record._opf_store.RESOLVED, res
-        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-        stamps = ("record-20260927T000101Z-" + "a" * 16,
-                  "record-20260927T000102Z-" + "b" * 16)
-        reservations = [Path(root) / record._opf_store.allocation_record("record", s) for s in stamps]
-        fds = []
-
-        def planned():
-            root_fd = record._opf_store._open_dir_nofollow(res.store_root)
-            fds.append(root_fd)
-            ctx = record.Context(res, str(root), root_fd)
-            ctx.journal_rel = record._record_journal_rel(record._probe_homes(ctx))
-            record._load_manifest(ctx)
-            assert ctx.homes == 2, ("T84 the validated generation", ctx.homes)
-            ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
-            return ctx, record._claim(ctx, ["BI", "WL"])
-
-        def reserve(ctx, ids, stamp):
-            cap = record._opf_oplock.acquire_operation(str(res.store_root), record.VERB)
-            try:
-                record._reserve_claim(ctx, record.Plan([], ids), cap, stamp)
-            finally:
-                record._opf_oplock.release_operation(cap)
-        try:
-            (ctx1, ids1), (ctx2, ids2) = planned(), planned()
-            assert ids1 == ids2 == ["BI-1", "WL-1"], ("T84 both plans derive the same numbers", ids1, ids2)
-            reserve(ctx1, ids1, stamps[0])
-            first = reservations[0].read_bytes()
-            try:
-                reserve(ctx2, ids2, stamps[1])
-            except record.RecordError as exc:
-                message = str(exc)
-            else:
-                raise AssertionError("T84 the second, stale plan must refuse at the held revalidation")
-            assert "changed between planning and the held capability" in message, message
-            assert not reservations[1].exists(), "T84 the refused run publishes no reservation"
-            assert journal_states(root, TYPED_JOURNAL) == {}, "T84 no transaction is opened"
-            assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, \
-                "T84 no operand is published"
-            ctx3, ids3 = planned()
-            assert ids3 == ["BI-2", "WL-2"], ("T84 the re-planned run derives the next numbers", ids3)
-            reserve(ctx3, ids3, stamps[1])
-        finally:
-            for fd in fds:
-                os.close(fd)
-        assert reservations[0].read_bytes() == first, "T84 the first reservation is never rewritten"
-        for reservation, claimed in zip(reservations, ({"BI": 1, "WL": 1}, {"BI": 2, "WL": 2})):
-            payload = tomllib.loads(reservation.read_bytes().decode("utf-8"))
-            assert payload["claims"] == claimed, ("T84 the reservations stand disjoint", reservation, payload)
-
-
-def flip_t84_no_recheck():
-    """A held reservation step with no fresh scan and no stale-plan comparison: the planned claims are
-    reserved as they stand, so a reservation landing after planning is never noticed."""
-    def no_recheck(ctx, plan, cap, run_id):
-        record._opf_journal.reserve_allocation(cap, "record", run_id, ctx.claims)
-    return patch.object(record, "_reserve_claim", no_recheck)
-
-
-# --- T85-T87: the cross-kind high-water, the publication boundary, the journal-home reader ---------------
-
-T85_IMPORT_RUN = "imp-20260927T000101Z-" + "a" * 16
-
-
-def t85_cross_kind_reservations(fx):
-    """The homes-2 high-water reads EVERY journal kind's reservations (spec 8.2: every reservation's
-    [claims] value for the counter key), the homes enumerated from the JOURNAL_KINDS registry: an
-    import-kind reservation of {BI: 1, WL: 1} moves the next create to BI-2 and WL-2 (its own
-    reservation says so, the import one is never touched), and that run records, exit 0,
-    as in T83. Fail-closed in every other kind's home: a malformed
-    reservation in each non-record kind's home, and in the import home an unreadable (non-regular)
-    entry, an ingest payload under an import name, and a record-grammar name, each refuse exit 2
-    with every byte untouched."""
-    env = fx.env
-    base = fx.case("t85-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t85-homes2-import-reserved", base)
-        cap = record._opf_oplock.acquire_operation(str(root), "import")
-        try:
-            record._opf_journal.reserve_allocation(cap, "import", T85_IMPORT_RUN, {"BI": 1, "WL": 1})
-        finally:
-            record._opf_oplock.release_operation(cap)
-        imported = Path(root) / record._opf_store.allocation_record("import", T85_IMPORT_RUN)
-        planted = imported.read_bytes()
-        rc, out, err = record_cli(env, root, CREATE)
-        rows = [r["id"] for r in model(root, BI_INDEX)["record"]]
-        assert rows == ["BI-2"], ("T85 the import-kind reservation's numbers are never issued", rows, rc,
-                                  err[-1200:])
-        own = sorted(os.listdir(Path(root) / record._ALLOCATIONS_REL))
-        assert len(own) == 1, ("T85 one record reservation", own)
-        claims = tomllib.loads((Path(root) / record._ALLOCATIONS_REL / own[0]).read_bytes()
-                               .decode("utf-8"))["claims"]
-        assert claims == {"BI": 2, "WL": 2}, ("T85 the record reservation claims above the import one", claims)
-        assert imported.read_bytes() == planted, "T85 the import reservation is never touched"
-        assert RECORDED_EVENT in out and rc == 0, ("T85 the run above the import reservation records, as T83",
-                                                  rc, err[-1600:])
-        stamp = "-20260927T000009Z-" + "9" * 16
-        for kind in record._opf_store.JOURNAL_KINDS:
-            if kind == "record":
-                continue
-            sub = fx.case("t85-homes2-malformed-" + kind, base)
-            target = Path(sub) / record._opf_store.allocation_record(
-                kind, record._opf_store._HOME_RUN_PREFIXES[kind] + stamp)
-            target.parent.mkdir(parents=True)
-            target.write_bytes(b"not toml [")
-            refused_untouched(env, sub, CREATE, "is malformed")
-        damaged = "imp" + stamp + ".toml"
-        for label, name, plant, needle in (
-                ("unreadable", damaged, lambda d: d.mkdir(), "cannot read the id reservation"),
-                ("conflicting", damaged, lambda d: d.write_bytes(record._opf_journal.reservation_payload(
-                    "ingest", "imp" + stamp, "op", {"BI": 1})),
-                 "conflicts with the exact canonical reservation"),
-                ("misnamed", "record" + stamp + ".toml", lambda d: d.write_bytes(
-                    record._opf_journal.reservation_payload("record", "record" + stamp, "op", {"BI": 1})),
-                 "is not an id reservation")):
-            sub = fx.case("t85-homes2-import-" + label, base)
-            target = Path(sub) / record._allocations_rel("import") / name
-            target.parent.mkdir(parents=True)
-            plant(target)
-            refused_untouched(env, sub, CREATE, needle)
-
-
-def flip_t85():
-    """The reviewed head's single hard-coded home: only the record kind's reservations are read."""
-    return patch.object(record, "_reservation_high",
-                        lambda ctx: record._kind_reservation_high(ctx, "record", record._ALLOCATIONS_REL))
-
-
-def flip_t85_doctor():
-    """A doctor that reads only the record kind reservation home: the import-kind reservation is
-    unread, so its numbers grade as missing records and the run above them is held."""
-    real = opf_check._reserved_numbers
-
-    def record_only(root_fd, rep):
-        with patch.object(opf_check._opf_store, "JOURNAL_KINDS", ("record",)):
-            return real(root_fd, rep)
-    return patch.object(opf_check, "_reserved_numbers", record_only)
-
-
-def t86_publication_requires_reservation(fx):
-    """The homes-2 publication boundary requires reservation evidence for the run id it publishes
-    under: a direct _publish naming no run id, one whose run id has no reservation (under a held
-    capability), and one whose reservation claims other numbers each refuse before any transaction
-    opens, with no journal transaction, every operand at the prestate and the capability released."""
-    root = fx.case("t86-homes2-boundary")
-    with _self_test_homes2_active(root):
-        req = record.parse_request(CREATE + ["--root", str(root)])
-        res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
-        assert res.status == record._opf_store.RESOLVED, res
-        root_fd = record._opf_store._open_dir_nofollow(res.store_root)
-        try:
-            ctx = record.Context(res, str(root), root_fd)
-            ctx.journal_rel = record._record_journal_rel(record._probe_homes(ctx))
-            assert ctx.journal_rel == TYPED_JOURNAL, ("T86 the probed journal home", ctx.journal_rel)
-            record._load_manifest(ctx)
-            ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
-            ctx.version = record._read_operand(root_fd, ctx.rel(opf_check.VERSION_NAME)).model
-            ctx.worklog = record._read_operand(root_fd, ctx.rel(opf_check.WORKLOG_NAME))
-            operand = record._read_operand(root_fd, record._operand_rel(req, ctx))
-            plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
-            for op in plan.operands:
-                op.new_raw = record._emit_bytes(op.new_model)
-            pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-            unreserved = "record-20260927T000201Z-" + "c" * 16
-            other = "record-20260927T000202Z-" + "d" * 16
-
-            def held_publish(run_id, reserve=None):
-                cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
-                try:
-                    if reserve is not None:
-                        record._opf_journal.reserve_allocation(cap, "record", run_id, reserve)
-                    record._publish(ctx, plan, "create", cap=cap, run_id=run_id)
-                finally:
-                    record._opf_oplock.release_operation(cap)
-            for label, call, needle in (
-                    ("no run id", lambda: record._publish(ctx, plan, "create"),
-                     "requires the run id its irrevocable id reservation"),
-                    ("no reservation", lambda: held_publish(unreserved), "requires its id reservation"),
-                    ("other claims", lambda: held_publish(other, {"BI": 7, "WL": 7}),
-                     "to claim exactly this plan's numbers")):
-                try:
-                    call()
-                except record.RecordError as exc:
-                    assert needle in str(exc) and "no transaction is opened" in str(exc), (label, str(exc))
-                else:
-                    raise AssertionError("T86 a publication with {} must refuse".format(label))
-                assert journal_states(root, TYPED_JOURNAL) == {}, ("T86 no transaction", label)
-                assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, \
-                    ("T86 the operands are untouched", label)
-                assert capability_records(root) == (False, False), ("T86 the capability is released", label)
-        finally:
-            os.close(root_fd)
-        assert not (Path(root) / record._opf_store.allocation_record("record", unreserved)).exists(), \
-            "T86 the boundary never reserves on its own"
-
-
-@contextlib.contextmanager
-def flip_t86():
-    """The reviewed head's boundary: a direct call naming no run id gets a freshly minted one, and no
-    reservation evidence is required."""
-    original = record._publish_homes2
-
-    def minting(ctx, plan, subcommand, cap=None, run_id=None):
-        if run_id is None:
-            run_id = record._record_run_id(os.urandom(16).hex())
-        return original(ctx, plan, subcommand, cap, run_id)
-    with patch.object(record, "_publish_homes2", minting), \
-            patch.object(record, "_require_reservation", lambda ctx, run_id: None):
-        yield
-
-
-def t87_journal_states_confirmed_absence(fx):
-    """The harness's journal reader reads an empty journal ONLY for confirmed absence: an absent home
-    reads {}, while a regular file, a symlink to a directory, a dangling symlink, and an unreadable
-    home (the opener's PermissionError) are each a harness fault, never apparent emptiness; a real
-    empty home reads {}."""
-    root = fx.case("t87-journal-home")
-    home = Path(root) / TYPED_JOURNAL
-    assert journal_states(root, TYPED_JOURNAL) == {}, "T87 an absent home reads empty"
-    home.parent.mkdir(parents=True)
-    (home.parent / "elsewhere").mkdir()
-
-    def faults(label):
-        try:
-            got = journal_states(root, TYPED_JOURNAL)
-        except Harness:
-            return
-        raise AssertionError("T87 a {} journal home must be a harness fault, not {!r}".format(label, got))
-    home.write_bytes(b"")
-    faults("regular-file")
-    home.unlink()
-    home.symlink_to("elsewhere")
-    faults("symlinked")
-    home.unlink()
-    home.symlink_to("absent")
-    faults("dangling-symlink")
-    home.unlink()
-    home.mkdir()
-
-    def unreadable(root_path, rel):
-        raise PermissionError(errno.EACCES, "synthetic unreadable journal home", rel)
-    with patch.object(journal, "open_journal_root_from_path", unreadable):
-        faults("unreadable")
-    assert journal_states(root, TYPED_JOURNAL) == {}, "T87 an empty home reads empty"
-
-
-def flip_t87():
-    """The reviewed head's shortcut: anything that is not a directory reads as an empty journal."""
-    original = journal_states
-
-    def shortcut(root, rel=None):
-        if not (Path(root) / (record.JOURNAL_REL if rel is None else rel)).is_dir():
-            return {}
-        return original(root, rel)
-    return patch.object(sys.modules[__name__], "journal_states", shortcut)
 
 
 TESTS = (
@@ -8283,7 +8686,10 @@ TESTS = (
     ("T20-homes2-legacy-journal-refused", t20_homes2_legacy_refused, flip_t20),
     ("T21-homes2-publish-typed", t21_homes2_publish, flip_t21),
     ("T22-homes2-claim-reserves", t22_homes2_claim_reserves, (flip_t22_refuse, flip_t22_noreserve,
-                                                              flip_t22_validator)),
+                                                              flip_t22_validator,
+                                                              flip_unreadable_reservation_skipped,
+                                                              flip_string_claims_admitted,
+                                                              flip_boolean_claims_admitted)),
     ("T23-homes2-crash-typed", t23_homes2_crash, flip_t23),
     ("T5-flip-unjournaled-write", t5_flip_write, None),     # FLIP_T5 itself is T5's discriminator
     ("T24-broken-manifest-fail-closed", t24_broken_manifest, flip_t24),
@@ -8315,7 +8721,7 @@ TESTS = (
     ("T50-leftover-lock-complete-scoped", t50_leftover_lock_complete_scoped, flip_t50),
     ("T51-lock-refusals-name-created", t51_lock_refusals_name_created, flip_t51),
     ("T52-publication-refused-before-intent", t52_publication_refused_before_intent,
-     (flip_t52_message, flip_t52_rule, flip_t83_doctor)),
+     (flip_t52_message, flip_t52_rule, flip_t79_doctor)),
     ("T53-projection-existence-only", t53_projection_existence_only, (flip_t53_outcome, flip_t53_guard)),
     ("T54-header-exact", t54_header_exact, flip_t54),
     ("T55-lock-release-after-unlink", t55_lock_release_after_unlink, flip_t55),
@@ -8368,22 +8774,38 @@ TESTS = (
     ("T76-examination-lock-failure-diagnosed", t76_lock_failure_diagnosed, flip_t76),
     ("T77-release-report-every-failure", t77_report_every_failure, flip_t77),
     ("T78-homes2-declaration-pair-required", t78_homes2_needs_the_pair, (flip_t78, flip_t30)),
-    ("T79-recovery-recursion-lease-refused-as-held", t79_recursion_lease_refused_as_held, flip_t79),
-    ("T80-discrimination-bound-to-assertion", t80_discrimination_bound, flip_t80),
-    ("T81-backstop-bound-to-injection", t81_backstop_bound_to_injection, (flip_t81_substring, flip_t81_runwide,
-                                                                          flip_t81_write_call,
-                                                                          flip_t81_token_only,
-                                                                          flip_t81_any_write,
-                                                                          flip_t81_in_process,
-                                                                          flip_t81_plain_type,
-                                                                          flip_t81_repr_substring)),
-    ("T82-expected-injection-seen", t82_expected_injection_seen, (flip_t82_unchecked,
-                                                                  flip_t82_t75_unwinding)),
-    ("T83-kill-after-reserve", t83_kill_after_reserve, (flip_t83, flip_t83_doctor)),
-    ("T84-two-runs-distinct-ids", t84_two_runs_never_same_id, (flip_t83, flip_t84_no_recheck)),
-    ("T85-homes2-cross-kind-high-water", t85_cross_kind_reservations, (flip_t85, flip_t85_doctor)),
-    ("T86-homes2-publication-requires-reservation", t86_publication_requires_reservation, flip_t86),
-    ("T87-journal-states-confirmed-absence", t87_journal_states_confirmed_absence, flip_t87),
+    ("T79-kill-after-reserve", t79_kill_after_reserve, (flip_t79, flip_t79_doctor)),
+    ("T80-two-runs-distinct-ids", t80_two_runs_never_same_id, (flip_t79, flip_t80_no_recheck)),
+    ("T81-homes2-cross-kind-high-water", t81_cross_kind_reservations, (flip_t81,
+                                                                       flip_t81_doctor,
+                                                                       flip_unreadable_reservation_skipped,
+                                                                       flip_string_claims_admitted,
+                                                                       flip_boolean_claims_admitted)),
+    ("T82-homes2-publication-requires-reservation", t82_publication_requires_reservation, flip_t82),
+    ("T83-journal-states-confirmed-absence", t83_journal_states_confirmed_absence, flip_t83),
+    ("T84-recovery-recursion-lease-refused-as-held", t84_recursion_lease_refused_as_held, flip_t84),
+    ("T85-homes2-allocations-home-import-symlink", _t85("import", "symlink"), flip_t85_open),
+    ("T85-homes2-allocations-home-import-regular-file", _t85("import", "regular-file"), flip_t85_open),
+    ("T85-homes2-allocations-home-import-file-parent", _t85("import", "file-parent"), flip_t85_open_parent),
+    ("T85-homes2-allocations-home-import-mode-0", _t85("import", "mode-0"), flip_t85_open),
+    ("T85-homes2-allocations-home-import-unlistable", _t85("import", "unlistable"), flip_t85_listing),
+    ("T85-homes2-allocations-home-import-underivable", _t85("import", "underivable"), flip_t85_derive),
+    ("T85-homes2-allocations-home-record-symlink", _t85("record", "symlink"), flip_t85_open),
+    ("T85-homes2-allocations-home-record-regular-file", _t85("record", "regular-file"), flip_t85_open),
+    ("T85-homes2-allocations-home-record-file-parent", _t85("record", "file-parent"), flip_t85_open_parent),
+    ("T85-homes2-allocations-home-record-mode-0", _t85("record", "mode-0"), flip_t85_open),
+    ("T85-homes2-allocations-home-record-unlistable", _t85("record", "unlistable"), flip_t85_listing),
+    ("T85-homes2-allocations-home-record-underivable", _t85("record", "underivable"), flip_t85_derive_record),
+    ("T86-discrimination-bound-to-assertion", t86_discrimination_bound, flip_t86),
+    ("T87-backstop-bound-to-injection", t87_backstop_bound_to_injection, (flip_t87_substring, flip_t87_runwide,
+                                                                          flip_t87_write_call,
+                                                                          flip_t87_token_only,
+                                                                          flip_t87_any_write,
+                                                                          flip_t87_in_process,
+                                                                          flip_t87_plain_type,
+                                                                          flip_t87_repr_substring)),
+    ("T88-expected-injection-seen", t88_expected_injection_seen, (flip_t88_unchecked,
+                                                                  flip_t88_t75_unwinding)),
 )
 
 
@@ -8415,7 +8837,7 @@ def self_test(red_on_revert=False):
 
 def _self_test_isolated():
     red_on_revert = _red_on_revert[0]
-    ran, failures = [], []
+    ran, failures, unevaluated = [], [], []
 
     def check(name, test):
         ran.append(name)
@@ -8423,6 +8845,9 @@ def _self_test_isolated():
             test()
         except AssertionError as exc:
             failures.append("{}: {}".format(name, exc))
+        except CannotEvaluate as exc:
+            ran.remove(name)
+            unevaluated.append("{}: {}".format(name, exc))
 
     base = Path(tempfile.mkdtemp(prefix="opf-record-gate-")).resolve()
     try:
@@ -8452,10 +8877,16 @@ def _self_test_isolated():
     finally:
         shutil.rmtree(base, ignore_errors=True)
     print("OPF-RECORD SELF-TEST: exercised " + ", ".join(ran))
+    for reason in unevaluated:
+        print("CANNOT EVALUATE: " + reason, file=sys.stderr)
     if failures:
         for failure in failures:
             print("FAIL: " + failure, file=sys.stderr)
         return 1
+    if unevaluated:
+        print("OPF-RECORD SELF-TEST CANNOT EVALUATE: {} check(s) not evaluated, never a pass".format(
+            len(unevaluated)), file=sys.stderr)
+        return 2
     print("OPF-RECORD SELF-TEST PASSED")
     return 0
 

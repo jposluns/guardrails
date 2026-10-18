@@ -128,7 +128,10 @@ its lower numbers are still reported missing and the next run is held at the pos
 a published record whose number a reservation records and whose deletion is committed is then graded as
 an orphaned reservation's number and not reported missing, unlike homes 1, where the counters high-water
 keeps that deletion a C-NO-DELETION finding. The homes-2 revision of spec 4.2 must settle this before
-homes 2 is activated. A legacy
+homes 2 is activated. This homes-2 path is reached only once activation sets
+_opf_store.SUPPORTED_HOMES to 2 (and _load_manifest admits the homes-2 spec_version); while
+SUPPORTED_HOMES is 1, every subcommand refuses a store declaring homes 2 before any reconciliation or
+write (_probe_homes), so the shipped verb claims through homes 1 only. A legacy
 .aiqt/record/journal found on a homes-2 store is refused and never recovered: homes 2 has no homes
 migration to carry it (spec 4.2).
 
@@ -2765,7 +2768,9 @@ def _publish_homes2(ctx, plan, subcommand, cap=None, run_id=None):
     held capability, before the transaction opens, _require_reservation re-reads that run's
     canonical reservation and requires its claims to be this plan's. A call naming no run id, or one
     whose reservation is absent, unreadable, non-canonical or claims other numbers, refuses with no
-    transaction opened."""
+    transaction opened. _run_operation reaches this only once activation sets
+    _opf_store.SUPPORTED_HOMES to 2 (and _load_manifest admits the homes-2 spec_version); while
+    SUPPORTED_HOMES is 1, _probe_homes refuses a store declaring homes 2 first."""
     try:
         _journal.require_containment()
     except (_journal.JournalError, OSError) as exc:

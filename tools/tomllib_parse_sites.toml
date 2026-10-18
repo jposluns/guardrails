@@ -679,7 +679,7 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/check_opf_record.py"
-function = "flip_t79.narrow"
+function = "flip_t84.narrow"
 form = "call"
 count = 1
 class = "EXEMPT"
@@ -719,7 +719,7 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/check_opf_record.py"
-function = "t83_kill_after_reserve"
+function = "t79_kill_after_reserve"
 form = "call"
 count = 2
 class = "EXEMPT"
@@ -727,7 +727,7 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/check_opf_record.py"
-function = "t84_two_runs_never_same_id"
+function = "t80_two_runs_never_same_id"
 form = "call"
 count = 1
 class = "EXEMPT"
@@ -735,7 +735,7 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/check_opf_record.py"
-function = "t85_cross_kind_reservations"
+function = "t81_cross_kind_reservations"
 form = "call"
 count = 1
 class = "EXEMPT"
