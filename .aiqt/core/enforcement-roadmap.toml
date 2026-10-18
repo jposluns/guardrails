@@ -31,7 +31,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "artbr1"
 status = "enforced"
-mechanisms = ["hook:protected-line-guard"]
+mechanisms = ["hook:merge-path-guard", "hook:protected-line-guard"]
 
 [[rule]]
 corpus-id = "asadv1"
@@ -191,7 +191,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "gatdis"
 status = "enforced"
-mechanisms = ["gate:ci-parity", "hook:gate-weakening-guard"]
+mechanisms = ["gate:ci-parity", "hook:gate-weakening-guard", "hook:prepush-declared-hook"]
 
 [[rule]]
 corpus-id = "gensrc"
@@ -310,8 +310,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "reqstp"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["hook:prepush-declared-hook"]
 
 [[rule]]
 corpus-id = "rerunf"

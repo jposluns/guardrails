@@ -104,6 +104,20 @@ registry is the inert ALLOW, and a missing tool_name also denies.
 Fixtures are throwaway git repos under the temp tree (a registry-carrying repo, a registry-less repo, a
 mutable-bad-registry repo, and a plain non-git dir), removed in the finally.
 
+It also covers the adopter-declared operations pair (merge_path_guard, artbr1; prepush_declared_hook,
+reqstp/gatdis) over the shared .aiqt/operations.json: with a merge member declared, every listed merge
+shape DENIES ('gh pr merge' in its flag spellings and under the peeled wrappers, the 'gh api' merge
+endpoints and graphql merge mutations, the shell-body raw backstop, and the MCP merge tool), the exact
+declared argv, an explicit target outside the declared repos scope, the read-only forms (--help,
+--disable-auto, the GET is-it-merged check) and ordinary commands ALLOW, a present-but-bad declaration
+DENIES the matched shapes and leaves other commands alone, an absent declaration or member is inert, and
+a non-git session with a merge shape allows with a note; each deny is paired with a minimal-pair allow
+control so a dropped check fails its pair, and the declaration byte cap is pinned at both ends. With a
+prepush member declared, a missing, non-executable, line-less or over-bound pre-push hook WARNS at
+SessionStart, an installed hook carrying the declared line (or the hook_line override) is silent, a bad
+declaration WARNS, and the inert boundaries (no declaration, no member, a non-git session) are silent.
+Fixtures are throwaway git repos under the temp tree, removed in the finally.
+
 It also covers the write-scope guard (write_scope_guard, wrtscp, EN-8): a Write/Edit/MultiEdit is confined
 to a harness-set per-slice declaration (write-scope.json at the registry-declared state_dir, out of the
 slice tree by default but possibly in-tree) while writes to the frozen floor (.aiqt/frozen.json, one entry
@@ -2775,6 +2789,7 @@ _DEADLINE_SHAPES = {
         "question": "q" * n, "header": "h", "multiSelect": False,
         "options": [{"label": "a", "description": "b"}, {"label": "c", "description": "d"}]}]}),
     "wakeup_long": lambda n, base: ("ScheduleWakeup", {"prompt": "p" * n, "delaySeconds": 60, "reason": "r"}),
+    "gh_merge_words": lambda n, base: ("Bash", {"command": _repeat("gh pr merge 12; ", n)}),
 }
 _DEADLINE_CASES = {
     "absolute_paths": ("write_content", "read_deep_path"),
@@ -2788,6 +2803,7 @@ _DEADLINE_CASES = {
     "git_discard": ("git_segments_reset", "nest_parens"),
     "git_explicit_binding": ("git_add_unbal", "cd_git_fetch_unbal", "breadth_push_after_unbal"),
     "git_stash_ref": ("sep_semicolon", "cd_git_fetch_unbal", "nest_parens"),
+    "merge_path_guard": ("gh_merge_words", "git_words", "nest_parens"),
     "orch_ask_guard": ("ask_long",),
     "orch_resume_barrier": ("git_words", "write_content"),
     "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
@@ -16950,6 +16966,311 @@ def _main_isolated(monitor):
         _test_deadline_posture(failures, tmp)
         _test_cannot_evaluate_paths(failures, tmp)
 
+        # === merge_path_guard (artbr1) + prepush_declared_hook (reqstp/gatdis): the adopter-declared ====
+        # .aiqt/operations.json operations. ONE shared declaration file, two members: merge arms the
+        # PreToolUse deny of bare PR merges (gh pr merge under wrappers, the gh api merge endpoints, the
+        # MCP merge tool), prepush arms the SessionStart warn that the declared required pre-push command
+        # is installed as the clone's pre-push hook. Judged by the STRUCTURED decision. Each deny vector
+        # is paired with a minimal-pair allow control that differs only in the discriminating feature
+        # (target scope, method, member presence), so a mutant that drops that feature's check fails the
+        # pair; the declaration-absent controls (mp-k*) kill an always-deny mutant and the deny battery
+        # kills an always-allow one. Fixtures are throwaway git repos under tmp (removed in the finally);
+        # ambient GH_REPO is popped for determinism and restored after the section.
+        def _mp_init(name):
+            path = tmp / name
+            path.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(path)],
+                           check=True, capture_output=True, text=True, timeout=30, env=git_fixture_env())
+            return path
+
+        def mpdecide(data):
+            code, stdout_obj, _stderr = aiqt_hooks.merge_path_guard(data)
+            if code == 2:
+                return "hard-block"
+            return _reduce_result(code, stdout_obj)
+
+        def mpexpect(label, want, command=None, cwd=None, tool="Bash", tool_input="__default__",
+                     with_tool=True):
+            data = {"hook_event_name": "PreToolUse"}
+            if with_tool:
+                data["tool_name"] = tool
+            if tool_input == "__default__":
+                data["tool_input"] = {"command": command} if command is not None else {}
+            elif tool_input is not None:
+                data["tool_input"] = tool_input
+            if cwd is not None:
+                data["cwd"] = cwd
+            got = mpdecide(data)
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
+        def ppdecide(cwd):
+            data = {"hook_event_name": "SessionStart"}
+            if cwd is not None:
+                data["cwd"] = cwd
+            code, stdout_obj, _stderr = aiqt_hooks.prepush_declared_hook(data)
+            if code == 2:
+                return "hard-block"
+            return _reduce_result(code, stdout_obj)
+
+        def ppexpect(label, want, cwd):
+            got = ppdecide(cwd)
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
+        _mp_decl = {"version": 1,
+                    "merge": {"argv": ["python3", "tools/merge_pr.py"], "repos": ["owner/repo"]},
+                    "prepush": {"command": "bash tools/pre-push-guard.sh"}}
+        _mp_saved_ghrepo = os.environ.pop("GH_REPO", None)
+        try:
+            mp_decl = _mp_init("mpdecl")              # declares merge (scoped to owner/repo) + prepush
+            (mp_decl / ".aiqt").mkdir(parents=True, exist_ok=True)
+            (mp_decl / ".aiqt" / "operations.json").write_text(json.dumps(_mp_decl), encoding="utf-8")
+            mp_none = _mp_init("mpnone")              # NO declaration (absent, inert)
+            mp_bad = _mp_init("mpbad")                # mutable bad/edge declarations
+            (mp_bad / ".aiqt").mkdir(parents=True, exist_ok=True)
+            mp_badreg = mp_bad / ".aiqt" / "operations.json"
+            mp_gh = _mp_init("mpgh")                  # declares a gh-shaped merge argv (prefix allow)
+            (mp_gh / ".aiqt").mkdir(parents=True, exist_ok=True)
+            (mp_gh / ".aiqt" / "operations.json").write_text(json.dumps(
+                {"version": 1, "merge": {"argv": ["gh", "pr", "merge", "--auto"]}}), encoding="utf-8")
+            mp_plain = tmp / "mpplain"                # plain non-git dir (no resolvable root)
+            mp_plain.mkdir(parents=True, exist_ok=True)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print("SELF-TEST ERROR: could not build the operations fixtures: {}".format(exc),
+                  file=sys.stderr)
+            return 2
+        mpd, mpn, mpb, mpg, mpp = str(mp_decl), str(mp_none), str(mp_bad), str(mp_gh), str(mp_plain)
+        try:
+            # --- DENY: every merge shape the plan lists, in the declaring repo ------------------------
+            mpexpect("(mp-d1) bare gh pr merge with flags DENIES", "deny",
+                     "gh pr merge 12 --merge --match-head-commit deadbeef", mpd)
+            mpexpect("(mp-d2) wrapped merge (timeout 60 gh pr merge) DENIES through the peel", "deny",
+                     "timeout 60 gh pr merge 12", mpd)
+            mpexpect("(mp-d2b) methodless bare gh pr merge DENIES", "deny", "gh pr merge 12", mpd)
+            mpexpect("(mp-d3) GH_REPO= segment assignment naming the declared repo DENIES", "deny",
+                     "GH_REPO=owner/repo gh pr merge 1", mpd)
+            mpexpect("(mp-d4) PR URL operand naming the declared repo DENIES", "deny",
+                     "gh pr merge https://github.com/owner/repo/pull/3", mpd)
+            mpexpect("(mp-d5) -R before the merge verb DENIES (separated -R owner/repo)", "deny",
+                     "gh pr -R owner/repo merge 3 --squash", mpd)
+            mpexpect("(mp-d5b) attached -Rowner/repo DENIES", "deny", "gh pr merge 3 -Rowner/repo", mpd)
+            mpexpect("(mp-d6) gh api --method=PUT pulls merge endpoint DENIES", "deny",
+                     "gh api --method=PUT repos/owner/repo/pulls/3/merge", mpd)
+            mpexpect("(mp-d6b) gh api separated -X PUT DENIES", "deny",
+                     "gh api -X PUT repos/owner/repo/pulls/3/merge", mpd)
+            mpexpect("(mp-d7) gh api attached -XPUT with {placeholder} target DENIES (implicit)", "deny",
+                     "gh api -XPUT repos/{owner}/{repo}/pulls/3/merge", mpd)
+            mpexpect("(mp-d8) gh api repos/.../merges (branch merge, no PR) DENIES", "deny",
+                     "gh api repos/owner/repo/merges -f base=main -f head=f", mpd)
+            mpexpect("(mp-d9) gh api graphql literal mergePullRequest mutation DENIES", "deny",
+                     "gh api graphql -f query='mutation{mergePullRequest(input:{})}'", mpd)
+            mpexpect("(mp-d10) bash -c shell body DENIES through the raw backstop", "deny",
+                     "bash -c 'gh pr merge 3'", mpd)
+            mpexpect("(mp-d11) expansion -R target cannot be proven outside and DENIES", "deny",
+                     'gh pr merge 3 -R "$R"', mpd)
+            mpexpect("(mp-d17) gh pr merge --auto DENIES (arming auto-merge is a merge)", "deny",
+                     "gh pr merge 3 --auto", mpd)
+            mpexpect("(mp-d18) sudo wrapper DENIES through the peel", "deny", "sudo gh pr merge 3", mpd)
+            mpexpect("(mp-d19) uncertain lex (unquoted #) with a merge spelling DENIES", "deny",
+                     "gh pr merge 3 # on green", mpd)
+            mpexpect("(mp-d20) refused lex (unbalanced quote) with a merge spelling DENIES", "deny",
+                     'gh pr merge 3 "unbalanced', mpd)
+            mpexpect("(mp-d21) literal absolute cd into the declaring repo DENIES from outside", "deny",
+                     "cd {} && gh pr merge 3".format(mpd), mpp)
+            # --- ALLOW controls: each the minimal pair of a deny above ---------------------------------
+            mpexpect("(mp-a1) gh pr view allows (no merge verb; kills a drop-verb-check mutant)",
+                     "allow", "gh pr view 12", mpd)
+            mpexpect("(mp-a1b) gh pr checks allows", "allow", "gh pr checks 12 --watch", mpd)
+            mpexpect("(mp-a2) lone gh pr merge --help allows (read-down)", "allow",
+                     "gh pr merge --help", mpd)
+            mpexpect("(mp-a3) gh pr merge --disable-auto allows (cancel, not merge)", "allow",
+                     "gh pr merge 3 --disable-auto", mpd)
+            mpexpect("(mp-a4) explicit -R outside the declared repos scope allows", "allow",
+                     "gh pr merge 3 -R other/x", mpd)
+            mpexpect("(mp-a5) GH_REPO= segment assignment outside the scope allows", "allow",
+                     "GH_REPO=other/x gh pr merge 1", mpd)
+            mpexpect("(mp-a6) PR URL operand outside the scope allows", "allow",
+                     "gh pr merge https://github.com/other/x/pull/3", mpd)
+            mpexpect("(mp-a7) methodless body-less gh api pulls merge endpoint allows (GET check)",
+                     "allow", "gh api repos/owner/repo/pulls/3/merge", mpd)
+            mpexpect("(mp-a8) the declared command allows (not a merge shape)", "allow",
+                     "python3 tools/merge_pr.py --pr 12 --method merge", mpd)
+            mpexpect("(mp-a9) a commit message mentioning gh pr merge allows (no raw scan on a "
+                     "certain-lex ordinary segment)", "allow",
+                     'git commit -m "document gh pr merge"', mpd)
+            mpexpect("(mp-a10) plain graphql query without a merge mutation allows", "allow",
+                     "gh api graphql -f query='query{viewer{login}}'", mpd)
+            # declaration-absent controls: the same denies are inert with no declaration (or no member)
+            mpexpect("(mp-k1) bare merge allows with no declaration (inert boundary)", "allow",
+                     "gh pr merge 12 --merge", mpn)
+            mpexpect("(mp-k2) api merge endpoint allows with no declaration", "allow",
+                     "gh api -XPUT repos/owner/repo/pulls/3/merge", mpn)
+            mpexpect("(mp-k3) shell-body merge allows with no declaration", "allow",
+                     "bash -c 'gh pr merge 3'", mpn)
+            mp_badreg.write_text(json.dumps({"version": 1}), encoding="utf-8")
+            mpexpect("(mp-k4) declaration without a merge member stays inert", "allow",
+                     "gh pr merge 12", mpb)
+            # ambient GH_REPO, both directions (the hook's own environment)
+            os.environ["GH_REPO"] = "owner/repo"
+            mpexpect("(mp-d22) ambient GH_REPO naming the declared repo DENIES", "deny",
+                     "gh pr merge 1", mpd)
+            os.environ["GH_REPO"] = "other/x"
+            mpexpect("(mp-a11) ambient GH_REPO outside the scope allows", "allow", "gh pr merge 1", mpd)
+            os.environ.pop("GH_REPO", None)
+            # the declared argv as a gh shape: the exact prefix allows, any other spelling denies
+            mpexpect("(mp-a12) the declared gh argv allows by exact prefix", "allow",
+                     "gh pr merge --auto", mpg)
+            mpexpect("(mp-a12b) declared prefix plus extra operands still allows", "allow",
+                     "gh pr merge --auto --delete-branch", mpg)
+            mpexpect("(mp-d23) a spelling short of the declared prefix DENIES", "deny",
+                     "gh pr merge", mpg)
+            mpexpect("(mp-d23b) a different method spelling DENIES beside the declared prefix", "deny",
+                     "gh pr merge 3 --squash", mpg)
+            # --- present-but-bad declarations: DENY merge shapes, leave ordinary commands alone --------
+            mp_badreg.write_text("{ not json", encoding="utf-8")
+            mpexpect("(mp-d14) malformed JSON declaration DENIES a merge shape", "deny",
+                     "gh pr merge 3", mpb)
+            mpexpect("(mp-a13) malformed declaration leaves a non-merge command alone", "allow",
+                     "git status", mpb)
+            mp_badreg.write_text(json.dumps({"version": True, "merge": {"argv": ["x"]}}),
+                                 encoding="utf-8")
+            mpexpect("(mp-d15) boolean version is bad, never version 1", "deny", "gh pr merge 3", mpb)
+            mp_badreg.write_text(json.dumps({"version": 1, "merge": {"argv": ["x"], "extra": 1}}),
+                                 encoding="utf-8")
+            mpexpect("(mp-d15b) unknown merge key is bad (strict schema)", "deny", "gh pr merge 3", mpb)
+            mp_badreg.write_text(json.dumps({"version": 1, "merge": {"argv": []}}), encoding="utf-8")
+            mpexpect("(mp-d15c) empty merge.argv is bad", "deny", "gh pr merge 3", mpb)
+            mp_badreg.write_text(json.dumps({"version": 1, "ops": {}}), encoding="utf-8")
+            mpexpect("(mp-d15d) unknown top-level key is bad", "deny", "gh pr merge 3", mpb)
+            # byte bound, each end: exactly at the cap is read, one byte over is bad (boundary pair)
+            _mp_prefix = json.dumps(
+                {"version": 1, "merge": {"argv": ["python3", "tools/merge_pr.py"]}})[:-1] \
+                + ', "prepush": {"command": "'
+            _mp_suffix = '"}}'
+            _mp_at = _mp_prefix + "y" * (aiqt_hooks._OPERATIONS_MAX_BYTES - len(_mp_prefix)
+                                         - len(_mp_suffix)) + _mp_suffix
+            if len(_mp_at.encode("utf-8")) != aiqt_hooks._OPERATIONS_MAX_BYTES:
+                failures.append("(mp-bound-setup) the at-the-cap declaration is {} bytes, not the cap"
+                                .format(len(_mp_at.encode("utf-8"))))
+            mp_badreg.write_text(_mp_at, encoding="utf-8")
+            mpexpect("(mp-bound-at) a declaration exactly at the byte cap is read (merge still denies)",
+                     "deny", "gh pr merge 3", mpb)
+            mp_badreg.write_text(_mp_at + "\n", encoding="utf-8")
+            mpexpect("(mp-bound-over) one byte over the cap is bad (merge shape denies as bad)",
+                     "deny", "gh pr merge 3", mpb)
+            mp_badreg.unlink()
+            mpexpect("(mp-k5) declaration removed again: inert", "allow", "gh pr merge 3", mpb)
+            os.symlink(str(mp_decl / ".aiqt" / "operations.json"), str(mp_badreg))
+            mpexpect("(mp-d16) a symlinked declaration is bad (regular file only)", "deny",
+                     "gh pr merge 3", mpb)
+            mp_badreg.unlink()
+            # --- cannot-evaluate notes (the _merge_path_note sites) -----------------------------------
+            mpexpect("(mp-nogit) a merge shape in a non-git session allows WITH A NOTE", "allow-note",
+                     "gh pr merge 3", mpp)
+            mpexpect("(mp-nocwd) a merge shape with no session cwd allows WITH A NOTE", "allow-note",
+                     "gh pr merge 3", None)
+            mpexpect("(mp-graphql-note) an opaque graphql body in the declaring repo allows WITH A "
+                     "NOTE", "allow-note", "gh api graphql --input body.json", mpd)
+            # --- MCP: the merge tool by short name, scoped by owner/repo ------------------------------
+            def mcp(label, want, tool, ti, cwd):
+                mpexpect(label, want, tool=tool, tool_input=ti, cwd=cwd)
+            mcp("(mp-m1) MCP merge_pull_request on the declared repo DENIES", "deny",
+                "mcp__github__merge_pull_request", {"owner": "owner", "repo": "repo"}, mpd)
+            mcp("(mp-m2) MCP merge tool with no readable owner/repo DENIES (governed fail-safe)",
+                "deny", "mcp__github__merge_pull_request", {}, mpd)
+            mcp("(mp-m3) MCP merge tool on another repo allows (scope discriminates)", "allow",
+                "mcp__github__merge_pull_request", {"owner": "other", "repo": "x"}, mpd)
+            mcp("(mp-m4) MCP merge tool allows with no declaration", "allow",
+                "mcp__github__merge_pull_request", {"owner": "owner", "repo": "repo"}, mpn)
+            mcp("(mp-m5) an MCP tool outside merge.mcp_tools allows (name discriminates)", "allow",
+                "mcp__github__list_merged", {"owner": "owner", "repo": "repo"}, mpd)
+            mcp("(mp-m6) MCP merge tool in a non-git session allows WITH A NOTE", "allow-note",
+                "mcp__github__merge_pull_request", {"owner": "o", "repo": "r"}, mpp)
+            mp_badreg.write_text("{ not json", encoding="utf-8")
+            mcp("(mp-m7) MCP merge tool under a bad declaration DENIES fail-closed", "deny",
+                "mcp__github__merge_pull_request", {"owner": "o", "repo": "r"}, mpb)
+            mp_badreg.unlink()
+            # --- fail posture ---------------------------------------------------------------------------
+            mpexpect("(mp-f1) missing tool_name DENIES (shared fail-closed contract)", "deny",
+                     with_tool=False, tool_input=None)
+            mpexpect("(mp-f2) unreadable Bash command DENIES fail-closed", "deny", tool_input={}, cwd=mpd)
+            _mp_wired = mpdecide({"hook_event_name": "PostToolUse", "tool_name": "Bash",
+                                  "tool_input": {"command": "gh pr merge 1"}})
+            if _mp_wired != "hard-block":
+                failures.append("(mp-f3) a mis-wired event must hard-block (exit 2), got {}"
+                                .format(_mp_wired))
+            # === prepush_declared_hook: the SessionStart install check ================================
+            ppexpect("(pp-w1) declared prepush with NO installed hook WARNS", "allow-note", mpd)
+            ppexpect("(pp-s1) no declaration is silent (inert)", "allow", mpn)
+            ppexpect("(pp-s2) a non-git session is silent (nothing opted in)", "allow", mpp)
+            ppexpect("(pp-s3) no session cwd is silent", "allow", None)
+            mp_badreg.write_text("{ not json", encoding="utf-8")
+            ppexpect("(pp-w2) a present-but-bad declaration WARNS, never a silent pass", "allow-note",
+                     mpb)
+            mp_badreg.write_text(json.dumps({"version": 1}), encoding="utf-8")
+            ppexpect("(pp-s4) a declaration without a prepush member is silent", "allow", mpb)
+            mp_badreg.unlink()
+            _pp_hook_dir = mp_decl / ".git" / "hooks"
+            _pp_hook_dir.mkdir(parents=True, exist_ok=True)
+            _pp_hook = _pp_hook_dir / "pre-push"
+            _pp_hook.write_text("#!/bin/sh\nbash tools/pre-push-guard.sh\n", encoding="utf-8")
+            os.chmod(_pp_hook, 0o644)
+            if os.access(str(_pp_hook), os.X_OK):
+                pass  # a DAC-bypassing runner (root) reads 0644 as executable; skip the exec vector
+            else:
+                ppexpect("(pp-w3) an installed but non-executable hook WARNS (git will not run it)",
+                         "allow-note", mpd)
+            os.chmod(_pp_hook, 0o755)
+            ppexpect("(pp-s5) an installed, executable hook carrying the declared line is silent",
+                     "allow", mpd)
+            _pp_hook.write_text("#!/bin/sh\necho something else\n", encoding="utf-8")
+            os.chmod(_pp_hook, 0o755)
+            ppexpect("(pp-w4) an installed hook WITHOUT the declared line WARNS (line discriminates)",
+                     "allow-note", mpd)
+            # hook_line override: a stub carrying hook_line (not command) reads installed
+            (mp_decl / ".aiqt" / "operations.json").write_text(json.dumps(
+                {"version": 1, "merge": _mp_decl["merge"],
+                 "prepush": {"command": "bash tools/pre-push-guard.sh",
+                             "hook_line": "exec hookmgr run pre-push"}}), encoding="utf-8")
+            _pp_hook.write_text("#!/bin/sh\nexec hookmgr run pre-push\n", encoding="utf-8")
+            os.chmod(_pp_hook, 0o755)
+            ppexpect("(pp-s6) a hook-manager stub matching hook_line is silent", "allow", mpd)
+            _pp_hook.write_text("#!/bin/sh\nbash tools/pre-push-guard.sh\n", encoding="utf-8")
+            os.chmod(_pp_hook, 0o755)
+            ppexpect("(pp-w5) with hook_line declared, the bare command line no longer satisfies it",
+                     "allow-note", mpd)
+            # hook read bound, each end: a hook exactly at the bound with the line is silent, one byte
+            # over warns (boundary pair; the line sits inside the bound in both)
+            _pp_line = "exec hookmgr run pre-push"
+            _pp_head = "#!/bin/sh\n" + _pp_line + "\n"
+            _pp_at = _pp_head + "#" * (aiqt_hooks._PREPUSH_HOOK_MAX_BYTES - len(_pp_head) - 1) + "\n"
+            if len(_pp_at.encode("utf-8")) != aiqt_hooks._PREPUSH_HOOK_MAX_BYTES:
+                failures.append("(pp-bound-setup) the at-the-bound hook is {} bytes, not the bound"
+                                .format(len(_pp_at.encode("utf-8"))))
+            _pp_hook.write_text(_pp_at, encoding="utf-8")
+            os.chmod(_pp_hook, 0o755)
+            ppexpect("(pp-bound-at) a hook exactly at the read bound is read (silent)", "allow", mpd)
+            _pp_hook.write_text(_pp_at + "\n", encoding="utf-8")
+            os.chmod(_pp_hook, 0o755)
+            ppexpect("(pp-bound-over) one byte over the read bound WARNS (cannot evaluate)",
+                     "allow-note", mpd)
+            _pp_hook.unlink()
+            (mp_decl / ".aiqt" / "operations.json").write_text(json.dumps(_mp_decl), encoding="utf-8")
+            # wiring: both handlers registered on their events
+            if (aiqt_hooks.HANDLERS.get("merge_path_guard") is not aiqt_hooks.merge_path_guard
+                    or aiqt_hooks.HANDLER_EVENT.get("merge_path_guard") != aiqt_hooks.PRETOOL
+                    or aiqt_hooks.HANDLERS.get("prepush_declared_hook")
+                    is not aiqt_hooks.prepush_declared_hook
+                    or aiqt_hooks.HANDLER_EVENT.get("prepush_declared_hook") != "SessionStart"):
+                failures.append("(mp-wiring) merge_path_guard/prepush_declared_hook handler or event "
+                                "wiring is missing or wrong")
+        finally:
+            if _mp_saved_ghrepo is None:
+                os.environ.pop("GH_REPO", None)
+            else:
+                os.environ["GH_REPO"] = _mp_saved_ghrepo
+
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
         # floor; inert on absence for slice confinement, fail-closed on cannot-evaluate once armed. Judged
@@ -17662,7 +17983,8 @@ def _main_isolated(monitor):
 
     _bash_guards = [aiqt_hooks.diff_source_pretool, aiqt_hooks.bash_absolute_paths,
                     aiqt_hooks.git_explicit_binding, aiqt_hooks.git_discard, aiqt_hooks.protected_line,
-                    aiqt_hooks.branch_root, aiqt_hooks.gate_weakening, aiqt_hooks.commit_msg_subst]
+                    aiqt_hooks.branch_root, aiqt_hooks.gate_weakening, aiqt_hooks.commit_msg_subst,
+                    aiqt_hooks.merge_path_guard]
     _bash_vectors = [
         "git status", "ls -la", "git diff", "git diff --color=always | grep foo", "/usr/bin/git diff",
         "git checkout -- file.txt", "git reset --hard", "git reset --soft", "git clean -fd",
@@ -17673,6 +17995,8 @@ def _main_isolated(monitor):
         'git commit -m "fix `whoami`"', "git commit -m x", "git -c alias.co=checkout co -- f",
         "git checkout-index -a -f", "eval 'git reset --hard'", 'git reset --hard "unbalanced',
         'git push --force "unbalanced', 'git commit -m "x `y', "git branch --track t origin/x",
+        "gh pr merge 12 --merge", "gh pr view 12", "timeout 60 gh pr merge 12",
+        "gh api -XPUT repos/o/r/pulls/3/merge", "bash -c 'gh pr merge 3'",
     ]
     for _g in _bash_guards:
         for _cmd in _bash_vectors:
@@ -17904,7 +18228,15 @@ def _main_isolated(monitor):
           "the frozen/floor denials are evaluated BEFORE the companion-store allow so a symlink into a "
           "declared store cannot bypass the freeze (findings 1 and 2), so a companion_stores widening cannot "
           "be self-declared through a guarded tool; the general Bash-write path stays the disclosed wrtscp "
-          "residual. A "
+          "residual. "
+          "artbr1 (merge_path_guard) is inert without an .aiqt/operations.json merge member, "
+          "DENIES-and-educates every matched merge shape in a declaring repository (naming the declared "
+          "command) and a present-but-bad declaration, ALLOWS the declared argv, the read-only forms and "
+          "explicit out-of-scope targets, and ALLOWS WITH A NOTE a merge shape in a non-git session and "
+          "an opaque graphql body. reqstp/gatdis (prepush_declared_hook) is a SessionStart WARN: silent "
+          "without a prepush member or with the declared hook line installed, one non-blocking warning "
+          "when the declared pre-push command is not the clone's installed hook or the declaration "
+          "cannot be read. A "
           "mis-wired PreToolUse event hard-blocks (exit 2). Historical note: several guards were "
           "originally ASK-based; this suite now asserts the no-ask outcomes above and the global "
           "invariant guarantees none reverts to an ask.")
