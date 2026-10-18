@@ -424,12 +424,13 @@ SUITE_RUNNERS = frozenset(os.path.basename(token) for run in SUITE_RUNS for toke
                           if token.endswith(".py"))
 # The path this gate runs as; _judge_shaped and _counts_as_judge read it from command tokens.
 GATE_PATH = "tools/check_python_host_pin.py"
-# The step right after a host-patch job's setup-python step (or right after the child-status probe step
-# there, PROBE_RUN): this gate, which fails there when the job does not run the host patch.
+# The step right after a host-patch job's setup-python step: this gate, which fails there when the job does
+# not run the host patch.
 GATE_RUN = "python3 -I -B " + GATE_PATH
-# The child-status probe (opf/tools/_child_status.py), which tools/check_child_status_coverage.py holds as the
-# first step after every setup-python step: when that step is an executable step running exactly this, the
-# Python host pin step is the one right after it, so the probe is the only step that can come between.
+# The child-status probe (opf/tools/_child_status.py). In each host-patch job the probe step runs right
+# after the Python host pin step: tools/check_child_status_coverage.py accepts the gate ahead of its probe
+# in those two jobs only, so the gate-step rule holds the gate as the step right after setup-python with no
+# step between. The committed-line controls and the order vectors read this text.
 PROBE_RUN = "python3 -I -B opf/tools/_child_status.py"
 # The runner image of each host-patch job. The setup-python versions manifest lists a patch release's Linux
 # builds by Ubuntu version (on 2026-10-12, x64 builds of 3.14.4 for 22.04 and 24.04 only), so ubuntu-latest
@@ -1200,18 +1201,14 @@ def _host_job_findings(job, tree, want):
         found.append("{}:{}: python-version {!r} in the host-patch job {} differs from the host patch {!r} "
                      "that {} names".format(WORKFLOW_REL, value.line, str(value), job, want, SOURCE_REL))
     after = setups[0] + 1
-    gate_at = after
-    if after < len(steps) and steps[after].get("run") == PROBE_RUN and not _step_departures(steps[after]):
-        gate_at = after + 1
-    gate = steps[gate_at] if gate_at < len(steps) else {}
+    gate = steps[after] if after < len(steps) else {}
     if "gate-step" in JOB_RULES and gate.get("run") != GATE_RUN:
-        found.append("{}: the step right after its setup-python step (or after the child-status probe step "
-                     "there) is not the Python host pin step, an executable step (exactly name, run and "
-                     "shell: bash) that runs {}".format(where, GATE_RUN))
+        found.append("{}: the step right after its setup-python step is not the Python host pin step, an "
+                     "executable step (exactly name, run and shell: bash) that runs {}".format(where, GATE_RUN))
     elif "gate-step" in JOB_RULES and _step_departures(gate):
-        found.append("{}: the step right after its setup-python step (or after the child-status probe step "
-                     "there) is not the Python host pin step: it runs {} but {} (an executable step carries "
-                     "exactly name, run and shell: bash)".format(where, GATE_RUN, "; ".join(_step_departures(gate))))
+        found.append("{}: the step right after its setup-python step is not the Python host pin step: it runs "
+                     "{} but {} (an executable step carries exactly name, run and shell: bash)".format(
+                         where, GATE_RUN, "; ".join(_step_departures(gate))))
     if "suite-step" in JOB_RULES:
         found.extend(_suite_findings(where, job, steps, after))
     return found
@@ -1608,8 +1605,7 @@ def evaluate(root, version, jobs_only=False):
         return 1, ["FAIL: " + finding for finding in findings]
     report = ("PASS: python host patch {} ({}): {} carries only the top-level keys {}, its host-patch jobs "
               "{} each run on {}, carry env: on no job key or step, check out as written, pin it in their "
-              "one setup-python step, run this gate right after it (or right after the child-status probe "
-              "step there) and run their suites in order, each "
+              "one setup-python step, run this gate right after it and run their suites in order, each "
               "held step with exactly name, run and shell: bash, every run: of "
               "every job outside them is tokenized line by line, and one step outside them carries the jobs leg's "
               "--jobs-only judge as its own run: command with exactly name, run and shell: bash, its job and "
@@ -2046,7 +2042,8 @@ def _job_cases():
     second = "  second:\n    runs-on: ubuntu-latest\n    steps:\n"
     decoy = ("  decoy:\n    runs-on: ubuntu-latest\n    steps:\n"
              "      - name: Decoy judge\n        run: " + JOBS_ONLY_RUN + "\n        if: false\n")
-    probe = "      - name: Child exit status observable\n" + SHELL_LINE + "        run: " + PROBE_RUN + "\n\n"
+    probe = ("      - name: Child exit status observable (after the host pin gate)\n" + SHELL_LINE
+             + "        run: " + PROBE_RUN + "\n\n")
     return (
         ("pins/host-job-missing-finding", (), (GFE,), "carries no job " + GFE, None),
         ("pins/newer-patch-finding", ((OPF, PIN, "python-version: '3.14.8'"),), (),
@@ -2091,12 +2088,10 @@ def _job_cases():
         ("jobs/step-before-gate-finding",
          ((GFE, GATE_STEP, "      - run: pip install other-python\n\n" + GATE_STEP),), (),
          "is not the Python host pin step", "gate-step"),
-        # Only one child-status probe step that is an executable step is passed over: a probe step that
-        # carries if:, or a second probe step, leaves the gate step out of its place.
-        ("jobs/probe-step-if-before-gate-finding",
-         ((GFE, GATE_STEP, probe.replace(SHELL_LINE, SHELL_LINE + "        if: false\n") + GATE_STEP),), (),
-         "is not the Python host pin step", "gate-step"),
-        ("jobs/two-probe-steps-before-gate-finding", ((OPF, GATE_STEP, probe + probe + GATE_STEP),), (),
+        # The child-status probe step belongs right after the gate step: a probe step between the
+        # setup-python step and the gate step, like any other step there, leaves the gate step out of
+        # its place.
+        ("jobs/probe-step-before-gate-finding", ((GFE, GATE_STEP, probe + GATE_STEP),), (),
          "is not the Python host pin step", "gate-step"),
         ("jobs/opf-suite-removed-finding", ((OPF, suite[OPF], ""),), (),
          "opf-host-patch does not run its suite", "suite-step"),
@@ -2460,12 +2455,24 @@ def _self_test_cases(base):
             ("pins/trailing-comment-passes", "'3.14.4'  # the host patch")):
         check(check_id, evaluate(_fixture(base, workflow=_workflow(((OPF, PIN, "python-version: " + pin),))),
                                  HOST)[0], 0)
-    # The child-status probe step between the setup-python step and the gate step in both host-patch jobs,
-    # as quality.yml carries it: the gate step is the one right after it, so the tree passes.
-    probe = "      - name: Child exit status observable\n" + SHELL_LINE + "        run: " + PROBE_RUN + "\n\n"
-    check("jobs/probe-step-before-gate-passes",
-          evaluate(_fixture(base, workflow=_workflow(((OPF, GATE_STEP, probe + GATE_STEP),
-                                                      (GFE, GATE_STEP, probe + GATE_STEP)))), HOST)[0], 0)
+    # The committed order: the gate step right after the setup-python step and the child-status probe step
+    # right after the gate, in both host-patch jobs, as quality.yml carries it. The probe step is an extra
+    # step this gate does not hold, so the tree passes; a copy whose gate-step rule reads the step after
+    # that one instead (a gate that wants a step between setup-python and itself) refuses this order and
+    # accepts the probe ahead of the gate, so each order is red under exactly one of the two.
+    probe = ("      - name: Child exit status observable (after the host pin gate)\n" + SHELL_LINE
+             + "        run: " + PROBE_RUN + "\n\n")
+    gate_line = "    gate = steps[after] if after < " + "len(steps) else {}\n"
+    shifted_gate = _mutant(base, "python_host_pin_gate_shifted", _read_text(Path(__file__).resolve()),
+                           ((gate_line, "    after += 1\n" + gate_line),))
+    ordered = _fixture(base, workflow=_workflow(((OPF, GATE_STEP, GATE_STEP + probe),
+                                                 (GFE, GATE_STEP, GATE_STEP + probe))))
+    swapped = _fixture(base, workflow=_workflow(((OPF, GATE_STEP, probe + GATE_STEP),
+                                                 (GFE, GATE_STEP, probe + GATE_STEP))))
+    check("jobs/gate-then-probe-passes",
+          (evaluate(ordered, HOST)[0], shifted_gate.evaluate(ordered, HOST)[0]), (0, 1))
+    check("jobs/probe-ahead-of-gate-mutant-red",
+          (evaluate(swapped, HOST)[0], shifted_gate.evaluate(swapped, HOST)[0]), (1, 0))
     check("jobs/extra-step-after-gate-passes", evaluate(_fixture(base, workflow=_workflow(((
         OPF, GATE_STEP, GATE_STEP + "      - name: Python host pin self-test\n        run: " + GATE_RUN
         + " --self-test\n\n"),))), HOST)[0], 0)

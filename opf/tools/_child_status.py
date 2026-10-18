@@ -15,7 +15,9 @@ without SIGCHLD or without fork, the guard refuses nothing, and this file's PASS
 probed.
 
 The guard runs first in both runners (tools/run_all_checks.sh and opf/tools/run_all_checks.sh) and in every CI
-job of the three workflows, as this file's own launch. opf/tools/opf.py, tools/check_selftest_execution.py and
+job of the three workflows, as this file's own launch; in the two host-patch jobs of quality.yml it runs right
+after the Python host pin step, which tools/check_python_host_pin.py holds as the step right after
+setup-python there. opf/tools/opf.py, tools/check_selftest_execution.py and
 the hooks dispatcher (.aiqt/core/hooks/scripts/aiqt_hooks.py and its generated plugin copy) carry inline
 copies, because each is a single-file unit that cannot import a sibling; tools/check_child_status_coverage.py
 pins every copy to this text by AST and enumerates every entry point.

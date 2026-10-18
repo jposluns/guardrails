@@ -2192,6 +2192,8 @@ expected-check-ids = [
   "launchers/workflow-probe-in-block-scalar",
   "launchers/workflow-probe-if-false",
   "launchers/workflow-probe-continued",
+  "launchers/workflow-host-pin-before-probe",
+  "launchers/workflow-host-pin-other-job",
   "launchers/workflow-block-hash-line",
   "launchers/workflow-defaults-after-steps",
   "launchers/workflow-python-outside-run-step",
