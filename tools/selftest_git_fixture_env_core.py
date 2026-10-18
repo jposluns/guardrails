@@ -1931,6 +1931,7 @@ _MEMBER_TIMEOUT_EXPECTED = [
     ("exit-2", "int", 2, "definite", True, ""),
     ("oserror", "str", None, "definite", True, ""),
     ("clean", "int", 0, "clean", True, ""),
+    ("bound-kill-unrecorded", [("tools/vector_member.py", "--self-test")], ()),
     ("findings-printed-first", 1, True, True, ["vector_hooked", "vector_killed", "vector_other"],
      [True, True], ""),
 ]
@@ -1948,7 +1949,12 @@ def _member_timeout_vectors(base):
     its evidence was observed), one that failed, one that ran a hook under exit 0 and a clean one
     exits 1, its stdout leading with the definite findings, which name exactly the three definite
     members, and only then listing both timeout messages under "also cannot evaluate"; stderr
-    stays empty. A case other than bound-kill that never finished inside its bound is recorded
+    stays empty. bound-kill-unrecorded pins the recording boundary's OTHER side: the same timeout
+    message left out of the record is a definite offender with no attribution (never folded into
+    cannot-evaluate), so dropping the recording turns a bound kill red here instead of silently
+    reclassifying it. These are regression pins over the engine's long-standing bound-kill path,
+    the same recording rule the lifecycle probes feed (their own vectors run in the system-config
+    lane). A case other than bound-kill that never finished inside its bound is recorded
     (host load, no verdict either way) and attributed (_partial_timeout_cause)."""
     import contextlib
     import io
@@ -1990,6 +1996,11 @@ def _member_timeout_vectors(base):
 
     timeout = "TIMEOUT: tools/vector_member.py --self-test reached its 1 s bound (cannot evaluate)"
     killed = "TIMEOUT: tools/vector_killed.py --self-test reached its 1 s bound (cannot evaluate)"
+    # The recording boundary's other side: the SAME timeout message, left
+    # unrecorded, is a definite offender with no attribution.
+    offenders, cause = _registered_offenders(
+        {("tools/vector_member.py", "--self-test"): (timeout, b"", b"", b"")}, [])
+    observed.append(("bound-kill-unrecorded", offenders, cause))
     lane = dict([
         (("tools/vector_member.py", "--self-test"), (timeout, b"", b"", b"")),
         (("tools/vector_killed.py", "--self-test"),

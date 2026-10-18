@@ -58,10 +58,11 @@ check = _gfe.check
 # stated exception), not a completion budget. The probe's whole intended work is one module import
 # plus the entry's own isolation setup up to its FIRST delegate call, where the stub stops it;
 # nothing it is meant to run waits on anything. Reaching it is attributed to the deadline: the
-# probe's timeout message names the probe and the last stage it reported and is recorded as
-# cannot-evaluate, never a lifecycle finding (which needs an observed wrong isolation) and never
-# "scheduling" by assumption: an entry that hangs before its delegate and a starved host both end
-# here, and the named stage is what distinguishes them.
+# probe's timeout message names the probe and ONLY the last stage it reported (the probe emits a
+# stage inside the delegate stub and another after the entry unwound, so a hang after the delegate
+# is never read as one before it) and is recorded as cannot-evaluate, never a lifecycle finding
+# (which needs an observed wrong isolation) and never "scheduling" by assumption: a hanging entry
+# and a starved host both end here, and the named stage is all this message asserts.
 _LIFECYCLE_PROBE_SECONDS = 60
 
 
@@ -92,11 +93,13 @@ def _lifecycle_probe(code, module, entry, delegate, env, run=None, cannot_evalua
             load = os.getloadavg()
         except OSError:
             load = "unavailable"
+        # Only the last OBSERVED stage is asserted: a wrapper can reach its
+        # delegate and hang afterwards (unwinding, restoration), so "stage
+        # entered" never licenses the claim that the delegate was not reached.
         message = ("TIMEOUT: lifecycle probe {}.{} reached its {} s bound {} (loadavg {}) "
                    "(cannot evaluate)".format(
                        module, entry, _LIFECYCLE_PROBE_SECONDS,
-                       "after it {} and before its delegate {} was reached".format(
-                           stages[-1], delegate) if stages
+                       "after its last reported stage: {}".format(stages[-1]) if stages
                        else "before its module import finished", load))
         (CANNOT_EVALUATE if cannot_evaluate is None else cannot_evaluate).append(message)
         print("LIFECYCLE " + message, file=sys.stdout if report is None else report, flush=True)
@@ -122,11 +125,13 @@ def _lifecycle_problems(results, recorded=None):
 
 
 _LIFECYCLE_TIMEOUT_EXPECTED = [
-    ("bound-kill-entered", True, True, True, True, ""),
-    ("bound-kill-import", True, True, True, True, ""),
-    ("exit-1", (1, "not json", ""), [], "", ""),
-    ("oserror", "[Errno 5] vector", [], "", ""),
-    ("clean", (0, [[], True]), [], "", ""),
+    ("bound-kill-entered", True, True, True, True, True, "", True),
+    ("bound-kill-delegated", True, True, True, True, True, "", True),
+    ("bound-kill-import", True, True, True, True, True, "", True),
+    ("exit-1", (1, "not json", ""), [], "", "", True),
+    ("oserror", "[Errno 5] vector", [], "", "", True),
+    ("clean", (0, [[], True]), [], "", "", True),
+    ("launch-bound-control", True, (_LIFECYCLE_PROBE_SECONDS, None)),
     ("problems-split", ["m.e: 'TIMEOUT: unrecorded (cannot evaluate)'", "m.g: (1, [])"],
      ["TIMEOUT: recorded (cannot evaluate)"]),
     ("finding-attributed", (([], ["TIMEOUT: recorded (cannot evaluate)"]),
@@ -136,19 +141,34 @@ _LIFECYCLE_TIMEOUT_EXPECTED = [
 
 
 def _lifecycle_timeout_vectors():
-    """env/lifecycle-probe-timeout-vectors, through scripted launches (nothing runs): a probe
-    still running at its bound returns its timeout message, which names the probe and the last
-    stage it reported, recorded in the record passed and announced on the report passed, nothing
-    on stderr; a nonzero exit, an unparsable payload and a launch error stay lifecycle evidence,
-    recorded nowhere. _lifecycle_problems keeps a recorded probe timeout out of the problems (an
-    unrecorded one stays a problem), and _lifecycle_finding attributes the finding to the probe
-    timeouts only when no definite path or problem stands beside them (a definite finding
-    outranks cannot-evaluate)."""
+    """env/lifecycle-probe-timeout-vectors, through scripted launches (nothing runs): every
+    scripted launch records the launch SHAPE the probe actually requested (interpreter head,
+    isolation flags, probe arguments, the probe bound as the subprocess timeout, captured text
+    streams and the environment), and every case compares that record against the one bounded
+    shape, so removing or disabling the production timeout turns every case red, not only the
+    exception handling; the launch-bound-control case pins that an otherwise identical unbounded
+    record compares unequal. A probe still running at its bound returns its timeout message,
+    which names the probe and ONLY the last stage it reported, never a claim that the delegate
+    was not reached (a wrapper can reach its delegate and hang unwinding: the post-delegation
+    case holds the message to the observed stage), recorded in the record passed and announced
+    on the report passed, nothing on stderr; a nonzero exit, an unparsable payload and a launch
+    error stay lifecycle evidence, recorded nowhere. _lifecycle_problems keeps a recorded probe
+    timeout out of the problems (an unrecorded one stays a problem), and _lifecycle_finding
+    attributes the finding to the probe timeouts only when no definite path or problem stands
+    beside them (a definite finding outranks cannot-evaluate)."""
     import contextlib
     import io
 
-    def scripted(effect):
+    launch_expected = (True, ("-I", "-B", "-c"),
+                       (str(ROOT / "opf" / "tools"), "vector_module", "vector_entry",
+                        "vector_delegate"),
+                       _LIFECYCLE_PROBE_SECONDS, True, True, {})
+
+    def scripted(effect, launches):
         def run(argv, **kwargs):
+            launches.append((argv[0] == sys.executable, tuple(argv[1:4]), tuple(argv[5:]),
+                             kwargs.get("timeout"), kwargs.get("capture_output") is True,
+                             kwargs.get("text") is True, kwargs.get("env")))
             if isinstance(effect, BaseException):
                 raise effect
             return subprocess.CompletedProcess(argv, effect[0], effect[1], "")
@@ -159,23 +179,36 @@ def _lifecycle_timeout_vectors():
             ("bound-kill-entered", subprocess.TimeoutExpired(
                 ["vector"], 60, output=b"",
                 stderr=b"probe stage: imported\nprobe stage: entered\n"),
-             "after it entered and before its delegate vector_delegate was reached"),
+             "after its last reported stage: entered"),
+            ("bound-kill-delegated", subprocess.TimeoutExpired(
+                ["vector"], 60, output=b"",
+                stderr=b"probe stage: imported\nprobe stage: entered\n"
+                       b"probe stage: delegated\n"),
+             "after its last reported stage: delegated"),
             ("bound-kill-import", subprocess.TimeoutExpired(["vector"], 60),
              "before its module import finished"),
             ("exit-1", (1, "not json"), None), ("oserror", OSError(5, "vector"), None),
             ("clean", (0, "[[], true]"), None)):
-        recorded, announced = [], io.StringIO()
+        recorded, announced, launches = [], io.StringIO(), []
         with contextlib.redirect_stderr(io.StringIO()) as leaked:
             value = _lifecycle_probe("", "vector_module", "vector_entry", "vector_delegate", {},
-                                     run=scripted(effect), cannot_evaluate=recorded,
+                                     run=scripted(effect, launches), cannot_evaluate=recorded,
                                      report=announced)
         if stage is None:
-            got.append((label, value, recorded, announced.getvalue(), leaked.getvalue()))
+            got.append((label, value, recorded, announced.getvalue(), leaked.getvalue(),
+                        launches == [launch_expected]))
             continue
         got.append((label, _is_timeout(value), recorded == [value],
                     announced.getvalue() == "LIFECYCLE {}\n".format(value),
                     "lifecycle probe vector_module.vector_entry" in value and stage in value,
-                    leaked.getvalue()))
+                    "before its delegate" not in value, leaked.getvalue(),
+                    launches == [launch_expected]))
+    # The launch-shape comparison itself discriminates the bound: the same
+    # record with the timeout slot emptied must compare unequal, so a
+    # comparison that stops carrying the timeout turns this control red.
+    unbounded = launch_expected[:3] + (None,) + launch_expected[4:]
+    got.append(("launch-bound-control", unbounded != launch_expected,
+                (launch_expected[3], unbounded[3])))
     recorded = "TIMEOUT: recorded (cannot evaluate)"
     problems, probes = _lifecycle_problems(dict([
         (("m", "d"), recorded), (("m", "e"), "TIMEOUT: unrecorded (cannot evaluate)"),
@@ -209,6 +242,7 @@ def _opf_home_lifecycles(config_results):
         "    seen.append([home != saved.get('HOME'),",
         "                 home == os.environ.get('XDG_CONFIG_HOME'), os.path.isdir(home),",
         "                 os.environ.get('GIT_CONFIG_NOSYSTEM') == '1'])",
+        "    print('probe stage: delegated', file=sys.stderr, flush=True)",
         "    raise StopProbe()",
         "setattr(module, delegate, stop)",
         "try:",
@@ -219,6 +253,7 @@ def _opf_home_lifecycles(config_results):
         "    fn(*args)",
         "except StopProbe:",
         "    pass",
+        "print('probe stage: unwound', file=sys.stderr, flush=True)",
         "print(json.dumps([seen, dict(os.environ) == saved]))",
     ))
     results = {}

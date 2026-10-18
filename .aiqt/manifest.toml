@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "bed3b626b0bdbedaba3ec7195c348cb930446fb164647ffbf257681c00dbc6de"
+tree-sha256 = "566c24a677fe1b2d11c1f536de2f2f8c9d1bea29dd0751f419bc1120e69fe719"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2691,8 +2691,8 @@ sha256 = "d807c70209e5f21928edecd66d6357dc7105bb2142df4e1ae627f7ddd508e261"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_observe.py"
-bytes = 235918
-sha256 = "45296d9037320bc3a6573aafc24cc30d6c7fc61807567ee1a5f9c9840cf2cd47"
+bytes = 235952
+sha256 = "2eba52d47cf14d63aabed5b6d0ad24ba734fc1846c0e82aebbb32f6e0e172ba1"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_plan.py"
@@ -3031,8 +3031,8 @@ sha256 = "21602bf559d127c6598c825c6e6c2ca7d4d2075a6837bbee32f8787fdb134fb1"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 1270206
-sha256 = "75f49e58d6e0972d8cf8d2b28315e8970801e8158a3e46e3e161ffa74c4cc313"
+bytes = 1281071
+sha256 = "2c8e74d6583c3004f1385af1fd30789eab51d7cbb3a148ec9b7bc5805c00c990"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
@@ -3776,13 +3776,13 @@ sha256 = "2a5c4d2174320b2529b1ee2e93d3c7814e0524622e2397fd2e5a31a4cc1168d3"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_system.py"
-bytes = 16813
-sha256 = "24485e50c0d6d29b85453e91ba885aa964953485e3a8bb9cd7dcbb9b1bf2fc3e"
+bytes = 19483
+sha256 = "bed6db1e427fa39c36dff02386eac2915d4a6c4d2ccdd94b1823309149663fcb"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_core.py"
-bytes = 152047
-sha256 = "64adb87f86a59acb6297b2462c913f6a246834384cf25a657e2f46808d01bd91"
+bytes = 152937
+sha256 = "59f6e49954c6212bf3293b2febdb144274086304709d028e881d38fb239c8165"
 
 [[sources]]
 path = "tools/selftest_opf_render.py"
