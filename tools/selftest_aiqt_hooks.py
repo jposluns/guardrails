@@ -2423,7 +2423,10 @@ _IE_MUTANTS = {
     "lone-dash": (('if arg in ("-", "--"):', 'if arg == "--":'),
                   ('if arg[:1] not in ("-", "+") or len(arg) < 2:', 'if arg[:1] not in ("-", "+"):')),
     "shopt": (('if words[0] == "shopt":', 'if False:'),),
-    "shopt-unset": (("return False  # shopt -u -o errexit turns errexit off", "return True"),),
+    "shopt-unset": (("on = False  # shopt -u -o errexit turns errexit off", "on = True"),),
+    "shopt-query": (('if word == "shopt" and _errexit_shopt_queries(words):', "if False:"),),
+    "shopt-set-safe": (('return bool(names) and "s" not in letters and "u" not in letters  # names alone '
+                        "report their state", "return True"),),
     "no-fallback": ((r"""quoted = _ERREXIT_UNQUOTED_HEREDOC_RE.sub(r"<<\1\2'\3'", command)""",
                      "quoted = command"),),
     "unquoted-body": ((r"""quoted = _ERREXIT_UNQUOTED_HEREDOC_RE.sub(r"<<\1\2'\3'", command)""",
@@ -2432,8 +2435,9 @@ _IE_MUTANTS = {
     "quoted-body-end": (("if cand == delim:", "if False:"),),
     "raw-text": (("segments, exact, in_progress = _lex_command(command, partial=True)",
                   "segments, exact, in_progress = _lex_command(_dequoted_text(command), partial=True)"),
-                 ("effect = _errexit_set_effect(words)",
-                  'effect = _errexit_set_effect(words[words.index("set"):] if "set" in words else words)')),
+                 ("effect, pipefail_effect = _errexit_set_effect(words)",
+                  'effect, pipefail_effect = _errexit_set_effect(words[words.index("set"):] if "set" in '
+                  "words else words)")),
     "initial-on": (("on = False  # errexit starts off: only a set or shopt in the command turns it on",
                     "on = True"),),
     "condition": (('_ERREXIT_CONDITION_WORDS = frozenset(("if", "elif", "while", "until"))',
@@ -2445,8 +2449,8 @@ _IE_MUTANTS = {
     "negation-pipeline": (("negated = False  # ! negates one pipeline only", "pass"),),
     "branch": (("armed = False  # else and elif open another branch, which the branch before does not run on "
                 "into", "pass"),),
-    "if-carry": (("frames[-1][1] = frames[-1][1] or armed  # a step of the branch before can still fail before "
-                  "fi", "pass"),),
+    "if-carry": (("frames[-1][1] = _errexit_armed(frames[-1][1], armed)  # the branch before can fail "
+                  "before fi", "pass"),),
     "closer": (('_ERREXIT_CLOSER_WORDS = frozenset(("fi", "done", "esac", "}"))',
                 "_ERREXIT_CLOSER_WORDS = frozenset()"),),
     "header": (('_ERREXIT_HEADER_WORDS = frozenset(("for", "select"))', "_ERREXIT_HEADER_WORDS = frozenset()"),),
@@ -2455,8 +2459,11 @@ _IE_MUTANTS = {
                          ("arms[2] = False  # the pattern ends at its ), and the arm's body follows", "pass")),
     "case-branch": (("armed = False  # ;; ends the arm: the next arm is another branch, not a later step",
                      "pass"),),
-    "case-carry": (("arms[1] = arms[1] or armed  # a step of this arm can still fail before esac", "pass"),),
+    "case-carry": (("arms[1] = _errexit_armed(arms[1], armed)  # a step of this arm can still fail before "
+                    "esac", "pass"),),
     "or-handled": (("if after_or:", "if False:"),),
+    "function-set": (("on = outside_on  # an option change in a body takes effect only when it is called",
+                      "pass"),),
     "or-and-never": (("if after_or:", "if False:"),
                      ('_ERREXIT_NEVER_FAILS = frozenset(("true", ":", "exit", "set", "shopt"))',
                       '_ERREXIT_NEVER_FAILS = frozenset(("set", "shopt"))')),
@@ -2470,39 +2477,50 @@ _IE_MUTANTS = {
                      '_ERREXIT_NEVER_FAILS = frozenset(("set", "shopt"))'),),
     "set-exempt": (('_ERREXIT_NEVER_FAILS = frozenset(("true", ":", "exit", "set", "shopt"))',
                     '_ERREXIT_NEVER_FAILS = frozenset(("true", ":", "exit"))'),),
-    "piped": (("return not after_or  # a pipeline of several commands counts unless it handles a failure after "
-               "||", "return False"),),
-    "piped-or": (("return not after_or  # a pipeline of several commands counts unless it handles a failure "
-                  "after ||", "return True"),),
-    "and-final": (('_errexit_stops(last[1], joiner == "||", piped, functions > 0)',
-                   '_errexit_stops(last[1], joiner is not None, piped, functions > 0)'),),
-    "function-body": (('_errexit_stops(last[1], joiner == "||", piped, functions > 0)',
-                       '_errexit_stops(last[1], joiner == "||", piped, False)'),),
-    "function-header": (('if kind == "open" and i < count and pairs[i] == ([], ")") and (', "if False and ("),),
+    "piped": (("if last_stops or pipefail:", "if False:"),),
+    "piped-or": (("if piped and after_or:", "if False:"),),
+    "pipefail-last": (('return "possible" if pipefail is None else False  # off: the last command decides; '
+                       "unknown: possible", "return True"),),
+    "pipefail-unknown": (('return "possible" if pipefail is None else False  # off: the last command decides; '
+                          "unknown: possible", "return False"),),
+    "pipefail-track": (("pipefail = pipefail_effect if unconditional else None  # a conditional change: "
+                        "state unknown", "pass"),),
+    "subshell-pipefail": (("pipefail = outside_pipefail  # and a pipefail setting made inside (...) ends "
+                           "with it too", "pass"),),
+    "redirect-only": (("return armed  # a statement of redirections only is a later statement: bash still "
+                       "runs them", "pass"),),
+    "redirect-only-empty": (('if kind == "list" and not words and redirected and armed:',
+                             'if kind == "list" and not words and armed:'),),
+    "and-final": (('stops = _errexit_stops(last[1], joiner == "||", piped, functions > 0, pipefail)',
+                   'stops = _errexit_stops(last[1], joiner is not None, piped, functions > 0, pipefail)'),),
+    "function-body": (('stops = _errexit_stops(last[1], joiner == "||", piped, functions > 0, pipefail)',
+                       'stops = _errexit_stops(last[1], joiner == "||", piped, False, pipefail)'),),
+    "function-header": (('if kind == "open" and i < count and pairs[i][:2] == ([], ")") and (',
+                         "if False and ("),),
     "function-keyword": (('elif word == "function" and k + 1 < len(words):', "elif False:"),),
     "function-scope": (("armed = outside  # the definition itself runs nothing", "pass"),),
-    "set-conditional": (('if effect is not None and joiner is None and not piped and kind not in ("pipe", '
-                         '"background"):', "if effect is not None:"),),
+    "set-conditional": (("if effect is not None and unconditional:", "if effect is not None:"),),
     "substitution": (("on = False  # bash runs a $(...) command substitution with errexit off", "pass"),),
     "substitution-status": (("last = (on, None)  # a command of assignments only takes the substitution's "
                              "status", "pass"),),
-    "statement-start": (("last = (on, words[0])  # errexit as the pipeline's last command starts",
-                         "last = (last[0] if last else on, words[0])"),),
+    "statement-start": (("last = (on, word)  # errexit as the pipeline's last command starts",
+                         "last = (last[0] if last else on, word)"),),
     "and-or": (('{"&&": "and-or", "||": "and-or",', '{"&&": "list", "||": "list",'),),
     "newline": (('";": "list", "": "list",', '";": "list", "": "pipe",'),),
     "pipe-amp": (('"|": "pipe", "|&": "pipe",', '"|": "pipe", "|&": "list",'),),
     "background": (('"&": "background",', '"&": "list",'),),
     "continuation": (('elif kind == "list" and not words and continued:', "elif False:"),),
-    "subshell-later": (("return True  # the subshell is a later statement", "pass"),),
-    "subshell-open": (("scopes.append((on, armed, last,", "return False and ((on, armed, last,"),),
+    "subshell-later": (("return armed  # the subshell is a later statement", "pass"),),
+    "subshell-open": (("scopes.append((on, pipefail, armed, last,",
+                       "return False and ((on, pipefail, armed, last,"),),
     "subshell-errexit": (("on = outside_on  # an errexit setting made inside (...) ends with the subshell",
                           "pass"),),
     "subshell-step": (("armed = outside_armed  # and so does a step inside it: what follows the subshell runs "
                        "either way", "pass"),),
     "subshell-ignored": (("ignored = ignored or exempt or negated  # so does a subshell in a condition or after !",
                           "pass"),),
-    "later-step": (("armed = True  # a later statement of this scope would run after this one failed",
-                    "return True"),),
+    "later-step": (("armed = _errexit_armed(armed, stops)  # a later statement of this scope would run after "
+                    "this", "return True"),),
     "tail": (("return armed and tail is not None", "return False"),),
     "tail-redirect": (("return armed and tail is not None", "return armed and bool(tail)"),),
     "nothing-after": (("return armed and tail is not None", "return on"),),
@@ -2546,6 +2564,16 @@ _IE_FIRE_ROWS = (
      "substitution-status"),
     ("(ie-f27) a later statement the lexer stopped inside that holds only a redirect",
      "set -e; a; > /abs/out <(b)", "tail-redirect"),
+    ("(ie-f28) a function definition does not run its set +e", "set -e; f() { set +e; }; false; echo after",
+     "function-set"),
+    ("(ie-f29) a shopt query reports in its exit status", "set -e; shopt -q login_shell; echo after",
+     "shopt-query"),
+    ("(ie-f30) a pipeline under set -o pipefail fails with any stage", "set -o pipefail; set -e; a | true; b",
+     "pipefail-track"),
+    ("(ie-f31) a pipeline whose pipefail state is unknown is a possible hazard",
+     "set -e; true || set -o pipefail; a | true; b", "pipefail-unknown"),
+    ("(ie-f32) a fully read statement of redirections only still runs them",
+     "set -e; make; > /abs/build.log", "redirect-only"),
 )
 
 # (label, command, mutant): rows the real handler must leave silent, each noted by its mutant. "over-broad"
@@ -2618,6 +2646,15 @@ _IE_SILENT_ROWS = (
     ("(ie-n55) a newline after a pipe continues the pipeline", "set -e; a ||\n  b |\n  c; d", "continuation"),
     ("(ie-n56) |& joins one pipeline", "set -e; a || b |& c; d", "pipe-amp"),
     ("(ie-n57) a lone - ends the set options", "set - -e; a; b", "lone-dash"),
+    ("(ie-n58) a function definition does not run its set -e", "f() { set -e; }; false; echo after",
+     "function-set"),
+    ("(ie-n59) a shopt that sets a known option form cannot fail", "set -e; shopt -s nullglob; echo after",
+     "shopt-set-safe"),
+    ("(ie-n60) without pipefail a pipeline takes its last command's status",
+     "set -e; false | true; echo after", "pipefail-last"),
+    ("(ie-n61) a pipefail set inside a subshell ends with it", "(set -o pipefail; a); set -e; x | true; b",
+     "subshell-pipefail"),
+    ("(ie-n62) a trailing ; leaves no later statement", "set -e; a;", "redirect-only-empty"),
 )
 
 
@@ -2775,23 +2812,31 @@ def _test_inline_errexit(failures, tmp):
         failures.append("(ie-mutant-unused) mutants no row uses: {}".format(", ".join(unused)))
 
     # The note is the exact constant, with the best-effort suffix only on a command the lexer could not
-    # read in full.
-    for label, command, partial in (("(ie-note-exact)", "set -euo pipefail; false; echo after", False),
-                                    ("(ie-note-heredoc)", "cat <<EOF > /abs/out.txt\nbody $X\nEOF\nset -e; a; b",
-                                     True),
-                                    ("(ie-note-tail)", "set -e; a; b <(true)", True)):
-        want = aiqt_hooks._ERREXIT_NOTE + (aiqt_hooks._ERREXIT_PARTIAL_NOTE if partial else "")
+    # read in full and the pipefail suffix only where the one step read as failing is a pipeline whose
+    # stopping depends on a pipefail state the walker could not read.
+    for label, command, suffix in (("(ie-note-exact)", "set -euo pipefail; false; echo after", ""),
+                                   ("(ie-note-heredoc)", "cat <<EOF > /abs/out.txt\nbody $X\nEOF\nset -e; a; b",
+                                    aiqt_hooks._ERREXIT_PARTIAL_NOTE),
+                                   ("(ie-note-tail)", "set -e; a; b <(true)", aiqt_hooks._ERREXIT_PARTIAL_NOTE),
+                                   ("(ie-note-pipefail)", "set -e; true || set -o pipefail; a | true; b",
+                                    aiqt_hooks._ERREXIT_PIPEFAIL_NOTE),
+                                   ("(ie-note-pipefail-on)", "set -euo pipefail; a | true; b", "")):
+        want = aiqt_hooks._ERREXIT_NOTE + suffix
         if handler(payload(command)) != aiqt_hooks._allow_note(want):
             failures.append("{} expected the note {!r} for {!r}".format(label, want, command))
 
     # _lex_command's real partial return shape: the segment it stopped inside is the tail, never a set; a
-    # tail holding only a redirect is [], and a command with no tail gives None.
+    # tail holding only a redirect is [], and a command with no tail gives None. Each fully read segment
+    # carries whether it holds a redirection, so a redirect-only statement is told from a bare separator.
     for label, command, want in (
-            ("(ie-lex-tail)", "set -e; a; b <(true)", ([(["set", "-e"], ";"), (["a"], ";")], ["b"], False)),
+            ("(ie-lex-tail)", "set -e; a; b <(true)",
+             ([(["set", "-e"], ";", False), (["a"], ";", False)], ["b"], False)),
             ("(ie-lex-tail-redirect)", "set -e; a; > /abs/out <(b)",
-             ([(["set", "-e"], ";"), (["a"], ";")], [], False)),
+             ([(["set", "-e"], ";", False), (["a"], ";", False)], [], False)),
             ("(ie-lex-set-unread)", "set -e <(true); a; b", ([], ["set", "-e"], False)),
-            ("(ie-lex-complete)", "set -e; a", ([(["set", "-e"], ";"), (["a"], "")], None, True))):
+            ("(ie-lex-complete)", "set -e; a", ([(["set", "-e"], ";", False), (["a"], "", False)], None, True)),
+            ("(ie-lex-redirect-only)", "set -e; a; > /abs/log",
+             ([(["set", "-e"], ";", False), (["a"], ";", False), ([], "", True)], None, True))):
         got = aiqt_hooks._errexit_statements(command)
         if got != want:
             failures.append("{} _errexit_statements({!r}) gave {!r}, want {!r}".format(label, command, got, want))
@@ -3320,6 +3365,8 @@ def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
     if outcome == "deadline":
         return ["reached no decision within the {:g}-second hang guard".format(_DEADLINE_HANG_SECONDS)]
     problems = []
+    if name in aiqt_hooks.NOTE_ONLY_PRETOOL_MODES and outcome == "deny":
+        problems.append("a note-only mode must never deny, whatever its timing")
     if cpu > _DEADLINE_BOUNDS[size]:
         problems.append("used {:.2f}s of CPU time, over its {}s bound".format(cpu, _DEADLINE_BOUNDS[size]))
     if wall > _DEADLINE_WALL_BOUND:
@@ -3428,6 +3475,35 @@ def _deadline_shape_rerun_failures():
         if len(lines) != want_lines or len(retimed) != want_reruns:
             out.append("(dl-shape-rerun-bounds) a run {} must give {} line(s) and {} re-run(s), got {!r} with "
                        "re-runs {!r}".format(edge, want_lines, want_reruns, lines, retimed))
+    return out
+
+
+def _deadline_note_only_deny_failures():
+    """(dl-shape-note-only-deny, dl-shape-note-only-deny-control) A denying outcome goes red for every shape
+    of every mode in NOTE_ONLY_PRETOOL_MODES, independent of timing: a synthetic deny within every time
+    bound must give one failure line naming the never-deny rule and no diagnostic re-run (the decision alone
+    is the failure), while the mode's expected outcome on the same case stays green. No handler is run."""
+    out = []
+    retimed = []
+
+    def retime(name, shape, size, cwd):
+        retimed.append((name, shape, size))
+        return 0.02, 0.15, "deny"
+
+    for name in aiqt_hooks.NOTE_ONLY_PRETOOL_MODES:
+        for shape in _DEADLINE_CASES.get(name, ()):
+            retimed.clear()
+            lines = _deadline_shape_verdicts([(name, shape, 65536, "/", 0.03, 0.15, "deny")], retime)
+            if len(lines) != 1 or retimed or "must never deny" not in lines[0]:
+                out.append("(dl-shape-note-only-deny) a synthetic deny within every bound must fail for "
+                           "({}, {}) with no re-run, got {!r} with re-runs {!r}".format(
+                               name, shape, lines, retimed))
+            good = "allow-note" if (name, shape) in _DEADLINE_NOTE_CASES else "allow"
+            retimed.clear()
+            lines = _deadline_shape_verdicts([(name, shape, 65536, "/", 0.03, 0.15, good)], retime)
+            if lines or retimed:
+                out.append("(dl-shape-note-only-deny-control) the {} control for ({}, {}) must stay green, "
+                           "got {!r} with re-runs {!r}".format(good, name, shape, lines, retimed))
     return out
 
 
@@ -5512,6 +5588,7 @@ def _test_deadline_posture(failures, tmp):
     """(dl-*) The PreToolUse deadline posture; see the section comment above."""
     failures.extend(_deadline_relation_failures())
     failures.extend(_deadline_shape_rerun_failures())
+    failures.extend(_deadline_note_only_deny_failures())
     failures.extend(_raw_sequence_failures())
     failures.extend(_join_fast_failures())
     failures.extend(_lex_skip_failures())
