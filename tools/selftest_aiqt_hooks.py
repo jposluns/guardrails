@@ -2645,10 +2645,12 @@ def _lex_skip_failures(count=4000, seed=20261017):
     caught by the same comparison, so it discriminates.
     (dl-lex-skip-taken) git_discard, its per-line reread (_uncertain_line_lossy), git_stash_ref,
     bash_absolute_paths and branch_root (on a command the full lex refuses as well, so their partial reads
-    run) each build at least one record and none with no word and no redirect on commands with runs of
-    parentheses, counted with aiqt_hooks._Segment wrapped (_lex_skip_callers, _lex_records_built). The
-    default lex of such a command must build some under the same count (dl-lex-skip-taken-red), so the count
-    discriminates."""
+    run), git_explicit_binding and commit_msg_subst each build at least one record and none with no word and
+    no redirect on commands with runs of parentheses, counted with aiqt_hooks._Segment wrapped
+    (_lex_skip_callers, _lex_records_built); git_stash_ref and bash_absolute_paths also do on a command whose
+    lex reads main's floor reading (_LEX_SKIP_FLOOR, held to reaching it by dl-lex-skip-floor), so dropping
+    skip_empty from _main_reading or _beside_main_reading fails here. The default lex of such a command must
+    build some under the same count (dl-lex-skip-taken-red), so the count discriminates."""
     out = []
     rng = random.Random(seed)
     texts = list(_LEX_SKIP_TEXTS)
@@ -2703,11 +2705,48 @@ def _lex_skip_callers():
         ("git_discard", handler("git_discard", nested), nested),
         ("_uncertain_line_lossy", lambda: aiqt_hooks._uncertain_line_lossy(reread), reread),
         ("git_stash_ref", handler("git_stash_ref", nested), nested),
+        ("git_stash_ref", handler("git_stash_ref", _LEX_SKIP_FLOOR), _LEX_SKIP_FLOOR),
         ("bash_absolute_paths", handler("bash_absolute_paths", nested), nested),
         ("bash_absolute_paths", handler("bash_absolute_paths", refused), refused),
+        ("bash_absolute_paths", handler("bash_absolute_paths", _LEX_SKIP_FLOOR), _LEX_SKIP_FLOOR),
         ("branch_root", handler("branch_root", nested), nested),
         ("branch_root", handler("branch_root", refused), refused),
+        ("git_explicit_binding", handler("git_explicit_binding", nested), nested),
+        ("commit_msg_subst", handler("commit_msg_subst", nested), nested),
     )
+
+
+# Runs of parentheses before the commit message form whose quoted here-document body holds an apostrophe: the
+# lex reads the body, main's substitution skip does not (it pairs the apostrophe past the ')'), so the lexer
+# also lexes main's reading of the command (_main_reading, _beside_main_reading), whose runs of parentheses
+# end segments with no word and no redirect before main's skip fails.
+_LEX_SKIP_FLOOR = "((((true)))); x=\"$(cat <<'EOF'\nDon't merge yet\nEOF\n)\""
+
+
+def _lex_skip_floor_failures():
+    """(dl-lex-skip-floor) The callers on _LEX_SKIP_FLOOR (_lex_skip_callers) reach main's floor reading:
+    each calls _main_reading with skip_empty True at least once, counted with aiqt_hooks._main_reading
+    wrapped, so dl-lex-skip-taken sees a floor reading that builds a record with no word and no redirect."""
+    out = []
+    main_reading = aiqt_hooks._main_reading
+    for label, call, command in _lex_skip_callers():
+        if command != _LEX_SKIP_FLOOR:
+            continue
+        calls = []
+
+        def counted(*args, **kwargs):
+            calls.append(kwargs.get("skip_empty", args[3] if len(args) > 3 else False))
+            return main_reading(*args, **kwargs)
+
+        aiqt_hooks._main_reading = counted
+        try:
+            call()
+        finally:
+            aiqt_hooks._main_reading = main_reading
+        if True not in calls:
+            out.append("(dl-lex-skip-floor) {} on {!r} made main's floor reading with skip_empty {!r}; it must "
+                       "make it at least once with skip_empty True".format(label, command, calls))
+    return out
 
 
 def _lex_words_only(result):
@@ -2736,6 +2775,188 @@ def _lex_records_built(call):
     finally:
         aiqt_hooks._Segment = segment
     return counts[0], counts[1]
+
+
+def _lex_readings_restart(command, partial=False, locale=False, skip_empty=False):
+    """The readings _lex_readings gives, each lexed from the start of the command (aiqt_hooks._lex_reading
+    with no _LexFork) as the lexer did before a reading resumed where an earlier one stopped: the reference
+    _lex_fork_failures compares against."""
+    readings = []
+    misread = False
+    pending = [{}]
+    while pending:
+        reading = pending.pop()
+        try:
+            lexed, body = aiqt_hooks._lex_reading(command, partial, reading, locale, skip_empty)
+        except aiqt_hooks._UncertainHashError as exc:
+            if (exc.backquote or exc.at is None or exc.at in reading
+                    or len(reading) >= aiqt_hooks._HASH_READING_LIMIT):
+                raise
+            pending.append(aiqt_hooks._hash_reading_with(reading, exc.at, False))
+            pending.append(aiqt_hooks._hash_reading_with(reading, exc.at, True))
+        except ValueError as exc:
+            if not reading:
+                raise
+            raise aiqt_hooks._UncertainHashError("a reading of an uncertain '#' does not lex: {}".format(exc))
+        else:
+            readings.append(lexed)
+            misread = misread or body
+    return aiqt_hooks._beside_main_reading(command, partial, locale, readings, skip_empty) if misread else readings
+
+
+def _lex_fork_outcome(call):
+    """call()'s result with _SubstHeredocs.reads's change, or the ValueError's type, text and index."""
+    reads = aiqt_hooks._SubstHeredocs.reads
+    try:
+        return call(), aiqt_hooks._SubstHeredocs.reads - reads
+    except ValueError as exc:
+        return type(exc).__name__, str(exc), getattr(exc, "at", None), aiqt_hooks._SubstHeredocs.reads - reads
+
+
+def _lex_fork_mismatches(texts):
+    """The (text, partial, skip_empty, locale) readings on which _lex_readings differs from
+    _lex_readings_restart, or a partial _lex_command from that reference's partial recovery: at most three."""
+    out = []
+    modes = [(partial, skip_empty, locale) for partial in (False, True) for skip_empty in (False, True)
+             for locale in (False, True)]
+    for text in texts:
+        for partial, skip_empty, locale in modes:
+            got = _lex_fork_outcome(lambda: aiqt_hooks._lex_readings(text, partial, locale, skip_empty))
+            want = _lex_fork_outcome(lambda: _lex_readings_restart(text, partial, locale, skip_empty))
+            if got == want and partial and got[0] == "_UncertainHashError":
+                got = _lex_fork_outcome(lambda: aiqt_hooks._lex_command(text, True, locale, skip_empty))
+                want = _lex_fork_outcome(lambda: _lex_partial_restart(text, locale, skip_empty))
+            if got != want:
+                out.append((text, partial, skip_empty, locale, got, want))
+                if len(out) == 3:
+                    return out
+    return out
+
+
+def _lex_partial_restart(command, locale, skip_empty):
+    """A partial _lex_command of a command whose readings cannot be judged, lexed from the start."""
+    lexed, misread = aiqt_hooks._lex_reading(command, True, None, locale, skip_empty)
+    readings = aiqt_hooks._beside_main_reading(command, True, locale, [lexed], skip_empty) if misread else [lexed]
+    return ([seg for segs, _complete, _open in readings for seg in segs],
+            all(done for _segs, done, _open in readings), readings[-1][2])
+
+
+# Commands for the resumed readings: uncertain '#' characters at a word boundary, at a redirect target, after
+# backslash-newlines that begin a word, inside a double-quoted substitution, near here-documents and backquotes,
+# and '#' lines whose readings leave different nesting stacks at their newline.
+_LEX_FORK_TEXTS = (
+    "(;;; #a #b #c #d\n)", "( #a\n #b\n #c\n #d\n)", "((( #a #b\n)))", "( #a #b #c #d #e\n)", "( > #a #b\n)",
+    "( 2> #a\n x)", ")\\\n#a\\\n", "(\\\n#a b\n)", "( #a (\n true ) )", "( #a `x` #b\n)", "( #a\n$(true) #b\n)",
+    "echo \"$( #a(\n)\" ( #b\n)", "x=$(cat <<'EOF'\n# Don't\nEOF\n) ( #a\n git status)", "( #a ${x\n} #b\n)",
+    "((((true)))); ( #a\n git reset --hard)", "( #a <<'E'\nbody\nE\n #b\n)", "( #a (\n) #b\n)")
+_LEX_FORK_ALPHABET = ("(", ")", ";", " ", "\n", "#", " #", "#a", "a", " x", "'", '"', "`", "$(", "${", "}",
+                      ">", "2>", "<<'E'\n", "\nE\n", "\\\n", "&&", "|", "\"$(", ")\"", "(#", ")#")
+
+
+def _lex_fork_failures(count=6000, seed=20261018):
+    """(dl-lex-fork) _lex_readings, whose readings resume where an earlier reading stopped at an uncertain
+    '#' (_LexFork), gives what lexing every reading from the start gives (_lex_readings_restart: the same
+    segments, flags and _SubstHeredocs.reads change, or the same ValueError), and a partial _lex_command
+    whose readings cannot be judged gives the reference's recovery, on _LEX_FORK_TEXTS and `count` seeded
+    texts over _LEX_FORK_ALPHABET, in every partial, skip_empty and locale mode. The corpus must hold commands
+    whose first reading stops where a reading can resume (dl-lex-fork-corpus).
+    (dl-lex-fork-red-nest, dl-lex-fork-red-tail) Two wrong resumptions, one with an empty nesting stack and
+    one taking a recorded rest by its index alone, must each be caught by the same comparison.
+    (dl-lex-fork-taken) The text before the first uncertain '#' is lexed once: on a run of separators before
+    four '#' lines (sixteen readings) one pass starts at the beginning. (dl-lex-fork-rest) On runs of
+    parentheses around a '#' line the rest after its newline is built once, counted in records, not once per
+    reading."""
+    out = []
+    rng = random.Random(seed)
+    texts = list(_LEX_FORK_TEXTS)
+    for _ in range(count):
+        texts.append("".join(rng.choice(_LEX_FORK_ALPHABET) for _ in range(rng.randint(1, 12))))
+    resumable = 0
+    for text in texts:
+        try:
+            aiqt_hooks._lex_reading(text, False, {})
+        except ValueError as exc:
+            resumable += getattr(exc, "fork", None) is not None
+    if resumable < 100:
+        out.append("(dl-lex-fork-corpus) only {} of {} commands stop where a reading can resume".format(
+            resumable, len(texts)))
+    for text, partial, skip_empty, locale, got, want in _lex_fork_mismatches(texts):
+        out.append("(dl-lex-fork) _lex_readings({!r}, partial={}, locale={}, skip_empty={}) gave {!r}, lexing "
+                   "every reading from the start gives {!r}".format(text, partial, locale, skip_empty, got, want))
+    for name, patch in (("nest", _lex_fork_empty_nest), ("tail", _lex_fork_tail_by_index)):
+        with patch():
+            if not _lex_fork_mismatches(texts):
+                out.append("(dl-lex-fork-red-{}) a wrong resumption passes the comparison".format(name))
+    lines = "(" + ";" * 200 + " #a\n #b\n #c\n #d\n)"
+    starts = _lex_pass_starts(lambda: aiqt_hooks._lex_command(lines))
+    if starts != 1:
+        out.append("(dl-lex-fork-taken) {} passes of {!r} started at the beginning; one must".format(
+            starts, lines[:12] + "..."))
+    parens = "(" * 50 + " #a #b #c #d\n" + ")" * 50
+    built, _empty = _lex_records_built(lambda: aiqt_hooks._lex_command(parens))
+    if not 100 <= built < 150:
+        out.append("(dl-lex-fork-rest) the readings of {!r} built {} records; the 50 before the '#' line and "
+                   "the 51 after it must each be built once (100 to 149 in all)".format(parens[:8] + "...", built))
+    return out
+
+
+def _lex_pass_starts(call):
+    """How many _lex_pass calls call() made from the start of the command (no _LexFork)."""
+    lex_pass = aiqt_hooks._lex_pass
+    starts = [0]
+
+    def counted(command, partial, hash_reading, locale, subst_heredocs, skip_empty=False, fork=None):
+        starts[0] += fork is None
+        return lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty, fork)
+
+    aiqt_hooks._lex_pass = counted
+    try:
+        call()
+    finally:
+        aiqt_hooks._lex_pass = lex_pass
+    return starts[0]
+
+
+@contextlib.contextmanager
+def _lex_fork_empty_nest():
+    """A wrong resumption for _lex_fork_failures: each resumed pass starts with an empty nesting stack."""
+    copy = aiqt_hooks._NestStack.copy
+    aiqt_hooks._NestStack.copy = lambda self: aiqt_hooks._NestStack()
+    try:
+        yield
+    finally:
+        aiqt_hooks._NestStack.copy = copy
+
+
+class _TailsByIndex(dict):
+    """A recorded-rest map keyed by the newline's index alone (a wrong _LexFork.tails)."""
+
+    def get(self, key, default=None):
+        return super().get(key[0], default)
+
+    def __contains__(self, key):
+        return super().__contains__(key[0])
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key[0], value)
+
+
+@contextlib.contextmanager
+def _lex_fork_tail_by_index():
+    """A wrong resumption for _lex_fork_failures: a later reading takes a recorded rest by index alone."""
+    fork_class = aiqt_hooks._LexFork
+
+    class _WrongFork(fork_class):
+        def __init__(self, *args):
+            super().__init__(*args)
+            if not isinstance(self.tails, _TailsByIndex):
+                self.tails = _TailsByIndex()
+
+    aiqt_hooks._LexFork = _WrongFork
+    try:
+        yield
+    finally:
+        aiqt_hooks._LexFork = fork_class
 
 
 def _repeat(unit, size, tail=""):
@@ -2778,7 +2999,36 @@ _DEADLINE_SHAPES = {
         "question": "q" * n, "header": "h", "multiSelect": False,
         "options": [{"label": "a", "description": "b"}, {"label": "c", "description": "d"}]}]}),
     "wakeup_long": lambda n, base: ("ScheduleWakeup", {"prompt": "p" * n, "delaySeconds": 60, "reason": "r"}),
+    # Uncertain '#' shapes (_DEADLINE_HASH_SHAPES): a run of separators inside a subshell before four '#'
+    # characters whose comment reading depends on context (five readings), the same with each '#' on its own
+    # line (sixteen readings), inside three parentheses, inside runs of parentheses on both sides, and with a
+    # fifth '#' (past the readings bound, so each guard takes its fallback).
+    "seps_hash": lambda n, base: ("Bash", {"command": "(" + ";" * (n - 20) + " #a #b #c #d\n)"}),
+    "seps_hash_lines": lambda n, base: ("Bash", {"command": "(" + ";" * (n - 26) + " #a\n #b\n #c\n #d\n)"}),
+    "seps_hash_nested": lambda n, base: ("Bash", {"command": "(((" + ";" * (n - 24) + " #a #b #c #d\n)))"}),
+    "paren_hash4": lambda n, base: ("Bash", {"command": "(" * ((n - 12) // 2) + " #a #b #c #d\n"
+                                             + ")" * ((n - 12) // 2)}),
+    "seps_hash5": lambda n, base: ("Bash", {"command": "(" + ";" * (n - 24) + " #a #b #c #d #e\n)"}),
 }
+# Every PreToolUse handler is timed on each uncertain '#' shape as well, and must reach the decision the pinned
+# base commit reached on it: "allow", except where this map names another for the (handler, shape) or, first,
+# the (handler, shape, size): protected_line denies seps_hash5 past 64 KB, where the size cap of its commit
+# reading denies a command longer than 65,536 characters. Before the readings resumed where an earlier reading
+# stopped, four handlers took 10 to 12 s on seps_hash at 1 MB, past the hook timeout, and lexing
+# seps_hash_lines took about 30 s.
+_DEADLINE_HASH_SHAPES = ("seps_hash", "seps_hash_lines", "seps_hash_nested", "paren_hash4", "seps_hash5")
+_DEADLINE_HASH_DECISIONS = {
+    ("orch_truncation_guard", "seps_hash"): "deny", ("orch_truncation_guard", "seps_hash_lines"): "deny",
+    ("orch_truncation_guard", "seps_hash_nested"): "deny", ("orch_truncation_guard", "paren_hash4"): "deny",
+    ("orch_truncation_guard", "seps_hash5"): "deny", ("protected_line", "seps_hash"): "deny",
+    ("protected_line", "seps_hash_lines"): "deny", ("protected_line", "seps_hash_nested"): "deny",
+    ("protected_line", "paren_hash4"): "deny", ("protected_line", "seps_hash5", 262144): "deny",
+    ("protected_line", "seps_hash5", 1048576): "deny"}
+
+
+def _deadline_hash_decision(name, shape, size):
+    """The decision a handler must reach on an uncertain '#' shape of that size (_DEADLINE_HASH_DECISIONS)."""
+    return _DEADLINE_HASH_DECISIONS.get((name, shape, size), _DEADLINE_HASH_DECISIONS.get((name, shape), "allow"))
 _DEADLINE_CASES = {
     "absolute_paths": ("write_content", "read_deep_path"),
     "bash_absolute_paths": ("git_words", "redirects_many", "nest_parens"),
@@ -2879,7 +3129,7 @@ def _deadline_shape_runs(tmp, sizes):
     runs = []
     for name, shapes in sorted(_DEADLINE_CASES.items()):
         cwd = str(orch if name.startswith(("orch_", "review_")) else plain)
-        for shape in shapes:
+        for shape in shapes + _DEADLINE_HASH_SHAPES:
             for size in sorted(sizes):
                 runs.append((name, shape, size, cwd) + _deadline_shape_case(name, shape, size, cwd))
     return runs
@@ -2897,6 +3147,8 @@ def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
             wall, _DEADLINE_WALL_BOUND))
     if (name, shape) in _DEADLINE_DENY_CASES and outcome != "deny":
         problems.append("expected deny, got {}".format(outcome))
+    elif shape in _DEADLINE_HASH_SHAPES and outcome != _deadline_hash_decision(name, shape, size):
+        problems.append("expected {}, got {}".format(_deadline_hash_decision(name, shape, size), outcome))
     elif outcome not in ("allow", "allow-note", "deny"):
         problems.append("ended {}".format(outcome))
     return problems
@@ -2928,8 +3180,9 @@ def _deadline_shape_verdicts(runs, retime):
 def _deadline_shape_failures(tmp):
     """(dl-shape) Every PreToolUse handler has shapes here, and on each shape at 64 KB, 256 KB and 1 MB it
     reaches a decision within the hang guard, that size's CPU-time bound and the wall-clock bound, denying
-    where the case carries a hazard (_deadline_shape_verdicts: a run over the wall-clock bound fails, and a
-    diagnostic re-run is reported beside it, never in its place)."""
+    where the case carries a hazard and reaching the pinned base commit's decision on each uncertain '#'
+    shape (_DEADLINE_HASH_SHAPES, which every handler runs) (_deadline_shape_verdicts: a run over the
+    wall-clock bound fails, and a diagnostic re-run is reported beside it, never in its place)."""
     out = []
     missing = sorted(name for name, event in aiqt_hooks.HANDLER_EVENT.items()
                      if event == aiqt_hooks.PRETOOL and name not in _DEADLINE_CASES)
@@ -5072,6 +5325,8 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_raw_sequence_failures())
     failures.extend(_join_fast_failures())
     failures.extend(_lex_skip_failures())
+    failures.extend(_lex_skip_floor_failures())
+    failures.extend(_lex_fork_failures())
     child_tmp = tmp / "deadline"
     child_tmp.mkdir()
     code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import selftest_aiqt_hooks as m; "

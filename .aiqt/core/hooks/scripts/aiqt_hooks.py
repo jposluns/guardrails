@@ -550,6 +550,11 @@ _Segment = collections.namedtuple(
 # backquote pops only what it removes (_NestStack, _nest_track). So one _lex_readings call takes at most
 # thirty-one lexes of at most two linear passes each, and a caller that lexes a command more than once pays
 # that for each call; the foreground detach scan keeps a nesting stack of the same kind and is linear too.
+# A reading of an uncertain '#' met at a word boundary or a redirect target resumes where the lex that met it
+# stopped (_LexFork), so the text before the first such '#' is lexed once, and its segments built once,
+# however many readings there are; where the readings of a '#' line reach the same state at its newline and
+# the rest holds no further such '#', the rest is lexed once too. A '#' met inside a word starts its readings
+# from the beginning, as above.
 #
 # OTHER SCANNERS. The raw-text readings beside the lexer read a comment their own way, and none of them
 # proves a command safe on its own: _join_continuations reads a '#' at any word start (after a blank, newline
@@ -591,6 +596,13 @@ class _NestStack(list):
 
     def __contains__(self, item):
         return self._open[item] > 0
+
+    def copy(self):
+        """A stack with the same entries and counts, changed independently of this one."""
+        out = _NestStack()
+        list.extend(out, self)
+        out._open.update(self._open)
+        return out
 
 
 def _nest_track(nest, c, after_dollar):
@@ -644,6 +656,8 @@ class _UncertainHashError(ValueError):
         super().__init__(message)
         self.at = at
         self.backquote = backquote
+        self.fork = None  # the lex's _LexFork where the lex can resume at that '#', set by _lex_pass
+        self.first = None  # the first reading's _LexFork, at the command's first uncertain '#' (_lex_readings)
 
 
 # The most uncertain '#' characters the lexer judges under both readings (2 ** 4 = 16 readings at most).
@@ -847,6 +861,20 @@ class _SubstHeredocs:
         if self.read:
             raise _SubstHeredocRetry()
         self.substitutions += 1
+
+    def state(self):
+        """(on, substitutions, read, floor), the whole state one lex shares across its skips."""
+        return self.on, self.substitutions, self.read, self.floor
+
+    def restore(self, state):
+        """Set the state state() gave."""
+        self.on, self.substitutions, self.read, self.floor = state
+
+    def copy(self):
+        """A _SubstHeredocs in the same state, changed independently of this one (a resumed lex, _LexFork)."""
+        out = _SubstHeredocs()
+        out.restore(self.state())
+        return out
 
 
 def _skip_quoting(command, i, n, nest=None, hash_reading=None, heredoc=None):
@@ -1840,6 +1868,44 @@ def _lex_uncertain(command):
     return bool(_lex_uncertain_causes(command))
 
 
+class _LexFork:
+    """Where one pass of a lex (_lex_pass) stopped at an uncertain '#' its reading does not map, at the
+    start of the token that asks for that '#''s reading (the '#' itself at a word boundary, a word read that
+    began with backslash-newlines and stopped at the '#', the redirect operator, or the IO_NUMBER before it,
+    whose target begins with the '#'), before that token changed anything: the index at, the segments built
+    so far, the words, flags and redirects of the segment in
+    progress, the start of that segment, the queued here-document delimiters, the nesting stack, what
+    precedes at (glued_at and before), and the pass's _SubstHeredocs (None for a pass reading no body). A
+    lex under a reading that extends the stopped one resumes from it with its own copies (_lex_reading,
+    _lex_readings); the segments themselves are shared, and no reader changes one.
+
+    tails, shared by every _LexFork of one _lex_readings call, maps the state of a resumed pass at the first
+    newline it ends (the index after it, the nesting stack, glued_at, before and the _SubstHeredocs state;
+    no word, redirect or here-document is pending there) to what the pass that first reached that state
+    went on to build: the segments after that newline, its partial-mode flags and its final _SubstHeredocs
+    state, recorded only where it ended without stopping at another '#'. Every '#' a reading maps lies
+    before that newline (a resumed pass starts at the last one it maps), so from the same state two readings
+    lex the same rest, and a later one takes the recorded rest instead of lexing it again: readings of a '#'
+    line meet again at its newline, so the text after it is lexed once too."""
+
+    def __init__(self, at, segments, argv, argv_opaque, argv_leading_tilde, redirects, opaque, seg_start,
+                 pending_heredocs, nest, glued_at, before, heredocs, tails):
+        self.at = at
+        self.segments = segments
+        self.argv = argv
+        self.argv_opaque = argv_opaque
+        self.argv_leading_tilde = argv_leading_tilde
+        self.redirects = redirects
+        self.opaque = opaque
+        self.seg_start = seg_start
+        self.pending_heredocs = pending_heredocs
+        self.nest = nest
+        self.glued_at = glued_at
+        self.before = before
+        self.heredocs = heredocs
+        self.tails = tails
+
+
 def _lex_command(command, partial=False, locale=False, skip_empty=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
@@ -1892,10 +1958,12 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False):
     list) passes it; the default False keeps every record."""
     try:
         readings = _lex_readings(command, partial, locale, skip_empty)
-    except _UncertainHashError:
+    except _UncertainHashError as exc:
         if not partial:
             raise
-        lexed, misread = _lex_reading(command, True, None, locale, skip_empty)
+        # A lex under no reading makes the first reading's lex up to the first uncertain '#', where it
+        # recovers what it read, so it resumes where that reading stopped (exc.first, when there is one).
+        lexed, misread = _lex_reading(command, True, None, locale, skip_empty, exc.first)
         readings = _beside_main_reading(command, True, locale, [lexed], skip_empty) if misread else [lexed]
     if partial:
         return ([seg for segs, _complete, _open in readings for seg in segs],
@@ -1919,6 +1987,17 @@ def _lex_readings(command, partial=False, locale=False, skip_empty=False):
     substitution that main's skip reads otherwise, main's reading follows (_beside_main_reading): one more
     pass per call, made only where such a reading made one pass, so the bound holds. Inside
     _SubstHeredocFloor the list is main's reading alone (_main_reading), one pass.
+
+    A lex stopped at an uncertain '#' its reading does not map at a word boundary, or at the start of a
+    redirect target, hands over where it stopped (_LexFork), and both readings of that '#' resume there
+    instead of lexing the text before it again, sharing the segments it had built. Both readings agree
+    with the stopped one on every '#' before it, so up to that '#' each would have made the same lex. So
+    the text before the first such '#' is lexed once, not once per lex, and the segments it ends are built
+    once and shared by every reading's list; a long run of separators or parentheses before the '#'
+    characters costs one pass whatever the number of readings. An uncertain '#' met inside a word (in a
+    substitution a double-quoted string holds, or right inside a redirect target) can have changed the
+    nesting stack or the here-document state before it, so its readings lex the command again from the
+    start, as before.
     Raises _UncertainHashError beyond that bound, at a '#' in or right after a backquote substitution,
     and when a reading fails to lex for another reason after an uncertain '#' was read (a ValueError the
     plain lex raises before any uncertain '#' propagates unchanged); in partial mode a reading that fails for
@@ -1927,21 +2006,27 @@ def _lex_readings(command, partial=False, locale=False, skip_empty=False):
         return [_main_reading(command, partial, locale, skip_empty)]
     readings = []
     misread = False
-    pending = [{}]
+    pending = [({}, None)]
+    first = None  # the first reading's _LexFork, where it stopped at the command's first uncertain '#'
     while pending:
-        reading = pending.pop()
+        reading, fork = pending.pop()
         try:
-            lexed, body = _lex_reading(command, partial, reading, locale, skip_empty)
+            lexed, body = _lex_reading(command, partial, reading, locale, skip_empty, fork)
         except _UncertainHashError as exc:
+            if not reading:
+                first = exc.fork
             if exc.backquote or exc.at is None or exc.at in reading or len(reading) >= _HASH_READING_LIMIT:
+                exc.first = first
                 raise
             # A stack: the comment reading, pushed last, is lexed first.
-            pending.append(_hash_reading_with(reading, exc.at, False))
-            pending.append(_hash_reading_with(reading, exc.at, True))
+            pending.append((_hash_reading_with(reading, exc.at, False), exc.fork))
+            pending.append((_hash_reading_with(reading, exc.at, True), exc.fork))
         except ValueError as exc:
             if not reading:
                 raise
-            raise _UncertainHashError("a reading of an uncertain '#' does not lex: {}".format(exc)) from exc
+            doubt = _UncertainHashError("a reading of an uncertain '#' does not lex: {}".format(exc))
+            doubt.first = first
+            raise doubt from exc
         else:
             readings.append(lexed)
             misread = misread or body
@@ -1955,7 +2040,7 @@ def _hash_reading_with(reading, at, comment):
     return out
 
 
-def _lex_reading(command, partial, hash_reading, locale=False, skip_empty=False):
+def _lex_reading(command, partial, hash_reading, locale=False, skip_empty=False, fork=None):
     """One lex of command (see _lex_command for the segments it returns, the partial contract, locale and
     skip_empty) with
     each uncertain '#' read as hash_reading maps its index (True a comment to the end of its line, False word
@@ -1966,10 +2051,18 @@ def _lex_reading(command, partial, hash_reading, locale=False, skip_empty=False)
     substitution starts again with no body read (the HERE-DOCUMENTS paragraph of _skip_quoting), so it makes
     at most two passes. Returns (lexed, misread): lexed is that lex, and misread is True when its result read
     a body in a substitution that main's skip reads otherwise (_subst_heredoc_misread), in one pass, where the
-    caller adds main's reading (_beside_main_reading, MAIN'S DECISION AS A FLOOR above _MainHashReading)."""
-    heredocs = _SubstHeredocs()
+    caller adds main's reading (_beside_main_reading, MAIN'S DECISION AS A FLOOR above _MainHashReading).
+
+    fork, when given, is where a lex under a reading that hash_reading extends stopped (_LexFork, from
+    _lex_readings), and the lex resumes there: the pass it stopped in (one reading bodies, or the second,
+    reading none) made the same lex up to there under hash_reading, since the stopped reading's lex
+    consulted no '#' that hash_reading maps otherwise. A pass reading bodies that then starts again lexes
+    the command again from the start reading none, as above."""
+    if fork is not None and fork.heredocs is None:
+        return _lex_pass(command, partial, hash_reading, locale, None, skip_empty, fork), False
+    heredocs = _SubstHeredocs() if fork is None else fork.heredocs.copy()
     try:
-        lexed = _lex_pass(command, partial, hash_reading, locale, heredocs, skip_empty)
+        lexed = _lex_pass(command, partial, hash_reading, locale, heredocs, skip_empty, fork)
     except _SubstHeredocRetry:
         return _lex_pass(command, partial, hash_reading, locale, None, skip_empty), False
     return lexed, heredocs.floor
@@ -1997,20 +2090,55 @@ def _beside_main_reading(command, partial, locale, readings, skip_empty=False):
     return readings + [mains]
 
 
-def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty=False):
+def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty=False, fork=None):
     """One pass of _lex_reading, reading a quoted here-document's body inside a command substitution through
     subst_heredocs (a _SubstHeredocs shared by the pass's substitution skips), or no body when it is None.
-    skip_empty True leaves out every segment with no word and no redirect (_lex_command)."""
+    skip_empty True leaves out every segment with no word and no redirect (_lex_command). fork, when given,
+    is the _LexFork the pass resumes from (_lex_reading), with copies of its lists and nesting stack. Where
+    hash_reading does not map an uncertain '#' met at a word boundary or at the start of a redirect target,
+    the _UncertainHashError raised carries the _LexFork of this pass at the start of that token."""
     n = len(command)
-    segments = []
-    argv = []
-    argv_opaque = []
-    argv_leading_tilde = []
-    redirects = []
-    opaque = [False]
-    seg_start = [0]
-    pending_heredocs = []  # queued (delim, strip_tabs) for QUOTED heredocs whose bodies to skip (finding 17)
-    nest = _NestStack()  # the nesting stack of the '#' comment rule (see the comment above _nest_track)
+    if fork is None:
+        segments = []
+        argv = []
+        argv_opaque = []
+        argv_leading_tilde = []
+        redirects = []
+        opaque = [False]
+        seg_start = [0]
+        pending_heredocs = []  # queued (delim, strip_tabs) for QUOTED heredocs whose bodies to skip (finding 17)
+        nest = _NestStack()  # the nesting stack of the '#' comment rule (see the comment above _nest_track)
+        i = 0
+        glued_at = -1  # the index just past a ')': a word read there may continue the word before the ')'
+        before = "break"  # what precedes index i, a backslash-newline aside, for _hash_comment_reading
+    else:
+        segments = list(fork.segments)
+        argv = list(fork.argv)
+        argv_opaque = list(fork.argv_opaque)
+        argv_leading_tilde = list(fork.argv_leading_tilde)
+        redirects = list(fork.redirects)
+        opaque = [fork.opaque]
+        seg_start = [fork.seg_start]
+        pending_heredocs = list(fork.pending_heredocs)
+        nest = fork.nest.copy()
+        i = fork.at
+        glued_at = fork.glued_at
+        before = fork.before
+    # The index of the uncertain '#' whose reading the token at i is asking for, and the index a reading that
+    # maps it resumes at (-1 for i): the start of a word read that began with backslash-newlines and stopped
+    # at that '#', since that read already asked whether the reading takes the '#' as word text (_LexFork).
+    hash_at = [-1, -1]
+    unstarted = (-1, -1)  # (start, stop) of the last word read that stopped with nothing started
+    tails = {} if fork is None else fork.tails
+    tail_key = None  # this resumed pass's state at the first newline it ends (_LexFork.tails), once reached
+    tail_from = 0
+
+    def remember(flags):
+        # Record what this resumed pass built after its first newline, for a later reading that reaches the
+        # same state there (_LexFork.tails).
+        if tail_key is not None and tail_key not in tails:
+            tails[tail_key] = (segments[tail_from:], flags,
+                               None if subst_heredocs is None else subst_heredocs.state())
 
     def end_segment(sep, op_start, next_start):
         # With no word and no redirect there is nothing to reset: argv_opaque, argv_leading_tilde and opaque
@@ -2035,8 +2163,11 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
         # or, inside an open parenthesis, ${...} or backquote substitution, a '#' whose reading depends on
         # context. Read as a comment it leaves the redirect with no target (cannot-evaluate, ASK); read as
         # word text it begins the target.
-        hash_target = (k < n and command[k] == "#" and _hash_comment_reading(nest, "break") is None
-                       and _hash_reading_choice(hash_reading, k, nest) is False)
+        hash_target = False
+        if k < n and command[k] == "#" and _hash_comment_reading(nest, "break") is None:
+            hash_at[0], hash_at[1] = k, -1
+            hash_target = _hash_reading_choice(hash_reading, k, nest) is False
+            hash_at[0] = -1
         if (k >= n or command[k] == "\n" or command[k] in _METACHARS
                 or (command[k] == "#" and not hash_target)):
             raise ValueError("malformed redirect: no target")
@@ -2051,9 +2182,6 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
     try:
         if "\x00" in command:
             raise ValueError("NUL in command")
-        i = 0
-        glued_at = -1  # the index just past a ')': a word read there may continue the word before the ')'
-        before = "break"  # what precedes index i, a backslash-newline aside, for _hash_comment_reading
         while i < n:
             c = command[i]
             if c in " \t":
@@ -2070,6 +2198,19 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                     i = _skip_heredoc_bodies(command, i, n, pending_heredocs)
                     del pending_heredocs[:]
                     seg_start[0] = i
+                if fork is not None and tail_key is None:
+                    # A resumed pass's first newline: where an earlier reading reached the same state, take
+                    # the rest it built (_LexFork.tails).
+                    tail_key = (i, tuple(nest), glued_at, before,
+                                None if subst_heredocs is None else subst_heredocs.state())
+                    tail_from = len(segments)
+                    seen = tails.get(tail_key)
+                    if seen is not None:
+                        rest, flags, final = seen
+                        segments.extend(rest)
+                        if subst_heredocs is not None:
+                            subst_heredocs.restore(final)
+                        return (segments,) + flags if partial else segments
                 continue
             if c == "#":
                 # An unquoted '#' at a WORD BOUNDARY. In a certain context (after a blank, a newline, one of
@@ -2082,7 +2223,9 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                 # (--rev=abc#1, ticket#123) is read inside _read_word and never reaches this position.
                 comment = _hash_comment_reading(nest, before)
                 if comment is None:
+                    hash_at[0], hash_at[1] = i, unstarted[0] if unstarted[1] == i else -1
                     comment = _hash_reading_choice(hash_reading, i, nest)
+                    hash_at[0] = -1
                 if comment:
                     nl = command.find("\n", i)
                     i = n if nl == -1 else nl
@@ -2143,6 +2286,8 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                 argv_leading_tilde.append(w_leading_tilde)
                 if w_opaque:
                     opaque[0] = True
+            else:
+                unstarted = (i, j)
             i = j
         end_segment("", n, n)
     except ValueError as exc:
@@ -2161,8 +2306,16 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                 segments.append(_Segment(list(argv), "", list(redirects),
                                          command[seg_start[0]:], opaque[0], list(argv_opaque),
                                          list(argv_leading_tilde)))
+            remember((False, in_progress))
             return segments, False, in_progress
+        if isinstance(exc, _UncertainHashError) and exc.at is not None and exc.at == hash_at[0]:
+            # Stopped at the '#' the token at i asks about, before the token changed anything: a reading
+            # that maps that '#' resumes here (_LexFork).
+            exc.fork = _LexFork(i if hash_at[1] < 0 else hash_at[1], segments, argv, argv_opaque,
+                                argv_leading_tilde, redirects, opaque[0],
+                                seg_start[0], pending_heredocs, nest, glued_at, before, subst_heredocs, tails)
         raise
+    remember((True, False))
     if partial:
         return segments, True, False
     return segments
@@ -3145,7 +3298,10 @@ def diff_source_pretool(data):
         return _diff_source_fallback(command)
     except ValueError:
         return _diff_source_fallback(command)
-    possibles = [(index, seg) for index, seg in enumerate(segments) if _is_possible_producer(seg)]
+    # A segment with no word and no raw text (one of a run of separators) is no possible producer: its argv
+    # holds no git word, its empty raw text matches no probe, and it carries no opaque word.
+    possibles = [(index, seg) for index, seg in enumerate(segments)
+                 if (seg.argv or seg.raw) and _is_possible_producer(seg)]
     # No producer-capable form anywhere (the bounded true boundary), or AIRTIGHT-NARROW: the WHOLE command is
     # one of the five closed proofs. Either allows, unless main's reading of a here-document body the lex read
     # fails, where the fallback main's failed lex takes decides instead (its note, or the allow).
@@ -4874,7 +5030,9 @@ def git_explicit_binding(data):
             "it is allowed; prefer an explicit '-C' target and enumerated scope.")
     reads = _SubstHeredocs.reads
     try:
-        segments = _segments(command)
+        # Both scans below read only each segment's words, and a segment with no word names no command
+        # (its _command_word is ''), so no such segment is built (_lex_command's skip_empty).
+        segments = _segments(command, skip_empty=True)
     except _UncertainHashError:
         # A '#' the lexer could not judge under both readings: the raw scan also reads the text with its
         # backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan), and a command
@@ -10993,21 +11151,20 @@ def _gate_plain_filter(argv):
 
 
 def _gate_case_depths(records):
-    """The number of case compounds open at each segment (a segment opens one when 'case' follows only
-    reserved words, and one starting with 'esac' closes one). Inside a case its pattern words and the ')'
-    and '|' between them lex as commands and separators, so no pipeline there is canonical."""
-    depths = []
+    """The number of case compounds open at each segment, yielded in order as the caller reaches it (a
+    segment opens one when 'case' follows only reserved words, and one starting with 'esac' closes one), so
+    a caller that stops early reads no further. Inside a case its pattern words and the ')' and '|' between
+    them lex as commands and separators, so no pipeline there is canonical."""
     depth = 0
     for seg in records:
         if seg.argv and seg.argv[0] == "esac" and depth:
             depth -= 1
-        depths.append(depth)
+        yield depth
         for word in seg.argv:
             if word == "case":
                 depth += 1
             if word not in _GATE_RESERVED:
                 break
-    return depths
 
 
 # The commands that may come before the producer pipeline in the same command while the deny tier still holds,
@@ -11071,13 +11228,12 @@ def _verification_sink(records):
     (_gate_plain_filter) with stdout not redirected, ending in '|' or '|&'. A real-file tee stage does NOT
     exempt the pipeline (by default the status is still the final stage's); it is returned so the message can
     say what the file holds, and a tr or uniq stage before it marks that file as filtered."""
-    case_depths = _gate_case_depths(records)
     n = len(records)
-    for i, seg in enumerate(records):
+    for (i, seg), case_depth in zip(enumerate(records), _gate_case_depths(records)):
         if i and not _gate_benign_prefix(records[i - 1]):
             return None   # an earlier command may set the run's environment or configuration: it only notes
         if (seg.sep_after not in _GATE_PIPES
-                or case_depths[i] or not _gate_simple(seg) or _gate_stdout_redirected(seg) or not _is_verification_run(seg.argv)):
+                or case_depth or not _gate_simple(seg) or _gate_stdout_redirected(seg) or not _is_verification_run(seg.argv)):
             continue
         if _gate_conditional_run(records, i):
             return None   # a pipeline run only when an earlier command fails, or never: it only notes
@@ -11177,8 +11333,9 @@ def _gate_flow_note(records, command):
         return (_GATE_SUBST_TEXT + ", and appears to pipe into 'head' or 'tail'. The hook reads both from the raw "
                 "text, where either may be quoted text, so it does not prove that the substitution runs, that the "
                 "pipe exists, or that any output is dropped; this is a note, not a refusal." + _GATE_NOTE_ADVICE)
-    first = next((i for i, seg in enumerate(records)
-                  if any(_is_checker_segment(s) or _gate_verify_shaped(s) for s in _gate_suffixes(seg.argv))), None)
+    first = next((i for i, seg in enumerate(records)  # a segment with no word has no suffix (_gate_suffixes)
+                  if seg.argv and any(_is_checker_segment(s) or _gate_verify_shaped(s)
+                                      for s in _gate_suffixes(seg.argv))), None)
     by_subst = first is None and subst
     if by_subst:
         first = 0
@@ -11367,9 +11524,12 @@ def gate_weakening(data):
         return _gate_weakening_fallback(scan)
     floor = _SubstHeredocs.reads != reads  # main's reading of a body the lex read fails: its decision is a floor
     records = [seg for reading in readings for seg in reading]
-    segments = [(seg.argv, seg.sep_after) for seg in records]
     pending_note = None  # the first heuristic gate-weakening allow-note; a certain --no-verify deny wins first
-    for index, (tokens, sep_after) in enumerate(segments):
+    for index, seg in enumerate(records):
+        tokens = seg.argv
+        if not tokens:
+            continue  # no command word, so neither git nor a checker (a run of separators reads nothing here)
+        sep_after = seg.sep_after
         if _command_word(tokens) == "git" and not _has_info_flag(tokens):
             sub, args = _git_sub_and_args(tokens)
             if sub in _NOVERIFY_VERBS:
@@ -11389,9 +11549,9 @@ def gate_weakening(data):
         # note). Only genuinely empty segments are skipped; a real intervening command (a non-empty
         # segment) still breaks adjacency and is NOT skipped.
         nxt_index = index + 1
-        while nxt_index < len(segments) and not segments[nxt_index][0]:
+        while nxt_index < len(records) and not records[nxt_index].argv:
             nxt_index += 1
-        nxt = segments[nxt_index][0] if nxt_index < len(segments) else []
+        nxt = records[nxt_index].argv if nxt_index < len(records) else []
         # ROUND-2 FINDING 14: the broad checker-shape swallow ('|| true'/'|| :') and truncating-pipe
         # ('| head/tail') HEURISTIC is too broad - a benign optional probe ('test -d /cache || true', 'pytest
         # || true' while iterating, 'make | head' to glance at output) is common and is not a gate bypass - so
@@ -11572,7 +11732,9 @@ def commit_msg_subst(data):
             "(rule sectvl, fail-safe).")
     reads = _SubstHeredocs.reads
     try:
-        segments = _lex_command(command)
+        # _commit_msg_subst_hit reads only the segment's own words, and finds no git commit in a segment with
+        # none, so no such segment is built (_lex_command's skip_empty).
+        segments = _lex_command(command, skip_empty=True)
     except _UncertainHashError:
         # A '#' the lexer could not judge under both readings: the raw scan also reads the text with its
         # backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan), and a command
