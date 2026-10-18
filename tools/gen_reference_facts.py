@@ -15,7 +15,7 @@ gen_mappings): exit 0 clean, exit 1 on drift, exit 2 fail-closed on an unreadabl
 Both READMEs are Markdown, so the blocks are rewritten with a clean-Markdown marker replace (the
 gen_claude precedent: no trailing indent) rather than the HTML-indented shared replace_block, which
 would leave the end marker indented as a Markdown code block. The landing page's COUNTS-TABLE block
-carries the WHOLE "What is inside" table, its two prose-only rows included: a Markdown table is one
+carries the WHOLE "What is inside" table, its prose-only row included: a Markdown table is one
 contiguous run of lines, so a marker line inside it would split the rendered table in two.
 
   gen_reference_facts.py            regenerate the roster and landing-count blocks
@@ -114,13 +114,12 @@ def _markers(name):
     return ("<!-- {}:BEGIN (generated) -->".format(name), "<!-- {}:END -->".format(name))
 
 
-def _replace_marked(text, name, inner, where):
-    """Replace the content between the named markers, keeping the markers, with clean Markdown spacing
-    (no trailing indent). Fail closed if a marker is missing, misordered, or DUPLICATED: exactly one
-    BEGIN and one END must be present. A second block with the same name would otherwise silently bypass
-    the drift check, because both generate and --check act on the first marker pair only, so a stale
-    duplicate could never be caught or updated. This runs on both paths (the builders feed generate and
-    --check alike)."""
+def _marked_span(text, name, where):
+    """Locate the named marker pair and return (BEGIN marker start, END marker start). Fail closed if a
+    marker is missing, misordered, or DUPLICATED: exactly one BEGIN and one END must be present. A
+    second block with the same name would otherwise silently bypass the drift check, because both
+    generate and --check act on the first marker pair only, so a stale duplicate could never be caught
+    or updated. This runs on both paths (the builders feed generate and --check alike)."""
     begin, end = _markers(name)
     n_begin = text.count(begin)
     n_end = text.count(end)
@@ -131,6 +130,33 @@ def _replace_marked(text, name, inner, where):
     j = text.find(end)
     if j < i:
         raise ValueError("{} markers misordered in {}".format(name, where))
+    return i, j
+
+
+def _require_disjoint(text, names, where):
+    """The named marker blocks must be separate, non-overlapping regions of the page. A block nested
+    inside another block, or two blocks that cross, passes each pair's own marker checks and is then
+    destroyed by the other block's replacement (replacing the outer block rewrites everything between
+    its markers, the inner pair included), so generation would report success while deleting a managed
+    block. Checked against the text as committed, BEFORE any replacement, so both generate and --check
+    fail closed with a diagnostic that names the overlapping blocks, never a marker count measured
+    after a replacement has already consumed a marker."""
+    spans = []
+    for name in names:
+        i, j = _marked_span(text, name, where)
+        spans.append((name, i, j + len(_markers(name)[1])))
+    for pos, (a, a_start, a_stop) in enumerate(spans):
+        for b, b_start, b_stop in spans[pos + 1:]:
+            if a_start < b_stop and b_start < a_stop:
+                raise ValueError("{} and {} marker blocks nest or cross in {}; each generated block "
+                                 "must be a separate region; fail-closed".format(a, b, where))
+
+
+def _replace_marked(text, name, inner, where):
+    """Replace the content between the named markers, keeping the markers, with clean Markdown spacing
+    (no trailing indent); _marked_span supplies the fail-closed marker validation."""
+    begin, end = _markers(name)
+    i, j = _marked_span(text, name, where)
     return text[:i] + begin + "\n" + inner + "\n" + text[j:]
 
 
@@ -146,10 +172,12 @@ def build_landing(root, manifests):
     """Return the landing README with its two count blocks regenerated from expected_counts (the gate's
     own predicates: .md rule files, "ci" gates, "claude-code" hooks with their block/warn split summing
     to the total, the standards manifests, and the enforcement register's summary row). Raises
-    ManifestError/OSError/ValueError on an unreadable or malformed input; the caller maps those to
-    exit 2."""
+    ManifestError/OSError/ValueError on an unreadable or malformed input, and on marker blocks that
+    nest or cross (validated against the committed text before either replacement); the caller maps
+    those to exit 2."""
     counts = expected_counts(root, manifests)
     text = (root / LANDING_REL).read_text(encoding="utf-8")
+    _require_disjoint(text, (PROOF_MARKER, TABLE_MARKER), LANDING_REL)
     text = _replace_marked(text, PROOF_MARKER, render_proof_line(counts), LANDING_REL)
     return _replace_marked(text, TABLE_MARKER, render_inside_table(counts), LANDING_REL)
 
@@ -189,9 +217,11 @@ def main():
 # --- self-test ----------------------------------------------------------------------------------------
 # Proves this generator's own invariants against synthetic trees (the sibling-generator pattern), so it
 # never becomes an ungated generator:
-#   (a) a conformant fixture (2 manifests; 3 rules, 2 ci gates, 2 claude-code hooks split 1/1, 1
-#       enforced) generates the right roster AND the right landing counts with the hand prose around the
-#       blocks untouched, then re-checks drift-clean,
+#   (a) a conformant fixture (2 manifests; 6 rules, 5 ci gates, 7 claude-code hooks split 4/3, 1
+#       enforced: every fixture count distinct, so a figure rendered into the wrong slot or two swapped
+#       count keys can never collide into a passing value) generates the right roster AND every landing
+#       figure in both blocks with the hand prose around the blocks untouched, then re-checks
+#       drift-clean,
 #   (b) a hand-desynced count in the committed roster block is caught by --check (exit 1),
 #   (c) a README missing the ROSTER markers fails closed (exit 2),
 #   (d) an empty .aiqt/standards/ dir fails closed (exit 2), never a false-clean empty roster,
@@ -199,13 +229,21 @@ def main():
 #   (f) a README with two ROSTER blocks fails closed (exit 2) on BOTH generate and --check, so a
 #       duplicate block can never silently bypass the drift check,
 #   (g) a manifest change MOVES the rendered landing figure: adding a ci gate to the gates manifest
-#       fails --check (exit 1, drift), and regenerating renders the new count and re-checks clean,
+#       fails --check (exit 1, drift), and regenerating renders the new count into BOTH blocks (proof
+#       line and table row, asserted literally) and re-checks clean; then EVERY count is moved at once
+#       to a new, still-distinct value and each moved figure is asserted literally in the proof line,
+#       the table and the roster, so a renderer that froze any single figure to a literal of the base
+#       fixture value fails here rather than passing on a coincidentally-right value,
 #   (h) a hand edit of the rendered landing text is caught by --check (exit 1),
 #   (i) a landing README missing the COUNTS-PROOF markers fails closed (exit 2),
 #   (j) a landing README missing the COUNTS-TABLE markers fails closed (exit 2),
 #   (k) a landing README with duplicated COUNTS-PROOF markers fails closed (exit 2),
 #   (l) a missing ENFORCEMENT.md (an expected_counts surface) fails closed (exit 2), never a guessed
-#       enforced figure.
+#       enforced figure,
+#   (m) a landing README whose marker blocks nest (either direction) or cross fails closed (exit 2) on
+#       BOTH generate and --check, and the failed generate writes nothing,
+#   (n) a landing README with misordered COUNTS-PROOF markers (END before BEGIN) fails closed (exit 2)
+#       on both generate and --check.
 
 _MANIFEST = (
     'map-key = "map-{k}"\nname = "{name}"\npublisher = "AIQT self-test"\nedition = "{ed}"\n'
@@ -227,23 +265,44 @@ _LANDING = (
     "Hand prose below the counts.\n"
 )
 
-# Three rule files, two ci gates (one other-platform entry proves the platform filter), two claude-code
-# hooks split one block / one warn, and an enforcement summary of one enforced rule.
+# Six rule files, five ci gates (one other-platform entry proves the platform filter), seven
+# claude-code hooks split four block / three warn (one other-platform entry again), and an enforcement
+# summary of one enforced rule. Every fixture count is distinct (enforced 1, frameworks 2, warning 3,
+# blocking 4, gates 5, rules 6, hooks 7), so a figure rendered into the wrong slot or two swapped count
+# keys can never collide into a passing value.
 _GATES_TOML = (
     '[[gate]]\nid = "g1"\nplatform = "ci"\n'
     '[[gate]]\nid = "g2"\nplatform = "ci"\n'
-    '[[gate]]\nid = "g3"\nplatform = "other"\n'
+    '[[gate]]\nid = "g3"\nplatform = "ci"\n'
+    '[[gate]]\nid = "g4"\nplatform = "ci"\n'
+    '[[gate]]\nid = "g5"\nplatform = "ci"\n'
+    '[[gate]]\nid = "g6"\nplatform = "other"\n'
 )
-_EXTRA_CI_GATE = '[[gate]]\nid = "g4"\nplatform = "ci"\n'
+_EXTRA_CI_GATE = '[[gate]]\nid = "g7"\nplatform = "ci"\n'
 _HOOKS_TOML = (
     '[[hook]]\nid = "h1"\nplatform = "claude-code"\ndefault = "block"\n'
-    '[[hook]]\nid = "h2"\nplatform = "claude-code"\ndefault = "warn"\n'
-    '[[hook]]\nid = "h3"\nplatform = "other"\ndefault = "block"\n'
+    '[[hook]]\nid = "h2"\nplatform = "claude-code"\ndefault = "block"\n'
+    '[[hook]]\nid = "h3"\nplatform = "claude-code"\ndefault = "block"\n'
+    '[[hook]]\nid = "h4"\nplatform = "claude-code"\ndefault = "block"\n'
+    '[[hook]]\nid = "h5"\nplatform = "claude-code"\ndefault = "warn"\n'
+    '[[hook]]\nid = "h6"\nplatform = "claude-code"\ndefault = "warn"\n'
+    '[[hook]]\nid = "h7"\nplatform = "claude-code"\ndefault = "warn"\n'
+    '[[hook]]\nid = "h8"\nplatform = "other"\ndefault = "block"\n'
 )
 _ENFORCEMENT = "# Register\n\n| Status | Count |\n| --- | --- |\n| Enforced | 1 |\n"
 
-_PROOF_TWO_GATES = ("**3 rules. 2 CI gates that check this repository. 2 Claude Code hooks shipped as "
-                    "an opt-in plugin. Mapped to 2 frameworks.**")
+# Every rendered landing figure, asserted as a LITERAL expectation (never built with the live
+# templates or renderers, which a regression under test would share): the whole proof line, then one
+# literal per anchored table wording, together covering all twelve rendered figure positions.
+_PROOF_RENDERED = ("**6 rules. 5 CI gates that check this repository. 7 Claude Code hooks shipped as "
+                   "an opt-in plugin. Mapped to 2 frameworks.**")
+_TABLE_RENDERED = (
+    "| **The standard** | 6 clear, single-behaviour rules",
+    "5 CI gates that check this repository and 7 Claude Code hooks shipped as an opt-in plugin "
+    "(4 blocking, 3 warning)",
+    "Today 1 of the 6 rules are linked to at least one shipped gate or hook",
+    "Mappings from the rules to 2 pinned external control catalogues",
+)
 
 
 def _write_fixture(base, manifests, readme, landing=None):
@@ -254,7 +313,7 @@ def _write_fixture(base, manifests, readme, landing=None):
     (std / "README.md").write_text(readme, encoding="utf-8")
     core = base / ".aiqt" / "core"
     (core / "rules").mkdir(parents=True)
-    for stem in ("r1", "r2", "r3"):
+    for stem in ("r1", "r2", "r3", "r4", "r5", "r6"):
         (core / "rules" / (stem + ".md")).write_text("# a fixture rule\n", encoding="utf-8")
     (core / "gates").mkdir()
     (core / "gates" / "manifest.toml").write_text(_GATES_TOML, encoding="utf-8")
@@ -298,12 +357,12 @@ def self_test_main():
                 or "- Beta Framework (edition 2.0)" not in readme_text:
             failures.append("conformant tree: expected both framework roster lines")
         landing_text = (good / LANDING_REL).read_text(encoding="utf-8")
-        if _PROOF_TWO_GATES not in landing_text:
+        if _PROOF_RENDERED not in landing_text:
             failures.append("conformant tree: expected the rendered landing proof line")
-        if "(1 blocking, 1 warning)" not in landing_text:
-            failures.append("conformant tree: expected the rendered blocking/warning split")
-        if "Today 1 of the 3 rules are linked to at least one shipped gate or hook" not in landing_text:
-            failures.append("conformant tree: expected the rendered enforcement figure")
+        for rendered in _TABLE_RENDERED:
+            if rendered not in landing_text:
+                failures.append("conformant tree: expected the rendered table figure "
+                                "({!r})".format(rendered))
         for prose in ("Hand prose above the counts.", "Hand prose between the blocks.",
                       "Hand prose below the counts."):
             if prose not in landing_text:
@@ -369,10 +428,55 @@ def self_test_main():
         if run_quiet(gatemove, check=False) != 0:
             failures.append("gate-move tree: regeneration expected exit 0")
         moved = (gatemove / LANDING_REL).read_text(encoding="utf-8")
-        if "3 CI gates that check this repository" not in moved:
-            failures.append("gate-move tree: expected the regenerated landing to state 3 CI gates")
+        if ("**6 rules. 6 CI gates that check this repository. 7 Claude Code hooks shipped as "
+                "an opt-in plugin. Mapped to 2 frameworks.**") not in moved:
+            failures.append("gate-move tree: expected the regenerated proof line to state 6 CI gates")
+        if ("6 CI gates that check this repository and 7 Claude Code hooks shipped as an opt-in "
+                "plugin (4 blocking, 3 warning)") not in moved:
+            failures.append("gate-move tree: expected the regenerated table row to state 6 CI gates")
         if run_quiet(gatemove, check=True) != 0:
             failures.append("gate-move tree: re-check after regeneration expected exit 0")
+        # Then EVERY count moves at once to a new, still-distinct value (enforced 2, frameworks 3,
+        # warning 5, blocking 6, gates 7, rules 9, hooks 11): a renderer that froze any figure to a
+        # literal of the base fixture value, in either landing block or the roster, fails the
+        # post-move assertions.
+        gates_path.write_text(_GATES_TOML + _EXTRA_CI_GATE
+                              + '[[gate]]\nid = "g8"\nplatform = "ci"\n', encoding="utf-8")
+        for stem in ("r7", "r8", "r9"):
+            (gatemove / ".aiqt" / "core" / "rules" / (stem + ".md")).write_text(
+                "# a fixture rule\n", encoding="utf-8")
+        (gatemove / ".aiqt" / "core" / "hooks" / "manifest.toml").write_text(_HOOKS_TOML + (
+            '[[hook]]\nid = "h9"\nplatform = "claude-code"\ndefault = "block"\n'
+            '[[hook]]\nid = "h10"\nplatform = "claude-code"\ndefault = "block"\n'
+            '[[hook]]\nid = "h11"\nplatform = "claude-code"\ndefault = "warn"\n'
+            '[[hook]]\nid = "h12"\nplatform = "claude-code"\ndefault = "warn"\n'), encoding="utf-8")
+        (gatemove / ".aiqt" / "standards" / "gamma.toml").write_text(
+            _MANIFEST.format(k="gamma", name="Gamma Framework", ed="3.0"), encoding="utf-8")
+        (gatemove / "ENFORCEMENT.md").write_text(
+            "# Register\n\n| Status | Count |\n| --- | --- |\n| Enforced | 2 |\n", encoding="utf-8")
+        if run_quiet(gatemove, check=True) != 1:
+            failures.append("all-counts move expected exit 1 (every rendered figure must move)")
+        if run_quiet(gatemove, check=False) != 0:
+            failures.append("all-counts move: regeneration expected exit 0")
+        moved = (gatemove / LANDING_REL).read_text(encoding="utf-8")
+        for rendered in (
+                "**9 rules. 7 CI gates that check this repository. 11 Claude Code hooks shipped as "
+                "an opt-in plugin. Mapped to 3 frameworks.**",
+                "| **The standard** | 9 clear, single-behaviour rules",
+                "7 CI gates that check this repository and 11 Claude Code hooks shipped as an "
+                "opt-in plugin (6 blocking, 5 warning)",
+                "Today 2 of the 9 rules are linked to at least one shipped gate or hook",
+                "Mappings from the rules to 3 pinned external control catalogues",
+        ):
+            if rendered not in moved:
+                failures.append("all-counts move: expected the regenerated figure "
+                                "({!r})".format(rendered))
+        roster_moved = (gatemove / README_REL).read_text(encoding="utf-8")
+        if "Frameworks with a manifest and enabled key (3 in total):" not in roster_moved \
+                or "- Gamma Framework (edition 3.0)" not in roster_moved:
+            failures.append("all-counts move: expected the regenerated roster to state 3 frameworks")
+        if run_quiet(gatemove, check=True) != 0:
+            failures.append("all-counts move: re-check after regeneration expected exit 0")
 
         # (h) a hand edit of the rendered landing text is caught by --check (exit 1).
         handedit = tmp / "handedit"
@@ -380,7 +484,7 @@ def self_test_main():
         if run_quiet(handedit, check=False) != 0:
             failures.append("hand-edit tree: initial generation expected exit 0")
         edited = (handedit / LANDING_REL).read_text(encoding="utf-8").replace(
-            "2 CI gates that check this repository", "9 CI gates that check this repository")
+            "5 CI gates that check this repository", "9 CI gates that check this repository")
         (handedit / LANDING_REL).write_text(edited, encoding="utf-8")
         if run_quiet(handedit, check=True) != 1:
             failures.append("hand-edited landing count expected exit 1 (drift)")
@@ -410,6 +514,44 @@ def self_test_main():
         (noenf / "ENFORCEMENT.md").unlink()
         if run_quiet(noenf, check=True) != 2:
             failures.append("missing ENFORCEMENT.md expected exit 2 (fail-closed)")
+
+        # (m) nested or crossing landing marker blocks fail closed (exit 2) on BOTH generate and
+        #     --check, and a failed generate writes nothing: without the disjointness guard the outer
+        #     block's replacement deletes the inner pair after that pair has already validated and
+        #     rendered, so generation reports success while destroying a managed block.
+        proof_pair = "<!-- COUNTS-PROOF:BEGIN (generated) -->\n<!-- COUNTS-PROOF:END -->"
+        table_pair = "<!-- COUNTS-TABLE:BEGIN (generated) -->\n<!-- COUNTS-TABLE:END -->"
+        overlapping = (
+            ("table-wraps-proof", "Prose.\n\n<!-- COUNTS-TABLE:BEGIN (generated) -->\n"
+             + proof_pair + "\n<!-- COUNTS-TABLE:END -->\n\nProse.\n"),
+            ("proof-wraps-table", "Prose.\n\n<!-- COUNTS-PROOF:BEGIN (generated) -->\n"
+             + table_pair + "\n<!-- COUNTS-PROOF:END -->\n\nProse.\n"),
+            ("crossing", "Prose.\n\n<!-- COUNTS-PROOF:BEGIN (generated) -->\n"
+             "<!-- COUNTS-TABLE:BEGIN (generated) -->\n<!-- COUNTS-PROOF:END -->\n"
+             "<!-- COUNTS-TABLE:END -->\n\nProse.\n"),
+        )
+        for label, landing in overlapping:
+            overlap = tmp / ("overlap-" + label)
+            _write_fixture(overlap, two, _README, landing=landing)
+            before = (overlap / LANDING_REL).read_text(encoding="utf-8")
+            if run_quiet(overlap, check=False) != 2:
+                failures.append("{} landing marker blocks expected exit 2 on generate "
+                                "(fail-closed)".format(label))
+            if (overlap / LANDING_REL).read_text(encoding="utf-8") != before:
+                failures.append("{} landing marker blocks: a failed generate must write "
+                                "nothing".format(label))
+            if run_quiet(overlap, check=True) != 2:
+                failures.append("{} landing marker blocks expected exit 2 on --check "
+                                "(fail-closed)".format(label))
+
+        # (n) misordered markers (END before BEGIN) fail closed (exit 2) on both generate and --check.
+        misordered = tmp / "misordered"
+        _write_fixture(misordered, two, _README, landing=_LANDING.replace(
+            proof_pair, "<!-- COUNTS-PROOF:END -->\n<!-- COUNTS-PROOF:BEGIN (generated) -->"))
+        if run_quiet(misordered, check=False) != 2:
+            failures.append("misordered COUNTS-PROOF markers expected exit 2 on generate (fail-closed)")
+        if run_quiet(misordered, check=True) != 2:
+            failures.append("misordered COUNTS-PROOF markers expected exit 2 on --check (fail-closed)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -418,13 +560,16 @@ def self_test_main():
         for failure in failures:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: a conformant tree generates the right framework count, roster and landing "
-          "counts with the hand prose untouched and re-checks drift-clean; a hand-desynced roster "
-          "count, a hand-edited landing count, and a manifest change that moves a rendered figure each "
-          "fail --check (exit 1), and regeneration renders the moved figure; and a README missing the "
-          "ROSTER markers, a landing README missing or duplicating a COUNTS marker pair, duplicated "
-          "ROSTER blocks (on both generate and --check), an empty standards dir, a missing "
-          "ENFORCEMENT.md, and an invalid-UTF-8 README all fail closed (exit 2)")
+    print("SELF-TEST PASS: a conformant tree generates the right framework count, roster and every "
+          "landing figure in both blocks with the hand prose untouched and re-checks drift-clean; a "
+          "hand-desynced roster count, a hand-edited landing count, and manifest changes that move "
+          "one rendered figure and then every one of them each fail --check (exit 1), and "
+          "regeneration renders each moved figure into both landing blocks and the roster; and a "
+          "README missing the ROSTER markers, a landing README missing or "
+          "duplicating a COUNTS marker pair, landing marker blocks that nest, cross or misorder (on "
+          "both generate and --check, the failed generate writing nothing), duplicated ROSTER blocks "
+          "(on both generate and --check), an empty standards dir, a missing ENFORCEMENT.md, and an "
+          "invalid-UTF-8 README all fail closed (exit 2)")
     return 0
 
 
