@@ -2442,11 +2442,55 @@ _HD_BASH_EXCEPTIONS = {
     "hd-a30": "bash warns of a body unread when its substitution closes, then reads it as the guard models",
     "hd-a31": "bash warns of a body unread when its substitution closes, then reads it as the guard models",
     "hd-a32": "bash warns of a body unread when its substitution closes, then reads it as the guard models",
-    "hd-a33": "bash warns of a body unread when its substitution closes, then reads it as the guard models",
     # Delimiters the guard cannot read, which it denies fail-safe.
     "hd-d12": "bash refuses a << with no delimiter word as a syntax error, so it reports no here-document",
     "hd-d16": "bash decodes the ANSI-C delimiter $'E\\x4fF' to EOF, which closes the body; the guard does not "
               "decode an escape in a delimiter",
+    # Continuation refusals (hd-d57 to hd-d77): the guard denies each of these as unverifiable, without
+    # modelling the joining bash applies to its backslash-newline pairs, so the oracle cannot corroborate
+    # the deny: either bash parses the command cleanly (the refusal by design), or bash does read an
+    # unterminated heredoc but its wanted delimiter is not one the guard's unjoined scan names (the pair
+    # hides or reshapes the opener for that scan), or bash emits no single-line wanted diagnostic at all.
+    # hd-d13 is NOT here: bash wants EOF and the unjoined scan names EOF, so that case agrees.
+    "hd-d57": "bash wants PY from the joined <<; the unjoined scan sees no << and names no opener",
+    "hd-d58": "bash wants PY from the joined <<; the unjoined scan sees only the closed <<A",
+    "hd-d59": "bash wants EOF from the << joined across two pairs; the unjoined scan names no opener",
+    "hd-d60": "bash wants EOF after joining the delimiter; the unjoined scan reads the delimiter as "
+              "backslash-escaped text, so it names another delimiter",
+    "hd-d61": "bash wants EOF from the heredoc in the joined $(; the pair leaves the unjoined scan inside "
+              "double quotes, so it names no opener",
+    "hd-d62": "bash refuses the joined form as a syntax error (a comment where the delimiter word must "
+              "stand), so it reports no here-document",
+    "hd-d63": "bash's wanted delimiter keeps the quoted pair and spans two lines, which the oracle's "
+              "single-line pattern cannot read; the unjoined scan reads that same two-line delimiter",
+    "hd-d64": "bash's wanted delimiter keeps the pair and spans two lines, which the oracle's single-line "
+              "pattern cannot read; the unjoined scan cannot read the ANSI-C delimiter at all",
+    "hd-d65": "bash wants 2]=3 from the joined &> resetting the command position; the unjoined scan reads "
+              "a subscript shift and names no opener",
+    "hd-d66": "bash wants X past the joined $'; the unjoined scan reads the quotes differently and names "
+              "no opener",
+    "hd-d67": "refused by design: bash removes the pair inside the double-quoted delimiter and the heredoc "
+              "closes, so bash parses the command cleanly",
+    "hd-d68": "refused by design: bash joins the delimiter to EOFX and the heredoc closes, so bash parses "
+              "the command cleanly",
+    "hd-d69": "refused by design: bash removes the pair before the delimiter and the heredoc closes, so "
+              "bash parses the command cleanly",
+    "hd-d70": "refused by design: bash removes the pair inside the delimiter and the heredoc closes, so "
+              "bash parses the command cleanly",
+    "hd-d71": "refused by design: bash joins each <<< to a here-string with no terminator line, so bash "
+              "parses the command cleanly",
+    "hd-d72": "refused by design: bash joins the continued body line onto the delimiter, which closes the "
+              "heredoc, so bash parses the command cleanly",
+    "hd-d73": "refused by design: the quoted body is read verbatim and its EOF line closes the heredoc, so "
+              "bash parses the command cleanly",
+    "hd-d74": "refused by design: the even run of backslashes continues no line and the heredoc closes, so "
+              "bash parses the command cleanly (the rule matches the pair's two characters textually)",
+    "hd-d75": "refused by design: the continued line is command text and the heredoc closes, so bash "
+              "parses the command cleanly",
+    "hd-d76": "refused by design: bash warns of a body unread when the substitution closes, then reads "
+              "every body and runs the command; that warning carries no wanted delimiter",
+    "hd-d77": "refused by design: the << is a shift in the assignment subscript, so bash parses the "
+              "command cleanly",
 }
 
 
@@ -2569,20 +2613,12 @@ def _test_heredoc_terminator(failures):
              "allow")
     hdexpect("(hd-a16) a terminator on the last line with no newline allows", "python3 - <<'PY'\nprint(1)\nPY",
              "allow")
-    hdexpect("(hd-a17) an unquoted body line continued onto the delimiter closes it",
-             "cat <<EOF\nbody\nEO\\\nF\necho after", "allow")
     hdexpect("(hd-a18) an empty delimiter is closed by an empty line", "cat <<''\nbody\n\necho after", "allow")
     hdexpect("(hd-a19) an opener in a parameter expansion or ANSI-C text is not an opener",
              "echo \"${x/<<EOF/y}\" ${x:-<<EOF} ${x:-'<<EOF'} $'a <<EOF b'", "allow")
     hdexpect("(hd-a20) a command with no << allows", "ls -la", "allow")
-    hdexpect("(hd-a21) a quoted delimiter's body is read verbatim", "cat <<'EOF'\nfoo\\\nEOF\necho after",
-             "allow")
-    hdexpect("(hd-a22) an even run of backslashes does not continue a body line",
-             "cat <<EOF\nfoo\\\\\nEOF\necho after", "allow")
     hdexpect("(hd-a23) <<- with a space before the delimiter allows", "cat <<- EOF\n\tbody\n\tEOF", "allow")
     hdexpect("(hd-a24) a comment after the opener allows", "cat <<EOF # note\nbody\nEOF", "allow")
-    hdexpect("(hd-a25) a line continued after the opener is command text, even one equal to the delimiter "
-             "(regression coverage)", "cat <<EOF \\\nEOF\nbody <<NOT\nEOF", "allow")
     hdexpect("(hd-a26) a plain subshell does not end a body at a delimiter followed by )",
              "(cat <<EOF\nbody\nEOF)\nEOF\n)", "allow")
     hdexpect("(hd-a27) an escaped quote inside ANSI-C text does not end it", "echo $'it\\'s <<EOF'", "allow")
@@ -2598,8 +2634,6 @@ def _test_heredoc_terminator(failures):
              'cat <<A "$(cat <<B)"\nB\nA\n', "allow")
     hdexpect("(hd-a32) a string running past that line resumes after the body already read",
              'cat "$(cat <<B)" "x\nsay "<<Q\nB\ny"\n', "allow")
-    hdexpect("(hd-a33) a backslash continuing that line resumes after the body already read",
-             "cat $(cat <<B) \\\nx <<Q\nB\n| cat\n", "allow")
     hdexpect("(hd-a34) a # right after a ((...)) command starts a comment, as in bash (regression coverage)",
              "((1))#; cat <<EOF\nx\nEOX", "allow")
     hdexpect("(hd-a35) a closed heredoc in a $(...) in arithmetic allows, and a << beside it is a shift "
@@ -2610,8 +2644,6 @@ def _test_heredoc_terminator(failures):
              "declare -A m=([k<<x]=1); a=([1<<2]=3)", "allow")
     hdexpect("(hd-a38) a <( inside double quotes is literal text, not a process substitution (regression coverage)",
              'echo "<(cat <<EOF\nx\nEOX\n)"', "allow")
-    hdexpect("(hd-a39) a line continuation between assignments is no word, so a later subscript stays one",
-             "a=1 \\\nb[1<<2]=3", "allow")
     # Quotes inside a subscript are read as bash reads them, so a quoted ] or << in one ends nothing.
     hdexpect("(hd-a40) a quoted ] and << inside an assignment subscript are subscript text",
              "a[']<<x']=1", "allow")
@@ -2623,16 +2655,6 @@ def _test_heredoc_terminator(failures):
              "cat < <(a[1<<2]=3; echo x)", "allow")
     hdexpect("(hd-a44) the word after a leading process substitution target can still be an assignment",
              "< <(true) b[1<<2]=3", "allow")
-    # Bash removes a backslash-newline pair before it splits operators and words, so a pair inside the
-    # delimiter word joins it (the delimiter of <<\<newline>EOF and of <<E\<newline>OF is the unquoted EOF),
-    # and a third < joined across a pair makes the <<< here-string, which opens no heredoc. These fail on a
-    # reader that takes the backslash into the delimiter word or reads the split <<< as a heredoc opener.
-    hdexpect("(hd-a45) a backslash-newline pair before the delimiter is removed, as in bash",
-             "cat <<\\\nEOF\nbody\nEOF\necho after", "allow")
-    hdexpect("(hd-a46) a backslash-newline pair inside the delimiter is removed, as in bash",
-             "cat <<E\\\nOF\nbody\nEOF\necho after", "allow")
-    hdexpect("(hd-a47) a <<< split by backslash-newline pairs is a here-string, not an opener",
-             "cat <<\\\n<EOF; cat <\\\n<\\\n<EOF", "allow")
     # Disclosed residuals: text another parser reads later is not scanned, and a later exact line closes a body.
     hdexpect("(hd-r1) a heredoc inside backticks is not checked (disclosed residual)", "x=`cat <<EOF\nin\nEOX\n`",
              "allow")
@@ -2670,8 +2692,9 @@ def _test_heredoc_terminator(failures):
              has=("<<EOF on line 1",), lacks=("away from it",))
     hdexpect("(hd-d12) a << with no delimiter word denies", "cat <<", "deny",
              has=("not followed by a delimiter word",))
-    hdexpect("(hd-d13) an unquoted continuation that swallows the terminator denies",
-             "cat <<EOF\nfoo\\\nEOF\necho after", "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d13) an unquoted continuation that swallows the terminator denies as unverifiable",
+             "cat <<EOF\nfoo\\\nEOF\necho after", "deny",
+             has=("backslash-newline", "without line continuations"))
     hdexpect("(hd-d14) a double-quoted string earlier on the line does not hide an opener",
              'echo "x" && cat <<EOF\nbody\nEOX', "deny", has=("<<EOF on line 1",))
     hdexpect("(hd-d15) a mistyped terminator in a process substitution denies",
@@ -2779,20 +2802,59 @@ def _test_heredoc_terminator(failures):
              'echo $(( ")" )) <<EOF\nx\n', "deny", has=("<<EOF on line 1",))
     hdexpect("(hd-d53) a ${...} holding a quoted ) in $((...)) does not end the arithmetic early",
              'echo $(( ${x:-")"} )) <<EOF\nx\n', "deny", has=("<<EOF on line 1",))
-    # Bash removes a backslash-newline pair before it splits operators, so '<', backslash-newline, '<' is
-    # the << operator and its unterminated heredoc denies. These fail on a reader that sees << only where
-    # the two characters are adjacent, with or without an earlier adjacent << in the same command.
-    hdexpect("(hd-d57) a << split by a backslash-newline pair is an opener",
-             "python3 - <\\\n<'PY'\nprint(1)\nPYX\necho after", "deny",
-             has=("exactly equal to 'PY'", "'PYX', is 1 edit away"))
-    hdexpect("(hd-d58) a split << after an earlier closed adjacent heredoc is an opener",
-             "cat <<A\na\nA\ncat <\\\n<'PY'\nprint(1)\nPYX\necho after", "deny",
-             has=("exactly equal to 'PY'",), lacks=("<<A on",))
-    hdexpect("(hd-d59) a << split by two backslash-newline pairs is an opener",
-             "cat <\\\n\\\n<EOF\nx\necho after", "deny", has=("exactly equal to 'EOF'",))
-    hdexpect("(hd-d60) a split delimiter is joined before the terminator is matched",
-             "cat <<\\\nEOF\nbody\nEOX\necho after", "deny",
-             has=("exactly equal to 'EOF'", "'EOX', is 1 edit away"))
+    # Bash removes each unquoted backslash-newline pair before it splits operators and words, so a pair can
+    # split or move a << operator, a delimiter word, another operator or a body line, and the scan does not
+    # model that joining. Any command that holds a pair and still holds a << once every pair is removed
+    # (regardless of quoting) therefore denies as unverifiable, with the same reason, without being
+    # scanned; every case in this block carries that reason's text. Where the label says "refused by
+    # design", bash parses and runs the command correctly (or, for hd-d76, warns and then runs it) and the
+    # deny is the rule's deliberate over-refusal; the other cases hide a heredoc bash does read. All but
+    # hd-d13 above are in _HD_BASH_EXCEPTIONS, each with the reason the oracle cannot corroborate it.
+    continuation = ("backslash-newline", "without line continuations")
+    hdexpect("(hd-d57) a << split by a backslash-newline pair denies as unverifiable",
+             "python3 - <\\\n<'PY'\nprint(1)\nPYX\necho after", "deny", has=continuation)
+    hdexpect("(hd-d58) a split << after an earlier closed adjacent heredoc denies as unverifiable",
+             "cat <<A\na\nA\ncat <\\\n<'PY'\nprint(1)\nPYX\necho after", "deny", has=continuation)
+    hdexpect("(hd-d59) a << split by two backslash-newline pairs denies as unverifiable",
+             "cat <\\\n\\\n<EOF\nx\necho after", "deny", has=continuation)
+    hdexpect("(hd-d60) a split delimiter with a mistyped terminator denies as unverifiable",
+             "cat <<\\\nEOF\nbody\nEOX\necho after", "deny", has=continuation)
+    hdexpect("(hd-d61) a pair that splits a $( inside double quotes hides a heredoc bash reads; it denies",
+             'x="$\\\n(cat <<EOF\nx\nEOF)"', "deny", has=continuation)
+    hdexpect("(hd-d62) a pair before a #-starting delimiter word denies (bash refuses the joined form)",
+             "cat <<\\\n#EOF\nx\n#EOF", "deny", has=continuation)
+    hdexpect("(hd-d63) a pair inside a single-quoted delimiter denies (bash keeps it, unterminated)",
+             "cat <<'E\\\nOF'\nbody\nEOF\necho after", "deny", has=continuation)
+    hdexpect("(hd-d64) a pair inside an ANSI-C delimiter denies (bash keeps it, unterminated)",
+             "cat <<$'E\\\nOF'\nbody\nEOF\necho after", "deny", has=continuation)
+    hdexpect("(hd-d65) a pair that splits &> turns a subscript into an opener bash reads; it denies",
+             "echo x &\\\n> f a[1<<2]=3\nbody\necho after", "deny", has=continuation)
+    hdexpect("(hd-d66) a pair that splits $' swallows an opener bash reads; it denies",
+             "echo $\\\n'a\\'' <<X\nbody\nXY\necho after", "deny", has=continuation)
+    hdexpect("(hd-d67) a pair inside a double-quoted delimiter denies, refused by design",
+             'cat <<"E\\\nOF"\nbody\nEOF\necho after', "deny", has=continuation)
+    hdexpect("(hd-d68) a pair at the end of the delimiter word denies, refused by design",
+             "cat <<EOF\\\nX\nbody\nEOFX\necho after", "deny", has=continuation)
+    hdexpect("(hd-d69) a pair between << and the delimiter denies, refused by design",
+             "cat <<\\\nEOF\nbody\nEOF\necho after", "deny", has=continuation)
+    hdexpect("(hd-d70) a pair inside the delimiter denies, refused by design",
+             "cat <<E\\\nOF\nbody\nEOF\necho after", "deny", has=continuation)
+    hdexpect("(hd-d71) a <<< split by pairs (a here-string, no opener) denies, refused by design",
+             "cat <<\\\n<EOF; cat <\\\n<\\\n<EOF", "deny", has=continuation)
+    hdexpect("(hd-d72) a body line continued onto the delimiter denies, refused by design",
+             "cat <<EOF\nbody\nEO\\\nF\necho after", "deny", has=continuation)
+    hdexpect("(hd-d73) a continued line inside a quoted body denies, refused by design",
+             "cat <<'EOF'\nfoo\\\nEOF\necho after", "deny", has=continuation)
+    hdexpect("(hd-d74) an even run of backslashes ending a body line denies, refused by design",
+             "cat <<EOF\nfoo\\\\\nEOF\necho after", "deny", has=continuation)
+    hdexpect("(hd-d75) a line continued after a closed opener denies, refused by design",
+             "cat <<EOF \\\nEOF\nbody <<NOT\nEOF", "deny", has=continuation)
+    hdexpect("(hd-d76) a continuation after a substitution whose body bash reads late denies, refused by design",
+             "cat $(cat <<B) \\\nx <<Q\nB\n| cat\n", "deny", has=continuation)
+    hdexpect("(hd-d77) a continuation between assignments beside a subscript shift denies, refused by design",
+             "a=1 \\\nb[1<<2]=3", "deny", has=continuation)
+    hdexpect("(hd-a48) a pair with no << after joining allows: no opener can form at a join",
+             "echo one \\\ntwo; echo 'a\\\nb'", "allow")
 
     # Near-miss bounds: within 2 edits AND fewer edits than the delimiter has characters, closest first.
     hdexpect("(hd-n1) a line 1 edit away is named", "cat <<END_OF\nx\nEND_OF ", "deny",
