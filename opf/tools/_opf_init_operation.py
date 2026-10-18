@@ -22,7 +22,7 @@ existing `.working` exactly as before, pinned by the seam self-tests. A resume i
 recorded plan: the adoption kind, the ancestral evidence commit, the admitted inventory and a
 caller-named operation id must each match, else it refuses (_resume_binding_or_refuse).
 
-The Architect's rulings it implements (PD-D2B-PR3-SCHEMA, decided 2026-09-24), by site:
+The maintainer's rulings it implements (PD-D2B-PR3-SCHEMA, decided 2026-09-24), by site:
 
   1. Bootstrap capability. The shared mutex is taken first (_opf_oplock.acquire_init_operation, a
      pre-store InitHolder: no control record, no lease); the plan and the directory journal are

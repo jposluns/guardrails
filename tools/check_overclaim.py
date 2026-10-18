@@ -304,7 +304,7 @@ NEGATOR = re.compile(r"\b(?:" + _NEGATOR_ALT + r")\b", re.IGNORECASE)
 # the clause leaves a different noun, subject, or conjunction between itself and the guarantee, so it does
 # NOT clear: "not only ... but also", "no other ...", "without exception ... guarantees", "no doubt ...
 # guarantees", and "requires no setup and guarantees" all still FLAG. This binds the open-ended affirmative-
-# negator idiom space by ADJACENCY rather than enumeration (Architect decision 2026-09-21); an adverb between
+# negator idiom space by ADJACENCY rather than enumeration (maintainer decision 2026-09-21); an adverb between
 # the negator and the guarantee ("does not always guarantee") is deliberately not cleared - the safe direction.
 NEG_AUX_TAIL = re.compile(
     r"^\s*(?:"
