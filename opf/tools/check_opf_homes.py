@@ -2183,9 +2183,14 @@ def boundary_self_test():
     vanished = set()
     inventories = {}
 
+    # The one journal read doctor makes: it lists the id reservation home of each kind and reads the
+    # reservation files directly inside one, for the reserved numbers alone.
+    allocation_homes = tuple(".working/journals/{}/allocations".format(kind)
+                             for kind in ("import", "ingest", "adoption", "layout", "preview", "record"))
+
     def listing(_fd, rel):
         listed.append(rel)
-        if rel == ".working/journals" or rel.startswith(".working/journals/"):
+        if (rel == ".working/journals" or rel.startswith(".working/journals/")) and rel not in allocation_homes:
             raise AssertionError("doctor read journals")
         if rel in unreadable or rel in files:
             raise store.StoreError("unreadable or wrong-type input: " + rel)
@@ -2218,6 +2223,9 @@ def boundary_self_test():
         return (copy.deepcopy(inventories[rel]), "ok") if rel in inventories else (None, "absent")
 
     def read_bytes(_fd, rel, rep):
+        if (rel == ".working/journals" or rel.startswith(".working/journals/")) and rel.rsplit("/", 1)[0] not in \
+                allocation_homes:
+            raise AssertionError("doctor read journal bytes outside the reservation files: " + rel)
         if rel in unreadable:
             rep.cant("unreadable " + rel)
             return None, "error"
@@ -2472,8 +2480,15 @@ def boundary_self_test():
           and len(report.checks) == 29)
     check("doctor-dispatches-evidence", lambda: report.checks.get("C-EVIDENCE-ENUM") == "FINDING")
     check("doctor-homes2-residual", lambda: all(r in report.residuals for r in doctor._HOMES2_RESIDUALS))
+    # Homes 2 lists nothing under journals/ but the id reservation home of each kind (the read_bytes mock
+    # refuses any journal byte read outside a reservation file), and a legacy store lists none of it.
     check("doctor-skips-journals", lambda: not contained(report, ".working/journals")
-          and not any(p == ".working/journals" or p.startswith(".working/journals/") for p in homes2_listed))
+          and not any((p == ".working/journals" or p.startswith(".working/journals/"))
+                      and p not in allocation_homes for p in homes2_listed))
+    check("doctor-lists-allocation-homes", lambda: sorted(
+        p for p in homes2_listed if p.startswith(".working/journals/")) == sorted(allocation_homes))
+    check("doctor-legacy-reads-no-reservations", lambda: not any(
+        p == ".working/journals" or p.startswith(".working/journals/") for p in legacy_listed))
     # Activated tooling alone widens nothing: a legacy manifest keeps the legacy roster and residuals.
     with active():
         activated_legacy, _ = dispatch(full_manifest)
