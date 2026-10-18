@@ -224,12 +224,14 @@ def _lines(path):
     own fstat must prove a regular file before anything is read; a directory, a FIFO or a
     device is never a register, and a socket, which that open cannot address at all, is
     named from a following stat taken only for the message). Raises CannotEvaluate naming
-    the file type for anything that is not a regular file, and naming the error for ANY
+    the file type for anything that is not a regular file (or naming the descriptor
+    instead, when the refusal's own close also fails: the close's OSError takes over, so
+    the message changes but the result stays CannotEvaluate), and naming the error for any
     other open, descriptor, path-value or decode failure, so no OSError or ValueError
     escapes to the caller as a traceback. ONLY the open's own ENOENT reads as an absent
-    register (no lines): the shared reader converts every failure after a successful open
-    (fstat, read, close) to CannotEvaluate, so a descriptor failure reporting ENOENT is
-    exit 2 for the caller, never a successful empty projection. The path is followed as
+    register (no lines): the shared reader converts every OSError after a successful open
+    (from fstat, read or close) to CannotEvaluate, so a descriptor failure reporting ENOENT
+    is exit 2 for the caller, never a successful empty projection. The path is followed as
     before, so a symlink to a regular register still reads; what it aliases is still
     type-checked."""
     try:
@@ -1225,13 +1227,19 @@ def cmd_project(a):
         print("project: refused, {}; the projection reads a regular file only, and its open "
               "never blocks on the file type".format(exc), file=sys.stderr)
         return 2
-    # Rows the projection cannot shape are refused like its read failures (exit 2 on
-    # stderr), never an escaped traceback and never a partial enumeration: a non-object
-    # row has no fields to project, and a non-string id would make the sorted enumeration
-    # below compare incomparable keys.
+    # Rows the projection cannot parse or shape are refused like its read failures (exit 2
+    # on stderr), never an escaped traceback and never a partial enumeration: a non-object
+    # row has no fields to project, a non-string id would make the sorted enumeration
+    # below compare incomparable keys, and a line nested too deeply for the JSON decoder
+    # (which raises RecursionError, not ValueError) is a parse failure like any other.
     for line in reg_lines:
         try:
             row = json.loads(line)
+        except RecursionError:
+            print("project: refused, a register line is nested too deeply for the JSON "
+                  "decoder (run check_mistakes_register.py); the projection never guesses "
+                  "at a row it cannot parse", file=sys.stderr)
+            return 2
         except ValueError:
             print("project: refused, a register line is not JSON (run "
                   "check_mistakes_register.py); the projection never guesses at a row it "
@@ -1658,10 +1666,10 @@ def self_test():
             pass
 
         # The bound exists only to turn a blocking regression into a failure instead of a
-        # hung suite: it is set far above any clean run of the bounded steps (the slowest
-        # is an append with its git subprocesses), it can fail a vector only by firing,
-        # never pass one, and a regression that blocks still fails within the bound. A
-        # loaded host can therefore at worst cause a false failure, never a false pass.
+        # hung suite: a step that exceeds the configured seconds (default 60) records a
+        # failure, so the alarm can fail a vector only by firing, never pass one, and a
+        # regression that blocks still fails within the bound. A loaded host can therefore
+        # at worst cause a false failure, never a false pass.
         def alarm_bounded(name, step, seconds=60):
             def on_alarm(signum, frame):
                 raise VectorAlarm("blocked for {} s".format(seconds))
@@ -1680,15 +1688,16 @@ def self_test():
         def project_rc(regpath):
             # stdout is kept (third element) so the regular-register vector can assert the
             # projected payload itself, not only the exit code; an escaped OSError,
-            # ValueError or SystemExit becomes a non-integer rc, which fails every rc
-            # assertion below, so an escape is always red, never a crashed suite
+            # ValueError, RecursionError or SystemExit becomes a non-integer rc, which
+            # fails every rc assertion below, so an escape is always red, never a crashed
+            # suite
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 try:
                     rc = cmd_project(argparse.Namespace(register=str(regpath)))
                 except SystemExit as exc:
                     rc = "an uncaught SystemExit: {!r}".format(exc.code)
-                except (OSError, ValueError) as exc:
+                except (OSError, ValueError, RecursionError) as exc:
                     rc = "an uncaught {}: {}".format(type(exc).__name__, exc)
             return rc, err.getvalue(), out.getvalue()
 
@@ -1961,8 +1970,10 @@ def self_test():
                                     absent_got[0], absent_got[1].strip(), absent_got[2]))
         # a register path whose OPEN fails with something other than ENOENT (here a path
         # component that is a file, ENOTDIR) is cannot-evaluate, never an escaped OSError
-        # and never an empty projection; the fixture reuses a regular file as the bogus
-        # directory component
+        # and never an empty projection; this refusal predates the descriptor-failure
+        # handling, so the vector is retained regression coverage (like the absent-register
+        # control, it also passes without that change); the fixture reuses a regular file
+        # as the bogus directory component
         enotdir_base = repo / "enotdir-proj.jsonl"
         enotdir_base.write_text("", encoding="utf-8")
         want_refusal("enotdir-project-refused",
@@ -1992,6 +2003,23 @@ def self_test():
                          alarm_bounded(row_name, lambda: project_rc(rowbad)),
                          row_naming)
             rowbad.unlink()
+        # a line nested too deeply for the JSON decoder (balanced or not) is refused with
+        # exit 2 naming the nesting and printing no payload, never an escaped
+        # RecursionError and never exit 1; the depth is far beyond what any plausible
+        # interpreter stack lets the decoder parse, so the decoder's recursion failure,
+        # not a shape check, decides both vectors
+        for deep_name, deep_body in (
+                ("deep-nesting-unbalanced-project-refused", "[" * 2000000 + "\n"),
+                ("deep-nesting-balanced-project-refused",
+                 "[" * 2000000 + "]" * 2000000 + "\n")):
+            deepbad = repo / "deepbad-proj.jsonl"
+            deepbad.write_text(deep_body, encoding="utf-8")
+            deep_got = alarm_bounded(deep_name, lambda: project_rc(deepbad))
+            want_refusal(deep_name, deep_got, ("nested too deeply",))
+            if deep_got is not None and deep_got[2] != "":
+                failures.append("{}: a refused projection must print nothing on stdout, "
+                                "got {!r}".format(deep_name, deep_got[2][:120]))
+            deepbad.unlink()
 
         # a tracked register with no computable merge-base is cannot-evaluate (exit 2), not a pass
         tracked = repo / "tracked.jsonl"
@@ -4562,8 +4590,10 @@ def self_test():
           "register still projects as no items), a projected register path that cannot be "
           "opened for another reason (a path through a non-directory) or is not a valid "
           "path value (an embedded NUL), each refused naming the read, never an escaped "
-          "error, a register line the projection cannot shape (a line that is not JSON, a "
-          "row that is not a JSON object, a row whose id is not a string, each refused "
+          "error, a register line the projection cannot parse or shape (a line that is "
+          "not JSON, a line nested too deeply for the JSON decoder, balanced and "
+          "unbalanced, with nothing printed on stdout, a row that is not a JSON object, a "
+          "row whose id is not a string, each refused "
           "with exit 2 naming the row, never a traceback and never exit 1), "
           "an undeclared register, an appender "
           "installed outside any git repository (subprocess vector, never a cwd-derived root, "

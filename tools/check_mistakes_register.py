@@ -195,9 +195,11 @@ def _read_regular(path, label):
     """Read one authority file as bytes: opened ONCE with READ_FLAGS, refused unless the OPENED
     descriptor is a regular file (fstat), and read from that same descriptor, so an entry
     swapped after an earlier inspection is judged as it was opened and a FIFO never blocks the
-    gate. Every failure raises CannotEvaluate naming label and path: a symlink, live or
-    dangling (ELOOP), an entry that cannot be opened (one gone since its inspection included),
-    a directory, a FIFO or any other non-regular file, and a read error."""
+    gate. Every open, type and read failure raises CannotEvaluate naming label and path: a
+    symlink, live or dangling (ELOOP), an entry that cannot be opened (one gone since its
+    inspection included), a directory, a FIFO or any other non-regular file, and a read
+    error; a failed close of the descriptor propagates as its own OSError (loud, never read
+    as absence)."""
     try:
         fd = os.open(str(path), READ_FLAGS)
     except OSError as exc:
@@ -241,17 +243,19 @@ def _read_following(path, label):
     on the file type: the open is NON-BLOCKING (a blocking read-only open of a FIFO waits
     for a writer), and the OPENED descriptor's own fstat must prove a regular file before
     anything is read (a read of a FIFO descriptor can wait forever). A non-regular file
-    raises CannotEvaluate naming LABEL and the file type. On Linux a socket (and a device
+    raises CannotEvaluate naming LABEL and the file type (unless the refusal's own close
+    also fails: the close's OSError takes over and the refusal names the descriptor
+    instead, still CannotEvaluate). On Linux a socket (and a device
     node no driver backs) cannot be opened as a file at all (ENXIO, before any descriptor
     exists), so that refusal names the type from a stat of the path that FOLLOWS it exactly
     as the open did (a symlink to a socket is named as a socket, not as the link), falling
     back to the entry's own lstat when the target cannot be inspected; either is a
     point-in-time read taken only for the message, never a proof about an opened
     descriptor. A failure of the OPEN ITSELF (absence included) propagates as the OSError
-    it is, so each caller keeps its own wording for an unopenable entry; a failure AFTER
-    the open succeeded (fstat, read, close) raises CannotEvaluate naming the descriptor
-    instead, so an errno such as ENOENT reported by a descriptor step can never read as a
-    confirmed-absent entry to a caller that treats a missing file as empty. O_NONBLOCK
+    it is, so each caller keeps its own wording for an unopenable entry; an OSError AFTER
+    the open succeeded (from fstat, read or close) raises CannotEvaluate naming the
+    descriptor instead, so an errno such as ENOENT reported by a descriptor step can never
+    read as a confirmed-absent entry to a caller that treats a missing file as empty. O_NONBLOCK
     stays set on the proven-regular descriptor: reads of a regular file behave the same
     with or without it."""
     try:
@@ -348,6 +352,11 @@ def verify_lines(lines, root=None, prefix="MR-"):
             continue
         except ValueError:
             problems.append("line {}: not a JSON object".format(n))
+            continue
+        except RecursionError:
+            # the decoder raises RecursionError, not ValueError, past its nesting limit;
+            # an unparseable row is a named violation, never an escaped traceback
+            problems.append("line {}: nested too deeply for the JSON decoder".format(n))
             continue
         if not isinstance(row, dict):
             problems.append("line {}: not a JSON object".format(n))
@@ -811,6 +820,22 @@ def self_test():
         dup_row = "{" + ", ".join(
             json.dumps(k) + ": " + json.dumps(v) for k, v in dup_fields) + "}"
         _case("duplicate-key-fails", [dup_row], False)
+        # a row nested too deeply for the JSON decoder (balanced or not) is a NAMED
+        # violation, never an escaped RecursionError that would crash the gate with a
+        # traceback instead of failing the register; the depth is far beyond what any
+        # plausible interpreter stack lets the decoder parse
+        for deep_name, deep_line in (
+                ("deep-nesting-unbalanced-named", "[" * 2000000),
+                ("deep-nesting-balanced-named", "[" * 2000000 + "]" * 2000000)):
+            try:
+                deep_problems = verify_lines([deep_line], prefix="MR-")
+            except RecursionError:
+                failures.append(deep_name + ": the decoder's RecursionError escaped "
+                                "instead of naming the row as a violation")
+            else:
+                if not any("nested too deeply" in p for p in deep_problems):
+                    failures.append("{}: want a violation naming the nesting, got {!r}"
+                                    .format(deep_name, deep_problems[:3]))
         # edit/delete/reorder of an anchored row fails via the anchor
         reg_dir = tmp / "r"
         reg_dir.mkdir()
@@ -1583,9 +1608,10 @@ def self_test():
         # the live leg's registry and register reads never block on the file type: a FIFO at
         # the declared register path, and a FIFO at the registry path itself, are each
         # refused (exit 2) with a diagnostic naming the file type; each vector runs under an
-        # alarm so a read that blocks fails instead of hanging the suite. The bound is set
-        # far above any clean run of these reads and can fail a vector only by firing,
-        # never pass one, so a loaded host can at worst cause a false failure.
+        # alarm so a read that blocks fails instead of hanging the suite. A read that
+        # exceeds the configured seconds (default 60) records a failure, so the alarm can
+        # fail a vector only by firing, never pass one, and a loaded host can at worst
+        # cause a false failure.
         class ReadAlarm(Exception):
             # deliberately NOT an OSError: the live leg's reads catch OSError, and the alarm
             # must escape them to fail the vector
@@ -1927,7 +1953,9 @@ def self_test():
             print("  - " + f)
         return 1
     print("SELF-TEST PASS: pure appends pass; a broken chain or sequence, a reused id, an illegal "
-          "transition, a non-object line, a bool or float seq, a duplicated key, an anchored "
+          "transition, a non-object line, a line nested too deeply for the JSON decoder "
+          "(balanced and unbalanced, a named violation, never an escaped RecursionError), "
+          "a bool or float seq, a duplicated key, an anchored "
           "rewrite or reorder, an unverifiable or absolute-path landed check_ref, a tracked "
           "rewrite with no computable merge-base, and a declared untracked register with no "
           "anchor all fail; a malformed, non-object or wrongly shaped anchor (a zero, negative, "
