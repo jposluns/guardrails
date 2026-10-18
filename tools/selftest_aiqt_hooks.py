@@ -2982,6 +2982,262 @@ def _raw_sequence_failures(count=20000, seed=20261015):
     return out
 
 
+# Commands for the continuation-join fast path: with no backslash-newline pair (backslashes, newlines and
+# quoting apart from each other) and with pairs at top level, inside quotes, substitutions, an expansion and
+# comments, including pairs the walk keeps.
+_JOIN_FAST_TEXTS = (
+    "", "git status", "a" + chr(92) + "b", "trailing" + chr(92), "echo 'a" + chr(92) + "b'", "one\ntwo",
+    'echo "a' + chr(92) + '"b"', "echo $(x)\n# c " + chr(92) + " x", "a" + chr(92) + "\r\nb",
+    "echo `a" + chr(92) + "`b`", "((true))", "a\n" + chr(92), chr(92) + "n",
+    "a" + chr(92) + "\nb", "a" + chr(92) + "\n", chr(92) + "\n", 'echo "a' + chr(92) + '\nb"',
+    "echo 'a" + chr(92) + "\nb'", "echo $'a" + chr(92) + "\nb'", "echo a # x " + chr(92) + "\necho b",
+    "echo $(a" + chr(92) + "\nb)", "echo `a" + chr(92) + "\nb`", "echo ${a" + chr(92) + "\nb}",
+    "cat <(a" + chr(92) + "\nb)", "a" + chr(92) * 2 + "\nb", "x " + chr(92) + "\n# y " + chr(92) + "\nz",
+    '"$(echo "' + chr(92) + '\n")"')
+_JOIN_FAST_ALPHABET = (chr(92), "\n", "'", '"', "$", "(", ")", "`", "#", "{", "}", " ", "a", "<", ";", "\r")
+
+
+def _join_fast_mismatches(join, texts):
+    """The texts on which join(text) differs from the full walk, or, for a text with no backslash-newline
+    pair, from (text, the identity index): [(text, got, want)], at most three."""
+    out = []
+    for text in texts:
+        want = aiqt_hooks._join_continuations_walk(text)
+        got = join(text)
+        if got != want or (chr(92) + "\n" not in text and got != (text, list(range(len(text) + 1)))):
+            out.append((text, got, want))
+            if len(out) == 3:
+                break
+    return out
+
+
+def _join_walk_calls(join, texts):
+    """[(text, calls)]: how many times join(text) called aiqt_hooks._join_continuations_walk, for each text,
+    counted by a wrapper installed on that module attribute for the run and restored after it."""
+    walk = aiqt_hooks._join_continuations_walk
+    calls = [0]
+
+    def counted(text):
+        calls[0] += 1
+        return walk(text)
+
+    out = []
+    aiqt_hooks._join_continuations_walk = counted
+    try:
+        for text in texts:
+            calls[0] = 0
+            join(text)
+            out.append((text, calls[0]))
+    finally:
+        aiqt_hooks._join_continuations_walk = walk
+    return out
+
+
+def _join_walk_misroutes(join, texts):
+    """The texts on which join(text) called the full walk other than once for a text with a backslash-newline
+    pair, or at all for a text without one: [(text, calls, wanted)], at most three."""
+    out = []
+    for text, calls in _join_walk_calls(join, texts):
+        wanted = 1 if chr(92) + "\n" in text else 0
+        if calls != wanted:
+            out.append((text, calls, wanted))
+            if len(out) == 3:
+                break
+    return out
+
+
+def _join_fast_failures(count=4000, seed=20261017):
+    """(dl-join-fast) _join_continuations, which skips the walk when a command holds no backslash-newline
+    pair, gives the same (joined, raw_index) as the full walk on _JOIN_FAST_TEXTS and `count` seeded random
+    texts over _JOIN_FAST_ALPHABET; the corpus must hold texts with and without a pair, and pairs the walk
+    removes and keeps. Three wrong fast paths (one skipping the walk on every command, one dropping the final
+    index entry, one deleting every pair with the identity index) must each be caught by the same comparison,
+    so it discriminates.
+    (dl-join-fast-walk) The fast path is taken: with the walk's calls counted (_join_walk_calls), the join
+    calls it exactly once for each of those texts with a pair and never for one without, since the equivalence
+    above holds just as well for a join that always walks. A join that always runs the walk must be caught by
+    the same count (dl-join-fast-walk-red), so the count discriminates."""
+    out = []
+    rng = random.Random(seed)
+    texts = list(_JOIN_FAST_TEXTS)
+    for _ in range(count):
+        texts.append("".join(rng.choice(_JOIN_FAST_ALPHABET) for _ in range(rng.randint(0, 12))))
+    pair = chr(92) + "\n"
+    with_pair = [text for text in texts if pair in text]
+    removed = sum(aiqt_hooks._join_continuations_walk(text)[0] != text for text in with_pair)
+    if not with_pair or len(with_pair) == len(texts) or not 0 < removed < len(with_pair):
+        out.append("(dl-join-fast-corpus) the corpus must hold texts with and without a pair and pairs the walk "
+                   "removes and keeps ({} of {} with a pair, {} changed)".format(len(with_pair), len(texts), removed))
+    for text, got, want in _join_fast_mismatches(aiqt_hooks._join_continuations, texts):
+        out.append("(dl-join-fast) _join_continuations({!r}) gave {!r}, the full walk {!r}".format(text, got, want))
+    for text, calls, wanted in _join_walk_misroutes(aiqt_hooks._join_continuations, texts):
+        out.append("(dl-join-fast-walk) _join_continuations({!r}) called the full walk {} time(s), want {}: once "
+                   "for a text with a backslash-newline pair, never for one without".format(text, calls, wanted))
+    if not _join_walk_misroutes(lambda text: aiqt_hooks._join_continuations_walk(text), texts):
+        out.append("(dl-join-fast-walk-red) a join that always runs the full walk passes the walk-call check")
+    walk = aiqt_hooks._join_continuations_walk
+    wrong = (
+        ("always", lambda text: (text, list(range(len(text) + 1)))),
+        ("short-index", lambda text: walk(text) if pair in text else (text, list(range(len(text))))),
+        ("replace", lambda text: (text.replace(pair, ""), list(range(len(text.replace(pair, "")) + 1)))),
+    )
+    for name, join in wrong:
+        if not _join_fast_mismatches(join, texts):
+            out.append("(dl-join-fast-red-{}) a wrong fast path passes the equivalence check".format(name))
+    return out
+
+
+# Commands for the lexer's skip_empty reading: runs of separators, blank lines, a comment and a quoted heredoc
+# opener (segments with no word and no redirect, some with a raw slice that is not blank), redirect-only
+# segments (kept), and commands the lexer refuses or, in partial mode, recovers in part.
+_LEX_SKIP_TEXTS = (
+    "", "((((true))))", "true;;", ";(;)", "a; ;b", "a &&\n\n b", "# c\ngit status", "> out; ;", "( > out )",
+    "cat <<'E'\nx\nE\n;", "<<'E'\nx\nE\n(a)", "a | (b) || c", "x 'y", ";;; 'y", "> o 'y", "a\n#c\n\n",
+    "(cd /x && git reset --hard)", "((true)) <(x)", "git stash pop; ;", "\t;\t")
+_LEX_SKIP_ALPHABET = ("(", ")", ";", "&", "|", " ", "\n", "a", ">", "'", "#", "x\t", "<<'E'\nE\n", "{", "$", "<(")
+
+
+def _lex_outcome(call):
+    """call()'s result, or the string "ValueError" when it raises ValueError."""
+    try:
+        return call()
+    except ValueError:
+        return "ValueError"
+
+
+def _lex_skip_want(text, partial):
+    """What _lex_command(text, partial, skip_empty=True) must give: the full lex with every record that has no
+    word and no redirect left out, with the same complete and in_progress flags in partial mode, or the same
+    ValueError."""
+    full = _lex_outcome(lambda: aiqt_hooks._lex_command(text, partial=partial))
+    if full == "ValueError":
+        return full
+    kept = [seg for seg in (full[0] if partial else full) if seg.argv or seg.redirects]
+    return (kept, full[1], full[2]) if partial else kept
+
+
+def _lex_skip_mismatches(lex, texts):
+    """The (text, partial) readings on which lex(text, partial) differs from _lex_skip_want, or on which the
+    _segments projection of it differs from _segments(text, skip_empty=True): [(text, partial, got, want)], at
+    most three."""
+    out = []
+    for text in texts:
+        for partial in (False, True):
+            want = _lex_skip_want(text, partial)
+            got = _lex_outcome(lambda: lex(text, partial))
+            if not partial and got == want:
+                want = "ValueError" if want == "ValueError" else [(seg.argv, seg.sep_after) for seg in want]
+                got = _lex_outcome(lambda: aiqt_hooks._segments(text, skip_empty=True))
+            if got != want:
+                out.append((text, partial, got, want))
+                if len(out) == 3:
+                    return out
+    return out
+
+
+def _lex_skip_failures(count=4000, seed=20261017):
+    """(dl-lex-skip) _lex_command with skip_empty=True gives the full lex with every record that has no word
+    and no redirect left out (the same ValueError, and the same complete and in_progress flags in partial mode),
+    and _segments with skip_empty=True gives its projection, on _LEX_SKIP_TEXTS and `count` seeded random texts
+    over _LEX_SKIP_ALPHABET. The corpus must hold a refused text, a partial recovery with a segment in progress,
+    a left-out record whose raw slice is not blank, and a kept record with a redirect and no word. Two wrong
+    readings (one leaving every record in, one leaving out a record with a redirect and no word) must each be
+    caught by the same comparison, so it discriminates.
+    (dl-lex-skip-taken) git_discard, its per-line reread (_uncertain_line_lossy), git_stash_ref,
+    bash_absolute_paths and branch_root (on a command the full lex refuses as well, so their partial reads
+    run) each build at least one record and none with no word and no redirect on commands with runs of
+    parentheses, counted with aiqt_hooks._Segment wrapped (_lex_skip_callers, _lex_records_built). The
+    default lex of such a command must build some under the same count (dl-lex-skip-taken-red), so the count
+    discriminates."""
+    out = []
+    rng = random.Random(seed)
+    texts = list(_LEX_SKIP_TEXTS)
+    for _ in range(count):
+        texts.append("".join(rng.choice(_LEX_SKIP_ALPHABET) for _ in range(rng.randint(0, 10))))
+    refused = in_progress = blank_left = kept_redirect = 0
+    for text in texts:
+        full = aiqt_hooks._lex_command(text, partial=True)  # partial mode returns, never raises
+        refused += _lex_outcome(lambda: aiqt_hooks._lex_command(text)) == "ValueError"
+        in_progress += full[2]
+        blank_left += any(not seg.argv and not seg.redirects and seg.raw.strip() for seg in full[0])
+        kept_redirect += any(not seg.argv and seg.redirects for seg in full[0])
+    if not (refused and in_progress and blank_left and kept_redirect):
+        out.append("(dl-lex-skip-corpus) the corpus must hold a refused text ({}), a partial recovery in progress "
+                   "({}), a left-out record with a raw slice that is not blank ({}) and a kept record with a "
+                   "redirect and no word ({})".format(refused, in_progress, blank_left, kept_redirect))
+    for text, partial, got, want in _lex_skip_mismatches(
+            lambda text, partial: aiqt_hooks._lex_command(text, partial=partial, skip_empty=True), texts):
+        out.append("(dl-lex-skip) _lex_command({!r}, partial={}, skip_empty=True) gave {!r}, want {!r}".format(
+            text, partial, got, want))
+    wrong = (
+        ("keep-all", lambda text, partial: aiqt_hooks._lex_command(text, partial=partial)),
+        ("words-only", lambda text, partial: _lex_words_only(aiqt_hooks._lex_command(text, partial=partial))),
+    )
+    for name, lex in wrong:
+        if not _lex_skip_mismatches(lex, texts):
+            out.append("(dl-lex-skip-red-{}) a wrong skip_empty reading passes the comparison".format(name))
+    for label, call, command in _lex_skip_callers():
+        built, empty = _lex_records_built(call)
+        if not built or empty:
+            out.append("(dl-lex-skip-taken) {} built {} record(s), {} of them with no word and no redirect, for "
+                       "{!r}; it must build at least one, and none with no word and no redirect".format(
+                           label, built, empty, command))
+    if not _lex_records_built(lambda: aiqt_hooks._lex_command("((((true))))"))[1]:
+        out.append("(dl-lex-skip-taken-red) the default lex builds no counted record with no word and no "
+                   "redirect, so the count cannot see a caller that does not skip them")
+    return out
+
+
+def _lex_skip_callers():
+    """(label, call, command) for each caller that lexes with skip_empty=True, on a command whose runs of
+    parentheses end segments with no word and no redirect; the handlers get no cwd and reach no git call."""
+    def handler(name, command):
+        data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command},
+                "session_id": "lex-skip-session", "tool_use_id": "lex-skip-call"}
+        return lambda: aiqt_hooks.HANDLERS[name](data)
+
+    nested = "((((true))))"
+    refused = nested + " <(x)"  # the full lex refuses the process substitution, so partial readers recover
+    reread = nested + " # git reset --hard"
+    return (
+        ("git_discard", handler("git_discard", nested), nested),
+        ("_uncertain_line_lossy", lambda: aiqt_hooks._uncertain_line_lossy(reread), reread),
+        ("git_stash_ref", handler("git_stash_ref", nested), nested),
+        ("bash_absolute_paths", handler("bash_absolute_paths", nested), nested),
+        ("bash_absolute_paths", handler("bash_absolute_paths", refused), refused),
+        ("branch_root", handler("branch_root", nested), nested),
+        ("branch_root", handler("branch_root", refused), refused),
+    )
+
+
+def _lex_words_only(result):
+    """A wrong skip_empty reading for _lex_skip_failures: it also leaves out a record with a redirect and no
+    word."""
+    if isinstance(result, tuple):
+        return ([seg for seg in result[0] if seg.argv], result[1], result[2])
+    return [seg for seg in result if seg.argv]
+
+
+def _lex_records_built(call):
+    """(built, empty): how many _Segment records call() built, and how many of them have no word and no
+    redirect, counted by a wrapper installed on aiqt_hooks._Segment for the call and restored after it."""
+    segment = aiqt_hooks._Segment
+    counts = [0, 0]
+
+    def counted(*fields):
+        counts[0] += 1
+        if not fields[0] and not fields[2]:
+            counts[1] += 1
+        return segment(*fields)
+
+    aiqt_hooks._Segment = counted
+    try:
+        call()
+    finally:
+        aiqt_hooks._Segment = segment
+    return counts[0], counts[1]
+
+
 def _repeat(unit, size, tail=""):
     return unit * max(1, (size - len(tail)) // len(unit)) + tail
 
@@ -5323,6 +5579,8 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_deadline_relation_failures())
     failures.extend(_deadline_shape_rerun_failures())
     failures.extend(_raw_sequence_failures())
+    failures.extend(_join_fast_failures())
+    failures.extend(_lex_skip_failures())
     child_tmp = tmp / "deadline"
     child_tmp.mkdir()
     code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import selftest_aiqt_hooks as m; "
