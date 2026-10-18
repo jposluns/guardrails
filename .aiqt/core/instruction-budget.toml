@@ -69,9 +69,10 @@
 #                        Raised 134241 -> 134499 on 2026-10-18 when security-seci-dependency-provenance
 #                        gained its sentence that a tag or branch name is a movable label, not pinned
 #                        provenance, so a fetched source is pinned to the commit or digest the label
-#                        resolved to, and a version mismatch in the fetched content is a changed entry
-#                        (secsup.7): rule files 117745 -> 118003 (+258 units); managed block 360 and file
-#                        headers 16136 unchanged. Recorded approval: the maintainer, 2026-10-18.
+#                        resolved to, and, where the fetched content declares its own version, a mismatch
+#                        with the version the label names is a changed entry (secsup.7): rule files
+#                        117745 -> 118003 (+258 units); managed block 360 and file headers 16136
+#                        unchanged. Recorded approval: the maintainer, 2026-10-18.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
