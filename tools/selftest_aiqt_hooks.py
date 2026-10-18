@@ -2479,6 +2479,137 @@ def _raw_sequence_failures(count=20000, seed=20261015):
     return out
 
 
+# The single regex the _RawMirrorConfig probe _RAW_PUSH_MIRRORCFG_RE replaced: the reference the differential
+# check holds the probe equal to, over short texts where its quadratic cost does not matter.
+_RAW_MIRROR_REFERENCE = (r"(?i)(?:^|[\s'\"])-c[\s'\"]+remote\.[^\s=]+\.mirror"
+                         r"|(?:^|[\s'\"])--config-env[=\s]['\"]*remote\.[^\s=]+\.mirror")
+# Words and joiners its corpus is drawn from: each option word, its case and near misses, the key and its
+# case, '.mirror' and its near misses, quotes, '=', blanks (a vertical tab and a no-break space among them),
+# whole quoted options, and the two letters the case-folded 'i' also matches (a dotless i, a dotted capital I).
+_RAW_MIRROR_WORDS = (
+    "-c", "-C", "-cx", "--config-env", "--CONFIG-ENV", "--config-envx", "remote.", "REMOTE.", "remote", "Remote",
+    ".mirror", ".MIRROR", ".mirro", "mirror", "remote..mirror", "remote.x.mirror", ".", "origin", "x", "-", "c",
+    "'", '"', "''", " ", "\t", "\n", "\x0b", "\u00a0", "=", "\u0131", "\u0130", "git", "push", "'-c'remote.",
+    "-c 'remote.", "--config-env='remote.")
+_RAW_MIRROR_JOINERS = ("", "", " ", "'", '"', "=", "\n")
+
+
+def _raw_mirror_first_only(text):
+    """A wrong mirror probe for _raw_mirror_failures: it reads only the first option."""
+    probe = aiqt_hooks._RAW_PUSH_MIRRORCFG_RE
+    found = probe.option.search(text)
+    if found is None:
+        return None
+    run = probe.key.match(text, found.end())
+    end = run.end() if run else found.end()
+    return probe.pattern.match(text, found.start()) if probe.mirror.search(text, found.end() + 1, end) else None
+
+
+def _raw_mirror_mismatches(search, texts, reference):
+    """The texts on which search(text) gives another span and text than the reference regex: at most three."""
+    out = []
+    for text in texts:
+        want, got = reference.search(text), search(text)
+        if (want and (want.span(), want.group())) != (got and (got.span(), got.group())):
+            out.append(text)
+            if len(out) == 3:
+                break
+    return out
+
+
+def _raw_mirror_failures(count=20000, seed=20261018):
+    """(dl-linear-mirror) _RAW_PUSH_MIRRORCFG_RE is a _RawMirrorConfig probe of the regex it replaced and
+    returns the match that regex returns (the same span and text, or None), over every corpus word alone and
+    `count` seeded random joins of one to twelve words. The corpus must give the regex both outcomes and hold
+    texts whose match starts at a later option than the first one. Two wrong probes (one reading only the
+    first option, one reading each key run on to the end of the text) must each be caught by the same
+    comparison, so it discriminates."""
+    out = []
+    probe = aiqt_hooks._RAW_PUSH_MIRRORCFG_RE
+    if not isinstance(probe, getattr(aiqt_hooks, "_RawMirrorConfig", ())):
+        return ["(dl-linear-mirror-type) _RAW_PUSH_MIRRORCFG_RE is not a _RawMirrorConfig probe"]
+    reference = re.compile(_RAW_MIRROR_REFERENCE)
+    if probe.pattern.pattern != _RAW_MIRROR_REFERENCE:
+        out.append("(dl-linear-mirror-pattern) the probe's regex is {!r}, not the regex it replaced".format(
+            probe.pattern.pattern))
+    rng = random.Random(seed)
+    texts = list(_RAW_MIRROR_WORDS)
+    for _ in range(count):
+        text = rng.choice(_RAW_MIRROR_WORDS)
+        for _ in range(rng.randint(0, 11)):
+            text += rng.choice(_RAW_MIRROR_JOINERS) + rng.choice(_RAW_MIRROR_WORDS)
+        texts.append(text)
+    hits = later = 0
+    for text in texts:
+        want = reference.search(text)
+        if want:
+            hits += 1
+            later += want.start() != probe.option.search(text).start()
+    if not (0 < hits < len(texts) and later):
+        out.append("(dl-linear-mirror-corpus) the corpus must give the regex both outcomes ({} of {} texts match) "
+                   "and hold a match that starts at a later option ({})".format(hits, len(texts), later))
+    for text in _raw_mirror_mismatches(probe.search, texts, reference):
+        out.append("(dl-linear-mirror) gives {!r} on {!r}, the regex it replaced {!r}".format(
+            probe.search(text), text, reference.search(text)))
+    wrong = (
+        ("first-only", _raw_mirror_first_only),
+        ("whole-text", aiqt_hooks._RawMirrorConfig(
+            _RAW_MIRROR_REFERENCE, probe.option.pattern, r"(?s).+", probe.mirror.pattern).search),
+    )
+    for name, search in wrong:
+        if not _raw_mirror_mismatches(search, texts, reference):
+            out.append("(dl-linear-mirror-red-{}) a wrong mirror probe passes the comparison".format(name))
+    return out
+
+
+# Texts for the in-place walk past a '<(' or '>(' process substitution in _raw_push_segments: nested quotes,
+# substitutions, expansions and escapes inside it, and forms left unterminated.
+_PROCSUBST_TEXTS = (
+    "<(x)", ">(a 'b)' c)", "<(a $(b) \"c)\" `d)`)", "<(a", "<(a " + chr(92) + ")", "<(${x)})", "<((x))",
+    "<(a)b<(c)", "<(a 'b", "<(a \"$(b)", ">(`)", "<(a" + chr(92))
+_PROCSUBST_ALPHABET = ("(", ")", "<(", "'", '"', "`", "$(", "${", "}", chr(92), " ", "x", "\n", ";")
+
+
+def _procsubst_skip_outcome(call):
+    """call()'s result, or ("ValueError", its message) when it raises ValueError."""
+    try:
+        return call()
+    except ValueError as exc:
+        return ("ValueError", str(exc))
+
+
+def _procsubst_skip_failures(count=20000, seed=20261018):
+    """(dl-procsubst-skip) _raw_push_segments walks past a '<(' or '>(' process substitution in place with
+    _skip_quoting_from(text, i + 1, n, ["paren"]); at each '(' of _PROCSUBST_TEXTS and of `count` seeded random
+    texts over _PROCSUBST_ALPHABET that gives the index _skip_quoting gives on the copy "$" + text[i:] it
+    walked before (mapped back to text), or the same ValueError. The corpus must hold both outcomes. Copying
+    the rest of the command for each one cost time quadratic in the length of a command that holds many."""
+    if not callable(getattr(aiqt_hooks, "_skip_quoting_from", None)):
+        return ["(dl-procsubst-skip-missing) aiqt_hooks has no _skip_quoting_from to walk a substitution in place"]
+    out = []
+    rng = random.Random(seed)
+    texts = list(_PROCSUBST_TEXTS)
+    for _ in range(count):
+        texts.append("".join(rng.choice(_PROCSUBST_ALPHABET) for _ in range(rng.randint(1, 12))))
+    closed = raised = 0
+    for text in texts:
+        n = len(text)
+        for i in range(n):
+            if text[i] != "(":
+                continue
+            want = _procsubst_skip_outcome(lambda: aiqt_hooks._skip_quoting("$" + text[i:], 0, n - i + 1) - 1 + i)
+            got = _procsubst_skip_outcome(lambda: aiqt_hooks._skip_quoting_from(text, i + 1, n, ["paren"]))
+            closed += isinstance(want, int)
+            raised += not isinstance(want, int)
+            if got != want and len(out) < 3:
+                out.append("(dl-procsubst-skip) the in-place walk from {!r} at {} gave {!r}, the copy {!r}".format(
+                    text, i, got, want))
+    if not (closed and raised):
+        out.append("(dl-procsubst-skip-corpus) the corpus must hold a substitution that closes ({}) and one that "
+                   "does not ({})".format(closed, raised))
+    return out
+
+
 # Commands for the continuation-join fast path: with no backslash-newline pair (backslashes, newlines and
 # quoting apart from each other) and with pairs at top level, inside quotes, substitutions, an expansion and
 # comments, including pairs the walk keeps.
@@ -2766,6 +2897,12 @@ _DEADLINE_SHAPES = {
     "subst_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, '; git commit -m "$(id)"')}),
     "breadth_push_after_unbal": lambda n, base: ("Bash", {"command": _repeat(
         "git add x ", n, "; git commit -a -m x; git push origin '")}),
+    # One key run of quoted '-c' mirror options with no '.mirror' and no blank, which the single
+    # mirror-configuration regex read in time quadratic in its length (0.9 to 1.6 s at 64 KB and 6.8 to
+    # 11.2 s at 180 KB for the push backstop alone, in-process on a 24-core host, 2026-10-18), then a
+    # force-push to a protected branch.
+    "mirror_cfg_run_after": lambda n, base: ("Bash", {"command": "git push " + _repeat(
+        "'-c'remote.", n - 9, "; git push --force origin main")}),
     "write_content": lambda n, base: ("Write", {"file_path": base + "/notes.txt", "content": "a" * n}),
     "write_secretish": lambda n, base: ("Write", {"file_path": base + "/notes.txt", "content": _repeat("a=", n)}),
     "write_deep_path": lambda n, base: ("Write", {"file_path": base + _repeat("/a", n - len(base)),
@@ -2793,7 +2930,7 @@ _DEADLINE_CASES = {
     "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
     "orch_untracked_wait_loop": ("git_words", "nest_cmdsubst"),
     "orch_yield_tool": ("wakeup_long",),
-    "protected_line": ("git_words_unbal_dq", "push_force_after"),
+    "protected_line": ("git_words_unbal_dq", "push_force_after", "mirror_cfg_run_after"),
     "review_dispatch_pin": ("git_add_parsed", "nest_cmdsubst"),
     "secrets_shift_left": ("cd_git_fetch_unbal", "nest_cmdsubst", "write_secretish"),
     "write_scope_guard": ("write_content", "write_deep_path"),
@@ -2802,7 +2939,7 @@ _DEADLINE_CASES = {
 _DEADLINE_DENY_CASES = frozenset((
     ("commit_msg_subst", "subst_after"), ("diff_source_pretool", "diff_after"),
     ("gate_weakening", "noverify_after"), ("git_explicit_binding", "breadth_push_after_unbal"),
-    ("protected_line", "push_force_after")))
+    ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
 # CPU time, plus that of the child processes it reaped). Over two runs on a 24-core host with Python
@@ -5067,6 +5204,8 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_deadline_relation_failures())
     failures.extend(_deadline_shape_rerun_failures())
     failures.extend(_raw_sequence_failures())
+    failures.extend(_raw_mirror_failures())
+    failures.extend(_procsubst_skip_failures())
     failures.extend(_join_fast_failures())
     failures.extend(_lex_skip_failures())
     child_tmp = tmp / "deadline"
