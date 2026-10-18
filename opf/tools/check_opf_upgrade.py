@@ -117,6 +117,12 @@ VECTOR ROSTER (U1-U29, P1):
       manifest is re-spelled with the escapes and keeps the path's value, the index stays byte-identical,
       doctor VALID; the same manifest with a literal separator in a comment refuses exit 2, tree
       unchanged. Fails without the precondition's acceptance of that earlier spelling.
+  U29b the store-read cap precondition: re-spelling grows each literal separator from three bytes to
+      six, so with a small cap patched in an isolated child, a legacy separator-bearing manifest whose
+      published emission would exceed the cap refuses exit 2 BEFORE any write, naming the store-read
+      cap, the tree byte-for-byte unchanged; the same frozen fixture upgrades under a roomy cap and at
+      a cap exactly equal to the published size (the reader's own boundary: only a LARGER file is
+      refused), each doctor-VALID. Fails without the pre-publication size check.
   P1  a seeded migration property test: 12 generated genuine-VALID 1.0.0 variants (module subset with the
       G2 coupling, 0-2 records per migrated type with matching high-waters, DECISIONS.md declared/omitted,
       the decision_support key present/absent) each upgrade to a doctor-VALID 1.2.0 store with every index
@@ -899,6 +905,52 @@ def _suite_isolated():
             check("U29 a literal separator in a comment refuses (exit 2)", rc29c == EXIT_ERROR)
             check("U29 the comment refusal names the canonical form, tree unchanged",
                   "canonical new-document form" in out29c and _snapshot(s29c) == before29c)
+
+            # U29b) The store-read cap precondition: escaping grows each literal separator from three
+            # bytes to six, so a legacy manifest near _opf_store.MAX_STORE_READ_BYTES could be re-emitted
+            # past the cap and published as a manifest the resolver then refuses. The upgrade sizes every
+            # file it would publish against the cap FIRST and refuses before any write. Exercised with a
+            # small cap patched in an isolated child: a roomy-cap control measures the published manifest
+            # size; the same fixture refuses under a cap one byte smaller, tree byte-for-byte unchanged,
+            # and still upgrades at a cap exactly equal to that size (the reader accepts a file of exactly
+            # the cap's size, so the refusal boundary matches the reader's own comparison).
+            sep_path_29b = "n" + chr(0x2028) * 40 + chr(0x2029) * 40 + ".md"
+            man29b = _FIX_MANIFEST.replace(
+                '[unmanaged]\npaths = []\n', '[unmanaged]\npaths = ["{}"]\n'.format(sep_path_29b), 1)
+
+            def capped_upgrade(store, cap):
+                return flipped_upgrade(store, "opf._opf_store.MAX_STORE_READ_BYTES = {}\n".format(cap))
+
+            def build_29b(name):
+                s = base / name
+                s.mkdir()
+                return s, build_store(s, manifest=man29b)
+
+            s29b_ok, mach29b_ok = build_29b("u29b-cap-control")
+            rc29b_ok, _out29b_ok = capped_upgrade(s29b_ok, 1 << 16)
+            published29b = (mach29b_ok / _opf_store.MANIFEST_NAME).read_bytes()
+            check("U29b roomy-cap control upgrades (exit 0)", rc29b_ok == EXIT_OK)
+            check("U29b control re-spelled the manifest with the escapes",
+                  b"\\u2028" in published29b and chr(0x2028).encode("utf-8") not in published29b)
+            s29b, mach29b = build_29b("u29b-cap-refusal")
+            orig29b = (mach29b / _opf_store.MANIFEST_NAME).read_bytes()
+            check("U29b the refusing cap still admits every pre-upgrade read",
+                  len(orig29b) <= len(published29b) - 1)
+            before29b = _snapshot(s29b)
+            rc29b, out29b = capped_upgrade(s29b, len(published29b) - 1)
+            check("U29b a publication past the cap refuses (exit 2) naming the store-read cap",
+                  rc29b == EXIT_ERROR and "store-read cap" in out29b
+                  and "would be {} bytes".format(len(published29b)) in out29b)
+            check("U29b the cap refusal leaves the tree byte-for-byte unchanged",
+                  _snapshot(s29b) == before29b)
+            s29b_at, mach29b_at = build_29b("u29b-cap-exact")
+            rc29b_at, _out29b_at = capped_upgrade(s29b_at, len(published29b))
+            check("U29b a publication of exactly the cap's size upgrades (exit 0)", rc29b_at == EXIT_OK)
+            check("U29b the at-cap manifest equals the control's published bytes",
+                  (mach29b_at / _opf_store.MANIFEST_NAME).read_bytes() == published29b)
+            drc29b, dout29b = doctor(s29b_at)
+            check("U29b the at-cap upgraded store is doctor-VALID",
+                  drc29b == EXIT_OK and "integrity: VALID" in dout29b)
 
             # U3) governance=true, MA+MD rows, empty MA/MD indexes, MA/MD counters.
             s3 = base / "u3-gov"

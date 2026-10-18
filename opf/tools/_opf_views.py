@@ -4120,6 +4120,59 @@ def self_test():
         finally:
             globals()["_WRITE_GATE_COMPOSED"] = _saved_flag
 
+        # --- one-time re-spelling of the DECISIONS.toml projection (spec 5.7/10.5): the emitter now writes
+        # U+2028/U+2029 as escapes, with NO generator-version bump, so a projection an EARLIER tool rendered
+        # from a record holding either character differs from the current render in exactly that spelling.
+        # The byte-level drift gate is NOT loosened: the old-spelled view reads as C-VIEW-DRIFT until one
+        # re-render re-spells it, and a projection over records holding neither character is byte-identical
+        # across a re-render, so a store without these characters sees no drift.
+        import _opf_check as _sep_check
+        _sep_decision = {"id": "MD-1", "type": "maintainer_decision", "status": "recorded",
+                         "title": "a ruling",
+                         "decision": "do" + chr(0x2028) + "this" + chr(0x2029) + "that",
+                         "created_at": "2026-06-01T00:00:00Z", "updated_at": "2026-06-01T00:00:00Z",
+                         "actor": {"kind": "maintainer"}}
+
+        def _add_sep_decision(root, bi):
+            import _opf_emit
+            mdir = root / WORKING_DIRNAME / "toml"
+            (mdir / "maintainer_decision.index.toml").write_text(
+                _opf_emit.emit({"schema": 1, "record": [_sep_decision]}), encoding="utf-8")
+            (mdir / "counters.toml").write_text(
+                _opf_emit.emit({"schema": 1, "counters": {
+                    "BI": 2, "DN": 1, "WL": 4, "FN": 0, "PD": 0, "AD": 0,
+                    "BL": 0, "HO": 1, "RF": 0, "CN": 0, "MD": 1, "PP": 0}}), encoding="utf-8")
+
+        _sep_root, _sep_obs = _gate_store(mutate=_add_sep_decision)
+        _sep_view = _sep_root / WORKING_DIRNAME / "DECISIONS.toml"
+        check("sep-respell-write-ok",
+              render(["--root", str(_sep_root), "--write"], observations=_sep_obs) == EXIT_OK)
+        _sep_now = _sep_view.read_bytes()
+        check("sep-respell-current-render-escapes",
+              b"\\u2028" in _sep_now and b"\\u2029" in _sep_now
+              and not any(ch.encode("utf-8") in _sep_now for ch in (chr(0x2028), chr(0x2029))))
+        _sep_old = _opf_emit.prior_separator_spelling(_sep_now.decode("utf-8")).encode("utf-8")
+        check("sep-respell-prior-spelling-differs", _sep_old != _sep_now)
+        _sep_view.write_bytes(_sep_old)
+        _sep_post = _sep_check.validate_store(
+            _opf_store.resolve_store(Path(str(_sep_root))), observations=_sep_obs)
+        check("sep-respell-old-view-is-view-drift",
+              _sep_post.checks.get("C-VIEW-DRIFT") == "FINDING"
+              and any("DECISIONS.toml" in m for m in _sep_post.by_check.get("C-VIEW-DRIFT", [])))
+        check("sep-respell-old-view-check-reports-drift",
+              render(["--root", str(_sep_root), "--check"]) == EXIT_DRIFT)
+        check("sep-respell-one-rerender-clears",
+              render(["--root", str(_sep_root), "--write"], observations=_sep_obs) == EXIT_OK
+              and _sep_view.read_bytes() == _sep_now)
+        check("sep-respell-check-clean-after-rerender",
+              render(["--root", str(_sep_root), "--check"]) == EXIT_OK)
+        # Control: a projection over records holding neither character is byte-identical across a re-render.
+        _plain_view = gvroot / WORKING_DIRNAME / "DECISIONS.toml"
+        _plain_before = _plain_view.read_bytes()
+        check("sep-plain-rerender-byte-identical",
+              render(["--root", str(gvroot), "--write"], observations=gvobs) == EXIT_OK
+              and _plain_view.read_bytes() == _plain_before)
+
         # --- VECTOR A (change-carries-check): EXERCISE the Phase-C owned-miss ROLLBACK + corrected diagnostic.
         # The natural PR-C vectors above never reach owned-miss (a source-sound store regenerates cleanly and
         # Phase C witnesses 1->0), so this seam monkeypatches _opf_check.validate_store to FORCE a PRE=valid /

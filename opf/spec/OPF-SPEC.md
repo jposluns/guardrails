@@ -604,7 +604,14 @@ carrying comments or non-canonical formatting. The canonical serialization write
 SEPARATOR and U+2029 PARAGRAPH SEPARATOR inside a string as the escapes `\u2028` and `\u2029`; a
 file that differs from it only by holding either character literally inside a basic string, as files
 written by earlier tooling do, still passes, reads back as the same values, and is re-spelled with
-the escapes by its next write. A hand edit or hand merge that leaves canonical bytes
+the escapes by its next write. A write that would grow a store file past the store reader's size cap
+refuses instead, before anything is written, so an upgrade or record operation never rewrites a
+readable store into one the reader refuses. The `DECISIONS.toml` machine projection (section 10.5)
+takes the same re-spelling without a generator-version bump: a projection an earlier tool rendered
+from a record holding either character differs from the current render in exactly that spelling, and
+the byte-level view-drift gate reports it as drifted until one re-render re-spells it. A projection
+over records holding neither character renders byte-identically, so a store without these characters
+sees no drift. A hand edit or hand merge that leaves canonical bytes
 passes it undetected, so this integration-base rule is a separate requirement that the precondition
 does not enforce. A merge that resolves without a conflict yet duplicates an ID is caught by `opf
 doctor`, which checks store-wide ID uniqueness and that every ID lies within its counter (section
