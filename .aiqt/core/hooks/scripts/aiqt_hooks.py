@@ -15505,6 +15505,10 @@ _CITECHK_EXPANDED_BOTH = ("its delimiter is unquoted, so bash expands parameters
 _CITECHK_SPLIT_UNREAD = ("a backslash-newline splits a here-document delimiter in this command, so the "
                          "command is scanned only as written and this file, which a lexing of it names, was "
                          "not read: no citation in it was checked")
+# Why standard input (-F -) is named as not read where it is not the command's own here-document: a pipe,
+# a file or descriptor redirection, or a redirection of the command's group supplies it, and this check
+# reads only the command's text and the files it names.
+_CITECHK_STDIN_UNSEEN = "it is read from standard input, which this check cannot see"
 # What _citechk_substituted_ops names where a substitution, quote, comment or delimiter word is still open at
 # the string's closing quote: bash reads on through that quote, so the lexer's reading of what follows it is
 # not bash's.
@@ -16066,9 +16070,11 @@ def _citechk_commands(command, cwd, deadline):
     evaluated. This holds with or without a backslash-newline in the command, which is what the walk alone
     needs before it runs, except where a backslash-newline splits a here-document delimiter: that command
     is scanned as one that does not lex, as above, before the lexings are compared, and each message or
-    body file the first lexing that lexed names is named as not read (_CITECHK_SPLIT_UNREAD), never read or
-    judged, since that lexing's reading of the command is not bash's; so a citation only such a file holds
-    is not judged, but the note and the row say the file was not read. A command is found after any reserved words
+    body file a lexing that lexed names is named as not read (_CITECHK_SPLIT_UNREAD; once, however many
+    lexings or options name it), never read or judged, since no lexing's reading of the command is bash's,
+    and standard input that -F - names there is named as not read too (_CITECHK_STDIN_UNSEEN) unless it is
+    the command's own here-document, whose text the scan as written already reads; so a citation only such
+    a file or stream holds is not judged, but the note and the row say it was not read. A command is found after any reserved words
     that begin its segment (_CITECHK_LEADING), so one
     inside a brace group, after '!', 'if' or 'then', or after time -- or coproc is read; a redirection of
     the group as a whole (after its '}') is not the command's own. A message or body file resolves against
@@ -16091,16 +16097,25 @@ def _citechk_commands(command, cwd, deadline):
     parse, why = _citechk_split_delim(command, readings[0][2])
     if parse == "raw":
         out = _citechk_as_written(command, cwd, "raw", _CITECHK_EXPANDED)
-        # The scan as written cannot read a message or body file, so each one the first lexing that lexed
-        # names is kept as a not-read entry (never evaluated: that lexing's reading of the command is not
-        # bash's), on the scan's item where the kind search found one, else as the lexed command's own item.
-        for item in _citechk_items(readings[0][0], readings[0][1], cwd, "raw", deadline, evaluate=False):
-            if not item["unread"]:
-                continue
-            if out:
-                out[0]["unread"] += item["unread"]
-            else:
-                out.append(item)
+        # The scan as written cannot read a message or body file, so each one a lexing that lexed names is
+        # kept as a not-read entry (never evaluated: no lexing's reading of the command is bash's), named
+        # once however many lexings or options name it, on the scan's item where the kind search found
+        # one, else as the lexed command's own item.
+        found = []  # the entries already named, so a later lexing or option adds only entries new to it
+        for segments, heredocs, _spans in readings:
+            for item in _citechk_items(segments, heredocs, cwd, "raw", deadline, evaluate=False):
+                unread = []
+                for entry in item["unread"]:
+                    if entry not in found:
+                        found.append(entry)
+                        unread.append(entry)
+                if not unread:
+                    continue
+                if out:
+                    out[0]["unread"] += unread
+                else:
+                    item["unread"] = unread
+                    out.append(item)
         return out
     differ = len(readings) == 1 or _citechk_shape(*readings[0][:2]) != _citechk_shape(*readings[1][:2])
     if differ:
@@ -16134,8 +16149,10 @@ def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True):
     heredocs _lex_command gave with them), each a dict as _citechk_commands describes, with parse, and with
     a read attempted of each message and body file it names (one that cannot be read named in unread).
     With evaluate False (the split-delimiter fallback, _citechk_commands), nothing is read: each message or
-    body file the lexing names is named in unread with _CITECHK_SPLIT_UNREAD instead, and an inline value
-    or standard input, whose text the scan of the command as written already reads, earns no entry."""
+    body file the lexing names is named in unread with _CITECHK_SPLIT_UNREAD instead, standard input is
+    named with _CITECHK_STDIN_UNSEEN (taken once, at the first -F -, as when it is evaluated) unless it is
+    the command's own here-document, whose text the scan of the command as written already reads, and an
+    inline value, whose text that scan also reads, earns no entry."""
     stdin = {}  # segment index: (redirects before it, body) of its last here-document
     for index, before, body in heredocs:
         stdin[index] = before, body
@@ -16185,7 +16202,15 @@ def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True):
             if name in ("-B", "--base") and kind != "git-commit":
                 item["base"] = value
             elif not evaluate:
-                if name in file_names and value != "-":
+                if name not in file_names:
+                    continue
+                if value == "-":
+                    if taken:
+                        continue
+                    taken = True
+                    if here is None:
+                        item["unread"].append(("{} -".format(name), _CITECHK_STDIN_UNSEEN))
+                else:
                     item["unread"].append(("{} {}".format(name, _citechk_short(value)), _CITECHK_SPLIT_UNREAD))
             elif name in inline_names:
                 item["texts"].append(("{} value".format(name), value))
@@ -16196,8 +16221,7 @@ def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True):
                 if here is not None:
                     item["texts"].append(("here-document", here[1]))
                 else:
-                    item["unread"].append(("{} -".format(name), "it is read from standard input, which this "
-                                           "check cannot see"))
+                    item["unread"].append(("{} -".format(name), _CITECHK_STDIN_UNSEEN))
             elif name in file_names:
                 label = "{} {}".format(name, _citechk_short(value))
                 if not os.path.isabs(value) and repo is None:

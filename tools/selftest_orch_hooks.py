@@ -3993,16 +3993,37 @@ def _citecheck_cases(tmp):
           [("tools/u.py:2", "covered"), ("tools/u.py:4-5", "covered"), ("tools/u.py:2-3", "stale"),
            ("tools/u.py:1-5", "stale")])
     # A piece covers only lines the file still has: after the file shrinks, a recorded line at the new last
-    # line still covers, one just past it does not, and neither does the recorded span's last line.
+    # line still covers, one just past it does not, and neither does the recorded span's last line. That
+    # last line was recorded empty, so its digest equals that of the bytes past the new end (both b"\n"):
+    # only the end bound, not a digest mismatch, keeps it stale.
     v_py = tools_dir / "v.py"
-    v_py.write_text("v1\nv2\nv3\nv4\nv5\nv6\n", encoding="utf-8")
+    v_py.write_text("v1\nv2\nv3\nv4\nv5\n\n", encoding="utf-8")
     read("shrunk", 1, 6, path=v_py)
     v_py.write_text("v1\nV2\nv3\nv4\n", encoding="utf-8")
-    check("citeledger/piece-end-bound",
-          classes("git commit -m 'tools/v.py:1 tools/v.py:3-4 tools/v.py:2 tools/v.py:5 tools/v.py:6'",
-                  "shrunk"),
+    shrunk_cites = "git commit -m 'tools/v.py:1 tools/v.py:3-4 tools/v.py:2 tools/v.py:5 tools/v.py:6'"
+    check("citeledger/piece-end-bound", classes(shrunk_cites, "shrunk"),
           [("tools/v.py:1", "covered"), ("tools/v.py:3-4", "covered"), ("tools/v.py:2", "stale"),
            ("tools/v.py:5", "stale"), ("tools/v.py:6", "stale")])
+    # The end bound decides that vector: under a variant of _citechk_fresh without it, the recorded empty
+    # line 6 digests to the bytes past the new end, so the same citation reads covered (line 5, whose
+    # recorded text was not empty, stays stale through its digest alone).
+    pieces_variants = tmp / "citecheck-pieces-variants"
+    pieces_variants.mkdir()
+    no_end_bound = _hook_variant(pieces_variants, "_citechk_fresh",
+                                 _hook_functions("_citechk_fresh").get("_citechk_fresh", ""),
+                                 "if to <= held and _cite_sha256", "if _cite_sha256")
+    if no_end_bound is None:
+        unbounded_end = "no variant: the end bound does not occur exactly once in _citechk_fresh"
+    else:
+        original = aiqt_hooks._citechk_fresh
+        aiqt_hooks._citechk_fresh = no_end_bound
+        try:
+            unbounded_end = classes(shrunk_cites, "shrunk")
+        finally:
+            aiqt_hooks._citechk_fresh = original
+    check("citeledger/piece-end-bound-variant", unbounded_end,
+          [("tools/v.py:1", "covered"), ("tools/v.py:3-4", "covered"), ("tools/v.py:2", "stale"),
+           ("tools/v.py:5", "stale"), ("tools/v.py:6", "covered")])
     # Past _CITE_PIECES_MAX lines a piece is a run of ceil(n / _CITE_PIECES_MAX) consecutive lines (the cap
     # cut to 2 here, so a five-line read holds runs 1-3 and 4-5): an edit inside a run stales every cited
     # line of that run, and the other run still covers its lines.
@@ -4031,8 +4052,13 @@ def _citecheck_cases(tmp):
           ([("tools/a.py:12", "covered")], [("tools/a.py:12", "stale")]))
     # A row's pieces field is used only where it is well formed: per-line pieces and one piece for the whole
     # span cover (the span digest matches nothing), while a piece count over the span's lines, a length that
-    # is not whole digests, and uppercase hex are each ignored, so the row is judged whole and the citation
-    # is stale. The count is tried just inside (1), at (3, the span's lines) and just outside (4) its bound.
+    # is not whole digests, and uppercase hex each leave the row judged whole, so the citation is stale. The
+    # count is tried just inside (1), at (3, the span's lines) and just outside (4) its bound. These vectors
+    # pin the judged-whole outcome, not each validation alone: the ragged and uppercase digests could never
+    # match any line's digest either, and the over-count row also fails the tiling re-derivation. The count
+    # ceiling and the tiling are each shown to reject on their own just below; the hex and whole-digest
+    # scans bound form (the recorder writes neither shape, and an uppercase digest matches no computed
+    # lowercase one).
     span_lines = [b"line%d = %d" % (n, n) for n in (1, 2, 3)]
     per_line = "".join(hashlib.sha256(piece + b"\n").hexdigest()[:16] for piece in span_lines)
     one_piece = hashlib.sha256(b"\n".join(span_lines) + b"\n").hexdigest()[:16]
@@ -4048,6 +4074,86 @@ def _citecheck_cases(tmp):
           {"pieces-ok": [("tools/a.py:2", "covered")], "pieces-one": [("tools/a.py:2", "covered")],
            "pieces-over": [("tools/a.py:2", "stale")], "pieces-ragged": [("tools/a.py:2", "stale")],
            "pieces-case": [("tools/a.py:2", "stale")]})
+
+    def pieces_row(session, path, rel, end, row_pieces):
+        ledger(session).write_bytes((json.dumps(
+            {"v": 1, "ts": "t", "kind": "read", "via": "Read", "path": os.path.realpath(str(path)),
+             "rel": rel, "start": 1, "end": end, "sha256": "0" * 64, "pieces": row_pieces,
+             "rev": None}) + "\n").encode("utf-8"))
+    # The piece-count ceiling rejects on its own: 129 per-line digests of a 129-line span are within the
+    # span's lines but over the 128-piece ceiling, so the row is judged whole and the citation is stale,
+    # while the matching per-line digests at 127 (just inside) and 128 (at the ceiling) cover. Every
+    # rejected pieces field here holds digests that match the file, so only the rejection keeps the
+    # citation stale, never a digest mismatch.
+    p_py = tools_dir / "p.py"
+    p_py.write_text("".join("p{}\n".format(n) for n in range(1, 130)), encoding="utf-8")
+    p_entry = aiqt_hooks._cite_entry(p_py.read_bytes(), str(p_py))
+
+    def per_line_pieces(end):
+        return "".join(hashlib.sha256(aiqt_hooks._cite_bytes(p_entry, n, n)).hexdigest()[:16]
+                       for n in range(1, end + 1))
+    for n in (127, 128, 129):
+        pieces_row("count-{}".format(n), p_py, "tools/p.py", n, per_line_pieces(n))
+    check("citeledger/piece-count-ceiling",
+          {n: classes("git commit -m 'tools/p.py:2'", "count-{}".format(n)) for n in (127, 128, 129)},
+          {127: [("tools/p.py:2", "covered")], 128: [("tools/p.py:2", "covered")],
+           129: [("tools/p.py:2", "stale")]})
+    # The ceiling, not the span-lines bound, decides the 129-piece row: under a variant of _citechk_row
+    # whose count bound is the span's lines alone, the same citation reads covered.
+    no_ceiling = _hook_variant(pieces_variants, "_citechk_row",
+                               _hook_functions("_citechk_row").get("_citechk_row", ""),
+                               "0 < count <= min(lines, _CITE_PIECES_MAX)", "0 < count <= lines")
+    if no_ceiling is None:
+        unceilinged = "no variant: the ceiling does not occur exactly once in _citechk_row"
+    else:
+        original = aiqt_hooks._citechk_row
+        aiqt_hooks._citechk_row = no_ceiling
+        try:
+            unceilinged = classes("git commit -m 'tools/p.py:2'", "count-129")
+        finally:
+            aiqt_hooks._citechk_row = original
+    check("citeledger/piece-count-ceiling-variant", unceilinged, [("tools/p.py:2", "covered")])
+    # The tiling re-derivation rejects on its own: 4 pieces of a 5-line span pass the count bounds, but
+    # ceil(5 / ceil(5/4)) is 3, a tiling the recorder cannot have made, so the row is judged whole and the
+    # citation is stale, while the true 3-piece tiling of the same span (runs 1-2, 3-4 and 5) covers. The
+    # impossible row's first three digests are that tiling's, so under a variant of _citechk_row without
+    # the re-derivation they match at the re-derived run size of 2 and the citation reads covered.
+    two_line_runs = "".join(hashlib.sha256(aiqt_hooks._cite_bytes(p_entry, at, min(at + 1, 5))).hexdigest()[:16]
+                            for at in (1, 3, 5))
+    pieces_row("tile-3", p_py, "tools/p.py", 5, two_line_runs)
+    pieces_row("tile-4", p_py, "tools/p.py", 5, two_line_runs + "f" * 16)
+    check("citeledger/piece-impossible-tiling",
+          {count: classes("git commit -m 'tools/p.py:2'", "tile-{}".format(count)) for count in (3, 4)},
+          {3: [("tools/p.py:2", "covered")], 4: [("tools/p.py:2", "stale")]})
+    no_tiling = _hook_variant(pieces_variants, "_citechk_row",
+                              _hook_functions("_citechk_row").get("_citechk_row", ""),
+                              "if extra or not group or -(-lines // group) != count \\\n",
+                              "if extra or not group \\\n")
+    if no_tiling is None:
+        untiled = "no variant: the tiling check does not occur exactly once in _citechk_row"
+    else:
+        original = aiqt_hooks._citechk_row
+        aiqt_hooks._citechk_row = no_tiling
+        try:
+            untiled = classes("git commit -m 'tools/p.py:2'", "tile-4")
+        finally:
+            aiqt_hooks._citechk_row = original
+    check("citeledger/piece-impossible-tiling-variant", untiled, [("tools/p.py:2", "covered")])
+    # The recorder's run size at its boundary, with no cap patched: a span of 127 or 128 lines carries one
+    # line per piece, so an edit of line 1 leaves lines 2 and 3 covered, while at 129 lines a piece is a
+    # two-line run, so the edit stales line 2 with it and line 3, the next run's first line, still covers.
+    boundary_runs = {}
+    for n in (127, 128, 129):
+        b_py = tools_dir / "b{}.py".format(n)
+        b_py.write_text("".join("b{}\n".format(k) for k in range(1, n + 1)), encoding="utf-8")
+        read("bound-{}".format(n), 1, n, path=b_py)
+        b_py.write_text("B1\n" + "".join("b{}\n".format(k) for k in range(2, n + 1)), encoding="utf-8")
+        boundary_runs[n] = classes(
+            "git commit -m 'tools/b{0}.py:1 tools/b{0}.py:2 tools/b{0}.py:3'".format(n), "bound-{}".format(n))
+    check("citeledger/piece-run-boundary", boundary_runs,
+          {127: [("tools/b127.py:1", "stale"), ("tools/b127.py:2", "covered"), ("tools/b127.py:3", "covered")],
+           128: [("tools/b128.py:1", "stale"), ("tools/b128.py:2", "covered"), ("tools/b128.py:3", "covered")],
+           129: [("tools/b129.py:1", "stale"), ("tools/b129.py:2", "stale"), ("tools/b129.py:3", "covered")]})
 
     # Message and body sources: -F and --file= files, a relative path under git -C, the option spellings,
     # gh pr create --body-file and gh pr edit --body, and one row per command of a compound command.
@@ -5642,11 +5748,15 @@ def _citecheck_step_cases(tmp):
     # A here-document delimiter that a backslash-newline splits is the word bash reads once it is removed:
     # <<E\, a newline and OF, <<\, a newline and EOF, and <<-\, a newline and EOF are the unquoted EOF, so
     # bash expands the body, and the command is scanned as one that does not lex, with that expansion named,
-    # with or without a $ in the body. A message or body file such a command names is kept: each one the
-    # first lexing that lexed names is named as not read, never read, judged or silently dropped (the file
-    # vector, whose msg.txt holds the only citation), on the raw scan's own item, or as the lexed command's
+    # with or without a $ in the body. A message or body file such a command names is kept: each one a
+    # lexing that lexed names is named as not read, once however many lexings or options name it (the file
+    # and file-twice vectors), never read, judged or silently dropped (the file vector, whose msg.txt holds
+    # the only citation), on the raw scan's own item, or as the lexed command's
     # item where the kind search finds no command in the text, as where quotes split its git word (the
-    # file-kindless vector); -F -, whose here-document lies in the scanned text, earns no such entry. The lexer reads each split delimiter at an operator it reads as one
+    # file-kindless vector); -F - whose here-document lies in the scanned text earns no such entry (the mid
+    # and quoted vectors), while -F - or --body-file - that a pipe or a file redirection feeds is named as
+    # read from standard input, which this scan cannot see (the stdin-pipe, stdin-redirect and stdin-gh
+    # vectors). The lexer reads each split delimiter at an operator it reads as one
     # that holds a newline, which no line matches, so it would take the rest of the command as that body: a
     # later command is scanned too, and so is one after a split delimiter that bash reads as quoted (<<E\, a
     # newline and 'OF'; <<$\, a newline and 'EOF'; <<"E"\, a newline and OF; <<"E\, a newline and OF"), for
@@ -5694,7 +5804,12 @@ def _citecheck_step_cases(tmp):
                           ("lead", "git commit -F - <<\\\nEOF\nsee tools/a.py:1\nEOF\n"),
                           ("dash", "git commit -F - <<-\\\nEOF\n\tsee tools/a.py:1\n\tEOF\n"),
                           ("file", "git commit -F msg.txt <<E\\\nOF\nx\nEOF\n"),
+                          ("file-twice", "git commit -F msg.txt -F msg.txt <<E\\\nOF\nx\nEOF\n"),
                           ("file-kindless", "g'i't commit -F msg.txt <<E\\\nOF\nx\nEOF\n"),
+                          ("stdin-pipe", "cat msg.txt | git commit -F -; cat <<E\\\n'OF'\nx\nEOF\n"),
+                          ("stdin-redirect", "git commit -F - < msg.txt; cat <<E\\\n'OF'\nx\nEOF\n"),
+                          ("stdin-gh", "cat msg.txt | gh pr create --title t --body-file -; "
+                                       "cat <<E\\\n'OF'\nx\nEOF\n"),
                           ("later", "cat <<E\\\nOF\nx\nEOF\n" + later),
                           ("quoted", "git commit -F - <<E\\\n'OF'\nsee tools/a.py:1\nEOF\n"),
                           ("later-quoted", "cat <<E\\\n'OF'\nx\nEOF\n" + later),
@@ -5778,6 +5893,9 @@ def _citecheck_step_cases(tmp):
 
     def split_unread(*labels):
         return ["{}: {}".format(label, reason_split) for label in labels]
+
+    def stdin_unread(name):
+        return ["{} -: it is read from standard input, which this check cannot see".format(name)]
     by_raw = [("raw", None, ["tools/a.py:1"], ["command text"], named("EOF"))]
     by_quoted = [("raw", None, ["tools/a.py:1"], ["command text"], [])]
     by_file = ("warn", [("lexed", None, ["tools/a.py:1"], ["-F msg.txt"], [])], False, None)
@@ -5791,7 +5909,13 @@ def _citecheck_step_cases(tmp):
            "lead": ("warn", by_raw, True, None), "dash": ("warn", by_raw, True, None),
            "file": ("warn", [("raw", None, [], ["command text"], named("EOF") + split_unread("-F msg.txt"))],
                     True, None),
+           "file-twice": ("warn", [("raw", None, [], ["command text"],
+                                    named("EOF") + split_unread("-F msg.txt"))], True, None),
            "file-kindless": ("warn", [("raw", None, [], [], split_unread("-F msg.txt"))], False, None),
+           "stdin-pipe": ("warn", [("raw", None, [], ["command text"], stdin_unread("-F"))], False, None),
+           "stdin-redirect": ("warn", [("raw", None, [], ["command text"], stdin_unread("-F"))], False, None),
+           "stdin-gh": ("warn", [("raw", None, [], ["command text"], stdin_unread("--body-file"))],
+                        False, None),
            "later": ("warn", by_raw, True, None), "quoted": ("warn", by_quoted, False, None),
            "later-quoted": ("warn", by_quoted, False, None), "later-ansi-c": ("warn", by_quoted, False, None),
            "later-quoted-part": ("warn", by_quoted, False, None),
@@ -5908,7 +6032,11 @@ def _citecheck_step_cases(tmp):
     # its text as written), and the -F file of the lexing that lexes is named as not read, never read or
     # judged. That vector, ansi-c-split-delim, holds its only citation in msg.txt, so its row shows the
     # citation unjudged (none listed) and the source named as not read: the file is skipped loudly, never
-    # silently.
+    # silently. A file that only the second lexing names is named too: in dquote-split-delim the first
+    # lexing takes the double quote inside each substitution as its string's end, so -F msg.txt falls
+    # inside one -m value and only the second, nested lexing names it, and the split quoted delimiter
+    # (whose newline no line matches) keeps the command on the raw scan, where that file is still named as
+    # not read.
     differ, commands_differ, lexings = {}, {}, aiqt_hooks._CITECHK_LEXINGS_DIFFER
     unlexed = ("as lexed (a read attempted of each message and body file that a lexing of it that lexed names, each "
                "one that could not be read named as not read; a lexing that did not lex is not evaluated, so a "
@@ -5918,6 +6046,8 @@ def _citecheck_step_cases(tmp):
                           ("ansi-c-in-subst", "git commit -F msg.txt -m \"$(echo $'x\\' y')\""),
                           ("ansi-c-split-delim", "git commit -F msg.txt -m \"$(echo $'x\\' y')\" <<'E\\\nOF'\n"
                                                  "x\nEOF\n"),
+                          ("dquote-split-delim", "git commit <<E\\\n'OF' -m \"$(echo '\"')\" -F msg.txt "
+                                                 "-m \"$(echo '\"')\"\nx\nEOF\n"),
                           ("alike", "git commit -F msg.txt -m \"$(echo x)\"")):
         commands_differ[name] = command
         differ[name] = read_split(command, "lexings-" + name, unlexed if name == "ansi-c-in-subst" else None)
@@ -5931,6 +6061,8 @@ def _citecheck_step_cases(tmp):
            "ansi-c-in-subst": ("warn", [("both", lexings, ["tools/a.py:1"], ["-F msg.txt", "-m value"], []),
                                         ("both", lexings, [], ["command text"], [])], False, lexings, True),
            "ansi-c-split-delim": ("warn", [("raw", None, [], ["command text"], split_unread("-F msg.txt"))],
+                                  False, None),
+           "dquote-split-delim": ("warn", [("raw", None, [], ["command text"], split_unread("-F msg.txt"))],
                                   False, None),
            "alike": ("warn", [("lexed", None, ["tools/a.py:1"], ["-F msg.txt", "-m value"], [])], False, None)})
     # The rule that scans a command with a split delimiter as one that does not lex before its two lexings
@@ -5951,6 +6083,26 @@ def _citecheck_step_cases(tmp):
     check("citeledger/check-lexings-differ-variant", ordered_raw,
           ("warn", [("both", lexings, ["tools/a.py:1"], ["-F msg.txt", "-m value"], []),
                     ("both", lexings, [], ["command text"], [])], False, lexings))
+    # Visiting every lexing that lexed decides dquote-split-delim: under a variant of _citechk_commands
+    # whose fallback keeps only the first lexing, the -F msg.txt that only the second lexing names is
+    # dropped silently, the defect the fallback guards against: with no entry and no citation in the
+    # scanned text, the whole command allows with no warning at all.
+    first_only = _hook_variant(base, "_citechk_commands",
+                               _hook_functions("_citechk_commands").get("_citechk_commands", ""),
+                               "for segments, heredocs, _spans in readings:",
+                               "for segments, heredocs, _spans in readings[:1]:")
+    if first_only is None:
+        first_lexing_only = "no variant: the fallback loop does not occur exactly once in _citechk_commands"
+    else:
+        original = aiqt_hooks._citechk_commands
+        aiqt_hooks._citechk_commands = first_only
+        try:
+            first_lexing_only = read_split(commands_differ["dquote-split-delim"],
+                                           "lexings-variant-dquote-split-delim")
+        finally:
+            aiqt_hooks._citechk_commands = original
+    check("citeledger/check-split-fallback-variant", first_lexing_only,
+          ("allow", [("raw", None, [], ["command text"], [])], False, None))
     # A command after the reserved words that begin its segment is read: in a brace group, after '!', 'if'
     # or 'then', after 'do', after 'time -p', after a '--' that follows time or its -p, and after coproc,
     # with the NAME bash reads before a compound command. Where bash runs another command, none is read: a
