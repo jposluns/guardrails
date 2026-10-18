@@ -5885,56 +5885,78 @@ def _citecheck_step_cases(tmp):
 
 
 # The command shapes whose cost the citation check's residue gives (_citecheck_cost_cases), each (name, head,
-# unit, tail, parse): the unit repeated as often as fits the length asked for, between head and tail, and the
-# parse its rows give at or under the command bound. The first thirteen each hold a backslash-newline and
-# cost most in the two lexings and the search for split delimiters: double-quoted look-alikes of a split
-# delimiter; one double-quoted substitution holding many split delimiters that bash reads as quoted, many
-# comments, many ANSI-C quotes (an odd count of quote characters, so the nested lexing, which reads them as
-# plain single quotes, does not lex), a long run of '#' inside a word, or many subshells; many double-quoted
-# substitutions each holding one split delimiter that bash reads as quoted; many comments in backticks on
-# one line; many quoted here-documents with a body line, without one, two to a line, or before a split
-# delimiter; and one quoted here-document with a large body in a -m value's substitution. The last three
-# cost most in the scan of a text for URLs (one long run of letters with no '://'), and in the search of a
-# command that does not lex for the git commit or gh pr it names (a git commit followed by many gh words
-# with no pr create after them, or a gh pr create followed by many git words with no commit after them),
-# each of which took time that grew with the square of its length before those patterns were made linear
-# (_CITECHK_URL, _CITECHK_RAW_KINDS).
+# unit, tail, rows): the unit repeated as often as fits the length asked for, between head and tail, then
+# blanks to that exact length, and the rows (_CITECHK_COST_ROWS) its command gives at or under the command
+# bound. The first thirteen each hold a backslash-newline and cost most in the two lexings and the search
+# for split delimiters: double-quoted look-alikes of a split delimiter; one double-quoted substitution
+# holding many split delimiters that bash reads as quoted, many comments, many ANSI-C quotes (an odd count
+# of quote characters, so the nested lexing, which reads them as plain single quotes, does not lex), a long
+# run of '#' inside a word, or many subshells; many double-quoted substitutions each holding one split
+# delimiter that bash reads as quoted; many comments in backticks on one line; many quoted here-documents
+# with a body line, without one, two to a line, or before a split delimiter; and one quoted here-document
+# with a large body in a -m value's substitution. The fourteenth holds no backslash-newline and costs most
+# in the lexing itself: many one-word commands ('; a' repeated). The last three cost most in the scan of a
+# text for URLs (one long run of letters with no '://'), and in the search of a command that does not lex
+# for the git commit or gh pr it names (a git commit followed by many gh words with no pr create after
+# them, or a gh pr create followed by many git words with no commit after them), each of which took time
+# that grew with the square of its length before those patterns were made linear (_CITECHK_URL,
+# _CITECHK_RAW_KINDS). Every shape cites tools/a.py:1 or names an expansion it does not read, so each of
+# its commands gives a warn row and a note at the bound.
 _CITECHK_COST_BODY = "OF\nsee tools/${F}.py:1\nEOF\n"
 _CITECHK_COST_SHAPES = (
     ("look-alikes", "git commit -F msg.txt; echo", " \"x <<E\\\nOF y\"", "", "lexed"),
     ("subst-quoted-delims", "git commit -F msg.txt; echo \"$(", "cat <<E\\\n'OF'\nx\nEOF\n", ")\"", "both"),
     ("subst-comments", "git commit -F msg.txt; echo \"$(", " # <<E\\\n# OF\n", ": )\"", "lexed"),
     ("subst-ansi-c", "git commit -F msg.txt; echo \"$(echo $'x\\' y'", "; echo $'x\\' <<E\\\nOF y' $'\\''", ")\"",
-     "both"),
-    ("subst-hash-run", "git commit -m \"$(: x", "#", "; cat <<E\\\n" + _CITECHK_COST_BODY + ")\"", "raw"),
-    ("subst-subshells", "git commit -m \"$(:; ", "(:); ", "cat <<E\\\n" + _CITECHK_COST_BODY + ")\"", "raw"),
+     "both, both warn"),
+    ("subst-hash-run", "git commit -m \"$(: x", "#", "; cat <<E\\\n" + _CITECHK_COST_BODY + ")\"", "raw, expanded"),
+    ("subst-subshells", "git commit -m \"$(:; ", "(:); ", "cat <<E\\\n" + _CITECHK_COST_BODY + ")\"",
+     "raw, expanded"),
     ("substs-quoted-delim", "git commit -F msg.txt; echo", " \"$(cat <<E\\\n'OF'\nx\nEOF\n)\"", "", "both"),
-    ("backtick-comments", "git commit -F msg.txt; echo \"", "`: # x` ", "<<E\\\nOF y\"", "both"),
+    ("backtick-comments", "git commit -F msg.txt; echo \"", "`: # x` ", "<<E\\\nOF y\"", "both, both warn"),
     ("heredocs-body", "git commit -F msg.txt; ", "cat <<'Q'\nx\nQ\n", "echo a\\\nb", "lexed"),
     ("heredocs-empty", "git commit -F msg.txt; ", "cat <<'Q'\nQ\n", "echo a\\\nb", "lexed"),
     ("heredocs-paired", "git commit -F msg.txt; ", "cat <<'Q'; cat <<'R'\nx\nQ\ny\nR\n", "echo a\\\nb", "lexed"),
-    ("heredocs-then-split", "git commit -F msg.txt; ", "cat <<'Q'\nx\nQ\n", "cat <<E\\\n'OF'\nx\nEOF\n", "raw"),
+    ("heredocs-then-split", "git commit -F msg.txt; ", "cat <<'Q'\nx\nQ\n", "cat <<E\\\n'OF'\nsee tools/a.py:1\nEOF\n",
+     "raw"),
     ("subst-heredoc-body", "git commit -m \"$(cat <<'EOF'\n", "see tools/a.py:1\n", "EOF\n)\" \\\n--no-edit",
-     "both"),
-    ("url-letters", "git commit -m 'see ", "a", "'", "lexed"),
-    ("raw-gh-words", "git commit '", "gh ", "", "raw"),
-    ("raw-git-words", "gh pr create '", "git ", "", "raw"))
+     "both, both warn"),
+    ("semicolons", "git commit -F msg.txt", "; a", "", "lexed"),
+    ("url-letters", "git commit -m 'see tools/a.py:1 ", "a", "'", "lexed"),
+    ("raw-gh-words", "git commit 'see tools/a.py:1 ", "gh ", "", "raw"),
+    ("raw-git-words", "gh pr create 'see tools/a.py:1 ", "git ", "", "raw"))
+# The rows each shape's command gives at the bound, by the name its entry above gives, each row (decision,
+# parse, the citations it judged with their class): a lexed command's row; a command read both ways, whose
+# lexed reading's row judges the citation and whose reading as written allows (it finds nothing) or warns
+# too (an expansion it names, or the citation cap the first reading used up); and a command scanned as
+# written, whose row judges the citation or names an expansion of a here-document.
+_CITECHK_COST_CITED = [("tools/a.py:1", "unread")]
+_CITECHK_COST_ROWS = {"lexed": [("warn", "lexed", _CITECHK_COST_CITED)],
+                      "both": [("warn", "both", _CITECHK_COST_CITED), ("allow", "both", [])],
+                      "both, both warn": [("warn", "both", _CITECHK_COST_CITED), ("warn", "both", [])],
+                      "raw": [("warn", "raw", _CITECHK_COST_CITED)],
+                      "raw, expanded": [("warn", "raw", [])]}
 _CITECHK_COST_OVER = 16 * 1024 * 1024  # the length the shapes are timed at over the bound (characters)
-_CITECHK_COST_LIMIT = 30               # seconds a timed hook process is given before it is stopped
+_CITECHK_COST_CPU = 4.0                # CPU seconds a timed run may take: 2 under the check's 6 second budget
+_CITECHK_COST_WALL = 5.0               # wall seconds a timed run may take: half the 10 second hook timeout
+_CITECHK_COST_LIMIT = 10               # seconds a timed hook process is given before it is stopped, as the
+                                       # platform stops a hook (tools/gen_hooks.py, TIMEOUT)
 
 
 def _citecheck_cost_command(head, unit, tail, size):
-    """head, then unit repeated as often as fits, then tail: a command of at most size characters (one unit
-    at the least)."""
-    return head + unit * max(1, (size - len(head) - len(tail)) // len(unit)) + tail
+    """head, then unit repeated as often as fits, then tail, then blanks to size: a command of exactly size
+    characters (one unit at the least, so a longer one where head, one unit and tail are longer)."""
+    command = head + unit * max(1, (size - len(head) - len(tail)) // len(unit)) + tail
+    return command + " " * (size - len(command))
 
 
 def _citecheck_cost_run(root, command, session):
     """One citation_read_check call on command at root, made as the platform makes it: the hook script run
     as its own process (python3 -I -B, so it compiles the hook rather than reading a cached compilation), the
-    payload on its standard input. (exit code, note, the parse of each citint row it appended, CPU seconds of
-    that process and the git probes it waited for, wall seconds); the exit code is "timeout" where it ran past
-    _CITECHK_COST_LIMIT seconds and was stopped."""
+    payload on its standard input. (exit code, note, each citint row it appended as (decision, parse, the
+    citations it judged with their class), CPU seconds of that process and the git probes it waited for,
+    wall seconds); the exit code is "timeout" where it ran past _CITECHK_COST_LIMIT seconds and was
+    stopped."""
     import resource
     events = Path(aiqt_hooks._orch_state_dir_for_root(str(root))) / "guard-events.jsonl"
 
@@ -5959,8 +5981,10 @@ def _citecheck_cost_run(root, command, session):
         note = json.loads(out.decode("utf-8")).get("systemMessage", "")
     except (ValueError, AttributeError):
         note = ""
-    parses = [r["detail"]["parse"] for r in rows()[before:] if r.get("kind") == "citint"]
-    return code, note, parses, cpu, wall
+    found = [(r["decision"], r["detail"]["parse"],
+              sorted({(c["cite"], c["class"]) for c in r["detail"]["citations"]}))
+             for r in rows()[before:] if r.get("kind") == "citint"]
+    return code, note, found, cpu, wall
 
 
 def _citecheck_cost_cases(tmp):
@@ -5968,18 +5992,27 @@ def _citecheck_cost_cases(tmp):
     one character under it or at it is lexed and its citation judged, and one a character over it is
     neither lexed nor scanned, named as not read with the bound (parse too-long) in the note and in its
     guard-events row; under a variant of _citechk_run without the bound, that command is lexed and judged
-    instead. Each command shape of _CITECHK_COST_SHAPES is then timed through the hook run as its own
-    process, as the platform runs it: at the bound's length, where it gives its parse, and at 16 MiB, where
-    it ends with the note and the row of a command over the bound. Each run's CPU time (the process and the
-    git probes it waited for) and wall time are printed, one line each ("citation-check cost: " and a JSON
-    object), so the figures the residue gives can be made again from this suite; a run is checked to take at
-    most the check's budget in CPU time (CPU time, which a runner busy with other work stretches less than
-    elapsed time) and to end within _CITECHK_COST_LIMIT seconds. The URL pattern and the kind search, made
-    linear, mask and find what the plain patterns did on a fixed set of generated strings."""
+    instead. The same holds for a git commit or gh pr create whose words, or whose git word, a
+    backslash-newline splits, since the kind search removes each backslash-newline as bash and the lexer do;
+    one that joins git to commit, which bash runs as gitcommit, is inert at each of those lengths; under a
+    variant of _citechk_kind that keeps the backslash-newlines, the split commands over the bound are inert.
+    Without a session cwd (absent or empty), a command over the bound is inert, as every command is there.
+    Each command shape of _CITECHK_COST_SHAPES is then timed through the hook run as its own process, as the
+    platform runs it, at exactly the bound's length and exactly 16 MiB: at the bound, its rows are checked
+    (_CITECHK_COST_ROWS: the decision, parse and citations of each, so a row that allows where a warn is due
+    fails) and so is its note; at 16 MiB, it must end with the note and the one warn row of a command over
+    the bound. Each run's CPU time (the process and the git probes it waited for) and wall time are printed,
+    one line each ("citation-check cost: " and a JSON object), so the figures the residue gives can be made
+    again from this suite; a run is checked to take at most _CITECHK_COST_CPU seconds of CPU time, 2 under
+    the check's 6 second budget (CPU time, which a runner busy with other work stretches less than elapsed
+    time), and at most _CITECHK_COST_WALL seconds of wall time, half the platform's 10 second timeout. The
+    URL pattern and the kind search, made linear, mask and find what the plain patterns did on a fixed set
+    of generated strings, and on the worst shape of each, timed in this process, take at most a tenth of the
+    plain patterns' time, so putting a plain pattern back fails check-linear-patterns."""
     import random
     import re
     repo = _CiteRepo(tmp / "citecheck-cost", {"tools/a.py": b"a1\na2\n", "msg.txt": b"see tools/a.py:1\n"})
-    bound, budget = aiqt_hooks._CITECHK_COMMAND_MAX, aiqt_hooks._CITECHK_BUDGET
+    bound = aiqt_hooks._CITECHK_COMMAND_MAX
     phrase = "this check cannot evaluate a command longer than {:,} characters".format(bound)
     head = "git commit -m 'see tools/a.py:1"
 
@@ -6014,17 +6047,74 @@ def _citecheck_cost_cases(tmp):
         finally:
             aiqt_hooks._citechk_run = original
     check("citeledger/check-command-bound-variant", lifted, (bound + 1,) + judged)
-    # The shapes, timed through the hook's own process at the bound's length and at 16 MiB.
+    # A backslash-newline between a command's words, or inside its git word, is removed by bash and by the
+    # lexer, and by the kind search too: such a git commit or gh pr create is lexed and judged one character
+    # under the bound and at it, and named as not read one over it, never passed over in silence there. One
+    # that joins git to commit (git\<newline>commit, which bash runs as gitcommit) is inert at each length.
+    split_shapes = (("git-words", "git \\\n  commit -m 'see tools/a.py:1", "git-commit"),
+                    ("git-word", "gi\\\nt commit -m 'see tools/a.py:1", "git-commit"),
+                    ("gh-words", "gh pr \\\n create --body 'see tools/a.py:1", "gh-pr-create"),
+                    ("glued", "git\\\ncommit -m 'see tools/a.py:1", None))
+
+    def split(split_head, length, session):
+        """The split command of length characters checked: its length, the verdict, each row's command,
+        parse and citations, and whether the note names the bound."""
+        command = split_head + " " * (length - len(split_head) - 1) + "'"
+        verdict, note, rows = _citecheck_run(repo.root, command, session)
+        return (len(command), verdict,
+                [(r["detail"]["cmd"], r["detail"]["parse"], [c["cite"] for c in r["detail"]["citations"]])
+                 for r in rows], phrase in note)
+    splits, split_want = {}, {}
+    for name, split_head, kind in split_shapes:
+        for side, length in (("under", bound - 1), ("at", bound), ("over", bound + 1)):
+            splits[(name, side)] = split(split_head, length, "split-{}-{}".format(name, side))
+            if kind is None:
+                split_want[(name, side)] = (length, "allow", [], False)
+            elif side == "over":
+                split_want[(name, side)] = (length, "warn", [(kind, "too-long", [])], True)
+            else:
+                split_want[(name, side)] = (length, "warn", [(kind, "lexed", ["tools/a.py:1"])], False)
+    check("citeledger/check-command-bound-split", splits, split_want)
+    # The removal decides the over vectors: under a variant of _citechk_kind that keeps each
+    # backslash-newline, the split commands over the bound name no git commit or gh pr create and are inert.
+    kept = _hook_variant(variants, "_citechk_kind", _hook_functions("_citechk_kind").get("_citechk_kind", ""),
+                         'joined = command.replace("\\\\\\n", "")', "joined = command")
+    if kept is None:
+        unjoined = "no variant: the removal does not occur exactly once in _citechk_kind"
+    else:
+        original = aiqt_hooks._citechk_kind
+        aiqt_hooks._citechk_kind = kept
+        try:
+            unjoined = {name: split(split_head, bound + 1, "split-variant-" + name)
+                        for name, split_head, kind in split_shapes if kind is not None}
+        finally:
+            aiqt_hooks._citechk_kind = original
+    check("citeledger/check-command-bound-split-variant", unjoined,
+          {name: (bound + 1, "allow", [], False) for name, _split_head, kind in split_shapes if kind is not None})
+    # Without a session cwd no toplevel is probed and no state directory is known, so a command over the
+    # bound is inert there, as every command is: no note and no row, whether the cwd is absent or empty.
+    no_cwd = {}
+    for name, extra in (("absent", {}), ("empty", {"cwd": ""})):
+        payload = dict({"hook_event_name": "PreToolUse", "tool_name": "Bash", "session_id": "bound-no-cwd",
+                        "tool_input": {"command": padded(bound + 1)}}, **extra)
+        no_cwd[name] = aiqt_hooks.citation_read_check(payload)
+    check("citeledger/check-command-bound-no-cwd", no_cwd, {"absent": (0, None, None), "empty": (0, None, None)})
+    # The shapes, timed through the hook's own process at exactly the bound's length and exactly 16 MiB.
     timed, want = {}, {}
-    for name, unit_head, unit, tail, parse in _CITECHK_COST_SHAPES:
+    for name, unit_head, unit, tail, outcome in _CITECHK_COST_SHAPES:
         for side, size in (("at-bound", bound), ("over", _CITECHK_COST_OVER)):
             command = _citecheck_cost_command(unit_head, unit, tail, size)
-            code, note, parses, cpu, wall = _citecheck_cost_run(repo.root, command, "cost-{}-{}".format(name, side))
+            code, note, rows, cpu, wall = _citecheck_cost_run(repo.root, command, "cost-{}-{}".format(name, side))
             print("citation-check cost: " + json.dumps({"shape": name, "side": side, "chars": len(command),
-                                                       "parse": parses, "cpu": round(cpu, 3),
+                                                       "decision": [row[0] for row in rows],
+                                                       "parse": [row[1] for row in rows], "cpu": round(cpu, 3),
                                                        "wall": round(wall, 3)}, sort_keys=True), flush=True)
-            timed[(name, side)] = (code, sorted(set(parses)), phrase in note, cpu <= budget)
-            want[(name, side)] = (0, [parse], False, True) if side == "at-bound" else (0, ["too-long"], True, True)
+            timed[(name, side)] = (code, len(command), rows, note.startswith(aiqt_hooks._CITECHK_HEAD),
+                                   phrase in note, cpu <= _CITECHK_COST_CPU, wall <= _CITECHK_COST_WALL)
+            if side == "at-bound":
+                want[(name, side)] = (0, size, _CITECHK_COST_ROWS[outcome], True, False, True, True)
+            else:
+                want[(name, side)] = (0, size, [("warn", "too-long", [])], True, True, True, True)
     check("citeledger/check-cost-shapes", timed, want)
     # The linear patterns against the plain ones they replace, on strings drawn from the characters they turn
     # on (a fixed seed, so every run draws the same strings).
@@ -6040,7 +6130,7 @@ def _citecheck_cost_cases(tmp):
     url_atoms = ("a", "Z", "1", "+", ".", "-", ":", "/", "://", " ", "\t", "<", ">", "x:", "<ab:", "http", "_",
                  "\u00e9", "1a")
     kind_atoms = ("git", "gh", "commit", "pr", "create", "edit", " ", "\n", ";", "&", "|", "x", "_", "\t", "-",
-                  "gitx", "xgit", "commits", "pr\n", "\ncreate", "'")
+                  "gitx", "xgit", "commits", "pr\n", "\ncreate", "'", "\\", "\\\n", "gi\\\nt")
     differ = []
     for _ in range(20000):
         line = "".join(draw.choice(url_atoms) for _ in range(draw.randint(0, 30)))
@@ -6048,9 +6138,38 @@ def _citecheck_cost_cases(tmp):
         if aiqt_hooks._CITECHK_URL.subn(aiqt_hooks._citechk_blank, line) != plain:
             differ.append(("url", line))
         text = "".join(draw.choice(kind_atoms) + draw.choice(("", " ")) for _ in range(draw.randint(0, 20)))
-        if aiqt_hooks._citechk_kind(text) != plain_kind(text):
+        if aiqt_hooks._citechk_kind(text) != plain_kind(text.replace("\\\n", "")):
             differ.append(("kind", text))
-    check("citeledger/check-linear-patterns", differ[:3], [])
+    # The worst shape of each, 16,384 characters, timed in this process against the plain patterns on the
+    # same text: a run of letters with no '://' for the URL masking, and a git commit followed by many gh
+    # words, or a gh pr create followed by many git words, for the kind search. The plain patterns restart
+    # at each later letter or word, and the hook's read the text about once, so the hook's must take at most
+    # a tenth of the plain patterns' time (the fastest of five runs, against one run): with a plain pattern
+    # put back the two take about the same time and the check fails, on a fast host or a slow one, and at
+    # this length each plain run takes well under a second on the host where this was measured.
+    def fastest(call, text, runs):
+        spent = []
+        for _ in range(runs):
+            began = time.perf_counter()
+            call(text)
+            spent.append(time.perf_counter() - began)
+        return min(spent)
+
+    def hook_url(text):
+        return aiqt_hooks._CITECHK_URL.subn(aiqt_hooks._citechk_blank, text)
+
+    def plain_url_masked(text):
+        return plain_url.subn(lambda found: " " * len(found.group(0)), text)
+    size = 16384
+    slow = []
+    for name, text, hook, plain in (("url", "see " + "a" * (size - 4), hook_url, plain_url_masked),
+                                    ("gh-words", ("git commit '" + "gh " * size)[:size], aiqt_hooks._citechk_kind,
+                                     plain_kind),
+                                    ("git-words", ("gh pr create '" + "git " * size)[:size],
+                                     aiqt_hooks._citechk_kind, plain_kind)):
+        if fastest(hook, text, 5) * 10 > fastest(plain, text, 1):
+            slow.append(name)
+    check("citeledger/check-linear-patterns", (differ[:3], slow), ([], []))
 
 
 def _cite_unpaired(roadmap):
