@@ -21,7 +21,7 @@ only at 1.1.0, so a POPULATED module-tier fixture's records are validated at run
 upgrade -> 1.2.0 doctor leg here rather than by the 1.0.0 baseline. In-gate re-verification is canonicity-only;
 1.0.0-doctor fidelity is authoring-time evidence.
 
-VECTOR ROSTER (U1-U28, P1):
+VECTOR ROSTER (U1-U29, P1):
   U1  pristine baseline: full delta, doctor VALID.
   U2  idempotence: a second run is a byte no-op reporting already-current.
   U3  governance=true, MA+MD rows + empty indexes + counters: contribution+preference_pattern indexes
@@ -112,6 +112,11 @@ VECTOR ROSTER (U1-U28, P1):
       not doctor-VALID names the STORE root for inspection; no unverified subtree restore is offered.
   U28 1.1.0 -> 1.2.0: only spec_version changes with current declared views; no provenance is
       fabricated; doctor VALID; a second run is a byte no-op.
+  U29 a 1.0.0 store an earlier emitter wrote with a literal U+2028 and U+2029 inside basic strings (an
+      [unmanaged] path in the manifest, a backlog item summary in its index) upgrades: exit 0, the
+      manifest is re-spelled with the escapes and keeps the path's value, the index stays byte-identical,
+      doctor VALID; the same manifest with a literal separator in a comment refuses exit 2, tree
+      unchanged. Fails without the precondition's acceptance of that earlier spelling.
   P1  a seeded migration property test: 12 generated genuine-VALID 1.0.0 variants (module subset with the
       G2 coupling, 0-2 records per migrated type with matching high-waters, DECISIONS.md declared/omitted,
       the decision_support key present/absent) each upgrade to a doctor-VALID 1.2.0 store with every index
@@ -353,6 +358,35 @@ updated_at = "2026-07-02T00:00:00Z"
 [record.actor]
 kind = "assistant"
 """)
+
+# --- FROZEN earlier-spelling fixtures (U29; synthetic data only) -------------------------------------------
+# An emitter before the U+2028/U+2029 escape wrote both literally inside a basic string. The manifest carries
+# them in an [unmanaged] path and the backlog index in a record summary; _escaped gives the current spelling,
+# re-verified canonical in-gate.
+_SEP_PATH = "notes" + chr(0x2028) + "draft" + chr(0x2029) + ".md"
+_FIX_SEP_MANIFEST = _FIX_MANIFEST.replace(
+    '[unmanaged]\npaths = []\n', '[unmanaged]\npaths = ["{}"]\n'.format(_SEP_PATH), 1)
+_FIX_SEP_BI_INDEX = ("""\
+schema = 1
+
+[[record]]
+created_at = "2026-07-01T00:00:00Z"
+id = "BI-1"
+status = "open"
+summary = "one{}two{}three"
+title = "A synthetic item"
+type = "backlog_item"
+updated_at = "2026-07-01T00:00:00Z"
+
+[record.actor]
+kind = "maintainer"
+""").format(chr(0x2028), chr(0x2029))
+
+
+def _escaped(text):
+    """`text` in the current spelling: each literal U+2028 and U+2029 written as its escape."""
+    return text.replace(chr(0x2028), "\\u2028").replace(chr(0x2029), "\\u2029")
+
 
 # --- module-enabled / view-omitting manifest and counter derivations (frozen baseline + exactly the rows a
 # valid 1.0.0 store of that shape carries, canonicalized). Each is RE-VERIFIED canonical in-gate. The type
@@ -641,7 +675,12 @@ def _suite_isolated():
         canon_cnt("gov+ds", _cnt_govds())
         canon_cnt("delivery_assurance", _cnt_da())
         canon_cnt("gov-ma-only", _cnt_gov_ma_only())
-        for label, text in (("md-index", _FIX_MD_INDEX), ("pp-index", _FIX_PP_INDEX)):
+        canon_man("earlier-spelling manifest, escaped", _escaped(_FIX_SEP_MANIFEST))
+        check("earlier-spelling fixtures hold the literal separators",
+              _escaped(_FIX_SEP_MANIFEST) != _FIX_SEP_MANIFEST
+              and _escaped(_FIX_SEP_BI_INDEX) != _FIX_SEP_BI_INDEX)
+        for label, text in (("md-index", _FIX_MD_INDEX), ("pp-index", _FIX_PP_INDEX),
+                            ("earlier-spelling bi-index, escaped", _escaped(_FIX_SEP_BI_INDEX))):
             check("canonical index: " + label,
                   _opf_emit.emit_checked(tomllib.loads(text)) == text)
         check("frozen fixture declares spec_version 1.0.0",
@@ -831,6 +870,35 @@ def _suite_isolated():
             rc28c, out28c = upgrade(s28)
             check("U28 second run is a byte no-op", rc28c == EXIT_OK and _snapshot(s28) == again28
                   and "nothing to upgrade" in out28c)
+
+            # U29) The earlier separator spelling: the canonical precondition accepts a manifest whose only
+            # difference from the fresh emission is a literal U+2028 or U+2029 inside a basic string, the
+            # manifest rewrite re-spells it with the escapes, the index the upgrade does not rewrite stays
+            # byte-identical, and doctor stays VALID. A literal separator in a comment is still refused.
+            s29 = base / "u29-separators"
+            s29.mkdir()
+            mach29 = build_store(s29, manifest=_FIX_SEP_MANIFEST,
+                                 counters=_FIX_COUNTERS.replace("BI = 0\n", "BI = 1\n", 1),
+                                 extra_files={idx("backlog_item"): _FIX_SEP_BI_INDEX})
+            bi29_before = (mach29 / idx("backlog_item")).read_bytes()
+            rc29, out29 = upgrade(s29)
+            check("U29 earlier separator spelling upgrades (exit 0)", rc29 == EXIT_OK)
+            raw29 = (mach29 / _opf_store.MANIFEST_NAME).read_bytes()
+            check("U29 manifest re-spelled with the escapes",
+                  not any(ch.encode("utf-8") in raw29 for ch in (chr(0x2028), chr(0x2029)))
+                  and b'paths = ["notes\\u2028draft\\u2029.md"]' in raw29)
+            check("U29 [unmanaged] path value unchanged", man_of(mach29)["unmanaged"]["paths"] == [_SEP_PATH])
+            check("U29 backlog index byte-identical", (mach29 / idx("backlog_item")).read_bytes() == bi29_before)
+            drc29, dout29 = doctor(s29)
+            check("U29 upgraded store is doctor-VALID", drc29 == EXIT_OK and "integrity: VALID" in dout29)
+            s29c = base / "u29-separator-comment"
+            s29c.mkdir()
+            build_store(s29c, manifest="# a note" + chr(0x2028) + "\n" + _FIX_SEP_MANIFEST)
+            before29c = _snapshot(s29c)
+            rc29c, out29c = upgrade(s29c)
+            check("U29 a literal separator in a comment refuses (exit 2)", rc29c == EXIT_ERROR)
+            check("U29 the comment refusal names the canonical form, tree unchanged",
+                  "canonical new-document form" in out29c and _snapshot(s29c) == before29c)
 
             # U3) governance=true, MA+MD rows, empty MA/MD indexes, MA/MD counters.
             s3 = base / "u3-gov"

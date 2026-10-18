@@ -600,7 +600,11 @@ hand-merged: after a merge conflict on a store path, take the integration base's
 conflicted store files and redo the authoring operation on that base, which claims the next ID
 afresh (section 8.8). The byte-reproduction precondition of `opf record` and `opf upgrade` refuses
 only a store file whose bytes are not the canonical serialization of its content, such as one
-carrying comments or non-canonical formatting. A hand edit or hand merge that leaves canonical bytes
+carrying comments or non-canonical formatting. The canonical serialization writes U+2028 LINE
+SEPARATOR and U+2029 PARAGRAPH SEPARATOR inside a string as the escapes `\u2028` and `\u2029`; a
+file that differs from it only by holding either character literally inside a basic string, as files
+written by earlier tooling do, still passes, reads back as the same values, and is re-spelled with
+the escapes by its next write. A hand edit or hand merge that leaves canonical bytes
 passes it undetected, so this integration-base rule is a separate requirement that the precondition
 does not enforce. A merge that resolves without a conflict yet duplicates an ID is caught by `opf
 doctor`, which checks store-wide ID uniqueness and that every ID lies within its counter (section

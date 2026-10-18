@@ -17,6 +17,13 @@ BIDI = tuple(chr(c) for c in (0x061C, 0x200E, 0x200F)
 FORBIDDEN = {ch.encode("utf-8"): ch for ch in ZERO_WIDTH + BIDI}
 FORBIDDEN_RE = re.compile(b"|".join(re.escape(b) for b in sorted(FORBIDDEN)))
 BOM = b"\xef\xbb\xbf"
+# U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR: str.splitlines() splits on both, so a literal one
+# inside a string or comment changes how a tool that splits lines with str.splitlines() reads the file. They
+# are kept OUT of FORBIDDEN on purpose: opf's view generator refuses a render carrying any FORBIDDEN member
+# and opf's record writer renders after every write, so widening that set would make render and record refuse
+# a store that holds one. opf's record emitter escapes them as it escapes FORBIDDEN, and AIQT's
+# tools/check_byte_canon.py refuses a literal one in its release scope; scan_bytes does not report them.
+LINE_SEPARATORS = {ch.encode("utf-8"): ch for ch in (chr(0x2028), chr(0x2029))}
 
 
 # --- pure legs (always exercised by --self-test) ----------------------------------------------------

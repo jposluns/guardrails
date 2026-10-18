@@ -17245,11 +17245,15 @@ def _upgrade_run(root):
         minor = sv == _UPGRADE_MID
 
         # PRECONDITION (spec 9.2): re-emitting the UNCHANGED parsed model reproduces the on-disk bytes
-        # exactly, proving the file is canonical and comment-free so the bounded rewrite loses nothing.
-        if _opf_emit.emit_checked(manifest_model).encode("utf-8") != manifest_bytes:
+        # exactly, proving the file is canonical and comment-free so the bounded rewrite loses nothing. A file
+        # an earlier emitter wrote with a literal U+2028 or U+2029 inside a basic string still passes when
+        # that is its only difference (_opf_emit.matches_store_bytes); the rewrite re-spells it.
+        if not _opf_emit.matches_store_bytes(
+                manifest_bytes, _opf_emit.emit_checked(manifest_model).encode("utf-8")):
             raise _UpgradeError("manifest is not in canonical new-document form (hand-edited or comment-"
                                 "bearing); refusing a model rewrite that could lose content (fail-closed)")
-        if _opf_emit.emit_checked(counters_model).encode("utf-8") != counters_bytes:
+        if not _opf_emit.matches_store_bytes(
+                counters_bytes, _opf_emit.emit_checked(counters_model).encode("utf-8")):
             raise _UpgradeError("counters.toml is not in canonical new-document form; refusing (fail-closed)")
 
         new_manifest, new_counters, added_ns, origin = (
