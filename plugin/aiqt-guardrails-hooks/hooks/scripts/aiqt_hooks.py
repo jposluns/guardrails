@@ -206,7 +206,11 @@ took at most 0.10 s of wall-clock time at 64 KB, 0.49 s at 256 KB and 2.07 s at 
 git_stash_ref). With the raw-text push backstop and the joined and de-quoted readings of the command,
 runs on 2026-10-17 on a 24-core host with Python 3.14.4 that was running other work measured at most
 0.13 s at 64 KB (protected_line, whose backstop reads the whole command before its 65,536-character
-commit size cap), 0.55 s at 256 KB and 2.17 s at 1 MB (nest_parens under git_discard). Interpreter
+commit size cap), 0.55 s at 256 KB and 2.17 s at 1 MB (nest_parens under git_discard). On the merged
+tree that combines this deadline with the shared reading of shell -c, eval, trap and interpreter code,
+five runs on 2026-10-18 on a 24-core host with Python 3.14.4 that was running other work measured at
+most 0.21 s at 64 KB (nest_parens under commit_identity), 0.55 s at 256 KB and 2.34 s at 1 MB
+(nest_cmdsubst under orch_untracked_wait_loop). Interpreter
 start-up adds about 0.1 to 0.2 s to each call. Outside the deadline: interpreter start-up and
 module import, which run before main(); a wait the interpreter cannot interrupt (a system call in
 uninterruptible sleep, such as a read from a hung network mount, or a long call into C code that does not
