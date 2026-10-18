@@ -978,12 +978,17 @@ def _config_poison_fixture(base):
 # tools/check_python_host_pin.py --self-test and tools/check_leaks.py --self-test. The
 # hook-latency harness added a tenth (tools/check_selftest_execution.py --suite
 # hook-latency-selftest; the bare runner that step expands to is a CONFIG_EXCLUSIONS["all"]
-# entry). The merged roster is 111 members, 109 of them in the malformed lane (counted by
-# running _registered_selftests() on the merged tree, 2026-10-17; config/member-roster-figures
-# asserts these counts and the two derived counts below against _registered_selftests(), so a
-# later roster change turns this comment red instead of stale).
+# entry). The 2026-10-17 merge of main into the change adding tools/ci_build_bash.py added an
+# eleventh, twelfth and thirteenth: tools/ci_build_bash.py with no argument (the runner of the
+# suite ci-build-bash-selftest, run directly; with no argument it runs its offline self-test, and
+# its build runs only on --build, which is no roster member), the same with --self-test, and
+# tools/check_selftest_execution.py --suite ci-build-bash-selftest. The merged roster is 114
+# members, 112 of them in the malformed lane (counted by running _registered_selftests() on the
+# merged tree, whose build step runs tools/ci_build_bash.py --build, 2026-10-17;
+# config/member-roster-figures asserts these counts and the two derived counts below against
+# _registered_selftests(), so a later roster change turns this comment red instead of stale).
 # NOT MEASURED, though these bounds govern those reruns all the same: the system lane; the
-# malformed lane's configuration for the 99 of its 109 members outside those ten; and the
+# malformed lane's configuration for the 102 of its 112 members outside those ten; and the
 # fsmonitor pass's own configuration (fsmonitor set in both config files, ignore and attributes
 # files removed, its four members run one at a time).
 # The opf.py --self-test times above and below and its 3600 s entry were sized before the
@@ -996,14 +1001,15 @@ def _config_poison_fixture(base):
 # bound) are not fed to the formula; the factor's headroom is meant to allow for them, but a run
 # that reached a bound has no known length, so no bound here is shown to cover it (below).
 # Roster coverage: the account of the whole-roster run gives a time or an upper bound for 89 of
-# the 111 members (every member registered when it was taken; the nine added by the 2026-10-13,
-# 2026-10-14, 2026-10-15 and 2026-10-16 merges and the hook-latency suite step are outside it).
+# the 114 members (every member registered when it was taken; the twelve added by the 2026-10-13,
+# 2026-10-14, 2026-10-15, 2026-10-16 and 2026-10-17 merges and the hook-latency suite step are
+# outside it).
 # Five took over 180 s and carry the entries below. The other 84 took 180 s or less: nine named
 # here (the six shorter opf/tools self-tests, check_python_floor.py, check_release_cut.py
 # --self-test --red-on-revert and check_selftest_execution.py --suite orch-behaviour-selftest),
 # the slowest 142.55 s; and 75 REPORTED by that account as each 62.42 s or less, with no
-# per-member time and no names given. The remaining 22 roster members have no recorded time (the
-# 12 the account does not name, plus the nine added by those merges and the hook-latency suite
+# per-member time and no names given. The remaining 25 roster members have no recorded time (the
+# 12 the account does not name, plus the twelve added by those merges and the hook-latency suite
 # step, named above), so their default bound is NOT sized from a measurement.
 # For every member, reaching its bound is cannot-evaluate, never a pass.
 # The factor is 40 / 24 * 4. 40 / 24 covers load5 40 under the model that wall time grows in

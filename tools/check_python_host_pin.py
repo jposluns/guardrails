@@ -65,6 +65,16 @@ Legs, in order:
                                 the four git-fixture-env suites the '3.14' jobs run as separate lanes,
                                 core, config-combined, config-malformed and config-system, in that
                                 order);
+                 bash-build     in each BASH_BUILD job (git-fixture-env-host-patch), exactly one step
+                                runs the pinned bash build script (a token whose normpath base name is
+                                BASH_BUILD_RUNNER, _bash_build_shaped), an executable step whose run: is
+                                BASH_BUILD_RUN, after every step that runs one of the job's suites
+                                before it (the core lane) and before every step that runs one of the
+                                others (the three config lanes, which rerun the hooks behaviour
+                                self-test, and it refuses a bash older than 5.3), so a build moved
+                                before the core lane or after a config lane, removed, repeated or
+                                carrying a key beyond name, run and shell (an if: among them) is a
+                                finding;
                  outside-judge  the judge step holds its place: exactly one step outside the HOST_JOBS
                                 jobs runs this gate with --jobs-only (JOBS_ONLY_RUN) as its own run:
                                 command, judged by command tokens, never by exact text. EVERY job
@@ -193,7 +203,9 @@ Legs, in order:
                So a top-level key outside TOP_KEYS, another runner or checkout, an env: on a
                host-patch job or on any of its steps, removing or moving a
                host-patch job, its setup-python step, its Python host pin step or one of its suite steps,
-               omitting, reordering, repeating or adding a suite step, changing a job id or the command a held
+               omitting, reordering, repeating or adding a suite step, removing, repeating or moving the
+               git-fixture-env job's pinned bash build step out of its place between the core lane and the
+               config lanes, changing a job id or the command a held
                step runs, and disabling or re-pointing a held step (if:, continue-on-error:,
                working-directory:, a missing shell:, a shell: other than bash or a shell: bash written
                on any line but the exact line shell: bash) are each a finding. A held
@@ -300,7 +312,13 @@ or whether that step runs; and what the suites
 test is theirs: a step whose run: command starts another interpreter, appends to GITHUB_PATH or GITHUB_ENV,
 changes the checked-out tree, uses a local or composite action, or names an executable that itself
 prints or re-interprets text (a script that echoes the flag, or env running its arguments as a
-command under an assignment, among them, out of a text grammar's reach) is not judged here.
+command under an assignment, among them, out of a text grammar's reach) is not judged here. The
+committed git-fixture-env-host-patch job carries one such step, the pinned bash build
+(tools/ci_build_bash.py --build), which appends the bin directory of the bash it builds to GITHUB_PATH
+for the config lanes after it; this gate holds that step's place, count and keys (bash-build) and its
+run: text (the closed safe set, the assignment refusal and the committed-line controls of the
+self-test), never what the build installs. The bash-build rule reads only the BASH_BUILD jobs: a build
+step added to another host-patch job is not refused here.
 tools/check_ci_parity.py is the second holder for those edits: it binds the line shell: bash on
 every step with a run: key (read once a trailing comment and trailing whitespace are removed, two
 spellings this gate refuses on the steps it holds), and its step grammar accepts only name:, uses:,
@@ -422,6 +440,15 @@ HOST_JOBS = tuple(HOST_SUITES)
 SUITE_RUNS = frozenset(run for runs in HOST_SUITES.values() for run in runs)
 SUITE_RUNNERS = frozenset(os.path.basename(token) for run in SUITE_RUNS for token in shlex.split(run)
                           if token.endswith(".py"))
+# The pinned bash build step (the bash-build rule, _bash_build_findings): the hooks behaviour self-test,
+# which the git-fixture-env config lanes rerun as a roster member, refuses a bash older than 5.3, so a
+# BASH_BUILD job runs this build once, after its first BASH_BUILD[job] HOST_SUITES runs and before every
+# later one (git-fixture-env-host-patch: after the core lane, before the three config lanes). A step with
+# a run: token whose os.path.normpath base name is BASH_BUILD_RUNNER is a build step (_bash_build_shaped),
+# so a respelled or repeated build is held too.
+BASH_BUILD_RUN = "python3 -I -B tools/ci_build_bash.py --build"
+BASH_BUILD_RUNNER = "ci_build_bash.py"
+BASH_BUILD = {"git-fixture-env-host-patch": 1}
 # The path this gate runs as; _judge_shaped and _counts_as_judge read it from command tokens.
 GATE_PATH = "tools/check_python_host_pin.py"
 # The step right after a host-patch job's setup-python step: this gate, which fails there when the job does
@@ -455,7 +482,7 @@ STEP_SHELL_LINE = "shell: " + STEP_SHELL
 # The rules of the jobs leg; the self-test removes each from a copy of this gate to show its cases red on
 # revert.
 JOB_RULES = frozenset({"workflow-keys", "job-keys", "runner", "checkout", "step-env", "setup", "pin",
-                       "gate-step", "suite-step", "outside-judge"})
+                       "gate-step", "suite-step", "bash-build", "outside-judge"})
 # The jobs leg run outside the host-patch jobs: the one step of quality.yml outside HOST_JOBS that runs
 # this gate with --jobs-only (in the committed workflow, the registry job's judge step). The outside-judge
 # rule holds its placement by command tokens (_counts_as_judge / _judge_shaped), never by exact text: no
@@ -497,8 +524,8 @@ JOBS_ONLY_STEM = "--jobs-o"
 # set refuses each of them by the character it must spell. An eval needs no refused character, so
 # the grammar does not refuse one spelled only in safe characters: its line is read by the deletion
 # read like any other. A ${{ }} expression is refused first, with its own wording
-# (_run_line_tokens runs before this scan). The committed host-patch jobs carry eight run: lines with
-# seven distinct texts, each ASCII letters, digits, spaces and the - _ . / punctuation, so each
+# (_run_line_tokens runs before this scan). The committed host-patch jobs carry nine run: lines with
+# eight distinct texts, each ASCII letters, digits, spaces and the - _ . / punctuation, so each
 # passes this grammar unchanged. A line the grammar admits is still cannot-evaluate (exit 2, the
 # assignment named) when its first word, once any leading HOST_RUN_PREFIX_WORDS are skipped, is a
 # shell assignment (HOST_RUN_ASSIGNMENT_RE, _leading_assignment): a PATH=tools:/usr/bin prefix is
@@ -1206,6 +1233,8 @@ def _host_job_findings(job, tree, want):
                          where, GATE_RUN, "; ".join(_step_departures(gate))))
     if "suite-step" in JOB_RULES:
         found.extend(_suite_findings(where, job, steps, after))
+    if "bash-build" in JOB_RULES:
+        found.extend(_bash_build_findings(where, job, steps))
     return found
 
 
@@ -1233,6 +1262,54 @@ def _suite_findings(where, job, steps, after):
             found.append("{} does not run its suite {} as an executable step: step {} {} (an executable "
                          "step carries exactly name, run and shell: bash)".format(
                              where, step["run"], index + 1, "; ".join(_step_departures(step))))
+    return found
+
+
+def _bash_build_shaped(step):
+    """Whether a host-patch step runs the pinned bash build script: a token of one of its run: lines
+    (shlex, POSIX) has the os.path.normpath base name BASH_BUILD_RUNNER. A run: line shlex cannot
+    tokenize counts as one, as in _suite_shaped, so it is held, never passed unread."""
+    run = step.get("run")
+    if not isinstance(run, str):
+        return False
+    for text in run.split("\n"):
+        try:
+            tokens = shlex.split(text)
+        except ValueError:
+            return True
+        if any(os.path.basename(os.path.normpath(token)) == BASH_BUILD_RUNNER for token in tokens):
+            return True
+    return False
+
+
+def _bash_build_findings(where, job, steps):
+    """The bash-build rule for one host-patch job: in a BASH_BUILD job exactly one step runs the build
+    script (_bash_build_shaped), an executable step (_step_departures) whose run: is BASH_BUILD_RUN, after
+    every step that runs one of the job's first BASH_BUILD[job] HOST_SUITES runs and before every step
+    that runs one of the later ones. A job outside BASH_BUILD is not read here."""
+    if job not in BASH_BUILD:
+        return []
+    before, later = HOST_SUITES[job][:BASH_BUILD[job]], HOST_SUITES[job][BASH_BUILD[job]:]
+    builds = [index for index, step in enumerate(steps) if _bash_build_shaped(step)]
+    if len(builds) != 1:
+        return ["{} carries {} pinned bash build steps (want exactly one that runs {}, after {} and before {}: "
+                "the later suites rerun the hooks behaviour self-test, which refuses a bash older than "
+                "5.3)".format(where, len(builds), BASH_BUILD_RUN, ", ".join(before), ", ".join(later))]
+    build = builds[0]
+    found = []
+    if steps[build].get("run") != BASH_BUILD_RUN:
+        found.append("{}: its pinned bash build step (step {}) runs {!r}, not {}".format(
+            where, build + 1, str(steps[build].get("run")), BASH_BUILD_RUN))
+    if _step_departures(steps[build]):
+        found.append("{}: its pinned bash build step (step {}) {} (an executable step carries exactly name, "
+                     "run and shell: bash)".format(where, build + 1, "; ".join(_step_departures(steps[build]))))
+    for index, step in enumerate(steps):
+        if step.get("run") in before and index > build:
+            found.append("{} runs its pinned bash build (step {}) before its suite {} (step {}), not after "
+                         "it".format(where, build + 1, step["run"], index + 1))
+        if step.get("run") in later and index < build:
+            found.append("{} runs its pinned bash build (step {}) after its suite {} (step {}), which needs "
+                         "bash 5.3".format(where, build + 1, step["run"], index + 1))
     return found
 
 
@@ -1600,13 +1677,14 @@ def evaluate(root, version, jobs_only=False):
         return 1, ["FAIL: " + finding for finding in findings]
     report = ("PASS: python host patch {} ({}): {} carries only the top-level keys {}, its host-patch jobs "
               "{} each run on {}, carry env: on no job key or step, check out as written, pin it in their "
-              "one setup-python step, run this gate right after it and run their suites in order, each "
+              "one setup-python step, run this gate right after it and run their suites in order, {} "
+              "running the pinned bash build once, after its core lane and before its config lanes, each "
               "held step with exactly name, run and shell: bash, every run: of "
               "every job outside them is tokenized line by line, and one step outside them carries the jobs leg's "
               "--jobs-only judge as its own run: command with exactly name, run and shell: bash, its job and "
               "every step of that job free of env:".format(
                   _patch_text(patch), SOURCE_REL, WORKFLOW_REL, ", ".join(TOP_KEYS), ", ".join(HOST_JOBS),
-                  RUNNER))
+                  RUNNER, ", ".join(BASH_BUILD)))
     if jobs_only:
         return 0, [report + " (--jobs-only: the interpreter leg did not run)"]
     return 0, [report + ", and this interpreter is Python {}".format(_patch_text(version[:3]))]
@@ -1632,6 +1710,7 @@ SETUP_STEP = "      - uses: actions/setup-python@v5\n        with:\n          " 
 # Each held step carries exactly name, run and shell: bash, as quality.yml writes it.
 SHELL_LINE = "        shell: bash\n"
 GATE_STEP = "      - name: Python host pin\n" + SHELL_LINE + "        run: " + GATE_RUN + "\n\n"
+BUILD_STEP = "      - name: Bash build\n" + SHELL_LINE + "        run: " + BASH_BUILD_RUN + "\n"
 JUDGE_STEP = ("      - name: Python host pin (jobs leg, outside the host-patch jobs)\n" + SHELL_LINE
               + "        run: " + JOBS_ONLY_RUN + "\n")
 REGISTRY_JOB = ("  registry:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n"
@@ -1850,11 +1929,20 @@ def _lane_reading(reader, refusal, text):
         return 2, "this lane reader cannot read which suite it runs" in str(exc)
 
 
+def _host_steps(job):
+    """The suite steps of a host-patch job (_suite_step) with, in a BASH_BUILD job, the pinned bash build
+    step (BUILD_STEP) after its first BASH_BUILD[job] suite steps, as quality.yml places it."""
+    steps = ["      - name: Suite" + text for text in _suite_step(job).split("      - name: Suite")[1:]]
+    if job in BASH_BUILD:
+        steps.insert(BASH_BUILD[job], BUILD_STEP)
+    return "".join(steps)
+
+
 def _host_job(job):
     """A whole host-patch job, laid out as quality.yml lays it out."""
     return ("  {0}:\n    name: {0}\n    runs-on: {1}\n    steps:\n      - uses: actions/checkout@v4\n"
             "        with:\n          fetch-depth: 0\n          fetch-tags: true\n\n".format(job, RUNNER)
-            + SETUP_STEP + GATE_STEP + _suite_step(job))
+            + SETUP_STEP + GATE_STEP + _host_steps(job))
 
 
 def _edited(text, edits, part):
@@ -2068,7 +2156,7 @@ def _job_cases():
         ("jobs/gate-step-removed-finding", ((OPF, GATE_STEP, ""),), (),
          "is not the Python host pin step", "gate-step"),
         ("jobs/gate-step-moved-finding",
-         ((GFE, GATE_STEP, ""), (GFE, suite[GFE], suite[GFE] + "\n" + GATE_STEP)), (),
+         ((GFE, GATE_STEP, ""), (GFE, lanes[3], lanes[3] + "\n" + GATE_STEP)), (),
          "is not the Python host pin step", "gate-step"),
         ("jobs/gate-step-other-command-finding",
          ((OPF, "run: " + GATE_RUN, "run: python3 tools/check_python_host_pin.py"),), (),
@@ -2083,7 +2171,7 @@ def _job_cases():
          "is not the Python host pin step", "gate-step"),
         ("jobs/opf-suite-removed-finding", ((OPF, suite[OPF], ""),), (),
          "opf-host-patch does not run its suite", "suite-step"),
-        ("jobs/git-fixture-env-suite-removed-finding", ((GFE, suite[GFE], ""),), (),
+        ("jobs/git-fixture-env-suite-removed-finding", tuple((GFE, lane, "") for lane in lanes), (),
          GFE + " does not run its suite", "suite-step"),
         ("jobs/suite-renamed-finding",
          ((GFE, "--suite git-fixture-env-core", "--suite python-floor-selftest"),), (),
@@ -2098,14 +2186,37 @@ def _job_cases():
          "opf-host-patch does not run its suite", "suite-step"),
         # The git-fixture-env job runs the four split suites, each its own step, in HOST_SUITES order:
         # omitting, reordering, repeating or adding a suite step (a renamed, retired or respelled suite
-        # of a suite runner, or another job's suite, among them) is each a finding.
+        # of a suite runner, or another job's suite, among them) is each a finding. The reordered and
+        # repeated suites are config lanes, so the pinned bash build stays before every config lane and
+        # after the core lane, and the suite-step rule alone refuses each.
         ("jobs/git-fixture-env-suite-omitted-finding", ((GFE, lanes[2], ""),), (),
          "it omits " + HOST_SUITES[GFE][2], "suite-step"),
-        ("jobs/git-fixture-env-suites-reordered-finding", ((GFE, lanes[0] + lanes[1], lanes[1] + lanes[0]),),
+        ("jobs/git-fixture-env-suites-reordered-finding", ((GFE, lanes[2] + lanes[3], lanes[3] + lanes[2]),),
          (), "it runs them in another order", "suite-step"),
         ("jobs/git-fixture-env-suite-repeated-finding",
-         ((GFE, lanes[3], lanes[3] + lanes[0].replace("name: Suite\n", "name: Suite again\n")),), (),
-         "repeats " + HOST_SUITES[GFE][0], "suite-step"),
+         ((GFE, lanes[3], lanes[3] + lanes[1].replace("name: Suite 2\n", "name: Suite 2 again\n")),), (),
+         "repeats " + HOST_SUITES[GFE][1], "suite-step"),
+        # The pinned bash build sits once in the git-fixture-env job, after the core lane and before the
+        # three config lanes, which rerun the hooks behaviour self-test (it refuses a bash older than 5.3):
+        # the build moved before the core lane, after the first config lane or after all three, removed,
+        # repeated, or kept under an if: is each a finding of the bash-build rule alone.
+        ("jobs/bash-build-before-core-lane-finding",
+         ((GFE, BUILD_STEP, ""), (GFE, lanes[0], BUILD_STEP + lanes[0])), (),
+         "(step 4) before its suite " + HOST_SUITES[GFE][0] + " (step 5), not after it", "bash-build"),
+        ("jobs/bash-build-after-first-config-lane-finding",
+         ((GFE, BUILD_STEP, ""), (GFE, lanes[1], lanes[1] + BUILD_STEP)), (),
+         "after its suite " + HOST_SUITES[GFE][1] + " (step 5), which needs bash 5.3", "bash-build"),
+        ("jobs/bash-build-after-all-config-lanes-finding",
+         ((GFE, BUILD_STEP, ""), (GFE, lanes[3], lanes[3] + BUILD_STEP)), (),
+         "after its suite " + HOST_SUITES[GFE][3] + " (step 7), which needs bash 5.3", "bash-build"),
+        ("jobs/bash-build-removed-finding", ((GFE, BUILD_STEP, ""),), (),
+         GFE + " carries 0 pinned bash build steps", "bash-build"),
+        ("jobs/bash-build-repeated-finding",
+         ((GFE, BUILD_STEP, BUILD_STEP + BUILD_STEP.replace("name: Bash build\n", "name: Bash build again\n")),),
+         (), GFE + " carries 2 pinned bash build steps", "bash-build"),
+        ("jobs/bash-build-step-if-finding",
+         ((GFE, BUILD_STEP, BUILD_STEP.replace(SHELL_LINE, SHELL_LINE + "        if: false\n")),), (),
+         "its pinned bash build step (step 5) carries if:", "bash-build"),
         ("jobs/git-fixture-env-suite-added-finding",
          ((GFE, lanes[3], lanes[3] + "      - name: Floor suite\n" + SHELL_LINE + "        run: " + floor_suite
            + "\n"),), (), "adds " + floor_suite, "suite-step"),
@@ -3019,19 +3130,22 @@ def _self_test_cases(base):
     check("jobs/host-job-assignment-argument-passes", evaluate(root, HOST)[0], 0)
 
     # Acceptance controls read from the committed .github/workflows/quality.yml (ROOT), not from
-    # module constants: its host-patch jobs carry eight run: lines with seven distinct texts (the gate
-    # line in each job, the gate self-test line, the OPF suite line and the four git-fixture-env suite
-    # lines), and each of them passes the closed grammar and the assignment refusal unchanged. Each
-    # check holds its texts: how many committed lines carry each, and what each refusal returns for it.
+    # module constants: its host-patch jobs carry nine run: lines with eight distinct texts (the gate
+    # line in each job, the gate self-test line, the OPF suite line, the four git-fixture-env suite
+    # lines and the pinned bash build line the git-fixture-env config lanes need), and each of them
+    # passes the closed grammar and the assignment refusal unchanged. Each check holds its texts: how
+    # many committed lines carry each, and what each refusal returns for it.
     committed = _committed_host_runs()
     for check_id, texts, count in (
             ("jobs/host-job-committed-gate-line-grammar-passes", (GATE_RUN,), 2),
             ("jobs/host-job-committed-selftest-line-grammar-passes", (GATE_RUN + " --self-test",), 1),
             ("jobs/host-job-committed-opf-suite-line-grammar-passes", HOST_SUITES[OPF], 1),
-            ("jobs/host-job-committed-gfe-suite-line-grammar-passes", HOST_SUITES[GFE], 1)):
+            ("jobs/host-job-committed-gfe-suite-line-grammar-passes", HOST_SUITES[GFE], 1),
+            ("jobs/host-job-committed-bash-build-line-grammar-passes",
+             ("python3 -I -B tools/ci_build_bash.py --build",), 1)):
         check(check_id, [(committed.count(text), _refused_run_char(text), _leading_assignment(text))
                          for text in texts], [(count, None, None)] * len(texts))
-    check("jobs/host-job-committed-run-lines-counted", (len(committed), len(set(committed))), (8, 7))
+    check("jobs/host-job-committed-run-lines-counted", (len(committed), len(set(committed))), (9, 8))
 
     # The step shape (RUN_KEYS, STEP_SHELL_LINE): the Python host pin step, each suite step and the
     # --jobs-only judge step carry exactly name, run and shell, the shell: written as the exact line
@@ -3145,7 +3259,7 @@ def _self_test_cases(base):
                                    + "SUITE_RUNNERS"),))
     added = ("      - name: Floor suite\n" + SHELL_LINE
              + "        run: python3 -I -B tools/check_selftest_execution.py --suite python-floor-selftest\n")
-    root = _fixture(base, workflow=_workflow(((GFE, _suite_step(GFE), _suite_step(GFE) + added),)))
+    root = _fixture(base, workflow=_workflow(((GFE, _host_steps(GFE), _host_steps(GFE) + added),)))
     code, lines = evaluate(root, HOST)
     check("jobs/git-fixture-env-added-suite-shape-mutant-red",
           (code, _has(lines, "adds python3 -I -B tools/check_selftest_execution.py --suite python-floor-selftest"),
