@@ -240,10 +240,18 @@ def main():
 #   (k) a landing README with duplicated COUNTS-PROOF markers fails closed (exit 2),
 #   (l) a missing ENFORCEMENT.md (an expected_counts surface) fails closed (exit 2), never a guessed
 #       enforced figure,
-#   (m) a landing README whose marker blocks nest (either direction) or cross fails closed (exit 2) on
-#       BOTH generate and --check, and the failed generate writes nothing,
+#   (m) a landing README whose marker blocks nest (either direction) or cross (either order) fails
+#       closed (exit 2) on BOTH generate and --check with a diagnostic NAMING both overlapping blocks
+#       and the overlap (never a marker count measured after a replacement), and the failed run writes
+#       neither README (the landing page or the standards README, whose roster is reconciled by the
+#       same run),
 #   (n) a landing README with misordered COUNTS-PROOF markers (END before BEGIN) fails closed (exit 2)
-#       on both generate and --check.
+#       on both generate and --check, the failed generate again writing neither README,
+#   (o) disjoint blocks that merely TOUCH (the proof END marker immediately followed by the table
+#       BEGIN marker) or sit in swapped order still generate and re-check clean (exit 0): the overlap
+#       test is a strict interval intersection, so touching is the accepted boundary case between the
+#       refused overlaps of (m) and the prose-separated standard fixture, and a guard tightened into
+#       refusing touching blocks fails here instead of over-refusing a legal page.
 
 _MANIFEST = (
     'map-key = "map-{k}"\nname = "{name}"\npublisher = "AIQT self-test"\nedition = "{ed}"\n'
@@ -293,13 +301,15 @@ _ENFORCEMENT = "# Register\n\n| Status | Count |\n| --- | --- |\n| Enforced | 1 
 
 # Every rendered landing figure, asserted as a LITERAL expectation (never built with the live
 # templates or renderers, which a regression under test would share): the whole proof line, then one
-# literal per anchored table wording, together covering all twelve rendered figure positions.
+# literal per anchored table wording, together covering all twelve rendered figure positions. Every
+# literal starts at FIXED text to the left of its first figure (the controls row at its cell opener),
+# so a renderer that glues a digit onto the front of a figure cannot still contain the literal.
 _PROOF_RENDERED = ("**6 rules. 5 CI gates that check this repository. 7 Claude Code hooks shipped as "
                    "an opt-in plugin. Mapped to 2 frameworks.**")
 _TABLE_RENDERED = (
     "| **The standard** | 6 clear, single-behaviour rules",
-    "5 CI gates that check this repository and 7 Claude Code hooks shipped as an opt-in plugin "
-    "(4 blocking, 3 warning)",
+    "| **Technical controls** | 5 CI gates that check this repository and 7 Claude Code hooks "
+    "shipped as an opt-in plugin (4 blocking, 3 warning)",
     "Today 1 of the 6 rules are linked to at least one shipped gate or hook",
     "Mappings from the rules to 2 pinned external control catalogues",
 )
@@ -329,12 +339,20 @@ def self_test_main():
     import tempfile
     from contextlib import redirect_stderr, redirect_stdout
 
-    def run_quiet(root, check):
-        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+    def run_captured(root, check):
+        """Run quietly and return (exit code, captured stderr text): the overlap vectors assert the
+        diagnostic wording as well as the code, so a refusal that regressed into the misleading
+        post-replacement marker-count message could not keep passing on its exit code alone."""
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
             try:
-                return run(root, check)
+                code = run(root, check)
             except SystemExit as exc:
-                return "raised SystemExit({!r})".format(exc.code)
+                code = "raised SystemExit({!r})".format(exc.code)
+        return code, err.getvalue()
+
+    def run_quiet(root, check):
+        return run_captured(root, check)[0]
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-reference-facts-selftest-"))
@@ -431,8 +449,8 @@ def self_test_main():
         if ("**6 rules. 6 CI gates that check this repository. 7 Claude Code hooks shipped as "
                 "an opt-in plugin. Mapped to 2 frameworks.**") not in moved:
             failures.append("gate-move tree: expected the regenerated proof line to state 6 CI gates")
-        if ("6 CI gates that check this repository and 7 Claude Code hooks shipped as an opt-in "
-                "plugin (4 blocking, 3 warning)") not in moved:
+        if ("| **Technical controls** | 6 CI gates that check this repository and 7 Claude Code "
+                "hooks shipped as an opt-in plugin (4 blocking, 3 warning)") not in moved:
             failures.append("gate-move tree: expected the regenerated table row to state 6 CI gates")
         if run_quiet(gatemove, check=True) != 0:
             failures.append("gate-move tree: re-check after regeneration expected exit 0")
@@ -463,8 +481,8 @@ def self_test_main():
                 "**9 rules. 7 CI gates that check this repository. 11 Claude Code hooks shipped as "
                 "an opt-in plugin. Mapped to 3 frameworks.**",
                 "| **The standard** | 9 clear, single-behaviour rules",
-                "7 CI gates that check this repository and 11 Claude Code hooks shipped as an "
-                "opt-in plugin (6 blocking, 5 warning)",
+                "| **Technical controls** | 7 CI gates that check this repository and 11 Claude "
+                "Code hooks shipped as an opt-in plugin (6 blocking, 5 warning)",
                 "Today 2 of the 9 rules are linked to at least one shipped gate or hook",
                 "Mappings from the rules to 3 pinned external control catalogues",
         ):
@@ -516,9 +534,14 @@ def self_test_main():
             failures.append("missing ENFORCEMENT.md expected exit 2 (fail-closed)")
 
         # (m) nested or crossing landing marker blocks fail closed (exit 2) on BOTH generate and
-        #     --check, and a failed generate writes nothing: without the disjointness guard the outer
+        #     --check, and a failed run writes nothing: without the disjointness guard the outer
         #     block's replacement deletes the inner pair after that pair has already validated and
-        #     rendered, so generation reports success while destroying a managed block.
+        #     rendered, so generation reports success while destroying a managed block. Three layouts
+        #     already exited 2 WITHOUT the guard, through the misleading marker-count error a
+        #     replacement leaves behind, so the exit code alone cannot discriminate them: each run
+        #     must also emit the overlap diagnostic that names BOTH blocks, and must leave BOTH
+        #     outputs (the landing page and the standards README, whose roster the same run
+        #     reconciles) byte-identical.
         proof_pair = "<!-- COUNTS-PROOF:BEGIN (generated) -->\n<!-- COUNTS-PROOF:END -->"
         table_pair = "<!-- COUNTS-TABLE:BEGIN (generated) -->\n<!-- COUNTS-TABLE:END -->"
         overlapping = (
@@ -529,29 +552,69 @@ def self_test_main():
             ("crossing", "Prose.\n\n<!-- COUNTS-PROOF:BEGIN (generated) -->\n"
              "<!-- COUNTS-TABLE:BEGIN (generated) -->\n<!-- COUNTS-PROOF:END -->\n"
              "<!-- COUNTS-TABLE:END -->\n\nProse.\n"),
+            ("crossing-reversed", "Prose.\n\n<!-- COUNTS-TABLE:BEGIN (generated) -->\n"
+             "<!-- COUNTS-PROOF:BEGIN (generated) -->\n<!-- COUNTS-TABLE:END -->\n"
+             "<!-- COUNTS-PROOF:END -->\n\nProse.\n"),
         )
         for label, landing in overlapping:
             overlap = tmp / ("overlap-" + label)
             _write_fixture(overlap, two, _README, landing=landing)
-            before = (overlap / LANDING_REL).read_text(encoding="utf-8")
-            if run_quiet(overlap, check=False) != 2:
-                failures.append("{} landing marker blocks expected exit 2 on generate "
-                                "(fail-closed)".format(label))
-            if (overlap / LANDING_REL).read_text(encoding="utf-8") != before:
-                failures.append("{} landing marker blocks: a failed generate must write "
-                                "nothing".format(label))
-            if run_quiet(overlap, check=True) != 2:
-                failures.append("{} landing marker blocks expected exit 2 on --check "
-                                "(fail-closed)".format(label))
+            before = ((overlap / LANDING_REL).read_bytes(), (overlap / README_REL).read_bytes())
+            for check_mode, mode_label in ((False, "generate"), (True, "--check")):
+                code, err = run_captured(overlap, check=check_mode)
+                if code != 2:
+                    failures.append("{} landing marker blocks expected exit 2 on {} "
+                                    "(fail-closed)".format(label, mode_label))
+                if PROOF_MARKER not in err or TABLE_MARKER not in err or "nest or cross" not in err:
+                    failures.append("{} {} diagnostic must name both overlapping blocks and the "
+                                    "overlap, never a leftover marker count "
+                                    "({!r})".format(label, mode_label, err))
+                if ((overlap / LANDING_REL).read_bytes(),
+                        (overlap / README_REL).read_bytes()) != before:
+                    failures.append("{} landing marker blocks: a failed {} must write nothing to "
+                                    "either README".format(label, mode_label))
 
-        # (n) misordered markers (END before BEGIN) fail closed (exit 2) on both generate and --check.
+        # (n) misordered markers (END before BEGIN) fail closed (exit 2) on both generate and --check,
+        #     the failed generate writing nothing to either README.
         misordered = tmp / "misordered"
         _write_fixture(misordered, two, _README, landing=_LANDING.replace(
             proof_pair, "<!-- COUNTS-PROOF:END -->\n<!-- COUNTS-PROOF:BEGIN (generated) -->"))
+        before = ((misordered / LANDING_REL).read_bytes(), (misordered / README_REL).read_bytes())
         if run_quiet(misordered, check=False) != 2:
             failures.append("misordered COUNTS-PROOF markers expected exit 2 on generate (fail-closed)")
+        if ((misordered / LANDING_REL).read_bytes(),
+                (misordered / README_REL).read_bytes()) != before:
+            failures.append("misordered COUNTS-PROOF markers: a failed generate must write nothing to "
+                            "either README")
         if run_quiet(misordered, check=True) != 2:
             failures.append("misordered COUNTS-PROOF markers expected exit 2 on --check (fail-closed)")
+
+        # (o) disjoint blocks that merely touch, or sit in swapped order, are still ACCEPTED: the
+        #     overlap test is a strict interval intersection, so regions that only touch do not
+        #     overlap. Touching is the boundary case exactly AT the interval edge (the overlaps of (m)
+        #     are inside it, the prose-separated standard fixture is outside it); a guard tightened
+        #     into refusing touching or reordered blocks fails here instead of over-refusing a page.
+        touching_landing = (
+            "# Fixture landing page\n\nHand prose above the counts.\n\n"
+            "<!-- COUNTS-PROOF:BEGIN (generated) -->\n"
+            "<!-- COUNTS-PROOF:END --><!-- COUNTS-TABLE:BEGIN (generated) -->\n"
+            "<!-- COUNTS-TABLE:END -->\n\nHand prose below the counts.\n")
+        swapped_landing = (
+            "# Fixture landing page\n\nHand prose above the counts.\n\n"
+            + table_pair + "\n\nHand prose between the blocks.\n\n"
+            + proof_pair + "\n\nHand prose below the counts.\n")
+        for label, landing in (("touching", touching_landing), ("swapped-order", swapped_landing)):
+            disjoint = tmp / ("disjoint-" + label)
+            _write_fixture(disjoint, two, _README, landing=landing)
+            if run_quiet(disjoint, check=False) != 0:
+                failures.append("{} disjoint landing blocks expected exit 0 on generate (the strict "
+                                "overlap test must not refuse them)".format(label))
+            accepted = (disjoint / LANDING_REL).read_text(encoding="utf-8")
+            if _PROOF_RENDERED not in accepted or _TABLE_RENDERED[1] not in accepted:
+                failures.append("{} disjoint landing blocks: expected both blocks "
+                                "rendered".format(label))
+            if run_quiet(disjoint, check=True) != 0:
+                failures.append("{} disjoint landing blocks expected exit 0 on --check".format(label))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -561,13 +624,17 @@ def self_test_main():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: a conformant tree generates the right framework count, roster and every "
-          "landing figure in both blocks with the hand prose untouched and re-checks drift-clean; a "
+          "landing figure in both blocks with the hand prose untouched and re-checks drift-clean, "
+          "and disjoint landing blocks that touch or sit in swapped order stay accepted on both "
+          "generate and --check; a "
           "hand-desynced roster count, a hand-edited landing count, and manifest changes that move "
           "one rendered figure and then every one of them each fail --check (exit 1), and "
           "regeneration renders each moved figure into both landing blocks and the roster; and a "
           "README missing the ROSTER markers, a landing README missing or "
-          "duplicating a COUNTS marker pair, landing marker blocks that nest, cross or misorder (on "
-          "both generate and --check, the failed generate writing nothing), duplicated ROSTER blocks "
+          "duplicating a COUNTS marker pair, landing marker blocks that nest or cross in either "
+          "order (on both generate and --check, each diagnostic naming both overlapping blocks, the "
+          "failed run writing nothing to either README) or misorder (on both generate and --check, "
+          "again writing nothing), duplicated ROSTER blocks "
           "(on both generate and --check), an empty standards dir, a missing ENFORCEMENT.md, and an "
           "invalid-UTF-8 README all fail closed (exit 2)")
     return 0

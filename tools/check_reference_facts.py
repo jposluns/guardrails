@@ -71,8 +71,9 @@ generator alone cannot assert:
     the enforced-rules figure): the committed text is RENDERED by tools/gen_reference_facts.py (which
     calls this module's expected_counts, so the renderer and this gate share one set of predicates)
     and drift-gated there; this leg recomputes the same figures through that one shared function, so
-    it is defence in depth against a hand edit of the rendered text, never against a wrong predicate
-    inside expected_counts itself (the gen_mappings/subset-denominator pattern), each
+    it is defence in depth against a hand edit of the rendered text (the gen_mappings/subset-denominator
+    pattern: the generator branch is the primary control), never against a wrong predicate inside
+    expected_counts itself; the figures are each
     recomputed from the rule corpus, the gates and hooks manifests
     (structure-validated, filtered to the platforms the page names: "ci" gates, "claude-code" hooks,
     and with the hook total checked against its blocking/warning split, so the page cannot print a
