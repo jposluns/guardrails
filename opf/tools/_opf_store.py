@@ -376,10 +376,11 @@ def imported_series_supported():
 def imported_series_declared(manifest_data):
     """True when the [opf] base table declares a spec_version of IMPORTED_SPEC_VERSION or later AND
     this tooling itself supports that series (imported_series_supported: SUPPORTED_SPEC_VERSION
-    at or above IMPORTED_SPEC_VERSION). One arm of the imported-series activation flag,
-    _opf_check.imported_series_active, which every imported-series reader takes (spec 8.2/4.2); its
-    other arm is the graded homes-2 declaration (homes_generation), so a store that passes this gate
-    alone, such as a homes-1 store declaring 1.3.0, stays inactive.
+    at or above IMPORTED_SPEC_VERSION): the version-and-support half of the activation flag every
+    imported-series reader and registration takes (spec 8.2/4.2), _opf_check.imported_series_active.
+    That flag's other arm is the graded homes-2 declaration (homes_generation), since the imported
+    series activates only inside the 2.0.0 declaration, so a store that passes this gate alone, such
+    as a homes-1 store declaring 1.3.0, stays inactive.
     Graded through the house SemVer parser; an absent, non-string, or unparseable spec_version reads
     False (manifest validation, not this helper, reports it). The tooling-support condition mirrors
     homes_generation's gate on SUPPORTED_HOMES: validate_manifest does NOT fail every newer
