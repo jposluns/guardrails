@@ -417,7 +417,7 @@ _Segment = collections.namedtuple(
 # the (kind, text) pairs a guard's uncertain-segment posture reads for a segment holding a shell string the
 # shared reading could not read, or a shell reading its script from standard input (_expand_shell_strings,
 # _shell_uncertain_texts). shell_scope is the child-shell scope a segment runs in: () for the command's own
-# shell, and for a segment placed from a child shell's -c string or a trap action, a tuple naming that string,
+# shell, and for a segment placed from a child shell's -c string or an EXIT trap action, a tuple naming that string,
 # so a cd there is known not to move the commands after the string (_scope_moved). All three are defaulted so
 # the positional _Segment(...) builds need not pass them.
 _Segment.__new__.__defaults__ = (None, None, ())
@@ -1422,11 +1422,12 @@ def _segments(command, locale=False):
 #   - a guard whose decision rests on the whole command's shape rather than on one segment (the orchestration
 #     poll-loop classifier) also classifies the flat lex and denies when either reading matches;
 #   - git_discard, which takes recovery snapshots, reads the flat lex only.
-# A string a child shell runs (a shell's -c string, under a wrapper, find or xargs too) or a trap action runs
-# apart from the commands after it, so its placed segments carry a scope of their own (shell_scope): a cd there
-# moves only the later commands of that same string (_scope_moved), never the parent shell's. An eval string,
-# and a DEBUG, ERR or RETURN trap action (run by the current shell between its commands), share the scope of
-# the segment that holds them.
+# A string a child shell runs (a shell's -c string, under a wrapper, find or xargs too) or a trap action set only on
+# EXIT (run when the shell exits, after every later command) runs apart from the commands after it, so its placed
+# segments carry a scope of their own (shell_scope): a cd there moves only the later commands of that same string
+# (_scope_moved), never the parent shell's. An eval string, and a trap action on any signal or on DEBUG, ERR or
+# RETURN (run by the current shell when the signal arrives or between its commands), share the scope of the
+# segment that holds them.
 # COST. Every word of a segment is scanned once: the option walk of every shell word in a segment shares one
 # memo (_shell_option_walk), the programs a wrapper launches are resolved in one pass (_launched_programs), and
 # each string operand is read once; a pipeline's posture text is built once, from one list of its stages, for
@@ -1454,8 +1455,9 @@ _SHELL_C_VALUE_LONG = frozenset(("--rcfile", "--init-file"))
 # priority, taskset's mask, flock's lock file); 'assign' tells whether VAR=value words may precede the program
 # (env, sudo); 'none' letters and 'long_none' long options make the wrapper launch no program (command -v,
 # sudo -l, ionice -p); a digit cluster (nice -10) is a value-free option. An option outside a wrapper's grammar
-# (env -S, which re-splits a string, among them) leaves what it launches unknown: every later word that names a
-# shell, eval or an interpreter is then read as one, the earlier safe-direction over-read.
+# (env -S, which re-splits a string, among them), and a wrapper word of _GATE_NOTE_WRAPPERS with no grammar here
+# (script), leave what it launches unknown: every later word that names a shell, eval or an interpreter is then
+# read as one, the earlier safe-direction over-read.
 _LAUNCH_GRAMMARS = {
     "env": dict(value="uC", flags="i0v", attached="", long_value=("--unset", "--chdir"),
                 long_flags=("--ignore-environment", "--null", "--debug", "--block-signal", "--default-signal",
@@ -1509,8 +1511,15 @@ _LAUNCH_GRAMMARS = {
                               "--show-limits", "--replace", "--eof"), operands=0),
 }
 # The wrappers that run a shell builtin in the current shell: eval is read under these alone, since every other
-# wrapper launches a program, and eval is not one.
-_LAUNCH_BUILTIN_WRAPPERS = frozenset(("command", "builtin"))
+# wrapper launches a program, and eval is not one. time is bash's reserved word here only when its words before the
+# program are -p or '--' (_LAUNCH_TIME_KEYWORD_WORDS): bash reads any other option as the command it times (time -f
+# x eval ... runs '-f'), so eval is read under time -p and a bare time, never under time with another option.
+_LAUNCH_BUILTIN_WRAPPERS = frozenset(("command", "builtin", "time"))
+_LAUNCH_TIME_KEYWORD_WORDS = frozenset(("-p", "--"))
+# The trap conditions whose action runs apart from the commands after the trap: EXIT (also written 0) runs its
+# action when the shell exits, after every later command. Any other condition (a signal, DEBUG, ERR, RETURN, or an
+# opaque word that may be one) runs its action in the current shell, so a cd there moves the commands after it.
+_TRAP_APART_CONDITIONS = frozenset(("EXIT", "0"))
 # find's primaries that run the program after them, up to a ';' word or a '+' word after '{}'.
 _FIND_EXEC_PRIMARIES = frozenset(("-exec", "-execdir", "-ok", "-okdir"))
 # How deep shell strings are read inside one another: the command itself is depth 0, a string it runs is depth
@@ -1593,9 +1602,9 @@ def _trap_string(argv, opaque, k):
     setting no action), or None when trap sets no command: it lists or prints, has no action operand, has no
     condition after the action (a lone 'trap ACTION', which bash does not read as setting a handler), or the
     action is '-' (reset to default) or '' (ignore). unread is True when the action operand, or a word before it,
-    is an opaque word. in_place is True when a condition is DEBUG, ERR or RETURN (the current shell runs the
-    action between its own commands, so a cd there moves the commands after it) or an opaque word that may be
-    one; an EXIT or signal action runs apart from the commands after the trap."""
+    is an opaque word. in_place is False only when every condition is EXIT (_TRAP_APART_CONDITIONS), whose action
+    runs when the shell exits, after every later command; a signal, DEBUG, ERR or RETURN action, or an opaque
+    condition that may be one, runs in the current shell, so a cd there moves the commands after it."""
     n = len(argv)
     i = k + 1
     while i < n:
@@ -1618,7 +1627,7 @@ def _trap_string(argv, opaque, k):
     if i + 1 >= n:
         return None, False, False  # an action with no condition after it: bash does not read it as a handler
     action = argv[i]
-    in_place = any(opaque[c] or argv[c].upper() in ("DEBUG", "ERR", "RETURN") for c in range(i + 1, n))
+    in_place = any(opaque[c] or argv[c].upper() not in _TRAP_APART_CONDITIONS for c in range(i + 1, n))
     return (action if action not in ("-", "") else None), False, in_place
 
 
@@ -1701,9 +1710,10 @@ def _launched_programs(argv, opaque, start):
     (_launch_walk), followed through further wrappers; and the program after each find -exec/-execdir/-ok/-okdir
     primary, whose words end at the ';' word, or the '+' word after '{}', that ends them (end). through_xargs
     tells that an xargs stands between the segment and the program, so the program never reads the segment's
-    standard input; builtin_ok tells that only command or builtin wrappers stand there, so the program may be a
-    shell builtin such as eval. overread is None, or (index, through_xargs) for a wrapper whose option outside its
-    grammar left what it launches unknown, after which every word naming a shell, eval or an interpreter is read
+    standard input; builtin_ok tells that only command, builtin or keyword time wrappers stand there
+    (_LAUNCH_BUILTIN_WRAPPERS), so the program may be a shell builtin such as eval. overread is None, or (index,
+    through_xargs) for a wrapper whose option outside its grammar, or a _GATE_NOTE_WRAPPERS word with no grammar
+    (script), left what it launches unknown, after which every word naming a shell, eval or an interpreter is read
     as one (the earlier safe-direction over-read). A find's own scan passes over each -exec program's words, and
     those are walked once by that program, so the resolution costs time linear in the segment's length."""
     n = len(argv)
@@ -1719,10 +1729,16 @@ def _launched_programs(argv, opaque, start):
         if word in _LAUNCH_GRAMMARS:
             kind, program = _launch_walk(argv, opaque, k, word, end)
             if kind == "program":
+                keyword = word != "time" or all(argv[m] in _LAUNCH_TIME_KEYWORD_WORDS for m in range(k + 1, program))
                 work.append((program, end, xargs or word == "xargs",
-                             builtin_ok and word in _LAUNCH_BUILTIN_WRAPPERS))
+                             builtin_ok and word in _LAUNCH_BUILTIN_WRAPPERS and keyword))
             elif kind == "unknown" and (overread is None or k < overread[0]):
                 overread = (k, xargs or word == "xargs")
+            continue
+        if word in _GATE_NOTE_WRAPPERS:
+            # a wrapper with no launch grammar here (script): what it launches is unknown, so every later word is read
+            if overread is None or k < overread[0]:
+                overread = (k, xargs)
             continue
         if word == "find":
             if not terminators:
@@ -1748,17 +1764,18 @@ def _launched_programs(argv, opaque, start):
 def _shell_reading(seg):
     """(strings, unread, stdin) for one segment. strings are (text, child) for the command strings it runs
     through a shell's -c option, through eval, or as a trap action, in word order: child is True for a shell's
-    -c string and a trap action that runs apart from the commands after it (_trap_string), False for eval and a
-    DEBUG, ERR or RETURN trap action, which the current shell runs. unread is True when a string is there that
-    the reading does not have (an opaque word, _shell_option_walk, _eval_string, _trap_string); stdin is True
-    when a shell word in it reads its SCRIPT from standard input: no -c option, and -s given or no operand after
-    its options (a shell with a script FILE operand, bash script.sh, reads its script from that file, so a pipe
-    or a here-document feeding it is data). The command word is found after leading reserved words and VAR=value
-    words (_command_start), and the programs it runs are resolved through the wrappers that launch them
-    (_launched_programs): a shell -c string is read only where that program is a shell (_SHELL_C_SHELLS), eval
-    only where it is eval reached directly or through command or builtin, and trap only as the command word; a
-    shell under xargs never reads a script from standard input. Each word is scanned once (_shell_option_walk
-    shares one memo per word range, and each string operand is read once)."""
+    -c string and an EXIT trap action, which run apart from the commands after it (_trap_string), False for eval
+    and a trap action on a signal or on DEBUG, ERR or RETURN, which the current shell runs. unread is True when a
+    string is there that the reading does not have (an opaque word, _shell_option_walk, _eval_string,
+    _trap_string); stdin is True when a shell word in it reads its SCRIPT from standard input: no -c option, and -s
+    given or no operand after its options (a shell with a script FILE operand, bash script.sh, reads its script
+    from that file, so a pipe or a here-document feeding it is data). The command word is found after leading
+    reserved words and VAR=value words (_command_start), and the programs it runs are resolved through the
+    wrappers that launch them (_launched_programs): a shell -c string is read only where that program is a shell
+    (_SHELL_C_SHELLS), eval only where it is eval reached directly or through command, builtin or keyword time
+    (time or time -p), and trap only as the command word; a shell under xargs never reads a script from standard
+    input. Each word is scanned once (_shell_option_walk shares one memo per word range, and each string operand
+    is read once)."""
     argv = seg.argv
     opaque = seg.argv_opaque
     n = len(argv)
@@ -1839,9 +1856,9 @@ def _shell_string_in_place(inner, seg, scope):
     """The segments of a string that segment `seg` runs, placed as if written in place of it: each carries
     seg's redirects before its own (the shell's redirects apply to everything the string runs, and the
     string's own come later and win) and runs in `scope` followed by its own scope within the string (the scope
-    of seg for an eval string, a new child scope for a child shell's string or a trap action), and the last one
-    ends with ';' when the string ended its own list. Trailing empty segments (a string ending in a newline) are
-    dropped first."""
+    of seg for an eval string or an in-place trap action, a new child scope for a child shell's string or an EXIT
+    trap action), and the last one ends with ';' when the string ended its own list. Trailing empty segments (a
+    string ending in a newline) are dropped first."""
     inner = list(inner)
     while inner and not inner[-1].argv and not inner[-1].redirects and inner[-1].sep_after == "":
         inner.pop()
@@ -1862,8 +1879,8 @@ def _expand_shell_strings(segments, locale, depth, scopes):
     list operator or '&' after the shell command reads from the string's last command (a pipe INTO the shell
     command still reads as feeding that segment, not the string's first command). Strings are read with
     _lex_command at depth + 1, so a string inside a string is read too, down to _SHELL_STRING_DEPTH. The segments
-    of a child shell's string or a trap action that runs apart get a child scope (shell_scope) of their own, named
-    from the counter `scopes` that every nested reading of the command shares.
+    of a child shell's string or an EXIT trap action, which run apart, get a child scope (shell_scope) of their
+    own, named from the counter `scopes` that every nested reading of the command shares.
     Nothing here raises. A segment is marked uncertain (shell_uncertain, the (kind, text) pairs its guard's
     posture reads, _shell_uncertain_texts) and kept as lexed when it holds a string the reading does not have
     (_shell_reading), a string past the depth bound, a string that does not lex, a string whose own reading
@@ -1953,8 +1970,8 @@ def _shell_uncertain_texts(segments, stage=False):
 def _scope_moved(moved, scope):
     """True when a segment in shell scope `scope` (shell_scope) runs in a directory a cd in one of the scopes of
     `moved` changed: a cd moves the later commands of its own scope and of the child scopes inside it, never those
-    of an enclosing or a sibling scope (a cd inside a child shell's -c string, or an EXIT or signal trap action,
-    leaves the parent shell where it was). Reads each of the scope's at most _SHELL_STRING_DEPTH + 1 prefixes."""
+    of an enclosing or a sibling scope (a cd inside a child shell's -c string, or an EXIT trap action, leaves the
+    parent shell where it was). Reads each of the scope's at most _SHELL_STRING_DEPTH + 1 prefixes."""
     return any(scope[:length] in moved for length in range(len(scope) + 1))
 
 
@@ -1966,7 +1983,10 @@ def _scope_moved(moved, scope):
 # families, perl and ruby system/exec/backquotes/qx/%x and a pipe open, node child_process calls), judges each
 # form's own command text ALONE (never a join of several forms), and denies when that text names a spelling the
 # guard denies; a spelling in a comment, or in printed or quoted text outside an execution form, is never read,
-# so it is never denied. This structured reading is separate from the raw-text scans that read interpreter code
+# so it is never denied. The reading turns a form into no form only where a closed grammar settles it: a comment
+# is skipped only where nothing before it on its line can open a construct the reading does not parse
+# (_interp_line_clear), and anything else the reading cannot classify is read as code, as the earlier reading
+# read it. This structured reading is separate from the raw-text scans that read interpreter code
 # only as raw text, as they did before it: protected_line's backstop scans the whole raw command text for a push
 # or commit spelling when no git command was lexed, and git_discard's scope scan reads the raw text of every
 # command. No other guard reads the execution forms of interpreter code.
@@ -2006,23 +2026,46 @@ _INTERP_EXEC_NAMES = {
     "node": frozenset(("exec", "execSync", "execFile", "execFileSync", "spawn", "spawnSync")),
 }
 # The python callee names that are an execution form only when bound to subprocess, as the code shows it: called
-# through a name the code imports subprocess as (import subprocess, import subprocess as sp; subprocess itself
-# is read so too), or a bare name it imports from subprocess (from subprocess import run). Any other run or call
-# (asyncio.run, a function of the code's own) is not one.
+# through a name the code imports subprocess as (import subprocess, import subprocess as sp), through the module
+# a call returns (__import__('subprocess'), importlib.import_module('subprocess')), or as a bare name it imports
+# from subprocess (from subprocess import run). Any other run or call (asyncio.run, a function of the code's own,
+# and subprocess.run with no import binding subprocess, which python refuses with a NameError) is not one, as with
+# no interpreter reading.
 _INTERP_PY_QUALIFIED = frozenset(("run", "call"))
 _INTERP_PY_IMPORT_RE = re.compile(r"\bimport\s+([A-Za-z_][\w.]*(?:\s+as\s+\w+)?(?:\s*,\s*[A-Za-z_][\w.]*"
                                   r"(?:\s+as\s+\w+)?)*)")
 _INTERP_PY_FROM_RE = re.compile(r"\bfrom\s+subprocess\s+import\s+\(?\s*([\w\s,*]+)")
+# A call returning the subprocess module, right before the '.' of the callee (searched in a bounded window).
+_INTERP_PY_MODULE_CALL_RE = re.compile(r"(?:\b__import__|\bimport_module)\s*\(\s*(['\"])subprocess\1\s*,?\s*\)\s*\."
+                                       r"\s*\Z")
+_INTERP_PY_MODULE_CALL_WINDOW = 160
+# A python keyword argument (name=value, not ==) after an argv list.
+_INTERP_PY_KEYWORD_RE = re.compile(r"([A-Za-z_]\w*)\s*=(?!=)\s*(.*)\Z", re.S)
 # The python, perl and ruby callee names of the argv form: when the first argument is a list literal of string
-# literals (python), or for perl and ruby system/exec/spawn there are two or more string-literal arguments, the
-# call runs the program those words name with no shell between (_interp_argv_text).
+# literals and every later argument is a keyword other than shell or executable (python; shell=False too), or for
+# perl and ruby system/exec/spawn there are two or more string-literal arguments, the call runs the program those
+# words name with no shell between (_interp_argv_text). A python list given shell=True runs its first element as a
+# shell command line.
 _INTERP_ARGV_LIST_FAMILIES = frozenset(("python",))
 _INTERP_ARGV_ARGS = {"perl": frozenset(("system", "exec")), "ruby": frozenset(("system", "exec", "spawn"))}
 _INTERP_BARE_CALLS = {"perl": frozenset(("system", "exec")), "ruby": frozenset(("system", "exec"))}
 _INTERP_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _INTERP_CLOSERS = {"(": ")", "[": "]", "{": "}", "<": ">"}
-# perl's quote-like operators, after which a '#' is their delimiter, not a comment.
-_INTERP_PERL_QUOTE_OPS = frozenset(("q", "qq", "qw", "qx", "qr", "m", "s", "tr", "y"))
+# What may open, before a comment opener on its line, a construct the reading does not parse and inside which that
+# opener is no comment: a perl quote-like operator (q, qq, qw, qx, qr, m, s, tr, y, with any delimiter, '#' among
+# them) or a perl, ruby or node regex literal ('/'; a '/' that only divides is read the same, the safe direction),
+# a ruby %-literal ('%') or ?-character literal ('?'). A comment opener with one of these before it on its line is
+# read as code, so the rest of its line is read (_interp_line_clear). python's '#' outside a string literal is
+# always a comment.
+_INTERP_COMMENT_GUARD_RE = {
+    "perl": re.compile(r"/|(?<![\w$@%&])(?:q[qwxr]?|m|s|tr|y)(?!\w)"),
+    "ruby": re.compile(r"[/%?]"),
+    "node": re.compile(r"/"),
+}
+# The rescan bound of one inline code's scan: a call that turns out to be no execution form (an unbound python run,
+# a perl open that opens no pipe) has its arguments scanned again as code, and once those rescans pass this many
+# times the code's length, the whole code is read as one command text instead, so the scan stays linear.
+_INTERP_RESCAN_FACTOR = 8
 
 
 def _interp_family(word):
@@ -2112,24 +2155,43 @@ def _interp_skip_string(code, i, family):
     return n
 
 
-def _interp_skip_comment(code, i, family):
+def _interp_line_clear(code, i, family, lines):
+    """True when nothing before code[i] on its line may open a construct the reading does not parse
+    (_INTERP_COMMENT_GUARD_RE: a perl quote-like operator, a regex literal, a ruby %-literal or ?-character
+    literal), so a comment opener at code[i] is certainly a comment. lines memoizes, per code text, each line read
+    (its start, its end and the index of the first such construct on it) and the line read last, so each line is
+    searched once and a comment opener on the line read last costs constant time."""
+    memo = lines.setdefault(code, {})
+    last = memo.get(None)
+    if last is None or not last[0] <= i <= last[1]:
+        start = code.rfind("\n", 0, i) + 1
+        last = memo.get(start)
+        if last is None:
+            stop = code.find("\n", i)
+            stop = len(code) if stop == -1 else stop
+            found = _INTERP_COMMENT_GUARD_RE[family].search(code, start, stop)
+            last = memo[start] = (start, stop, stop if found is None else found.start())
+        memo[None] = last
+    return last[2] >= i
+
+
+def _interp_skip_comment(code, i, family, lines):
     """The index just past the comment opening at code[i], or None when none opens there: '#' to the end of its
-    line in python and ruby, and in perl unless it follows '$' ($#array) or a quote-like operator name (s#a#b#);
-    '//' to the end of its line and '/*' to its '*/' in node. A comment is not code, so no execution form is
-    read inside it."""
+    line in python (outside a string literal, which the scan has already skipped); in perl and ruby '#' to the end
+    of its line, and in node '//' to the end of its line and '/*' to its '*/', each only where nothing before it on
+    its line may open a construct the reading does not parse (_interp_line_clear), so with one there the rest of
+    the line is read as code; and never perl's '$#' ($#array). A comment is not code, so no execution form is read
+    inside it. lines is the memo _interp_line_clear keeps."""
     c = code[i]
     if c == "#" and family in ("python", "ruby", "perl"):
-        if family == "perl" and i:
-            if code[i - 1] == "$":
-                return None
-            back = i
-            while back and (code[back - 1].isalnum() or code[back - 1] == "_"):
-                back -= 1
-            if code[back:i] in _INTERP_PERL_QUOTE_OPS and code[back - 1:back] not in ("$", "@", "%"):
-                return None
+        if family == "perl" and code[i - 1:i] == "$":
+            return None
+        if family != "python" and not _interp_line_clear(code, i, family, lines):
+            return None
         end = code.find("\n", i)
         return len(code) if end == -1 else end
-    if c == "/" and family == "node" and code[i + 1:i + 2] in ("/", "*"):
+    if (c == "/" and family == "node" and code[i + 1:i + 2] in ("/", "*")
+            and _interp_line_clear(code, i, family, lines)):
         if code[i + 1] == "/":
             end = code.find("\n", i)
             return len(code) if end == -1 else end
@@ -2138,10 +2200,11 @@ def _interp_skip_comment(code, i, family):
     return None
 
 
-def _interp_region_end(code, i, family, closer):
+def _interp_region_end(code, i, family, closer, lines):
     """The index where the region starting at code[i] ends (exclusive): the `closer` that balances the bracket
     just before i (closer one of ')', ']', '}', '>'), or, with closer None, the end of the statement (an unquoted
-    ';' or newline); len(code) when neither comes. String literals and comments inside are skipped whole."""
+    ';' or newline); len(code) when neither comes. String literals and comments (_interp_skip_comment, with its
+    memo `lines`) inside are skipped whole."""
     n = len(code)
     opener = {")": "(", "]": "[", "}": "{", ">": "<"}.get(closer)
     depth = 1
@@ -2151,7 +2214,7 @@ def _interp_region_end(code, i, family, closer):
             i = _interp_skip_string(code, i, family)
             continue
         if c in "#/":
-            skipped = _interp_skip_comment(code, i, family)
+            skipped = _interp_skip_comment(code, i, family, lines)
             if skipped is not None:
                 i = skipped
                 continue
@@ -2169,10 +2232,11 @@ def _interp_region_end(code, i, family, closer):
 
 
 def _interp_python_bindings(code):
-    """(modules, names) for python inline code: the names the code imports subprocess as (subprocess itself
-    always among them), and the bare names it imports from subprocess ('*' for a star import), as its import
-    statements show them."""
-    modules = {"subprocess"}
+    """(modules, names) for python inline code: the names the code imports subprocess as (import subprocess,
+    import subprocess as sp), and the bare names it imports from subprocess ('*' for a star import), as its import
+    statements show them. subprocess is no binding until the code imports it: with no import a call through it
+    raises NameError, so it is no execution form, as with no interpreter reading."""
+    modules = set()
     names = set()
     for match in _INTERP_PY_IMPORT_RE.finditer(code):
         for item in match.group(1).split(","):
@@ -2202,6 +2266,63 @@ def _interp_qualifier(code, i):
     while j and (code[j - 1].isalnum() or code[j - 1] == "_"):
         j -= 1
     return code[j:end]
+
+
+def _interp_python_bound(code, i, name, bindings):
+    """True when the python run or call whose name starts at code[i] is bound to subprocess (_INTERP_PY_QUALIFIED):
+    an attribute of a name the code imports subprocess as, an attribute of the module __import__('subprocess') or
+    importlib.import_module('subprocess') returns (_INTERP_PY_MODULE_CALL_RE, read in a bounded window before the
+    '.'), or a bare name the code imports from subprocess; bindings is _interp_python_bindings(code)."""
+    qualifier = _interp_qualifier(code, i)
+    if qualifier is None:
+        return name in bindings[1] or "*" in bindings[1]
+    if qualifier:
+        return qualifier in bindings[0]
+    return _INTERP_PY_MODULE_CALL_RE.search(code, max(0, i - _INTERP_PY_MODULE_CALL_WINDOW), i) is not None
+
+
+def _interp_python_shell(rest, lines):
+    """For a python call whose first argument is a list or tuple, `rest` being its argument text after that list:
+    False when every later argument is a keyword other than shell and executable, or shell=False (the list runs its
+    program with no shell between); True when they are such keywords and shell=True (the list's first element runs
+    as a shell command line); None for anything else (a positional argument, *args or **kwargs, executable=, a shell
+    value other than True or False), which the reading cannot settle."""
+    rest = rest.strip()
+    if not rest:
+        return False
+    if rest[0] != ",":
+        return None
+    items = []
+    start = 1
+    i = 1
+    n = len(rest)
+    while i < n:
+        c = rest[i]
+        if c in "'\"":
+            i = _interp_skip_string(rest, i, "python")
+            continue
+        if c in "([{":
+            i = _interp_region_end(rest, i + 1, "python", _INTERP_CLOSERS[c], lines) + 1
+            continue
+        if c == ",":
+            items.append(rest[start:i])
+            start = i + 1
+        i += 1
+    items.append(rest[start:])
+    shell = False
+    for item in items:
+        item = item.strip()
+        if not item:
+            continue
+        keyword = _INTERP_PY_KEYWORD_RE.match(item)
+        if keyword is None or keyword.group(1) == "executable":
+            return None
+        if keyword.group(1) == "shell":
+            value = keyword.group(2).strip()
+            if value not in ("True", "False"):
+                return None
+            shell = value == "True"
+    return shell
 
 
 def _interp_literal_items(text, family):
@@ -2235,9 +2356,12 @@ def _interp_literal_items(text, family):
 
 
 def _interp_argv_text(words):
-    """The command text an argv-form execution runs, its words given: the program is resolved through the
-    wrappers that launch it (_launched_programs); the words of a git program, or a shell's -c string, are
-    returned; any other program's words are data it receives, so nothing ("") is."""
+    """The command text an argv-form execution runs, its words given, or None when the reading cannot settle it:
+    the program is resolved through the wrappers that launch it (_launched_programs); the words of a git program,
+    or a shell's -c string, are returned; a shell with no -c and no script operand reads its script from its
+    standard input, which the call may feed, and an interpreter (_interp_family) may run a command from its own
+    code, so either is unsettled (None) and the caller reads the call's whole argument text; any other program's
+    words are data it receives, so nothing ("") is."""
     if not words:
         return ""
     opaque = [False] * len(words)
@@ -2248,23 +2372,46 @@ def _interp_argv_text(words):
         if name == "git":
             texts.append(" ".join(words[k:end]))
         elif name in _SHELL_C_SHELLS:
-            kind, j, has_c, _has_s = _shell_option_walk(words, opaque, k + 1, {}, end)
+            kind, j, has_c, has_s = _shell_option_walk(words, opaque, k + 1, {}, end)
             if has_c and kind == "operand":
                 texts.append(words[j])
+            elif not has_c and (has_s or kind == "end"):
+                return None
+        elif _interp_family(name) is not None:
+            return None
     if overread is not None:
         texts.append(" ".join(words))  # a wrapper option outside its grammar: read every word, as before
     return "\n".join(texts)
 
 
-def _interp_form_text(family, name, args):
-    """The command text of one execution form, `args` being its argument text. An argv form (a python call
-    whose first argument is a list or tuple of string literals; a perl or ruby system, exec or spawn with two or
-    more string-literal arguments; a node execFile, execFileSync, spawn or spawnSync naming its program and a
-    list of string-literal arguments) runs its program with no shell between, so only a git program's words or a
-    shell's -c string are read (_interp_argv_text); a perl or ruby open runs a command only through a pipe
-    (perl's '-|' or '|-' mode, or a '|' at either end of its file argument; ruby's '|' at the start), so any other
-    open is no execution form (None); every other form's argument text is read whole, as the command line a shell
-    runs."""
+def _interp_node_options_clear(text, lines):
+    """True when `text`, what follows the program and its list in a node execFile, execFileSync, spawn or
+    spawnSync call, is nothing, or one object literal that names no shell option (its text holds no word 'shell'):
+    with a shell option the call runs its command line in a shell, and any other argument (a variable holding
+    options, a callback) the reading cannot settle, so the caller reads the call's whole argument text."""
+    text = text.strip()
+    if not text:
+        return True
+    if text[0] != ",":
+        return False
+    text = text[1:].strip()
+    if text[:1] != "{":
+        return not text
+    end = _interp_region_end(text, 1, "node", "}", lines)
+    return text[end + 1:].strip() in ("", ",") and re.search(r"\bshell\b", text[:end]) is None
+
+
+def _interp_form_text(family, name, args, lines):
+    """The command text of one execution form, `args` being its argument text and `lines` the comment memo
+    (_interp_line_clear). An argv form (a python call whose first argument is a list or tuple of string literals
+    and whose other arguments are keywords other than shell and executable, or shell=False; a perl or ruby system,
+    exec or spawn with two or more string-literal arguments; a node execFile, execFileSync, spawn or spawnSync
+    naming its program and a list of string-literal arguments) runs its program with no shell between, so only a
+    git program's words or a shell's -c string are read (_interp_argv_text); a python list or tuple of string
+    literals given shell=True runs its first element as a shell command line, which is read
+    (_interp_python_shell); a perl or ruby open runs a command only through a pipe (perl's '-|' or '|-' mode, or a
+    '|' at either end of its file argument; ruby's '|' at the start), so any other open is no execution form
+    (None); every other form's argument text is read whole, as the command line a shell runs."""
     if name == "open":
         items = []
         depth = 0
@@ -2290,29 +2437,35 @@ def _interp_form_text(family, name, args):
         stripped = args.lstrip()
         if stripped.startswith(("[", "(")):
             closer = "]" if stripped[0] == "[" else ")"
-            end = _interp_region_end(stripped, 1, family, closer)
+            end = _interp_region_end(stripped, 1, family, closer, lines)
             words = _interp_literal_items(stripped[1:end], family)
-            if words is not None:
-                return _interp_argv_text(words)
+            shell = _interp_python_shell(stripped[end + 1:], lines) if words is not None else None
+            if shell:
+                return words[0] if words else ""
+            text = _interp_argv_text(words) if shell is not None else None
+            if text is not None:
+                return text
         return args
     if name in _INTERP_ARGV_ARGS.get(family, ()):
         words = _interp_literal_items(args, family)
-        if words is not None and len(words) >= 2:
-            return _interp_argv_text(words)
-        return args
+        text = _interp_argv_text(words) if words is not None and len(words) >= 2 else None
+        return args if text is None else text
     if family == "node" and name in ("execFile", "execFileSync", "spawn", "spawnSync"):
         comma = args.find(",")
         program = _interp_literal_items(args[:comma] if comma != -1 else args, family)
         rest = args[comma + 1:].strip() if comma != -1 else ""
         if program is not None and len(program) == 1:
             words = [program[0]]
+            tail = ("," + rest) if rest else ""
             if rest[:1] == "[":
-                end = _interp_region_end(rest, 1, family, "]")
+                end = _interp_region_end(rest, 1, family, "]", lines)
                 listed = _interp_literal_items(rest[1:end], family)
                 if listed is None:
                     return args
                 words.extend(listed)
-            return _interp_argv_text(words)
+                tail = rest[end + 1:]
+            text = _interp_argv_text(words) if _interp_node_options_clear(tail, lines) else None
+            return args if text is None else text
         return args
     return args
 
@@ -2320,14 +2473,19 @@ def _interp_form_text(family, name, args):
 def _interp_exec_regions(code, family):
     """The command texts of the execution forms in inline code `code` of `family` (_INTERP_EXEC_NAMES and the
     backquote, qx and %x forms), one per form, in order (_interp_form_text). Names inside string literals and
-    comments are not read, since a string is data until an execution form runs it and a comment is not code; a
-    python run or call is a form only when bound to subprocess (_INTERP_PY_QUALIFIED, _interp_python_bindings);
-    a form whose text names nothing (an argv form running another program) is left out."""
+    comments (_interp_skip_comment) are not read, since a string is data until an execution form runs it and a
+    comment is not code; a python run or call is a form only when bound to subprocess (_INTERP_PY_QUALIFIED,
+    _interp_python_bound), checked before its arguments are scanned; a form whose text names nothing (an argv
+    form running another program) is left out. A call whose arguments prove it no form (a perl or ruby open that
+    opens no pipe) has them read on as code; once those rescans pass _INTERP_RESCAN_FACTOR times the code's length,
+    the whole code is returned as one text, the earlier reading's safe direction, so the scan stays linear."""
     names = _INTERP_EXEC_NAMES[family]
     bare = _INTERP_BARE_CALLS.get(family, frozenset())
     bindings = None
+    lines = {}
     regions = []
     n = len(code)
+    rescanned = 0
     i = 0
     while i < n:
         c = code[i]
@@ -2340,7 +2498,7 @@ def _interp_exec_regions(code, family):
             i = _interp_skip_string(code, i, family)
             continue
         if c in "#/":
-            skipped = _interp_skip_comment(code, i, family)
+            skipped = _interp_skip_comment(code, i, family, lines)
             if skipped is not None:
                 i = skipped
                 continue
@@ -2365,18 +2523,22 @@ def _interp_exec_regions(code, family):
         while k < n and code[k] in " \t":
             k += 1
         if name in names and k < n and code[k] == "(":
-            end = _interp_region_end(code, k + 1, family, ")")
             qualified = True
             if family == "python" and name in _INTERP_PY_QUALIFIED:
                 if bindings is None:
                     bindings = _interp_python_bindings(code)
-                qualifier = _interp_qualifier(code, i)
-                qualified = (qualifier in bindings[0] if qualifier is not None
-                             else name in bindings[1] or "*" in bindings[1])
+                qualified = _interp_python_bound(code, i, name, bindings)
             elif family == "ruby" and name == "open":
                 qualified = _interp_qualifier(code, i) in (None, "Kernel")  # File.open and URI.open run nothing
-            text = _interp_form_text(family, name, code[k + 1:end]) if qualified else None
+            if not qualified:
+                i = j  # no execution form: its arguments are read on, as any other code
+                continue
+            end = _interp_region_end(code, k + 1, family, ")", lines)
+            text = _interp_form_text(family, name, code[k + 1:end], lines)
             if text is None:
+                rescanned += end - k
+                if rescanned > _INTERP_RESCAN_FACTOR * n:
+                    return [code]
                 i = j  # no execution form: its arguments are read on, as any other code
                 continue
             if text:
@@ -2384,8 +2546,8 @@ def _interp_exec_regions(code, family):
             i = end + 1
             continue
         if name in bare and k > j and k < n:
-            end = _interp_region_end(code, k, family, None)
-            text = _interp_form_text(family, name, code[k:end])
+            end = _interp_region_end(code, k, family, None, lines)
+            text = _interp_form_text(family, name, code[k:end], lines)
             if text:
                 regions.append(text)
             i = end
@@ -2399,13 +2561,15 @@ def _interp_exec_forms(records):
     text per form, in order ([] when none), so a guard judges each form ALONE and never a join of several. An
     interpreter segment runs a program (after leading reserved words and VAR=value words, _command_start, and the
     wrappers that launch it, _launched_programs) whose _gate_word names an interpreter family (_interp_family);
-    after a wrapper option outside its grammar every later word naming an interpreter is read as one (the
-    earlier safe-direction over-read). Its inline code is read with the family's option grammar (_interp_codes),
-    and only the execution forms in that code are returned (_interp_exec_regions). Disclosed residuals: a command
-    the code holds in a variable or builds at run time (cmd = '...'; os.system(cmd)), an execution form the lists
-    do not name or a run or call reached through a name the code's imports do not bind to subprocess, a form
-    inside a string the code interpolates (an f-string, ruby's #{...}), an option outside the grammars that takes
-    a separate value (read as the script operand, which ends the walk), and an interpreter family off the list."""
+    after a wrapper option outside its grammar, or a wrapper with no grammar (script), every later word naming an
+    interpreter is read as one (the earlier safe-direction over-read). Its inline code is read with the family's
+    option grammar (_interp_codes), and only the execution forms in that code are returned
+    (_interp_exec_regions). Disclosed residuals: a command the code holds in a variable or builds at run time
+    (cmd = '...'; os.system(cmd)), an execution form the lists do not name, a run or call reached through a name
+    the code does not bind to subprocess (subprocess.run with no import of subprocess, which python refuses, is no
+    form, as with no interpreter reading), a form inside a string the code interpolates (an f-string, ruby's
+    #{...}), an option outside the grammars that takes a separate value (read as the script operand, which ends
+    the walk), and an interpreter family off the list."""
     texts = []
     for seg in records:
         argv = seg.argv
@@ -5053,7 +5217,7 @@ def git_explicit_binding(data):
     denied here. A segment whose string the reading cannot read, or a shell reading its script from a pipe or a
     here-document, is uncertain alone: the raw fallback (_expbnd_fallback) reads each of that segment's texts
     alone (_shell_uncertain_texts), and every other segment is judged as before. A cd placed from a child shell's
-    -c string or an EXIT or signal trap action moves only the later commands of that string (_scope_moved). An
+    -c string or an EXIT trap action moves only the later commands of that string (_scope_moved). An
     interpreter's inline code is read only in its execution forms, each alone (_interp_exec_forms): a breadth
     stage paired with a publish in one form denies (the one deny; a breadth stage and a publish in two separate
     forms, and a cd-then-mutate there, keep the posture, allow)."""
