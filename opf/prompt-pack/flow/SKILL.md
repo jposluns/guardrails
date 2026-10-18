@@ -1186,17 +1186,18 @@ convergence rule.
   posting a new handoff "MUST supersede the previous in the same act", so the closing handoff
   requires a writer that supersedes the previous `current` handoff in the posting operation
   itself; where no clean `current` handoff authored by a non-importer actor exists, the new one
-  supersedes nothing and any writer may post it. The reference writer lacks that capability: it
-  documents that "posting a new handoff does not supersede the previous one in the same act"
-  (`opf record`), and a `create` followed by a separate `transition` of the old handoff is two
-  acts, not one, so the run never composes the two. Where the writer in use lacks it, as the
-  reference writer does, and such a `current` handoff exists, the run records the enumeration
-  and the pending-decisions queue in full (every `open` `pending_decision` ID) in one `infra`
-  worklog entry whose `detail` opens with the single line `flow handoff-deferred` and which
-  links with `relates` the `current` handoff it could not supersede, tying the newer state to
-  that handoff by record, posts no `handoff` record, since a second one would leave two live
-  handoffs, and surfaces the gap, a writer capability the adopter must supply, in its report and
-  at the next attended boundary. The handoff rests on that enumerated fact, not on OPF
+  supersedes nothing and any writer may post it. The reference writer has that capability:
+  `opf record create --type handoff` supersedes the previous `current` handoff in the same
+  journaled write, all or nothing, so on the reference writer the run posts the closing handoff
+  directly. A `create` followed by a separate `transition` of the old handoff is two acts, not
+  one, so the run never composes the two where the writer in use lacks the single-act
+  capability; where it lacks it and such a `current` handoff exists, the run records the
+  enumeration and the pending-decisions queue in full (every `open` `pending_decision` ID) in
+  one `infra` worklog entry whose `detail` opens with the single line `flow handoff-deferred`
+  and which links with `relates` the `current` handoff it could not supersede, tying the newer
+  state to that handoff by record, posts no `handoff` record, since a second one would leave two
+  live handoffs, and surfaces the gap, a writer capability the adopter must supply, in its
+  report and at the next attended boundary. The handoff rests on that enumerated fact, not on OPF
   actionability: an item awaiting a decision stays actionable in the section 8.5 sense, its
   parked steps wait on their triggers, and the next run resumes at the first step whose trigger
   has resolved; no proposal is thereby treated as ratified, and no stop is granted by one. A

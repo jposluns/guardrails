@@ -87,7 +87,9 @@ record authoring (spec 9.2 is the precedent; spec 8.8 is normative):
      and for a transition the one named record's `status` and `updated_at` change plus its `proposed_from`
      write or removal, a pending_decision's resolution bundle write or removal, a contribution's delivery
      bundle or receipt write or removal, and the `supersedes` link a decision landing unqualified `decided`
-     appends. The delta is
+     appends; a handoff create additionally supersedes the one prior clean current handoff in the same
+     act (spec 8.5): that row's `status` to unqualified `superseded` and its `updated_at`, plus the
+     `supersedes` link appended to the new record. The delta is
      derived INDEPENDENTLY of the planner's rows, from a pre-planning copy of the request, the allocation
      result, the clock value, the planned-from bytes, and the schema rules;
   6. the planned-destination cleanliness gate and the single-writer lease (the shared _opf_write_guard
@@ -206,8 +208,21 @@ transition changes `status` and `updated_at` only, plus `proposed_from` (written
 (written by `proposed -> sent`, removed by the rejection of `sent/proposed`) and its receipt keys (written
 by `sent -> acknowledged` with --receipt-ref, removed by the rejection of `acknowledged/proposed`), and the
 `supersedes` link a decision landing unqualified `decided` appends, so a target state that requires any
-other field refuses at validate_record; posting a new handoff does not supersede the previous one in the
-same act. Three contribution cases stay outside this verb: an assistant or automation send under a
+other field refuses at validate_record. Posting a new handoff supersedes the previous one in the same act
+(spec 8.5): a `create --type handoff`, which lands unqualified `current` whatever the actor, moves the one
+clean current handoff of the active index to unqualified `superseded` in the same journaled transaction
+(the supersession is the spec's own requirement, never a proposal, so it lands unqualified whatever the
+posting actor), appends one `supersedes` link to the new record after its requested links, and reports
+that status change as the plan's transition, so the final gate accepts its one pending snapshot
+comparison exactly as it does a transition's; a first handoff, with no current handoff to supersede,
+supersedes nothing. The current-handoff set this reads is the one the doctor's C-HANDOFF counts (the
+active handoff index and every archived record, through the doctor's own archive walk), so a prior state
+the spec forbids refuses with every byte untouched before anything is written, each refusal carrying a
+named diagnostic: more than one current handoff (two-current-handoffs, a C-HANDOFF finding already), a
+current handoff found in the archive, which never holds one (archived-current-handoff, spec 12), and an
+importer-authored current handoff, which this verb may not transition and which discharges no
+supersession (importer-current-handoff, spec 8.6/8.8). Three contribution cases stay outside this verb:
+an assistant or automation send under a
 standing authorization (spec 8.4) still lands `sent/proposed`, since the verb does not read the
 declaration; a planned delivery at `proposed` cannot be written (create takes no `delivery`) and a row
 carrying one refuses the send (the way out is to withdraw that record and create a new contribution,
@@ -315,8 +330,10 @@ PENDING_DECISION = "pending_decision"
 # The resolution bundle a pending_decision's `open -> decided` writes (spec 8.5, 8.8): all-or-none, all
 # three keys on `decided`, none on `open` or `withdrawn`.
 DECISION_BUNDLE = ("decision", "decided_at", "decided_by")
-# The link relation --supersedes appends when a decision lands unqualified `decided` (spec 8.5, 8.6).
+# The link relation --supersedes appends when a decision lands unqualified `decided` (spec 8.5, 8.6),
+# and the one a handoff create appends to the handoff it supersedes in the same act (spec 8.5).
 SUPERSEDES = "supersedes"
+HANDOFF = "handoff"
 CONTRIBUTION = "contribution"
 # The delivery bundle a contribution's `proposed -> sent` writes (spec 8.5, 8.8), and the receipt keys
 # --receipt-ref adds to it on `sent -> acknowledged` (legal only at acknowledged).
@@ -979,11 +996,82 @@ def _check_request(req, ctx):
         _operand_rel(req, ctx)
 
 
+def _current_handoffs(ctx, rows):
+    """The current handoffs the doctor's C-HANDOFF counts (a handoff at `current` with no qualifier),
+    gathered over the records that check reads: the active handoff index (`rows`, as _opf_check._make_rec
+    views), then every archived record through the doctor's own archive walk (_opf_check.archived_records),
+    so this planner and the final doctor judge the at-most-one-current rule over one record set. An archive
+    input the walk finds missing, unreadable or malformed refuses before anything is written, never
+    skipped (spec 8.8, 12)."""
+    archived, problems = _opf_check.archived_records(ctx.root_fd, ctx.machine_rel, ctx.types, ctx.vendors,
+                                                     ctx.import_status, homes=ctx.homes)
+    if problems:
+        raise RecordError("the archive does not pass the doctor's own archive walk ({}), so this handoff "
+                          "create is refused: posting a new handoff supersedes the current one (spec 8.5), "
+                          "and the current-handoff set reads the records the doctor's C-HANDOFF reads, "
+                          "every archived record included. Nothing written; fail-closed".format(
+                              "; ".join(problems)))
+    recs = [_opf_check._make_rec(r, HANDOFF, "active") for r in rows if isinstance(r, dict)] + archived
+    return [rec for rec in recs if rec.rtype == HANDOFF and rec.state == "current" and rec.qual is None]
+
+
+def _handoff_supersession(ctx, operand, ts):
+    """The supersession a handoff create performs in the same act (spec 8.5): the id of the ONE clean
+    current handoff the new record supersedes, or None when none exists (a first handoff supersedes
+    nothing). The current set is the one the doctor's C-HANDOFF counts (_current_handoffs), so a prior
+    state the spec forbids, which the final doctor would refuse only after publication, refuses HERE with
+    every byte untouched, each refusal carrying a named diagnostic:
+      two-current-handoffs: more than one current handoff stands (spec 8.5 allows at most one; the store
+        is already a C-HANDOFF finding and no supersession target is determinable);
+      archived-current-handoff: the current handoff was rotated to the archive, which never holds one
+        (spec 12), and this verb writes the active index only;
+      importer-current-handoff: the current handoff is importer-authored; imported history discharges no
+        supersession and this verb never transitions an importer-authored record (spec 8.6, 8.8).
+    The superseded row is seated once (_locate), schema-valid before it is trusted or overwritten
+    (_require_valid_current), and dated before the clock (_require_later)."""
+    current = _current_handoffs(ctx, _index_rows(operand))
+    if not current:
+        return None
+    if len(current) > 1:
+        raise RecordError("create handoff refused (two-current-handoffs): {} current handoffs stand ({}); "
+                          "at most one current handoff exists across the store (spec 8.5, C-HANDOFF), so "
+                          "no supersession target is determinable. Repair the store under opf doctor "
+                          "first; nothing written (fail-closed)".format(
+                              len(current), ", ".join(_opf_store._safe_display(rec.id) for rec in current)))
+    rec = current[0]
+    if rec.location != "active":
+        raise RecordError("create handoff refused (archived-current-handoff): the current handoff {} sits "
+                          "in {}; the current handoff never rotates (spec 12) and this verb writes the "
+                          "active index only, so the supersession posting requires (spec 8.5) cannot be "
+                          "performed. Repair the rotation first; nothing written (fail-closed)".format(
+                              _opf_store._safe_display(rec.id), rec.location))
+    if rec.actor_kind == "importer":
+        raise RecordError("create handoff refused (importer-current-handoff): the current handoff {} is "
+                          "importer-authored; imported history discharges no supersession obligation and "
+                          "this verb never transitions an importer-authored record (spec 8.6, 8.8). A "
+                          "maintainer resolves that record first; nothing written (fail-closed)".format(
+                              _opf_store._safe_display(rec.id)))
+    if not isinstance(rec.id, str):
+        raise RecordError("the current handoff carries a malformed id ({}); a transition never trusts or "
+                          "overwrites an invalid record (repair it under opf doctor first); nothing "
+                          "written (fail-closed)".format(_opf_store._safe_display(rec.id)))
+    row = _locate(operand, rec.id)
+    _require_valid_current(row, HANDOFF, ctx, rec.id, operand.rel)
+    _require_later(row, ts)
+    return rec.id
+
+
 def _plan_create(req, ctx, operand, now):
     """`create`: one new record of a baseline type in its initial state. An assistant or automation
     author entering a gated initial state lands `/proposed` (spec 8.4); a created-terminal factual type
     (reference, autonomous_decision, maintainer_decision) carries no qualifier. The id is claimed through
-    the seam; the record is validated by validate_record before anything is planned further."""
+    the seam; the record is validated by validate_record before anything is planned further. A handoff,
+    which lands unqualified `current` whatever the actor, supersedes the one prior clean current handoff
+    in the same act (spec 8.5, _handoff_supersession): that row lands unqualified `superseded` with this
+    operation's `updated_at` (the supersession is the spec's own requirement, never a proposal), the new
+    record appends one `supersedes` link to it after its requested links, the worklog entry records it,
+    and the plan reports that status change; a first handoff supersedes nothing, and a prior state the
+    spec forbids refuses with every byte untouched (the named diagnostics of _handoff_supersession)."""
     rtype = req.values["--type"]
     spec = _require_create_type(rtype, ctx)
     rows = _index_rows(operand)
@@ -1005,15 +1093,28 @@ def _plan_create(req, ctx, operand, now):
         if "scopes" not in spec.extra_keys:
             raise RecordError("--scope applies to block records only, not {}; fail-closed".format(rtype))
         record["scopes"] = list(req.scopes)
+    superseded = _handoff_supersession(ctx, operand, ts) if rtype == HANDOFF and qual is None else None
+    if superseded is not None:
+        record["links"] = list(record.get("links", [])) + [{"rel": SUPERSEDES, "id": superseded}]
     _validated(record, rtype, ctx)
+    detail = "opf-record create {} {}".format(rid, record["status"])
+    related = [{"rel": "relates", "id": rid}]
+    if superseded is not None:
+        detail += "\nsupersedes: " + superseded
+        related.append({"rel": "relates", "id": superseded})
     entry = _lifecycle_entry(ctx, wid, now, req.actor, "added",
                              "created {} ({}) at {}".format(rid, rtype, record["status"]),
-                             "opf-record create {} {}".format(rid, record["status"]),
-                             [{"rel": "relates", "id": rid}])
+                             detail, related)
     operand.new_model = copy.deepcopy(operand.model)
+    if superseded is not None:
+        for prior in operand.new_model["record"]:
+            if isinstance(prior, dict) and prior.get("id") == superseded:
+                prior.update({"status": "superseded", "updated_at": ts})
+                _validated(prior, HANDOFF, ctx)
     operand.new_model["record"] = list(operand.new_model.get("record", [])) + [record]
     _append_worklog(ctx, entry)
-    return Plan([ctx.counters, operand, ctx.worklog], [rid, wid])
+    return Plan([ctx.counters, operand, ctx.worklog], [rid, wid],
+                transition=None if superseded is None else (superseded, "current", "superseded"))
 
 
 def _plan_worklog_append(req, ctx, operand, now):
@@ -1581,10 +1682,39 @@ def _expected_delta(req, ctx, raws, now):
             row["refs"] = [{"kind": ref["kind"], "locator": ref["locator"], "note": ref["note"]}
                            for ref in req.refs]
         if sub == "create":
+            detail = "opf-record create {} {}".format(ids[0], row["status"])
+            targets = [ids[0]]
+            # The handoff posting rule (spec 8.5/8.8), derived here on its own, apart from the planner: a
+            # handoff created at unqualified `current` supersedes the one prior clean current handoff of
+            # the prior index (type `handoff`, status exactly `current`, not importer-authored): that row's
+            # `status` moves to `superseded` with `updated_at` at the clock value, the new row appends one
+            # `supersedes` link to it after its requested links, the worklog entry adds a `supersedes:`
+            # detail line and a `relates` link to it, and the expected status change is that supersession.
+            # Whether the write is legal (the archive walk, a second current handoff, an importer author)
+            # is the planner's refusal and is not judged again here.
+            if rtype == "handoff" and not proposed:
+                prior_rows = docs[rels[1]].get("record")
+                cands = [r for r in (prior_rows if isinstance(prior_rows, list) else [])
+                         if isinstance(r, dict) and r.get("type") == "handoff"
+                         and r.get("status") == "current"
+                         and not (isinstance(r.get("actor"), dict) and r["actor"].get("kind") == "importer")]
+                if len(cands) > 1:
+                    raise _postcondition_failed("the prior {} holds more than one current handoff".format(
+                        rels[1]))
+                if cands:
+                    hid = cands[0].get("id")
+                    if not isinstance(hid, str):
+                        raise _postcondition_failed("the prior current handoff in {} carries no string "
+                                                    "id".format(rels[1]))
+                    cands[0].update({"status": "superseded", "updated_at": ts})
+                    row["links"] = list(row.get("links", [])) + [{"rel": "supersedes", "id": hid}]
+                    detail += "\nsupersedes: " + hid
+                    targets.append(hid)
+                    transition = (hid, "current", "superseded")
             docs[rels[1]]["record"] = list(docs[rels[1]].get("record", [])) + [row]
             entry = _expected_entry(wid, ts, req.actor, "added",
                                     "created {} ({}) at {}".format(ids[0], rtype, row["status"]),
-                                    "opf-record create {} {}".format(ids[0], row["status"]), [ids[0]])
+                                    detail, targets)
         else:
             entry = row
     elif sub == "transition":
@@ -1698,7 +1828,9 @@ def _postcondition(plan, req, ctx, now):
     schema rules give, the clock's timestamps, and the claimed ids; for a status change exactly `status`,
     `updated_at`, the `proposed_from` write or removal, a pending_decision's resolution bundle write or
     removal, a contribution's delivery bundle or receipt write or removal, and its `supersedes` link
-    append of the one named record; the counters advanced by
+    append of the one named record; for a handoff create additionally the one prior clean current
+    handoff's supersession (spec 8.5: its `status` to `superseded` and its `updated_at`, the `supersedes`
+    link appended to the new record, and that status change reported); the counters advanced by
     exactly the claim; nothing else. A stray mutation of an existing record or of a new row, a lost or
     reordered row, a changed schema marker, a status change touching another field or another record, or
     a counter moved by anything but the claim refuses before anything is written, and so does a plan whose
@@ -3215,8 +3347,8 @@ def self_test():
             print("  - " + f, file=sys.stderr)
         return 1
     print("opf-record self-test: PASS ({} checks: grammar, allocation seam, completeness proof, planners, "
-          "transitions, resolution bundle, supersession, receipts, released span, precondition, "
-          "postcondition)".format(checked[0]))
+          "transitions, resolution bundle, supersession, handoff posting, receipts, released span, "
+          "precondition, postcondition)".format(checked[0]))
     return EXIT_OK
 
 
@@ -3722,6 +3854,7 @@ def _self_test_transitions(check, plan, post, full, now):
             needle))
     _self_test_decisions(check, plan, post, full, now)
     _self_test_supersession(check, plan, post, full, now)
+    _self_test_handoff(check, plan, post, full, now)
     _self_test_delivery(check, plan, post, full, now)
     _self_test_pending(check)
     _self_test_leftover_lock(check)
@@ -3919,6 +4052,72 @@ def _self_test_supersession(check, plan, post, full, now):
         mutate(op)
         check("the postcondition refuses {}".format(label),
               _refuses(lambda argv=argv, p=p, c=c: post(p, c, argv), "postcondition failed"))
+
+
+def _self_test_handoff(check, plan, post, full, now):
+    """The supersession a handoff create performs in the same act (spec 8.5): a second handoff supersedes
+    the first in one plan, a first handoff supersedes nothing, each prior state the spec forbids refuses
+    with its named diagnostic, and the postcondition vectors that discriminate a planner drifting from the
+    rule (the delta is derived by the oracle on its own, so each drift refuses with nothing written)."""
+    earlier = "2026-09-26T00:00:00Z"
+    ts = _rfc3339(now)
+    counters = dict(full, HO=1)
+
+    def ho(n, status, kind="assistant", **kw):
+        return dict({"id": "HO-{}".format(n), "type": HANDOFF, "status": status, "title": "t",
+                     "created_at": earlier, "updated_at": earlier, "actor": {"kind": kind}}, **kw)
+
+    argv = ["create", "--type", "handoff", "--title", "h", "--actor", "assistant", "--link", "relates=HO-1"]
+    p, c, op = plan(argv, rows=[ho(1, "current")], counters=counters)
+    old, new = op.new_model["record"]
+    entry = c.worklog.new_model["entry"][-1]
+    check("a second handoff supersedes the first in the same plan, after its requested links",
+          old == dict(ho(1, "current"), status="superseded", updated_at=ts)
+          and new["status"] == "current"
+          and new["links"] == [{"rel": "relates", "id": "HO-1"}, {"rel": SUPERSEDES, "id": "HO-1"}]
+          and p.ids == ["HO-2", "WL-1"] and p.transition == ("HO-1", "current", "superseded")
+          and post(p, c, argv) is None)
+    check("the posting's worklog entry names and relates the superseded handoff",
+          entry["detail"] == "opf-record create HO-2 current\nsupersedes: HO-1"
+          and entry["links"] == [{"rel": "relates", "id": "HO-2"}, {"rel": "relates", "id": "HO-1"}])
+    first = ["create", "--type", "handoff", "--title", "h", "--actor", "maintainer"]
+    p, c, op = plan(first)
+    check("a first handoff supersedes nothing",
+          op.new_model["record"] == [{"id": "HO-1", "type": HANDOFF, "status": "current", "title": "h",
+                                      "created_at": ts, "updated_at": ts, "actor": {"kind": "maintainer"}}]
+          and p.ids == ["HO-1", "WL-1"] and p.transition is None and post(p, c, first) is None)
+    plain = first[:-2] + ["--actor", "assistant"]
+    p, c, op = plan(plain, rows=[ho(1, "superseded")], counters=counters)
+    check("a store holding only superseded handoffs is a first-handoff case",
+          "links" not in op.new_model["record"][-1] and p.transition is None and post(p, c, plain) is None)
+    for label, rows, needle in (
+            ("two current handoffs", [ho(1, "current"), ho(2, "current")], "two-current-handoffs"),
+            ("an importer-authored current handoff", [ho(1, "current", kind="importer")],
+             "importer-current-handoff"),
+            ("a schema-invalid current handoff", [dict(ho(1, "current"), title="   ")], "not schema-valid"),
+            ("a duplicate-seated current handoff", [ho(1, "current"), ho(1, "superseded")], "seated 2 times"),
+            ("a clock not past the current handoff", [ho(1, "current", updated_at="2026-09-28T00:00:00Z")],
+             "must follow")):
+        check("a handoff create refuses {} ({})".format(label, needle), _refuses(
+            lambda rows=rows: plan(plain, rows=rows, counters=dict(counters, HO=2)), needle))
+    base = [ho(1, "current"), ho(2, "superseded")]
+    for label, mutate in (
+            ("a supersession that leaves the old handoff current",
+             lambda p, op: op.new_model["record"][0].update({"status": "current", "updated_at": earlier})),
+            ("a supersession that writes no link",
+             lambda p, op: op.new_model["record"][-1].pop("links")),
+            ("a supersession that touches the already-superseded sibling",
+             lambda p, op: op.new_model["record"][1].__setitem__("updated_at", ts)),
+            ("a plan that reports no status change",
+             lambda p, op: setattr(p, "transition", None))):
+        p, c, op = plan(plain, rows=copy.deepcopy(base), counters=dict(counters, HO=2))
+        mutate(p, op)
+        check("the postcondition refuses {}".format(label),
+              _refuses(lambda p=p, c=c: post(p, c, plain), "postcondition failed"))
+    p, c, op = plan(plain, rows=[ho(1, "superseded")], counters=counters)
+    op.new_model["record"][-1]["links"] = [{"rel": SUPERSEDES, "id": "HO-1"}]
+    check("the postcondition refuses a supersedes link written on a first handoff",
+          _refuses(lambda: post(p, c, plain), "postcondition failed"))
 
 
 def _self_test_delivery(check, plan, post, full, now):

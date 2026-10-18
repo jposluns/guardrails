@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T88)
+  check_opf_record.py --self-test                    the fixture suite (T1-T89)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
                                                      through an assertion (_discriminate)
 
@@ -22,9 +22,11 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T4  two sequential creates claim BI-1 then BI-2 (and their own worklog entries WL-1, WL-2) with
       monotonic counters; a counters map missing an enabled namespace refuses (flip: drop the
       known-complete proof)
-  T5  a kill at each journal step of create and of an assistant transition (three operands: counters,
-      index, worklog) and of a maintainer done-with-receipt (four operands: counters, backlog index, done
-      index, worklog) leaves the killed run's lease; the next run releases that confirmed-dead holder's
+  T5  a kill at each journal step of create, of an assistant transition (three operands: counters,
+      index, worklog), of a handoff-superseding create (three operands: the supersession and the appended
+      handoff land together or not at all) and of a maintainer done-with-receipt (four operands: counters,
+      backlog index, done index, worklog) leaves the killed run's lease; the next run releases that
+      confirmed-dead holder's
       leftover lease through its own reconciliation (spec 5.7, the T74 dead-run release clause) and
       reconciles, leaving the operands exactly the prestate or exactly the poststate, the poststate iff
       the transaction is COMPLETE, and no killed run reports an id (flip: write counters outside the
@@ -501,6 +503,23 @@ Each case runs on its own copy of that template; the root is removed in a finall
       once on every path. Accepted: the declared injection reaching its own backstop (flips: a
       discriminator that refuses only stray backstop lines; T75's earlier collection, which drops
       each child's stderr when an assertion fails before its verdict reads)
+  T89 posting a new handoff supersedes the current one in the same act (spec 8.5): a first handoff
+      supersedes nothing and reports no status change; the second posting lands the old handoff at
+      unqualified superseded with this operation's updated_at, appends the supersedes link to the new
+      record after its requested links, records the supersession in its worklog entry, reports the status
+      change, and is doctor VALID once committed with HANDOFF.md showing exactly one current handoff
+      (flips: the planner performs no supersession, the reviewed head's append-only create, which only the
+      independent oracle refuses; a supersession that demands a previous current handoff, under which the
+      first posting is refused). Each prior state the spec forbids refuses with its named diagnostic and
+      every byte untouched, never published and then failed at the final doctor, each case its own test: a
+      hand-edited second current handoff (a C-HANDOFF finding at rest) refuses the next posting
+      (two-current-handoffs; flip: supersede whichever current handoff comes first, which the oracle's own
+      one-current derivation still refuses), and a legacy importer-authored current handoff in the clean
+      index, which the writer may not transition and which discharges no supersession (spec 8.6/8.8),
+      refuses it (importer-current-handoff; flip: the firewall dropped from the supersession, which the
+      oracle's own importer exclusion still refuses). The atomicity of the supersession rides T5: a kill
+      at each journal step of the superseding create leaves the store at exactly the prestate or exactly
+      the poststate, the old and new handoff never split.
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), or, when no assertion fails, a
@@ -562,6 +581,7 @@ MACH = ".working/toml"
 COUNTERS = MACH + "/counters.toml"
 BI_INDEX = MACH + "/backlog_item.index.toml"
 PD_INDEX = MACH + "/pending_decision.index.toml"
+HO_INDEX = MACH + "/handoff.index.toml"
 MD_INDEX = MACH + "/maintainer_decision.index.toml"
 PP_INDEX = MACH + "/preference_pattern.index.toml"
 DECISIONS_VIEW = ".working/DECISIONS.md"
@@ -1327,13 +1347,20 @@ def journal_states(root, rel=None):
 def _t5_scenarios(fx):
     """(label, base store or None for the template, args, operands in journal order): create over the
     template; an assistant transition (three operands) and a maintainer done-with-receipt (four operands)
-    over a committed store whose BI-1 is active."""
+    over a committed store whose BI-1 is active; and a handoff-superseding create (three operands) over a
+    committed store holding the current HO-1, so the supersession and the appended handoff land together
+    or not at all (spec 8.5)."""
     active = fx.case("t5-base-active")
     with ticking():
         step(fx, active, ["create", "--type", "backlog_item", "--title", "k"] + MAINTAINER, "BI-1")
         step(fx, active, ["transition", "BI-1", "active"] + MAINTAINER, "BI-1 active")
+    posted = fx.case("t5-base-handoff")
+    with ticking():
+        step(fx, posted, ["create", "--type", "handoff", "--title", "k"] + ASSISTANT, "HO-1")
     return (("create", None, CREATE, (COUNTERS, BI_INDEX, WORKLOG)),
             ("transition", active, ["transition", "BI-1", "done"] + ASSISTANT, (COUNTERS, BI_INDEX, WORKLOG)),
+            ("handoff-supersede", posted, ["create", "--type", "handoff", "--title", "k2"] + ASSISTANT,
+             (COUNTERS, HO_INDEX, WORKLOG)),
             ("done-with-receipt", active, ["done-with-receipt", "BI-1"] + MAINTAINER,
              (COUNTERS, BI_INDEX, DN_INDEX, WORKLOG)))
 
@@ -2724,6 +2751,135 @@ def flip_t73_receipt():
     """The rejection of acknowledged/proposed keeps the receipt keys, which a sent contribution may not
     carry."""
     return patch.object(record, "_rejected_delivery", lambda rtype, cur_state, rejection, row: None)
+
+
+# --- T89: posting a new handoff supersedes the current one in the same act ----------------------------------
+
+HANDOFF_VIEW = ".working/HANDOFF.md"
+HO_CREATE = ["create", "--type", "handoff", "--title", "resume here"]
+
+
+def _handoff_section(root, heading):
+    """The entry lines of one section of the rendered HANDOFF view."""
+    text = read(root, HANDOFF_VIEW).decode("utf-8")
+    assert "## " + heading + "\n" in text, (heading, text)
+    return text.split("## " + heading + "\n", 1)[1].split("\n## ", 1)[0].strip().splitlines()
+
+
+def t89_handoff_supersession(fx):
+    """A first handoff supersedes nothing and reports no status change; posting the second supersedes it in
+    the same act (spec 8.5): HO-1 lands unqualified superseded with this operation's updated_at, HO-2
+    appends the supersedes link after its requested links, the worklog entry records the supersession, the
+    run reports the status change, and doctor is VALID once committed, HANDOFF.md showing exactly one
+    current handoff."""
+    env = fx.env
+    root = fx.case("t89-supersede")
+    with ticking():
+        out = step(fx, root, HO_CREATE + ASSISTANT, "HO-1")
+        assert '"change": null' in out, ("T89 a first handoff reports no status change", out[-800:])
+        first = row(root, "HO-1", HO_INDEX)
+        assert first["status"] == "current" and "links" not in first, first
+        doctor_valid(env, root)
+        out = step(fx, root, HO_CREATE + ["--link", "relates=HO-1"] + ASSISTANT, "HO-2 supersedes HO-1")
+        assert '"change": "HO-1 current -> superseded"' in out, ("T89 the supersession is reported",
+                                                                 out[-800:])
+        old, new = row(root, "HO-1", HO_INDEX), row(root, "HO-2", HO_INDEX)
+        assert old["status"] == "superseded" and old["updated_at"] == new["created_at"], (old, new)
+        assert new["status"] == "current" and new["links"] == [
+            {"rel": "relates", "id": "HO-1"}, {"rel": "supersedes", "id": "HO-1"}], new
+        assert lifecycle(root)[-1] == "opf-record create HO-2 current\nsupersedes: HO-1", lifecycle(root)
+        entry = model(root, WORKLOG)["entry"][-1]
+        assert entry["links"] == [{"rel": "relates", "id": "HO-2"}, {"rel": "relates", "id": "HO-1"}], entry
+        doctor_valid(env, root)
+        assert _handoff_section(root, "Current") == ["- HO-2 resume here"], read(root, HANDOFF_VIEW)
+        assert _handoff_section(root, "Superseded") == ["- HO-1 resume here"], read(root, HANDOFF_VIEW)
+
+
+def flip_t89_skip():
+    """The planner performs no supersession (the reviewed head's behaviour: create only appends): only the
+    independent oracle, which derives the handoff posting rule on its own, refuses the second posting."""
+    return patch.object(record, "_handoff_supersession", lambda ctx, operand, ts: None)
+
+
+def flip_t89_required_target():
+    """A supersession that demands a previous current handoff: a first handoff, with nothing to supersede,
+    is refused instead of posted."""
+    original = record._handoff_supersession
+
+    def demanding(ctx, operand, ts):
+        target = original(ctx, operand, ts)
+        if target is None:
+            raise record.RecordError("posting a handoff requires a current handoff to supersede; fail-closed")
+        return target
+    return patch.object(record, "_handoff_supersession", demanding)
+
+
+def t89_two_current_refused(fx):
+    """The forbidden prior state (spec 8.5: at most one current handoff) refuses with its named diagnostic
+    and every byte untouched, never published and then failed at the final doctor: a second current handoff
+    hand-edited in canonically (a C-HANDOFF finding at rest) refuses the next posting."""
+    env = fx.env
+    root = fx.case("t89-two-current")
+    with ticking():
+        step(fx, root, HO_CREATE + ASSISTANT, "HO-1")
+        index = model(root, HO_INDEX)
+        forged = dict(index["record"][0], id="HO-2", title="a forged twin")
+        index["record"] = index["record"] + [forged]
+        write_commit(env, root, HO_INDEX, emit.emit_checked(index).encode("utf-8"), "a second current handoff")
+        counters = model(root, COUNTERS)
+        counters["counters"]["HO"] += 1
+        write_commit(env, root, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
+        rc, out, err = cli(env, ["doctor", "--root", str(root)])
+        assert rc == 1 and "C-HANDOFF" in out, ("T89 two current handoffs are a doctor finding", rc,
+                                                out[-1600:])
+        refused_untouched(env, root, HO_CREATE + ASSISTANT, "two-current-handoffs")
+
+
+def flip_t89_first_current():
+    """Supersede whichever current handoff comes first when several stand: the forbidden prior state is
+    laundered instead of refused with its named diagnostic. The independent oracle derives the one-current
+    rule on its own and still refuses, so the named refusal this flip removes turns its test red."""
+    original = record._current_handoffs
+
+    def first_only(ctx, rows):
+        return original(ctx, rows)[:1]
+    return patch.object(record, "_current_handoffs", first_only)
+
+
+def t89_importer_current_refused(fx):
+    """A legacy importer-authored current handoff in the clean index is no supersession target: the
+    clean-series writer never transitions an importer-authored record and imported history discharges no
+    supersession (spec 8.6/8.8), so the posting refuses with its named diagnostic and every byte
+    untouched."""
+    env = fx.env
+    root = fx.case("t89-importer-current")
+    index = model(root, HO_INDEX)
+    index["record"] = index["record"] + [{
+        "id": "HO-1", "type": "handoff", "status": "current", "title": "migrated",
+        "created_at": "2026-08-01T00:00:00Z", "updated_at": "2026-08-01T00:00:00Z",
+        "actor": {"kind": "importer"}}]
+    write_commit(env, root, HO_INDEX, emit.emit_checked(index).encode("utf-8"), "a legacy importer handoff")
+    counters = model(root, COUNTERS)
+    counters["counters"]["HO"] += 1
+    write_commit(env, root, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
+    with ticking():
+        refused_untouched(env, root, HO_CREATE + ASSISTANT, "importer-current-handoff")
+
+
+def flip_t89_importer():
+    """Drop the importer firewall from the supersession: the importer-authored current handoff is
+    superseded like clean history. The independent oracle keeps its own importer exclusion and refuses,
+    so the named refusal this flip removes turns its test red."""
+    def unfirewalled(ctx, operand, ts):
+        current = record._current_handoffs(ctx, record._index_rows(operand))
+        if not current:
+            return None
+        rec = current[0]
+        row = record._locate(operand, rec.id)
+        record._require_valid_current(row, record.HANDOFF, ctx, rec.id, operand.rel)
+        record._require_later(row, ts)
+        return rec.id
+    return patch.object(record, "_handoff_supersession", unfirewalled)
 
 
 def t8_collision(fx):
@@ -8786,6 +8942,9 @@ TESTS = (
                                                                           flip_t87_repr_substring)),
     ("T88-expected-injection-seen", t88_expected_injection_seen, (flip_t88_unchecked,
                                                                   flip_t88_t75_unwinding)),
+    ("T89-handoff-posting-supersedes", t89_handoff_supersession, (flip_t89_skip, flip_t89_required_target)),
+    ("T89-two-current-handoffs-refused", t89_two_current_refused, flip_t89_first_current),
+    ("T89-importer-current-handoff-refused", t89_importer_current_refused, flip_t89_importer),
 )
 
 
