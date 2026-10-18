@@ -93,14 +93,17 @@ def _lifecycle_probe(code, module, entry, delegate, env, run=None, cannot_evalua
             load = os.getloadavg()
         except OSError:
             load = "unavailable"
-        # Only the last OBSERVED stage is asserted: a wrapper can reach its
-        # delegate and hang afterwards (unwinding, restoration), so "stage
-        # entered" never licenses the claim that the delegate was not reached.
+        # Only the OBSERVED stage reports are asserted: a wrapper can reach
+        # its delegate and hang afterwards (unwinding, restoration), so
+        # "stage entered" never licenses the claim that the delegate was not
+        # reached, and NO observed stage asserts only that none was received
+        # (the import can have finished without its stage line being
+        # observed), never an unfinished import.
         message = ("TIMEOUT: lifecycle probe {}.{} reached its {} s bound {} (loadavg {}) "
                    "(cannot evaluate)".format(
                        module, entry, _LIFECYCLE_PROBE_SECONDS,
                        "after its last reported stage: {}".format(stages[-1]) if stages
-                       else "before its module import finished", load))
+                       else "before it reported any stage", load))
         (CANNOT_EVALUATE if cannot_evaluate is None else cannot_evaluate).append(message)
         print("LIFECYCLE " + message, file=sys.stdout if report is None else report, flush=True)
         return message
@@ -128,6 +131,7 @@ _LIFECYCLE_TIMEOUT_EXPECTED = [
     ("bound-kill-entered", True, True, True, True, True, "", True),
     ("bound-kill-delegated", True, True, True, True, True, "", True),
     ("bound-kill-import", True, True, True, True, True, "", True),
+    ("bound-kill-unreported", True, True, True, True, True, "", True),
     ("exit-1", (1, "not json", ""), [], "", "", True),
     ("oserror", "[Errno 5] vector", [], "", "", True),
     ("clean", (0, [[], True]), [], "", "", True),
@@ -148,9 +152,12 @@ def _lifecycle_timeout_vectors():
     shape, so removing or disabling the production timeout turns every case red, not only the
     exception handling; the launch-bound-control case pins that an otherwise identical unbounded
     record compares unequal. A probe still running at its bound returns its timeout message,
-    which names the probe and ONLY the last stage it reported, never a claim that the delegate
+    which names the probe and ONLY the stage reports observed, never a claim that the delegate
     was not reached (a wrapper can reach its delegate and hang unwinding: the post-delegation
-    case holds the message to the observed stage), recorded in the record passed and announced
+    case holds the message to the observed stage) and never, when no stage was observed, a
+    claim that the import had not finished (a probe can finish its import and be killed before
+    its stage line is observed: both no-stage cases hold the message to that absence),
+    recorded in the record passed and announced
     on the report passed, nothing on stderr; a nonzero exit, an unparsable payload and a launch
     error stay lifecycle evidence, recorded nowhere. _lifecycle_problems keeps a recorded probe
     timeout out of the problems (an unrecorded one stays a problem), and _lifecycle_finding
@@ -186,7 +193,11 @@ def _lifecycle_timeout_vectors():
                        b"probe stage: delegated\n"),
              "after its last reported stage: delegated"),
             ("bound-kill-import", subprocess.TimeoutExpired(["vector"], 60),
-             "before its module import finished"),
+             "before it reported any stage"),
+            ("bound-kill-unreported", subprocess.TimeoutExpired(
+                ["vector"], 60, output=b"",
+                stderr=b"a line that is not a stage report\n"),
+             "before it reported any stage"),
             ("exit-1", (1, "not json"), None), ("oserror", OSError(5, "vector"), None),
             ("clean", (0, "[[], true]"), None)):
         recorded, announced, launches = [], io.StringIO(), []

@@ -988,8 +988,25 @@ def _aggregator_self_test():
     return EXIT_OK
 
 
+def _watchdog_window_verdict(result):
+    """Classify the window exercise's run_bounded result: "pass" for the
+    subject's own return, "unestablished" for the TIMEOUT sentinel
+    (run_bounded's OWN bound, which host starvation can reach on a correct
+    2 s subject, ended the exercise, establishing nothing about it: no
+    verdict, never a definite failure) and "fail" for every other sentinel
+    (OOM, CHILD-DIED, ERROR and SETUP-ERROR stay definite: fail closed)."""
+    if result == "RETURNED":
+        return "pass"
+    return "unestablished" if result == "TIMEOUT" else "fail"
+
+
 def _watchdog_timer_case(label, mode):
-    """Private subprocess fixture: its timers belong to this process alone."""
+    """Private subprocess fixture: its timers belong to this process alone.
+    When every check holds but the window exercise's subject run was never
+    established on this host (_watchdog_window_verdict), the exact
+    _WATCHDOG_CANNOT_EVALUATE marker is printed on the clean exit, which
+    the launching runner maps to the distinct CANNOT-EVALUATE outcome,
+    never a pass and never a definite failure."""
     import contextlib
     import io
     import os
@@ -999,12 +1016,24 @@ def _watchdog_timer_case(label, mode):
 
     if _bootstrap() != EXIT_OK:
         return EXIT_MALFORMED
+    unestablished = []
+
+    def window_case():
+        # The 2 s subject under run_bounded's 10 s bound: its own return is
+        # the exercise; the bound tripping instead is host starvation on a
+        # correct subject (recorded apart: no verdict), and every other
+        # sentinel stays a definite failure.
+        verdict = _watchdog_window_verdict(_opf_emit.run_bounded(
+            lambda: (time.sleep(2), "RETURNED")[1], timeout_s=10))
+        if verdict == "unestablished":
+            unestablished.append("run_bounded's own 10 s bound, not the subject's "
+                                 "return, ended the window exercise")
+        return 0 if verdict in ("pass", "unestablished") else 1
     functions = {
         "changelog": _opf_changelog.self_test, "views": _opf_views.self_test,
         "store": _opf_store.self_test, "check": _opf_check.self_test,
         "emit": _opf_emit.self_test,
-        "window": lambda: 0 if _opf_emit.run_bounded(
-            lambda: (time.sleep(2), "RETURNED")[1], timeout_s=10) == "RETURNED" else 1}
+        "window": window_case}
     which = {"virtual": signal.ITIMER_VIRTUAL, "prof": signal.ITIMER_PROF}.get(
         mode, signal.ITIMER_REAL)
     signum = {signal.ITIMER_REAL: signal.SIGALRM,
@@ -1081,8 +1110,18 @@ def _watchdog_timer_case(label, mode):
         ok = ok and signal.SIGALRM in pending and signal.SIGALRM in signal.sigpending()
     if not ok:
         print(label, mode, rc, before, after, mutations, fired, output.getvalue())
+        # No save/restore or teardown mutation: the subprocess exits with its timer.
+        return EXIT_FINDING
+    if unestablished:
+        # Every check held, but the window subject's run was never
+        # established: the exact marker on this clean exit, never a pass
+        # (the runner maps it to the distinct CANNOT-EVALUATE) and never a
+        # definite failure; a failed check above stays one (fail closed:
+        # the marker is honored only on a clean exit).
+        print(_WATCHDOG_CANNOT_EVALUATE + " (timer/" + label + "/" + mode + ": "
+              + "; ".join(unestablished) + ")")
     # No save/restore or teardown mutation: the subprocess exits with its timer.
-    return EXIT_OK if ok else EXIT_FINDING
+    return EXIT_OK
 
 
 # The watchdog isolation self-test's per-case process bound: each of its
@@ -1100,12 +1139,15 @@ def _watchdog_isolation_cases():
 
 def _watchdog_isolation_self_test(launch=None):
     """Exercise actual callers in fresh processes, without borrowing our
-    timer. A fixture killed at its own process bound is no verdict on its
+    timer. A fixture killed at its own process bound, and one whose clean
+    exit carries the exact _WATCHDOG_CANNOT_EVALUATE marker (its window
+    exercise was never established on this host), is no verdict on its
     case (a starved host can reach any bound): the distinct CANNOT-EVALUATE
-    (EXIT_MALFORMED), never a pass and never a definite failure; the
-    regression runner's scripted-launch vectors pin that mapping. `launch`
-    (label, mode, code) exists for those vectors; the default launches the
-    real fixture."""
+    (EXIT_MALFORMED), never a pass and never a definite failure, while the
+    marker on a nonzero exit stays a failure (_watchdog_completion_verdict);
+    the regression runner's scripted-launch vectors pin both mappings.
+    `launch` (label, mode, code) exists for those vectors; the default
+    launches the real fixture."""
     import subprocess
     import signal
     from _opf_emit import run_status_owned
@@ -1134,10 +1176,10 @@ def _watchdog_isolation_self_test(launch=None):
                 + repr(label) + ", " + repr(mode) + ")")
         try:
             result = launch(label, mode, code)
-            ok = result.returncode == EXIT_OK
+            verdict = _watchdog_completion_verdict(result.returncode, result.stdout)
             detail = result.stdout + result.stderr
         except (RuntimeError, subprocess.CalledProcessError) as exc:
-            ok, detail = False, str(exc)
+            verdict, detail = "fail", str(exc)
         except subprocess.TimeoutExpired:
             # A kill at the fixture's own process bound establishes nothing
             # about the case: recorded apart as the distinct CANNOT-EVALUATE,
@@ -1147,7 +1189,16 @@ def _watchdog_isolation_self_test(launch=None):
                   "fixture reached its %ss process bound (no verdict)"
                   % _WATCHDOG_ISOLATION_TIMEOUT, file=sys.stderr)
             continue
-        if not ok:
+        if verdict == "cannot-evaluate":
+            # The fixture exited clean with the exact marker: its exercise
+            # was never established on this host. Recorded apart, never a
+            # pass and never a definite failure; the marker on a nonzero
+            # exit is not honored (that run stays a failure below).
+            unevaluated.append(label + "/" + mode)
+            print("opf watchdog isolation: CANNOT EVALUATE", label, mode, detail,
+                  file=sys.stderr)
+            continue
+        if verdict != "pass":
             failed = True
             print("opf watchdog isolation: FAIL", label, mode, detail, file=sys.stderr)
     for name in ("_fixture_setpgid", "_fixture_owned_fds", "release_fd"):
@@ -1216,18 +1267,22 @@ _TREE_STARTUP_BACKSTOP = 60
 # it is the stimulus, so each pays this wait instead of
 # _TREE_STARTUP_BACKSTOP.
 _TREE_VECTOR_BACKSTOP = 5
-# A guardian's startup makes no loop before READY (fork, subreaper setup and
-# the READY write: millisecond-scale CPU), so a guardian sampled runnable
-# (state R) at the startup backstop that has already CONSUMED this much CPU
-# time is busy-looping before READY, a code regression. The judgment is by
-# CPU time, never wall time: a merely starved guardian is granted little CPU
-# however much wall time passes, so host starvation stays below this floor
-# and remains no verdict, while the busy loop is established by the CPU it
-# burned, whatever the host's scheduling.
+# A guardian's startup does only bounded work before READY (fork, one sweep
+# of its inherited descriptors, subreaper setup and the READY write:
+# millisecond-scale CPU for the descriptor tables these legs hold), far
+# under this floor, so a guardian sampled runnable (state R) at the startup
+# backstop, placed before READY by an empty channel at both READY checks,
+# that has already CONSUMED this much CPU time is busy-looping before READY,
+# a code regression. The judgment is by CPU time, never wall time: a merely
+# starved guardian is granted little CPU however much wall time passes, so
+# host starvation stays below this floor and remains no verdict, while the
+# busy loop is established by the CPU it burned, whatever the host's
+# scheduling.
 _STARTUP_BUSY_CPU_SECONDS = 1.0
-# The exact stdout marker a completion leg prints (with its cause) when a
-# backstop, not the leg's stimulus, ended the exercise, or the stimulus
-# was observed only after cleanup: no verdict exists, so the regression runner maps this marker (only on a
+# The exact stdout marker a watchdog fixture prints (with its cause) when a
+# backstop or bound, not the leg's stimulus or its subject's own return,
+# ended the exercise, or the stimulus was observed only after cleanup: no
+# verdict exists, so the launching runner maps this marker (only on a
 # clean fixture exit) to the distinct CANNOT-EVALUATE aggregate
 # (EXIT_MALFORMED), never a pass and never a finding.
 _WATCHDOG_CANNOT_EVALUATE = "opf watchdog completion: CANNOT EVALUATE"
@@ -1360,11 +1415,13 @@ def _watchdog_path_seconds(path):
 
 
 def _watchdog_leg_closeout_seconds():
-    """The close-out allowance one regression leg's launch gets after its
-    process bound: the LONGEST total among _watchdog_closeout_paths. It is a
-    maximum over those derived paths, not a sum over every wait in close();
-    _watchdog_closeout_vectors runs the real close-out code along each path
-    and refuses a path whose waits outrun its total."""
+    """The derived close-out ceiling: the LONGEST total among
+    _watchdog_closeout_paths, bounding the timed waits one regression leg's
+    launch can make after its process bound. It is a maximum over those
+    derived paths, not a sum over every wait in close(), and nothing grants
+    it at runtime: its only consumer is _watchdog_closeout_vectors, which
+    runs the real close-out code along each path and refuses a path whose
+    waits outrun its total or this ceiling."""
     return max(_watchdog_path_seconds(path) for path in _watchdog_closeout_paths().values())
 
 
@@ -2541,8 +2598,9 @@ def _watchdog_ledger_case(mode, budget):
     """Private subprocess: one concurrency vector of the runtime ledger, in its
     own independently bounded fixture process (claude round-6 MEDIUM-2, codex
     round-7 MEDIUM 6): a regression that hangs a vector is killed at that
-    vector's own process bound and reported as that vector's failure, never a
-    hung suite and never a false pass. Returns the vector leg's own verdict
+    vector's own process bound, which the runner records as that vector's own
+    no-verdict CANNOT-EVALUATE (EXIT_MALFORMED), never a
+    hung suite and never a pass. Returns the vector leg's own verdict
     int for the launching fixture to compare (3 marks a fixture that never
     exercised its path); the two bool-return control modes
     deliberately return a bool the launching fixture must REJECT
@@ -3942,12 +4000,13 @@ def _watchdog_launcher_case(label, disposition):
 
 def _tree_publish_seconds(path):
     """When this tree marker was PUBLISHED, as epoch seconds: its inode
-    change time, which the atomic rename into the final name updates. The
+    change time, which the atomic rename into the final name refreshes. The
     modification time records the earlier write into the scratch name and
     SURVIVES the rename, so a subject preempted between its write and its
-    rename would read as published at the write, and a publication landing
-    after the observer's last poll would then be misread as one the observer
-    overlooked (a harness-defect verdict for what is host scheduling)."""
+    rename would read as published at the write. The reported no-verdict
+    causes name this time so they describe the publication, not the earlier
+    write; no verdict is decided by it (the never-parsed-markers check is
+    ordered by each poll's own observations, never by this stamp)."""
     return path.stat().st_ctime
 
 
@@ -3987,16 +4046,17 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
     tree-cleanup verdict, and the cause names what was observed. A cause
     that is deterministic is a definite failure whose message says it is a
     code regression, never reported as host scheduling: the observer never
-    ran, or polled long after both markers were PUBLISHED (the rename into
-    the final name, _tree_publish_seconds, never the earlier write) without
-    parsing them; a malformed marker; a timed_out=False receipt from a
+    ran, or parsed nothing at a poll where the leg's own look, taken at
+    that same poll, parsed both PUBLISHED markers (ordered by that poll's
+    observations, never by any clock); a malformed marker; a timed_out=False receipt from a
     guardian a poll COLLECTED before the caller's deadline (one not
     collected by then may have left on the EOF of the caller's own backstop
     close, ordered by those observed events, so that is no verdict, never a
     failure); a guardian asleep before READY (no READY byte in its channel
     before or after its state sample: one published between them is the
     host's scheduling, not a startup hang); a guardian runnable before
-    READY that already consumed the busy-loop CPU floor
+    READY, placed there by that same empty channel at both checks, that
+    already consumed the busy-loop CPU floor
     (_STARTUP_BUSY_CPU_SECONDS: judged by CPU time, which starvation
     cannot accrue, never by wall time); and a guardian that ran its expiry
     after a stimulus mounted before the caller's deadline without ever
@@ -4103,7 +4163,7 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
             subject = subject.replace(parked, "[time.sleep(0.005) for _ in iter(lambda: "
                                       "os.path.exists(" + repr(str(release)) + "), True)]")
         launched, observed, snapshot, collected, shift = [], [], [], [], []
-        stimulus, startup = [], []
+        stimulus, startup, unparsed = [], [], []
         polls = [0, 0.0]  # observer calls, and the wall time of the last one
 
         def parse():
@@ -4272,7 +4332,14 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
             polls[0] += 1
             polls[1] = time.time()
             if not observed:
-                pids = parse() if observe_parse else []
+                # The leg's own look at the markers, taken at this same
+                # poll: both published and parseable here while the
+                # observer parsed nothing is ordered by this one poll's
+                # observations, never by any clock.
+                seen_now = parse()
+                pids = seen_now if observe_parse else []
+                if seen_now and not pids:
+                    unparsed.append(polls[0])
                 if pids and order == "cleanup-first":
                     backstop_now()
                     facts["held"] = hold(lambda: not guardian_running(pid))
@@ -4356,6 +4423,7 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
         for path in markers:
             path.unlink()
         polls[:] = [0, 0.0]
+        del unparsed[:]
         started, launch_at, outcome = time.time(), real_clock(), None
         with patch.object(time, "monotonic", clock), \
                 patch.object(emit, "_FixtureProcess", capture), \
@@ -4383,9 +4451,7 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
         # What was published, recorded apart from the verdict's own checks.
         facts["markers"] = [path.read_text(encoding="ascii") if path.exists() else None
                             for path in markers]
-        facts["published-before-last-poll"] = bool(
-            len(parse()) == 2
-            and max(_tree_publish_seconds(path) for path in markers) + 1.0 < polls[1])
+        facts["published-unparsed"] = bool(unparsed)
         if outcome is None:
             raise AssertionError("fixture was accepted: " + mode)
         if not observed:
@@ -4402,8 +4468,9 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
                 if state == "R-busy":
                     raise AssertionError(
                         "the leg's fixture guardian was RUNNABLE at the {} s startup backstop "
-                        "and had not signalled READY, yet {}; its startup makes no loop before "
-                        "READY, so this is a code regression (a busy startup loop), judged by "
+                        "and had not signalled READY, yet {}; its bounded pre-READY work (a "
+                        "descriptor sweep and a few setup calls) cannot account for that CPU, "
+                        "so this is a code regression (a busy startup loop), judged by "
                         "the CPU time it was granted, which host starvation cannot accrue, "
                         "never by the wall clock: {}".format(backstop, seen, mode))
                 return ("cannot-evaluate", "the leg's fixture guardian never signalled READY "
@@ -4428,13 +4495,15 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
                                          "scheduling".format(path.name, raw_text[:64])) from None
                 seen.append("{} marker published at +{:.2f} s".format(
                     path.name, _tree_publish_seconds(path) - started))
-            if len(parse()) == 2:
-                newest = max(_tree_publish_seconds(path) for path in markers)
-                if newest + 1.0 < polls[1]:
-                    raise AssertionError(
-                        "the observer polled {:.2f} s after both markers were published and "
-                        "never parsed them: a code regression (harness defect), not host "
-                        "scheduling: {}".format(polls[1] - newest, mode))
+            if unparsed:
+                # Ordered by the polls' own observations, never by a clock
+                # (a stepped realtime clock must never turn a correct run
+                # into this harness-defect failure).
+                raise AssertionError(
+                    "both markers were published and parseable at {} of the observer's {} "
+                    "polls (the first at poll {}), yet the observer never parsed them: a "
+                    "code regression (harness defect), not host scheduling: {}".format(
+                        len(unparsed), polls[0], unparsed[0], mode))
             return ("cannot-evaluate", "within the {} s startup backstop the observer polled {} "
                     "times (the last at +{:.2f} s) and saw: {}; no stimulus was mounted".format(
                         backstop, polls[0], max(0.0, polls[1] - started), ", ".join(seen)))
@@ -4520,12 +4589,15 @@ def _watchdog_startup_diagnosis(before, state, after, cpu=None):
     (`after`; each check is "ready", "empty" or "other") and the CPU time
     the guardian has been granted (`cpu`, seconds, None when unreadable).
     Returns (label, cause). Only two labels are the startup code
-    regressions the leg raises: "S" (asleep, with an empty channel at BOTH
-    checks, so it had not published READY when sampled: a startup hang) and
-    "R-busy" (runnable with at least _STARTUP_BUSY_CPU_SECONDS of CPU time
-    consumed: a busy startup loop, established by the CPU it burned, which
-    host starvation cannot accrue however much wall time passes); every
-    other label is no verdict."""
+    regressions the leg raises, and BOTH require an empty channel at BOTH
+    checks, which places the sample before READY (a check that found
+    something else, or that failed, leaves open that READY was already
+    published, so the sample does not place the guardian in its startup):
+    "S" (asleep: a startup hang) and "R-busy" (runnable with at least
+    _STARTUP_BUSY_CPU_SECONDS of CPU time consumed: a busy startup loop,
+    established by the CPU it burned, which host starvation cannot accrue
+    however much wall time passes); every other label, the unplaced ones
+    included, is no verdict."""
     if before == "ready":
         return "late-caller", ("it HAD signalled READY, but the caller did not read "
                                "it in time: host scheduling")
@@ -4542,10 +4614,17 @@ def _watchdog_startup_diagnosis(before, state, after, cpu=None):
                               "startup location is not established (no code regression "
                               "established)".format(before, after))
     if state == "R":
+        if (before, after) != ("empty", "empty"):
+            return "R-unplaced", ("it was runnable (state R), but the READY checks around "
+                                  "that sample found {} and {}, not an empty channel, so "
+                                  "the sample does not place it before READY and the CPU "
+                                  "it consumed may be legitimate work after READY (no "
+                                  "code regression established)".format(before, after))
         if cpu is not None and cpu >= _STARTUP_BUSY_CPU_SECONDS:
             return "R-busy", ("it had already consumed {:.2f} s of CPU time, at or above "
-                              "the {} s floor no correct startup (which loops on nothing "
-                              "before READY) can reach; a starved guardian is granted "
+                              "the {} s floor, far above the bounded pre-READY work its "
+                              "startup does (a sweep of its inherited descriptors and a "
+                              "few setup calls); a starved guardian is granted "
                               "little CPU, so this CPU time, unlike wall time, "
                               "establishes a busy startup loop".format(
                                   cpu, _STARTUP_BUSY_CPU_SECONDS))
@@ -4563,16 +4642,21 @@ def _watchdog_startup_vectors():
     """Red-on-revert table for _watchdog_startup_diagnosis: returns each
     ((before, state, after, cpu), got label, want label) that differs. A
     channel holding something other than READY, or a failed look at it,
-    leaves a sleeping guardian unplaced (no verdict), never the startup
-    hang; only an empty channel at both checks makes state S that hang.
-    State R is judged by CPU time at _STARTUP_BUSY_CPU_SECONDS, each end of
-    that boundary pinned: just under it (and an unreadable CPU) stays the
+    leaves a sleeping OR runnable guardian unplaced (no verdict), never a
+    startup code regression, whatever CPU it consumed; only an empty
+    channel at both checks makes state S the startup hang and lets state R
+    be judged by CPU time at _STARTUP_BUSY_CPU_SECONDS, each end of that
+    boundary pinned: just under it (and an unreadable CPU) stays the
     no-verdict "R", exactly at it and just over it are the busy loop."""
     floor = _STARTUP_BUSY_CPU_SECONDS
     table = (
         (("empty", "S", "empty", None), "S"), (("other", "S", "empty", None), "S-unplaced"),
         (("empty", "S", "other", None), "S-unplaced"),
         (("other", "S", "other", None), "S-unplaced"),
+        (("other", "R", "empty", floor), "R-unplaced"),
+        (("empty", "R", "other", floor), "R-unplaced"),
+        (("other", "R", "other", floor), "R-unplaced"),
+        (("other", "R", "other", None), "R-unplaced"),
         (("empty", "R", "empty", None), "R"),
         (("empty", "R", "empty", floor - 0.01), "R"),
         (("empty", "R", "empty", floor), "R-busy"),
@@ -4607,10 +4691,13 @@ def _watchdog_tree_vectors():
 
     # The publish-time reading, pinned deterministically: a marker whose
     # write is back-dated and then renamed into place must read as published
-    # at the rename (the publish), never at the write, or a subject
-    # preempted between the two would turn host scheduling into a
-    # harness-defect failure (the "never parsed them" check and the
-    # blind-observer vector's published-before-last-poll fact both read it).
+    # at the inode change (which the rename refreshes), never at the
+    # back-dated write stamp, or the reported causes would describe a
+    # subject preempted between its write and its rename as having
+    # published at the write. os.utime itself refreshes the inode change
+    # time, so this discriminates WHICH stamp is read, not that the rename
+    # refreshed it (that is the platform's rename contract); no verdict is
+    # decided by the stamp (_tree_publish_seconds).
     with tempfile.TemporaryDirectory(prefix="opf-tree-") as directory:
         scratch = Path(directory, "marker.tmp")
         scratch.write_text("1", encoding="ascii")
@@ -4689,9 +4776,16 @@ def _watchdog_tree_vectors():
                        live_then_held, "nested-timeout", order="backstop-after-snapshot")
     expect_unevaluated("backstop-after-snapshot/cancel", "expired before the cancel's",
                        live_then_held, "nested-cancel", order="backstop-after-snapshot")
-    # The stimulus removed: the backstop alone ends supervision.
-    expect_unevaluated("no-stimulus/timeout", "may be the backstop's", live, "nested-timeout",
-                       order="no-stimulus")
+    # The stimulus removed: the backstop alone ends supervision. The
+    # schedule needs the guardian's own expiry on the receipt: a receipt
+    # with timed_out=False is the caller-backstop-first schedule (the
+    # caller's close()'s EOF won the race, which a slow host can produce
+    # on a correct run; the eof-after-snapshot vector below holds it to
+    # no verdict), not this one.
+    expect_unevaluated("no-stimulus/timeout", "may be the backstop's",
+                       lambda facts: live(facts)
+                       and facts.get("receipt-timed-out") is True,
+                       "nested-timeout", order="no-stimulus")
     expect_failure("no-stimulus/cancel", "timeout stood in for the cancel stimulus", live,
                    "nested-cancel", order="no-stimulus")
     # Pass condition (3): a subject that exits BY ITSELF between the
@@ -4745,9 +4839,14 @@ def _watchdog_tree_vectors():
                                       and facts.get("collected-early") is False),
                        "nested-timeout", order="eof-after-snapshot")
     # A guardian clock that never applies the shift expires only at the
-    # real deadline, after a stimulus mounted well before it.
+    # real deadline, after a stimulus mounted well before it. The schedule
+    # needs that expiry on the receipt (timed_out=True): the caller and
+    # the guardian share this one deadline, so the caller's close()'s EOF
+    # can end supervision first on a slow host (receipt timed_out=False),
+    # which establishes nothing about the shift.
     expect_failure("shift-absent/timeout", "the guardian clock shift is absent",
-                   lambda facts: live(facts) and facts.get("stimulus-early") is True,
+                   lambda facts: (live(facts) and facts.get("stimulus-early") is True
+                                  and facts.get("receipt-timed-out") is True),
                    "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, clock_shift=False)
     # The leg's backstop return (no marker ever published), and the
     # deterministic causes that must be definite failures, not stalls.
@@ -4763,7 +4862,7 @@ def _watchdog_tree_vectors():
                    "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, publish="malformed")
     expect_failure("blind-observer", "never parsed them",
                    lambda facts: facts.get("ready") is True
-                   and facts.get("published-before-last-poll") is True,
+                   and facts.get("published-unparsed") is True,
                    "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, observe_parse=False)
     # A guardian that never signals READY: asleep before READY is a code
     # regression (a definite failure), and so is a runnable one once the
@@ -15255,8 +15354,9 @@ def _watchdog_regression_self_test():
     launcher_dispositions = ("ignored", "handler")
     # The runtime ledger's concurrency vectors (claude round-6 MEDIUM-2,
     # codex round-7 MEDIUM 6): each runs in its own independently bounded
-    # fixture process, so a regression that hangs one is killed at that
-    # vector's bound and reported as THAT vector's failure, never a hung
+    # fixture process, so a regression that hangs one is killed at THAT
+    # vector's bound, which the runner records as that vector's own
+    # no-verdict CANNOT-EVALUATE (never a pass), never a hung
     # suite. Each row is (mode, the vector leg's own declared budget,
     # which the fixture passes through to _watchdog_ledger_case, expected
     # verdict). The budgets are term-exact at the vectors' definitions;
@@ -15529,10 +15629,11 @@ def _watchdog_regression_self_test():
                   + "return opf.EXIT_OK if rc == opf.EXIT_MALFORMED else rc",
                   bound("blocked-isolation")))
     # One fixture per ledger concurrency vector: the expected verdict is
-    # compared INSIDE the fixture (0 on a match, 3 otherwise), so a hang,
-    # crash or wrong verdict is a nonzero fixture status, and a hung
-    # vector is killed at its own independent bound and reported as that
-    # vector's failure, never a hung suite.
+    # compared INSIDE the fixture (0 on a match, 3 otherwise), so a crash
+    # or wrong verdict is a nonzero fixture status, and a hung vector is
+    # killed at its own independent bound, which the runner records as
+    # that vector's own no-verdict CANNOT-EVALUATE (never a pass), never
+    # a hung suite.
     def ledger_fixture(mode, seconds, want, control=False):
         # ONE comparison fragment serves the real vectors and the
         # boolean-return controls (codex round-8 MEDIUM): only an
@@ -16099,10 +16200,23 @@ def _watchdog_regression_self_test():
             got = _watchdog_run_legs([(label, "", 1) for label in outcomes], scripted(outcomes))
         if got != want:
             flip_missed.append("leg aggregate %r -> %r, want %r" % (sorted(outcomes), got, want))
-    # The isolation self-test's own bound-kill mapping (red-on-revert), over
-    # scripted launches: a timer fixture killed at its process bound makes
-    # that run the distinct EXIT_MALFORMED (no verdict), never a definite
-    # failure; clean launches keep EXIT_OK and failing ones EXIT_FINDING.
+    # The window exercise's own classification (red-on-revert): only the
+    # subject's return passes; run_bounded's TIMEOUT sentinel (its own
+    # bound, which host starvation can reach on a correct subject) is no
+    # verdict; every other sentinel stays a definite failure (fail closed).
+    for result, want in (("RETURNED", "pass"), ("TIMEOUT", "unestablished"),
+                         ("OOM", "fail"), ("CHILD-DIED", "fail"),
+                         ("ERROR:ValueError", "fail"), ("SETUP-ERROR:NoFork", "fail")):
+        if _watchdog_window_verdict(result) != want:
+            flip_missed.append("window verdict %r -> %r, want %r"
+                               % (result, _watchdog_window_verdict(result), want))
+    # The isolation self-test's own no-verdict mappings (red-on-revert), over
+    # scripted launches: a timer fixture killed at its process bound, and a
+    # clean exit carrying the exact cannot-evaluate marker (a fixture whose
+    # window exercise was never established), make that run the distinct
+    # EXIT_MALFORMED (no verdict), never a definite failure; clean unmarked
+    # launches keep EXIT_OK, failing ones EXIT_FINDING, and the marker on a
+    # failing exit is not honored (fail closed).
     def isolation_scripted(outcome):
         def launch(label, mode, code):
             if isinstance(outcome, BaseException):
@@ -16111,12 +16225,15 @@ def _watchdog_regression_self_test():
         return launch
 
     for outcome, want in ((subprocess.TimeoutExpired("timer", 1), EXIT_MALFORMED),
-                          ((EXIT_OK, ""), EXIT_OK), ((EXIT_FINDING, ""), EXIT_FINDING)):
+                          ((EXIT_OK, ""), EXIT_OK), ((EXIT_FINDING, ""), EXIT_FINDING),
+                          ((EXIT_OK, marked), EXIT_MALFORMED),
+                          ((EXIT_FINDING, marked), EXIT_FINDING)):
         with contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()):
             got = _watchdog_isolation_self_test(launch=isolation_scripted(outcome))
         if got != want:
-            flip_missed.append("isolation bound-kill aggregate %r, want %r" % (got, want))
+            flip_missed.append("isolation no-verdict aggregate for %r: %r, want %r"
+                               % (outcome, got, want))
     # The close-out allowance derivation: the real close-out code, run along
     # each derived path under a virtual clock, must fit that path's total
     # and reach each of its waits.
