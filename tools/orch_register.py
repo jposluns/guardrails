@@ -32,7 +32,12 @@
       is refused at write time instead of reaching CI. A violation (an illegal transition, an
       unknown status, a wrong-family id, a landed row without an existing --commit and --check-ref)
       exits 1; a context or authority the appender cannot evaluate (an unreadable register or
-      register descriptor, a symlinked register path, an appender installed outside any git
+      register descriptor, a symlinked register path, a register path that is not a regular
+      file (a FIFO, a directory, a device or a socket: the register open is NON-BLOCKING, so
+      no file type can make the open wait, and the opened descriptor's own fstat decides
+      before any lock or read, because on Linux a read-write open of a FIFO succeeds while a
+      read through that descriptor can wait forever; the non-blocking flag is cleared once
+      the file is proven regular), an appender installed outside any git
       repository, a gate root git itself does not confirm as a repository toplevel (an invalid
       gitfile, an empty .git directory or a dangling .git symlink is a marker, not a
       repository, selected by the shared lstat marker walk and never walked past, and a marker
@@ -140,6 +145,10 @@
       landed, as granted open items, so the stop guard itself enforces mistake-to-guardrail
       follow-through. A registry can name this as (part of) its enumerator. An attestation register
       is evidence, never backlog: project the mistakes register, not the attestations file.
+      The projection reads through the same non-blocking open and descriptor file-type check
+      as the appender: a register that is not a regular file is refused with exit 2 and a
+      diagnostic naming the file type, never read and never blocked on (the path is still
+      followed, so a symlink to a regular register projects as before).
   orch_register.py --self-test
       Synthetic fixtures for the write-time validation: each refusal vector leaves the register
       and its anchor byte-identical (the first-row cleanup and left-in-place vectors assert
@@ -195,11 +204,44 @@ ZERO = "0" * 64
 LOCK_WAITS = 16
 
 
+def _nonregular_name(mode):
+    """A plain name for a non-regular file type, for refusal messages."""
+    if stat.S_ISFIFO(mode):
+        return "a FIFO (named pipe)"
+    if stat.S_ISDIR(mode):
+        return "a directory"
+    if stat.S_ISSOCK(mode):
+        return "a socket"
+    if stat.S_ISCHR(mode):
+        return "a character device"
+    if stat.S_ISBLK(mode):
+        return "a block device"
+    return "a non-regular file (mode 0o{:o})".format(stat.S_IFMT(mode))
+
+
 def _lines(path):
+    """The register's decoded lines, read without blocking: the open is non-blocking (a
+    blocking read-only open of a FIFO waits for a writer), the opened descriptor's own
+    fstat must prove a regular file (a directory, a FIFO or a device is never a register),
+    and only then is the non-blocking flag cleared so the read itself keeps its normal
+    semantics. Raises CannotEvaluate naming the file type for anything that is not a
+    regular file; an absent register reads as no lines. The path is followed as before, so
+    a symlink to a regular register still reads; what it aliases is still type-checked."""
     try:
-        return path.read_text(encoding="utf-8").splitlines()
+        fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK)
     except FileNotFoundError:
         return []
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise CannotEvaluate("the register path names {}, not a regular file".format(
+                _nonregular_name(st.st_mode)))
+        fcntl.fcntl(fd, fcntl.F_SETFL,
+                    fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+        raw = _fd_bytes(fd)
+    finally:
+        os.close(fd)
+    return raw.decode("utf-8").splitlines()
 
 
 def _gate_root():
@@ -900,8 +942,10 @@ def cmd_append(a, _waits=0):
     try:
         try:
             # read-write though the commit never writes through it, so a register this caller
-            # may not write is refused here rather than replaced by the commit's rename
-            fd = os.open(str(path), os.O_RDWR | os.O_NOFOLLOW)
+            # may not write is refused here rather than replaced by the commit's rename; the
+            # open is non-blocking so no file type can make the open itself wait, and the
+            # file-type check on the opened descriptor below decides what was opened
+            fd = os.open(str(path), os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
         except FileNotFoundError:
             fd = -1
         except OSError as exc:
@@ -910,10 +954,38 @@ def cmd_append(a, _waits=0):
                       "validated text to one file identity, so an aliased path is never "
                       "followed; nothing written", file=sys.stderr)
                 return 2
+            if exc.errno == errno.EISDIR:
+                print("append: refused, the register path names a directory, not a regular "
+                      "file; nothing written", file=sys.stderr)
+                return 2
             print("append: refused, the register cannot be read ({}); nothing written".format(
                 exc), file=sys.stderr)
             return 2
         if fd >= 0:
+            # Refuse a non-regular register BEFORE locking or reading: on Linux a read-write
+            # open of a FIFO succeeds and a read through that descriptor can wait forever
+            # (the descriptor itself holds the write end), so only the opened descriptor's
+            # own file type decides.
+            try:
+                st_opened = os.fstat(fd)
+            except OSError as exc:
+                print("append: refused, the register cannot be inspected through its open "
+                      "descriptor ({}); nothing written".format(exc), file=sys.stderr)
+                return 2
+            if not stat.S_ISREG(st_opened.st_mode):
+                print("append: refused, the register path names {}, not a regular file; "
+                      "nothing written".format(_nonregular_name(st_opened.st_mode)),
+                      file=sys.stderr)
+                return 2
+            # the descriptor was opened non-blocking only so the open and the check above
+            # could not wait; the proven-regular file now reads with normal semantics
+            try:
+                fcntl.fcntl(fd, fcntl.F_SETFL,
+                            fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+            except OSError as exc:
+                print("append: refused, the register descriptor's non-blocking flag cannot "
+                      "be cleared ({}); nothing written".format(exc), file=sys.stderr)
+                return 2
             # Serialize cooperating appenders: the exclusive lock is held from before the read
             # until the commit lands (or the refusal returns), so two appends through this tool
             # cannot interleave between the read, the validation and the commit.
@@ -1123,7 +1195,13 @@ def cmd_append(a, _waits=0):
 
 def cmd_project(a):
     latest = {}
-    for line in _lines(Path(a.register)):
+    try:
+        reg_lines = _lines(Path(a.register))
+    except CannotEvaluate as exc:
+        print("project: refused, {}; the projection reads a regular file only, and its open "
+              "never blocks on the file type".format(exc), file=sys.stderr)
+        return 2
+    for line in reg_lines:
         try:
             row = json.loads(line)
         except ValueError:
@@ -1529,6 +1607,124 @@ def self_test():
         link.symlink_to("target.jsonl")
         declare(mistakes_register="link.jsonl")
         refused("symlinked-register-refused", link, 2, "symlink", "MR-2")
+
+        # ---- a register that is not a regular file is refused with exit 2 BEFORE locking or
+        # reading: on Linux a read-write open of a FIFO succeeds and a read through that
+        # descriptor can wait forever (the descriptor itself holds the write end), and a
+        # read-only open of a FIFO with no writer waits in the open itself, so both the
+        # appender and the projection open non-blocking and refuse on the opened
+        # descriptor's file type. Every vector here runs under an alarm, so a regression
+        # that blocks fails instead of hanging the suite.
+        class VectorAlarm(Exception):
+            # deliberately NOT an OSError: the appender's own read loop and the projection
+            # catch OSError, and the alarm must escape both to fail the vector
+            pass
+
+        def alarm_bounded(name, step, seconds=10):
+            def on_alarm(signum, frame):
+                raise VectorAlarm("blocked for {} s".format(seconds))
+            old_handler = signal.signal(signal.SIGALRM, on_alarm)
+            signal.alarm(seconds)
+            try:
+                return step()
+            except VectorAlarm as exc:
+                failures.append("{}: the call blocked instead of refusing ({})".format(
+                    name, exc))
+                return None
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+
+        def project_rc(regpath):
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                try:
+                    rc = cmd_project(argparse.Namespace(register=str(regpath)))
+                except OSError as exc:
+                    rc = "an uncaught {}: {}".format(type(exc).__name__, exc)
+            return rc, err.getvalue()
+
+        def want_refusal(name, got, naming):
+            if got is None:
+                return  # the alarm already recorded the failure
+            rc, err = got
+            missing = [w for w in naming if w not in err]
+            if rc != 2 or missing:
+                failures.append("{}: want exit 2 naming {}, got exit {!r}: {}".format(
+                    name, " and ".join(repr(w) for w in naming), rc, err.strip()))
+
+        declare(mistakes_register="fifo.jsonl")
+        fifo_reg = repo / "fifo.jsonl"
+        os.mkfifo(str(fifo_reg))
+        fifo_before = os.lstat(str(fifo_reg))
+        want_refusal("fifo-register-refused",
+                     alarm_bounded("fifo-register-refused", lambda: append(fifo_reg, "MR-1")),
+                     ("FIFO", "not a regular file"))
+        fifo_after = os.lstat(str(fifo_reg))
+        if (not stat.S_ISFIFO(fifo_after.st_mode)
+                or (fifo_before.st_dev, fifo_before.st_ino)
+                != (fifo_after.st_dev, fifo_after.st_ino)):
+            failures.append("fifo-register-refused: the refusal changed the register entry")
+        if temps_beside(fifo_reg):
+            failures.append("fifo-register-refused: the refusal left a temporary file: "
+                            "{}".format(temps_beside(fifo_reg)))
+        want_refusal("fifo-project-refused",
+                     alarm_bounded("fifo-project-refused", lambda: project_rc(fifo_reg)),
+                     ("FIFO", "not a regular file"))
+        fifo_reg.unlink()
+        # a directory at the register path: the appender's read-write open refuses it with
+        # the same named diagnostic, and the projection's file-type check refuses it too
+        declare(mistakes_register="dirreg.jsonl")
+        dir_reg = repo / "dirreg.jsonl"
+        dir_reg.mkdir()
+        want_refusal("directory-register-refused",
+                     alarm_bounded("directory-register-refused",
+                                   lambda: append(dir_reg, "MR-1")),
+                     ("directory", "not a regular file"))
+        if not dir_reg.is_dir() or list(dir_reg.iterdir()):
+            failures.append("directory-register-refused: the refusal changed the directory")
+        want_refusal("directory-project-refused",
+                     alarm_bounded("directory-project-refused", lambda: project_rc(dir_reg)),
+                     ("directory", "not a regular file"))
+        dir_reg.rmdir()
+        # a symlinked register path stays refused by name under the same bound whatever it
+        # aliases (here a FIFO, so following it could block); the projection still follows
+        # the path but refuses the aliased FIFO by the opened descriptor's file type
+        declare(mistakes_register="fifolink.jsonl")
+        fifo_target = repo / "fifolink-target"
+        os.mkfifo(str(fifo_target))
+        fifo_link = repo / "fifolink.jsonl"
+        fifo_link.symlink_to("fifolink-target")
+        want_refusal("symlink-register-refused-bounded",
+                     alarm_bounded("symlink-register-refused-bounded",
+                                   lambda: append(fifo_link, "MR-1")),
+                     ("symlink",))
+        want_refusal("symlink-to-fifo-project-refused",
+                     alarm_bounded("symlink-to-fifo-project-refused",
+                                   lambda: project_rc(fifo_link)),
+                     ("FIFO", "not a regular file"))
+        if (not fifo_link.is_symlink()
+                or not stat.S_ISFIFO(os.lstat(str(fifo_target)).st_mode)):
+            failures.append("symlink-to-fifo vectors: a refusal changed the register entry "
+                            "or its target")
+        fifo_link.unlink()
+        fifo_target.unlink()
+        # a regular register still appends and still projects after the file-type check,
+        # under the same alarm so a clean path that started blocking fails rather than hangs
+        declare(mistakes_register="plain.jsonl")
+        plain_reg = repo / "plain.jsonl"
+        alarm_bounded("regular-register-still-appends",
+                      lambda: accepted("regular-register-still-appends", plain_reg, "MR-1",
+                                       bootstrap=True))
+        alarm_bounded("regular-register-still-appends-ordinary",
+                      lambda: accepted("regular-register-still-appends-ordinary", plain_reg,
+                                       "MR-1", "accepted"))
+        plain_got = alarm_bounded("regular-register-still-projects",
+                                  lambda: project_rc(plain_reg))
+        if plain_got is not None and plain_got[0] != 0:
+            failures.append("regular-register-still-projects: want exit 0, got exit {!r}: "
+                            "{}".format(plain_got[0], plain_got[1].strip()))
+
         # a tracked register with no computable merge-base is cannot-evaluate (exit 2), not a pass
         tracked = repo / "tracked.jsonl"
         declare(mistakes_register="tracked.jsonl")
@@ -4069,7 +4265,13 @@ def self_test():
           "existing commit or check_ref, a row that would fuse onto an unterminated last line, an "
           "anchored rewrite, a wrong-family id in either direction, and a --prefix that disagrees "
           "with the registry declaration are each refused (exit 1); an unreadable register or "
-          "register descriptor, a symlinked register path, an undeclared register, an appender "
+          "register descriptor, a symlinked register path (probed alarm-bounded, aliasing a "
+          "FIFO, so a follow would block), a register path that is not a regular file (a "
+          "FIFO and a directory, each refused by the appender and by the projection with a "
+          "diagnostic naming the file type, each alarm-bounded so a blocking regression "
+          "fails rather than hangs, the FIFO entry and the directory left unchanged, while "
+          "a regular register still appends and still projects under the same bound), "
+          "an undeclared register, an appender "
           "installed outside any git repository (subprocess vector, never a cwd-derived root, "
           "run through a test-only search ceiling at the fixture's temporary directory, so a "
           "git checkout around it cannot decide the verdict, the ceiling's control still "
