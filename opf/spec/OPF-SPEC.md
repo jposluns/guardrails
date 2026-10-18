@@ -1639,7 +1639,12 @@ generator.
 
 A deterministic render is byte-reproducible: UTF-8, LF line endings, stable ordering, no
 locale-dependent sorting, no wall-clock content in compared bytes, no network access, and no model
-involvement. Every generated file opens with a header stating that it is generated and must not be
+involvement. A record field value rendered into a Markdown view stays on one line: LF, CR, U+0085
+NEXT LINE, U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR each collapse to a single space (a
+CR LF pair to one space), and DEL and the other C0 controls except TAB are dropped, so the rendered
+value holds no character that Python's str.splitlines() treats as a line boundary; the store keeps
+the value as written.
+Every generated file opens with a header stating that it is generated and must not be
 hand-edited, naming its source paths, the schema and generator versions, a digest of the source
 set, and the regeneration command; the header carries no timestamp.
 
