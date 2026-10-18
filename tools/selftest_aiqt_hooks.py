@@ -4088,6 +4088,79 @@ def _deadline_shape_rerun_failures():
     return out
 
 
+_LEX_SCALING_SHAPE = "nest_cmdsubst"
+_LEX_SCALING_SIZES = (262144, 1048576)
+# A linear reader grows about 4 times over a 4-times size step; a quadratic one grows about 16 times.
+_LEX_SCALING_RATIO = 8.0
+_LEX_SCALING_FLOOR = 0.5
+
+
+def _lex_scaling_over(small, large, floor):
+    """True when the (small, large) CPU costs fail the scaling bound: the large read costs MORE than
+    _LEX_SCALING_RATIO times the small one AND more than `floor`. Both comparisons are exclusive, derived
+    for the failing side: a large read exactly at the ratio times the small one, or exactly at the floor,
+    still passes, and the first microsecond over both fails."""
+    return large > floor and large > _LEX_SCALING_RATIO * small
+
+
+def _lex_scaling_failures(reader=None, sizes=_LEX_SCALING_SIZES, floor=_LEX_SCALING_FLOOR, runs=3):
+    """(dl-lex-scaling) The shared segment reading (_lex_command) stays about linear on the nested
+    command-substitution shape: reading the 1 MiB command may cost at most _LEX_SCALING_RATIO times the
+    CPU time of reading the 256 KiB one (a linear reader grows about 4 times over that size step, a
+    quadratic one about 16), unless the large read costs no more than `floor` CPU seconds, small on any
+    host (_lex_scaling_over). Each size is read `runs` times and the smallest CPU time kept, so one
+    scheduling stall cannot flip the check, and the ratio of two CPU times on one host is free of that
+    host's speed factor. reader, sizes, floor and runs are taken by the red check, which proves a
+    quadratic reader fails this check."""
+    read = aiqt_hooks._lex_command if reader is None else reader
+    costs = []
+    for size in sizes:
+        command = _DEADLINE_SHAPES[_LEX_SCALING_SHAPE](size, "")[1]["command"]
+        best = None
+        for _ in range(runs):
+            began = time.process_time()
+            read(command)
+            spent = time.process_time() - began
+            best = spent if best is None or spent < best else best
+        costs.append(best)
+    small, large = costs
+    if _lex_scaling_over(small, large, floor):
+        return ["(dl-lex-scaling) the shared reading used {:.2f}s of CPU on the {}-character {} command "
+                "against {:.2f}s on the {}-character one, over {:g} times: superlinear growth".format(
+                    large, sizes[1], _LEX_SCALING_SHAPE, small, sizes[0], _LEX_SCALING_RATIO)]
+    return []
+
+
+def _lex_scaling_red_failures():
+    """(dl-lex-scaling-red) The scaling check discriminates: the shared reading wrapped with one
+    whole-command scan per segment (cost quadratic in the command's length) must fail it, run at a
+    quarter of the real sizes with no floor so the red case costs seconds, not minutes.
+    (dl-lex-scaling-bounds) Each bound at its edge: a large cost exactly at the ratio times the small one,
+    or exactly at the floor, passes; one a microsecond over both fails; one over the ratio but at the
+    floor passes (the floor keeps a tiny read from failing on noise)."""
+    out = []
+
+    def quadratic(command):
+        segments = aiqt_hooks._lex_command(command)
+        for _seg in segments:
+            command.count("\x00")
+        return segments
+    if not _lex_scaling_failures(reader=quadratic, sizes=(65536, 262144), floor=0.0, runs=2):
+        out.append("(dl-lex-scaling-red) a reader with one whole-command scan per segment passes the "
+                   "scaling check, so the check cannot see superlinear growth")
+    floor = _LEX_SCALING_FLOOR
+    for label, small, large, want in (
+            ("at-ratio", 0.1, _LEX_SCALING_RATIO * 0.1, False),
+            ("over-ratio", 0.1, _LEX_SCALING_RATIO * 0.1 + 1e-6, True),
+            ("at-floor", floor / (_LEX_SCALING_RATIO * 2), floor, False),
+            ("over-floor", floor / (_LEX_SCALING_RATIO * 2), floor + 1e-6, True),
+            ("under-ratio", 0.2, _LEX_SCALING_RATIO * 0.2 - 1e-6, False)):
+        if _lex_scaling_over(small, large, floor) != want:
+            out.append("(dl-lex-scaling-bounds) costs ({}, {}) must {} the scaling bound ({})".format(
+                small, large, "fail" if want else "pass", label))
+    return out
+
+
 _DEADLINE_PAYLOAD = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                 "tool_input": {"command": "git status"}, "cwd": "/"})
 
@@ -6125,8 +6198,8 @@ def _deadline_entry_message_failures():
 
 
 def _deadline_child(tmp):
-    """The deadline checks that set timers and dispositions, plus the shape timings, in this (child)
-    process; returns their failures."""
+    """The deadline checks that set timers and dispositions, plus the shape timings and the reader scaling
+    checks, in this (child) process; returns their failures."""
     return (_deadline_path_failures() + _deadline_restore_failures() + _deadline_race_failures()
             + _deadline_take_failures() + _deadline_defer_failures() + _deadline_enclosing_restore_failures()
             + _deadline_rearm_failures() + _deadline_discard_failures() + _deadline_alarm_failures()
@@ -6134,7 +6207,8 @@ def _deadline_child(tmp):
             + _deadline_outer_deadline_failures() + _deadline_restore_fault_failures()
             + _deadline_unknown_failures() + _deadline_fire_take_failures() + _deadline_window_error_failures()
             + _deadline_result_failures()
-            + _deadline_entry_message_failures() + _deadline_shape_failures(Path(tmp)))
+            + _deadline_entry_message_failures() + _deadline_shape_failures(Path(tmp))
+            + _lex_scaling_failures() + _lex_scaling_red_failures())
 
 
 def _deadline_relation_failures():

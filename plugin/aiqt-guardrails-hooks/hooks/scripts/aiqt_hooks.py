@@ -208,9 +208,11 @@ runs on 2026-10-17 on a 24-core host with Python 3.14.4 that was running other w
 0.13 s at 64 KB (protected_line, whose backstop reads the whole command before its 65,536-character
 commit size cap), 0.55 s at 256 KB and 2.17 s at 1 MB (nest_parens under git_discard). On the merged
 tree that combines this deadline with the shared reading of shell -c, eval, trap and interpreter code,
-five runs on 2026-10-18 on a 24-core host with Python 3.14.4 that was running other work measured at
-most 0.21 s at 64 KB (nest_parens under commit_identity), 0.55 s at 256 KB and 2.34 s at 1 MB
-(nest_cmdsubst under orch_untracked_wait_loop). Interpreter
+after that reading was bounded to one lex per command (_shell_reading_may_report skips the per-segment
+resolution where no word can name a shell, eval or trap; the poll-loop classifier and protected_line
+reuse one reading instead of lexing again), five runs on 2026-10-18 on a 24-core host with Python 3.14.4
+that was running other work measured at most 0.17 s at 64 KB (nest_parens under commit_identity), 0.31 s
+at 256 KB and 1.50 s at 1 MB (nest_cmdsubst_background under orch_truncation_guard). Interpreter
 start-up adds about 0.1 to 0.2 s to each call. Outside the deadline: interpreter start-up and
 module import, which run before main(); a wait the interpreter cannot interrupt (a system call in
 uninterruptible sleep, such as a read from a hung network mount, or a long call into C code that does not
@@ -1283,15 +1285,16 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False, _depth=
     skip_empty True gives this reading with every record that has no word and no redirect left out, every other
     record, its order and the partial-mode flags unchanged (_lex_flat's skip_empty). The flat lex is read with
     skip_empty first; while no segment it keeps (none before the one in progress, in partial mode) runs a shell
-    string or reads a script from standard input (_shell_reading), placing changes no record, so that lex is the
-    whole reading and builds no record for a run of separators. Otherwise the command is read in full and the
+    string or reads a script from standard input (_shell_reading, pre-screened by _shell_reading_may_report so
+    a segment with no shell, eval or trap word costs one word scan), placing changes no record, so that lex is
+    the whole reading and builds no record for a run of separators. Otherwise the command is read in full and the
     records with no word and no redirect are left out of that reading, since a left-out record can carry the
     separator that tells a shell it reads its script from a pipe (_expand_shell_strings)."""
     scopes = [0] if _scopes is None else _scopes
     if skip_empty:
         flat = _lex_flat(command, partial=partial, locale=locale, skip_empty=True)
         kept = (flat[0][:-1] if flat[2] else flat[0]) if partial else flat
-        if not any(strings or unread or stdin for strings, unread, stdin in map(_shell_reading, kept)):
+        if not any(_shell_reading_may_report(seg) and any(_shell_reading(seg)) for seg in kept):
             return flat
         full = _lex_command(command, partial=partial, locale=locale, _depth=_depth, _scopes=scopes)
         if partial:
@@ -1534,7 +1537,9 @@ def _segments(command, locale=False, skip_empty=False):
 # memo (_shell_option_walk), the programs a wrapper launches are resolved in one pass (_launched_programs), and
 # each string operand is read once; a pipeline's posture text is built once, from one list of its stages, for
 # the last shell in it that reads its script from the pipe, and each posture text is kept once. So the reading
-# costs time and memory linear in the command's length at each of the _SHELL_STRING_DEPTH levels.
+# costs time and memory linear in the command's length at each of the _SHELL_STRING_DEPTH levels. A command
+# none of whose words could name a shell, eval or trap (_shell_reading_may_report) pays one word scan and is
+# returned as the flat lex built it (_expand_shell_strings).
 # The POSIX shells, by basename, whose -c option runs its first operand as a command line.
 _SHELL_C_SHELLS = frozenset(("bash", "sh", "dash", "zsh", "ksh"))
 # The single-letter shell options that take the next word as their value (-o and +o option names, -O and +O
@@ -1863,6 +1868,30 @@ def _launched_programs(argv, opaque, start):
     return programs, overread
 
 
+# The command-word basenames that can make _shell_reading report anything: a shell whose -c string or
+# standard-input script is read, eval, and trap. Every string, unread flag and stdin flag _shell_reading
+# reports is found only where some argv word resolves (_gate_word) to one of these, whether directly, through
+# the wrappers _launched_programs follows, or after an over-read wrapper.
+_SHELL_READING_WORDS = _SHELL_C_SHELLS | frozenset(("eval", "trap"))
+
+
+def _shell_reading_may_report(seg):
+    """True when _shell_reading(seg) could report anything: some word of seg.argv resolves (_gate_word) to a
+    shell, eval or trap (_SHELL_READING_WORDS). False proves ([], False, False) without the full resolution,
+    in one cheap pass over the words: a word with no slash and no backslash is its own _gate_word once
+    lowercased (and is already that where it is lowercase), so only a word carrying a path or an
+    alias-suppressing backslash takes the call."""
+    for word in seg.argv:
+        if word in _SHELL_READING_WORDS:
+            return True
+        if "/" in word or "\\" in word:
+            if _gate_word(word) in _SHELL_READING_WORDS:
+                return True
+        elif not word.islower() and word.lower() in _SHELL_READING_WORDS:
+            return True
+    return False
+
+
 def _shell_reading(seg):
     """(strings, unread, stdin) for one segment. strings are (text, child) for the command strings it runs
     through a shell's -c option, through eval, or as a trap action, in word order: child is True for a shell's
@@ -1992,7 +2021,14 @@ def _expand_shell_strings(segments, locale, depth, scopes):
     (stdin_script, 'segment'); fed by a pipe (not under xargs), with its own raw text ('stage'), and the last
     such shell of a pipeline also with the raw text of the pipeline up to and including it, each stage followed
     by the here-document bodies it reads ('pipeline'), built once per pipeline from one list of its stages so
-    the texts cost memory linear in the command's length. Every other segment is left as lexed."""
+    the texts cost memory linear in the command's length. Every other segment is left as lexed.
+
+    While no segment holds a word that could make _shell_reading report anything (_shell_reading_may_report,
+    one cheap pass over the words), there is no string to place, no segment to mark and no pipeline text to
+    build, so the segments are returned unchanged, the same list, and the per-segment resolution below never
+    runs; a long command with no shell, eval or trap word costs one word scan here."""
+    if not any(map(_shell_reading_may_report, segments)):
+        return segments
     out = []
     marks = {}  # index in out -> the (kind, text) pairs of that segment, in order
     prev_sep = None
@@ -8877,8 +8913,13 @@ _CommitStep = collections.namedtuple(
 
 # status: "outside", "unverifiable", "help", or "grammar".
 # "grammar" establishes syntax only. Records retain the original _Segment metadata.
+# complete is True exactly when records hold the COMPLETE shared segment reading of the command
+# (_lex_command), so a caller that needs that reading reads records instead of lexing the command again;
+# it is False where no reading or only a partial recovery was taken (an unreadable or over-budget command,
+# or a command the lexer refused). Defaulted so the positional _CommitSyntax(...) builds need not pass it.
 _CommitSyntax = collections.namedtuple(
-    "_CommitSyntax", ("status", "records", "steps", "commit_indexes", "detail"))
+    "_CommitSyntax", ("status", "records", "steps", "commit_indexes", "detail", "complete"))
+_CommitSyntax.__new__.__defaults__ = (True,)
 
 # Identity must be worktree-specific: the canonical absolute Git directory plus its
 # validated filesystem identity, not merely the common repository directory.
@@ -9064,9 +9105,9 @@ def _commit_command_syntax(command):
     grammar evidence. Exact lone help forms are non-committing syntax, not A-D.
     """
     if not isinstance(command, str):
-        return _CommitSyntax("unverifiable", (), (), (), "unreadable command")
+        return _CommitSyntax("unverifiable", (), (), (), "unreadable command", complete=False)
     if len(command) > _COMMIT_MAX_COMMAND:
-        return _CommitSyntax("unverifiable", (), (), (), "command size budget exhausted")
+        return _CommitSyntax("unverifiable", (), (), (), "command size budget exhausted", complete=False)
     try:
         records = tuple(_lex_command(command))
     except ValueError:
@@ -9076,7 +9117,7 @@ def _commit_command_syntax(command):
         apparent = apparent or not _commit_quote_bytes_known(command)
         apparent = apparent or any(_commit_apparent_segment(seg) for seg in partial)
         status = "unverifiable" if apparent else "outside"
-        return _CommitSyntax(status, tuple(partial), (), (), "incomplete shell parse")
+        return _CommitSyntax(status, tuple(partial), (), (), "incomplete shell parse", complete=False)
     # The budget counts the segments the command itself holds (the flat lex), as before the shell-string
     # reading: the segments placed from a shell -c, eval or trap string are judged below, but a long script
     # inside one string does not exhaust the budget by itself.
@@ -10052,8 +10093,10 @@ def _protected_line_fallback_denies(text):
     return bool(_fallback_push_hit(text) or _fallback_push_hit(_dequoted_text(text)))
 
 
-def _protected_line_fallback(command, wrapped=False):
-    """Commit-free push fallback; commit syntax is checked before this path.
+def _protected_line_fallback(command, wrapped=False, syntax=None):
+    """Commit-free push fallback; commit syntax is checked before this path. syntax is the
+    _commit_command_syntax reading of `command` where the caller already holds it, so the command is not
+    read again; None reads it here (the default for every caller judging a different text).
 
     R10 (DECIDED item 3): the raw push scan reads the WHOLE command text, with no
     heredoc stripping at all. Stripping removes text, so any stripping defect can
@@ -10077,7 +10120,8 @@ def _protected_line_fallback(command, wrapped=False):
     over-denial, reached only on an uncertain, unparseable or wrapper-hidden command).
     Hidden commits are checked independently of other Git segments by the commit recognizer.
     """
-    syntax = _commit_command_syntax(command)
+    if syntax is None:
+        syntax = _commit_command_syntax(command)
     if syntax.status != "outside":
         if syntax.status == "help":
             return _allow()
@@ -10169,11 +10213,13 @@ def protected_line(data):
                 return _commit_denial(outcome[1])
         return _allow()
 
-    # Only commit-free commands reach the existing push classifier/help shortcut.
-    try:
-        seg_records = _lex_command(command)
-    except ValueError:
-        return _protected_line_fallback(command)
+    # Only commit-free commands reach the existing push classifier/help shortcut. The commit reading above
+    # already took the shared segment reading: when it is complete its records ARE those segments, so the
+    # command is lexed once here; an incomplete reading (the lexer refused the command) routes to the raw
+    # fallback exactly as the lexer's refusal did when this path lexed for itself.
+    if not syntax.complete:
+        return _protected_line_fallback(command, syntax=syntax)
+    seg_records = syntax.records
     # An uncertain segment (a shell string the reading cannot read, or a shell reading its script from a pipe or a
     # here-document) is read under this guard's posture: the raw fallback over each of its texts alone, returned
     # where it denies there (an apparent commit, or a force, delete or mirror push). For a shell reading its script
@@ -10239,7 +10285,7 @@ def protected_line(data):
     flat_saw_git = any(_command_word(seg.argv) == "git" for seg in _lex_flat(command))
     if ((not flat_saw_git or _lex_uncertain(command))
             and (_RAW_GIT_RE.search(command) or _RAW_GIT_RE.search(_dequoted_text(command)))):
-        return _protected_line_fallback(command, wrapped=not flat_saw_git)
+        return _protected_line_fallback(command, wrapped=not flat_saw_git, syntax=syntax)
     return _allow()
 
 
@@ -15655,14 +15701,17 @@ def _orch_bg_poll_loop(command):
     Both the shared reading (_lex_command, shell strings placed in place) and the flat lex (_lex_flat) are
     classified, and 'match' stands when either matches: placing a shell string's segments can add a bare '&' or a
     command after the loop that the flat lex does not have, so the flat classification keeps every match it makes
-    (the floor of the shared reading), while a loop inside a shell string matches through the shared reading."""
+    (the floor of the shared reading), while a loop inside a shell string matches through the shared reading.
+    The command is lexed once: the shared reading is the flat lex with the shell strings placed over it
+    (_expand_shell_strings, exactly what _lex_command builds), and when placing changed nothing the one
+    classification already covers both readings."""
     try:
-        segments = _lex_command(command)
         flat = _lex_flat(command)
+        segments = _expand_shell_strings(flat, False, 0, [0])
     except ValueError:
         return "indeterminate"              # heredoc/process-sub/unbalanced-quote/NUL/malformed-redirect
     verdict = _orch_poll_loop_shape(segments)
-    if verdict != "match" and _orch_poll_loop_shape(flat) == "match":
+    if verdict != "match" and segments is not flat and _orch_poll_loop_shape(flat) == "match":
         return "match"
     return verdict
 
