@@ -243,37 +243,51 @@ def _read_following(path, label):
     anything is read (a read of a FIFO descriptor can wait forever). A non-regular file
     raises CannotEvaluate naming LABEL and the file type. On Linux a socket (and a device
     node no driver backs) cannot be opened as a file at all (ENXIO, before any descriptor
-    exists), so that refusal names the type from the path's own lstat, a point-in-time read
-    taken only for the message, never as a proof about an opened descriptor. Every other
-    failure (absence included) propagates as the OSError it is, so each caller keeps its own
-    wording for an unreadable entry. O_NONBLOCK stays set on the proven-regular descriptor:
-    reads of a regular file behave the same with or without it."""
+    exists), so that refusal names the type from a stat of the path that FOLLOWS it exactly
+    as the open did (a symlink to a socket is named as a socket, not as the link), falling
+    back to the entry's own lstat when the target cannot be inspected; either is a
+    point-in-time read taken only for the message, never a proof about an opened
+    descriptor. A failure of the OPEN ITSELF (absence included) propagates as the OSError
+    it is, so each caller keeps its own wording for an unopenable entry; a failure AFTER
+    the open succeeded (fstat, read, close) raises CannotEvaluate naming the descriptor
+    instead, so an errno such as ENOENT reported by a descriptor step can never read as a
+    confirmed-absent entry to a caller that treats a missing file as empty. O_NONBLOCK
+    stays set on the proven-regular descriptor: reads of a regular file behave the same
+    with or without it."""
     try:
         fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError as exc:
         if exc.errno == errno.ENXIO:
             try:
-                mode = os.lstat(str(path)).st_mode
+                mode = os.stat(str(path)).st_mode
             except OSError:
-                mode = None
+                try:
+                    mode = os.lstat(str(path)).st_mode
+                except OSError:
+                    mode = None
             if mode is not None and not stat.S_ISREG(mode):
                 raise CannotEvaluate(
                     "{} names {}, not a regular file (the non-blocking open cannot address "
                     "it, so it was never opened or read)".format(label, _nonregular_name(mode)))
         raise
     try:
-        st_mode = os.fstat(fd).st_mode
-        if not stat.S_ISREG(st_mode):
-            raise CannotEvaluate("{} names {}, not a regular file".format(
-                label, _nonregular_name(st_mode)))
-        chunks = []
-        while True:
-            chunk = os.read(fd, READ_CHUNK)
-            if not chunk:
-                return b"".join(chunks)
-            chunks.append(chunk)
-    finally:
-        os.close(fd)
+        try:
+            st_mode = os.fstat(fd).st_mode
+            if not stat.S_ISREG(st_mode):
+                raise CannotEvaluate("{} names {}, not a regular file".format(
+                    label, _nonregular_name(st_mode)))
+            chunks = []
+            while True:
+                chunk = os.read(fd, READ_CHUNK)
+                if not chunk:
+                    return b"".join(chunks)
+                chunks.append(chunk)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise CannotEvaluate("{} was opened but cannot be read from its open descriptor "
+                             "({}); a failure after a successful open is never an absent "
+                             "entry".format(label, exc))
 
 
 def gate_root(start):
@@ -692,6 +706,7 @@ def self_test():
     import io
     import shutil
     import signal
+    import socket
     import tempfile
     import threading
     # Hermetic git fixtures (test-hermeticity): every fixture git call below inherits
@@ -1568,9 +1583,9 @@ def self_test():
         # the live leg's registry and register reads never block on the file type: a FIFO at
         # the declared register path, and a FIFO at the registry path itself, are each
         # refused (exit 2) with a diagnostic naming the file type; each vector runs under an
-        # alarm so a read that blocks fails instead of hanging the suite. The bound is sized
-        # from measured clean runs of these reads (well under a second each) with two orders
-        # of magnitude of margin for a loaded host.
+        # alarm so a read that blocks fails instead of hanging the suite. The bound is set
+        # far above any clean run of these reads and can fail a vector only by firing,
+        # never pass one, so a loaded host can at worst cause a false failure.
         class ReadAlarm(Exception):
             # deliberately NOT an OSError: the live leg's reads catch OSError, and the alarm
             # must escape them to fail the vector
@@ -1619,6 +1634,80 @@ def self_test():
             failures.append("gate-fifo-registry-refused: a FIFO registry should be exit 2 "
                             "naming the registry and the file type, got exit {!r}: {}".format(
                                 fifo_got[0], fifo_got[1].strip()))
+        registry.unlink()
+        # a symlink to a SOCKET at the declared register path: the read follows the path,
+        # as it always has, so the refusal names the TARGET's type (a socket), never the
+        # link's own numeric mode, still exit 2 under the same bound
+        registry.write_text(json.dumps(
+            {"version": 1, "mistakes_register": "socklink-reg.jsonl"}), encoding="utf-8")
+        gate_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        held_cwd = os.getcwd()
+        os.chdir(str(repo))
+        try:
+            # bound by a relative name: a bound AF_UNIX path is limited to about 107
+            # bytes, and the fixture's temporary directory can be deeper than that
+            gate_sock.bind("sock-target")
+        finally:
+            os.chdir(held_cwd)
+        sock_link_reg = repo / "socklink-reg.jsonl"
+        sock_link_reg.symlink_to("sock-target")
+        try:
+            sock_got = bounded_run("gate-socket-symlink-register-named", repo)
+            if sock_got is not None and (
+                    sock_got[0] != 2 or "a socket" not in sock_got[1]
+                    or "not a regular file" not in sock_got[1]):
+                failures.append("gate-socket-symlink-register-named: a symlink to a socket "
+                                "should be exit 2 naming the socket, got exit {!r}: "
+                                "{}".format(sock_got[0], sock_got[1].strip()))
+            if not sock_link_reg.is_symlink():
+                failures.append("gate-socket-symlink-register-named: the refusal changed "
+                                "the register entry")
+        finally:
+            gate_sock.close()
+        sock_link_reg.unlink()
+        (repo / "sock-target").unlink()
+        # a failure AFTER the declared register's open succeeded (an injected read error
+        # reporting ENOENT, the errno a too-broad absence test would read as a missing
+        # register) is a named cannot-evaluate on the open descriptor, exit 2, never read
+        # as an absent or merely unopenable entry
+        inj_gate_reg = repo / "inject-gate-reg.jsonl"
+        inj_gate_rows = chain(lambda p: row(1, "MR-1", "proposed", p))
+        inj_gate_reg.write_text("\n".join(inj_gate_rows) + "\n", encoding="utf-8")
+        registry.write_text(json.dumps(
+            {"version": 1, "mistakes_register": "inject-gate-reg.jsonl"}), encoding="utf-8")
+        inj_gate_id = os.stat(str(inj_gate_reg))
+        real_gate_read = os.read
+        gate_fired = {"n": 0}
+
+        def gate_failing_read(read_fd, count):
+            # fire only on the declared register's own read, identified by the open
+            # descriptor's file identity, never on the registry read (same chunk size)
+            if count == READ_CHUNK:
+                try:
+                    st_read = os.fstat(read_fd)
+                except OSError:
+                    st_read = None
+                if st_read is not None and (st_read.st_dev, st_read.st_ino) == \
+                        (inj_gate_id.st_dev, inj_gate_id.st_ino):
+                    gate_fired["n"] += 1
+                    raise FileNotFoundError(2, "injected descriptor read failure")
+            return real_gate_read(read_fd, count)
+
+        os.read = gate_failing_read
+        try:
+            inj_got = bounded_run("gate-descriptor-failure-named", repo)
+        finally:
+            os.read = real_gate_read
+        if inj_got is not None and (
+                inj_got[0] != 2
+                or "cannot be read from its open descriptor" not in inj_got[1]):
+            failures.append("gate-descriptor-failure-named: a read failure on the opened "
+                            "register descriptor should be exit 2 naming the descriptor, "
+                            "got exit {!r}: {}".format(inj_got[0], inj_got[1].strip()))
+        if inj_got is not None and gate_fired["n"] == 0:
+            failures.append("gate-descriptor-failure-named: the injected failure never "
+                            "fired, so the vector proved nothing")
+        inj_gate_reg.unlink()
         registry.unlink()
         # the paired control: the same reads on a regular registry and register still verify
         # and pass (update=True establishes the untracked register's first anchor), under the
@@ -1892,9 +1981,12 @@ def self_test():
           "attestations declaration names its own key); and the live leg's registry and "
           "register reads never block on the file type (a FIFO at the declared register "
           "path and a FIFO at the registry path are each refused, exit 2, with a diagnostic "
-          "naming the file type, alarm-bounded so a blocking regression fails rather than "
-          "hangs, while the regular-file control still verifies and passes under the same "
-          "bound)")
+          "naming the file type, a symlink to a socket is refused naming the TARGET's type, "
+          "a socket, never the link's own numeric mode, and a failure injected after the "
+          "register's open succeeded, reporting ENOENT, is refused naming the open "
+          "descriptor, never read as an absent entry, each alarm-bounded so a blocking "
+          "regression fails rather than hangs, while the regular-file control still "
+          "verifies and passes under the same bound)")
     return 0
 
 

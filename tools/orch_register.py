@@ -155,10 +155,14 @@
       The projection reads through the same non-blocking open and descriptor file-type check
       as the appender: a register that is not a regular file is refused with exit 2 and a
       diagnostic naming the file type (a socket, which the open cannot address at all, is
-      named from the path's own lstat), never read and never blocked on, and any OTHER open,
-      descriptor or decode failure is refused with exit 2 naming the error, never an escaped
-      traceback (an absent register still projects as no items; the path is still
-      followed, so a symlink to a regular register projects as before).
+      named from a following stat, so a symlink to a socket is named as a socket), never
+      read and never blocked on, and any OTHER open, descriptor, path-value or decode
+      failure is refused with exit 2 naming the error, never an escaped traceback. An
+      absent register still projects as no items, where absent means the open's OWN
+      ENOENT only: a descriptor failure after a successful open is exit 2, never a
+      successful empty projection. A register line that is not JSON, or whose row is not
+      a JSON object with a string id, is refused with exit 2 as well. The path is still
+      followed, so a symlink to a regular register projects as before.
   orch_register.py --self-test
       Synthetic fixtures for the write-time validation: each refusal vector leaves the register
       and its anchor byte-identical (the first-row cleanup and left-in-place vectors assert
@@ -219,16 +223,20 @@ def _lines(path):
     check_mistakes_register._read_following (a non-blocking open whose OPENED descriptor's
     own fstat must prove a regular file before anything is read; a directory, a FIFO or a
     device is never a register, and a socket, which that open cannot address at all, is
-    named from the path's own lstat). Raises CannotEvaluate naming the file type for
-    anything that is not a regular file, and naming the error for ANY other open, descriptor
-    or decode failure, so no OSError escapes to the caller as a traceback; an absent
-    register reads as no lines. The path is followed as before, so a symlink to a regular
-    register still reads; what it aliases is still type-checked."""
+    named from a following stat taken only for the message). Raises CannotEvaluate naming
+    the file type for anything that is not a regular file, and naming the error for ANY
+    other open, descriptor, path-value or decode failure, so no OSError or ValueError
+    escapes to the caller as a traceback. ONLY the open's own ENOENT reads as an absent
+    register (no lines): the shared reader converts every failure after a successful open
+    (fstat, read, close) to CannotEvaluate, so a descriptor failure reporting ENOENT is
+    exit 2 for the caller, never a successful empty projection. The path is followed as
+    before, so a symlink to a regular register still reads; what it aliases is still
+    type-checked."""
     try:
         raw = _read_following(path, "the register path")
     except FileNotFoundError:
         return []
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise CannotEvaluate("the register cannot be read ({})".format(exc))
     try:
         return raw.decode("utf-8").splitlines()
@@ -1217,12 +1225,24 @@ def cmd_project(a):
         print("project: refused, {}; the projection reads a regular file only, and its open "
               "never blocks on the file type".format(exc), file=sys.stderr)
         return 2
+    # Rows the projection cannot shape are refused like its read failures (exit 2 on
+    # stderr), never an escaped traceback and never a partial enumeration: a non-object
+    # row has no fields to project, and a non-string id would make the sorted enumeration
+    # below compare incomparable keys.
     for line in reg_lines:
         try:
             row = json.loads(line)
         except ValueError:
-            sys.exit("project: malformed register line (run check_mistakes_register.py)")
-        latest[row.get("id")] = row
+            print("project: refused, a register line is not JSON (run "
+                  "check_mistakes_register.py); the projection never guesses at a row it "
+                  "cannot parse", file=sys.stderr)
+            return 2
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+            print("project: refused, a register row is not a JSON object with a string id "
+                  "(run check_mistakes_register.py); the projection never guesses at a row "
+                  "it cannot shape", file=sys.stderr)
+            return 2
+        latest[row["id"]] = row
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     items = [{"id": "{}-guardrail".format(rid), "title": "land the guardrail: {}".format(
         row.get("guardrail", "")), "state": "open", "granted": row["status"] == "accepted"}
@@ -1637,11 +1657,11 @@ def self_test():
             # catch OSError, and the alarm must escape both to fail the vector
             pass
 
-        # The bound is sized from measured clean runs of the bounded vectors on an unloaded
-        # host (the slowest, a clean append with its git subprocesses, measured around a
-        # tenth of a second even through a fresh interpreter), with more than two orders of
-        # magnitude of margin for a loaded host; it can fail a vector only by firing, never
-        # pass one, and a regression that blocks still fails within the bound.
+        # The bound exists only to turn a blocking regression into a failure instead of a
+        # hung suite: it is set far above any clean run of the bounded steps (the slowest
+        # is an append with its git subprocesses), it can fail a vector only by firing,
+        # never pass one, and a regression that blocks still fails within the bound. A
+        # loaded host can therefore at worst cause a false failure, never a false pass.
         def alarm_bounded(name, step, seconds=60):
             def on_alarm(signum, frame):
                 raise VectorAlarm("blocked for {} s".format(seconds))
@@ -1659,12 +1679,16 @@ def self_test():
 
         def project_rc(regpath):
             # stdout is kept (third element) so the regular-register vector can assert the
-            # projected payload itself, not only the exit code
+            # projected payload itself, not only the exit code; an escaped OSError,
+            # ValueError or SystemExit becomes a non-integer rc, which fails every rc
+            # assertion below, so an escape is always red, never a crashed suite
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 try:
                     rc = cmd_project(argparse.Namespace(register=str(regpath)))
-                except OSError as exc:
+                except SystemExit as exc:
+                    rc = "an uncaught SystemExit: {!r}".format(exc.code)
+                except (OSError, ValueError) as exc:
                     rc = "an uncaught {}: {}".format(type(exc).__name__, exc)
             return rc, err.getvalue(), out.getvalue()
 
@@ -1757,6 +1781,18 @@ def self_test():
                          alarm_bounded("socket-project-refused",
                                        lambda: project_rc(sock_reg)),
                          ("socket", "not a regular file"))
+            # a symlink to the socket is followed, as projection reads always have been,
+            # so the refusal names the TARGET's type (a socket), never the link's own
+            # numeric mode
+            sock_link = repo / "socklink.jsonl"
+            sock_link.symlink_to("sock.jsonl")
+            want_refusal("socket-symlink-project-named",
+                         alarm_bounded("socket-symlink-project-named",
+                                       lambda: project_rc(sock_link)),
+                         ("socket", "not a regular file"))
+            if not sock_link.is_symlink():
+                failures.append("socket-symlink-project-named: the refusal changed the link")
+            sock_link.unlink()
             if not stat.S_ISSOCK(os.lstat(str(sock_reg)).st_mode):
                 failures.append("socket vectors: a refusal changed the register entry")
         finally:
@@ -1844,6 +1880,118 @@ def self_test():
                                    lambda: project_rc(garbled_proj)),
                      ("cannot be read",))
         garbled_proj.unlink()
+        # a descriptor failure AFTER the projection's open succeeded is cannot-evaluate
+        # (exit 2 naming the open descriptor), never a successful empty projection and
+        # never an escaped OSError: a failure injected at each descriptor step of the
+        # shared reader (fstat, read, close), each reporting ENOENT, the errno that a
+        # too-broad absence test would read as a missing register
+        inj_reg = repo / "inject-proj.jsonl"
+        inj_reg.write_text('{"id": "MR-9", "status": "accepted", "guardrail": "g"}\n',
+                           encoding="utf-8")
+        inj_id = os.stat(str(inj_reg))
+        real_p_read, real_p_fstat, real_p_close = os.read, os.fstat, os.close
+        inj_fired = {"n": 0}
+
+        def inj_is_reg(st):
+            return (st.st_dev, st.st_ino) == (inj_id.st_dev, inj_id.st_ino)
+
+        def inj_read(read_fd, count):
+            # fire only on the projection's own register read, identified by the open
+            # descriptor's file identity, never on another read of the same chunk size
+            if count == 1 << 16:
+                try:
+                    st_read = real_p_fstat(read_fd)
+                except OSError:
+                    st_read = None
+                if st_read is not None and inj_is_reg(st_read):
+                    inj_fired["n"] += 1
+                    raise FileNotFoundError(2, "injected descriptor failure on read")
+            return real_p_read(read_fd, count)
+
+        def inj_fstat(fstat_fd):
+            st_seen = real_p_fstat(fstat_fd)
+            if inj_is_reg(st_seen):
+                inj_fired["n"] += 1
+                raise FileNotFoundError(2, "injected descriptor failure on fstat")
+            return st_seen
+
+        def inj_close(close_fd):
+            # the close itself still happens exactly once; only its reported result fails
+            try:
+                st_closed = real_p_fstat(close_fd)
+            except OSError:
+                st_closed = None
+            real_p_close(close_fd)
+            if st_closed is not None and inj_is_reg(st_closed):
+                inj_fired["n"] += 1
+                raise FileNotFoundError(2, "injected descriptor failure on close")
+
+        inj_reals = {"read": real_p_read, "fstat": real_p_fstat, "close": real_p_close}
+        for inj_name, inj_attr, inj_fn in (
+                ("project-read-failure-never-absent", "read", inj_read),
+                ("project-fstat-failure-never-absent", "fstat", inj_fstat),
+                ("project-close-failure-never-absent", "close", inj_close)):
+            inj_fired["n"] = 0
+            setattr(os, inj_attr, inj_fn)
+            try:
+                inj_got = alarm_bounded(inj_name, lambda: project_rc(inj_reg))
+            finally:
+                setattr(os, inj_attr, inj_reals[inj_attr])
+            want_refusal(inj_name, inj_got,
+                         ("cannot be read from its open descriptor",))
+            if inj_got is not None and inj_fired["n"] == 0:
+                failures.append(inj_name + ": the injected failure never fired, so the "
+                                "vector proved nothing")
+        inj_reg.unlink()
+        # the paired control: a genuinely ABSENT register (the open's own ENOENT) still
+        # projects as no items, exit 0
+        absent_got = alarm_bounded("absent-register-still-projects-empty",
+                                   lambda: project_rc(repo / "no-such-register.jsonl"))
+        if absent_got is not None:
+            absent_payload = None
+            if absent_got[0] == 0:
+                try:
+                    absent_payload = json.loads(absent_got[2])
+                except ValueError:
+                    absent_payload = None
+            if (absent_got[0] != 0 or not isinstance(absent_payload, dict)
+                    or absent_payload.get("items") != []):
+                failures.append("absent-register-still-projects-empty: want exit 0 with no "
+                                "items, got exit {!r}: {} {!r}".format(
+                                    absent_got[0], absent_got[1].strip(), absent_got[2]))
+        # a register path whose OPEN fails with something other than ENOENT (here a path
+        # component that is a file, ENOTDIR) is cannot-evaluate, never an escaped OSError
+        # and never an empty projection; the fixture reuses a regular file as the bogus
+        # directory component
+        enotdir_base = repo / "enotdir-proj.jsonl"
+        enotdir_base.write_text("", encoding="utf-8")
+        want_refusal("enotdir-project-refused",
+                     alarm_bounded("enotdir-project-refused",
+                                   lambda: project_rc(enotdir_base / "child.jsonl")),
+                     ("cannot be read",))
+        enotdir_base.unlink()
+        # an invalid register path VALUE (an embedded NUL, impossible in an OS argument
+        # vector but reachable in-process) is cannot-evaluate, never an escaped ValueError
+        want_refusal("nul-path-project-refused",
+                     alarm_bounded("nul-path-project-refused",
+                                   lambda: project_rc("nul\x00path.jsonl")),
+                     ("cannot be read",))
+        # rows the projection cannot shape are refused with exit 2 naming the row, never
+        # an escaped traceback (a non-object row has no fields; a non-string id would make
+        # the sorted enumeration compare incomparable keys) and never exit 1
+        for row_name, row_body, row_naming in (
+                ("non-json-line-project-refused", "{\n", ("is not JSON",)),
+                ("non-object-row-project-refused", "[1]\n",
+                 ("not a JSON object with a string id",)),
+                ("non-string-id-project-refused",
+                 '{"id": 1, "status": "proposed", "guardrail": "g"}\n',
+                 ("not a JSON object with a string id",))):
+            rowbad = repo / "rowbad-proj.jsonl"
+            rowbad.write_text(row_body, encoding="utf-8")
+            want_refusal(row_name,
+                         alarm_bounded(row_name, lambda: project_rc(rowbad)),
+                         row_naming)
+            rowbad.unlink()
 
         # a tracked register with no computable merge-base is cannot-evaluate (exit 2), not a pass
         tracked = repo / "tracked.jsonl"
@@ -4406,7 +4554,17 @@ def self_test():
           "at the registry path (refused naming the registry and the file type, nothing "
           "created, while a regular registry still reads and a clean append lands under the "
           "same bound), a register the projection cannot decode (refused naming the read, "
-          "never a traceback), "
+          "never a traceback), a symlink to a socket at the projected register path "
+          "(refused naming the TARGET's type, a socket, never the link's own numeric "
+          "mode), a descriptor failure after the projection's open succeeded (fstat, read "
+          "and close each injected to report ENOENT, each refused naming the open "
+          "descriptor, never a successful empty projection, while a genuinely absent "
+          "register still projects as no items), a projected register path that cannot be "
+          "opened for another reason (a path through a non-directory) or is not a valid "
+          "path value (an embedded NUL), each refused naming the read, never an escaped "
+          "error, a register line the projection cannot shape (a line that is not JSON, a "
+          "row that is not a JSON object, a row whose id is not a string, each refused "
+          "with exit 2 naming the row, never a traceback and never exit 1), "
           "an undeclared register, an appender "
           "installed outside any git repository (subprocess vector, never a cwd-derived root, "
           "run through a test-only search ceiling at the fixture's temporary directory, so a "

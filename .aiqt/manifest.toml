@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "37b19124b68ad38a81df79ba8070b96e01d9dca16552d20ca36b661d2ba8305f"
+tree-sha256 = "9a3c41ec4b0dab567019a8802542b3b677a9bbc04a716256c4d7888755556708"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3411,8 +3411,8 @@ sha256 = "e4fbc6cccdfb032cd5c0f6fecba4fdde40e4ed510435643b2bcba573151b6616"
 
 [[sources]]
 path = "tools/check_mistakes_register.py"
-bytes = 113475
-sha256 = "2df5db2fe4d83772a396a98c7e4bc2a0682cd9a0c400404ad849f518e8c05553"
+bytes = 118780
+sha256 = "de1b8ea28ffd9fd839658175faecb4f568285bccb2d313c361065dd02a1b5c8c"
 
 [[sources]]
 path = "tools/check_msg_leaks.py"
@@ -3726,8 +3726,8 @@ sha256 = "26b2e951fe7c452e19c919e04bbc2cf3854eefd085fe3f10399678b84b4d5b9a"
 
 [[sources]]
 path = "tools/orch_register.py"
-bytes = 266049
-sha256 = "22c87577413b4e97378263ef66a6e89132a676d0857f5856dddbaabd5248b499"
+bytes = 275593
+sha256 = "620099d64d4b0300867aca210aece91e667efced64dbdef1e90a2c4fcac87345"
 
 [[sources]]
 path = "tools/pin.py"
