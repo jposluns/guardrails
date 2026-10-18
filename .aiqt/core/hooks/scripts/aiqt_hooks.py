@@ -10469,7 +10469,10 @@ def commit_msg_subst(data):
 # heredoc, and reads a double-quoted "$(cat <<'EOF' ...)" as one word), so this guard makes its own raw pass,
 # tracking only what decides whether a << is an opener: quoting, escapes, comments, assignment subscripts,
 # and the command, arithmetic and parameter substitutions that nest inside one another. A delimiter
-# word is read by the shared _parse_heredoc_delim, so both passes read a delimiter alike.
+# word is read by the shared _parse_heredoc_delim; this guard feeds it the word with every backslash-newline
+# pair bash would remove already taken out (bash removes the pair before it splits words, so the pair can
+# split the << operator itself or stand inside the delimiter word), while the shared parser itself is
+# unchanged and other callers still hand it raw text.
 _HeredocOpener = collections.namedtuple(
     "_HeredocOpener", ("spec", "line", "delim", "strip_tabs", "quoted", "terminated", "near", "stop"))
 _HEREDOC_NEAR_MISS_MAX = 2  # the largest edit distance at which a body line is named as a near miss
@@ -10581,6 +10584,78 @@ def _heredoc_skip_to(command, i, n, close):
     return n
 
 
+def _heredoc_skip_line_joins(command, i, n):
+    """The index at or after i of the first character that is not part of a backslash-newline pair. Bash
+    removes each such pair while reading input, BEFORE it splits the text into operators and words, so an
+    operator or a word goes on across one or more pairs: '<', backslash-newline, '<' is the << operator."""
+    while i + 1 < n and command[i] == "\\" and command[i + 1] == "\n":
+        i += 2
+    return i
+
+
+def _heredoc_joined_tail(command, i, n):
+    """The text of command from index i with each backslash-newline pair bash would remove taken out, plus a
+    map from each index of that text back to its index in command (one extra entry maps the joined end to
+    where scanning resumes). Bash removes the pair wherever the backslash is unquoted, double quotes
+    included; inside '...' or $'...' the pair is literal text and is kept, and any other backslash keeps
+    the character after it, so an escaped backslash never joins a line. The join is read only as far as a
+    heredoc delimiter word can reach: it stops just after the first kept newline outside quotes."""
+    chars = []
+    backmap = []
+    quote = ""  # "", "'", '"' or "$'": the quoting state of the joined text read so far
+    while i < n:
+        c = command[i]
+        if quote in ("'", "$'"):
+            if quote == "$'" and c == "\\" and i + 1 < n:  # in $'...' a backslash keeps the next character
+                chars.append(c)
+                backmap.append(i)
+                chars.append(command[i + 1])
+                backmap.append(i + 1)
+                i += 2
+                continue
+            chars.append(c)
+            backmap.append(i)
+            i += 1
+            if c == "'":
+                quote = ""
+            continue
+        if c == "\\":
+            if command.startswith("\n", i + 1):
+                i += 2  # the removed pair (also inside double quotes, as in bash)
+                continue
+            chars.append(c)
+            backmap.append(i)
+            if i + 1 < n:
+                chars.append(command[i + 1])
+                backmap.append(i + 1)
+            i += 2
+            continue
+        if quote == '"':
+            chars.append(c)
+            backmap.append(i)
+            i += 1
+            if c == '"':
+                quote = ""
+            continue
+        if c == "$" and command.startswith("'", i + 1):
+            quote = "$'"
+            chars.append(c)
+            backmap.append(i)
+            chars.append("'")
+            backmap.append(i + 1)
+            i += 2
+            continue
+        if c == "'" or c == '"':
+            quote = c
+        chars.append(c)
+        backmap.append(i)
+        i += 1
+        if c == "\n":
+            break
+    backmap.append(i)
+    return "".join(chars), backmap
+
+
 def _heredoc_openers(command):
     """Every heredoc opener bash would act on in a raw Bash command, in source order, each read through to its
     terminator by _heredoc_body. An opener is a << that is not part of a here-string <<<, and that is not
@@ -10593,6 +10668,18 @@ def _heredoc_openers(command):
     arithmetic, in a subscript or in a ${...}; a <( directly inside double quotes or in arithmetic is literal
     text, as in bash. A << whose delimiter word _parse_heredoc_delim cannot read is returned with delim None
     and terminated False.
+    A backslash-newline pair is removed as bash removes it (before operators and words are split) when it
+    splits a << or <<< operator or stands, outside single quotes, inside the delimiter word: '<',
+    backslash-newline, '<' opens a heredoc, a third < joined the same way makes the <<< here-string, and
+    <<E backslash-newline OF reads the unquoted delimiter EOF; inside '...' or $'...' the pair is kept, as
+    in bash. DISCLOSED RESIDUAL: a pair that splits any OTHER multi-character construct ($(, $((, $[, ${,
+    $', <(, >(, ((, or a name joined to its subscript's [) is still read as its unjoined characters, so a
+    << inside text bash joins to arithmetic or to an assignment subscript is read as an opener and denies
+    fail-safe, and a heredoc inside a $(...), <(...) or >(...) whose opening is split by a pair is still
+    found, but its body is read at the surrounding command's newline without the substitution's early-stop
+    and ordering rules, so a body bash cuts short at a line such as EOF) can be read as terminated and the
+    command allowed (cat <, backslash-newline, (cat <<EOF / a / EOF) y / EOF draws bash's end-of-file
+    warning yet allows here).
     Bodies are read in bash's order. Each command context (the command, and each $(...), <(...) or >(...)
     in it at any depth) keeps its own pending openers, and a newline of that context reads only its own
     pending bodies, in the order their openers appeared; the pending bodies of the contexts around it wait
@@ -10784,24 +10871,35 @@ def _heredoc_openers(command):
             nl = command.find("\n", i)
             i = n if nl < 0 else nl
             continue
-        if c == "<" and nx == "<":
-            if command.startswith("<<<", i):  # a here-string: no body and no terminator line
-                word_start = True
-                redirect = True
-                i += 3
+        if c == "<":
+            # bash removes a backslash-newline pair before it splits operators, so a < joined to a later <
+            # across one or more pairs is the << operator, and a third < joined the same way makes it the
+            # <<< here-string; a < that joins to anything else falls through to the redirection reads below
+            second = _heredoc_skip_line_joins(command, i + 1, n)
+            if command.startswith("<", second):
+                third = _heredoc_skip_line_joins(command, second + 1, n)
+                if command.startswith("<", third):  # a here-string: no body and no terminator line
+                    word_start = True
+                    redirect = True
+                    i = third + 1
+                    continue
+                # the delimiter word is read over the same joined text (a pair inside the word is removed;
+                # one inside '...' or $'...' is kept), so <<\<newline>EOF and <<E\<newline>OF both read the
+                # unquoted delimiter EOF, as bash does; the shared parser itself is unchanged
+                joined, backmap = _heredoc_joined_tail(command, third, n)
+                parsed = _parse_heredoc_delim(joined, 0, len(joined))
+                end = third if parsed is None else backmap[parsed[3]]
+                if parsed is None:
+                    openers.append(_HeredocOpener(command[i:end], line_at(i), None, False, False, False, None,
+                                                  None))
+                else:
+                    quoted, delim, strip_tabs, _end = parsed
+                    openers.append(_HeredocOpener(command[i:end], line_at(i), delim, strip_tabs, quoted, False,
+                                                  None, None))
+                    frame[2].append(len(openers) - 1)
+                word_start = parsed is None
+                i = end
                 continue
-            parsed = _parse_heredoc_delim(command, i + 2, n)
-            end = i + 2 if parsed is None else parsed[3]
-            if parsed is None:
-                openers.append(_HeredocOpener(command[i:end], line_at(i), None, False, False, False, None, None))
-            else:
-                quoted, delim, strip_tabs, _end = parsed
-                openers.append(_HeredocOpener(command[i:end], line_at(i), delim, strip_tabs, quoted, False, None,
-                                              None))
-                frame[2].append(len(openers) - 1)
-            word_start = parsed is None
-            i = end
-            continue
         if c in "<>" and nx == "(":  # a process substitution runs a command
             if redirect:  # it is a redirection's target (cat < <(...)), read as a target word is read below
                 redirect = False
@@ -10916,7 +11014,10 @@ def heredoc_terminator(data):
             "well-formed Bash command.",
             "AIQT guardrail: denied a Bash call with no readable command; re-issue a well-formed command "
             "(rule sectvl, fail-safe).")
-    if "<<" not in command:
+    if "<<" not in command and ("\\\n" not in command or "<<" not in command.replace("\\\n", "")):
+        # bash removes a backslash-newline pair before it splits operators, so a << can stand split as '<',
+        # backslash-newline, '<': a command is skipped only when no << survives joining every such pair
+        # (removing more pairs than bash would can only send a command to the full scan, never skip one)
         return _allow()
     bad = [op for op in _heredoc_openers(command) if not op.terminated]
     if not bad:

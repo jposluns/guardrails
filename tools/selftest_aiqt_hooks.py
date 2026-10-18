@@ -2623,6 +2623,16 @@ def _test_heredoc_terminator(failures):
              "cat < <(a[1<<2]=3; echo x)", "allow")
     hdexpect("(hd-a44) the word after a leading process substitution target can still be an assignment",
              "< <(true) b[1<<2]=3", "allow")
+    # Bash removes a backslash-newline pair before it splits operators and words, so a pair inside the
+    # delimiter word joins it (the delimiter of <<\<newline>EOF and of <<E\<newline>OF is the unquoted EOF),
+    # and a third < joined across a pair makes the <<< here-string, which opens no heredoc. These fail on a
+    # reader that takes the backslash into the delimiter word or reads the split <<< as a heredoc opener.
+    hdexpect("(hd-a45) a backslash-newline pair before the delimiter is removed, as in bash",
+             "cat <<\\\nEOF\nbody\nEOF\necho after", "allow")
+    hdexpect("(hd-a46) a backslash-newline pair inside the delimiter is removed, as in bash",
+             "cat <<E\\\nOF\nbody\nEOF\necho after", "allow")
+    hdexpect("(hd-a47) a <<< split by backslash-newline pairs is a here-string, not an opener",
+             "cat <<\\\n<EOF; cat <\\\n<\\\n<EOF", "allow")
     # Disclosed residuals: text another parser reads later is not scanned, and a later exact line closes a body.
     hdexpect("(hd-r1) a heredoc inside backticks is not checked (disclosed residual)", "x=`cat <<EOF\nin\nEOX\n`",
              "allow")
@@ -2769,6 +2779,20 @@ def _test_heredoc_terminator(failures):
              'echo $(( ")" )) <<EOF\nx\n', "deny", has=("<<EOF on line 1",))
     hdexpect("(hd-d53) a ${...} holding a quoted ) in $((...)) does not end the arithmetic early",
              'echo $(( ${x:-")"} )) <<EOF\nx\n', "deny", has=("<<EOF on line 1",))
+    # Bash removes a backslash-newline pair before it splits operators, so '<', backslash-newline, '<' is
+    # the << operator and its unterminated heredoc denies. These fail on a reader that sees << only where
+    # the two characters are adjacent, with or without an earlier adjacent << in the same command.
+    hdexpect("(hd-d57) a << split by a backslash-newline pair is an opener",
+             "python3 - <\\\n<'PY'\nprint(1)\nPYX\necho after", "deny",
+             has=("exactly equal to 'PY'", "'PYX', is 1 edit away"))
+    hdexpect("(hd-d58) a split << after an earlier closed adjacent heredoc is an opener",
+             "cat <<A\na\nA\ncat <\\\n<'PY'\nprint(1)\nPYX\necho after", "deny",
+             has=("exactly equal to 'PY'",), lacks=("<<A on",))
+    hdexpect("(hd-d59) a << split by two backslash-newline pairs is an opener",
+             "cat <\\\n\\\n<EOF\nx\necho after", "deny", has=("exactly equal to 'EOF'",))
+    hdexpect("(hd-d60) a split delimiter is joined before the terminator is matched",
+             "cat <<\\\nEOF\nbody\nEOX\necho after", "deny",
+             has=("exactly equal to 'EOF'", "'EOX', is 1 edit away"))
 
     # Near-miss bounds: within 2 edits AND fewer edits than the delimiter has characters, closest first.
     hdexpect("(hd-n1) a line 1 edit away is named", "cat <<END_OF\nx\nEND_OF ", "deny",
