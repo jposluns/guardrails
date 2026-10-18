@@ -376,17 +376,17 @@ def imported_series_supported():
 def imported_series_declared(manifest_data):
     """True when the [opf] base table declares a spec_version of IMPORTED_SPEC_VERSION or later AND
     this tooling itself supports that series (imported_series_supported: SUPPORTED_SPEC_VERSION
-    at or above IMPORTED_SPEC_VERSION): the version-and-support half of the activation flag every
-    imported-series reader and registration takes (spec 8.2/4.2), _opf_check.imported_series_active.
-    That flag's other arm is the graded homes-2 declaration (homes_generation), since the imported
-    series activates only inside the 2.0.0 declaration, so a store that passes this gate alone, such
-    as a homes-1 store declaring 1.3.0, stays inactive.
+    at or above IMPORTED_SPEC_VERSION): the gate the activation flag every imported-series reader
+    and registration takes (spec 8.2/4.2), _opf_check.imported_series_active, reads. Base spec
+    1.3.0 defines the separate imported series on homes 1 (spec 4.2), so the homes generation is
+    no arm of the activation: a homes-1 store declaring 1.3.0 under a supporting tooling is active,
+    and so is a 2.0.0 / homes = 2 store, whose declared version sits above the threshold.
     Graded through the house SemVer parser; an absent, non-string, or unparseable spec_version reads
     False (manifest validation, not this helper, reports it). The tooling-support condition mirrors
     homes_generation's gate on SUPPORTED_HOMES: validate_manifest does NOT fail every newer
     declaration closed (it accepts the reserved HOMES2_SPEC_VERSION / homes = 2 pair, spec 4.2), so a
     VALID store can declare 2.0.0 today, and reading the declaration alone would activate the
-    series on it as soon as homes 2 is supported, registering the imported leaves while every
+    series on it today, registering the imported leaves while every
     imported-content check is still deferred. Raising
     SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION is the tooling half of the spec 1.3.0
     activation; this helper needs no edit then, but activation must also land the imported-content
@@ -5074,14 +5074,14 @@ def self_test():
         # (red when the constant itself drifts, e.g. to a multidigit 1.2.100 the interval
         # samples alone would not see; a drift to the sampled 1.2.10 the matrix already reds).
         check("imported-spec-version-pinned-130", IMPORTED_SPEC_VERSION == "1.3.0")
-        # imported_series_declared, the declaration-and-support arm of the activation flag, requires
+        # imported_series_declared, the gate the activation flag reads, requires
         # BOTH the declared spec_version (IMPORTED_SPEC_VERSION or later, through the house SemVer
         # parser) AND this tooling's own support (SUPPORTED_SPEC_VERSION at or above
         # IMPORTED_SPEC_VERSION, the way homes_generation gates on SUPPORTED_HOMES). A newer
         # declaration ALONE answers False, including the reserved 2.0.0 / homes = 2 pair
         # validate_manifest accepts today (spec 4.2): without the tooling-support condition that
-        # accepted store would activate the series, and register the imported leaves, as soon as
-        # homes 2 is supported, while every imported-content check is still deferred. The current
+        # accepted store would activate the series, and register the imported leaves, today,
+        # while every imported-content check is still deferred. The current
         # 1.2.0, an older, a non-string, and an unparseable declaration answer False in every case
         # (spec 8.2/4.2), INCLUDING while support is raised: once the tooling-support clause is
         # satisfied, only the declared-version

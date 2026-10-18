@@ -78,8 +78,8 @@ def plan_write_scope(machine_rel, manifest_model, store_paths, verb):
     findings = []
     _opf_store._validate_unmanaged(manifest_model.get("unmanaged"), findings)
     # The SAME explicit imported-series activation flag the doctor driver derives (spec 8.2/4.2), from
-    # the SAME function (_opf_check.imported_series_active: the graded homes-2 declaration and this
-    # tooling's imported-series support), passed to the SAME single authority (F10-1): once
+    # the SAME function (_opf_check.imported_series_active: a declared 1.3.0-or-later spec_version
+    # under this tooling's imported-series support), passed to the SAME single authority (F10-1): once
     # activation makes the flag true, an [unmanaged] declaration naming an imported leaf refuses here
     # exactly as the doctor flags it, so the writer and the doctor cannot diverge on the imported
     # managed set.

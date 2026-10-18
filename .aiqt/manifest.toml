@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "1de0a187426876ca7277a3a0c1abd808ed96abbc52de87e9a3b24b92e5038ba6"
+tree-sha256 = "2aeb87edf3912aed55e29e71a05d94e37bcde27ec6999a6a36efb43dbf7b4732"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2706,8 +2706,8 @@ sha256 = "785012cc91281f47261281a8bb412f8c56cd0201815d7e1ce43e1d1ee4010697"
 
 [[sources]]
 path = "opf/tools/_opf_check.py"
-bytes = 458597
-sha256 = "4678ee1fe532b2f4fe65f9320292b29a141b231bbc4400c7007866fa147e4d72"
+bytes = 465165
+sha256 = "015e4feb9799b8ff809624099a3dd3552f181d70270cfda8a8bb57077f5cc9dc"
 
 [[sources]]
 path = "opf/tools/_opf_emit.py"
@@ -2766,8 +2766,8 @@ sha256 = "80bedee0a9245cac9f2480e1af7e523f3933f1f752d310c9887cd2ac0156ce1c"
 
 [[sources]]
 path = "opf/tools/_opf_observe.py"
-bytes = 94819
-sha256 = "5940a2c61a59ada289ae46eeb34aaba095af077881cce35e5cc70b777debdbb0"
+bytes = 97948
+sha256 = "f1dedcc00e84e2662ff43b726b9d6d5c5b2be601bd3f3a185fc13d1a63990b8e"
 
 [[sources]]
 path = "opf/tools/_opf_oplock.py"
@@ -2781,8 +2781,8 @@ sha256 = "0d9e538618029fbc77e6e92abcf327013eb4f4245cbd4ddf6767ccaabda67af2"
 
 [[sources]]
 path = "opf/tools/_opf_record.py"
-bytes = 276827
-sha256 = "a434bc3ff5cd3d74c8faa24044d786ef132fa2bc1b4b5b87c79a00c591b43fca"
+bytes = 277006
+sha256 = "cd329c50cb220c72a5ac9ae3b457c0831748d5756b378f102a46acc3a0d52efa"
 
 [[sources]]
 path = "opf/tools/_opf_release.py"
@@ -2796,8 +2796,8 @@ sha256 = "6ca849473862cfcbfb3eed0b837d855f1c6b0ffd118a887f02a651c9121b7627"
 
 [[sources]]
 path = "opf/tools/_opf_store.py"
-bytes = 318281
-sha256 = "fd206abfa892a67501d1289b6e400e59d879929da866eb07fffa8ffcf64a0c8b"
+bytes = 318234
+sha256 = "d9c22053e9c2296c63ac0733d6e2ccee33905a2593fc69beb17b93a112b575f3"
 
 [[sources]]
 path = "opf/tools/_opf_views.py"
@@ -2816,8 +2816,8 @@ sha256 = "913ebe4e30a731fec7b02ecacec4b4c0f97767b863e02c04d2004be19f3dbc5c"
 
 [[sources]]
 path = "opf/tools/_opf_write_guard.py"
-bytes = 117763
-sha256 = "6394ed8584f895297e322f24419e81ab2ad7dc0b5b3cb2700ea211c62d430879"
+bytes = 117773
+sha256 = "715dd3d5421423108b1fce92abd360702f3cf8c006c357320f2a405b1cfeeeb5"
 
 [[sources]]
 path = "opf/tools/_optlevel.py"
