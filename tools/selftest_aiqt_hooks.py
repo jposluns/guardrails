@@ -2632,17 +2632,20 @@ def _procsubst_walk_calls(walk, command):
 def _procsubst_walk_problems(walk, command):
     """What walk(command)'s recorded _skip_quoting_from calls (_procsubst_walk_calls) get wrong against the
     in-place read of a command whose only quoting constructs are its process substitutions: one call for
-    each substitution's '(', in order, each on `command` itself (never on a copy of its tail) from just
-    past that '(' with the one open paren context. Phrases, [] for none, at most three."""
+    each substitution's '(', in order, each passing `command` ITSELF, compared by object identity, so
+    neither a copy of its tail nor a fresh full-length copy equal in value passes, from just past that
+    '(' with the one open paren context. The caller passes a command the continuation join returns
+    unchanged (no backslash-newline pair), so the walked text and the command can be one object.
+    Phrases, [] for none, at most three."""
     wants = [i for i in range(1, len(command)) if command[i] == "(" and command[i - 1] in "<>"]
     calls = _procsubst_walk_calls(walk, command)
     out = []
     if len(calls) != len(wants):
         out.append("made {} _skip_quoting_from call(s) for {} substitution(s)".format(len(calls), len(wants)))
     for (text, start, stack), i in zip(calls, wants):
-        if text != command:
-            out.append("walked a copy of {} character(s) for the substitution at {} (want the command in "
-                       "place, {} characters)".format(len(text), i, len(command)))
+        if text is not command:
+            out.append("walked a copy of {} character(s) for the substitution at {} (want the command "
+                       "object itself in place, {} characters)".format(len(text), i, len(command)))
         elif (start, stack) != (i + 1, ["paren"]):
             out.append("walked from {} with contexts {} for the substitution at {} (want from {} with "
                        "['paren'])".format(start, stack, i, i + 1))
@@ -2660,21 +2663,38 @@ def _procsubst_copying_walk(command):
             aiqt_hooks._skip_quoting("$" + command[i:], 0, n - i + 1)
 
 
+def _procsubst_equal_copy_walk(command):
+    """A wrong segments walk for _procsubst_taken_failures: at each process substitution's '(' it walks a
+    fresh full-length copy EQUAL to the command in value, which still allocates per substitution in time
+    quadratic in the command's length and which only the object-identity record catches (a value
+    comparison, segment equality and the bounded timed rows all pass it)."""
+    n = len(command)
+    for i in range(1, n):
+        if command[i] == "(" and command[i - 1] in "<>":
+            aiqt_hooks._skip_quoting_from((command + " ")[:-1], i + 1, n, ["paren"])
+
+
 def _procsubst_taken_failures():
     """(dl-procsubst-taken) The in-place walk is TAKEN by the production split: on a command of many
     adjacent process substitutions ending in a protected force-push, _raw_push_segments calls
-    _skip_quoting_from once per substitution on the command itself, never on a copy of its tail
-    (_procsubst_walk_problems; the command holds no backslash-newline pair, so the joined text the split
-    walks equals the command), and _raw_push_match still matches the force-push segment
+    _skip_quoting_from once per substitution passing the command OBJECT ITSELF, never a copy of its tail
+    nor a fresh full-length copy equal in value (_procsubst_walk_problems compares by identity; the
+    command holds no backslash-newline pair, so the joined text the split walks IS the command,
+    dl-procsubst-taken-joined), and _raw_push_match still matches the force-push segment
     (dl-procsubst-taken-match). The equivalence
     check above holds just as well for a split that copies, so only this record pins the call site; the
     bounded timed rows do not (the copying split stayed under the 1 MB CPU bound when measured). The
-    copying call shape it replaced must be caught by the same record (dl-procsubst-taken-red), so the
-    record discriminates."""
+    copying call shape it replaced must be caught by the same record (dl-procsubst-taken-red), and so
+    must a per-substitution full-length copy equal in value, which only the identity comparison can see
+    (dl-procsubst-taken-red-equal), so the record discriminates."""
     if not callable(getattr(aiqt_hooks, "_skip_quoting_from", None)):
         return ["(dl-procsubst-taken-missing) aiqt_hooks has no _skip_quoting_from to record the walk on"]
     command = "cat " + "<(x) >(x) " * 1200 + "; git push --force origin main"
     out = []
+    if aiqt_hooks._join_continuations(command)[0] is not command:
+        out.append("(dl-procsubst-taken-joined) the continuation join must return this fixture (it holds "
+                   "no backslash-newline pair) as the same object, so the split can walk the command "
+                   "itself and the identity record below can read anything else as a copy")
     for problem in _procsubst_walk_problems(aiqt_hooks._raw_push_segments, command):
         out.append("(dl-procsubst-taken) _raw_push_segments {}".format(problem))
     if not aiqt_hooks._raw_push_match(command):
@@ -2683,6 +2703,9 @@ def _procsubst_taken_failures():
     if not _procsubst_walk_problems(_procsubst_copying_walk, command):
         out.append("(dl-procsubst-taken-red) a walk that copies the rest of the command for each substitution "
                    "passes the call record")
+    if not _procsubst_walk_problems(_procsubst_equal_copy_walk, command):
+        out.append("(dl-procsubst-taken-red-equal) a walk that passes a fresh full-length copy, equal to the "
+                   "command in value, for each substitution passes the call record")
     return out
 
 
@@ -2980,8 +3003,9 @@ _DEADLINE_SHAPES = {
     "mirror_cfg_run_after": lambda n, base: ("Bash", {"command": "git push " + _repeat(
         "'-c'remote.", n - 9, "; git push --force origin main")}),
     # A run of adjacent process substitutions, which the push backstop's segment split walked by copying
-    # the rest of the command for each one, in time quadratic in the length of the run (4.7 s at 1 MB,
-    # in-process on a 24-core host, 2026-10-18), then a force-push to a protected branch. The bounds
+    # the rest of the command for each one, in time quadratic in the length of the run (about 3.4 s of
+    # CPU for one call of the copying split alone at 1 MB, in-process on a 24-core host, 2026-10-18,
+    # against about 0.11 s for the in-place walk), then a force-push to a protected branch. The bounds
     # here are not what pins the in-place walk (the copying split stayed under the 1 MB CPU bound when
     # measured); the call record (dl-procsubst-taken) does.
     "procsubst_run_after": lambda n, base: ("Bash", {"command": "cat " + _repeat(
