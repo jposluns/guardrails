@@ -14413,6 +14413,8 @@ _CITE_MAX_FILE = 16 * 1024 * 1024        # a larger file or blob is not read, so
 _CITE_CAP = 4 * 1024 * 1024              # a session file an append would take past this is rotated first
 _CITE_DEDUP_BELOW = 256 * 1024           # duplicate rows are skipped only while the file is smaller than this
 _CITE_ROW_MAX = 4096                     # a row whose JSON line is this many bytes or more is dropped
+_CITE_PIECES_MAX = 128                   # a row carries at most this many piece digests of its span
+_CITE_PIECE_HEX = 16                     # hex characters kept of each piece digest (64 bits)
 _CITE_PRUNE_AGE_NS = 14 * 86400 * 10 ** 9  # ledger files last modified longer ago than this are pruned
 _CITE_PRUNE_MAX = 50                     # at most this many files are pruned per new session file
 _CITE_EDIT_MAX = 50                      # at most this many replacements of a replace_all Edit are recorded
@@ -14648,6 +14650,18 @@ def _cite_bytes(entry, start, end):
     lines = entry["lines"]
     tail = b"\n" if end < len(lines) or entry["blob"].endswith(b"\n") else b""
     return b"\n".join(lines[start - 1:end]) + tail
+
+
+def _cite_pieces(entry, start, end):
+    """The piece digests of lines start..end: the span cut into runs of ceil(n/_CITE_PIECES_MAX)
+    consecutive lines (one line each for a span of at most _CITE_PIECES_MAX lines; the last run may be
+    shorter), each run's raw bytes (_cite_bytes) digested and the first _CITE_PIECE_HEX hex characters
+    kept, concatenated in the runs' order. The citation check matches each run of a changed span on its
+    own (_citechk_fresh), so an edit inside a recorded span leaves the span's other runs covering their
+    lines at their recorded positions."""
+    group = -((start - end - 1) // _CITE_PIECES_MAX)
+    return "".join(_cite_sha256(_cite_bytes(entry, at, min(at + group - 1, end)))[:_CITE_PIECE_HEX]
+                   for at in range(start, end + 1, group))
 
 
 def _cite_read(path, files, deadline):
@@ -15096,9 +15110,11 @@ def _cite_rows(tool, tool_input, response, cwd, root, deadline):
     (resolved through symlinks; for git show, the repository path under the resolved toplevel), "rel"
     (relative to the resolved root, or null outside it; for git show, the repository path, or null when the
     repository is not the session's), "start", "end", "sha256" (of the raw bytes of lines start..end,
-    LF-split, CR kept), "rev" (the git show revision exactly as the command typed it, not resolved, else
-    null)}. At most _CITE_MAX_ROWS rows; the call's deadline is checked before each row is digested, and
-    the rows digested by then are returned (none where it is reached before root is resolved)."""
+    LF-split, CR kept), "pieces" (the span's piece digests, _cite_pieces, so the citation check can match
+    an unchanged run of a span that has changed elsewhere), "rev" (the git show revision exactly as the
+    command typed it, not resolved, else null)}. At most _CITE_MAX_ROWS rows; the call's deadline is
+    checked before each row is digested (its span digest and its piece digests are one step), and the rows
+    digested by then are returned (none where it is reached before root is resolved)."""
     files = {}
     if tool == "Read":
         found = _cite_from_read(tool_input, response, files, deadline)
@@ -15122,7 +15138,8 @@ def _cite_rows(tool, tool_input, response, cwd, root, deadline):
         path = entry["path"]
         rel = entry["rel"] if "rel" in entry else (path[len(top):] if path.startswith(top) else None)
         rows.append({"v": 1, "ts": ts, "kind": kind, "via": via, "path": path, "rel": rel, "start": start,
-                     "end": end, "sha256": _cite_sha256(_cite_bytes(entry, start, end)), "rev": rev})
+                     "end": end, "sha256": _cite_sha256(_cite_bytes(entry, start, end)),
+                     "pieces": _cite_pieces(entry, start, end), "rev": rev})
     return rows
 
 
@@ -15232,7 +15249,9 @@ def _cite_append(state_dir, session, rows):
     """Append rows to this session's ledger, <state_dir>/citation-ledger/<first 16 hex of sha256(session
     id)>.jsonl, in one write: None on success, else the failure detail. The directory is made 0700 (its
     leaf opened without following a symlink) and the file 0600, whatever the umask. A row whose JSON line is
-    _CITE_ROW_MAX bytes or more is dropped, and a row whose _CITE_KEY fields equal an earlier row's of the
+    _CITE_ROW_MAX bytes or more is first written without its pieces (the span digest still covers the whole
+    span, as a row recorded before piece digests does), and dropped only where its line is still that long;
+    a row whose _CITE_KEY fields equal an earlier row's of the
     same call, or (while the file is under _CITE_DEDUP_BELOW bytes) a row the file already holds, is
     skipped. Where the append would take a non-empty file past _CITE_CAP bytes the file is first renamed
     onto <name>.1, replacing the older generation. Creating a file (a new session's, or the fresh one after
@@ -15241,6 +15260,9 @@ def _cite_append(state_dir, session, rows):
     for row in rows:
         key = tuple(row[field] for field in _CITE_KEY)
         line = (json.dumps(row, sort_keys=True) + "\n").encode("utf-8")
+        if len(line) >= _CITE_ROW_MAX and "pieces" in row:
+            slim = {field: value for field, value in row.items() if field != "pieces"}
+            line = (json.dumps(slim, sort_keys=True) + "\n").encode("utf-8")
         if key not in seen and len(line) < _CITE_ROW_MAX:
             seen.add(key)
             items.append((key, line))
@@ -15268,8 +15290,10 @@ def citation_read_recorder(data):
     """citint/refcap, PostToolUse (recorder, never blocks): record the line spans a Read, Grep, plain Bash
     read, Write or Edit returned or wrote, for a later citation check. Inert (a silent allow) unless the
     payload is a PostToolUse one with a non-empty session_id, a recorded tool and a tool_input object, and
-    the session cwd resolves to a git toplevel; not registry-gated and not holder-gated, since each session
-    writes only its own ledger file. A tool_response shape it does not recognize, or output that does not
+    the session cwd resolves to a git toplevel (the session cwd's own, the only directory probed: a
+    git -C naming another repository supplies none, so with the session cwd outside every git repository
+    the recorder is inert even for a git -C ... show read); not registry-gated and not holder-gated, since
+    each session writes only its own ledger file. A tool_response shape it does not recognize, or output that does not
     equal the file's text, records nothing. Size bounds: a Bash command longer than _CITE_MAX_COMMAND
     characters, and a Read, Grep or Bash output, a Write content or an Edit's new_string, old_string or
     originalFile longer than _CITE_MAX_TEXT characters, record nothing, and a path longer than
@@ -15285,7 +15309,8 @@ def citation_read_recorder(data):
     file is opened and before its fstat, and before each stat of a path a Grep, grep or rg call searches, at
     each line of a response's split, of the comparison of shown lines with the file and of the scan of grep
     output, at each word of a grep or rg command, at each line number of the merge of grep hits into spans,
-    before each Edit range and at each of its lines, and before each row's digest; the rows digested by
+    before each Edit range and at each of its lines, and before each row's digests (its span digest and its
+    piece digests, _cite_pieces, are one row's step); the rows digested by
     then are appended. A step under way when it is reached finishes first: the scan of one output line for
     the places it could split, with the slicing of its at most _CITE_MAX_SPLITS splits and the join of each
     split's path to cwd (at most _CITE_MAX_TEXT characters); the find and slice of one line when a response
@@ -15295,7 +15320,8 @@ def citation_read_recorder(data):
     at most _CITE_MAX_FILE bytes); the parse of one word of a grep or rg command (at most _CITE_MAX_COMMAND
     characters); one lstat of a path's resolution, with the join of the component to the path walked so
     far, or one readlink; one stat, open or fstat; the read of one chunk; and the count of the lines before
-    one Edit range or the digest of one row (at most _CITE_MAX_FILE bytes each). Bounded by size or count
+    one Edit range or the digests of one row, its span and its at most _CITE_PIECES_MAX pieces (at most
+    _CITE_MAX_FILE bytes each). Bounded by size or count
     instead of the deadline: the payload, read and parsed whole before this handler starts; the lexing of a
     command, the argument checks of git show and the parse of its one ls-tree line, and the join of each
     path a grep or rg command names to cwd (a command of at most _CITE_MAX_COMMAND characters); the split of
@@ -15341,6 +15367,10 @@ def citation_read_recorder(data):
 # directory of each distinct toplevel among the session cwd's, each command's git -C toplevel and each cited
 # file's, at most _CITECHK_MAX_LEDGERS of them; _citechk_tops), merges their rows, and names each cited
 # range that no recorded read or write row covers at the cited lines with the content those lines hold now.
+# A row whose span has changed still covers at the pieces of it that hold their recorded content
+# (_citechk_fresh, from the row's piece digests), so an edit inside a read span stales only the cited lines
+# whose own piece changed, before and after that edit is committed; a row without piece digests (recorded
+# before them, or past the row size bound) is judged by its span digest alone, whole.
 # A toplevel whose ledger is not read (past that bound or the deadline, or a cited file's directory whose
 # toplevel is not probed) is named in the guard-events row and, when a range is judged, in the note (at
 # most _CITECHK_TOPS_SHOWN of them, the rest counted); a read recorded under any other toplevel is not
@@ -15406,7 +15436,9 @@ def citation_read_recorder(data):
 # removal of backslash-newlines and its test for a git or gh word (measured to 16 MiB by
 # tools/selftest_orch_hooks.py, _citecheck_cost_cases; a longer command was not measured). Without a
 # session cwd, or where the session cwd resolves to no git toplevel within the deadline, no state directory
-# is known, so the check is inert for every command there, one over the bound included (a toplevel probe
+# is known, so the check is inert for every command there, one over the bound and a git -C <repo> commit
+# that itself names a repository included: only the session cwd is probed for the state directory, never
+# the command's git -C directory (a toplevel probe
 # the deadline cuts short is named in a note instead). A command's
 # standard input (-F -) is the here-document bash gives it, its last
 # standard-input redirection (a later one that duplicates fd 0 onto itself, such as <&0, leaves it), read
@@ -15416,7 +15448,9 @@ def citation_read_recorder(data):
 # lex is scanned as written, and so is one in which a backslash-newline splits the delimiter of a
 # here-document whose operator the lexer reads (quoted or not), or of one that bash reads as unquoted inside
 # a command substitution in a double-quoted string; the expansion of each here-document with an unquoted
-# delimiter in such a command is named as not read. Where the walk through such a string meets what it does
+# delimiter in such a command is named as not read, and so is each message or body file a lexing of a
+# split-delimiter command names (_CITECHK_SPLIT_UNREAD: the file is never read or judged, since that
+# lexing's reading of the command is not bash's). Where the walk through such a string meets what it does
 # not follow as bash does (_citechk_substituted_ops), the command is read both ways, and so is a command
 # whose two lexings differ, or of which only one lexes (_citechk_commands), unless a backslash-newline splits
 # a here-document delimiter in it, when it is scanned as one that does not lex. Read both ways, a command is
@@ -15466,6 +15500,11 @@ _CITECHK_EXPANDED = ("its delimiter is unquoted, so bash expands parameters, com
                      "scanned")
 _CITECHK_EXPANDED_BOTH = ("its delimiter is unquoted, so bash expands parameters, command substitutions and "
                           "arithmetic in its body, and the command's text was scanned only as written")
+# Why a message or body file a lexing of a split-delimiter command names is named as not read: the command
+# is scanned as written, and the file it names is kept in the note instead of being dropped silently.
+_CITECHK_SPLIT_UNREAD = ("a backslash-newline splits a here-document delimiter in this command, so the "
+                         "command is scanned only as written and this file, which a lexing of it names, was "
+                         "not read: no citation in it was checked")
 # What _citechk_substituted_ops names where a substitution, quote, comment or delimiter word is still open at
 # the string's closing quote: bash reads on through that quote, so the lexer's reading of what follows it is
 # not bash's.
@@ -16026,9 +16065,10 @@ def _citechk_commands(command, cwd, deadline):
     message and body file of each, and the raw scan's item after them; a lexing that does not lex is not
     evaluated. This holds with or without a backslash-newline in the command, which is what the walk alone
     needs before it runs, except where a backslash-newline splits a here-document delimiter: that command
-    is scanned as one that does not lex, as above, before the lexings are compared, so even the files of a
-    lexing that lexes are neither read nor named (an omission: no note says such a file was not read, so a
-    citation only it holds is not seen). A command is found after any reserved words
+    is scanned as one that does not lex, as above, before the lexings are compared, and each message or
+    body file the first lexing that lexed names is named as not read (_CITECHK_SPLIT_UNREAD), never read or
+    judged, since that lexing's reading of the command is not bash's; so a citation only such a file holds
+    is not judged, but the note and the row say the file was not read. A command is found after any reserved words
     that begin its segment (_CITECHK_LEADING), so one
     inside a brace group, after '!', 'if' or 'then', or after time -- or coproc is read; a redirection of
     the group as a whole (after its '}') is not the command's own. A message or body file resolves against
@@ -16050,7 +16090,18 @@ def _citechk_commands(command, cwd, deadline):
         return _citechk_as_written(command, cwd, "raw", _CITECHK_EXPANDED)
     parse, why = _citechk_split_delim(command, readings[0][2])
     if parse == "raw":
-        return _citechk_as_written(command, cwd, "raw", _CITECHK_EXPANDED)
+        out = _citechk_as_written(command, cwd, "raw", _CITECHK_EXPANDED)
+        # The scan as written cannot read a message or body file, so each one the first lexing that lexed
+        # names is kept as a not-read entry (never evaluated: that lexing's reading of the command is not
+        # bash's), on the scan's item where the kind search found one, else as the lexed command's own item.
+        for item in _citechk_items(readings[0][0], readings[0][1], cwd, "raw", deadline, evaluate=False):
+            if not item["unread"]:
+                continue
+            if out:
+                out[0]["unread"] += item["unread"]
+            else:
+                out.append(item)
+        return out
     differ = len(readings) == 1 or _citechk_shape(*readings[0][:2]) != _citechk_shape(*readings[1][:2])
     if differ:
         parse, why = "both", why or _CITECHK_LEXINGS_DIFFER
@@ -16078,10 +16129,13 @@ def _citechk_shape(segments, heredocs):
                for red in seg.redirects]) for seg in segments], heredocs)
 
 
-def _citechk_items(segments, heredocs, cwd, parse, deadline):
+def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True):
     """The git commit and gh pr create or edit commands of one lexing of a Bash command (segments and the
     heredocs _lex_command gave with them), each a dict as _citechk_commands describes, with parse, and with
-    a read attempted of each message and body file it names (one that cannot be read named in unread)."""
+    a read attempted of each message and body file it names (one that cannot be read named in unread).
+    With evaluate False (the split-delimiter fallback, _citechk_commands), nothing is read: each message or
+    body file the lexing names is named in unread with _CITECHK_SPLIT_UNREAD instead, and an inline value
+    or standard input, whose text the scan of the command as written already reads, earns no entry."""
     stdin = {}  # segment index: (redirects before it, body) of its last here-document
     for index, before, body in heredocs:
         stdin[index] = before, body
@@ -16130,6 +16184,9 @@ def _citechk_items(segments, heredocs, cwd, parse, deadline):
                 continue
             if name in ("-B", "--base") and kind != "git-commit":
                 item["base"] = value
+            elif not evaluate:
+                if name in file_names and value != "-":
+                    item["unread"].append(("{} {}".format(name, _citechk_short(value)), _CITECHK_SPLIT_UNREAD))
             elif name in inline_names:
                 item["texts"].append(("{} value".format(name), value))
             elif name in file_names and value == "-":
@@ -16295,8 +16352,13 @@ def _citechk_generation(dirfd, name, deadline):
 
 
 def _citechk_row(line):
-    """(path, start, end, sha256) of one ledger line holding a recorder row (v 1, kind read or wrote, a
-    non-empty path, 1 <= start <= end, a 64-character digest), else None."""
+    """(path, start, end, sha256, pieces) of one ledger line holding a recorder row (v 1, kind read or
+    wrote, a non-empty path, 1 <= start <= end, a 64-character digest), else None. pieces is the row's
+    piece digests only where they are well formed (a non-empty lowercase-hex string of whole
+    _CITE_PIECE_HEX-character digests, their count at most the span's lines and _CITE_PIECES_MAX, and the
+    tiling _cite_pieces makes giving back that count; the count bounds are checked before the hex scan, so
+    the scan reads at most _CITE_PIECES_MAX digests), else None: a row recorded before piece digests, or
+    whose pieces field is malformed, is judged by its span digest alone."""
     try:
         row = json.loads(line)
     except (ValueError, RecursionError):
@@ -16304,10 +16366,20 @@ def _citechk_row(line):
     if not isinstance(row, dict) or row.get("v") != 1 or row.get("kind") not in ("read", "wrote"):
         return None
     path, start, end, digest = row.get("path"), row.get("start"), row.get("end"), row.get("sha256")
-    if isinstance(path, str) and path and type(start) is int and type(end) is int and 1 <= start <= end \
-            and isinstance(digest, str) and len(digest) == 64:
-        return (path, start, end, digest)
-    return None
+    if not (isinstance(path, str) and path and type(start) is int and type(end) is int and 1 <= start <= end
+            and isinstance(digest, str) and len(digest) == 64):
+        return None
+    pieces = row.get("pieces")
+    if isinstance(pieces, str) and pieces:
+        count, extra = divmod(len(pieces), _CITE_PIECE_HEX)
+        lines = end - start + 1
+        group = -(-lines // count) if 0 < count <= min(lines, _CITE_PIECES_MAX) else 0
+        if extra or not group or -(-lines // group) != count \
+                or not all(c in "0123456789abcdef" for c in pieces):
+            pieces = None
+    else:
+        pieces = None
+    return (path, start, end, digest, pieces)
 
 
 def _citechk_ledger(directory, key, deadline):
@@ -16504,6 +16576,25 @@ def _citechk_resolve(token, repo, index, deadline, tops=None):
     return (hits.pop() if len(hits) == 1 else None), None
 
 
+def _citechk_fresh(entry, start, end, pieces):
+    """The line spans of one recorded span that still hold the recorded content, judged piece by piece: for
+    each piece of the row's pieces (the tiling _cite_pieces made, re-derived from their count as
+    _citechk_row validated it), its span, where its lines all lie within the file and their bytes digest to
+    the recorded piece digest. An edit inside a recorded span leaves the span's other pieces covering their
+    lines, so only a cited line whose own piece changed is reported as changed (one line per piece for a
+    span of at most _CITE_PIECES_MAX lines, a run of ceil(n/_CITE_PIECES_MAX) lines beyond that)."""
+    count = len(pieces) // _CITE_PIECE_HEX
+    group = -((start - end - 1) // count)
+    spans, held = [], len(entry["lines"])
+    for k in range(count):
+        at = start + k * group
+        to = min(at + group - 1, end)
+        if to <= held and _cite_sha256(_cite_bytes(entry, at, to))[:_CITE_PIECE_HEX] \
+                == pieces[k * _CITE_PIECE_HEX:(k + 1) * _CITE_PIECE_HEX]:
+            spans.append((at, to))
+    return spans
+
+
 def _citechk_class(cite, item, index, state):
     """(class, detail) of one citation, or (None, None) for a token that names no file and is not
     path-shaped (not a citation): covered, authored-in-diff (the rest of the range is lines the relevant diff
@@ -16511,9 +16602,14 @@ def _citechk_class(cite, item, index, state):
     lettered extension, but no such file), unrecordable (a file the recorder never records), or unjudged.
     A row is current where the file's lines start..end hash, as _cite_bytes gives them, to the row's digest:
     the bytes the recorder digested, so a git show row of any revision counts where the working tree holds
-    the blob's bytes at those lines. A read or a diff probe the check's deadline cuts short, a cited file
+    the blob's bytes at those lines. A row that is not current covers at the pieces of its span that still
+    hash to its piece digests (_citechk_fresh), so freshness is judged per cited line, not per recorded
+    row: an edit inside a read span leaves the span's untouched pieces covering, and only a cited line
+    whose own piece changed (or one of a row without pieces: recorded before them, or past the row size
+    bound) falls through to stale. A read or a diff probe the check's deadline cuts short, a cited file
     reached once it has passed (no stat or open is made then), and a range whose rows are not all digested
-    before it (checked before each digest), are unjudged, and state["budget"] says so; so is a range whose
+    before it (checked before each row's digests; a row's span digest and, where it is not current, its
+    piece digests are that row's step), are unjudged, and state["budget"] says so; so is a range whose
     cited path or repository top is not resolved, with the bound or the budget as its detail
     (_citechk_real)."""
     token, first, last = cite[0], cite[1], cite[2]
@@ -16549,7 +16645,7 @@ def _citechk_class(cite, item, index, state):
         return "unjudged", "the file could not be read"
     rows = index.get(real, ())
     current = []
-    for start, end, digest in rows:
+    for start, end, digest, pieces in rows:
         known = state["current"].get((real, start, end, digest))
         if known is None and _cite_over(state["deadline"]):
             state["budget"] = True
@@ -16559,6 +16655,17 @@ def _citechk_class(cite, item, index, state):
             state["current"][(real, start, end, digest)] = known
         if known:
             current.append((start, end))
+            continue
+        if not pieces:
+            continue
+        fresh = state["fresh"].get((real, start, end, digest))
+        if fresh is None and _cite_over(state["deadline"]):
+            state["budget"] = True
+            return "unjudged", _CITECHK_OUT_OF_TIME
+        if fresh is None:
+            fresh = _citechk_fresh(entry, start, end, pieces)
+            state["fresh"][(real, start, end, digest)] = fresh
+        current += fresh
     if _citechk_covers(current, first, last):
         return "covered", None
     added, why = _citechk_diff(item, real, state)
@@ -16569,7 +16676,7 @@ def _citechk_class(cite, item, index, state):
         return "unjudged", why
     if added and _citechk_covers(current + added, first, last):
         return "authored-in-diff", None
-    if _citechk_covers([(start, end) for start, end, _digest in rows], first, last):
+    if _citechk_covers([(start, end) for start, end, _digest, _pieces in rows], first, last):
         return "stale", None
     if real.lower().endswith(_CITECHK_BLIND):
         return "unrecordable", "a notebook, PDF or image read"
@@ -16697,10 +16804,10 @@ def _citechk_run(data):
     # grows with the number of git -C directories or cited files' directories.
     tops_shown, tops_more = unread_tops[:_CITECHK_TOPS_SHOWN], max(len(unread_tops) - _CITECHK_TOPS_SHOWN, 0)
     index = {}
-    for path, start, end, digest in rows:
-        index.setdefault(path, []).append((start, end, digest))
-    state = {"files": {}, "current": {}, "tops": {}, "bases": {}, "diffs": {}, "bytes": 0, "deadline": deadline,
-             "budget": False}
+    for path, start, end, digest, pieces in rows:
+        index.setdefault(path, []).append((start, end, digest, pieces))
+    state = {"files": {}, "current": {}, "fresh": {}, "tops": {}, "bases": {}, "diffs": {}, "bytes": 0,
+             "deadline": deadline, "budget": False}
     judged, over_cap = 0, 0
     for item in commands:
         room = max(_CITECHK_MAX_CITES - judged, 0)
@@ -16828,12 +16935,15 @@ def citation_read_check(data):
     append one guard-events row (kind citint) per checked command, decision warn or allow. Inert (a silent
     allow, no row) on any other event or tool, any other command within the bound below, a payload with no
     command string, and, for every
-    command (one over the bound below included), a payload with no session cwd and a session cwd that
+    command (one over the bound below and a git -C <repo> commit included: only the session cwd is probed
+    for the state directory, never the command's git -C directory), a payload with no session cwd and a
+    session cwd that
     resolves to no git toplevel (a toplevel probe the deadline cuts short is named in a note instead).
     A ledger that cannot be read, a toplevel whose ledger is not read (past that bound or the deadline, or
     a cited file's directory whose toplevel is not probed; at most _CITECHK_TOPS_SHOWN named, the rest
     counted), a missing session id, a body file that cannot be read, a body on standard input it cannot
-    see, the expansion of a
+    see, a message or body file a lexing of a command with a split here-document delimiter names
+    (_CITECHK_SPLIT_UNREAD, never read or judged), the expansion of a
     here-document with an unquoted delimiter in a command that does not lex or that is read both ways
     (_citechk_commands; the note says why it was), a command longer than _CITECHK_COMMAND_MAX characters,
     whatever its text names, which is neither lexed nor scanned (_citechk_too_long; that bound is checked
