@@ -1438,8 +1438,8 @@ def _plan_done_with_receipt(req, ctx, operand, now):
     row = _locate(operand, rid)
     current = row.get("status")
     if row.get("type") != BACKLOG or current not in ("active", "done/proposed"):
-        raise RecordError("done-with-receipt moves an active or done/proposed backlog item to done; {} is {!r} "
-                          "(fail-closed)".format(rid, current))
+        raise RecordError("done-with-receipt moves an active or done/proposed backlog item to done; {} is {} "
+                          "(fail-closed)".format(rid, _opf_store._safe_display(current)))
     _require_valid_current(row, BACKLOG, ctx, rid, operand.rel)
     tc = _opf_schema.validate_transition(BACKLOG, current, "done", req.actor["kind"])
     if tc.status != _opf_store.VALID:
@@ -1738,7 +1738,8 @@ def _record_journal_rel(homes):
         return JOURNAL_REL
     if type(homes) is int and homes == 2:
         return _opf_store.journal_root("record")
-    raise RecordError("unknown homes generation {!r} for the record journal; fail-closed".format(homes))
+    raise RecordError("unknown homes generation {} for the record journal; fail-closed".format(
+        _opf_store._safe_display(homes)))
 
 
 def _probe_homes(ctx):
@@ -1776,11 +1777,12 @@ def _probe_homes(ctx):
     base = model.get(_opf_store.STANDARD_TOKEN) if isinstance(model, dict) else None
     declared = base.get("homes", 1) if isinstance(base, dict) else 1
     if type(declared) is not int or declared != generation:
-        raise RecordError("the store manifest declares homes generation {!r}, which this tooling does not "
+        raise RecordError("the store manifest declares homes generation {}, which this tooling does not "
                           "activate (it activates homes {} at most, and homes 2 only with spec_version {}), "
                           "so the record journal home cannot be told and reconciling a legacy journal could "
                           "write under .aiqt/ on a homes-2 store. Nothing written (fail-closed)".format(
-                              declared, _opf_store.SUPPORTED_HOMES, _opf_store.HOMES2_SPEC_VERSION))
+                              _opf_store._safe_display(declared), _opf_store.SUPPORTED_HOMES,
+                              _opf_store.HOMES2_SPEC_VERSION))
     return generation
 
 
@@ -1939,11 +1941,12 @@ def _leftover_lock_outcome(owner, states):
 def _with_recovery_lease(ctx, pending, recover):
     """Run `recover` holding the single-writer lease, claimed for RECOVERY through
     _opf_write_guard.acquire_lease_for_recovery: the atomic claim publication uses, with the spec 5.7
-    live-holder rule applied to exactly the present-lease refusal. A leftover lease whose complete
-    well-formed payload names a holder on THIS host confirmed dead (positive evidence only) is released
-    through this reconciliation and the claim retried once; a lease held by a live or possibly-live
-    holder, a cross-host holder, or one with a malformed payload refuses before any recovery write and is
-    never seized, and releasing any such lease stays the operator's explicit reconciliation step. A
+    never-seize and dead-run release clauses applied to exactly the present-lease refusal. A leftover
+    lease whose complete well-formed payload names a holder on THIS host confirmed dead (positive
+    evidence only) is released through this reconciliation and the claim retried once; a lease held by a
+    live or possibly-live holder, a cross-host holder, or one with a malformed payload refuses before any
+    recovery write and is never seized, and releasing any such lease stays the operator's explicit
+    reconciliation step. A
     released leftover is REPORTED whatever follows it: it heads the outcome lines `recover` returns, a
     RecordError that `recover` raises carries it appended, a WriteGuardError from the release after a
     clean recovery carries it appended, and any other failure surfaces it on stderr (best-effort, never
@@ -2377,7 +2380,8 @@ def _removal_parts(recovered, operation, staging_removed, created_removed=()):
     if recovered:
         parts.append("the stale operation capability {} of a holder its recovery gate confirmed dead "
                      "({})".format(" and ".join(recovered), "its recorded operation not reported"
-                                   if operation is None else "its recorded operation {!r}".format(operation)))
+                                   if operation is None else "its recorded operation {}".format(
+                                       _opf_store._safe_display(operation))))
     parts.extend(created_removed)
     return parts
 
@@ -2430,7 +2434,7 @@ def _reclaimed_outcome(cap, pending):
     line = ("recovery cleared the operation capability's {}, left by an interrupted {} run whose holder "
             "its recovery gate confirmed dead, under the held capability".format(
                 " and ".join(cap.recovered), "(recorded operation not reported)" if operation is None
-                else repr(operation)))
+                else _opf_store._safe_display(operation)))
     if not pending:
         line += (" with no record journal work pending (read under the held capability: no "
                  "transaction open, every terminal one in the homes record grammar having an entry at its "
@@ -2439,8 +2443,8 @@ def _reclaimed_outcome(cap, pending):
     if cap.staging_removed:
         line += "; the acquisition also removed {}".format("; ".join(cap.staging_removed))
     if operation is not None and operation != VERB:
-        line += ("; this run reconciles only the opf record journal, so any journal work of the {!r} "
-                 "operation is not examined here".format(operation))
+        line += ("; this run reconciles only the opf record journal, so any journal work of the {} "
+                 "operation is not examined here".format(_opf_store._safe_display(operation)))
     if pending:
         return line
     return line + (". A COMPLETE transaction's publication was applied when it committed; its "
@@ -3331,6 +3335,23 @@ def _self_test_units(check):
     for bad in (0, 3, None, "2", True):
         check("an unknown homes generation refuses the journal home ({!r})".format(bad),
               _refuses(lambda bad=bad: _record_journal_rel(bad), "unknown homes generation"))
+    # Deep values: a homes declaration nested 100,000 levels deep (what tomllib builds from
+    # a dotted [opf.homes.a.a ...] header) still refuses as a RecordError with a bounded message; pre-fix its
+    # {!r} render raised RecursionError out of the refusal.
+    _deep_homes = _deep_cur = {}
+    for _ in range(100000):
+        _deep_cur["a"] = {}
+        _deep_cur = _deep_cur["a"]
+    _deep_refusal = None
+    try:
+        _record_journal_rel(_deep_homes)
+    except RecordError as exc:
+        _deep_refusal = str(exc)
+    except RecursionError:
+        pass                 # the pre-fix escape: the check below then fails rather than aborting the suite
+    check("a deeply nested homes generation refuses the journal home with a bounded message",
+          _deep_refusal is not None and "unknown homes generation" in _deep_refusal
+          and "nested deeper than" in _deep_refusal and len(_deep_refusal) <= 2048)
     token = os.urandom(16).hex()
     rid = _record_run_id(token)
     check("the minted run id is the homes record- grammar bound to the lock token",
@@ -3354,6 +3375,40 @@ def _self_test_units(check):
     finally:
         os.close(empty_fd)
         os.rmdir(empty)
+    # The manifest route: _probe_homes reads the manifest through
+    # _read_operand, and tomllib builds a dotted [opf.homes.a.a ...] header of 100,000 parts into a
+    # 100,000-level nested table. The refusal naming that declaration renders it bounded; pre-fix its {!r}
+    # render raised RecursionError out of the probe. CPython 3.14.8 and later refuse a TOML key of more than
+    # 1,000 dotted parts, so the table is built directly and iteratively, in the shape tomllib gives that
+    # header (compared below with tomllib's own parse of the header at 999 parts, under that cap), and
+    # _read_operand is replaced for the probe by one that returns it, so the check runs on every supported
+    # interpreter and parses no longer key.
+    from types import SimpleNamespace
+    deep_homes = {"b": 1}
+    for _ in range(100000):
+        deep_homes = {"a": deep_homes}
+    deep_model = {_opf_store.STANDARD_TOKEN: {"homes": deep_homes}}
+    shape_homes = {"b": 1}
+    for _ in range(997):
+        shape_homes = {"a": shape_homes}
+    deep_shape = (tomllib.loads("[{}.homes".format(_opf_store.STANDARD_TOKEN) + ".a" * 997 + "]\nb = 1\n")
+                  == {_opf_store.STANDARD_TOKEN: {"homes": shape_homes}})
+    deep_globals = globals()
+    deep_read = deep_globals["_read_operand"]
+    deep_globals["_read_operand"] = lambda root_fd, rel: Operand(rel, b"", 0o644, deep_model)
+    deep_probe = None
+    try:
+        _probe_homes(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
+    except RecordError as exc:
+        deep_probe = str(exc)
+    except RecursionError:
+        pass                 # the pre-fix escape: the check below then fails rather than aborting the suite
+    finally:
+        deep_globals["_read_operand"] = deep_read
+    check("a deeply nested manifest homes declaration refuses the homes probe with a bounded message",
+          deep_shape and deep_probe is not None and "declares homes generation" in deep_probe
+          and "nested deeper than" in deep_probe
+          and len(deep_probe) <= 512 + _opf_store._DISPLAY_MAX_CHARS + _opf_store._DISPLAY_MARKER_MAX)
 
 
 def _self_test_contexts(check, root_fd, now):
