@@ -555,7 +555,8 @@ def emit_checked(document):
     except _decode_error:  # value-free so a hostile decode-error __str__ is never formatted into a diagnostic
         raise EmitError("emitted document did not reparse as TOML; fail-closed")
     except BaseException:  # noqa: BLE001 - fail-closed backstop mirroring emit(): a NON-TOMLDecodeError
-        # reparse or comparison failure (a RecursionError from a >1000-part dotted key on 3.12/3.13, or a
+        # reparse or comparison failure (a RecursionError from deep nesting or, from CPython 3.14.8, a
+        # >1000-part dotted key, or a
         # MemoryError building the second tree or the comparison stack) becomes a value-free EmitError, so
         # emit_checked honours the same no-uncontrolled-exception contract as emit() and U7's `except
         # EmitError` fail-closed path is never bypassed by a leaked exception.
@@ -768,15 +769,19 @@ def _fixture_send_subject(peer, subject, subject_fd):
 
 def _fixture_ack_subject(fd):
     """Release the subject, strictly AFTER the receipt send returned: an acknowledged
-    subject is always addressable through its delivered receipt (QA18 codex F2). A
-    subject that already died is tolerated (its wait status is authoritative), and the
-    write end closes either way, so a guardian that dies before acknowledging always
-    hands the blocked subject an EOF."""
+    subject is always addressable through its delivered receipt (QA18 codex F2). The
+    write is reported, observed: True only when os.write wrote the one ack byte, and
+    False when it failed with OSError -- a subject that already died is tolerated (its
+    wait status is authoritative). The write end closes either way, so a guardian that
+    dies before acknowledging always hands the blocked subject an EOF. The guardian
+    ignores the report (supervision reads the subject's status); a caller certifying
+    the release to a third party publishes only on True, never on a swallowed
+    failure."""
     import os
     try:
-        os.write(fd, b"A")
+        return os.write(fd, b"A") == 1
     except OSError:
-        pass  # the subject is already gone: supervision reads its status
+        return False  # the subject is already gone: supervision reads its status
     finally:
         os.close(fd)
 
@@ -4511,8 +4516,8 @@ def self_test():
         failures.append("budget/multibyte-restore: the production ceiling was not restored")
 
     # --- emit_checked reparse/compare backstop: ANY non-control-flow failure fails closed to EmitError --
-    # A >1000-part dotted key makes tomllib raise RecursionError (NOT TOMLDecodeError) on 3.12/3.13, and
-    # either the reparse or the comparison can raise MemoryError on a large store-derived model; the
+    # Deep nesting, and from CPython 3.14.8 a >1000-part dotted key, make tomllib raise RecursionError (NOT
+    # TOMLDecodeError), a many-part key can raise MemoryError under a memory limit, and either the reparse or the comparison can raise MemoryError on a large store-derived model; the
     # contract (docstring) and U7's `except EmitError` fail-closed path require these to become EmitError,
     # never escape uncontrolled. Swap the module tomllib for a stub whose loads() raises a
     # non-TOMLDecodeError and assert the conversion; a mutant catching only TOMLDecodeError, or dropping
