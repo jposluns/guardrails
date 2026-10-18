@@ -202,6 +202,8 @@ run_gate "git-fixture-env-core" python3 -I -B tools/check_selftest_execution.py 
 run_gate "git-fixture-env-config-combined" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined
 run_gate "git-fixture-env-config-malformed" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed
 run_gate "git-fixture-env-config-system" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system
+run_gate "merge-train-selftest" python3 -I -B tools/merge_train.py --self-test --red-on-revert
+run_gate "merge-train-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite merge-train-selftest
 run_gate "instruction-budget-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite instruction-budget-selftest
 run_gate "brief-capability-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite brief-capability-selftest
 run_gate "hook-latency-selftest" python3 -I -B tools/check_selftest_execution.py --suite hook-latency-selftest

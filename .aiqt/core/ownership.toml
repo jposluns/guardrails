@@ -64,6 +64,10 @@ reason = "Repository-local corpus config for tools/check_cited_standards.py, pas
 path = ".aiqt/license-qualification.toml"
 reason = "Repository-local licence-qualification gate configuration (the declared licence identity plus the class-3 exception list) read by tools/check_license_qualification.py; tracked, not shipped. Adopters own their configuration (an absent file applies no declaration and no exceptions), like .aiqt/newtab.toml; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
 
+[[exclusion]]
+path = ".aiqt/merge-train.toml"
+reason = "Repository-local merge-train opt-in; tracked, not shipped. It names this repository's maintainer identity and generator commands, and its presence on a base branch is what enables tools/merge_train.py, so shipping it would switch the tool on in every adopter under the wrong identity. Adopters commit their own, like .aiqt/newtab.toml."
+
 # --- concern-1: manifest-self and the managed block ----------------------------------------------------
 
 [[release-class]]
