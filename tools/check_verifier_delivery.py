@@ -228,10 +228,15 @@ LIMITS. An input file is read up to MAX_INPUT_BYTES (16 MiB); a delivery is pars
 size (the self-test runs, in a capped child each under RUNTIME_CAP_SECONDS, a 16 MiB backtick run after a
 quote, a 16 MiB run of inch marks in the last answer, a 16 MiB whitespace run on the VERDICT line and a
 16 MiB zero-width-space run, digit run and U+FDFA ligature run (the longest NFKC expansion, 18
-characters; bare and after a leading Q) on marker-shaped lines, and 16 MiB runs of "](" and of "[]("
-with no ")" on one line; the 8a61dfb9 forms of the code-span and VERDICT scanners exceed that cap on the
-backtick and whitespace runs, and the earlier link-target pattern (_BACKTRACKING_INLINE_DESTINATION_RE,
-which rescans to the line's end from every "](") on the "](" run). At most MAX_QUOTES quotes are
+characters; bare and after a leading Q) on marker-shaped lines, a 16 MiB line of one repeated
+character reference, and 16 MiB runs of "](" and of "[](" with no ")" on one line; the 8a61dfb9 forms
+of the code-span and VERDICT scanners exceed that cap on the backtick and whitespace runs, and the
+earlier link-target pattern (_BACKTRACKING_INLINE_DESTINATION_RE, which rescans to the line's end from
+every "](") on the "](" run). Each reading decodes each distinct character reference of a line once,
+so a line of one repeated reference costs one decode per reading and a line of distinct references
+one decode per reference; the link-target scan reads no "]" past the line's last ")" or "][", so a
+run of "](" with no ")" after it costs no destination read, while a run that does end in ")" is still
+read one "](" at a time. At most MAX_QUOTES quotes are
 checked; each costs at most one pass over the tree's blobs, which are read into memory (bounded at
 MAX_TREE_BYTES) only when a quote needs a tree-wide search or a failure
 needs its diagnostic. The brief's question text is joined line by line, which is not linear in a very
@@ -320,7 +325,10 @@ transport, indented code blocks, ambient GIT_ variables, replace refs, blob re-h
 paths, the pinned tree and the three runtime scanners (code spans, the VERDICT line and link
 targets); a recording seam also shows the NFKC input for the
 two U+FDFA runtime fixtures is the bounded head only (whole-remainder normalisation fails those two
-checks on any host, however fast). The prefix form of the QA-COMPLETE test has a CLI fixture whose
+checks on any host, however fast), and recording seams on the decoders and the destination read show
+a line of one repeated reference is decoded once per reading and a "[](" run with no ")" reads no
+destination (a decode per copy or a read per "](" fails those checks on any host). The prefix form
+of the QA-COMPLETE test has a CLI fixture whose
 letters run past the word ("QA COMPLETED tasks:"), which an exact test would pass, but no flip/
 check. These have a fixture but no flip/ check, since they
 sit inside the parser's loop or another guard also refuses the same input: each closed-shape refusal
@@ -832,9 +840,11 @@ def _hidden_construct(masked):
         return 'an image "!["'
     if _link_runs_on(masked):
         return "an inline link whose destination or title may run past its line"
-    for match in ENTITY_RE.finditer(masked):
-        if html.unescape(match.group(0)) in QUOTE_MARKS:
-            return "the character reference {} (it renders as a quote mark)".format(match.group(0))
+    # Each distinct reference is decoded once, in order of first appearance, so the first one that
+    # renders as a quote mark is the one a decode per match would name.
+    for reference in dict.fromkeys(ENTITY_RE.findall(masked)):
+        if _html_unescape(reference) in QUOTE_MARKS:
+            return "the character reference {} (it renders as a quote mark)".format(reference)
     return None
 
 
@@ -852,9 +862,10 @@ def _marker_ignorable(char):
 
 
 # CommonMark's inline reading the marker scan models: a backslash escape of ASCII punctuation, or a
-# character reference (named, decimal or hex, semicolon-terminated; ENTITY_RE's grammar).
-MARKER_SOURCE_RE = re.compile(r"\\([!-/:-@\[-`{-~])"
-                              r"|&(?:#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")
+# character reference (named, decimal or hex, semicolon-terminated; ENTITY_RE's grammar). One group
+# holds the whole match, so a split returns each one between the texts around it.
+MARKER_SOURCE_RE = re.compile(r"(\\[!-/:-@\[-`{-~]"
+                              r"|&(?:#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});)")
 _NUMERIC_REFERENCE_RE = re.compile(r"&#(?:([0-9]{1,7})|[xX]([0-9A-Fa-f]{1,6}));")
 # The bounded pre-scan of digit-run length: a numeric reference run past the grammar bound (seven
 # decimal or six hexadecimal digits). html.unescape tokenizes runs of any length and converts a
@@ -874,6 +885,44 @@ _ASCII_IGNORABLE = frozenset(filter(_marker_ignorable, map(chr, range(128))))
 _MATERIAL_CACHE = {}
 # The seam _marker_scan normalises the head through, so the self-test can record its NFKC input.
 _marker_normalize = unicodedata.normalize
+# The seam each html.unescape decode of delivery text goes through (_unescape and the quote-mark
+# reference test of _hidden_construct), so the self-test can record its inputs.
+_html_unescape = html.unescape
+# html.unescape's own reference grammar (the standard library html module's), with one group
+# around the whole reference so a split returns each one between the texts around it.
+_HTML_REFERENCE_RE = re.compile(r"(&(?:#[0-9]+;?|#[xX][0-9a-fA-F]+;?|[^\t\n\f <&#;]{1,32};?))")
+
+
+def _decoded_pieces(parts, decode):
+    """The text of parts (a split on a pattern with one group: text, reference, text, ..., text)
+    with each reference replaced by decode(reference), called once per distinct reference in
+    order of first appearance. The rest is the split, one table lookup per reference and a join,
+    so a 16 MiB line of one repeated reference costs one decode, not one per copy; a line of
+    distinct references still costs one decode each."""
+    references = parts[1::2]
+    decoded = {reference: decode(reference) for reference in dict.fromkeys(references)}
+    parts[1::2] = map(decoded.__getitem__, references)
+    return "".join(parts)
+
+
+# The last text _unescape decoded and its decoding. The whole-line and link-stripped skeleton
+# readings and the legacy marker reading decode the same line object, so a line is decoded once
+# for all three while no other line holding a reference is decoded in between.
+_LAST_UNESCAPED = [None, None]
+
+
+def _unescape(text):
+    """html.unescape(text), each distinct reference decoded once (_decoded_pieces). html.unescape
+    replaces each match of its grammar by a value that depends on the matched text alone, and a
+    reference decoded on its own matches that grammar whole again, so the result is the same
+    string (decode/split-unescape-matches-html-unescape holds it on the grammar's edge cases)."""
+    if "&" not in text:
+        return text
+    if text is _LAST_UNESCAPED[0]:
+        return _LAST_UNESCAPED[1]
+    decoded = _decoded_pieces(_HTML_REFERENCE_RE.split(text), _html_unescape)
+    _LAST_UNESCAPED[:] = [text, decoded]
+    return decoded
 
 
 def _reference_commonmark(reference):
@@ -922,23 +971,23 @@ def _marker_rendered(line):
     decoded text is never rescanned, so a backslash-escaped reference stays literal text. An
     unknown entity name stays literal only under this CommonMark reading; the legacy html.unescape
     reading (_marker_candidate decodes the whole line with it) matches known entity prefixes and
-    semicolonless forms instead."""
+    semicolonless forms instead. Each distinct escape or reference is decoded once
+    (_decoded_pieces)."""
     if "\\" not in line and "&" not in line:
         return line
-    pieces, at = [], 0
-    for match in MARKER_SOURCE_RE.finditer(line):
-        pieces.append(line[at:match.start()])
-        pieces.append(match.group(1) or _reference_commonmark(match.group(0)))
-        at = match.end()
-    pieces.append(line[at:])
-    return "".join(pieces)
+    return _decoded_pieces(MARKER_SOURCE_RE.split(line), _commonmark_source)
 
 
-# The escape-aware legacy decode, cached per token: one 16 MiB line can repeat a reference
-# millions of times, and the cache keeps that at one html.unescape call per distinct CACHED
-# token. The cache holds at most 4096 entries, so a token first seen once the cache is full is
-# decoded on every call (each decode still bounded by the token grammar): the one-decode
-# promise holds for cached tokens only.
+def _commonmark_source(source):
+    """One MARKER_SOURCE_RE match as _marker_rendered decodes it: an escape as the character it
+    escapes, a character reference through _reference_commonmark."""
+    return source[1] if source[0] == "\\" else _reference_commonmark(source)
+
+
+# The escape-aware legacy decode, cached per token across lines (within one line _decoded_pieces
+# already decodes each distinct token once). The cache holds at most 4096 entries, so a token
+# first seen once the cache is full is decoded again on each line that holds it (each decode still
+# bounded by the token grammar).
 _LEGACY_TOKEN_CACHE = {}
 
 
@@ -965,14 +1014,14 @@ def _marker_escape_aware(line):
     raw code point, _reference_commonmark returning chr(0xFFFF), so only this escape-aware
     reading shows that marker; decode/noncharacter-reference-readings pins both decodes). Kept
     beside the whole-line html.unescape reading as a further refusal branch, a union, never a
-    replacement."""
-    pieces, at = [], 0
-    for match in MARKER_SOURCE_RE.finditer(line):
-        pieces.append(line[at:match.start()])
-        pieces.append(match.group(1) or _legacy_reference(match.group(0)))
-        at = match.end()
-    pieces.append(line[at:])
-    return "".join(pieces)
+    replacement. Each distinct escape or reference is decoded once (_decoded_pieces)."""
+    return _decoded_pieces(MARKER_SOURCE_RE.split(line), _escape_aware_source)
+
+
+def _escape_aware_source(source):
+    """One MARKER_SOURCE_RE match as _marker_escape_aware decodes it: an escape as the character it
+    escapes, a character reference through _legacy_reference."""
+    return source[1] if source[0] == "\\" else _legacy_reference(source)
 
 
 def _marker_material(char):
@@ -1020,7 +1069,7 @@ def _marker_candidate(line):
     escape_aware = _marker_escape_aware(line)
     if escape_aware != rendered and _marker_scan(escape_aware):
         return True
-    legacy = html.unescape(line)
+    legacy = _unescape(line)
     return legacy != rendered and _marker_scan(legacy)
 
 
@@ -1286,12 +1335,17 @@ def _link_target_spans(line):
     ONE forward scan, linear in the line: a link that closes is passed over whole; each destination
     run is read by one parenthesis pass that every "](" inside it shares; and a title,
     angle-destination or label scan ends at or before the next unescaped opener of its own kind, so
-    scans of one kind never overlap."""
+    scans of one kind never overlap. No "]" past reach can close a link (an inline link needs a ")"
+    after its "](", and a full reference link's label opens with "]["), so the scan stops there: a
+    run of "](" with no ")" after it costs no destination read."""
+    reach = max(line.rfind(")"), line.rfind("]["))
     spans, reading, openers, pos = [], [None], [], 0
     while True:
         escaped_to = -1
         for event in _LABEL_EVENT_RE.finditer(line, pos):
             char, at = event.group(), event.start()
+            if at > reach:
+                return spans
             if len(char) == 2:
                 escaped_to = event.end()
                 continue
@@ -1351,7 +1405,7 @@ def _without_link_targets(line):
         at = end
     pieces.append(line[at:])
     kept = (text for piece in pieces for text in _ANGLE_TARGET_RE.split(piece))
-    return "".join(html.unescape(text) if "&" in text else text for text in kept)
+    return "".join(_unescape(text) for text in kept)
 
 
 def _letter_skeleton(line):
@@ -1394,7 +1448,7 @@ def _boundary_shown(line):
     "blockersfound" and stays content, while "\uff36\uff25\uff32\uff24\uff29\uff23\uff34: QA-COMPLETE"
     reads "qacomplete" and is refused); the link-target removal has the limits
     _without_link_targets lists."""
-    decoded = html.unescape(line) if "&" in line else line
+    decoded = _unescape(line)
     for text in (decoded, _without_link_targets(line)):
         skeleton = _letter_skeleton(text)
         if skeleton.startswith(_COMPLETE_SKELETON):
@@ -2788,6 +2842,31 @@ def _self_test_cases(fx):
     check("runtime/reference-run-at-cap-bounded",
           (len(reference_run.encode("utf-8")), _capped_run(fx, reference_run, "linear")),
           (MAX_INPUT_BYTES, (0, "PASS")))
+    # The deterministic decode bound behind that row: a recording seam on each decoder shows that a
+    # line of a thousand copies of one reference is decoded once per reading, whatever the host
+    # speed: the whole-line skeleton reading (its link-stripped reading stubbed out), the
+    # link-stripped reading alone, the legacy marker reading, all three on one line object (one
+    # shared decode, _unescape), the quote-mark reference test, and the CommonMark and escape-aware
+    # marker readings (_decoded_pieces). A decode per copy, or of the whole line at once, fails this
+    # check on any host. Each reading but the shared one gets a fresh line object.
+    def _decoder_inputs(seam, thunk):
+        seen, decoder = [], getattr(sys.modules[__name__], seam)
+        _patched(seam, lambda text: seen.append(text) or decoder(text), thunk)
+        return seen
+
+    dense = lambda: "text " + "&#133;" * 1000
+    one_line = dense()
+    check("runtime/reference-run-one-decode-per-distinct-reference",
+          [_decoder_inputs(seam, thunk) for seam, thunk in (
+              ("_html_unescape", lambda: _patched("_without_link_targets", lambda line: "",
+                                                  lambda: _boundary_shown(dense()))),
+              ("_html_unescape", lambda: _without_link_targets(dense())),
+              ("_html_unescape", lambda: _marker_candidate(dense())),
+              ("_html_unescape", lambda: (_boundary_shown(one_line), _marker_candidate(one_line))),
+              ("_html_unescape", lambda: _hidden_construct(dense())),
+              ("_reference_commonmark", lambda: _marker_rendered(dense())),
+              ("_legacy_reference", lambda: _marker_escape_aware(dense())))],
+          [["&#133;"]] * 7)
     # A 16 MiB run of "](" with no ")" on one line: the letter-skeleton sweep, which runs before
     # the shape scan, reads its link targets in one forward pass, and the shape scan then refuses
     # the inline link that may run past its line; the earlier link-target pattern rescans to the
@@ -2798,12 +2877,28 @@ def _self_test_cases(fx):
           (MAX_INPUT_BYTES, (2, "CANNOT_EVALUATE")))
     check("flip/runtime-link-opener-run-backtracking",
           _capped_run(fx, link_openers, "backtracking-link-targets"), "timeout")
-    # The same run with an opening bracket before every "](": each "]" now closes link text, so
-    # every "](" goes through the destination read, all of them sharing one parenthesis pass.
+    # The same run with an opening bracket before every "](": each "]" now closes link text, but
+    # with no ")" after any "](" none of them can close a link, so the link-target scan stops
+    # before the first (no "]" past the line's last ")" or "][" is read) and the shape scan then
+    # refuses the inline link that may run past its line.
     bracketed_openers = _padded(_mixed(sha), "text ", "[](", "\nVERDICT:")
     check("runtime/bracketed-link-opener-run-at-cap-bounded",
           (len(bracketed_openers.encode("utf-8")), _capped_run(fx, bracketed_openers, "linear")),
           (MAX_INPUT_BYTES, (2, "CANNOT_EVALUATE")))
+    # The deterministic bound behind that row: a recording seam on the destination read shows a
+    # thousand "[](" with no ")" read no destination, whatever the host speed (a read per "]("
+    # fails this check on any host), while a ")" after the run still has every "](" before it read
+    # and closes the last link.
+    def _destination_reads(line):
+        seen, reader = [], _inline_link_end
+        spans = _patched("_inline_link_end",
+                         lambda text, at, reading: seen.append(at) or reader(text, at, reading),
+                         lambda: _link_target_spans(line))
+        return spans, seen
+
+    check("runtime/bracketed-link-opener-run-reads-no-destination",
+          (_destination_reads("text " + "[](" * 1000), _destination_reads("[](" * 3 + ")")),
+          (([], []), ([(7, 10)], [1, 4, 7])))
 
     # The deterministic head bound: a recording seam shows the NFKC input is the head only (marker
     # material up to and including the first non-material character), whatever the host speed;
@@ -2854,6 +2949,15 @@ def _self_test_cases(fx):
           [(_marker_rendered("&#{};".format(point)), _marker_rendered("&#x{:x};".format(point)))
            for point, _ in bounds],
           [(expected, expected) for _, expected in bounds])
+    # The split decode (_unescape) is html.unescape on its grammar's edges: a decoded "&" that is
+    # not rescanned, semicolonless and unknown names read by their longest known prefix, the
+    # Windows-1252 remap, dropped and replaced code points, a name past the 32-character bound, an
+    # empty numeric reference, a carriage return inside a name and repeated references.
+    unescape_edges = ("&amp;amp;", "&ampx;", "&notit;", "&amp", "&nbspQ4.", "Q4&#46 x", "&#133;&#x85;&#133;",
+                      "&#147;&#x94;", "&#0;&#55296;&#x110000;", "&#65535;&#xFFFF;&#31;", "&" + "a" * 40 + ";",
+                      "&&#38;&", "&#;&#x;", "a&l\rt;b", "&#9999999;" * 3)
+    check("decode/split-unescape-matches-html-unescape",
+          [_unescape(text) for text in unescape_edges], [html.unescape(text) for text in unescape_edges])
     check("git/unresolvable-sha-cannot-evaluate",
           refusal(fx.run(_mixed(OTHER_SHA), pin=OTHER_SHA), "git cat-file"), refused)
     plain = fx.base / "plain"
