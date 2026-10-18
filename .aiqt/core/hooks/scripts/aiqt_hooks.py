@@ -15278,16 +15278,21 @@ def citation_read_recorder(data):
 # symlinked registry, as every hook here reads it, so the command's git -C directory and the citations in
 # its texts choose which repositories' registries are read) and the guard-events append. Of those steps,
 # all that grow with the command's length but the kind search are taken only for a command of at most
-# _CITECHK_COMMAND_MAX characters, checked before any of them: a longer command is neither lexed nor
-# scanned (_citechk_too_long), and the first git commit or gh pr create or edit its text names is named as
-# not read, with that bound, in the note and in its guard-events row (parse too-long), so no citation in it
-# is checked. Three other steps grow with the command's length at any length, since they come before the
-# bound or with it: the dispatcher's read and parse of the payload, the prefilter's search for a commit or
-# pr word, and the kind search, with its removal of backslash-newlines and its test for a git or gh word
-# (measured to 16 MiB by tools/selftest_orch_hooks.py, _citecheck_cost_cases; a longer command was not
-# measured). Without a session cwd, or where the session cwd resolves to no git toplevel within the
-# deadline, no state directory is known, so the check is inert for every command there, one over the bound
-# included (a toplevel probe the deadline cuts short is named in a note instead). A command's
+# _CITECHK_COMMAND_MAX characters, and that bound is checked first, before the prefilter's search for a
+# commit or pr word, the kind search and any lexing: a longer command is neither lexed nor scanned
+# (_citechk_too_long), and it is always named as not read, with that bound, in the note and in its
+# guard-events row (parse too-long), whatever its text names and however its words are spelled, so no
+# citation in it is checked. The kind search only labels that row (its cmd) with the first git commit or gh
+# pr create or edit it finds, and with none where it finds none, as where quotes split a word (g'i't) or a
+# backslash-newline joins git to commit; a miss never drops the note or the row. Within the bound, the
+# prefilter reads the text as written, so a command whose commit or pr word a quote or a backslash-newline
+# splits is not checked there. Two other steps grow with the command's length at any length: the
+# dispatcher's read and parse of the payload, and, over the bound, the kind search, with its
+# removal of backslash-newlines and its test for a git or gh word (measured to 16 MiB by
+# tools/selftest_orch_hooks.py, _citecheck_cost_cases; a longer command was not measured). Without a
+# session cwd, or where the session cwd resolves to no git toplevel within the deadline, no state directory
+# is known, so the check is inert for every command there, one over the bound included (a toplevel probe
+# the deadline cuts short is named in a note instead). A command's
 # standard input (-F -) is the here-document bash gives it, its last
 # standard-input redirection (a later one that duplicates fd 0 onto itself, such as <&0, leaves it), read
 # once however many -F - options name it; where that redirection is no here-document of the command,
@@ -15323,7 +15328,9 @@ _CITECHK_HEAD = "AIQT guardrail (rules citint/refcap, BAKE: warning only, nothin
 _CITECHK_OUT_OF_TIME = "the check ran out of its time budget"
 _CITECHK_PREFILTER = re.compile(r"\bcommit\b|\bpr\b")
 # A command the lexer cannot read (an unquoted here-document, for example) is scanned whole as body text
-# when it names one of these: a git (gh) word followed in its segment, up to the next newline, ';', '&' or
+# when it names one of these, and the row of a command over the bound is labelled with the one it names (a
+# command over the bound that names none keeps its note and row, _citechk_too_long): a git (gh) word
+# followed in its segment, up to the next newline, ';', '&' or
 # '|', by a commit (pr create, pr edit) word, found where group 1 begins in its text with each
 # backslash-newline removed, as bash removes it (_citechk_kind), and searched for only where that text holds
 # that git or gh at all. Each pattern is tried only at a segment's start and
@@ -15385,8 +15392,9 @@ _CITECHK_GH_LONG = frozenset(("--assignee", "--base", "--body", "--body-file", "
 _CITECHK_SOURCES = {"git-commit": (("-m", "--message"), ("-F", "--file")),
                     "gh-pr-create": (("-b", "--body"), ("-F", "--body-file")),
                     "gh-pr-edit": (("-b", "--body"), ("-F", "--body-file"))}
+# None labels a command over the bound whose text the kind search finds no command in (_citechk_too_long).
 _CITECHK_LABELS = {"git-commit": "git commit message", "gh-pr-create": "gh pr create body",
-                   "gh-pr-edit": "gh pr edit body"}
+                   "gh-pr-edit": "gh pr edit body", None: "Bash call"}
 # The citation grammar. FORM_A is PATH:N, PATH:N-M or PATH:N:COL; FORM_B is "line N of PATH" or "lines N-M in
 # PATH". A line number has one to nine digits and no leading zero.
 _CITECHK_PATH = r"(?<![A-Za-z0-9_./:-])(/?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_-][A-Za-z0-9_.-]*)"
@@ -15832,7 +15840,9 @@ def _citechk_kind(command):
     """The first git commit, gh pr create or gh pr edit that command's text names, the kind whose git or gh
     word comes first (_CITECHK_RAW_KINDS), or None where it names none. Each backslash-newline is removed
     first, as bash removes it and as the lexer does, so 'git \\<newline> commit' and 'gi\\<newline>t commit'
-    are found as the lexer finds them, and 'git\\<newline>commit', which bash runs as gitcommit, is not."""
+    are found as the lexer finds them, and 'git\\<newline>commit', which bash runs as gitcommit, is not. It
+    removes no quote, so a word a quote splits (g'i't) is not found; over the bound that leaves the row
+    unlabelled and never drops it (_citechk_too_long)."""
     joined = command.replace("\\\n", "")
     hits = sorted((found.start(1), kind) for word, regex, kind in _CITECHK_RAW_KINDS if word in joined
                   for found in [regex.search(joined)] if found)
@@ -15855,23 +15865,21 @@ def _citechk_as_written(command, cwd, parse, reason):
 
 
 def _citechk_too_long(command, cwd):
-    """A command longer than _CITECHK_COMMAND_MAX characters, as the one item of the first git commit or gh
-    pr create or edit that its text names (_citechk_kind; none where it names none), with parse "too-long",
-    no text, and the command named as not read: it is neither lexed nor scanned, since the two lexings and
-    the search for split delimiters are not checked against the deadline, the scan of its text is checked
-    only between lines, and each takes time that grows with its length (the shapes
+    """A command longer than _CITECHK_COMMAND_MAX characters, as one item with parse "too-long", no text,
+    and the command named as not read, whatever its text names: it is neither lexed nor scanned, since the
+    two lexings and the search for split delimiters are not checked against the deadline, the scan of its
+    text is checked only between lines, and each takes time that grows with its length (the shapes
     tools/selftest_orch_hooks.py times, _citecheck_cost_cases), so no message, body file or here-document in
-    it is read and no citation in it is checked. Of the command, only the prefilter's search for a commit or
-    pr word, its length and that kind search (its text with each backslash-newline removed, so a command
-    split between its words is named as the lexer would read it) are read before the toplevel probe."""
-    kind = _citechk_kind(command)
-    if kind is None:
-        return []
+    it is read and no citation in it is checked. The item's cmd is the first git commit or gh pr create or
+    edit that the kind search finds in its text (_citechk_kind), or None where it finds none: that search
+    only labels the item, and a miss (a word that quotes split, such as g'i't, git joined to commit by a
+    backslash-newline, or a command that names none) never drops it. Of the command, only its length and
+    that kind search are read before the toplevel probe."""
     reason = ("this check cannot evaluate a command longer than {:,} characters, and this one is {:,}, so it "
               "was neither lexed nor scanned: no message, body file or here-document in it was read and no "
               "citation in it was checked").format(_CITECHK_COMMAND_MAX, len(command))
-    return [{"cmd": kind, "parse": "too-long", "texts": [], "unread": [("command text", reason)], "repo": cwd,
-             "base": None}]
+    return [{"cmd": _citechk_kind(command), "parse": "too-long", "texts": [], "unread": [("command text", reason)],
+             "repo": cwd, "base": None}]
 
 
 def _citechk_commands(command, cwd, deadline):
@@ -16501,15 +16509,19 @@ def _citechk_run(data):
     deadline = time.monotonic() + _CITECHK_BUDGET
     tool_input, cwd = data.get("tool_input"), data.get("cwd")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str) or not _CITECHK_PREFILTER.search(command):
+    if not isinstance(command, str):
         return None
-    # The bound is checked before any lexing: neither lexing nor the search for split delimiters is checked
-    # against the deadline (and a scan only between lines), and their time grows with the command's length,
-    # so a longer command is named as not read (_citechk_too_long) rather than lexed past the platform's
-    # timeout, where its note and row would be lost.
+    # The bound is checked first, before the prefilter, the kind search and any lexing: neither lexing nor
+    # the search for split delimiters is checked against the deadline (and a scan only between lines), and
+    # their time grows with the command's length, so a longer command is named as not read
+    # (_citechk_too_long) rather than lexed past the platform's timeout, where its note and row would be
+    # lost. That note and row do not depend on what its text names or how it is spelled: a text search
+    # cannot read every way bash splits or quotes a word, so a miss there must not end the check.
     repo = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
     if len(command) > _CITECHK_COMMAND_MAX:
         commands = _citechk_too_long(command, repo)
+    elif not _CITECHK_PREFILTER.search(command):
+        return None
     else:
         commands = _citechk_commands(command, repo, deadline)
     # Without a session cwd no toplevel can be probed and no state directory is known, so no row can be
@@ -16699,7 +16711,8 @@ def citation_read_check(data):
     records, or not judged; a relative cited path that names no file under the command's repository is
     matched by its suffix only to a recorded path under that repository's toplevel, _citechk_resolve), and
     append one guard-events row (kind citint) per checked command, decision warn or allow. Inert (a silent
-    allow, no row) on any other event, tool or command, a payload with no command string, and, for every
+    allow, no row) on any other event or tool, any other command within the bound below, a payload with no
+    command string, and, for every
     command (one over the bound below included), a payload with no session cwd and a session cwd that
     resolves to no git toplevel (a toplevel probe the deadline cuts short is named in a note instead).
     A ledger that cannot be read, a toplevel whose ledger is not read (past that bound or the deadline, or
@@ -16708,10 +16721,11 @@ def citation_read_check(data):
     see, the expansion of a
     here-document with an unquoted delimiter in a command that does not lex or that is read both ways
     (_citechk_commands; the note says why it was), a command longer than _CITECHK_COMMAND_MAX characters,
-    which is neither lexed nor scanned (_citechk_too_long; that bound is checked before any lexing, though
-    the dispatcher's read and parse of the payload, the prefilter and the kind search still take time that
-    grows with the command's length: tools/selftest_orch_hooks.py times such calls to 16 MiB,
-    _citecheck_cost_cases, and a longer command was not measured), and an exhausted budget (one that stops
+    whatever its text names, which is neither lexed nor scanned (_citechk_too_long; that bound is checked
+    first, before the prefilter, the kind search and any lexing, though the dispatcher's read and parse of
+    the payload and the kind search that labels its row still take time that grows with the command's
+    length: tools/selftest_orch_hooks.py times such calls to 16 MiB, _citecheck_cost_cases, and a longer
+    command was not measured), and an exhausted budget (one that stops
     the scan of the
     message texts included), citation cap, file cap, read bound, path bound or link bound (a path the check
     would resolve that is longer than _CITE_MAX_PATH characters, or whose resolution would follow more than

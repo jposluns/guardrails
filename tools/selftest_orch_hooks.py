@@ -5920,20 +5920,24 @@ _CITECHK_COST_SHAPES = (
     ("heredocs-then-split", "git commit -F msg.txt; ", "cat <<'Q'\nx\nQ\n", "cat <<E\\\n'OF'\nsee tools/a.py:1\nEOF\n",
      "raw"),
     ("subst-heredoc-body", "git commit -m \"$(cat <<'EOF'\n", "see tools/a.py:1\n", "EOF\n)\" \\\n--no-edit",
-     "both, both warn"),
+     "both, capped"),
     ("semicolons", "git commit -F msg.txt", "; a", "", "lexed"),
     ("url-letters", "git commit -m 'see tools/a.py:1 ", "a", "'", "lexed"),
     ("raw-gh-words", "git commit 'see tools/a.py:1 ", "gh ", "", "raw"),
     ("raw-git-words", "gh pr create 'see tools/a.py:1 ", "git ", "", "raw"))
 # The rows each shape's command gives at the bound, by the name its entry above gives, each row (decision,
-# parse, the citations it judged with their class): a lexed command's row; a command read both ways, whose
-# lexed reading's row judges the citation and whose reading as written allows (it finds nothing) or warns
-# too (an expansion it names, or the citation cap the first reading used up); and a command scanned as
-# written, whose row judges the citation or names an expansion of a here-document.
+# parse, the full list of citations it judged, each with its class, duplicates included): a lexed command's
+# row; a command read both ways, whose lexed reading's row judges the citation and whose reading as written
+# allows (it finds nothing) or warns too (an expansion it names); one read both ways whose text cites the
+# range on every line of a here-document, whose lexed reading's row judges it as often as the citation cap
+# allows (_CITECHK_MAX_CITES) and whose reading as written warns for the citations past that cap; and a
+# command scanned as written, whose row judges the citation or names an expansion of a here-document.
 _CITECHK_COST_CITED = [("tools/a.py:1", "unread")]
 _CITECHK_COST_ROWS = {"lexed": [("warn", "lexed", _CITECHK_COST_CITED)],
                       "both": [("warn", "both", _CITECHK_COST_CITED), ("allow", "both", [])],
                       "both, both warn": [("warn", "both", _CITECHK_COST_CITED), ("warn", "both", [])],
+                      "both, capped": [("warn", "both", _CITECHK_COST_CITED * aiqt_hooks._CITECHK_MAX_CITES),
+                                       ("warn", "both", [])],
                       "raw": [("warn", "raw", _CITECHK_COST_CITED)],
                       "raw, expanded": [("warn", "raw", [])]}
 _CITECHK_COST_OVER = 16 * 1024 * 1024  # the length the shapes are timed at over the bound (characters)
@@ -5954,9 +5958,9 @@ def _citecheck_cost_run(root, command, session):
     """One citation_read_check call on command at root, made as the platform makes it: the hook script run
     as its own process (python3 -I -B, so it compiles the hook rather than reading a cached compilation), the
     payload on its standard input. (exit code, note, each citint row it appended as (decision, parse, the
-    citations it judged with their class), CPU seconds of that process and the git probes it waited for,
-    wall seconds); the exit code is "timeout" where it ran past _CITECHK_COST_LIMIT seconds and was
-    stopped."""
+    full list of citations it judged, each with its class, in the row's order and duplicates included), CPU
+    seconds of that process and the git probes it waited for, wall seconds); the exit code is "timeout"
+    where it ran past _CITECHK_COST_LIMIT seconds and was stopped."""
     import resource
     events = Path(aiqt_hooks._orch_state_dir_for_root(str(root))) / "guard-events.jsonl"
 
@@ -5981,26 +5985,32 @@ def _citecheck_cost_run(root, command, session):
         note = json.loads(out.decode("utf-8")).get("systemMessage", "")
     except (ValueError, AttributeError):
         note = ""
-    found = [(r["decision"], r["detail"]["parse"],
-              sorted({(c["cite"], c["class"]) for c in r["detail"]["citations"]}))
+    found = [(r["decision"], r["detail"]["parse"], [(c["cite"], c["class"]) for c in r["detail"]["citations"]])
              for r in rows()[before:] if r.get("kind") == "citint"]
     return code, note, found, cpu, wall
 
 
 def _citecheck_cost_cases(tmp):
-    """The command bound of the citation check (_CITECHK_COMMAND_MAX) is checked before any lexing: a command
+    """The command bound of the citation check (_CITECHK_COMMAND_MAX) is checked first, before the prefilter,
+    the kind search and any lexing: a command
     one character under it or at it is lexed and its citation judged, and one a character over it is
     neither lexed nor scanned, named as not read with the bound (parse too-long) in the note and in its
     guard-events row; under a variant of _citechk_run without the bound, that command is lexed and judged
     instead. The same holds for a git commit or gh pr create whose words, or whose git word, a
-    backslash-newline splits, since the kind search removes each backslash-newline as bash and the lexer do;
-    one that joins git to commit, which bash runs as gitcommit, is inert at each of those lengths; under a
-    variant of _citechk_kind that keeps the backslash-newlines, the split commands over the bound are inert.
-    Without a session cwd (absent or empty), a command over the bound is inert, as every command is there.
+    backslash-newline splits, since the kind search removes each backslash-newline as bash and the lexer do,
+    and labels the row over the bound with that command; one that joins git to commit, which bash runs as
+    gitcommit, is inert under the bound and at it and gets the note and an unlabelled row over it; under a
+    variant of _citechk_kind that keeps the backslash-newlines, the split commands over the bound still get
+    the note and the row, unlabelled. A command that names no git, a git commit whose commit word a
+    backslash-newline splits, git with its letters quoted apart (g'i't) and plain prose are each checked one
+    character under the bound, at it and over it, and at 16 MiB: whatever each names, each over the bound
+    gets the note and its too-long row. Without a session cwd (absent or empty), a command over the bound is
+    inert, as every command is there, and the same command with the cwd present gets the note and its row.
     Each command shape of _CITECHK_COST_SHAPES is then timed through the hook run as its own process, as the
     platform runs it, at exactly the bound's length and exactly 16 MiB: at the bound, its rows are checked
-    (_CITECHK_COST_ROWS: the decision, parse and citations of each, so a row that allows where a warn is due
-    fails) and so is its note; at 16 MiB, it must end with the note and the one warn row of a command over
+    (_CITECHK_COST_ROWS: the decision, parse and full list of citations of each, duplicates included, so a
+    row that allows where a warn is due, or that judges a citation once more or once less, fails) and so is
+    its note; at 16 MiB, it must end with the note and the one warn row of a command over
     the bound. Each run's CPU time (the process and the git probes it waited for) and wall time are printed,
     one line each ("citation-check cost: " and a JSON object), so the figures the residue gives can be made
     again from this suite; a run is checked to take at most _CITECHK_COST_CPU seconds of CPU time, 2 under
@@ -6049,8 +6059,9 @@ def _citecheck_cost_cases(tmp):
     check("citeledger/check-command-bound-variant", lifted, (bound + 1,) + judged)
     # A backslash-newline between a command's words, or inside its git word, is removed by bash and by the
     # lexer, and by the kind search too: such a git commit or gh pr create is lexed and judged one character
-    # under the bound and at it, and named as not read one over it, never passed over in silence there. One
-    # that joins git to commit (git\<newline>commit, which bash runs as gitcommit) is inert at each length.
+    # under the bound and at it, and named as not read one over it, its row labelled with the command. One
+    # that joins git to commit (git\<newline>commit, which bash runs as gitcommit) is inert under the bound
+    # and at it, and one over it gets the note and a row the kind search leaves unlabelled (cmd None).
     split_shapes = (("git-words", "git \\\n  commit -m 'see tools/a.py:1", "git-commit"),
                     ("git-word", "gi\\\nt commit -m 'see tools/a.py:1", "git-commit"),
                     ("gh-words", "gh pr \\\n create --body 'see tools/a.py:1", "gh-pr-create"),
@@ -6068,15 +6079,16 @@ def _citecheck_cost_cases(tmp):
     for name, split_head, kind in split_shapes:
         for side, length in (("under", bound - 1), ("at", bound), ("over", bound + 1)):
             splits[(name, side)] = split(split_head, length, "split-{}-{}".format(name, side))
-            if kind is None:
-                split_want[(name, side)] = (length, "allow", [], False)
-            elif side == "over":
+            if side == "over":
                 split_want[(name, side)] = (length, "warn", [(kind, "too-long", [])], True)
+            elif kind is None:
+                split_want[(name, side)] = (length, "allow", [], False)
             else:
                 split_want[(name, side)] = (length, "warn", [(kind, "lexed", ["tools/a.py:1"])], False)
     check("citeledger/check-command-bound-split", splits, split_want)
-    # The removal decides the over vectors: under a variant of _citechk_kind that keeps each
-    # backslash-newline, the split commands over the bound name no git commit or gh pr create and are inert.
+    # The removal decides only the label over the bound: under a variant of _citechk_kind that keeps each
+    # backslash-newline, the split commands over the bound name no git commit or gh pr create, and each
+    # still gets the note and its row, unlabelled.
     kept = _hook_variant(variants, "_citechk_kind", _hook_functions("_citechk_kind").get("_citechk_kind", ""),
                          'joined = command.replace("\\\\\\n", "")', "joined = command")
     if kept is None:
@@ -6090,15 +6102,64 @@ def _citecheck_cost_cases(tmp):
         finally:
             aiqt_hooks._citechk_kind = original
     check("citeledger/check-command-bound-split-variant", unjoined,
-          {name: (bound + 1, "allow", [], False) for name, _split_head, kind in split_shapes if kind is not None})
+          {name: (bound + 1, "warn", [(None, "too-long", [])], True)
+           for name, _split_head, kind in split_shapes if kind is not None})
+    # Over the bound, a command always gets the note and its too-long row, whatever its text names and
+    # however its words are spelled: the bound is checked before the prefilter and the kind search, and the
+    # kind search only labels the row (cmd None where it finds no command). Each family below is checked one
+    # character under the bound, at it and one over it in this process, and at 16 MiB through the hook run
+    # as its own process. Under the bound and at it, each takes the path the other vectors here check: svn
+    # commit, which names no git, holds a commit word and is lexed, naming no command; a git commit whose
+    # commit word a backslash-newline splits holds no commit word as written, so the prefilter passes it
+    # over; git with its letters quoted apart (g'i't) is lexed as git and its citation judged; and prose with
+    # no commit or pr word is passed over by the prefilter.
+    families = (("no-git", "svn commit -m 'see tools/a.py:1", "'", None, None),
+                ("split-commit", "git co\\\nmmit -m 'see tools/a.py:1", "'", "git-commit", None),
+                ("quoted-git", "g'i't commit -m 'see tools/a.py:1", "'", None, "git-commit"),
+                ("prose", "Plain prose that cites tools/a.py:1 and names no command", ".", None, None))
+
+    def family(family_head, family_tail, length):
+        return family_head + " " * (length - len(family_head) - len(family_tail)) + family_tail
+    spelled, spelled_want = {}, {}
+    for name, family_head, family_tail, label, lexed in families:
+        for side, length in (("under", bound - 1), ("at", bound), ("over", bound + 1)):
+            command = family(family_head, family_tail, length)
+            verdict, note, rows = _citecheck_run(repo.root, command, "spelled-{}-{}".format(name, side))
+            spelled[(name, side)] = (len(command), verdict,
+                                     [(r["detail"]["cmd"], r["detail"]["parse"],
+                                       [c["cite"] for c in r["detail"]["citations"]],
+                                       len(r["detail"]["sources_unread"])) for r in rows], phrase in note)
+            if side == "over":
+                spelled_want[(name, side)] = (length, "warn", [(label, "too-long", [], 1)], True)
+            elif lexed is None:
+                spelled_want[(name, side)] = (length, "allow", [], False)
+            else:
+                spelled_want[(name, side)] = (length, "warn", [(lexed, "lexed", ["tools/a.py:1"], 0)], False)
+        command = family(family_head, family_tail, _CITECHK_COST_OVER)
+        code, note, rows, cpu, wall = _citecheck_cost_run(repo.root, command, "spelled-{}-16mib".format(name))
+        print("citation-check cost: " + json.dumps({"shape": "spelled-" + name, "side": "over",
+                                                   "chars": len(command), "decision": [row[0] for row in rows],
+                                                   "parse": [row[1] for row in rows], "cpu": round(cpu, 3),
+                                                   "wall": round(wall, 3)}, sort_keys=True), flush=True)
+        spelled[(name, "16mib")] = (code, len(command), rows, note.startswith(aiqt_hooks._CITECHK_HEAD),
+                                    phrase in note, cpu <= _CITECHK_COST_CPU, wall <= _CITECHK_COST_WALL)
+        spelled_want[(name, "16mib")] = (0, _CITECHK_COST_OVER, [("warn", "too-long", [])], True, True, True, True)
+    check("citeledger/check-command-bound-spellings", spelled, spelled_want)
     # Without a session cwd no toplevel is probed and no state directory is known, so a command over the
     # bound is inert there, as every command is: no note and no row, whether the cwd is absent or empty.
+    # Those two cases alone are a baseline check, since a hook that kept this command silent for any other
+    # reason would pass them as well. The same command with the session cwd present must get the note and
+    # its row, so the check as a whole fails where anything but the missing cwd keeps that command silent.
+    prose_over = family(families[3][1], families[3][2], bound + 1)
     no_cwd = {}
     for name, extra in (("absent", {}), ("empty", {"cwd": ""})):
         payload = dict({"hook_event_name": "PreToolUse", "tool_name": "Bash", "session_id": "bound-no-cwd",
-                        "tool_input": {"command": padded(bound + 1)}}, **extra)
+                        "tool_input": {"command": prose_over}}, **extra)
         no_cwd[name] = aiqt_hooks.citation_read_check(payload)
-    check("citeledger/check-command-bound-no-cwd", no_cwd, {"absent": (0, None, None), "empty": (0, None, None)})
+    verdict, note, rows = _citecheck_run(repo.root, prose_over, "bound-cwd-present")
+    no_cwd["present"] = (verdict, phrase in note, [(r["detail"]["cmd"], r["detail"]["parse"]) for r in rows])
+    check("citeledger/check-command-bound-no-cwd", no_cwd,
+          {"absent": (0, None, None), "empty": (0, None, None), "present": ("warn", True, [(None, "too-long")])})
     # The shapes, timed through the hook's own process at exactly the bound's length and exactly 16 MiB.
     timed, want = {}, {}
     for name, unit_head, unit, tail, outcome in _CITECHK_COST_SHAPES:

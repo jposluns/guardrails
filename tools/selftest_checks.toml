@@ -1363,6 +1363,7 @@ expected-check-ids = [
   "citeledger/check-command-bound-variant",
   "citeledger/check-command-bound-split",
   "citeledger/check-command-bound-split-variant",
+  "citeledger/check-command-bound-spellings",
   "citeledger/check-command-bound-no-cwd",
   "citeledger/check-cost-shapes",
   "citeledger/check-linear-patterns",
