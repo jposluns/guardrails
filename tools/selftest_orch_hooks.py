@@ -10790,31 +10790,38 @@ def _main_isolated(report_path=None):
         # scans read as two different bodies holding the same next level. The classifier reads each distinct
         # body once (aiqt_hooks._SubstitutionWork), so it reads all 28 within the bound and answers 'match', as
         # the reading with no bound and no memo did after about 12 s of CPU on one host (wl/bound-match), where
-        # it now takes about 0.04 s. Nested 6 levels
-        # deep (KEPT) its reading passes the bound after reading BASE, the innermost body, and that line read
-        # before the bound still answers 'match' (wl/bound-kept); around echo, nested 6 deep (ECHO_6), no line
-        # read is the loop, and past the bound the classifier answers 'indeterminate'
-        # (wl/bound-indeterminate). Past the bound each guard still judges the command's own line, as it did with
-        # no bound: BASE after the nesting around echo 6 deep (OWN_LOOP) is a 'match' that the wait-loop guard
-        # denies, and a background dispatch piping pytest into head before that nesting (OWN_SINK) is denied by
-        # the truncation guard; the reading of each passes the bound (wl/bound-indeterminate). Each guard decides
-        # each command, NESTED (44,322 bytes) included, within 1 s of CPU.
+        # it now takes about 0.04 s. After 12,000 words nested 6 more levels deep (KEPT) its reading passes the
+        # bound after reading BASE, the innermost body, and that line read before the bound still answers
+        # 'match' (wl/bound-kept); around echo after 12,000 words, nested 6 deep (ECHO_6), no line read is the
+        # loop and no body left unread holds its words, and past the bound the classifier answers
+        # 'indeterminate' (wl/bound-indeterminate). Past the bound each guard still judges the command's own
+        # line, as it did with no bound: BASE after the nesting around echo 6 deep (OWN_LOOP) is a 'match' that
+        # the wait-loop guard denies, and a background dispatch piping pytest into head before that nesting
+        # (OWN_SINK) is denied by the truncation guard; the reading of each passes the bound
+        # (wl/bound-indeterminate). And a body left unread is judged by its words, as reading it could: BASE in
+        # a substitution after ECHO_6 is a 'match' that the wait-loop guard denies (wl/bound-unread-match), and
+        # pytest piped into head in a substitution after ECHO_6 is denied by the truncation guard
+        # (trunc/bound-unread-denies). Each guard decides each command, NESTED (44,322 bytes) included, within
+        # 1 s of CPU.
         def _nest(command, levels):
             for _level in range(levels):
                 command = 'x="$(echo "\'")" "\'" `' + command.replace("\\", "\\\\").replace("`", "\\`") + " '\\\"'`"
             return command
         NESTED = _nest("echo " + "y " * 1500 + "`" + BASE + "`", 13)
-        KEPT = _nest("echo " + "y " * 1500 + "`" + BASE + "`", 5)
-        ECHO_6 = _nest("echo " + "y " * 1500, 6)
+        KEPT = _nest("echo " + "y " * 12000 + "`" + BASE + "`", 6)
+        ECHO_6 = _nest("echo " + "y " * 12000, 6)
         OWN_LOOP = ECHO_6 + "; " + BASE
         OWN_SINK = "pytest | head -5; " + ECHO_6
         check("wl/bound-match", (clf(NESTED), clf(OWN_LOOP)), ("match", "match"))
-        check("wl/bound-kept", (aiqt_hooks._substitution_lines(aiqt_hooks._lex_command(KEPT))[1], clf(KEPT)),
+        check("wl/bound-kept", (bool(aiqt_hooks._substitution_lines(aiqt_hooks._lex_command(KEPT))[1]), clf(KEPT)),
               (True, "match"))
         check("wl/bound-indeterminate",
-              (tuple(aiqt_hooks._substitution_lines(aiqt_hooks._lex_command(cmd))[1]
+              (tuple(bool(aiqt_hooks._substitution_lines(aiqt_hooks._lex_command(cmd))[1])
                      for cmd in (ECHO_6, OWN_LOOP, OWN_SINK)), clf(ECHO_6)),
               ((True, True, True), "indeterminate"))
+        UNREAD_LOOP = ECHO_6 + "; echo `" + BASE + "`"
+        check("wl/bound-unread-match", (clf(UNREAD_LOOP), _verdict(wl(UNREAD_LOOP, rib=True))), ("match", "deny"))
+        check("trunc/bound-unread-denies", _verdict(tg(ECHO_6 + "; echo `pytest | head -5`", rib=True)), "deny")
         for cid, decide, own, wants in (("wl/bound-cost", wl, OWN_LOOP, ("deny", "deny")),
                                         ("trunc/bound-cost", tg, OWN_SINK, ("warn", "deny"))):
             got = []

@@ -820,6 +820,8 @@ expected-check-ids = [
   "wl/bound-match",
   "wl/bound-kept",
   "wl/bound-indeterminate",
+  "wl/bound-unread-match",
+  "trunc/bound-unread-denies",
   "wl/bound-cost",
   "trunc/bound-cost",
   "wl/handler-allow-foreground",
