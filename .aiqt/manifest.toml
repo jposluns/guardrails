@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "8d725609bff1c6ea6f3c12d89a936f1b2ea60643b82828f66c66ed48a7113db1"
+tree-sha256 = "caf86443bdf70b2ed2f23c936bec454c48bb07a4bf4cf01226571d9961e8d349"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -66,8 +66,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 344820
-sha256 = "1b55c619c0cc251bf2a034de1fdfc9b4ff35416e5322d72fe09e7984878d3805"
+bytes = 345466
+sha256 = "fcc62c2f2f5e032b99a68e2d988933d3d44c5f262f4ab9beed4d2dc208e91b6f"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -811,8 +811,8 @@ sha256 = "7854ba7c7fa8221a2b408deaf73505b492ff2d39f67d5addac1b20ed98ac2ba6"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 611672
-sha256 = "9f2e679ec3d9ee8b977840335cb87645296bdb45d794af5c3d1a00e4426cfc9b"
+bytes = 612318
+sha256 = "b5b7a2bfdfb7b3003f6fda1424540304e4bca8f20870f7a4d0843569703adba6"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2346,8 +2346,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 358928
-sha256 = "7d9c43e35177f366a3517f6d1452fdba8d2eaa5f0d722d59a4adfb1ecb164f66"
+bytes = 359574
+sha256 = "a4e0350622d6bf4008495b79613574d41e3b186e273d4d9ee5fe7540df6071b9"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3146,8 +3146,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 413710
-sha256 = "b03aaaa2ee8a7753799dd8f01603713b18694d8b68a9b168f32a406242cc6415"
+bytes = 414356
+sha256 = "09e9dc3bccc76c4a9f01cc7d9e9ea1107f5d8169a1f55931c3a5ebfe70e1e59f"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3331,8 +3331,8 @@ sha256 = "e7a1ac60ef340bdc56147ed5e0a0ee539d731ce21cba4b3dc2a7f1fef49eaed0"
 
 [[sources]]
 path = "tools/check_control_retirement.py"
-bytes = 57761
-sha256 = "d7c26af4896d593d357d6850df63d0d34d62f0a7e11120ad459290894ec633ef"
+bytes = 68718
+sha256 = "6dddff08746f03316a05a96ac52411b41940d9a9bfd37c16405f3c85adf5f5d1"
 
 [[sources]]
 path = "tools/check_crosswalk.py"
@@ -3556,8 +3556,8 @@ sha256 = "0d64a0b1d4f608aaf16966aabcf8c46d1dcc4118f8dbabab875a88d1b24947a6"
 
 [[sources]]
 path = "tools/control_retirements.toml"
-bytes = 1684
-sha256 = "ebdaa2e27f9094bc53c74f13bbd749086d7b031d41c71d4f675305ec86a115c3"
+bytes = 1799
+sha256 = "887f299d32a42e90b335f9e2d2962c5ba224a374adf5d91fbe19ca3931802d79"
 
 [[sources]]
 path = "tools/doctor.py"
@@ -3751,8 +3751,8 @@ sha256 = "4b57263208e5d81578205bd2192c3dbf32119b2f08f2635f10f6bbc63324cfb0"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 102452
-sha256 = "55c5f1e05bfa77fc2f091c95648f584ea8fb38f98f97ee195bb99e4ef0c36f16"
+bytes = 102684
+sha256 = "adcdf099d7d8267f2197c76050ec05f59b4860eb53c8dbb38df9f38826b97d5b"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

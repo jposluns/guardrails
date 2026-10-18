@@ -13,9 +13,10 @@
 #                  observed attempt
 #   authorization  disclosed only: the reference to the maintainer's recorded authorization
 #
-# A rename is one covered row whose successor is the new id. Rows are append-only: a row stays unchanged once
-# it lands, and is deleted only when its control comes back, because no row may name a control live at the
-# head. The gate checks that each field is present and well-formed; whether the evidence is true and the
+# A rename is one covered row whose successor is the new id. A new row names a control live at the comparison
+# base, so a row for a control that was never there is a finding. Rows are append-only: a row stays unchanged
+# once it lands, and is deleted only when its control comes back, because no row may name a control live at
+# the head. The gate checks that each field is present and well-formed; whether the evidence is true and the
 # authorization was given is for review.
 #
 # Example (not live):

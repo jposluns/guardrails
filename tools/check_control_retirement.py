@@ -19,9 +19,11 @@ tools/control_retirements.toml, in one of the rule's three states:
   unreachable  evidence names the change that removes the capability and the observed attempt
   disclosed    authorization names the maintainer's recorded authorization; evidence is optional
 
-The record is append-only: a row present at the base stays byte-for-byte equal at the head, unless its
-control is live at the head again, which every row forbids. A row may name only a control absent at the
-head; a row naming a control absent at both ends is history and stays.
+The record is append-only: a row present at the base is present at the head with the same keys and values,
+unless its control is live at the head again, which every row forbids. Rows are compared as parsed TOML, so
+key order, row order and string quoting are not compared. A row may name only a control absent at the head,
+and a row new at the head only a control live at the base (one the change removes); a row the base already
+holds that names a control absent at both ends is history and stays.
 
 Base binding. On a pull request (GITHUB_EVENT_NAME=pull_request or GITHUB_BASE_REF set) the base is the
 unique merge base of HEAD and refs/remotes/origin/<GITHUB_BASE_REF>, and --base is refused. On a GitHub
@@ -31,19 +33,29 @@ the commit --base names. A shallow repository, an unresolvable or ambiguous base
 input at either end, or a missing head record cannot be evaluated (exit 2), never a pass. The base record
 may be absent (an empty record).
 
-Git configuration. Every git call, live and in the self-test, runs under the hermetic git environment of
-tools/_git_fixture_env.py (git_fixture_env): every GIT_-prefixed variable is dropped, HOME and
-XDG_CONFIG_HOME point at an empty scratch home, and the global and system config files are pinned to
-os.devnull with GIT_CONFIG_NOSYSTEM=1. So no global, XDG or system configuration, a malformed file
-included, reaches a read; the repository's own config, refs and objects are read as before.
+Git configuration. Every git call the gate makes, and every fixture git call of its self-test, runs under
+the hermetic git environment of tools/_git_fixture_env.py (git_fixture_env): every GIT_-prefixed variable
+is dropped, HOME and XDG_CONFIG_HOME point at an empty scratch home (a temporary directory created for the
+run and removed at exit), the global and system config files are pinned to os.devnull with
+GIT_CONFIG_NOSYSTEM=1, and gc.auto, gc.autoDetach and maintenance.auto are pinned off at command scope
+(GIT_CONFIG_COUNT), which no read the gate makes depends on. So no global, XDG or system configuration, a
+malformed file included, reaches a read; the repository's own config, refs and objects are still read. A
+scratch home that cannot be created cannot be evaluated (exit 2). The self-test's poison controls are the
+one deliberate exception: each runs git with one malformed caller configuration surface, to show that the
+surface breaks a read that honours it.
 
-Loaders: the registry rows are validated by the execution gate's own schema validator
-(check_selftest_execution._manifest_rows) at both ends, and gate and hook ids are held to the hooks
-generator's control-id grammar (gen_hooks.ID_RE). The full gate and hook loaders
+Loaders. At the head, the registry rows are validated by the execution gate's own schema validator
+(check_selftest_execution._manifest_rows), and gate and hook ids are held to the hooks generator's
+control-id grammar (gen_hooks.ID_RE). The base is read by id only: the id of each [[gate]] and [[hook]]
+row, and the id and expected-check-ids of each [[suite]] row, every other key ignored (a key the head
+schema does not know among them). A base id is a non-empty string with no control or format character (a
+suite id also without '/'), which every id the head grammars admit meets, and a row may name any id in that
+grammar. So a change that migrates the registry schema or narrows an id grammar can still be judged against
+its base. Renaming a key this reader uses (id or expected-check-ids) needs the reader to accept both names
+for that change, or the base cannot be evaluated (exit 2). The full gate and hook loaders
 (gen_enforceability.load_gates_manifest, gen_hooks.load_manifest) are not reused: they read a filesystem
-path and the gate loader requires each script on disk, so neither can read a base snapshot, and a schema
-change landing in the same change would make a full base validation refuse. Their own gates validate the
-head.
+path and the gate loader requires each script on disk, so neither can read a base snapshot. Their own
+gates validate the head.
 
 Residue. It sees only the three id sets: a control whose id survives while its assertion weakens, a
 diagnostic no registered check pins, a reason whose wording changes while its meaning is lost, a hook in
@@ -53,8 +65,9 @@ compares two endpoints, so an id removed and restored inside the range is unseen
 authorization are checked for presence only; whether the evidence is true, and whether the authorization
 was given, is review's to establish. Locally the base follows the local main ref, which can be stale.
 Grafts and replace objects are not inspected beyond GIT_NO_REPLACE_OBJECTS. A safe.directory entry in the
-caller's global or system configuration is not read, so a checkout owned by another user cannot be
-evaluated (exit 2), never a pass.
+caller's global or system configuration is not read either, so a checkout owned by another account fails
+git's ownership check, which the gate reports as cannot-evaluate (exit 2), never a pass; runs by the
+checkout owner, and CI, whose runner owns its checkout, are unaffected.
 
   check_control_retirement.py               check the repository
   check_control_retirement.py --base REV    check against REV (local runs only)
@@ -85,6 +98,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -92,6 +106,7 @@ import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _git_fixture_env  # noqa: E402  (its scratch home, which one self-test vector makes unavailable)
 import _selftest_exit_report  # noqa: E402  (the execution report, finalized at interpreter exit)
 import check_selftest_execution  # noqa: E402  (the authoritative registry schema)
 from _git_fixture_env import fixture_git_lifecycle, git_fixture_env  # noqa: E402  (the hermetic git environment)
@@ -123,9 +138,13 @@ class CannotEvaluate(Exception):
 
 def _git_env():
     """The hermetic git environment (git_fixture_env) with replace objects, optional locks and prompts off: no
-    GIT_-prefixed variable redirects a read, and no global, XDG or system configuration reaches it."""
-    return git_fixture_env(GIT_NO_REPLACE_OBJECTS="1", GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0",
-                           LC_ALL="C")
+    GIT_-prefixed variable redirects a read, and no global, XDG or system configuration reaches it. A scratch
+    home that cannot be created is CannotEvaluate (exit 2), not an uncaught error (exit 1, the findings exit)."""
+    try:
+        return git_fixture_env(GIT_NO_REPLACE_OBJECTS="1", GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0",
+                               LC_ALL="C")
+    except OSError as exc:
+        raise CannotEvaluate("hermetic git environment: scratch home not created ({})".format(exc))
 
 
 def _finish(result, label):
@@ -285,16 +304,28 @@ def _required(read, where, rel):
     return _parse_toml(data, "{} {}".format(where, rel))
 
 
-def control_ids(data, table, kind, label):
-    """The control keys kind:<id> of every [[table]] row; a row without a control id cannot be evaluated."""
+def _id_text(value):
+    """True for a non-empty string with no control or format character: the registry's own check-id grammar,
+    and the grammar a base id and a row's control id are read by, which every id the head grammars admit
+    meets."""
+    return isinstance(value, str) and bool(value) and not check_selftest_execution._has_ctrl(value)
+
+
+def _head_id_ok(cid):
+    return bool(ID_RE.fullmatch(cid))
+
+
+def control_ids(data, table, kind, label, id_ok):
+    """The control keys kind:<id> of every [[table]] row, each id held to id_ok; a row without such an id cannot
+    be evaluated."""
     rows = data.get(table)
     if not isinstance(rows, list) or not rows:
         raise CannotEvaluate("{}: [[{}]] must be a non-empty array of tables".format(label, table))
     keys = set()
     for number, row in enumerate(rows, 1):
         cid = row.get("id") if isinstance(row, dict) else None
-        if not isinstance(cid, str) or not ID_RE.fullmatch(cid):
-            raise CannotEvaluate("{}: [[{}]] #{} has no kebab-case id".format(label, table, number))
+        if not isinstance(cid, str) or not id_ok(cid):
+            raise CannotEvaluate("{}: [[{}]] #{} has no usable id".format(label, table, number))
         key = "{}:{}".format(kind, cid)
         if key in keys:
             raise CannotEvaluate("{}: duplicate {} id {!r}".format(label, table, cid))
@@ -303,7 +334,7 @@ def control_ids(data, table, kind, label):
 
 
 def check_keys(data, label):
-    """The control keys check:<suite>/<check id> of the registry, after the execution gate's schema."""
+    """The control keys check:<suite>/<check id> of the head registry, after the execution gate's schema."""
     violation = io.StringIO()
     with contextlib.redirect_stderr(violation):
         rows = check_selftest_execution._manifest_rows(data, label)
@@ -312,12 +343,41 @@ def check_keys(data, label):
     return {"check:{}/{}".format(row["id"], cid) for row in rows for cid in row["expected-check-ids"]}
 
 
+def base_check_keys(data, label):
+    """The control keys check:<suite>/<check id> of the base registry, read by id only: the id and
+    expected-check-ids of each [[suite]] row, every other key ignored, so a change that migrates the registry
+    schema can still be judged against its base. A row without a suite id (no '/') or a non-empty list of
+    check ids, or a key listed twice, cannot be evaluated."""
+    suites = data.get("suite")
+    if not isinstance(suites, list) or not suites:
+        raise CannotEvaluate("{}: [[suite]] must be a non-empty array of tables".format(label))
+    found = set()
+    for number, row in enumerate(suites, 1):
+        sid = row.get("id") if isinstance(row, dict) else None
+        if not _id_text(sid) or "/" in sid:
+            raise CannotEvaluate("{}: [[suite]] #{} has no usable suite id".format(label, number))
+        cids = row.get("expected-check-ids")
+        if not isinstance(cids, list) or not cids or not all(_id_text(cid) for cid in cids):
+            raise CannotEvaluate("{}: [[suite]] #{} ({}) has no non-empty list of usable check ids".format(
+                label, number, sid))
+        for cid in cids:
+            control = "check:{}/{}".format(sid, cid)
+            if control in found:
+                raise CannotEvaluate("{}: {} is listed twice".format(label, control))
+            found.add(control)
+    return found
+
+
 def live_controls(read, where):
-    """Every control key live in one snapshot."""
+    """Every control key live in one snapshot: the head held to the head's own registry schema and id grammar,
+    the base read by id only."""
+    head = where == "head"
+    id_ok = _head_id_ok if head else _id_text
+    registry = check_keys if head else base_check_keys
     live = set()
-    live |= control_ids(_required(read, where, GATES_REL), "gate", "gate", where + " " + GATES_REL)
-    live |= control_ids(_required(read, where, HOOKS_REL), "hook", "hook", where + " " + HOOKS_REL)
-    live |= check_keys(_required(read, where, REGISTRY_REL), where + " " + REGISTRY_REL)
+    live |= control_ids(_required(read, where, GATES_REL), "gate", "gate", where + " " + GATES_REL, id_ok)
+    live |= control_ids(_required(read, where, HOOKS_REL), "hook", "hook", where + " " + HOOKS_REL, id_ok)
+    live |= registry(_required(read, where, REGISTRY_REL), where + " " + REGISTRY_REL)
     return live
 
 
@@ -346,14 +406,15 @@ def _text(value):
 
 
 def control_key_ok(key):
-    """True for gate:<id>, hook:<id> or check:<suite>/<check id> in the grammars the registries use."""
+    """True for gate:<id>, hook:<id> or check:<suite>/<check id> in the grammar a base id is read by
+    (_id_text), so every id the base or head registries admit, a whitespace-padded check id among them, can
+    be named."""
     kind, sep, rest = key.partition(":")
     if kind in ("gate", "hook"):
-        return bool(sep) and bool(ID_RE.fullmatch(rest))
+        return bool(sep) and _id_text(rest)
     if kind == "check":
         suite, slash, cid = rest.partition("/")
-        return (bool(sep) and bool(check_selftest_execution.SUITE_ID_RE.fullmatch(suite)) and bool(slash)
-                and _text(cid) and cid == cid.strip())
+        return bool(sep) and _id_text(suite) and bool(slash) and _id_text(cid)
     return False
 
 
@@ -400,6 +461,7 @@ def evaluate(base_read, head_read):
         raise CannotEvaluate("head {}: missing".format(LEDGER_REL))
     head_rows = load_ledger(head_data, "head " + LEDGER_REL)
     removed = removed_controls(base_live, head_live)
+    base_named = set(row["control"] for row in base_rows if isinstance(row.get("control"), str))
     findings, rows_by_control = [], {}
     for number, row in enumerate(head_rows, 1):
         findings.extend(row_findings(number, row, head_live))
@@ -409,6 +471,13 @@ def evaluate(base_read, head_read):
                 findings.append("{} row {} ({}): duplicates row {}".format(
                     LEDGER_REL, number, control, rows_by_control[control]))
             rows_by_control.setdefault(control, number)
+            # A row new at head records a removal in this range, so it names a control live at the base. A row
+            # whose control the base record already names is history, or an edit the append-only check reports;
+            # a malformed control or one live at head is reported by row_findings.
+            if (control_key_ok(control) and control not in head_live and control not in base_live
+                    and control not in base_named):
+                findings.append("{} row {} ({}): names no control live at base; a new row records a control "
+                                "the change removes".format(LEDGER_REL, number, control))
     for control in sorted(removed):
         if control not in rows_by_control:
             findings.append("{}: present at base, absent at head, and no row in {} records its disposition"
@@ -470,6 +539,15 @@ def _ledger_text(rows):
         "{} = {}\n".format(key, json.dumps(value)) for key, value in row.items()) for row in rows)
 
 
+def _extra_key_registry(suites):
+    """_registry_text with a top-level key and a [[suite]] key the head schema does not know."""
+    return 'schema-note = "fixture"\n' + _registry_text(suites).replace("\nrunner = ", '\nowner = "fixture"\nrunner = ')
+
+
+def _no_scratch_home():
+    raise FileNotFoundError(2, "No usable temporary directory found")
+
+
 def _without(suites, suite_id, cid=None, add=None):
     """suites with one check id (or, when cid is None, the whole suite) removed, and an id optionally added."""
     kept = []
@@ -523,17 +601,18 @@ def _covered(control=DROPPED, successor=SUCCESSOR):
 
 
 def _fixtures(base_dir):
-    """[(vector, root, environ, base_arg, expected exit, expected output fragments)]."""
+    """[(vector, root, environ, base_arg, expected exit, expected output fragments, patch or None)]."""
     vectors = []
     environ = {key: value for key, value in os.environ.items() if not key.startswith("GITHUB_")}
 
-    def add(vector, base, head, code, texts, env=None, base_arg=None, branch="main", prepare=None):
-        # A preparer adjusts the fixture and the run environment; it may return a replacement root.
+    def add(vector, base, head, code, texts, env=None, base_arg=None, branch="main", prepare=None, patch=None):
+        # A preparer adjusts the fixture and the run environment; it may return a replacement root. A patch
+        # (owner, attribute, replacement) is applied around the gate's run only.
         root = _repo(base_dir, vector.replace("/", "-"), base, head, branch)
         run_env = dict(environ, **(env or {}))
         if prepare is not None:
             root = prepare(root, run_env) or root
-        vectors.append((vector, root, run_env, base_arg, code, texts))
+        vectors.append((vector, root, run_env, base_arg, code, texts, patch))
 
     base = _snapshot()
     dropped = _without(BASE_SUITES, "orch-behaviour-selftest", "trunc/head-denies")
@@ -568,6 +647,11 @@ def _fixtures(base_dir):
         ("check:entry-guard-selftest/live/real-tree-passes: present at base",
          "check:entry-guard-selftest/live/direct-launch-passes: present at base", "2 finding(s)"))
     add("rename/no-row", base, _snapshot(suites=renamed), 1, (DROPPED + ": present at base",))
+    # The registry admits a whitespace-padded check id, so a row can name one.
+    padded = BASE_SUITES[:1] + (("entry-guard-selftest", BASE_SUITES[1][1] + (" live/padded ",)),)
+    add("rename/padded-check-id", _snapshot(suites=padded), _snapshot(ledger=[
+        dict(control="check:entry-guard-selftest/ live/padded ", state="disclosed",
+             authorization="recorded in the change")]), 0, ("1 control(s) removed",))
     add("row/names-live", base, _snapshot(ledger=[
         dict(control="gate:ci-parity", state="disclosed", authorization="recorded")]), 1,
         ("(gate:ci-parity): names a control still live at head",))
@@ -582,6 +666,9 @@ def _fixtures(base_dir):
     add("row/bad-control", base, _snapshot(suites=dropped, ledger=[
         dict(control="orch-behaviour-selftest/trunc/head-denies", state="disclosed", authorization="x")]), 1,
         ("row 1: control must be gate:<id>, hook:<id> or check:<suite>/<check id>", DROPPED + ": present at base"))
+    add("row/names-nothing-removed", base, _snapshot(ledger=[
+        dict(control="gate:never-existed", state="disclosed", authorization="recorded in the change")]), 1,
+        ("(gate:never-existed): names no control live at base", "1 finding(s)"))
     history = dict(control="gate:retired-gate", state="disclosed", authorization="recorded earlier")
     add("ledger/history-kept", _snapshot(ledger=[history]), _snapshot(ledger=[history]), 0,
         ("0 control(s) removed",))
@@ -607,9 +694,18 @@ def _fixtures(base_dir):
     add("base/unparseable-registry", dict(base, **{REGISTRY_REL: "[[suite]\n"}), _snapshot(), 2,
         ("base tools/selftest_checks.toml: malformed",))
     add("base/schema-invalid-registry", dict(base, **{REGISTRY_REL: "format-version = 2\n"}), _snapshot(), 2,
-        ("base tools/selftest_checks.toml: schema-invalid",))
+        ("base tools/selftest_checks.toml: [[suite]] must be a non-empty array of tables",))
+    # The base is read by id only: keys the head schema does not know, and an id outside the head grammar,
+    # still yield the base ids, so the removal is judged; the head stays held to its own schema.
+    add("base/registry-extra-key", dict(base, **{REGISTRY_REL: _extra_key_registry(BASE_SUITES)}),
+        _snapshot(suites=dropped), 1, (DROPPED + ": present at base", "1 finding(s)"))
+    add("base/id-outside-head-grammar", _snapshot(gates=BASE_GATES + ("Legacy_Gate",)), _snapshot(ledger=[
+        dict(control="gate:Legacy_Gate", state="disclosed", authorization="recorded in the change")]), 0,
+        ("1 control(s) removed",))
+    add("head/schema-invalid-registry", base, dict(_snapshot(), **{REGISTRY_REL: _extra_key_registry(BASE_SUITES)}),
+        2, ("head tools/selftest_checks.toml: schema-invalid",))
     add("base/gate-without-id", dict(base, **{GATES_REL: '[[gate]]\nscript = "tools/x.py"\n'}), _snapshot(), 2,
-        ("base .aiqt/core/gates/manifest.toml: [[gate]] #1 has no kebab-case id",))
+        ("base .aiqt/core/gates/manifest.toml: [[gate]] #1 has no usable id",))
     add("base/hooks-missing", dict(base, **{HOOKS_REL: None}), _snapshot(), 2,
         ("base .aiqt/core/hooks/manifest.toml: missing",))
     add("head/ledger-missing", base, _snapshot(ledger=None), 2, ("head tools/control_retirements.toml: missing",))
@@ -622,6 +718,8 @@ def _fixtures(base_dir):
     add("local/base-arg", base, _snapshot(suites=dropped), 1, (DROPPED + ": present at base", "--base HEAD"),
         base_arg="HEAD", branch="trunk")
     add("local/base-arg-option", base, _snapshot(), 2, ("is not a usable commit name",), base_arg="--all")
+    add("env/scratch-home-unavailable", base, _snapshot(), 2, ("scratch home not created",),
+        patch=(_git_fixture_env, "_scratch_home", _no_scratch_home))
 
     def shallow(root, run_env):
         # Two commits, then a depth-1 clone over file://, which git marks shallow; the clone replaces the root.
@@ -674,12 +772,14 @@ def _fixtures(base_dir):
 
 
 def _gate(module, vector):
-    """Run one vector against module (this gate or a mutant): (exit code or "crashed (...)", output)."""
-    _name, root, environ, base_arg, _code, _texts = vector
+    """Run one vector against module (this gate or a mutant), its patch applied around the run: (exit code or
+    "crashed (...)", output)."""
+    _name, root, environ, base_arg, _code, _texts, patch = vector
     out = io.StringIO()
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-            code = module.run(root, base_arg, environ)
+            with contextlib.nullcontext() if patch is None else _patched(*patch):
+                code = module.run(root, base_arg, environ)
     except Exception as exc:
         code = "crashed ({})".format(type(exc).__name__)
     return code, out.getvalue()
@@ -710,11 +810,11 @@ def _patched(owner, name, replacement):
 # fail under at least one mutant, so each finding and refusal is shown red on revert.
 MUTANTS = (
     ("removal-leg", "        if control not in rows_by_control:\n", "        if False:\n", "drop/check-no-row"),
-    ("gate-set", '    live |= control_ids(_required(read, where, GATES_REL), "gate", "gate", where + " " + GATES_REL)\n',
-     "", "drop/gate-no-row"),
-    ("hook-set", '    live |= control_ids(_required(read, where, HOOKS_REL), "hook", "hook", where + " " + HOOKS_REL)\n',
-     "", "drop/hook-no-row"),
-    ("check-set", '    live |= check_keys(_required(read, where, REGISTRY_REL), where + " " + REGISTRY_REL)\n', "",
+    ("gate-set", '    live |= control_ids(_required(read, where, GATES_REL), "gate", "gate", where + " " + GATES_REL,'
+     " id_ok)\n", "", "drop/gate-no-row"),
+    ("hook-set", '    live |= control_ids(_required(read, where, HOOKS_REL), "hook", "hook", where + " " + HOOKS_REL,'
+     " id_ok)\n", "", "drop/hook-no-row"),
+    ("check-set", '    live |= registry(_required(read, where, REGISTRY_REL), where + " " + REGISTRY_REL)\n', "",
      "drop/suite-no-row"),
     ("successor-live", "        if successor not in head_live:\n", "        if False:\n", "covered/successor-absent"),
     ("required-field", "        if not _text(row.get(key)):\n", "        if row.get(key) is None:\n",
@@ -730,6 +830,13 @@ MUTANTS = (
     ("unknown-field", "    if unknown:\n", "    if False:\n", "row/unknown-field"),
     ("control-grammar", "    if not isinstance(control, str) or not control_key_ok(control):\n",
      "    if not isinstance(control, str):\n", "row/bad-control"),
+    ("row-id-grammar", "        return bool(sep) and _id_text(rest)\n", "        return bool(sep) and _head_id_ok(rest)\n",
+     "base/id-outside-head-grammar"),
+    ("padded-id", "        return bool(sep) and _id_text(suite) and bool(slash) and _id_text(cid)\n",
+     "        return bool(sep) and _id_text(suite) and bool(slash) and _id_text(cid) and cid == cid.strip()\n",
+     "rename/padded-check-id"),
+    ("new-row-removal", "            if (control_key_ok(control) and control not in head_live and control not in base_live\n",
+     "            if (False\n", "row/names-nothing-removed"),
     ("append-only", "        if row not in head_rows and row.get(\"control\") not in head_live:\n",
      "        if False:\n", "ledger/append-edit"),
     ("local-target", 'LOCAL_TARGET = "refs/heads/main"', 'LOCAL_TARGET = "HEAD"', "base/missing-main"),
@@ -738,9 +845,19 @@ MUTANTS = (
      "    except ZeroDivisionError as exc:\n        raise CannotEvaluate(str(exc))\n", "base/unparseable-registry"),
     ("registry-schema", "    if rows is None:\n        raise CannotEvaluate(\"{}: schema-invalid",
      "    if rows is None:\n        return set()\n        raise CannotEvaluate(\"{}: schema-invalid",
-     "base/schema-invalid-registry"),
-    ("control-id", "        if not isinstance(cid, str) or not ID_RE.fullmatch(cid):\n", "        if False:\n",
+     "head/schema-invalid-registry"),
+    ("base-registry-rows",
+     "        raise CannotEvaluate(\"{}: [[suite]] must be a non-empty array of tables\".format(label))\n",
+     "        return set()\n", "base/schema-invalid-registry"),
+    ("base-registry-by-id", "    registry = check_keys if head else base_check_keys\n", "    registry = check_keys\n",
+     "base/registry-extra-key"),
+    ("base-id-grammar", "    id_ok = _head_id_ok if head else _id_text\n", "    id_ok = _head_id_ok\n",
+     "base/id-outside-head-grammar"),
+    ("control-id", "        if not isinstance(cid, str) or not id_ok(cid):\n", "        if False:\n",
      "base/gate-without-id"),
+    ("scratch-home-refused", "    except OSError as exc:\n        raise CannotEvaluate(\"hermetic git environment",
+     "    except ZeroDivisionError as exc:\n        raise CannotEvaluate(\"hermetic git environment",
+     "env/scratch-home-unavailable"),
     ("input-required", "    if data is None:\n        raise CannotEvaluate(\"{} {}: missing\".format(where, rel))\n",
      "    if data is None:\n        data = b\"\"\n", "base/hooks-missing"),
     ("head-ledger-required", "    if head_data is None:\n        raise", "    if head_data is None and False:\n        raise",
@@ -785,20 +902,26 @@ MALFORMED_CONFIG = "[core\n\tbroken\n"
 # shallow repository and an unresolvable base.
 POISONED_VECTORS = ("same/base-equals-head", "drop/check-no-row", "ci/push-drop-no-row", "base/shallow",
                     "ci/pr-base-ref-unresolved")
+# The caller configuration surfaces, each with the variable that selects it.
+POISON_SURFACES = (("home", "HOME"), ("system", "GIT_CONFIG_SYSTEM"), ("xdg", "XDG_CONFIG_HOME"))
 
 
 def _poisoned_config(base_dir, git):
-    """(environment changes, exposure log) for a caller git configuration that breaks every read honouring
-    it: HOME/.gitconfig, XDG_CONFIG_HOME/git/config and the GIT_CONFIG_SYSTEM file are each malformed. An
-    observer git placed first on PATH records home, xdg or system when a launch would read that surface (the
-    system file whenever neither GIT_CONFIG_NOSYSTEM=1 nor GIT_CONFIG_SYSTEM=/dev/null pins it off), then runs
-    git (the lifecycle's wrapper, which itself pins the system file off, so that surface is observed, not
-    read)."""
+    """(environment changes, environment changes per surface, malformed file per surface, exposure log) for a
+    caller git configuration that breaks a read honouring it: HOME/.gitconfig, XDG_CONFIG_HOME/git/config and
+    the GIT_CONFIG_SYSTEM file are each malformed. The first changes poison all three surfaces; the changes for
+    one surface poison only it, with HOME and XDG_CONFIG_HOME otherwise at an empty directory and the system
+    file otherwise os.devnull. An observer git placed first on PATH records launch for every launch, and home,
+    xdg or system when the launch would read that surface (the system file whenever neither
+    GIT_CONFIG_NOSYSTEM=1 nor GIT_CONFIG_SYSTEM=/dev/null pins it off), then runs git, the executable the
+    lifecycle's PATH wrapper runs, so no pin of that wrapper stands in for the gate's own."""
     poison = Path(base_dir) / "caller-config"
-    home, xdg, system = poison / "home", poison / "xdg", poison / "system-gitconfig"
+    home, xdg, clean = poison / "home", poison / "xdg", poison / "clean"
+    files = dict(home=home / ".gitconfig", xdg=xdg / "git" / "config", system=poison / "system-gitconfig")
     (xdg / "git").mkdir(parents=True)
     home.mkdir()
-    for path in (home / ".gitconfig", xdg / "git" / "config", system):
+    clean.mkdir()
+    for path in files.values():
         path.write_text(MALFORMED_CONFIG, encoding="utf-8")
     observer_dir = poison / "bin"
     observer_dir.mkdir()
@@ -807,6 +930,7 @@ def _poisoned_config(base_dir, git):
     observer = observer_dir / "git"
     observer.write_text(
         "#!/bin/sh\n"
+        'printf "launch\\n" >> {log}\n'
         '[ "${{HOME:-}}" != {home} ] || printf "home\\n" >> {log}\n'
         '[ "${{XDG_CONFIG_HOME:-}}" != {xdg} ] || printf "xdg\\n" >> {log}\n'
         'if [ "${{GIT_CONFIG_NOSYSTEM:-}}" != 1 ] && [ "${{GIT_CONFIG_SYSTEM:-}}" != {null} ]; then '
@@ -815,9 +939,11 @@ def _poisoned_config(base_dir, git):
                                    null=shlex.quote(os.devnull), log=shlex.quote(str(log)),
                                    git=shlex.quote(git)), encoding="utf-8")
     observer.chmod(0o700)
-    changes = dict(HOME=str(home), XDG_CONFIG_HOME=str(xdg), GIT_CONFIG_SYSTEM=str(system),
+    changes = dict(HOME=str(home), XDG_CONFIG_HOME=str(xdg), GIT_CONFIG_SYSTEM=str(files["system"]),
                    PATH=str(observer_dir) + os.pathsep + os.environ.get("PATH", os.defpath))
-    return changes, log
+    unpoisoned = dict(changes, HOME=str(clean), XDG_CONFIG_HOME=str(clean), GIT_CONFIG_SYSTEM=os.devnull)
+    surfaces = dict((surface, dict(unpoisoned, **{key: changes[key]})) for surface, key in POISON_SURFACES)
+    return changes, surfaces, files, log
 
 
 def _poisoned(environ, changes):
@@ -830,13 +956,13 @@ def _poisoned(environ, changes):
 def _poisoned_gate(module, vector, changes):
     """_gate with the poisoned configuration in the run environment and in the process environment, so a git
     environment derived from either carries it; the process environment is restored afterwards."""
-    name, root, environ, base_arg, code, texts = vector
+    name, root, environ, base_arg, code, texts, patch = vector
     saved = dict(os.environ)
     try:
         poisoned = _poisoned(saved, changes)
         os.environ.clear()
         os.environ.update(poisoned)
-        return _gate(module, (name, root, _poisoned(environ, changes), base_arg, code, texts))
+        return _gate(module, (name, root, _poisoned(environ, changes), base_arg, code, texts, patch))
     finally:
         os.environ.clear()
         os.environ.update(saved)
@@ -865,11 +991,14 @@ def self_test(report_path=None):
         # (tools/_selftest_exit_report.py); nothing writes it in band. It is armed before the fixture
         # environment, whose scratch home registers its own exit handler, so the finalizer runs last.
         _selftest_exit_report.arm(report_path, SUITE_ID, executed)
-    with fixture_git_lifecycle() as git:
-        return _self_test_isolated(executed, git)
+    # The git the lifecycle's PATH wrapper runs, resolved the same way before the wrapper is first on PATH; the
+    # poison observer runs it directly. Without git the lifecycle refuses before this is used.
+    real_git = shutil.which("git")
+    with fixture_git_lifecycle():
+        return _self_test_isolated(executed, os.path.abspath(real_git))
 
 
-def _self_test_isolated(executed, git):
+def _self_test_isolated(executed, real_git):
     results = []
 
     def check(check_id, ok, detail=""):
@@ -903,12 +1032,14 @@ def _self_test_isolated(executed, git):
                 ("vector/drop-gate-no-row", "drop/gate-no-row"),
                 ("vector/drop-suite-no-row", "drop/suite-no-row"),
                 ("vector/rename-no-row", "rename/no-row"),
+                ("vector/rename-padded-check-id", "rename/padded-check-id"),
                 ("vector/row-names-live", "row/names-live"),
                 ("vector/row-duplicate", "row/duplicate"),
                 ("vector/row-unknown-state", "row/unknown-state"),
                 ("vector/row-foreign-field", "row/foreign-field"),
                 ("vector/row-unknown-field", "row/unknown-field"),
                 ("vector/row-bad-control", "row/bad-control"),
+                ("vector/row-names-nothing-removed", "row/names-nothing-removed"),
                 ("vector/ledger-history-kept", "ledger/history-kept"),
                 ("vector/ledger-append-edit", "ledger/append-edit"),
                 ("vector/ledger-append-delete", "ledger/append-delete"),
@@ -919,6 +1050,9 @@ def _self_test_isolated(executed, git):
                 ("vector/base-missing-main", "base/missing-main"),
                 ("vector/base-unparseable-registry", "base/unparseable-registry"),
                 ("vector/base-schema-invalid-registry", "base/schema-invalid-registry"),
+                ("vector/base-registry-extra-key", "base/registry-extra-key"),
+                ("vector/base-id-outside-head-grammar", "base/id-outside-head-grammar"),
+                ("vector/head-schema-invalid-registry", "head/schema-invalid-registry"),
                 ("vector/base-gate-without-id", "base/gate-without-id"),
                 ("vector/base-hooks-missing", "base/hooks-missing"),
                 ("vector/base-shallow", "base/shallow"),
@@ -928,6 +1062,7 @@ def _self_test_isolated(executed, git):
                 ("vector/head-duplicate-hook-id", "head/duplicate-hook-id"),
                 ("vector/local-base-arg", "local/base-arg"),
                 ("vector/local-base-arg-option", "local/base-arg-option"),
+                ("vector/env-scratch-home-unavailable", "env/scratch-home-unavailable"),
                 ("vector/ci-pr-drop-no-row", "ci/pr-drop-no-row"),
                 ("vector/ci-pr-base-arg-refused", "ci/pr-base-arg-refused"),
                 ("vector/ci-pr-no-base-ref", "ci/pr-no-base-ref"),
@@ -972,30 +1107,45 @@ def _self_test_isolated(executed, git):
 
         # 4. caller git configuration: with a malformed HOME, XDG and system config in the run and process
         # environments, every git read the gate makes is pinned off them, so each vector gives the same exit and
-        # output as without the poison, and no launch is observed reading those surfaces. A control first
-        # proves the poison breaks a git read that honours it and that the observer records all three surfaces.
-        changes, log = _poisoned_config(base_dir, git)
-        control_root = by_name.get("same/base-equals-head", (None, base_dir))[1]
-        try:
-            probe = subprocess.run(["git", "-C", str(control_root), "rev-parse", "HEAD"], capture_output=True,
-                                   timeout=TIMEOUT, env=_poisoned(os.environ, changes))
-            control = (probe.returncode != 0 and b"bad config" in probe.stderr,
-                       sorted(set(log.read_text(encoding="utf-8").split())))
-        except (OSError, subprocess.SubprocessError) as exc:
-            control = (False, "control launch failed: {}".format(exc))
-        check("config/poison-control-breaks-git", control == (True, ["home", "system", "xdg"]), control)
-        log.write_bytes(b"")
-        changed = []
+        # output as without the poison, and the observer records launches for each vector but none reading those
+        # surfaces. Controls first prove that each surface alone breaks a git read that honours it (git names
+        # that surface's file), and that the observer records that launch and exactly that surface.
+        changes, surfaces, files, log = _poisoned_config(base_dir, real_git)
+        controls = {}
+        control_root = by_name["same/base-equals-head"][1] if "same/base-equals-head" in by_name else None
+        for surface, _key in POISON_SURFACES:
+            log.write_bytes(b"")
+            if control_root is None:
+                controls[surface] = (False, "vector not built")
+                continue
+            try:
+                probe = subprocess.run(["git", "-C", str(control_root), "rev-parse", "HEAD"], capture_output=True,
+                                       timeout=TIMEOUT, env=_poisoned(os.environ, surfaces[surface]))
+                controls[surface] = (probe.returncode != 0 and b"bad config" in probe.stderr
+                                     and str(files[surface]).encode("utf-8") in probe.stderr,
+                                     sorted(set(log.read_text(encoding="utf-8").split())))
+            except (OSError, subprocess.SubprocessError) as exc:
+                controls[surface] = (False, "control launch failed: {}".format(exc))
+        check("config/poison-control-breaks-git", all(
+            controls[surface] == (True, sorted(("launch", surface))) for surface, _key in POISON_SURFACES), controls)
+        changed, unobserved, exposure = [], [], set()
         for name in POISONED_VECTORS:
             if name not in by_name:
                 changed.append((name, "vector not built"))
+                unobserved.append(name)
                 continue
-            clean, poisoned = _gate(this, by_name[name]), _poisoned_gate(this, by_name[name], changes)
+            clean = _gate(this, by_name[name])
+            log.write_bytes(b"")
+            poisoned = _poisoned_gate(this, by_name[name], changes)
+            observed = log.read_text(encoding="utf-8").split()
+            if "launch" not in observed:
+                unobserved.append(name)
+            exposure |= set(observed) - {"launch"}
             if poisoned != clean:
                 changed.append((name, clean, poisoned))
         check("config/poisoned-same-result", vectors and not changed, changed)
-        exposure = sorted(set(log.read_text(encoding="utf-8").split()))
-        check("config/poisoned-no-exposure", vectors and not exposure, exposure)
+        check("config/poisoned-no-exposure", vectors and not unobserved and not exposure,
+              dict(unobserved=unobserved, exposure=sorted(exposure)))
 
     # the in-run self-guard: the executed set is exactly this suite's registered set
     expected, problem = _registered_check_ids()
@@ -1014,9 +1164,11 @@ def _self_test_isolated(executed, git):
         return 1
     print("SELF-TEST PASS: control-retirement {} checks ({} vectors: removed gate, hook and check ids without a "
           "row are findings; covered, unreachable and disclosed rows are held to their fields; a rename is one "
-          "row; the record is append-only; unresolvable bases and malformed inputs fail closed; {} mutants each "
-          "caught, every refusing vector discriminating; a poisoned caller HOME, XDG and system git configuration "
-          "changes no result)".format(len(results), len(vectors), len(MUTANTS)))
+          "row; a new row names a control live at the base; the record is append-only; the base is read by id "
+          "only; unresolvable bases, malformed inputs and an unavailable scratch home fail closed; {} mutants "
+          "each caught, every refusing vector discriminating; a poisoned caller HOME, XDG and system git "
+          "configuration, each shown to break a read that honours it, changes no result)".format(
+              len(results), len(vectors), len(MUTANTS)))
     return 0
 
 
