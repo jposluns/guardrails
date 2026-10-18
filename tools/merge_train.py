@@ -79,15 +79,25 @@ confinement reads the repository layout from the filesystem, so a git inside a l
 does not model (a core.worktree setting, for one) runs for the three discovery reads before the
 check against the worktree list git reports refuses it.
 
-Configuration isolation, stated exactly. Every git child launched with its working directory
-inside a private checkout or a fresh checkout (see _PR_DIRS and _git: the merge, every
-checkout, diff, status, add, ls-files, ls-tree, cat-file, write-tree, commit-tree, rev-parse,
-rev-list, merge-base and config call there) runs with GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM
-at the null device and GIT_CONFIG_NOSYSTEM=1: the operator's global and system configuration
-files, and every file they include, are not read there, so no merge driver, textconv, filter,
-submodule recursion, include, signing program or helper named there can be selected by an
-attribute the PR commits (a command named relative to the working directory would otherwise
-run a program the PR supplies). _changed_lines also passes --no-textconv. What such a child
+Configuration isolation, stated exactly. Every git child the tool launches through _git with
+its working directory inside a private checkout or a fresh checkout (see _PR_DIRS and _git:
+the merge, every checkout, diff, status, add, ls-files, ls-tree, cat-file, write-tree,
+commit-tree, rev-parse, rev-list, merge-base and config call there) runs with
+GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM at the null device and GIT_CONFIG_NOSYSTEM=1. The rule
+is that location, so it does not cover a git launched outside _git, which the tool does not
+make, nor one launched from elsewhere that names a checkout with --git-dir or --work-tree:
+transport commands below (the PR-branch fetch and the push among them) do that by design,
+naming the private checkout's git directory with the empty transport directory as their work
+tree, and read the operator's configuration for the reasons given there. The operator's
+global and system configuration files, and every file they include, are not read by those
+children: no merge driver, textconv or filter defined there can be selected by an attribute
+the PR commits (a command named relative to the working directory would otherwise run a
+program the PR supplies), and no include, submodule recursion, signing program or helper set
+there applies. _changed_lines also passes --no-textconv. A behaviour change follows: the
+operator's merge and diff preferences (merge.renames, merge.directoryRenames and
+diff.algorithm, for some) no longer apply in those checkouts, so git's defaults decide how
+the merge resolves, which conflicts it reports and what review_carry compares; a conflict
+outside the generated files is still refused, never pushed. What such a child
 reads instead is passed explicitly or set locally by the tool: the maintenance pins in option
 position on every launch (gc.auto=0, gc.autoDetach=false, maintenance.auto=false), the commit
 identity in the environment for the merge and commit-tree, and the checkout's local
@@ -211,9 +221,11 @@ failure, a possibly truncated PR list, bad arguments).
 THREAT MODEL (cooperative): agents on a single-operator host. The repository's local config, the
 operator's global and system config, hooks and the object store are trusted; the tool guards
 against accidents and odd local state, not hostile repository state. Trusted configuration is
-still not read in a checkout holding PR content (see the configuration isolation above),
-because a trusted command named relative to the working directory runs whatever program the PR
-places there. Disclosed residuals: fork PRs
+still not read by the tool's git children in the private and fresh checkouts (see the
+configuration isolation above), because a trusted command named relative to the working
+directory runs whatever program the PR places there. The author's own PR worktree also holds
+PR content and its author-side reads do read that configuration; they merge, diff, check out
+and filter nothing, and hooks and fsmonitor are pinned off for them. Disclosed residuals: fork PRs
 are refused (fork-pr), not supported; v1 supports the remote "origin" and the base "main" only; the
 regenerate and check commands run the merged tree's copy of the generators, which may include the
 PR's own changes; review_carry is information only; the private checkout reuses the repository's
@@ -459,8 +471,13 @@ _PR_GIT_ENV = dict(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
                    GIT_CONFIG_NOSYSTEM="1")
 
 # The operator settings a fresh checkout carries over (see guard_fresh_checkout): values that
-# select a built-in conversion, never a command.
-_FRESH_CHECKOUT_KEYS = ("core.autocrlf", "core.eol")
+# select a built-in conversion, never a command, each with the git config options that read
+# it the way git itself does. git reads core.autocrlf as "input" or a boolean, a valueless
+# key being true, so it is read as bool-or-str: every boolean spelling becomes true or false
+# (a plain read prints a valueless key as the empty string, which the fresh checkout would
+# then read as false) and any other value is carried as written. core.eol is carried as
+# written.
+_FRESH_CHECKOUT_KEYS = (("core.autocrlf", ("--type=bool-or-str",)), ("core.eol", ()))
 
 
 def _names_process_state(entry):
@@ -784,8 +801,10 @@ def _git(cwd, *args, extra_env=None, timeout=GIT_TIMEOUT, ok=(0,), push=False, c
     launch whose working directory lies inside a directory in _PR_DIRS (compared by realpath,
     and taken as inside when its realpath cannot be computed) also receives _PR_GIT_ENV, after
     extra_env, so no caller can lift it: the operator's global and system configuration is
-    not read there. The rule is the launch's location, never a caller's choice, so a git call
-    added in a checkout holding PR content later is isolated as well.
+    not read there. The rule is the launch's working directory, never a caller's choice, so a
+    later call through _git with its working directory in such a checkout is isolated as
+    well; a git launched outside _git, or from elsewhere naming a checkout with --git-dir or
+    --work-tree, is not.
     Returns (returncode, stdout bytes, stderr text); raises Refuse("git-failed") on a refused
     git, a timeout and an exit code outside ok when ok is not None. The audit records every
     attempted argv, a refused one included."""
@@ -1660,10 +1679,10 @@ def guard_fresh_checkout(ctx, scratch, new):
     exit or ANY stderr output is refused as normal-checkout-failed before any check runs. Each
     check there is accepted only with exit 0 and no fault on stderr (see guard_child_fault)."""
     carried = []
-    for key in _FRESH_CHECKOUT_KEYS:
+    for key, typed in _FRESH_CHECKOUT_KEYS:
         for scope in ("--global", "--system"):
-            code, out, _err = _git(ctx["transport"], "config", "--includes", scope, "--get", key,
-                                   ok=(0, 1))
+            code, out, _err = _git(ctx["transport"], "config", "--includes", scope, *typed,
+                                   "--get", key, ok=(0, 1))
             if code == 0:
                 carried.append((key, out.decode("utf-8", "replace").strip()))
                 break
@@ -7204,7 +7223,66 @@ def case_crlf(tmp):
     check("fresh/operator-eol-carried",
           (rc, _result(reports, 1), fx3.remote_ref("feat/x"), _has_marker(wt3), fx3.pushes()),
           (1, "normal-checkout-failed", old3, False, []))
-    check("fresh/invariants", _invariants(fx, fx2, fx3), [])
+    # Fourth: a valueless core.autocrlf in the global configuration, which git reads as true.
+    # The fresh checkout carries it as true (see _FRESH_CHECKOUT_KEYS) and the candidate is
+    # refused as for autocrlf = true. Red with the bool-or-str read dropped: git config then
+    # prints the empty string, and the fresh checkout reads that as false.
+    fx4 = _fixture(tmp, "valueless-autocrlf")
+    wt4 = _stale_pr(fx4)
+    old4 = fx4.remote_ref("feat/x")
+    gitconfig.write_text("[core]\n\tautocrlf\n", encoding="utf-8")
+    try:
+        rc, reports, _fatal = fx4.run()
+    finally:
+        try:
+            os.unlink(str(gitconfig))
+        except FileNotFoundError:
+            pass
+    check("fresh/valueless-autocrlf-carried-as-true",
+          (rc, _result(reports, 1), fx4.remote_ref("feat/x"), _has_marker(wt4), fx4.pushes()),
+          (1, "normal-checkout-failed", old4, False, []))
+    # The system fallback of the carry, with no global setting: the operator's system
+    # configuration (reached through GIT_CONFIG_SYSTEM, see _system_config_git) sets
+    # core.autocrlf = true, and the candidate is refused as for the global setting. Red with
+    # the --system read removed. Then a global core.autocrlf = false over that system true:
+    # the global value alone is carried and the candidate goes ahead. Red when the system
+    # value is read and carried as well (the later setting wins).
+    fx5 = _fixture(tmp, "system-autocrlf")
+    wt5 = _stale_pr(fx5)
+    old5 = fx5.remote_ref("feat/x")
+    wrapper5 = _system_config_git(fx5, "[core]\n\tautocrlf = true\n")
+    try:
+        rc, reports, _fatal = fx5.run()
+        system_got = (rc, _result(reports, 1), fx5.remote_ref("feat/x"), _has_marker(wt5),
+                      fx5.pushes())
+        gitconfig.write_text("[core]\n\tautocrlf = false\n", encoding="utf-8")
+        try:
+            rc, reports, _fatal = fx5.run()
+        finally:
+            os.unlink(str(gitconfig))
+        outranked = (rc, _result(reports, 1))
+    finally:
+        os.unlink(str(wrapper5))
+    check("fresh/system-autocrlf-carried", system_got,
+          (1, "normal-checkout-failed", old5, False, []))
+    check("fresh/global-autocrlf-outranks-system", outranked, (0, "would-merge"))
+    # The system fallback for core.eol: a system core.eol = crlf with a committed `text`
+    # attribute and no global setting, refused as for the global setting. Red with the
+    # --system read removed.
+    fx6 = _fixture(tmp, "system-eol")
+    wt6 = fx6.add_pr(1, "feat/x", dict([
+        ("src/b.txt", "bravo\n"), (".gitattributes", "src/b.txt text\n")]))
+    old6 = fx6.remote_ref("feat/x")
+    fx6.advance_main(dict([("src/c.txt", "charlie\n")]))
+    wrapper6 = _system_config_git(fx6, "[core]\n\teol = crlf\n")
+    try:
+        rc, reports, _fatal = fx6.run()
+    finally:
+        os.unlink(str(wrapper6))
+    check("fresh/system-eol-carried",
+          (rc, _result(reports, 1), fx6.remote_ref("feat/x"), _has_marker(wt6), fx6.pushes()),
+          (1, "normal-checkout-failed", old6, False, []))
+    check("fresh/invariants", _invariants(fx, fx2, fx3, fx4, fx5, fx6), [])
 
 
 def _scripted_pr(fx, attributes, scripts):
@@ -7223,18 +7301,47 @@ def _scripted_pr(fx, attributes, scripts):
     return wt
 
 
+def _system_config_git(fx, text):
+    """Give fx's tool runs an operator system configuration holding text. The file is written
+    beside the fixture, and fx's bin directory (the front of every run's PATH, so a run
+    resolves its git there) gets a git wrapper naming that file in GIT_CONFIG_SYSTEM for every
+    launch that neither sets GIT_CONFIG_NOSYSTEM=1 nor names a system file itself, the way git
+    reads its compiled-in system file for such a launch. The suite's own git wrapper pins the
+    system configuration off for every launch, so no run could read one otherwise. The wrapper
+    execs the git in git's own exec path with the maintenance pins. Returns the wrapper; the
+    caller removes it once its runs and controls are done, because a fixture made later takes
+    this bin directory into its own PATH."""
+    system = fx.base / "system.gitconfig"
+    system.write_text(text, encoding="utf-8")
+    exec_path = subprocess.run(["git", "--exec-path"], stdout=subprocess.PIPE, env=_clean_env(),
+                               timeout=60, check=True).stdout.decode("utf-8", "replace").strip()
+    wrapper = fx.bin / "git"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        "if [ \"${GIT_CONFIG_NOSYSTEM:-}\" != 1 ] && [ \"${GIT_CONFIG_SYSTEM+x}\" != x ]; then\n"
+        "  export GIT_CONFIG_SYSTEM='%s'\n"
+        "fi\n"
+        "exec '%s' -c gc.auto=0 -c gc.autoDetach=false -c maintenance.auto=false \"$@\"\n" % (
+            system, os.path.join(exec_path, "git")), encoding="utf-8")
+    wrapper.chmod(0o755)
+    return wrapper
+
+
 def case_isolation(tmp):
     # No git child working in a checkout that holds PR content (the private checkout and the
     # fresh checkout) reads the operator's global or system configuration (see _PR_DIRS and
     # _PR_GIT_ENV). The suite's HOME is the scrubbed scratch home, so the case owns its
-    # .gitconfig for each run's duration, as case_crlf does. Each PR here commits, at its tree
-    # root, a script that records that it ran, and an attribute selecting a driver the
-    # operator's global configuration defines with a command relative to the working
-    # directory. Red while those children read that configuration: git then ran the PR's
-    # script from the checkout. Each vector also runs the same configuration outside the
-    # tool, where the script does run, so a green vector cannot come from a dead script or a
-    # configuration that never took effect.
+    # .gitconfig for each run's duration, as case_crlf does; a system configuration reaches a
+    # run through _system_config_git. Each PR here commits, at its tree root, a script that
+    # records that it ran, and an attribute selecting a driver the operator's configuration
+    # defines with a command relative to the working directory. Red while those children read
+    # that configuration: git then ran the PR's script from the checkout. Each vector has its
+    # own fixture and run, so it goes red through the defence it names and no other, and each
+    # also runs the same configuration outside the tool, where the script does run, so a
+    # green vector cannot come from a dead script or a configuration that never took effect.
     gitconfig = Path(os.environ["HOME"]) / ".gitconfig"
+    real_child = globals()["_run_child"]
+    pins = ["-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"]
 
     def recorder(name, tail):
         sentinel = Path(tmp) / ("isolation-%s-ran" % name)
@@ -7249,72 +7356,148 @@ def case_isolation(tmp):
         except FileNotFoundError:
             pass
 
-    # A merge driver and a textconv. The merge of the conflicting digest runs the merge
-    # driver; the review_carry comparison (_changed_lines) runs the textconv.
-    fx = _fixture(tmp, "isolation-drivers")
+    # A merge driver from the global configuration: the merge of the conflicting digest runs
+    # it. The control merges the base in a plain clone of the PR.
+    fx = _fixture(tmp, "isolation-merge-driver")
     merge_ran, merge_script = recorder("merge-driver", "exit 1\n")
-    diff_ran, diff_script = recorder("textconv", "exec cat \"$1\"\n")
-    wt = _scripted_pr(fx, "* merge=prdriver diff=prdiff\n",
-                      dict([("prdriver.sh", merge_script), ("prdiff.sh", diff_script)]))
-    configured("[merge \"prdriver\"]\n\tdriver = ./prdriver.sh %O %A %B\n"
-               "[diff \"prdiff\"]\n\ttextconv = ./prdiff.sh\n")
+    _scripted_pr(fx, "* merge=prdriver\n", dict([("prdriver.sh", merge_script)]))
+    configured("[merge \"prdriver\"]\n\tdriver = ./prdriver.sh %O %A %B\n")
     try:
         rc, reports, _fatal = fx.run()
-        in_run = (merge_ran.exists(), diff_ran.exists())
-        # _changed_lines itself, over the author's PR worktree (no checkout of the run, so
-        # the configuration is read there): --no-textconv alone keeps the textconv out. Red
-        # with that option dropped.
-        if diff_ran.exists():
-            diff_ran.unlink()
-        _changed_lines(wt, "HEAD~1", "HEAD", [])
-        unit_textconv = diff_ran.exists()
-        # Outside the tool, the same configuration runs both scripts: a plain diff in the PR
-        # worktree runs the textconv, and a merge of the base in a plain clone of the PR
-        # runs the merge driver.
-        _git(wt, "diff", "--no-color", "HEAD~1", "HEAD")
-        probe = Path(tmp) / "isolation-drivers-control"
+        in_run = merge_ran.exists()
+        probe = Path(tmp) / "isolation-merge-driver-control"
         _git(fx.base, "clone", "--quiet", "--no-local", "-b", "feat/x", str(fx.remote),
              str(probe))
         _git(probe, "merge", "--no-commit", "--no-ff", "--no-edit", "origin/main",
              extra_env=FIXTURE_IDENT, ok=None)
-        control = (merge_ran.exists(), diff_ran.exists())
+        control = merge_ran.exists()
     finally:
         unconfigured()
     check("isolation/pr-merge-driver-never-runs",
-          (rc, _result(reports, 1), in_run[0], control[0]), (0, "would-merge", False, True))
+          (rc, _result(reports, 1), in_run, control), (0, "would-merge", False, True))
+    # A textconv from the global configuration, alone in its run. Nothing the run does asks for
+    # a textconv (_changed_lines passes --no-textconv), so the run's own diffs cannot show
+    # whether the private checkout reads that configuration; a probe does. At the first git
+    # launch of the run in the private checkout once the PR's script is there, it asks git
+    # diff for textconv output over the PR's own commit, through _git with that checkout as
+    # its working directory. Red with the isolation removed, whatever _changed_lines passes:
+    # the probe then runs the PR's script. --no-textconv has its own check below.
+    fx2 = _fixture(tmp, "isolation-textconv")
+    diff_ran, diff_script = recorder("textconv", "exec cat \"$1\"\n")
+    wt2 = _scripted_pr(fx2, "* diff=prdiff\n", dict([("prdiff.sh", diff_script)]))
+    head2 = fx2.prs[0]["headRefOid"]
+    probes = []
+
+    def _textconv_probe_child(argv, cwd=None, env=None, timeout=None, push=False,
+                              executable=None):
+        where = os.path.basename(os.path.dirname(str(cwd)))
+        if (not probes and where.startswith("merge-train-scratch-") and list(argv[1:7]) == pins
+                and os.path.exists(os.path.join(str(cwd), "prdiff.sh"))):
+            probes.append(None)
+            probes[0] = _git(cwd, "diff", "--no-color", "--textconv", head2 + "~1", head2,
+                             ok=None)[0]
+        return real_child(argv, cwd=cwd, env=env, timeout=timeout, push=push,
+                          executable=executable)
+
+    configured("[diff \"prdiff\"]\n\ttextconv = ./prdiff.sh\n")
+    try:
+        globals()["_run_child"] = _textconv_probe_child
+        try:
+            rc, reports, _fatal = fx2.run()
+        finally:
+            globals()["_run_child"] = real_child
+        in_run = diff_ran.exists()
+        # _changed_lines itself, over the author's PR worktree (no checkout of the run, so
+        # the configuration is read there): --no-textconv alone keeps the textconv out. Red
+        # with that option dropped, whatever the isolation does.
+        if diff_ran.exists():
+            diff_ran.unlink()
+        _changed_lines(wt2, "HEAD~1", "HEAD", [])
+        unit_textconv = diff_ran.exists()
+        # Outside the tool, a plain diff in the PR worktree runs the textconv.
+        _git(wt2, "diff", "--no-color", "HEAD~1", "HEAD")
+        control = diff_ran.exists()
+    finally:
+        unconfigured()
     check("isolation/pr-textconv-never-runs",
-          (rc, _result(reports, 1), in_run[1], control[1]), (0, "would-merge", False, True))
-    check("isolation/changed-lines-passes-no-textconv", (unit_textconv, control[1]),
+          (rc, _result(reports, 1), probes, in_run, control),
+          (0, "would-merge", [0], False, True))
+    check("isolation/changed-lines-passes-no-textconv", (unit_textconv, control),
           (False, True))
     # A filter in the fresh checkout: the private checkout unsets every filter attribute, so
     # only the fresh checkout could run it. The control is a plain clone of the PR, whose
     # checkout runs the smudge filter.
-    fx2 = _fixture(tmp, "isolation-filter")
+    fx3 = _fixture(tmp, "isolation-filter")
     filter_ran, filter_script = recorder("filter", "exec cat\n")
-    _scripted_pr(fx2, "src/b.txt filter=prfilter\n", dict([("prfilter.sh", filter_script)]))
+    _scripted_pr(fx3, "src/b.txt filter=prfilter\n", dict([("prfilter.sh", filter_script)]))
     configured("[filter \"prfilter\"]\n\tsmudge = ./prfilter.sh\n")
     try:
-        rc, reports, _fatal = fx2.run()
+        rc, reports, _fatal = fx3.run()
         in_run = filter_ran.exists()
-        _git(fx2.base, "clone", "--quiet", "--no-local", "-b", "feat/x", str(fx2.remote),
+        _git(fx3.base, "clone", "--quiet", "--no-local", "-b", "feat/x", str(fx3.remote),
              str(Path(tmp) / "isolation-filter-control"))
         control = filter_ran.exists()
     finally:
         unconfigured()
     check("isolation/fresh-checkout-operator-filter-never-runs",
           (rc, _result(reports, 1), in_run, control), (0, "would-merge", False, True))
+    # A merge driver from the system configuration, reached through GIT_CONFIG_SYSTEM (see
+    # _system_config_git). Red with GIT_CONFIG_SYSTEM and GIT_CONFIG_NOSYSTEM both taken out
+    # of _PR_GIT_ENV (either one alone keeps the system file unread). The control merges the
+    # base in a plain clone of the PR through the same wrapper, found first on its PATH.
+    fx4 = _fixture(tmp, "isolation-system-driver")
+    system_ran, system_script = recorder("system-merge-driver", "exit 1\n")
+    _scripted_pr(fx4, "* merge=prdriver\n", dict([("prdriver.sh", system_script)]))
+    wrapper = _system_config_git(fx4, "[merge \"prdriver\"]\n\tdriver = ./prdriver.sh %O %A %B\n")
+    try:
+        rc, reports, _fatal = fx4.run()
+        in_run = system_ran.exists()
+        probe = Path(tmp) / "isolation-system-driver-control"
+        control_env = _clean_env(dict(FIXTURE_IDENT, PATH=str(fx4.bin) + os.pathsep + fx4.path))
+        subprocess.run(["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c",
+                        "maintenance.auto=false", "clone", "--quiet", "--no-local", "-b",
+                        "feat/x", str(fx4.remote), str(probe)], cwd=str(fx4.base),
+                       env=control_env, timeout=60, check=True)
+        subprocess.run(["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c",
+                        "maintenance.auto=false", "merge", "--no-commit", "--no-ff",
+                        "--no-edit", "origin/main"], cwd=str(probe), env=control_env,
+                       timeout=60, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        control = system_ran.exists()
+    finally:
+        os.unlink(str(wrapper))
+    check("isolation/system-merge-driver-never-runs",
+          (rc, _result(reports, 1), in_run, control), (0, "would-merge", False, True))
+    # The push passes --no-recurse-submodules. The push reads the operator's configuration
+    # (for its credentials), and an operator push.recurseSubmodules=only makes git push the
+    # submodules alone and leave the branch unpushed, exiting 0 (observed on git 2.55.0). Red
+    # with that option dropped: the run then reports something other than pushed. The control
+    # is a plain push from the PR worktree under the same configuration, which lands nothing.
+    fx5 = _fixture(tmp, "isolation-push")
+    wt5 = _stale_pr(fx5)
+    configured("[push]\n\trecurseSubmodules = only\n")
+    try:
+        rc, reports, _fatal = fx5.run(apply=True)
+        _git(wt5, "push", "-q", "origin", "%s:refs/heads/isolation-push-control" % (
+            _git_text(wt5, "rev-parse", "HEAD")))
+        control = fx5.remote_ref("isolation-push-control")
+    finally:
+        unconfigured()
+    report = reports[0] if reports else dict()
+    check("isolation/push-passes-no-recurse-submodules",
+          (rc, report.get("result"), fx5.remote_ref("feat/x") == report.get("new_head"),
+           control), (0, "pushed", True, None))
     # The configuration each git child sees, read at every launch in the run's private
     # directories by git config with that launch's own environment (the git its PATH names)
     # and working directory: a global submodule.recurse, and a key set only in a file a global
     # include names. The children in the private base repository and the transport directory
-    # read the operator's configuration by design and are the control.
-    fx3 = _fixture(tmp, "isolation-config-view")
-    _stale_pr(fx3)
+    # read the operator's configuration by design and are the control. Each read keeps git's
+    # exit code beside its output: git config --get exits 1 for a key that is not set, so a
+    # read that failed for another reason is never taken for "not set".
+    fx6 = _fixture(tmp, "isolation-config-view")
+    _stale_pr(fx6)
     included = Path(tmp) / "isolation-included.gitconfig"
     included.write_text("[mergetrainprobe]\n\tincluded = yes\n", encoding="utf-8")
     views = []
-    real_child = globals()["_run_child"]
-    pins = ["-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"]
 
     def _config_view_child(argv, cwd=None, env=None, timeout=None, push=False, executable=None):
         # Only the run's git launches (their argv carries the maintenance pins), never a
@@ -7327,7 +7510,8 @@ def case_isolation(tmp):
                     read = subprocess.run(["git", "config", "--get", key], cwd=str(cwd),
                                           env=env, timeout=60, stdout=subprocess.PIPE,
                                           stderr=subprocess.DEVNULL)
-                    values.append(read.stdout.decode("utf-8", "replace").strip())
+                    values.append((read.returncode,
+                                   read.stdout.decode("utf-8", "replace").strip()))
                 views.append((kind, values[0], values[1]))
         return real_child(argv, cwd=cwd, env=env, timeout=timeout, push=push,
                           executable=executable)
@@ -7335,7 +7519,7 @@ def case_isolation(tmp):
     configured("[submodule]\n\trecurse = true\n[include]\n\tpath = %s\n" % included)
     globals()["_run_child"] = _config_view_child
     try:
-        rc, reports, _fatal = fx3.run()
+        rc, reports, _fatal = fx6.run()
     finally:
         globals()["_run_child"] = real_child
         unconfigured()
@@ -7346,11 +7530,14 @@ def case_isolation(tmp):
 
     check("isolation/global-submodule-recurse-not-read",
           (rc, _result(reports, 1), kinds, seen(1, True), seen(1, False)),
-          (0, "would-merge", ["base", "fresh", "scratch"], [""], ["true"]))
+          (0, "would-merge", ["base", "fresh", "scratch"], [(1, "")], [(0, "true")]))
     check("isolation/global-include-not-read",
           (rc, _result(reports, 1), kinds, seen(2, True), seen(2, False)),
-          (0, "would-merge", ["base", "fresh", "scratch"], [""], ["yes"]))
-    check("isolation/invariants", _invariants(fx, fx2, fx3), [])
+          (0, "would-merge", ["base", "fresh", "scratch"], [(1, "")], [(0, "yes")]))
+    # A general safety check over every run above (the remote base untouched, no forbidden
+    # argv, only fast-forward pushes of the PR branch and only under --apply), never a
+    # detector for the isolation: it stays green with the isolation removed.
+    check("isolation/invariants", _invariants(fx, fx2, fx3, fx4, fx5, fx6), [])
 
 
 def case_latepush(tmp):
