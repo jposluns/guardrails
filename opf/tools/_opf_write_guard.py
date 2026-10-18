@@ -77,7 +77,14 @@ def plan_write_scope(machine_rel, manifest_model, store_paths, verb):
         (product if scope == "product" else store).add(relpath)
     findings = []
     _opf_store._validate_unmanaged(manifest_model.get("unmanaged"), findings)
-    classification = _opf_check.classify_containment(manifest_model, machine_rel)
+    # The SAME explicit imported-series activation flag the doctor driver derives (spec 8.2/4.2), from
+    # the SAME function (_opf_check.imported_series_active, keyed on the homes-2 declaration), passed to
+    # the SAME single authority (F10-1): once activation makes the flag true, an [unmanaged]
+    # declaration naming an imported leaf refuses here exactly as the doctor flags it, so the writer
+    # and the doctor cannot diverge on the imported managed set.
+    classification = _opf_check.classify_containment(
+        manifest_model, machine_rel,
+        imported=_opf_check.imported_series_active(manifest_model))
     findings += classification.malformed + classification.colliding
     if findings:
         raise WriteGuardError("cannot plan {} writes: {}".format(verb, "; ".join(findings)))

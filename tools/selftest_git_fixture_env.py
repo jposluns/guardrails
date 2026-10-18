@@ -488,6 +488,10 @@ CONFIG_EXCLUSIONS = {
         ("tools/check_selftest_execution.py", "--suite", "git-fixture-env-config-system"):
             "A git-fixture-env lane cannot recursively launch a git-fixture-env suite;"
             " the suite's controls run inside its four registered runners.",
+        ("tools/measure_hook_latency.py",):
+            "A bare launch is a real timing measurement of the shipped hooks, not a self-test:"
+            " minutes at its defaults, and the hooks' own git calls drop GIT_CONFIG_NOSYSTEM by"
+            " design; its self-test stays in this roster as the hook-latency-selftest suite step.",
     },
     "archive": {
         ("tools/check_release_build.py", "--self-test"):
@@ -536,7 +540,8 @@ def _registered_selftests(root=ROOT):
     commands = set()
     for relative, extract in (("tools/run_all_checks.sh", extract_local),
                               ("opf/tools/run_all_checks.sh", extract_local),
-                              (".github/workflows/quality.yml", extract_ci)):
+                              (".github/workflows/quality.yml", extract_ci),
+                              (".github/workflows/msg-leaks.yml", extract_ci)):
         source, read_diagnostic = read_runner_text(root / relative, relative)
         if read_diagnostic is not None:
             raise ValueError("{}: registry diagnostics: {}".format(
@@ -906,37 +911,134 @@ def _config_poison_fixture(base):
 
 # Per-member time bounds (seconds) for _run_config_member. A member absent here keeps
 # CONFIG_MEMBER_BOUND_DEFAULT. config/member-bound-table pins this table (every key an exact
-# registered roster argv, the one override, the default); it does not test any sizing.
+# registered roster argv, each override, the default), config/member-bound-opf-selftest pins
+# the opf.py --self-test entry, config/member-bound-reaches-run pins that _run_config_member
+# hands the looked-up bound to _run_bounded, and config/member-roster-figures pins this
+# comment's roster figures against _registered_selftests() (all in _member_bound_checks); none
+# of them tests any sizing.
+# Figures in this comment carry one of four labels: MEASURED (run for SIZING below), ESTIMATED
+# (derived by the SIZING formula), REPORTED (an earlier account, not reproduced here) or
+# READ FROM SOURCE (read from the member's own code, not measured).
 #
 # CONFIG_MEMBER_BOUND_DEFAULT is a DELIBERATE SHORTER DEADLINE, not a bound sized above every
 # member's own end-to-end budget. Budgets the members grant themselves, READ FROM SOURCE (not
-# measured): opf/tools/opf.py --self-test grants its blocked-isolation case 31 * 180 + 30 = 5610 s
-# (the isolation matrix's 31 cases at 180 s each plus a 30 s launch margin), above this default;
-# the tools/check_selftest_execution.py members set no internal bound of their own (the CI job
-# timeout is their outer bound). The kill-timeout rule ("A kill timeout outlives the wait it
-# bounds", AGENTS.md) allows a deadline below a callee's budget only where cutting the work short
-# is the explicit intent, and only when reaching it is attributed to the deadline rather than
-# reported as the callee's failure.
-# CHOICE: the default is NOT raised above 5610 s; it stays a deliberate shorter deadline, and
-# cutting a member short is the explicit intent here because this lane owns no member's verdict.
+# measured): opf/tools/opf.py --self-test grants its blocked-isolation leg alone
+# 31 * _deadline_case_budget(180) = 31 * (180 + 5 + 1) = 5766 s (the isolation matrix's 31 cases,
+# each its 180 s timeout plus the 5 s fixture cleanup grace and the 1 s receipt allowance), and its
+# regression runner bounds that leg at 5766 + 30 = 5796 s (the 30 s launch margin); that is one leg,
+# so the whole self-test grants itself more. The tools/check_selftest_execution.py members set no
+# internal bound of their own (the CI job timeout is their outer bound). The kill-timeout rule
+# ("A kill timeout outlives the wait it bounds", AGENTS.md) asks that a bound meant to let a command
+# finish be sized above the budget the command grants itself; it allows a deliberately shorter
+# deadline where cutting the work short is the explicit intent, provided reaching it is attributed
+# to the deadline rather than reported as a failure of the callee. Every bound in this table takes
+# that exception: none is offered as a bound above its member's whole self-granted budget.
+# CHOICE: the default is NOT raised above 5766 s, and neither is any entry below (each is sized
+# from config-lane runs MEASURED on this host; see SIZING); each stays a deliberate shorter
+# deadline relative to the member's self-granted budget, yet each is sized above the member's
+# measured lane runs so that the member finishes under the load the SIZING factor covers;
+# reaching a bound stays cannot-evaluate, attributed to the bound, never a FAIL of that member
+# and never a pass, because this lane owns no member's verdict.
 # Every roster member is a registered step or the runner behind a registered --suite step
-# (_registered_selftests reads the CI workflow, both standalone runners and the suite manifest),
+# (_registered_selftests reads both CI workflows, both standalone runners and the suite manifest),
 # and that step runs the member to completion under no deadline from this suite, so no member's
 # pass or fail depends on this bound. This lane asks a different question (does the
-# member stay clean under injected caller hooks, ignore files, attributes and fsmonitor), it
-# reruns each member in three config lanes (combined, malformed, system), and the bound caps how
-# long one stalled rerun can hold that answer back. Cutting a rerun short leaves the question
-# unanswered, never answered wrongly: reaching the bound is cannot-evaluate (exit 2 when nothing
-# definite was found), never a FAIL of that member and never a pass.
+# member stay clean under injected caller hooks, ignore files, attributes and fsmonitor). The
+# roster is every registered self-test except CONFIG_EXCLUSIONS["all"] (the four git-fixture-env
+# suite runners and the bare hook-latency measurement, whose self-test stays in the roster as its
+# --suite step); the combined and system lanes rerun every roster member, the malformed lane
+# every one outside CONFIG_EXCLUSIONS["malformed"], the fsmonitor pass four of them under
+# --self-test (its _run_config_member calls), and the bound caps how long one stalled rerun can
+# hold that answer back. Cutting a rerun short leaves the question unanswered, never answered
+# wrongly: reaching the bound is cannot-evaluate (exit 2 when nothing definite was found), never a
+# FAIL of that member and never a pass.
+#
+# SIZING. MEASURED (2026-10-12, 24-CPU host, nice 10, every bound lifted to 10800 s): the suite's
+# own _config_results (four workers, run through main() with its lanes replaced) under the combined
+# lane's injected configuration, rebuilt by a copy of that lane's setup code (NOT a call to
+# _config_injection_lane itself), over opf.py, check_opf_record.py --red-on-revert,
+# _opf_adopt_observe.py, check_release_delta.py and check_opf_init.py --self-test plus six shorter
+# opf/tools self-tests (_opf_adopt.py, _opf_oplock.py, _opf_init_operation.py,
+# check_opf_upgrade.py, check_opf_homes.py and check_opf_doctor.py), eleven members, twice (load5
+# 24.02 to 29.29, then 29.29 to 33.68); once over the whole combined roster, 101 members (load5
+# 27.35 to 32.99); and once under the malformed lane's configuration over those eleven members
+# less its exclusion, ten members (load5 30.01 to 32.14). Every member exited 0 with no hook,
+# fsmonitor or exposure record in every run. Each entry below gives its lane time per run.
+# Those runs predate the 2026-10-13 merge from main that added four roster members
+# (opf/tools/_opf_adopt_discover.py --self-test, tools/check_brief_capability.py, the same with
+# --self-test, and tools/check_selftest_execution.py --suite brief-capability-selftest): the
+# whole-roster run above was measured over the then 101 members, before those four existed. The
+# 2026-10-14 merge from main added a fifth (.github/check_cited_standards_contract.py
+# --self-test). The 2026-10-15 merge from main added a sixth (opf/tools/_opf_import_batch.py
+# --self-test). The merged roster was then 107 members, 105 of them in the malformed lane
+# (counted by running _registered_selftests() on the merged tree, 2026-10-15). The 2026-10-16
+# merge of main into the change adding tools/gen_agents.py --self-test made that self-test a
+# seventh addition. The 2026-10-16 merges of the host-patch CI legs and of the leak, reference
+# facts and launcher-isolation input fixes added an eighth and a ninth:
+# tools/check_python_host_pin.py --self-test and tools/check_leaks.py --self-test. The
+# hook-latency harness added a tenth (tools/check_selftest_execution.py --suite
+# hook-latency-selftest; the bare runner that step expands to is a CONFIG_EXCLUSIONS["all"]
+# entry). The change adding tools/orch_register.py --self-test adds an eleventh, that member
+# itself, not one a merge brought in. The merged roster is 112 members, 110 of them in the
+# malformed lane (counted by
+# running _registered_selftests() on the merged tree, 2026-10-17; config/member-roster-figures
+# asserts these counts and the two derived counts below against _registered_selftests(), so a
+# later roster change turns this comment red instead of stale).
+# NOT MEASURED, though these bounds govern those reruns all the same: the system lane; the
+# malformed lane's configuration for the 100 of its 110 members outside those ten; and the
+# fsmonitor pass's own configuration (fsmonitor set in both config files, ignore and attributes
+# files removed, its four members run one at a time).
+# The opf.py --self-test times above and below and its 3600 s entry were sized before the
+# 2026-10-13 merge added the opf-write-guard delegate to opf.py --self-test; the delegate's own
+# self-test, MEASURED standalone on the merged tree (2026-10-13), exited 0 in 0.23 s wall, so the
+# entry is not resized for it.
+# ESTIMATED: bound = the slowest MEASURED lane time * 20 / 3, rounded up to a multiple of 300 s;
+# the formula value exceeds the 1200 s default exactly when that time exceeds 180 s. REPORTED times
+# (opf.py's 1192 s lane run, and the opf.py and check_opf_record.py lane runs that reached a 1200 s
+# bound) are not fed to the formula; the factor's headroom is meant to allow for them, but a run
+# that reached a bound has no known length, so no bound here is shown to cover it (below).
+# Roster coverage: the account of the whole-roster run gives a time or an upper bound for 89 of
+# the 112 members (every member registered when it was taken; the nine added by the 2026-10-13,
+# 2026-10-14, 2026-10-15 and 2026-10-16 merges, the hook-latency suite step, and the eleventh
+# that the orch_register change adds, are outside it).
+# Five took over 180 s and carry the entries below. The other 84 took 180 s or less: nine named
+# here (the six shorter opf/tools self-tests, check_python_floor.py, check_release_cut.py
+# --self-test --red-on-revert and check_selftest_execution.py --suite orch-behaviour-selftest),
+# the slowest 142.55 s; and 75 REPORTED by that account as each 62.42 s or less, with no
+# per-member time and no names given. The remaining 23 roster members have no recorded time (the
+# 12 the account does not name, plus the nine added by those merges, the hook-latency suite
+# step and the orch_register self-test, named above), so their default bound is NOT sized from
+# a measurement.
+# For every member, reaching its bound is cannot-evaluate, never a pass.
+# The factor is 40 / 24 * 4. 40 / 24 covers load5 40 under the model that wall time grows in
+# proportion to load5 once load5 exceeds the 24 CPUs, and not below (every measured run had load5
+# above 24 throughout, so this overstates the growth from where it was measured). 4 is headroom for
+# what that model does not explain: the REPORTED (not reproduced here) opf.py --self-test lane runs
+# of 1192 s and the four that reached the then 1200 s default, at least 2.2 times its slowest
+# measured lane time. Each bound stays below 5766 s (see CHOICE).
 CONFIG_MEMBER_BOUND_DEFAULT = 1200
 CONFIG_MEMBER_BOUNDS = {
-    # MEASURED (2026-10-07, nice 10, load5 about 12 to 14 on a 16-CPU host): one complete run took
-    # 582.30 s wall and 425.55 s CPU and passed; two plain runs were still running at 585 s and
-    # 590 s. The previous 1200 s default was reached twice at load5 above 20 (2026-10-07).
-    # ESTIMATED (assumes wall time grows roughly in proportion to load once load exceeds the CPU
-    # count): 3600 s, about 6.2 times the measured run, covers load5 up to about 80; it also
-    # exceeds the command's own T75 wait chain (540 s per call, 4 calls: 2160 s).
-    ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert"): 3600,
+    # MEASURED lane times (see SIZING): 650.49 s, 709.77 s, 734.81 s (whole roster) and 683.69 s
+    # (malformed). ESTIMATED: 734.81 * 20 / 3 = 4898.7, so 5100 s. REPORTED by the earlier sizing,
+    # not reproduced here (2026-10-07, load5 about 12 to 14 on a 16-CPU host): one standalone
+    # nice 10 run took 582.30 s wall and passed; a 1200 s bound was reached twice in the lanes at
+    # load5 above 20.
+    ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert"): 5100,
+    # MEASURED lane times (see SIZING): 482.53 s, 529.80 s, 510.39 s (whole roster) and 493.53 s
+    # (malformed). ESTIMATED: 529.80 * 20 / 3 = 3532.0, so 3600 s. REPORTED by the earlier sizing,
+    # not reproduced here (2026-10-12, load5 about 18 to 21): one standalone nice 10 run took
+    # 467.16 s wall and 255.64 s CPU and passed; lane runs of 730 s and 1192 s, and four lane
+    # reruns that reached the 1200 s default in config/opf/rc or config/opf/malformed.
+    ("opf/tools/opf.py", "--self-test"): 3600,
+    # MEASURED lane times (see SIZING): 265.55 s, 259.96 s, 257.71 s (whole roster) and 261.91 s
+    # (malformed). ESTIMATED: 265.55 * 20 / 3 = 1770.3, so 1800 s.
+    ("opf/tools/_opf_adopt_observe.py", "--self-test"): 1800,
+    # MEASURED lane times (see SIZING): 214.08 s, 243.45 s and 189.62 s (whole roster); the
+    # malformed lane excludes this member. ESTIMATED: 243.45 * 20 / 3 = 1623.0, so 1800 s.
+    ("tools/check_release_delta.py", "--self-test"): 1800,
+    # MEASURED lane times (see SIZING): 207.87 s, 220.76 s, 229.02 s (whole roster) and 219.70 s
+    # (malformed). ESTIMATED: 229.02 * 20 / 3 = 1526.8, so 1800 s.
+    ("opf/tools/check_opf_init.py", "--self-test"): 1800,
 }
 # After the process-group kill: the bounded drain of output still held by a descendant that left
 # the group (setsid or setpgid), the bounded reap of the leader, and the bounded wait for the group
@@ -3665,6 +3767,7 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_adopt_apply.py": "Apply-shell refusal, evidence and journal vectors over temporary filesystem fixtures.",
     "opf/tools/_opf_adopt_discover.py": "Read-only source-discovery vectors over temporary filesystem fixtures.",
     "opf/tools/_opf_adopt_hook.py": "Pure enable-hook merge vectors over synthetic registration bytes.",
+    "opf/tools/_opf_import_batch.py": "Pure batch parsing, canonical emission and digest vectors over in-memory bytes.",
     "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
@@ -4219,6 +4322,13 @@ _SCAN_ALLOWED_UNPINNED = (
      "cannot-evaluate head: replays the REGISTERED hook entry's own dispatcher command (a"
      " python3 hook-script argv from the hooks registry), not a git launch; the suite's"
      " lifecycle PATH wrapper pins any git a hook child resolves through PATH"),
+    ("tools/measure_hook_latency.py", "_sample", ("unresolved",),
+     "cannot-evaluate head: the timing funnel launches the command each hooks.json PreToolUse"
+     " entry declares (python3 running the dispatcher, or the self-test's stub dispatcher)"
+     " and that interpreter's -I -c version probe, never git; the dispatcher's own git"
+     " calls run inside the launched script, and this tool's fixture git calls go through"
+     " _git, whose argv carries gc.auto=0, gc.autoDetach=false and maintenance.auto=false"
+     " as literal `-c` pairs in option position"),
     ("tools/selftest_git_fixture_env.py", "_start_member_group", ("unresolved",),
      "cannot-evaluate head: the bounded-run funnel (_run_bounded) receives its argv from its"
      " callers, and every caller passes a sys.executable head (_run_config_member's registered members,"
