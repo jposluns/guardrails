@@ -1373,6 +1373,8 @@ expected-check-ids = [
   "config/member-roster-later-removed",
   "config/member-roster-measured-lane-changed",
   "config/member-roster-measured-outside-account",
+  "config/member-roster-oracle",
+  "config/member-roster-synthetic",
   "config/member-timeout-cannot-evaluate",
   "config/member-timeout-cleanup-failure",
   "config/member-timeout-cleanup-on-raise",

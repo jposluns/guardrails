@@ -1216,10 +1216,13 @@ def _roster_figures(roster):
                  for argv in sorted(SIZING_MEASURED)
                  if (_command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"])
                  != (argv in SIZING_MALFORMED_MEASURED)]
+    # One nonblank line means no line-boundary character at all, not just LF and CR: splitlines
+    # recognizes the full set (VT, FF, FS, GS, RS, NEL and the Unicode separators), and the
+    # padding makes a leading or trailing boundary split too.
     problems += ["stale or unreasoned later measurement: {!r}".format(argv)
                  for argv, citation in sorted(SIZING_LATER_MEASURED.items())
                  if argv not in members or not citation.strip()
-                 or "\n" in citation or "\r" in citation]
+                 or len(("x" + citation + "x").splitlines()) != 1]
     problems += ["bound with no measurement behind it: {!r}".format(argv)
                  for argv in sorted(CONFIG_MEMBER_BOUNDS)
                  if argv not in SIZING_MEASURED and argv not in SIZING_LATER_MEASURED]
