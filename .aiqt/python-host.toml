@@ -1,0 +1,14 @@
+# .aiqt/python-host.toml
+#
+# The SINGLE SOURCE for the exact CPython patch release the maintainers' host runs (PYTHON-HOST-PIN), read by
+# tools/check_python_host_pin.py and tools/check_python_floor.py. Repository-local CI configuration: tracked,
+# not shipped (an [[exclusion]] in .aiqt/core/ownership.toml), like .aiqt/newtab.toml.
+#
+# python-host-patch   "MAJOR.MINOR.PATCH", a patch release of the floor in .aiqt/core/python-floor.toml. The
+#                     host-patch jobs in .github/workflows/quality.yml pin exactly this release, and
+#                     tools/check_python_host_pin.py fails when a pin differs or when the interpreter that
+#                     runs it is another release. When the host interpreter changes, change this value and
+#                     those pins together, in one reviewed change.
+
+format-version = 1
+python-host-patch = "3.14.4"
