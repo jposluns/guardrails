@@ -556,6 +556,25 @@ ALLOWLIST = (
     },
     {
         "side": "ci-only",
+        "identity": "tools/check_rule_behaviour.py --base <ref:origin/${GITHUB_BASE_REF}>",
+        "reason": (
+            "CI binds rule edits against the pull request's target branch, "
+            "derived from trusted event context; the bare leg runs on both sides."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
+        "identity": "tools/check_rule_behaviour.py --base HEAD^",
+        "reason": (
+            "The CI push branch binds against the history-relative literal base "
+            "HEAD^ when it resolves; there is no local --base leg, so this "
+            "literal form is CI-only by design."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
         "identity": (
             "tools/check_branch_root.py --protected <ref:origin/${GITHUB_BASE_REF}> --head <ref:$PR_HEAD_SHA> --max-lag 200"
         ),
