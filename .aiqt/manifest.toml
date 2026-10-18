@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f9c4c713939e1fdd678e7364316171ca3034187cc55f058bb913c5120a23bba4"
+tree-sha256 = "384710b86f3d7b0190115ad2e155f0a264ca82af7e226c0b1c6fd420a9768433"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -66,8 +66,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 348655
-sha256 = "46a6288b287155977f3800258e2bbc1236f491874549352e4a95eb859f6713af"
+bytes = 350196
+sha256 = "8cd3e127d10f867382435eda2ac6af78f5ba893791c414ff93cc86e417311a65"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2372,7 +2372,7 @@ sha256 = "aaf972bbdd8b8520076c1bb6f9d701fab580ed6fd34a91c2ba125d39d463aa11"
 [[sources]]
 path = "README.md"
 bytes = 5065
-sha256 = "0b47a768c5c6fd79b1bde3e89b83c1cafae2dd280b3b2e332d70ee998303cbad"
+sha256 = "543026bdafd6fbf3e5317f85b5980f6d30e90da73357b524494cc1eec6929b2b"
 
 [[sources]]
 path = "RELEASING.md"
@@ -3326,8 +3326,8 @@ sha256 = "b0d8a83421a487098c6e65882b69db2592f6d6783e38f3ad2603949436508cd1"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 102105
-sha256 = "c7e15d566a0c28600673bd384aa8a7b40317465f3e0304f6d7b6942a02562235"
+bytes = 118910
+sha256 = "14f82c84fceac20644c4cc96fa0cc14c616383eac0866998ec131c5c9df7bd9d"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -3761,8 +3761,8 @@ sha256 = "da6927fe31b1fd7049ece63faecfeb40d01e79c2d6a53617202f9b7c4abb32d8"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 105658
-sha256 = "b8fac1c53a83e0f9add839e56d3b0196e1d32f31d76046653457fd0e6dd64ffb"
+bytes = 106130
+sha256 = "2a284d77fb1bab81efd72dbc8250b6ea64c6a912b548ce65f51fe7e3dfe30eeb"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

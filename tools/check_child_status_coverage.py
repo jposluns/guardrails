@@ -19,12 +19,19 @@ with exit 2). This gate holds where it runs:
      probe, and no line above it names Python (read in line order through check_ci_parity.read_runner_text).
      A line names Python when, unless it is a whole-line comment, it holds an interpreter word (python with
      any path before it and any version after it) or a .py word; a # later in the line hides nothing, as it
-     can sit inside a word or a quoted string. In a workflow under .github/workflows/ that names Python, every
-     line that names it sits inside a job the gate parses (a key at two spaces with nothing after its colon,
-     under a top-level jobs: line), after that job's one setup-python step and the PROBE_STEP that is the
-     first step after it, and its interpreter words are python3 or python only: a line before the probe, a
-     line outside every parsed job (a job key at other indentation or with a trailing comment, a line outside
-     jobs:) and an absolute or versioned interpreter (/usr/bin/python3, python3.14) are each a finding. Every
+     can sit inside a word or a quoted string. Every workflow under .github/workflows/ must sit inside a
+     closed grammar the gate reads line by line (read_workflow): key lines and '- ' items, each block at one
+     indentation deeper than its parent, jobs at two spaces under a top-level jobs: key, steps as '- ' items
+     that are each a mapping, and each value a one-line scalar (plain, quoted, or a flow sequence of plain
+     words) or a literal block scalar (|) whose lines are text, a # line in it included. A line the grammar
+     does not classify (a continued scalar, a repeated key, an anchor, alias or tag, a folded or flow-mapping
+     value, a trailing comment, a tab in the indentation) is a finding, never a pass. Inside it, every value
+     that names Python sits in a step with a run: key, after its job's one setup-python step and the probe
+     step right after that; the probe step is exactly PROBE_STEP (its name, shell: bash and run, and no
+     other key, so no if: and no continue-on-error), the job carries no continue-on-error, and the
+     interpreter words are python3 or python only. A value before the probe, in a step with no run: key or
+     outside every job's steps (a job-level defaults: shell, an env value) and an absolute or versioned
+     interpreter (/usr/bin/python3, python3.14) are each a finding. Every
      hook command registered in the plugin's hooks.json is exactly "command": "python3" with
      "args": ["-I", HOOK_TARGET, <mode>] (the shape tools/gen_hooks.py writes), its mode a HANDLERS key with a
      HANDLER_EVENT entry; and every .py word on a non-comment line of a shell launcher (tools/*.sh,
@@ -103,11 +110,13 @@ there; the walk for launchers under opf/ does not descend into a symlinked direc
 a launcher reached only through one is not read; R13 a reviewed load whose target is held in a variable or
 computed stays reviewed when the assignment, argument or computation changes, since its row pins the call text
 only, and the scan then follows the row's targets, not the new one (the self-test shows this limit); R14 a
-workflow or runner line that starts Python through a variable ($PY, ${{ env.PY }}), a console script (pip,
-pytest) or any other name the interpreter pattern does not match is not seen as naming Python. Whether a real
-launcher starts these tools with SIGCHLD ignored, and whether the steps of one CI job share one disposition, are
-not established: each job's probe step reads the disposition of its own step only, so it cannot show what the
-job's other steps inherit.
+workflow value or runner line that starts Python through a variable ($PY, ${{ env.PY }}), a console script
+(pip, pytest) or any other name the interpreter pattern does not match is not seen as naming Python; R15 the
+workflow grammar is this gate's own reading of a YAML subset, held to the self-test's cases and the current
+workflows and not compared with the parser GitHub runs, so a file inside it that GitHub reads another way is
+not seen. Whether a real launcher starts these tools with SIGCHLD ignored, and whether the steps of one CI job
+share one disposition, are not established: each job's probe step reads the disposition of its own step only,
+so it cannot show what the job's other steps inherit.
 """
 import sys
 
@@ -182,10 +191,20 @@ OPF_RUNNER = check_ci_parity.STANDALONE_SOURCE
 RUNNER_PROBES = ((LOCAL_RUNNER, 'run_gate "child-status" python3 -I -B ' + CANONICAL_REL),
                  (OPF_RUNNER, 'run_gate "child-status" python3 -I -B "$here/_child_status.py"'))
 WORKFLOWS_REL = ".github/workflows"
-PROBE_STEP = ("- name: Child exit status observable (before any gate)", "shell: bash",
-              "run: python3 -I -B " + CANONICAL_REL)
-SETUP_PYTHON_RE = re.compile(r"\s*- uses: actions/setup-python@")
-JOB_RE = re.compile(r"  ([A-Za-z0-9_-]+):")
+# The probe step, exactly: these keys in this order with these values, and no other key.
+PROBE_STEP = (("name", "Child exit status observable (before any gate)"), ("shell", "bash"),
+              ("run", "python3 -I -B " + CANONICAL_REL))
+SETUP_PYTHON_USES = "actions/setup-python@"
+JOBS_INDENT = 2
+# The closed workflow grammar (read_workflow): a key line, and the one-line scalars a value may be (quoted and
+# closed on its line, a flow sequence of plain words, or a plain scalar that starts with no indicator and holds
+# no ': ' and no ' #').
+KEY_LINE_RE = re.compile(r"([A-Za-z0-9_-]+):(?: (.*))?")
+SINGLE_QUOTED_RE = re.compile(r"'(?:[^']|'')*'")
+DOUBLE_QUOTED_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
+FLOW_WORDS_RE = re.compile(r"\[[A-Za-z0-9_.-]+(?:, [A-Za-z0-9_.-]+)*\]")
+PLAIN_INDICATORS = "-?:,[]{}#&*!|>'\"%@`"
+PLAIN_BREAK_RE = re.compile(r":(?:\s|$)|\s#")
 # An interpreter word: python with any path before it and any version or ABI letter after it (/usr/bin/python3,
 # python3.14, python3.14t), not part of a longer word (setup-python, python-version, check_python_floor.py).
 # Only PLAIN_INTERPRETERS are accepted in a workflow: the interpreter setup-python puts on PATH.
@@ -483,13 +502,18 @@ def hook_block_finding(rel, tree):
 
 # ---------------------------------------------------------------------------------------- leg 4: launchers
 
+def _text_names_python(text):
+    """True when text holds an interpreter word or a .py word, wherever a # sits in it."""
+    return bool(PYTHON_WORD_RE.search(text) or PY_WORD_RE.search(text))
+
+
 def _names_python(line):
-    """True when a runner or workflow line names Python: an interpreter word or a .py word. Only a whole-line
-    comment is skipped; a # later in the line can sit inside a word or a quoted string, where it starts no
-    comment, so the whole line is read."""
+    """True when a runner line names Python (_text_names_python). Only a whole-line comment is skipped; a # later
+    in the line can sit inside a word or a quoted string, where it starts no comment, so the whole line is
+    read."""
     if line.lstrip().startswith("#"):
         return False
-    return bool(PYTHON_WORD_RE.search(line) or PY_WORD_RE.search(line))
+    return _text_names_python(line)
 
 
 def runner_first_gate_finding(rel, text, probe_line):
@@ -504,61 +528,226 @@ def runner_first_gate_finding(rel, text, probe_line):
     return "{}: no run_gate line".format(rel)
 
 
-def workflow_findings(rel, text):
-    """Findings for a workflow that names Python: each line that names it must sit inside a job the gate parses,
-    after that job's one setup-python step and the probe step right after it, and name no interpreter outside
-    PLAIN_INTERPRETERS. A line read neither as a job key nor as a job's body (another indentation, a key with a
-    trailing comment) ends the current job, so the lines after it sit outside every job until the next key."""
-    lines = text.splitlines()
-    named = [index for index, line in enumerate(lines) if _names_python(line)]
-    if not named:
-        return []
-    out = ["{}:{}: names the interpreter {}, not the python3 or python setup-python puts on PATH".format(
-        rel, index + 1, word) for index in named for word in PYTHON_WORD_RE.findall(lines[index])
-        if word not in PLAIN_INTERPRETERS]
-    if "jobs:" not in lines:
-        return out + ["{}: names Python with no top-level jobs: line".format(rel)]
-    jobs, current = [], None
-    for index in range(lines.index("jobs:") + 1, len(lines)):
-        line = lines[index]
-        match = JOB_RE.fullmatch(line)
-        if match:
-            current = (match.group(1), [])
-            jobs.append(current)
-        elif line and not line.startswith((" ", "#")):
-            break
-        elif line.startswith("   ") or not line.strip() or line.lstrip().startswith("#"):
-            if current is not None:
-                current[1].append(index)
+class _OutsideGrammar(Exception):
+    """A workflow line the closed grammar does not classify; args are (line index, what the line is)."""
+
+
+def _indent(line):
+    return len(line) - len(line.lstrip(" "))
+
+
+def _next_line(lines, at):
+    """The index of the first line from at that is neither blank nor a whole-line comment (outside a literal block
+    scalar, a # line is a YAML comment)."""
+    while at < len(lines) and (not lines[at].strip() or lines[at].lstrip(" ").startswith("#")):
+        at += 1
+    return at
+
+
+def _scalar_ok(value):
+    """True when value is a one-line scalar the grammar reads: quoted and closed on its line, a flow sequence of
+    plain words, or a plain scalar with no indicator first, no ': ', no ' #' and no space at either end."""
+    if value[:1] == "'":
+        return bool(SINGLE_QUOTED_RE.fullmatch(value))
+    if value[:1] == '"':
+        return bool(DOUBLE_QUOTED_RE.fullmatch(value))
+    if value[:1] == "[":
+        return bool(FLOW_WORDS_RE.fullmatch(value))
+    return (bool(value) and value == value.strip() and value[0] not in PLAIN_INDICATORS
+            and not PLAIN_BREAK_RE.search(value))
+
+
+def _block(lines, at, indent):
+    """(node, next index) for the block whose first line, lines[at], sits at indent: a sequence when that line is a
+    '- ' item, else a mapping."""
+    if lines[at][indent:].startswith("- "):
+        return _sequence(lines, at, indent)
+    return _mapping(lines, at, indent)
+
+
+def _mapping(lines, at, indent, first=None):
+    """(("map", indent, entries), next index) for the key lines at indent from lines[at]; first is the (index,
+    text) of a key that shares a '- ' item's line. Each entry is (index, key, value, child): a one-line scalar
+    value, a literal block scalar (value "|" and its ("text", None, lines) child), a nested block (value None)
+    or nothing."""
+    entries, keys = [], set()
+    while True:
+        if first is not None:
+            (index, text), first = first, None
         else:
-            current = None
-    named_set, owned = set(named), set()
-    for job, indexes in jobs:
-        owned.update(indexes)
-        body = [lines[index] for index in indexes]
-        python_at = [position for position, index in enumerate(indexes) if index in named_set]
-        if not python_at:
+            at = _next_line(lines, at)
+            if at == len(lines) or _indent(lines[at]) < indent:
+                return ("map", indent, entries), at
+            if _indent(lines[at]) > indent:
+                raise _OutsideGrammar(at, "a line deeper than the keys around it (a continued scalar or a misplaced "
+                                          "key)")
+            index, text, at = at, lines[at][indent:], at + 1
+        match = KEY_LINE_RE.fullmatch(text)
+        if match is None:
+            raise _OutsideGrammar(index, "not a key line at the indentation of the keys around it")
+        key, value = match.groups()
+        if key in keys:
+            raise _OutsideGrammar(index, "a repeated key {}".format(key))
+        keys.add(key)
+        child = None
+        if value is None:
+            after = _next_line(lines, at)
+            if after < len(lines) and _indent(lines[after]) > indent:
+                child, at = _block(lines, after, _indent(lines[after]))
+        elif value == "|":
+            child, at = _literal(lines, at, indent)
+        elif not _scalar_ok(value):
+            raise _OutsideGrammar(index, "a value that is not a one-line scalar or a literal block scalar (|)")
+        entries.append((index, key, value, child))
+
+
+def _sequence(lines, at, indent):
+    """(("seq", indent, items), next index) for the '- ' items at indent from lines[at]: each item is a one-line
+    scalar (index, None, value, None) or a mapping whose first key shares its line (index, None, None,
+    mapping)."""
+    items = []
+    while True:
+        at = _next_line(lines, at)
+        if at == len(lines) or _indent(lines[at]) < indent:
+            return ("seq", indent, items), at
+        if not lines[at][indent:].startswith("- "):
+            raise _OutsideGrammar(at, "not a '- ' item at the indentation of the items around it")
+        index, body = at, lines[at][indent + 2:]
+        if KEY_LINE_RE.fullmatch(body):
+            child, at = _mapping(lines, at + 1, indent + 2, (index, body))
+            items.append((index, None, None, child))
+        elif _scalar_ok(body):
+            items.append((index, None, body, None))
+            at += 1
+        else:
+            raise _OutsideGrammar(index, "an item that is not a one-line scalar or a mapping")
+
+
+def _literal(lines, at, indent):
+    """(("text", None, lines), next index) for a literal block scalar whose key sits at indent: every following
+    line that is blank or deeper, each an (index, line) read whole as text (a # line in it is text, not a
+    comment), at one indentation set by its first non-blank line."""
+    text, depth = [], None
+    while at < len(lines):
+        line = lines[at]
+        if line.strip():
+            if _indent(line) <= indent:
+                break
+            if depth is None:
+                depth = _indent(line)
+            elif _indent(line) < depth:
+                raise _OutsideGrammar(at, "a literal block scalar line less indented than its first line")
+        text.append((at, line))
+        at += 1
+    return ("text", None, text), at
+
+
+def read_workflow(text):
+    """The workflow's top-level ("map", 0, entries), every line read under the closed grammar; raises
+    _OutsideGrammar naming the first line the grammar does not classify."""
+    return _mapping(text.splitlines(), 0, 0)[0]
+
+
+def _values(node):
+    """(line index, text) of every value under node: each one-line scalar, and each line of a literal block
+    scalar."""
+    kind, _depth, body = node
+    if kind == "text":
+        return list(body)
+    out = []
+    for index, _key, value, child in body:
+        if child is not None:
+            out.extend(_values(child))
+        elif value is not None:
+            out.append((index, value))
+    return out
+
+
+def _workflow_jobs(top):
+    """[(job id, job entries, steps)] under the top-level jobs: key, each step the entries of one '- ' item;
+    raises _OutsideGrammar where jobs: does not hold a mapping at two spaces, a job is not a mapping, or steps:
+    does not hold '- ' items that are each a mapping."""
+    out = []
+    for index, key, _value, child in top[2]:
+        if key != "jobs":
             continue
-        setup = [index for index, line in enumerate(body) if SETUP_PYTHON_RE.match(line)]
-        if len(setup) != 1:
-            out.append("{}: job {} launches Python with {} setup-python steps, not one".format(rel, job, len(setup)))
+        if child is None or child[0] != "map" or child[1] != JOBS_INDENT:
+            raise _OutsideGrammar(child[2][0][0] if child is not None and child[2] else index,
+                                  "jobs: does not hold a mapping of jobs at two spaces")
+        for job_index, job, _job_value, body in child[2]:
+            if body is None or body[0] != "map":
+                raise _OutsideGrammar(job_index, "job {} does not hold a mapping".format(job))
+            steps = []
+            for steps_index, job_key, _steps_value, node in body[2]:
+                if job_key != "steps":
+                    continue
+                if node is None or node[0] != "seq" or any(item[3] is None for item in node[2]):
+                    raise _OutsideGrammar(steps_index, "steps: does not hold '- ' items that are each a mapping")
+                steps = [item[3][2] for item in node[2]]
+            out.append((job, body[2], steps))
+    return out
+
+
+def _step_pairs(step):
+    return tuple((key, value) for _index, key, value, _child in step)
+
+
+def workflow_findings(rel, text):
+    """Findings for one workflow. A workflow outside the closed grammar (read_workflow, _workflow_jobs) is one
+    finding, naming the first line the grammar does not classify, and nothing else in it is placed. Inside it,
+    every value that names Python must sit in a step with a run: key after its job's one setup-python step and
+    the probe step right after that, which is exactly PROBE_STEP; the job carries no continue-on-error, and every
+    interpreter word is one of PLAIN_INTERPRETERS."""
+    try:
+        top = read_workflow(text)
+        jobs = _workflow_jobs(top)
+    except _OutsideGrammar as exc:
+        return ["{}:{}: outside the workflow grammar the gate reads: {}".format(rel, exc.args[0] + 1, exc.args[1])]
+    named = [(index, value) for index, value in _values(top) if _text_names_python(value)]
+    out = ["{}:{}: names the interpreter {}, not the python3 or python setup-python puts on PATH".format(
+        rel, index + 1, word) for index, value in named for word in PYTHON_WORD_RE.findall(value)
+        if word not in PLAIN_INTERPRETERS]
+    placed = set()
+    for job, entries, steps in jobs:
+        step_named = [[index for index, value in _values(("map", None, step)) if _text_names_python(value)]
+                      for step in steps]
+        placed.update(index for indexes in step_named for index in indexes)
+        if not any(step_named):
             continue
-        step = next((index for index in range(setup[0] + 1, len(body))
-                     if body[index].lstrip().startswith("- ")), None)
-        got = tuple(line.strip() for line in body[step:step + len(PROBE_STEP)]) if step is not None else ()
-        if got != PROBE_STEP:
-            out.append("{}: job {}: the first step after setup-python is not the child-status probe step".format(
-                rel, job))
+        setups = [position for position, step in enumerate(steps) if any(
+            key == "uses" and (value or "").startswith(SETUP_PYTHON_USES) for _index, key, value, _child in step)]
+        if len(setups) != 1:
+            out.append("{}: job {} launches Python with {} setup-python steps, not one".format(rel, job, len(setups)))
             continue
-        out.extend("{}:{}: job {}: names Python before the child-status probe step".format(
-            rel, indexes[position] + 1, job) for position in python_at if position < step)
-    out.extend("{}:{}: names Python outside every job the gate parses (a job key it does not read, or a line "
-               "outside jobs:)".format(rel, index + 1) for index in named if index not in owned)
+        probe = setups[0] + 1
+        if probe == len(steps) or _step_pairs(steps[probe]) != PROBE_STEP:
+            out.append("{}: job {}: the step right after setup-python is not the child-status probe step exactly "
+                       "(its name, shell: bash and run, and no other key)".format(rel, job))
+            continue
+        if any(key == "continue-on-error" for _index, key, _value, _child in entries):
+            out.append("{}: job {} launches Python and carries continue-on-error, which would mask a probe "
+                       "failure".format(rel, job))
+        for position, indexes in enumerate(step_named):
+            if position < probe:
+                out.extend("{}:{}: job {}: names Python before the child-status probe step".format(
+                    rel, index + 1, job) for index in indexes)
+            elif position > probe and not any(key == "run" for _index, key, _value, _child in steps[position]):
+                out.extend("{}:{}: job {}: names Python in a step with no run: key".format(rel, index + 1, job)
+                           for index in indexes)
+    out.extend("{}:{}: names Python outside the steps of every job".format(rel, index + 1)
+               for index, _value in named if index not in placed)
     return out
 
 
 def workflow_targets(text):
-    return {match.group(1) for line in text.splitlines() for match in PY_LAUNCH_RE.finditer(line.split("#", 1)[0])}
+    """The .py files a workflow launches through an interpreter word, read in every value the grammar reads (a #
+    inside a word and a literal block scalar's # line included); a workflow outside the grammar, already a
+    finding, is read whole, line by line."""
+    try:
+        values = [value for _index, value in _values(read_workflow(text))]
+    except _OutsideGrammar:
+        values = text.splitlines()
+    return {match.group(1) for value in values for match in PY_LAUNCH_RE.finditer(value)}
 
 
 def _single_binding(lines, pattern, forms):
@@ -1029,13 +1218,32 @@ def _inputs():
     probe_line = RUNNER_PROBES[0][1] + "\n"
     opf_probe = 'run_gate "child-status"                python3 -I -B "$here/_child_status.py"\n'
     quality = real[WORKFLOWS_REL + "/quality.yml"]
-    step = "      " + PROBE_STEP[0] + "\n        " + PROBE_STEP[1] + "\n        " + PROBE_STEP[2] + "\n"
+    probe_lines = ["{}: {}".format(key, value) for key, value in PROBE_STEP]
+    step = "      - " + probe_lines[0] + "\n" + "".join("        " + line + "\n" for line in probe_lines[1:])
     head = "    runs-on: ubuntu-latest\n    steps:\n"
     gate = "      - name: Gate\n        shell: bash\n"
     lone = "jobs:\n  lone:\n" + head + gate
     setup = "      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.14'\n"
     guarded = "jobs:\n  lone:\n" + head + setup + step
     launch = "        run: python3 -I -B tools/check_leaks.py\n"
+    # Each a workflow the closed grammar does not classify at one line: an anchor, a merge key, a tag, a folded
+    # value, a flow mapping, a repeated key, a tab, a literal line less indented than its first, a document
+    # marker, a quoted scalar continued, a step that is not a mapping, and a trailing comment.
+    outside_grammar = (
+        guarded + gate + "        run: &launch python3 -I -B tools/check_leaks.py\n",
+        guarded + "      - <<: *probe\n",
+        guarded + gate + "        run: !!str python3 -I -B tools/check_leaks.py\n",
+        guarded + gate + "        run: >\n          python3 -I -B tools/check_leaks.py\n",
+        "jobs:\n  lone:\n" + head + "      - {uses: actions/setup-python@v5}\n" + step + gate + launch,
+        guarded + gate + launch + "        run: python3 -I -B tools/check_leaks.py --self-test\n",
+        guarded + gate + "\trun: python3 -I -B tools/check_leaks.py\n",
+        guarded + gate + "        run: |\n            echo one\n          python3 -I -B tools/check_leaks.py\n",
+        "---\n" + guarded + gate + launch,
+        guarded + gate + "        run: 'python3 -I -B\n          tools/check_leaks.py'\n",
+        "jobs:\n  lone:\n" + head + "      - python3 -I -B tools/check_leaks.py\n",
+        guarded + gate + "        run: python3 -I -B tools/check_leaks.py # a gate\n")
+    workflows = tuple((WORKFLOWS_REL + "/" + name, _text(ROOT, WORKFLOWS_REL + "/" + name))
+                      for name in _listdir(ROOT, WORKFLOWS_REL) if name.endswith((".yml", ".yaml")))
     here_line = 'here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 2\n'
     texts = {
         "runner": real[LOCAL_RUNNER], "runner-moved": _swap(real[LOCAL_RUNNER], probe_line, ""),
@@ -1054,6 +1262,21 @@ def _inputs():
         "interpreter-spelling": guarded + gate + "        run: /usr/bin/python3 -m tools.check_leaks\n" + gate
                                 + "        run: python3.14 -I -B tools/check_leaks.py\n",
         "hash-inside-word": lone + "        run: echo a#b; python3 -I -B tools/check_leaks.py\n",
+        "probe-in-block-scalar": "jobs:\n  lone:\n" + head + setup + "          note: |\n"
+                                 + "".join("            " + line + "\n" for line in ["- " + probe_lines[0]]
+                                           + probe_lines[1:]) + gate + launch,
+        "probe-if-false": guarded + "        if: false\n" + gate + launch,
+        "probe-continued": guarded + "          || true\n" + gate + launch,
+        "later-job-key": "jobs:\n  one:\n" + head + setup + step + "   two:\n" + head + gate + launch,
+        "targets-hash": guarded + gate + "        run: echo a#b; python3 -I -B tools/child.py\n",
+        "block-hash-line": "jobs:\n  lone:\n" + head + gate + "        run: |\n          echo x\\\n"
+                           "          #; python3 -I -B tools/check_leaks.py\n" + setup + step,
+        "defaults-after-steps": "jobs:\n  lone:\n" + head + "      - run: print('before setup')\n" + setup + step
+                                + "    defaults:\n      run:\n        shell: python {0}\n",
+        "python-outside-run-step": guarded + "      - uses: actions/github-script@v7\n        with:\n"
+                                   "          script: tools/check_leaks.py\n",
+        "job-continue-on-error": "jobs:\n  lone:\n    continue-on-error: true\n" + head + setup + step + gate + launch,
+        "outside-grammar": outside_grammar, "workflows": workflows,
         "shell-unguarded": "#!/bin/sh\n# python3 tools/opf.py in a comment is not a launch\n"
                            "python3 -I -B tools/check_leaks.py\n",
         "shell-outside": "#!/bin/sh\npython3 -I -B /tmp/opf.py\n" + here_line
@@ -1177,7 +1400,14 @@ def _vectors(module, trees, texts, canonical_tree):
     every_launcher = ["tools/a.sh", "opf/seen.sh"] + list(m.EXTRA_SHELL_LAUNCHERS)
     reviewed_reads = _synthetic_reads(m, SYNTHETIC_REVIEWED)
     ci_launcher = "opf/enforcement/ci/x.sh"
-    outside = "names Python outside every job the gate parses (a job key it does not read, or a line outside jobs:)"
+    outside = "names Python outside the steps of every job"
+    grammar = "outside the workflow grammar the gate reads: "
+    deeper = grammar + "a line deeper than the keys around it (a continued scalar or a misplaced key)"
+    not_probe = ("w: job lone: the step right after setup-python is not the child-status probe step exactly (its "
+                 "name, shell: bash and run, and no other key)")
+
+    def workflow(key):
+        return m.workflow_findings("w", texts[key])
 
     vectors = (
         ("copies/real-copies-identical", lambda: not copies("opf", m.CANONICAL_NAMES)
@@ -1215,14 +1445,32 @@ def _vectors(module, trees, texts, canonical_tree):
             "lone", texts["no-setup"]))),
         ("launchers/workflow-names-py-file", lambda: any("0 setup-python" in finding for finding in
                                                          m.workflow_findings("lone", texts["shebang-job"]))),
-        ("launchers/workflow-no-jobs-line", lambda: m.workflow_findings("w", texts["no-jobs-line"])
-         == ["w: names Python with no top-level jobs: line"]),
-        ("launchers/workflow-python-before-setup", lambda: m.workflow_findings("w", texts["python-before-setup"])
+        ("launchers/workflow-no-jobs-line", lambda: workflow("no-jobs-line") == ["w:3: " + outside]),
+        ("launchers/workflow-python-before-setup", lambda: workflow("python-before-setup")
          == ["w:7: job lone: names Python before the child-status probe step"]),
-        ("launchers/workflow-job-key-indented", lambda: m.workflow_findings("w", texts["job-key-indented"])
-         == ["w:5: " + outside]),
-        ("launchers/workflow-job-key-comment", lambda: m.workflow_findings("w", texts["job-key-comment"])
-         == ["w:19: " + outside]),
+        ("launchers/workflow-job-key-indented", lambda: workflow("job-key-indented")
+         == ["w:2: " + grammar + "jobs: does not hold a mapping of jobs at two spaces"]),
+        ("launchers/workflow-job-key-comment", lambda: workflow("job-key-comment")
+         == ["w:14: " + grammar + "a value that is not a one-line scalar or a literal block scalar (|)"]),
+        ("launchers/workflow-later-job-key", lambda: workflow("later-job-key") == ["w:11: " + deeper]),
+        ("launchers/workflow-probe-in-block-scalar", lambda: workflow("probe-in-block-scalar") == [not_probe]),
+        ("launchers/workflow-probe-if-false", lambda: workflow("probe-if-false") == [not_probe]),
+        ("launchers/workflow-probe-continued", lambda: workflow("probe-continued") == ["w:11: " + deeper]),
+        ("launchers/workflow-block-hash-line", lambda: workflow("block-hash-line")
+         == ["w:9: job lone: names Python before the child-status probe step"]),
+        ("launchers/workflow-defaults-after-steps", lambda: workflow("defaults-after-steps") == ["w:14: " + outside]),
+        ("launchers/workflow-python-outside-run-step", lambda: workflow("python-outside-run-step")
+         == ["w:13: job lone: names Python in a step with no run: key"]),
+        ("launchers/workflow-job-continue-on-error", lambda: workflow("job-continue-on-error")
+         == ["w: job lone launches Python and carries continue-on-error, which would mask a probe failure"]),
+        ("launchers/workflow-outside-grammar", lambda: [
+            [grammar in finding for finding in m.workflow_findings("w", text)] for text in texts["outside-grammar"]]
+         == [[True]] * len(texts["outside-grammar"])),
+        ("launchers/workflow-targets-hash-inside-word", lambda: m.workflow_targets(texts["targets-hash"])
+         == {CANONICAL_REL, "tools/child.py"}),
+        ("launchers/real-workflows-in-grammar", lambda: bool(texts["workflows"]) and all(
+            m._workflow_jobs(m.read_workflow(text)) and not m.workflow_findings(rel, text)
+            for rel, text in texts["workflows"])),
         ("launchers/workflow-interpreter-path-needs-probe", lambda: any(
             "0 setup-python" in finding for finding in m.workflow_findings("w", texts["interpreter-path-job"]))),
         ("launchers/workflow-interpreter-spelling", lambda: m.workflow_findings("w", texts["interpreter-spelling"])
@@ -1313,24 +1561,40 @@ MUTANTS = (
     ("runner-first", "if line.split() != probe_line.split():", "if False:", "launchers/runner-first-gate"),
     ("runner-prelude", "        if _names_python(line):\n            return", "        if False:\n            return",
      "launchers/runner-prelude-launch"),
-    ("workflow-step", "        if got != PROBE_STEP:\n", "        if False:\n", "launchers/workflow-first-step"),
-    ("workflow-setup", "        if len(setup) != 1:\n", "        if False:\n", "launchers/workflow-no-setup"),
-    ("workflow-py-word", "return bool(PYTHON_WORD_RE.search(line) or PY_WORD_RE.search(line))",
-     "return bool(PYTHON_WORD_RE.search(line))", "launchers/workflow-names-py-file"),
-    ("workflow-no-jobs", "    if \"jobs:\" not in lines:\n", "    if False:\n", "launchers/workflow-no-jobs-line"),
-    ("workflow-early", "for position in python_at if position < step)", "for position in python_at if False)",
+    ("workflow-step", "if probe == len(steps) or _step_pairs(steps[probe]) != PROBE_STEP:",
+     "if probe == len(steps):", "launchers/workflow-first-step"),
+    ("workflow-step-keys", "_step_pairs(steps[probe]) != PROBE_STEP",
+     "_step_pairs(steps[probe])[:len(PROBE_STEP)] != PROBE_STEP", "launchers/workflow-probe-if-false"),
+    ("workflow-setup", "        if len(setups) != 1:\n", "        if False:\n", "launchers/workflow-no-setup"),
+    ("workflow-py-word", "return bool(PYTHON_WORD_RE.search(text) or PY_WORD_RE.search(text))",
+     "return bool(PYTHON_WORD_RE.search(text))", "launchers/workflow-names-py-file"),
+    ("workflow-early", "            if position < probe:\n", "            if False:\n",
      "launchers/workflow-python-before-setup"),
-    ("workflow-outside", "for index in named if index not in owned)", "for index in named if False)",
-     "launchers/workflow-job-key-indented"),
-    ("workflow-job-reset", "        else:\n            current = None\n", "        else:\n            pass\n",
-     "launchers/workflow-job-key-comment"),
+    ("workflow-outside", "for index, _value in named if index not in placed)", "for index, _value in named if False)",
+     "launchers/workflow-defaults-after-steps"),
+    ("workflow-run-step", "elif position > probe and not any(", "elif False and not any(",
+     "launchers/workflow-python-outside-run-step"),
+    ("workflow-job-masking", "if any(key == \"continue-on-error\" for",
+     "if False and any(key == \"continue-on-error\" for", "launchers/workflow-job-continue-on-error"),
+    ("workflow-jobs-indent", " or child[1] != JOBS_INDENT:", ":", "launchers/workflow-job-key-indented"),
+    ("grammar-deeper", "            if _indent(lines[at]) > indent:\n                raise _OutsideGrammar(",
+     "            if _indent(lines[at]) > indent:\n                at += 1\n                continue\n"
+     "                raise _OutsideGrammar(", "launchers/workflow-probe-continued"),
+    ("grammar-plain", "    return (bool(value) and value == value.strip()",
+     "    return True or (bool(value) and value == value.strip()", "launchers/workflow-job-key-comment"),
+    ("grammar-repeated-key", "        if key in keys:\n", "        if False:\n", "launchers/workflow-outside-grammar"),
+    ("literal-hash", "    if kind == \"text\":\n        return list(body)\n",
+     "    if kind == \"text\":\n        return [(index, line) for index, line in body\n"
+     "                if not line.lstrip().startswith(\"#\")]\n", "launchers/workflow-block-hash-line"),
     ("workflow-interpreter", "if word not in PLAIN_INTERPRETERS]", "if False]",
      "launchers/workflow-interpreter-spelling"),
     ("workflow-interpreter-word", r"(?<![\w.])(?<![A-Za-z0-9]-)(?:[^\s;|&()<>=]*/)?python[0-9.]*[a-z]?(?![\w.-])",
      r"(?<![\w./-])python3?(?=\s)", "launchers/workflow-interpreter-path-needs-probe"),
-    ("comment-split", "return bool(PYTHON_WORD_RE.search(line) or PY_WORD_RE.search(line))",
-     "return bool(PYTHON_WORD_RE.search(line.split(\"#\", 1)[0]) or PY_WORD_RE.search(line.split(\"#\", 1)[0]))",
+    ("comment-split", "return bool(PYTHON_WORD_RE.search(text) or PY_WORD_RE.search(text))",
+     "return bool(PYTHON_WORD_RE.search(text.split(\"#\", 1)[0]) or PY_WORD_RE.search(text.split(\"#\", 1)[0]))",
      "launchers/workflow-hash-inside-word"),
+    ("targets-comment-split", "for match in PY_LAUNCH_RE.finditer(value)}",
+     "for match in PY_LAUNCH_RE.finditer(value.split(\"#\", 1)[0])}", "launchers/workflow-targets-hash-inside-word"),
     ("hook-command", "        if command.get(\"command\") != HOOK_COMMAND:\n", "        if False:\n",
      "launchers/hook-command-exact"),
     ("hook-args", "and len(args) == len(HOOK_ARGS) + 1 and args[:-1] == HOOK_ARGS",
@@ -1391,7 +1655,7 @@ MUTANTS = (
      "completeness/scan-follows-local-imports"),
 )
 UNMUTATED = {"copies/real-copies-identical", "entries/real-entries-pass", "launchers/real-launchers-pass",
-             "completeness/scan-clean-module"}
+             "launchers/real-workflows-in-grammar", "completeness/scan-clean-module"}
 
 
 def _load_mutant(source, directory, number):
@@ -1574,6 +1838,16 @@ def self_test(lane, report_path=None):
                                 ("launchers/workflow-python-before-setup", 0),
                                 ("launchers/workflow-job-key-indented", 0),
                                 ("launchers/workflow-job-key-comment", 0),
+                                ("launchers/workflow-later-job-key", 0),
+                                ("launchers/workflow-probe-in-block-scalar", 0),
+                                ("launchers/workflow-probe-if-false", 0), ("launchers/workflow-probe-continued", 0),
+                                ("launchers/workflow-block-hash-line", 0),
+                                ("launchers/workflow-defaults-after-steps", 0),
+                                ("launchers/workflow-python-outside-run-step", 0),
+                                ("launchers/workflow-job-continue-on-error", 0),
+                                ("launchers/workflow-outside-grammar", 0),
+                                ("launchers/workflow-targets-hash-inside-word", 0),
+                                ("launchers/real-workflows-in-grammar", 0),
                                 ("launchers/workflow-interpreter-path-needs-probe", 0),
                                 ("launchers/workflow-interpreter-spelling", 0),
                                 ("launchers/workflow-hash-inside-word", 0), ("launchers/hook-command-exact", 0),
