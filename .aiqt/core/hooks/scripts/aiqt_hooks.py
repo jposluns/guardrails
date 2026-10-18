@@ -4230,11 +4230,12 @@ def _errexit_set_effect(words):
 
 
 def _errexit_shopt_queries(words):
-    """Whether the shopt command `words` takes a form whose own exit status can be non-zero: -q queries
-    named options, an option letter shopt does not take (anything beyond s, u, o and p) is an error, giving
-    -s and -u together is an error, and option names given without -s or -u report in the exit status
-    whether every name is set. Setting or unsetting (-s or -u, with -o for a set -o option name), and a
-    bare listing with no names, exit 0; whether each NAME is one shopt knows is not judged."""
+    """Whether the shopt command `words` takes a form whose own exit status can be non-zero: an option
+    letter shopt does not take (anything beyond q, s, u, o and p) is an error, giving -s and -u together is
+    an error, and option names given without -s or -u report in the exit status whether every name is set,
+    with or without -q, which only silences that report. Setting or unsetting (-s or -u, with -o for a
+    set -o option name) exits 0 even with -q beside it, and so do a bare listing and a bare -q or -p with
+    no names; whether each NAME is one shopt knows is not judged."""
     letters = ""
     names = []
     for arg in words[1:]:
@@ -4242,11 +4243,13 @@ def _errexit_shopt_queries(words):
             letters += arg[1:]
         else:
             names.append(arg)
-    if "q" in letters or any(letter not in "suop" for letter in letters):
-        return True  # a query, or an option shopt refuses, can fail
+    if any(letter not in "qsuop" for letter in letters):
+        return True  # an option shopt refuses can fail
     if "s" in letters and "u" in letters:
         return True  # shopt refuses setting and unsetting at once
-    return bool(names) and "s" not in letters and "u" not in letters  # names alone report their state
+    if "s" in letters or "u" in letters:
+        return False  # setting or unsetting exits 0: a -q beside them only silences output
+    return bool(names)  # names alone, queried or not, report their state in the exit status
 
 
 def _errexit_armed(current, new):
@@ -4285,15 +4288,19 @@ def _errexit_stops(word, after_or, piped, in_function, pipefail):
     pipeline after || is read as the handling the author wrote for the failure before it, so it counts only
     when it cannot succeed: a lone false, or a return outside a function body, where return fails. A
     pipeline of several commands counts when its last command can fail (without pipefail the pipeline takes
-    that command's status) or when pipefail is on (any stage's failure then fails the pipeline); when its
-    last command gives errexit nothing to stop at and the pipefail state is unknown, it counts as
-    "possible", not certain. Otherwise a lone _ERREXIT_NEVER_FAILS word or a return inside a function body
+    that command's status) or when pipefail is on (any stage's failure then fails the pipeline); each of its
+    commands runs in its own subshell, so an exit or return there only supplies that stage's status and can
+    fail the pipeline like any command; when its last command gives errexit nothing to stop at and the
+    pipefail state is unknown, it counts as "possible", not certain. Otherwise a lone _ERREXIT_NEVER_FAILS
+    word or a return inside a function body
     (which ends the function) gives errexit nothing to stop at, and every other pipeline counts, whatever it
     runs: the hook does not judge whether a command can fail."""
     if piped and after_or:
         return False  # a pipeline of several commands after || handles the failure before it
     if piped:
-        last_stops = not in_function if word == "return" else word not in _ERREXIT_NEVER_FAILS
+        # each pipeline command runs in its own subshell, so an exit or return there only supplies
+        # that stage's status to the pipeline: neither leaves the surrounding context
+        last_stops = word in ("exit", "return") or word not in _ERREXIT_NEVER_FAILS
         if last_stops or pipefail:
             return True  # the last command can fail alone, or pipefail lets any stage fail the pipeline
         return "possible" if pipefail is None else False  # off: the last command decides; unknown: possible
@@ -4315,11 +4322,13 @@ def _errexit_hazard(pairs, tail):
     stopping depends on a pipefail state the walker could not read. pairs and tail are _errexit_statements'
     reading; the tail (None when there is none) counts only as a later statement, never as a set or as a
     step that can fail, and a fully read statement of redirections only also counts as a later statement
-    (bash still runs its redirections, truncating a > target).
+    (bash still runs its redirections, truncating a > target), whatever separator ends it; a closing fi,
+    done, esac or } that carries a redirection closes its construct and is no later statement.
 
     Option changes are tracked in order (_errexit_set_effect), and only one that runs whenever its statement
     runs counts: the first command of its && or || list, outside a pipeline and not sent to the background;
-    a conditional pipefail change leaves the pipefail state unknown. A setting made inside a (...) subshell
+    a pipefail change that is conditional there, or sits inside an if, case or loop body that may not run,
+    leaves the pipefail state unknown. A setting made inside a (...) subshell
     ends with it, a setting made inside a function body takes effect when the function is called, never at
     its definition, and a $(...) command substitution runs with errexit off, as bash runs it without
     inherit_errexit. A statement is no step that can fail when errexit is off as its final pipeline's last
@@ -4341,6 +4350,7 @@ def _errexit_hazard(pairs, tail):
     braces = []  # (a function body, and armed, ignored, on and pipefail outside it) for each open { group
     frames = []  # [if or case, an earlier branch armed, a case pattern comes next] for each open if and case
     functions = 0  # the open function bodies
+    loops = 0  # the open do ... done bodies, whose steps run only as the loop runs
     fn_pending = False  # a function header was read, and its body has not opened yet
     last = None  # (errexit on as it started, its command word or None) for the open pipeline's last command
     exempt = False  # the open statement is part of a condition or a for or select header, up to then or do
@@ -4383,6 +4393,8 @@ def _errexit_hazard(pairs, tail):
             elif word == "!":
                 negated = True  # and in a pipeline negated by !
             elif word in ("then", "do"):
+                if word == "do":
+                    loops += 1  # a do opens a loop or select body
                 exempt = False  # the condition or header ends, and a body follows
             elif word == "{":
                 braces.append((fn_pending, armed, ignored, on, pipefail))
@@ -4399,6 +4411,7 @@ def _errexit_hazard(pairs, tail):
                 break
             k += 1
         words = words[k:]
+        closer = False
         if words and all(word in _ERREXIT_CLOSER_WORDS for word in words):
             for word in words:
                 if word == "}" and braces:
@@ -4408,15 +4421,20 @@ def _errexit_hazard(pairs, tail):
                         armed = outside  # the definition itself runs nothing
                         on = outside_on  # an option change in a body takes effect only when it is called
                         pipefail = outside_pipefail  # pipefail likewise: the definition changes no option
+                elif word == "done" and loops:
+                    loops -= 1  # done closes the loop or select body its do opened
                 elif word in ("fi", "esac") and frames and frames[-1][0] == ("if" if word == "fi" else "case"):
                     armed = _errexit_armed(frames.pop()[1], armed)  # any branch can have failed before fi/esac
             words = []
+            closer = True  # even carrying a redirection, the closer is no later statement
         if kind == "open" and i < count and pairs[i][:2] == ([], ")") and (
                 (fn_pending and not words) or (len(words) == 1 and not words[0].endswith("$"))):
             fn_pending = True  # name () or function name (): a function header, whose () opens no subshell
             i += 1
             previous = ")"
             continue
+        if not words and redirected and armed and not closer:
+            return armed  # a statement of redirections only is a later statement: bash still runs them
         if words:
             if armed:
                 return armed  # a later statement runs after one that failed with nothing to stop it
@@ -4436,7 +4454,8 @@ def _errexit_hazard(pairs, tail):
             if effect is not None and unconditional:
                 on = effect  # an option change that runs whenever its statement runs
             if pipefail_effect is not None:
-                pipefail = pipefail_effect if unconditional else None  # a conditional change: state unknown
+                in_branch = bool(frames) or loops > 0  # an if, case or loop body may not run
+                pipefail = pipefail_effect if unconditional and not in_branch else None  # else: state unknown
             continued = False
         if kind == "and-or":
             joiner = sep
@@ -4452,7 +4471,7 @@ def _errexit_hazard(pairs, tail):
             fn_pending = False
             substitution = bool(argv) and argv[-1].endswith("$")
             scopes.append((on, pipefail, armed, last, exempt, ignored, negated, joiner, piped, functions,
-                           substitution, len(frames), len(braces)))
+                           loops, substitution, len(frames), len(braces)))
             if substitution:
                 on = False  # bash runs a $(...) command substitution with errexit off
             ignored = ignored or exempt or negated  # so does a subshell in a condition or after !
@@ -4461,7 +4480,7 @@ def _errexit_hazard(pairs, tail):
         elif kind == "close":
             if scopes:
                 (outside_on, outside_pipefail, outside_armed, outside_last, exempt, ignored, negated, joiner,
-                 piped, functions, substitution, frame_depth, brace_depth) = scopes.pop()
+                 piped, functions, loops, substitution, frame_depth, brace_depth) = scopes.pop()
                 del frames[frame_depth:]  # a construct left open inside the subshell ends with it
                 del braces[brace_depth:]
                 on = outside_on  # an errexit setting made inside (...) ends with the subshell
@@ -4479,13 +4498,13 @@ def _errexit_hazard(pairs, tail):
         elif kind == "list" and not words and continued:
             continue  # a newline after &&, || or a pipe continues the statement
         else:
-            if kind == "list" and not words and redirected and armed:
-                return armed  # a statement of redirections only is a later statement: bash still runs them
             if kind == "list" and last is not None and last[0] and not exempt and not ignored and not negated:
                 stops = _errexit_stops(last[1], joiner == "||", piped, functions > 0, pipefail)
                 armed = _errexit_armed(armed, stops)  # a later statement of this scope would run after this
             last, negated, joiner, piped, continued = None, False, None, False, False  # a new statement
-    return armed and tail is not None
+    if tail is None:
+        return False  # the last statement never notes: nothing runs after it
+    return armed  # the tail counts only as a later statement, preserving a "possible" reading
 
 
 def inline_errexit(data):
@@ -4503,12 +4522,14 @@ def inline_errexit(data):
     inline set -e does stop at a failure the note is a false alarm, and the note never says a step failed.
     errexit or pipefail turned on another way (bash -e, a sourced file, SHELLOPTS, an alias, a function,
     eval, an earlier call) is not seen, and neither is a set reached through a wrapper (builtin set -e); a
-    pipefail change that may not run leaves the pipefail state unknown, which only softens the note's
-    wording. Apart from the few builtins _errexit_stops reads, it does not judge whether a step can fail or
-    whether a later step depends on it, and it reads a || branch as handling the failure before it whether
-    or not that branch can fail itself; a shopt is judged by its argument form only, never by whether its
-    option names exist, and a redirect-only statement counts as a later statement but never as a step that
-    can fail. A function body is read where it is defined, as if the function were called plainly: bash
+    pipefail change that may not run (after && or ||, in a pipeline, backgrounded, or inside an if, case or
+    loop body) leaves the pipefail state unknown, so a pipeline it could govern notes as possible rather
+    than as certain or silent. Apart from the few builtins _errexit_stops reads, it does not judge whether a
+    step can fail or whether a later step depends on it, and it reads a || branch as handling the failure
+    before it whether or not that branch can fail itself; a shopt is judged by its argument form only, never
+    by whether its option names exist, and a redirect-only statement counts as a later statement but never
+    as a step that can fail. A function body is read where it is defined, as if the function were called
+    plainly: bash
     ignores errexit inside a function called in an && or || list, a condition or a ! pipeline, which is not
     modelled. Compound commands are read only through their reserved words (_errexit_hazard). An unquoted
     heredoc is read again with its delimiter quoted, a best-effort reading the note says it is; nothing after

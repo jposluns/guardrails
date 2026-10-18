@@ -2425,8 +2425,18 @@ _IE_MUTANTS = {
     "shopt": (('if words[0] == "shopt":', 'if False:'),),
     "shopt-unset": (("on = False  # shopt -u -o errexit turns errexit off", "on = True"),),
     "shopt-query": (('if word == "shopt" and _errexit_shopt_queries(words):', "if False:"),),
-    "shopt-set-safe": (('return bool(names) and "s" not in letters and "u" not in letters  # names alone '
-                        "report their state", "return True"),),
+    "shopt-set-safe": (("return False  # setting or unsetting exits 0: a -q beside them only silences output",
+                        "return True"),),
+    "shopt-quiet-set": (("return False  # setting or unsetting exits 0: a -q beside them only silences output",
+                         'return "q" in letters'),),
+    "shopt-set-unset": (("return True  # shopt refuses setting and unsetting at once", "return False"),),
+    "shopt-letters": (('if any(letter not in "qsuop" for letter in letters):', "if False:"),),
+    "shopt-names": (("return bool(names)  # names alone, queried or not, report their state in the exit "
+                     "status", "return False"),),
+    "shopt-bare-query": (("return bool(names)  # names alone, queried or not, report their state in the exit "
+                          "status", 'return "q" in letters or bool(names)'),),
+    "shopt-pipefail": (('return on if "errexit" in names else None, on if "pipefail" in names else None',
+                        'return on if "errexit" in names else None, None'),),
     "no-fallback": ((r"""quoted = _ERREXIT_UNQUOTED_HEREDOC_RE.sub(r"<<\1\2'\3'", command)""",
                      "quoted = command"),),
     "unquoted-body": ((r"""quoted = _ERREXIT_UNQUOTED_HEREDOC_RE.sub(r"<<\1\2'\3'", command)""",
@@ -2483,14 +2493,28 @@ _IE_MUTANTS = {
                        "unknown: possible", "return True"),),
     "pipefail-unknown": (('return "possible" if pipefail is None else False  # off: the last command decides; '
                           "unknown: possible", "return False"),),
-    "pipefail-track": (("pipefail = pipefail_effect if unconditional else None  # a conditional change: "
+    "pipefail-track": (("pipefail = pipefail_effect if unconditional and not in_branch else None  # else: "
                         "state unknown", "pass"),),
+    "pipefail-off": (("pipefail = on  # set -o pipefail turns pipefail on and set +o pipefail turns it off",
+                      "pipefail = True"),),
+    "branch-pipefail": (("in_branch = bool(frames) or loops > 0  # an if, case or loop body may not run",
+                         "in_branch = False"),),
+    "function-pipefail": (("pipefail = outside_pipefail  # pipefail likewise: the definition changes no "
+                           "option", "pass"),),
+    "pipeline-exit": (('last_stops = word in ("exit", "return") or word not in _ERREXIT_NEVER_FAILS',
+                       'last_stops = not in_function if word == "return" else word not in '
+                       "_ERREXIT_NEVER_FAILS"),),
+    "armed-merge": (("if current is True or new is True:", "if False:"),),
     "subshell-pipefail": (("pipefail = outside_pipefail  # and a pipefail setting made inside (...) ends "
                            "with it too", "pass"),),
     "redirect-only": (("return armed  # a statement of redirections only is a later statement: bash still "
                        "runs them", "pass"),),
-    "redirect-only-empty": (('if kind == "list" and not words and redirected and armed:',
-                             'if kind == "list" and not words and armed:'),),
+    "redirect-only-empty": (("if not words and redirected and armed and not closer:",
+                             "if not words and armed and not closer:"),),
+    "redirect-later-kind": (("if not words and redirected and armed and not closer:",
+                             'if kind == "list" and not words and redirected and armed and not closer:'),),
+    "closer-redirect": (("closer = True  # even carrying a redirection, the closer is no later statement",
+                         "pass"),),
     "and-final": (('stops = _errexit_stops(last[1], joiner == "||", piped, functions > 0, pipefail)',
                    'stops = _errexit_stops(last[1], joiner is not None, piped, functions > 0, pipefail)'),),
     "function-body": (('stops = _errexit_stops(last[1], joiner == "||", piped, functions > 0, pipefail)',
@@ -2521,9 +2545,13 @@ _IE_MUTANTS = {
                           "pass"),),
     "later-step": (("armed = _errexit_armed(armed, stops)  # a later statement of this scope would run after "
                     "this", "return True"),),
-    "tail": (("return armed and tail is not None", "return False"),),
-    "tail-redirect": (("return armed and tail is not None", "return armed and bool(tail)"),),
-    "nothing-after": (("return armed and tail is not None", "return on"),),
+    "tail": (('return armed  # the tail counts only as a later statement, preserving a "possible" reading',
+              "return False"),),
+    "tail-redirect": (('return armed  # the tail counts only as a later statement, preserving a "possible" '
+                       "reading", "return armed and bool(tail)"),),
+    "possible-tail": (('return armed  # the tail counts only as a later statement, preserving a "possible" '
+                       "reading", "return bool(armed)"),),
+    "nothing-after": (("return False  # the last statement never notes: nothing runs after it", "return on"),),
 }
 
 # (label, command, mutant): rows the real handler must note, each silent under its mutant.
@@ -2574,6 +2602,28 @@ _IE_FIRE_ROWS = (
      "set -e; true || set -o pipefail; a | true; b", "pipefail-unknown"),
     ("(ie-f32) a fully read statement of redirections only still runs them",
      "set -e; make; > /abs/build.log", "redirect-only"),
+    ("(ie-f33) shopt -s with -u is an error whose status can fail", "set -e; shopt -s -u extglob; echo after",
+     "shopt-set-unset"),
+    ("(ie-f34) an option letter shopt does not take can fail", "set -e; shopt -x; echo after",
+     "shopt-letters"),
+    ("(ie-f35) shopt names alone report their state", "set -e; shopt extglob; echo after", "shopt-names"),
+    ("(ie-f36) a function definition does not run its set +o pipefail",
+     "set -eo pipefail; f() { set +o pipefail; }; false | true; echo after", "function-pipefail"),
+    ("(ie-f37) shopt -s -o pipefail turns pipefail on", "shopt -s -o pipefail; set -e; false | true; echo after",
+     "shopt-pipefail"),
+    ("(ie-f38) an exit in a pipeline only fails its own stage", "set -e\ntrue | exit 1\necho after",
+     "pipeline-exit"),
+    ("(ie-f39) a return in a pipeline inside a function only fails its own stage",
+     "set -e; f() { true | return 1; echo after; }; f", "pipeline-exit"),
+    ("(ie-f40) a pipefail change inside an if body may not run",
+     "set -o pipefail; set -e; if a; then set +o pipefail; fi; false | true; echo after", "branch-pipefail"),
+    ("(ie-f41) a pipefail change inside a loop body may not run",
+     "set -o pipefail; set -e; while a; do set +o pipefail; done; false | true; echo after",
+     "branch-pipefail"),
+    ("(ie-f42) a background statement of redirections only still runs them",
+     "set -e; false\n> /abs/log &", "redirect-later-kind"),
+    ("(ie-f43) an && list of redirections only is a later statement",
+     "set -e; false; > /abs/a && > /abs/b", "redirect-only"),
 )
 
 # (label, command, mutant): rows the real handler must leave silent, each noted by its mutant. "over-broad"
@@ -2655,6 +2705,25 @@ _IE_SILENT_ROWS = (
     ("(ie-n61) a pipefail set inside a subshell ends with it", "(set -o pipefail; a); set -e; x | true; b",
      "subshell-pipefail"),
     ("(ie-n62) a trailing ; leaves no later statement", "set -e; a;", "redirect-only-empty"),
+    ("(ie-n63) a } carrying a redirection closes its group", "set -e; { false; } > /abs/log",
+     "closer-redirect"),
+    ("(ie-n64) fi carrying a redirection closes its if", "set -e; if a; then false; fi > /abs/log",
+     "closer-redirect"),
+    ("(ie-n65) done carrying a redirection closes its loop",
+     "set -e; for f in x y; do false; done > /abs/log", "closer-redirect"),
+    ("(ie-n66) esac carrying a redirection closes its case",
+     "set -e; case $x in a) false;; esac > /abs/log", "closer-redirect"),
+    ("(ie-n67) a loop fed by a redirection on its done",
+     'set -e\nwhile read -r l; do echo "$l"; done < /abs/list.txt', "closer-redirect"),
+    ("(ie-n68) shopt -qs sets silently and exits 0", "set -e; shopt -qs extglob; echo after",
+     "shopt-quiet-set"),
+    ("(ie-n69) shopt -q -s sets silently and exits 0", "set -e; shopt -q -s extglob; echo after",
+     "shopt-quiet-set"),
+    ("(ie-n70) a bare shopt -q exits 0", "set -e; shopt -q; echo after", "shopt-bare-query"),
+    ("(ie-n71) set +o pipefail turns pipefail off",
+     "set -eo pipefail; set +o pipefail; false | true; echo after", "pipefail-off"),
+    ("(ie-n72) a function definition does not run its set -o pipefail",
+     "set -e; f() { set -o pipefail; }; false | true; echo after", "function-pipefail"),
 )
 
 
@@ -2807,6 +2876,29 @@ def _test_inline_errexit(failures, tmp):
             if (flipped == (0, None, None) if want_note else noted(flipped)) is not True:
                 failures.append("{}: the {} mutant must {} this row, so the row shows the rule decides it; got "
                                 "{!r}".format(label, mutant, "silence" if want_note else "note", flipped))
+    # Wording-level rules need wording-level flips: the stronger of two armed readings must win whichever
+    # order the branches close in, and a "possible" reading must survive the tail path. Each check pins the
+    # exact note from the real handler, then shows its mutant degrading that wording.
+    for label, command, suffix, mutant, degraded_suffix in (
+            ("(ie-note-armed-merge)",
+             "set -e; if a; then set -o pipefail; fi; if b; then false | true; else false; fi; echo after",
+             "", "armed-merge", aiqt_hooks._ERREXIT_PIPEFAIL_NOTE),
+            ("(ie-note-possible-tail-flip)",
+             "set -e; true || set -o pipefail; false | true; echo after <(true)",
+             aiqt_hooks._ERREXIT_PIPEFAIL_NOTE + aiqt_hooks._ERREXIT_PARTIAL_NOTE, "possible-tail",
+             aiqt_hooks._ERREXIT_PARTIAL_NOTE)):
+        used.add(mutant)
+        want = aiqt_hooks._ERREXIT_NOTE + suffix
+        if handler(payload(command)) != aiqt_hooks._allow_note(want):
+            failures.append("{} expected the note {!r} for {!r}".format(label, want, command))
+        if mutant not in mutants:
+            failures.append("{}: its mutant {} was not built".format(label, mutant))
+            continue
+        degraded = aiqt_hooks._allow_note(aiqt_hooks._ERREXIT_NOTE + degraded_suffix)
+        if mutants[mutant](payload(command)) != degraded:
+            failures.append("{}: the {} mutant must change the note wording for {!r}, so the check shows the "
+                            "rule decides it".format(label, mutant, command))
+
     unused = sorted(set(_IE_MUTANTS) - used)
     if unused:
         failures.append("(ie-mutant-unused) mutants no row uses: {}".format(", ".join(unused)))
@@ -2820,7 +2912,13 @@ def _test_inline_errexit(failures, tmp):
                                    ("(ie-note-tail)", "set -e; a; b <(true)", aiqt_hooks._ERREXIT_PARTIAL_NOTE),
                                    ("(ie-note-pipefail)", "set -e; true || set -o pipefail; a | true; b",
                                     aiqt_hooks._ERREXIT_PIPEFAIL_NOTE),
-                                   ("(ie-note-pipefail-on)", "set -euo pipefail; a | true; b", "")):
+                                   ("(ie-note-pipefail-on)", "set -euo pipefail; a | true; b", ""),
+                                   ("(ie-note-branch-pipefail)",
+                                    "set -e; if a; then set -o pipefail; fi; false | true; echo after",
+                                    aiqt_hooks._ERREXIT_PIPEFAIL_NOTE),
+                                   ("(ie-note-possible-tail)",
+                                    "set -e; true || set -o pipefail; false | true; echo after <(true)",
+                                    aiqt_hooks._ERREXIT_PIPEFAIL_NOTE + aiqt_hooks._ERREXIT_PARTIAL_NOTE)):
         want = aiqt_hooks._ERREXIT_NOTE + suffix
         if handler(payload(command)) != aiqt_hooks._allow_note(want):
             failures.append("{} expected the note {!r} for {!r}".format(label, want, command))
@@ -3479,10 +3577,13 @@ def _deadline_shape_rerun_failures():
 
 
 def _deadline_note_only_deny_failures():
-    """(dl-shape-note-only-deny, dl-shape-note-only-deny-control) A denying outcome goes red for every shape
+    """(dl-shape-note-only-deny, dl-shape-note-only-deny-control, dl-shape-note-only-nonempty) A denying
+    outcome goes red for every shape
     of every mode in NOTE_ONLY_PRETOOL_MODES, independent of timing: a synthetic deny within every time
     bound must give one failure line naming the never-deny rule and no diagnostic re-run (the decision alone
-    is the failure), while the mode's expected outcome on the same case stays green. No handler is run."""
+    is the failure), while the mode's expected outcome on the same case stays green. A note-only mode with
+    no timed shape at all is itself a failure, so an empty shape collection cannot pass vacuously. No
+    handler is run."""
     out = []
     retimed = []
 
@@ -3491,7 +3592,11 @@ def _deadline_note_only_deny_failures():
         return 0.02, 0.15, "deny"
 
     for name in aiqt_hooks.NOTE_ONLY_PRETOOL_MODES:
-        for shape in _DEADLINE_CASES.get(name, ()):
+        shapes = _DEADLINE_CASES.get(name, ())
+        if not shapes:
+            out.append("(dl-shape-note-only-nonempty) note-only mode {} has no timed shape, so the never-deny "
+                       "rule would be asserted on nothing".format(name))
+        for shape in shapes:
             retimed.clear()
             lines = _deadline_shape_verdicts([(name, shape, 65536, "/", 0.03, 0.15, "deny")], retime)
             if len(lines) != 1 or retimed or "must never deny" not in lines[0]:
