@@ -1352,6 +1352,27 @@ def self_test_isolated():
             check("homes2-prior-imported-baseline",
                   isinstance(obs.get("prior"), dict)
                   and obs["prior"].get("imported") == {"imported:BI-1": leaf_digest})
+            # The imported WORKLOG leaf joins the baseline through its [[entry]] rows (worklog.imported.toml
+            # is a ledger, not an index): its committed entries carry the same engine digest beside the
+            # index-leaf rows (red when the ledger leaf is skipped or read under the [[record]] member).
+            wl_rel = "{}/{}".format(machine_rel, _opf_store.IMPORTED_WORKLOG_NAME)
+            _write(homes2_repo, wl_rel,
+                   'schema = 1\n\n[[entry]]\n'
+                   'id = "imported:WL-1"\n'
+                   'type = "worklog"\n'
+                   'status = "recorded"\n'
+                   'kind = "added"\n'
+                   'summary = "i1"\n'
+                   '[entry.actor]\nkind = "importer"\nid = "assistant"\n')
+            _git_setup(homes2_repo, home, "add", "-A")
+            _git_setup(homes2_repo, home, "commit", "-m", "an imported worklog entry")
+            with open(str(homes2_repo / wl_rel), "rb") as fh:
+                wl_digest = _opf_check._record_digest(tomllib.loads(fh.read().decode("utf-8"))["entry"][0])
+            obs, notes = gather(_Res(homes2_repo, machine_rel))
+            check("homes2-prior-imported-worklog-entries",
+                  isinstance(obs.get("prior"), dict)
+                  and obs["prior"].get("imported") == {"imported:BI-1": leaf_digest,
+                                                       "imported:WL-1": wl_digest})
             _write(homes2_repo, leaf_rel, 'schema = 1\n\n' + leaf_row)
             _git_setup(homes2_repo, home, "commit", "-am", "an imported row with no id")
             obs, notes = gather(_Res(homes2_repo, machine_rel))
@@ -1360,6 +1381,48 @@ def self_test_isolated():
         finally:
             _opf_store.SUPPORTED_HOMES = prev_homes
             _opf_store.SUPPORTED_SPEC_VERSION = prev_ssv
+
+        # 8. A homes-1 HEAD that DECLARES the imported series (spec_version 1.3.0) while the tooling
+        # supports it is declared but INACTIVE: the baseline branch reads the ONE activation flag
+        # (_opf_check.imported_series_active, which needs the graded 2.0.0 / homes = 2 declaration),
+        # never its declaration-and-support arm (_opf_store.imported_series_declared) alone, so the
+        # prior imported baseline stays the honest empty one even with an imported leaf committed, at
+        # homes support 1 and 2 alike (red when the reconstruction reads the declaration arm).
+        h1_repo = base / "homes1-declared"
+        h1_repo.mkdir()
+        _git_setup(h1_repo, home, "init")
+        _write_store(h1_repo)
+        h1_manifest = h1_repo / machine_rel / _MANIFEST_NAME
+        h1_manifest.write_text(h1_manifest.read_text(encoding="utf-8").replace(
+            'spec_version = "1.0.0"\n', 'spec_version = "{}"\n'.format(
+                _opf_store.IMPORTED_SPEC_VERSION)), encoding="utf-8")
+        _write(h1_repo, "{}/backlog_item{}".format(machine_rel, _opf_store.IMPORTED_INDEX_SUFFIX),
+               'schema = 1\n\n[[record]]\n'
+               'id = "imported:BI-1"\n'
+               'type = "backlog_item"\n'
+               'status = "done"\n'
+               'title = "t"\n'
+               '[record.actor]\nkind = "importer"\nid = "assistant"\n')
+        _git_setup(h1_repo, home, "add", "-A")
+        _git_setup(h1_repo, home, "commit", "-m", "seed a homes-1 store declaring the imported series")
+        h1_decl = {"opf": {"spec_version": _opf_store.IMPORTED_SPEC_VERSION}}
+        prev_homes = _opf_store.SUPPORTED_HOMES
+        prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
+        h1_empty = []
+        try:
+            _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
+            for supported_homes in (1, 2):
+                _opf_store.SUPPORTED_HOMES = supported_homes
+                obs, notes = gather(_Res(h1_repo, machine_rel))
+                h1_empty.append(
+                    _opf_store.imported_series_declared(h1_decl)
+                    and not _opf_check.imported_series_active(h1_decl)
+                    and isinstance(obs.get("prior"), dict)
+                    and obs["prior"].get("imported") == {})
+        finally:
+            _opf_store.SUPPORTED_HOMES = prev_homes
+            _opf_store.SUPPORTED_SPEC_VERSION = prev_ssv
+        check("homes1-declared-prior-imported-inert-with-support-raised", h1_empty == [True, True])
     except OSError as exc:
         print("opf observe self-test: harness error: could not build a git fixture ({}); fail-closed".format(
             exc), file=sys.stderr)
@@ -1373,7 +1436,8 @@ def self_test_isolated():
         return 1
     print("opf observe self-test: PASS (tracked/untracked; 0/1/multiple remotes; prior from a committed "
           "HEAD with an engine-matching immutable-body digest; unborn HEAD -> empty prior; a non-repo dir "
-          "omits remote and prior with a note; a homes-2 HEAD's imported baseline)")
+          "omits remote and prior with a note; a homes-2 HEAD's imported baseline, worklog entries "
+          "included; a homes-1 HEAD declaring the series stays inactive)")
     return 0
 
 

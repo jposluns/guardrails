@@ -3460,6 +3460,32 @@ def _self_test_contexts(check, root_fd, now):
         _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = prev_gates
     ctx = ctx_of(imported_full)
     check("an imported row breaks the homes-1 proof", _counter_state(ctx, ctx.counters.model)[1] != [])
+    # A homes-1 manifest that DECLARES the imported series (spec_version 1.3.0) with the tooling's support
+    # raised is declared but INACTIVE: this reader takes the ONE activation flag
+    # (_opf_check.imported_series_active, which needs the graded 2.0.0 / homes = 2 declaration), never its
+    # declaration-and-support arm (_opf_store.imported_series_declared) alone, so the proof neither
+    # requires nor accepts an imported row, at homes support 1 and 2 alike (red when this reader reads the
+    # declaration arm).
+    declared_h1 = {"opf": {"spec_version": _opf_store.IMPORTED_SPEC_VERSION}}
+    declared_inert = []
+    try:
+        _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
+        for supported_homes in (1, 2):
+            _opf_store.SUPPORTED_HOMES = supported_homes
+            ctx = ctx_of(full)
+            ctx.manifest = declared_h1
+            clean_rows_ok = _counter_state(ctx, ctx.counters.model)[1] == []
+            ctx = ctx_of(imported_full)
+            ctx.manifest = declared_h1
+            declared_inert.append(
+                _opf_store.imported_series_declared(declared_h1)
+                and not _opf_check.imported_series_active(declared_h1)
+                and clean_rows_ok
+                and _counter_state(ctx, ctx.counters.model)[1] != [])
+    finally:
+        _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = prev_gates
+    check("the declared-but-inactive homes-1 store keeps the clean completeness proof",
+          declared_inert == [True, True])
     # Schema markers are exact integers everywhere this verb reads one (codex QA3 F1's sibling checks):
     # a bool or float marker (True == 1, 1.0 == 1 under ==) is refused, never read as schema 1.
     for marker in (True, 1.0):

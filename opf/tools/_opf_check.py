@@ -1928,7 +1928,8 @@ def _gather_imported_rows(root_fd, machine_rel, enabled_types, rep):
     [[record]] rows of <type>.imported.index.toml, and the [[entry]] rows of worklog.imported.toml.
     Returns (rows, unread): `rows` holds (counter_key, id, row) for every row whose id lies in its own leaf
     series, imported:<NS>-<n> over the leaf type namespace, in leaf then row order; `unread` holds the
-    counter keys whose leaf could not be read (a CANNOT-EVALUATE is already recorded), so no later check
+    counter keys whose leaf could not be read (a CANNOT-EVALUATE is already recorded here, and every later
+    per-series check that skips such a key discloses its own), so no later check
     reads an unread leaf as an empty one. An ABSENT leaf contributes no rows, and every id its counter
     allocated is still owed (C-NO-DELETION). A row outside its leaf series (a clean id, another namespace,
     a non-string or malformed id) is a finding here, the series grammar; the rest of the imported envelope
@@ -1991,13 +1992,16 @@ def _check_imported_no_deletion(rows, unread, high, floor, namespaces, rep):
     present imported ids must be exactly floor+1 .. high-water on that row own number line, apart from the
     clean one. Imported records never rotate (spec 12), so the imported leaves are their only location. The
     same O(present) arithmetic as the clean scan: an overhang COUNT above the max present id, then the first
-    gap below it, never a range() expansion of the high-water (F15). A key whose leaf is unread, or whose
-    counter is absent or malformed (the C-COUNTERS finding), is skipped here, never read as a deletion."""
+    gap below it, never a range() expansion of the high-water (F15). A key whose leaf is unread is a named
+    CANNOT-EVALUATE for this check, never read as a deletion and never a silent per-series pass; a key whose
+    counter is absent or malformed (the C-COUNTERS finding) is skipped here."""
     present = {}
     for key, rid, _row in rows:
         present.setdefault(key, set()).add(parse_series_id(rid)[2])
     for key in sorted(IMPORTED_PREFIX + ns for ns in namespaces):
         if key in unread:
+            rep.cant("C-NO-DELETION: the {} imported leaf could not be read; whether its allocated ids "
+                     "are all present is not evaluated (spec 8.2/8.3)".format(key))
             continue
         hw = high.get(key)
         if not (isinstance(hw, int) and not isinstance(hw, bool) and hw >= 0):
@@ -2023,11 +2027,15 @@ def _check_imported_append_only(prior_imported, rows, unread, rep):
     MUST be immutable after publication; a correction is a fresh import run). Every imported id in the prior
     committed snapshot must still be present with an unchanged canonical body digest (_record_digest, the
     digest the prior carries). A prior that carries no imported baseline is a named CANNOT-EVALUATE, never a
-    silent pass; an id whose leaf is unread is skipped, its CANNOT-EVALUATE already recorded."""
+    silent pass; an unread leaf makes its series a named CANNOT-EVALUATE for this check too (its prior ids
+    are skipped rather than read as deleted, and the skip is disclosed, never a silent per-series pass)."""
     if prior_imported is None:
         rep.cant("C-HISTORY-APPEND-ONLY: the prior committed snapshot carries no imported-series baseline; "
                  "imported immutability across time (spec 8.3) is not evaluated")
         return
+    for key in sorted(unread):
+        rep.cant("C-HISTORY-APPEND-ONLY: the {} imported leaf could not be read; imported immutability "
+                 "across time (spec 8.3) is not evaluated for that series".format(key))
     current = {}
     for _key, rid, row in rows:
         current.setdefault(rid, row)
@@ -3285,10 +3293,15 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     rep.ran("C-CONTIGUITY")
     _check_worklog_contiguous(merged.keys(), rep)
     # imported:WL tiles its own line, apart from the clean tiling above (spec 8.2): `merged` stays clean-only,
-    # so clean release spans, frozen coverage and the changelog gates never read an imported entry.
-    if imported and IMPORTED_PREFIX + "WL" not in imported_unread:
-        _check_imported_worklog_contiguous([parse_series_id(rid)[2] for key, rid, _row in imported_rows
-                                            if key == IMPORTED_PREFIX + "WL"], rep)
+    # so clean release spans, frozen coverage and the changelog gates never read an imported entry. An unread
+    # imported worklog leaf is a named CANNOT-EVALUATE for this check, never a silent per-series pass.
+    if imported:
+        if IMPORTED_PREFIX + "WL" in imported_unread:
+            rep.cant("C-CONTIGUITY: the imported:WL imported leaf could not be read; imported worklog "
+                     "contiguity (spec 8.2) is not evaluated")
+        else:
+            _check_imported_worklog_contiguous([parse_series_id(rid)[2] for key, rid, _row in imported_rows
+                                                if key == IMPORTED_PREFIX + "WL"], rep)
 
     # --- C-TRACKED / C-SYNC-AGREE: topology, from the injected observations (spec 5.1/5.6) ------------
     rep.ran("C-TRACKED")
@@ -5177,7 +5190,12 @@ def self_test():
             # An unreadable imported leaf, or one with no [[record]] array, is a named CANNOT-EVALUATE and is
             # never read as an empty leaf: neither its allocated ids nor a prior imported record are reported
             # deleted (spec 11: an unreadable input fails closed; red when an unread leaf joins the
-            # no-deletion or the append-only scan).
+            # no-deletion or the append-only scan). Each per-series check that skips the unread series
+            # reports it as NOT EVALUATED itself: C-NO-DELETION and C-HISTORY-APPEND-ONLY name the skipped
+            # imported:BI series as cannot-evaluate rather than keeping a per-check PASS over a leaf
+            # nothing read (red when either skip goes back to a silent per-series pass), while the clean
+            # imported worklog line still grades (C-CONTIGUITY stays PASS here: its leaf is absent, not
+            # unread).
             _i3_unread = []
             for _i3_text in ("record = [ not toml", "schema = 1\nrecord = 1\n"):
                 _i3_ur = _i3_run(_i3_machine(imp={"imported:BI": 2}, leaves={
@@ -5186,9 +5204,115 @@ def self_test():
                     _i3_ur is not None and _i3_ur.status == CANNOT_EVALUATE
                     and _i3_ur.checks.get("C-ID-SPACE") == "CANNOT-EVALUATE"
                     and any("backlog_item.imported.index.toml" in m for m in _i3_ur.cannot_evaluate)
-                    and not any("imported:BI" in m for m in _i3_msgs(_i3_ur, "C-NO-DELETION")
+                    and _i3_ur.checks.get("C-NO-DELETION") == "CANNOT-EVALUATE"
+                    and any("imported:BI" in m and "not evaluated" in m
+                            for m in _i3_msgs(_i3_ur, "C-NO-DELETION"))
+                    and _i3_ur.checks.get("C-HISTORY-APPEND-ONLY") == "CANNOT-EVALUATE"
+                    and any("imported:BI" in m and "not evaluated" in m
+                            for m in _i3_msgs(_i3_ur, "C-HISTORY-APPEND-ONLY"))
+                    and _i3_ur.checks.get("C-CONTIGUITY") == "PASS"
+                    and not any("absent" in m or "changed" in m
+                                for m in _i3_msgs(_i3_ur, "C-NO-DELETION")
                                 + _i3_msgs(_i3_ur, "C-HISTORY-APPEND-ONLY")))
             check("imported-unread-leaf-cannot-evaluate-never-deleted", _i3_unread == [True, True])
+            # The imported WORKLOG leaf unread: C-CONTIGUITY reports the imported:WL series as not
+            # evaluated too (red when the unread leaf keeps the contiguity PASS), beside the same
+            # C-NO-DELETION and C-HISTORY-APPEND-ONLY disclosures, and the clean worklog tiling still
+            # grades (no clean C-CONTIGUITY finding on this store).
+            _i3_wldig = _record_digest(_i3_wl(1))
+            _i3_wlur = _i3_run(_i3_machine(imp={"imported:WL": 1}, leaves={
+                "worklog.imported.toml": "entry = [ not toml"}), obs=_i3_obs({"imported:WL-1": _i3_wldig}))
+            check("imported-unread-worklog-leaf-not-evaluated-per-check",
+                  _i3_wlur is not None and _i3_wlur.status == CANNOT_EVALUATE
+                  and _i3_wlur.checks.get("C-CONTIGUITY") == "CANNOT-EVALUATE"
+                  and any("imported:WL" in m and "not evaluated" in m
+                          for m in _i3_msgs(_i3_wlur, "C-CONTIGUITY"))
+                  and not any(m.startswith("C-CONTIGUITY: the worklog")
+                              for m in _i3_msgs(_i3_wlur, "C-CONTIGUITY"))
+                  and _i3_wlur.checks.get("C-NO-DELETION") == "CANNOT-EVALUATE"
+                  and any("imported:WL" in m and "not evaluated" in m
+                          for m in _i3_msgs(_i3_wlur, "C-NO-DELETION"))
+                  and _i3_wlur.checks.get("C-HISTORY-APPEND-ONLY") == "CANNOT-EVALUATE"
+                  and any("imported:WL" in m and "not evaluated" in m
+                          for m in _i3_msgs(_i3_wlur, "C-HISTORY-APPEND-ONLY")))
+            # The per-series grading over EVERY enabled namespace, never only the ones the vectors above
+            # use: each enabled BASELINE namespace and a module-tier one (governance's MA, enabled inside
+            # the fixture) takes the same five vectors end to end, per namespace and per check verdict.
+            # The positive leaf (rows within the high-water) leaves only the activation tripwire; an id
+            # above its own imported high-water is the exact C-ID-SPACE finding; a duplicated id is the
+            # C-ID-SPACE duplicate finding; an allocated id absent from the leaf is the C-NO-DELETION
+            # overhang finding with its exact count; and a committed row that changed or vanished since
+            # the prior snapshot is each a C-HISTORY-APPEND-ONLY finding. Row content stays ungraded
+            # (C-IMPORTED-SCHEMA work): only the id series, the counters, and the digests grade here
+            # (red when the per-series grading narrows to some namespaces, e.g. a gather that reads only
+            # the BI and WL leaves).
+            _i3_type_of = {ns: t for t, ns in BASELINE_TYPES.items()}
+            _i3_type_of["MA"] = "maintainer_action"
+
+            def _i3_srow(ns, n, mark="t"):
+                if ns == "WL":
+                    row = dict(_i3_wl(n))
+                    row["summary"] = mark
+                    return row
+                return {"id": "imported:{}-{}".format(ns, n), "type": _i3_type_of[ns], "status": "done",
+                        "title": mark, "actor": {"kind": "importer", "id": "assistant"}}
+
+            def _i3_ns_machine(ns, imp_high, rows):
+                tname = _i3_type_of[ns]
+                if tname in _LEDGER_TYPES:
+                    leaf = {_opf_store.IMPORTED_WORKLOG_NAME: {"schema": 1, "entry": rows}}
+                else:
+                    leaf = {tname + _opf_store.IMPORTED_INDEX_SUFFIX: idx(rows)}
+                m = _i3_machine(imp={"imported:" + ns: imp_high}, leaves=leaf)
+                if ns == "MA":
+                    m["manifest.toml"]["modules"] = {"governance": True}
+                    m["manifest.toml"]["types"]["maintainer_action"] = {"namespace": "MA"}
+                    m["counters.toml"]["counters"]["MA"] = 0
+                    m["maintainer_action.index.toml"] = idx([])
+                return m
+
+            _i3_every_ns = _i3_ns + ["MA"]
+            _i3_pos, _i3_ovr, _i3_dup2, _i3_del2, _i3_his = [], [], [], [], []
+            for _i3_x in _i3_every_ns:
+                _i3_xr = _i3_run(_i3_ns_machine(_i3_x, 2, [_i3_srow(_i3_x, 1), _i3_srow(_i3_x, 2)]))
+                _i3_pos.append(_i3_tripwire_only(_i3_xr))
+                _i3_xr = _i3_run(_i3_ns_machine(_i3_x, 1, [_i3_srow(_i3_x, 1), _i3_srow(_i3_x, 2)]))
+                _i3_ovr.append(_i3_xr is not None and _i3_xr.checks.get("C-ID-SPACE") == "FINDING"
+                               and _i3_msgs(_i3_xr, "C-ID-SPACE") == [
+                                   "C-ID-SPACE: imported series: id 'imported:{0}-2' exceeds the "
+                                   "imported:{0} high-water 1 (unreserved id; spec 8.2)".format(_i3_x)])
+                _i3_xr = _i3_run(_i3_ns_machine(
+                    _i3_x, 2, [_i3_srow(_i3_x, 1), _i3_srow(_i3_x, 2), _i3_srow(_i3_x, 2)]))
+                _i3_dup2.append(_i3_xr is not None and _i3_xr.checks.get("C-ID-SPACE") == "FINDING"
+                                and any("imported series: duplicate id 'imported:{}-2'".format(_i3_x) in f
+                                        for f in _i3_msgs(_i3_xr, "C-ID-SPACE")))
+                _i3_xr = _i3_run(_i3_ns_machine(_i3_x, 2, [_i3_srow(_i3_x, 1)]))
+                _i3_del2.append(_i3_xr is not None and _i3_xr.checks.get("C-NO-DELETION") == "FINDING"
+                                and any("1 allocated imported:{0}-<n> id(s) above imported:{0}-1".format(
+                                    _i3_x) in f for f in _i3_msgs(_i3_xr, "C-NO-DELETION")))
+                _i3_xr = _i3_run(
+                    _i3_ns_machine(_i3_x, 2, [_i3_srow(_i3_x, 1, mark="edited")]),
+                    obs=_i3_obs({"imported:{}-1".format(_i3_x): _record_digest(_i3_srow(_i3_x, 1)),
+                                 "imported:{}-2".format(_i3_x): _record_digest(_i3_srow(_i3_x, 2))},
+                                {"imported:" + _i3_x: 2}))
+                _i3_his.append(_i3_xr is not None
+                               and _i3_xr.checks.get("C-HISTORY-APPEND-ONLY") == "FINDING"
+                               and any("imported:{}-1".format(_i3_x) in f
+                                       and "changed since the prior committed snapshot" in f
+                                       for f in _i3_msgs(_i3_xr, "C-HISTORY-APPEND-ONLY"))
+                               and any("imported:{}-2".format(_i3_x) in f
+                                       and "absent from the imported leaves" in f
+                                       for f in _i3_msgs(_i3_xr, "C-HISTORY-APPEND-ONLY")))
+            check("imported-populated-leaf-every-namespace",
+                  len(_i3_pos) == len(_i3_every_ns) == 13 and all(_i3_pos))
+            check("imported-above-high-water-every-namespace",
+                  len(_i3_ovr) == len(_i3_every_ns) and all(_i3_ovr))
+            check("imported-duplicate-id-every-namespace",
+                  len(_i3_dup2) == len(_i3_every_ns) and all(_i3_dup2))
+            check("imported-deleted-allocated-id-every-namespace",
+                  len(_i3_del2) == len(_i3_every_ns) and all(_i3_del2))
+            check("imported-history-changed-and-vanished-every-namespace",
+                  len(_i3_his) == len(_i3_every_ns) and all(_i3_his))
             # A 1.3.0 store on homes 1 declares the imported series but not inside the 2.0.0 / homes = 2
             # declaration, so the flag is False: an imported counter row stays the former C-COUNTERS finding
             # and the leaves are never graded (red when the grading reads the declared spec_version alone).
@@ -5218,22 +5342,40 @@ def self_test():
             _opf_store.SUPPORTED_SPEC_VERSION = _i3_prev_ssv
         # imported_series_active is bound once in this module, by its module-level def: a parallel change
         # that carries the same definition must leave ONE copy when both merge, and a textual merge can keep
-        # two without a conflict. Every binding form is counted, anywhere in the source (a def, a class, an
-        # assignment or other name store, an import alias, an except name), so a second binding by
-        # assignment or import is caught as well as a second def (red when the module binds it twice).
+        # two without a conflict. The census counts these binding forms, anywhere in the source: a def, a
+        # class, an assignment or other name store (comprehension and walrus targets included), an import
+        # alias, an except name, a function parameter of any kind, and a structural-pattern capture (a case
+        # name, a star capture, or a mapping rest), so a second binding by any of them is caught as well as
+        # a second def (red when the module binds it twice).
         import ast
         import inspect
+
+        def _i3_census(tree, name):
+            return [n for n in ast.walk(tree)
+                    if (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                        and n.name == name)
+                    or (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+                        and n.id == name)
+                    or (isinstance(n, ast.alias) and (n.asname or n.name) == name)
+                    or (isinstance(n, ast.ExceptHandler) and n.name == name)
+                    or (isinstance(n, ast.arg) and n.arg == name)
+                    or (isinstance(n, (ast.MatchAs, ast.MatchStar)) and n.name == name)
+                    or (isinstance(n, ast.MatchMapping) and n.rest == name)]
+
         _i3_tree = ast.parse(inspect.getsource(sys.modules[__name__]))
-        _i3_binds = [n for n in ast.walk(_i3_tree)
-                     if (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-                         and n.name == "imported_series_active")
-                     or (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
-                         and n.id == "imported_series_active")
-                     or (isinstance(n, ast.alias) and (n.asname or n.name) == "imported_series_active")
-                     or (isinstance(n, ast.ExceptHandler) and n.name == "imported_series_active")]
+        _i3_binds = _i3_census(_i3_tree, "imported_series_active")
         check("imported-series-active-defined-once",
               len(_i3_binds) == 1 and isinstance(_i3_binds[0], ast.FunctionDef)
               and _i3_binds[0] in _i3_tree.body)
+        # The census discriminates each newly counted form on a fixture that binds the name ONLY that way:
+        # a function parameter, a case capture, a star capture, and a mapping rest each count exactly one
+        # (red when the parameter or pattern-capture arm is dropped and such a binding goes uncounted).
+        check("imported-series-active-census-counts-parameters-and-captures",
+              [len(_i3_census(ast.parse(_i3_src), "imported_series_active")) for _i3_src in (
+                  "def f(imported_series_active):\n    pass\n",
+                  "match v:\n    case imported_series_active:\n        pass\n",
+                  "match v:\n    case [*imported_series_active]:\n        pass\n",
+                  "match v:\n    case {**imported_series_active}:\n        pass\n")] == [1, 1, 1, 1])
         # The declaration alone never activates either: at the shipped SUPPORTED_HOMES the declared pair
         # grades generation 1, so an imported counter row is still the former C-COUNTERS finding and the
         # leaves are never read (red when the flag reads the declaration without tooling support).
