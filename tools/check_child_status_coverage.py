@@ -28,11 +28,12 @@ with exit 2). This gate holds where it runs:
      value, a trailing comment, a tab in the indentation) is a finding, never a pass. Inside it, every value
      that names Python sits in a step with a run: key, after its job's one setup-python step and the probe
      step right after that; the probe step is exactly PROBE_STEP (its name, shell: bash and run, and no
-     other key, so no if: and no continue-on-error). In the two host-patch jobs (HOST_PATCH_JOBS) only, the
-     Python host pin step, exactly HOST_PIN_STEP, may stand between setup-python and the probe
-     (tools/check_python_host_pin.py holds that step as the one right after setup-python there), and the
-     probe step right after it is then exactly HOST_PROBE_STEP (the same shape, its name saying it runs
-     after that gate); no other step, and no other spelling of either step, is passed over. The job carries
+     other key, so no if: and no continue-on-error). In the two host-patch jobs (HOST_PATCH_JOBS) of the
+     one workflow HOST_PATCH_WORKFLOW only, the Python host pin step, exactly HOST_PIN_STEP, may stand
+     between setup-python and the probe (tools/check_python_host_pin.py holds that step as the one right
+     after setup-python there), and the probe step right after it is then exactly HOST_PROBE_STEP (the same
+     shape, its name saying it runs after that gate); no other step, and no other spelling of either step,
+     is passed over. The job carries
      no continue-on-error, and the
      interpreter words are python3 or python only. A value before the probe, in a step with no run: key or
      outside every job's steps (a job-level defaults: shell, an env value) and an absolute or versioned
@@ -199,11 +200,13 @@ WORKFLOWS_REL = ".github/workflows"
 # The probe step, exactly: these keys in this order with these values, and no other key.
 PROBE_STEP = (("name", "Child exit status observable (before any gate)"), ("shell", "bash"),
               ("run", "python3 -I -B " + CANONICAL_REL))
-# The two host-patch jobs of quality.yml and the Python host pin step, exactly:
+# The two host-patch jobs, the one workflow they live in and the Python host pin step, exactly:
 # tools/check_python_host_pin.py holds that step as the one right after each of these jobs' setup-python
-# step, so in these jobs only, exactly that step may stand between setup-python and the probe, and the
-# probe step right after it is HOST_PROBE_STEP, the probe with the name that placement makes true. A job
-# with either id in any other workflow gets the same reading; the exactness of both steps is the bound.
+# step, so in these jobs of HOST_PATCH_WORKFLOW only, exactly that step may stand between setup-python and
+# the probe, and the probe step right after it is HOST_PROBE_STEP, the probe with the name that placement
+# makes true. The exception is keyed on the workflow path and the job id together, so a job with either id
+# in any other workflow gets the plain reading; the exactness of both steps is the bound.
+HOST_PATCH_WORKFLOW = WORKFLOWS_REL + "/quality.yml"
 HOST_PATCH_JOBS = ("opf-host-patch", "git-fixture-env-host-patch")
 HOST_PIN_STEP = (("name", "Python host pin"), ("shell", "bash"),
                  ("run", "python3 -I -B tools/check_python_host_pin.py"))
@@ -711,8 +714,9 @@ def workflow_findings(rel, text):
     """Findings for one workflow. A workflow outside the closed grammar (read_workflow, _workflow_jobs) is one
     finding, naming the first line the grammar does not classify, and nothing else in it is placed. Inside it,
     every value that names Python must sit in a step with a run: key after its job's one setup-python step and
-    the probe step right after that, which is exactly PROBE_STEP; in a HOST_PATCH_JOBS job only, the step right
-    after setup-python may instead be exactly HOST_PIN_STEP, with exactly HOST_PROBE_STEP right after it; the
+    the probe step right after that, which is exactly PROBE_STEP; in a HOST_PATCH_JOBS job of the workflow
+    HOST_PATCH_WORKFLOW only, the step right after setup-python may instead be exactly HOST_PIN_STEP, with
+    exactly HOST_PROBE_STEP right after it; the
     job carries no continue-on-error, and every
     interpreter word is one of PLAIN_INTERPRETERS."""
     try:
@@ -738,7 +742,8 @@ def workflow_findings(rel, text):
             continue
         probe = setups[0] + 1
         pin, want_probe = None, PROBE_STEP
-        if job in HOST_PATCH_JOBS and probe < len(steps) and _step_pairs(steps[probe]) == HOST_PIN_STEP:
+        if (rel == HOST_PATCH_WORKFLOW and job in HOST_PATCH_JOBS and probe < len(steps)
+                and _step_pairs(steps[probe]) == HOST_PIN_STEP):
             pin, probe, want_probe = probe, probe + 1, HOST_PROBE_STEP
         if probe == len(steps) or _step_pairs(steps[probe]) != want_probe:
             out.append("{}: job {}: the step right after {} is not the child-status probe step exactly "
@@ -1294,10 +1299,20 @@ def _inputs():
         "probe-if-false": guarded + "        if: false\n" + gate + launch,
         "probe-continued": guarded + "          || true\n" + gate + launch,
         # The order the host-patch jobs of quality.yml run: the Python host pin step right after
-        # setup-python, the probe right after it; the same order in any other job is a finding.
+        # setup-python, the probe right after it; the same order under any other job id, or under either
+        # host-patch job id in any other workflow, is a finding. The departures: the pin step extended by
+        # one key (a prefix-only match of HOST_PIN_STEP), the pin followed by the probe named for the plain
+        # placement, and the probe ahead of the pin, which this gate accepts (the pin's own placement is
+        # the host pin gate's to hold).
         "host-pin-before-probe": "jobs:\n  opf-host-patch:\n" + head + setup + pin_step + host_probe
                                  + gate + launch,
         "host-pin-other-job": "jobs:\n  lone:\n" + head + setup + pin_step + host_probe + gate + launch,
+        "host-pin-git-job": "jobs:\n  git-fixture-env-host-patch:\n" + head + setup + pin_step + host_probe
+                            + gate + launch,
+        "host-pin-prefix": "jobs:\n  opf-host-patch:\n" + head + setup + pin_step
+                           + "        timeout-minutes: 5\n" + host_probe + gate + launch,
+        "host-pin-old-probe": "jobs:\n  opf-host-patch:\n" + head + setup + pin_step + step + gate + launch,
+        "host-probe-ahead": "jobs:\n  opf-host-patch:\n" + head + setup + step + pin_step + gate + launch,
         "later-job-key": "jobs:\n  one:\n" + head + setup + step + "   two:\n" + head + gate + launch,
         "targets-hash": guarded + gate + "        run: echo a#b; python3 -I -B tools/child.py\n",
         "block-hash-line": "jobs:\n  lone:\n" + head + gate + "        run: |\n          echo x\\\n"
@@ -1434,11 +1449,17 @@ def _vectors(module, trees, texts, canonical_tree):
     outside = "names Python outside the steps of every job"
     grammar = "outside the workflow grammar the gate reads: "
     deeper = grammar + "a line deeper than the keys around it (a continued scalar or a misplaced key)"
-    not_probe = ("w: job lone: the step right after setup-python is not the child-status probe step exactly (its "
-                 "name, shell: bash and run, and no other key)")
+    def not_probe_in(rel, job, after="setup-python"):
+        return ("{}: job {}: the step right after {} is not the child-status probe step exactly (its "
+                "name, shell: bash and run, and no other key)").format(rel, job, after)
+
+    not_probe = not_probe_in("w", "lone")
 
     def workflow(key):
         return m.workflow_findings("w", texts[key])
+
+    def quality_workflow(key):
+        return m.workflow_findings(m.HOST_PATCH_WORKFLOW, texts[key])
 
     vectors = (
         ("copies/real-copies-identical", lambda: not copies("opf", m.CANONICAL_NAMES)
@@ -1460,7 +1481,7 @@ def _vectors(module, trees, texts, canonical_tree):
         ("launchers/real-launchers-pass",
          lambda: m.runner_first_gate_finding("runner", texts["runner"], local_probe) is None
          and m.runner_first_gate_finding("opf", texts["opf-runner"], opf_probe) is None
-         and not m.workflow_findings("quality", texts["quality"])
+         and not m.workflow_findings(m.HOST_PATCH_WORKFLOW, texts["quality"])
          and not hooks("hooks")
          and all(m.binds_here(texts[rel]) and not m.shell_findings(rel, texts[rel], m.SELF_ENTRIES)
                  for rel in SHELL_REAL)),
@@ -1471,7 +1492,7 @@ def _vectors(module, trees, texts, canonical_tree):
         ("launchers/runner-prelude-launch", lambda: "a Python launch above the child-status probe" in (
             m.runner_first_gate_finding("runner", texts["runner-prelude-launch"], local_probe) or "")),
         ("launchers/workflow-first-step", lambda: any("job secrets:" in finding for finding in m.workflow_findings(
-            "quality", texts["quality-step-gone"]))),
+            m.HOST_PATCH_WORKFLOW, texts["quality-step-gone"]))),
         ("launchers/workflow-no-setup", lambda: any("0 setup-python" in finding for finding in m.workflow_findings(
             "lone", texts["no-setup"]))),
         ("launchers/workflow-names-py-file", lambda: any("0 setup-python" in finding for finding in
@@ -1487,8 +1508,18 @@ def _vectors(module, trees, texts, canonical_tree):
         ("launchers/workflow-probe-in-block-scalar", lambda: workflow("probe-in-block-scalar") == [not_probe]),
         ("launchers/workflow-probe-if-false", lambda: workflow("probe-if-false") == [not_probe]),
         ("launchers/workflow-probe-continued", lambda: workflow("probe-continued") == ["w:11: " + deeper]),
-        ("launchers/workflow-host-pin-before-probe", lambda: not workflow("host-pin-before-probe")),
-        ("launchers/workflow-host-pin-other-job", lambda: workflow("host-pin-other-job") == [not_probe]),
+        ("launchers/workflow-host-pin-before-probe", lambda: not quality_workflow("host-pin-before-probe")),
+        ("launchers/workflow-host-pin-other-job", lambda: quality_workflow("host-pin-other-job")
+         == [not_probe_in(m.HOST_PATCH_WORKFLOW, "lone")]),
+        ("launchers/workflow-host-pin-opf-job-other-workflow", lambda: workflow("host-pin-before-probe")
+         == [not_probe_in("w", "opf-host-patch")]),
+        ("launchers/workflow-host-pin-git-job-other-workflow", lambda: workflow("host-pin-git-job")
+         == [not_probe_in("w", "git-fixture-env-host-patch")]),
+        ("launchers/workflow-host-pin-prefix-step", lambda: quality_workflow("host-pin-prefix")
+         == [not_probe_in(m.HOST_PATCH_WORKFLOW, "opf-host-patch")]),
+        ("launchers/workflow-host-pin-old-probe-name", lambda: quality_workflow("host-pin-old-probe")
+         == [not_probe_in(m.HOST_PATCH_WORKFLOW, "opf-host-patch", "the Python host pin step")]),
+        ("launchers/workflow-host-probe-ahead-of-pin", lambda: not quality_workflow("host-probe-ahead")),
         ("launchers/workflow-block-hash-line", lambda: workflow("block-hash-line")
          == ["w:9: job lone: names Python before the child-status probe step"]),
         ("launchers/workflow-defaults-after-steps", lambda: workflow("defaults-after-steps") == ["w:14: " + outside]),
@@ -1599,12 +1630,21 @@ MUTANTS = (
     ("workflow-step-keys", "_step_pairs(steps[probe]) != want_probe",
      "_step_pairs(steps[probe])[:len(want_probe)] != want_probe", "launchers/workflow-probe-if-false"),
     ("workflow-host-pin-accept",
-     "if job in HOST_PATCH_JOBS and probe < len(steps) and _step_pairs(steps[probe]) == HOST_PIN_STEP:",
+     "if (rel == HOST_PATCH_WORKFLOW and job in HOST_PATCH_JOBS and probe < len(steps)\n"
+     "                and _step_pairs(steps[probe]) == HOST_PIN_STEP):",
      "if False:", "launchers/workflow-host-pin-before-probe"),
-    ("workflow-host-pin-scope",
-     "if job in HOST_PATCH_JOBS and probe < len(steps) and _step_pairs(steps[probe]) == HOST_PIN_STEP:",
-     "if probe < len(steps) and _step_pairs(steps[probe]) == HOST_PIN_STEP:",
-     "launchers/workflow-host-pin-other-job"),
+    ("workflow-host-pin-scope", "rel == HOST_PATCH_WORKFLOW and job in HOST_PATCH_JOBS and probe",
+     "rel == HOST_PATCH_WORKFLOW and probe", "launchers/workflow-host-pin-other-job"),
+    ("workflow-host-pin-workflow-scope", "rel == HOST_PATCH_WORKFLOW and job in HOST_PATCH_JOBS",
+     "job in HOST_PATCH_JOBS", "launchers/workflow-host-pin-opf-job-other-workflow"),
+    ("workflow-host-pin-workflow-true", "if (rel == HOST_PATCH_WORKFLOW and", "if (True and",
+     "launchers/workflow-host-pin-git-job-other-workflow"),
+    ("workflow-host-pin-prefix", "_step_pairs(steps[probe]) == HOST_PIN_STEP",
+     "_step_pairs(steps[probe])[:len(HOST_PIN_STEP)] == HOST_PIN_STEP",
+     "launchers/workflow-host-pin-prefix-step"),
+    ("workflow-probe-either-name", "if probe == len(steps) or _step_pairs(steps[probe]) != want_probe:",
+     "if probe == len(steps) or _step_pairs(steps[probe]) not in (PROBE_STEP, HOST_PROBE_STEP):",
+     "launchers/workflow-host-pin-old-probe-name"),
     ("workflow-host-pin-early", "if position < probe and position != pin:", "if position < probe:",
      "launchers/workflow-host-pin-before-probe"),
     ("workflow-setup", "        if len(setups) != 1:\n", "        if False:\n", "launchers/workflow-no-setup"),
@@ -1697,7 +1737,8 @@ MUTANTS = (
      "completeness/scan-follows-local-imports"),
 )
 UNMUTATED = {"copies/real-copies-identical", "entries/real-entries-pass", "launchers/real-launchers-pass",
-             "launchers/real-workflows-in-grammar", "completeness/scan-clean-module"}
+             "launchers/real-workflows-in-grammar", "launchers/workflow-host-probe-ahead-of-pin",
+             "completeness/scan-clean-module"}
 
 
 def _load_mutant(source, directory, number):
@@ -1885,6 +1926,11 @@ def self_test(lane, report_path=None):
                                 ("launchers/workflow-probe-if-false", 0), ("launchers/workflow-probe-continued", 0),
                                 ("launchers/workflow-host-pin-before-probe", 0),
                                 ("launchers/workflow-host-pin-other-job", 0),
+                                ("launchers/workflow-host-pin-opf-job-other-workflow", 0),
+                                ("launchers/workflow-host-pin-git-job-other-workflow", 0),
+                                ("launchers/workflow-host-pin-prefix-step", 0),
+                                ("launchers/workflow-host-pin-old-probe-name", 0),
+                                ("launchers/workflow-host-probe-ahead-of-pin", 0),
                                 ("launchers/workflow-block-hash-line", 0),
                                 ("launchers/workflow-defaults-after-steps", 0),
                                 ("launchers/workflow-python-outside-run-step", 0),
