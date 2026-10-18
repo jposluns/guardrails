@@ -17245,11 +17245,15 @@ def _upgrade_run(root):
         minor = sv == _UPGRADE_MID
 
         # PRECONDITION (spec 9.2): re-emitting the UNCHANGED parsed model reproduces the on-disk bytes
-        # exactly, proving the file is canonical and comment-free so the bounded rewrite loses nothing.
-        if _opf_emit.emit_checked(manifest_model).encode("utf-8") != manifest_bytes:
+        # exactly, proving the file is canonical and comment-free so the bounded rewrite loses nothing. A file
+        # an earlier emitter wrote with a literal U+2028 or U+2029 inside a basic string still passes when
+        # that is its only difference (_opf_emit.matches_store_bytes); the rewrite re-spells it.
+        if not _opf_emit.matches_store_bytes(
+                manifest_bytes, _opf_emit.emit_checked(manifest_model).encode("utf-8")):
             raise _UpgradeError("manifest is not in canonical new-document form (hand-edited or comment-"
                                 "bearing); refusing a model rewrite that could lose content (fail-closed)")
-        if _opf_emit.emit_checked(counters_model).encode("utf-8") != counters_bytes:
+        if not _opf_emit.matches_store_bytes(
+                counters_bytes, _opf_emit.emit_checked(counters_model).encode("utf-8")):
             raise _UpgradeError("counters.toml is not in canonical new-document form; refusing (fail-closed)")
 
         new_manifest, new_counters, added_ns, origin = (
@@ -17257,6 +17261,24 @@ def _upgrade_run(root):
         origin_version = _UPGRADE_MID if minor else _UPGRADE_FROM
         new_manifest_bytes = _opf_emit.emit_checked(new_manifest).encode("utf-8")
         new_counters_bytes = _opf_emit.emit_checked(new_counters).encode("utf-8")
+        empty_index = _opf_emit.emit_checked(
+            {"schema": _opf_schema.SUPPORTED_SCHEMA, "record": []}).encode("utf-8")
+
+        # PRECONDITION (store-read cap): every store file this upgrade would publish must stay readable
+        # by the store reader, which refuses any store file LARGER than _opf_store.MAX_STORE_READ_BYTES
+        # (a file of exactly that size still reads, so only a larger emission refuses here). Re-spelling
+        # a literal U+2028/U+2029 as its six-byte escape, like the schema delta itself, grows the
+        # emission, so a legacy file near the cap could otherwise be rewritten into one the reader then
+        # refuses, leaving a store that no longer resolves. Refuse BEFORE the cleanliness probes, the
+        # lease, and any write, so the store is left byte-for-byte unchanged (fail-closed).
+        for publish_rel, publish_bytes in ((manifest_rel, new_manifest_bytes),
+                                           (counters_rel, new_counters_bytes),
+                                           ("an upgrade-created empty index", empty_index)):
+            if len(publish_bytes) > _opf_store.MAX_STORE_READ_BYTES:
+                raise _UpgradeError(
+                    "upgraded {} would be {} bytes, over the {}-byte store-read cap its reader "
+                    "enforces; refusing before any write, the store is unchanged (fail-closed)".format(
+                        publish_rel, len(publish_bytes), _opf_store.MAX_STORE_READ_BYTES))
 
         # STEP 3: derive the scope from this delta and its POST-delta render declarations. The same
         # destinations drive the cleanliness gate, index creation, recovery, and staging advice.
@@ -17304,8 +17326,6 @@ def _upgrade_run(root):
             _upgrade_replace(root_fd, manifest_rel, new_manifest_bytes)
             if new_counters_bytes != counters_bytes:
                 _upgrade_replace(root_fd, counters_rel, new_counters_bytes)
-            empty_index = _opf_emit.emit_checked(
-                {"schema": _opf_schema.SUPPORTED_SCHEMA, "record": []}).encode("utf-8")
             created_indexes = []
             for idx_rel in write_scope["indexes"]:
                 if _upgrade_create_index(root_fd, idx_rel, empty_index):
