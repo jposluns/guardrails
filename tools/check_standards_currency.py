@@ -51,7 +51,7 @@ except Exception:  # pragma: no cover - gen_rules is a sibling; this only guards
 
 # Per-status policy, in days of age since `retrieved`. warn=None means "warn immediately" (a
 # point-in-time or draft capture is inherently a review-me state); otherwise warn once age exceeds the
-# warn count. FAIL once age exceeds the fail count. Confirmed defaults (CW-3 Q1, Architect-set):
+# warn count. FAIL once age exceeds the fail count. Confirmed defaults (CW-3 Q1, maintainer-set):
 #   stable   warn > 365, fail > 730   (slow-moving published standards; a year's notice, two-year backstop)
 #   snapshot warn now,   fail > 365   (a pinned content version is always "review me"; fail once a year old)
 #   beta     warn now,   fail > 180   (a draft is volatile; do not let it linger past six months)
@@ -167,10 +167,41 @@ def run(std_dir, today, warn_only=False):
 # (status, retrieved) pairs across every threshold boundary, checks audit()'s precedence, and exercises
 # run() itself over synthetic manifest files written to a private tempdir (current->0, stale->1,
 # stale+--warn-only->0, malformed->2, malformed+--warn-only->2, absent->2). The run()-level cases need a
-# writable tempdir and are skipped (with a printed note, never a false pass) where none exists; CI always
-# has one. This is the only part of the tool wired into the PR gate.
+# writable tempdir; where none exists they are a NAMED NOT RUN failure (never a skip beside a PASS); CI
+# always has one. This is the only part of the tool wired into the PR gate.
 
-def self_test_main():
+def _not_run(failures, case, cause):
+    """Record a self-test case that could not run as a NAMED failure (a counted cannot-evaluate that
+    fails the run), never a printed note beside a PASS: coverage that did not run is not coverage."""
+    failures.append("NOT RUN: {}: {}; coverage that did not run FAILS the self-test, never a silent "
+                    "PASS".format(case, cause))
+
+
+_RUN_LEVEL_CASES = ("the run()-level exit-contract cases (current, stale, stale under --warn-only, "
+                    "malformed, malformed under --warn-only, absent dir, over-long integer literal, "
+                    "injected parser overflow)")
+
+
+def _not_run_vector(failures):
+    """Red-on-revert vector for the temp-root skip that printed a PLAIN SELF-TEST PASS and exited 0: a
+    nested self-test run with an unavailable temp directory (mkdtemp raises OSError) must exit nonzero
+    AND name the run()-level cases on a NOT RUN line."""
+    import io
+    from contextlib import redirect_stderr, redirect_stdout
+
+    def _unavailable(*_args, **_kwargs):
+        raise OSError("injected: no writable temp directory")
+
+    out = io.StringIO()
+    with redirect_stdout(out), redirect_stderr(io.StringIO()):
+        rc = self_test_main(_mkdtemp=_unavailable, _vectors=False)
+    want = "NOT RUN: {}: no writable temp directory".format(_RUN_LEVEL_CASES)
+    if rc == 0 or want not in out.getvalue():
+        failures.append("(NOT RUN vector) an unavailable temp directory must exit nonzero AND record {!r}, "
+                        "never a plain PASS exit 0 (got exit {})".format(want, rc))
+
+
+def self_test_main(_mkdtemp=None, _vectors=True):
     today = date(2026, 8, 17)
 
     def days_ago(n):
@@ -259,8 +290,8 @@ def self_test_main():
 
     # run()-level exit contract, against real manifest files: the actual CLI entry point, including the
     # --warn-only masking behaviour (a FAIL downgrades to 0, a MALFORMED must NOT), absent-dir
-    # fail-closed, and current -> 0. Needs a writable tempdir; skipped (not failed) where none exists,
-    # since CI always has one and this is supplementary to the classify/audit coverage above.
+    # fail-closed, and current -> 0. Needs a writable tempdir; where none exists this is a NAMED
+    # NOT RUN failure (nonzero exit), never a skip beside a PASS.
     import io
     import shutil
     import tempfile
@@ -279,11 +310,10 @@ def self_test_main():
             return run(sd, today, warn_only=warn_only)
 
     try:
-        tmp = Path(tempfile.mkdtemp(prefix="aiqt-currency-selftest-"))
-    except OSError:
+        tmp = Path((_mkdtemp or tempfile.mkdtemp)(prefix="aiqt-currency-selftest-"))
+    except OSError as exc:
         tmp = None
-        print("SELF-TEST NOTE: no writable temp directory; run()-level cases SKIPPED "
-              "(classify()/audit() coverage above still ran)", file=sys.stderr)
+        _not_run(failures, _RUN_LEVEL_CASES, "no writable temp directory ({})".format(exc))
     if tmp is not None:
         try:
             std = tmp / "standards"
@@ -349,14 +379,18 @@ def self_test_main():
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    if _vectors:
+        _not_run_vector(failures)
+
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:
             print("  - " + f)
         return 1
     print("SELF-TEST PASS: per-status thresholds, warn-immediately, unparseable/future/unknown "
-          "fail-closed, audit precedence (MALFORMED > FAIL > OK), and url validation (https-with-host "
-          "required, malformed fails closed, absent -> None) all hold")
+          "fail-closed, audit precedence (MALFORMED > FAIL > OK), url validation (https-with-host "
+          "required, malformed fails closed, absent -> None), and the run()-level exit contract all "
+          "hold; an unavailable temp directory is a NOT RUN failure (nonzero exit), never a silent PASS")
     return 0
 
 

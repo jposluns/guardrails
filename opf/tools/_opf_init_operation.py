@@ -14,7 +14,7 @@ journal (PR3b). It is a LIBRARY milestone: it adds no CLI verb, stages nothing i
 retains the shipped base exit-0 store scaffolding; wiring it to init_operation and exposing
 coupled-init CLI milestones are deferred to PR7.
 
-The Architect's rulings it implements (PD-D2B-PR3-SCHEMA, decided 2026-09-24), by site:
+The maintainer's rulings it implements (PD-D2B-PR3-SCHEMA, decided 2026-09-24), by site:
 
   1. Bootstrap capability. The shared mutex is taken first (_opf_oplock.acquire_init_operation, a
      pre-store InitHolder: no control record, no lease); the plan and the directory journal are

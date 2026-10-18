@@ -772,15 +772,19 @@ def _fixture_send_subject(peer, subject, subject_fd):
 
 def _fixture_ack_subject(fd):
     """Release the subject, strictly AFTER the receipt send returned: an acknowledged
-    subject is always addressable through its delivered receipt (QA18 codex F2). A
-    subject that already died is tolerated (its wait status is authoritative), and the
-    write end closes either way, so a guardian that dies before acknowledging always
-    hands the blocked subject an EOF."""
+    subject is always addressable through its delivered receipt (QA18 codex F2). The
+    write is reported, observed: True only when os.write wrote the one ack byte, and
+    False when it failed with OSError -- a subject that already died is tolerated (its
+    wait status is authoritative). The write end closes either way, so a guardian that
+    dies before acknowledging always hands the blocked subject an EOF. The guardian
+    ignores the report (supervision reads the subject's status); a caller certifying
+    the release to a third party publishes only on True, never on a swallowed
+    failure."""
     import os
     try:
-        os.write(fd, b"A")
+        return os.write(fd, b"A") == 1
     except OSError:
-        pass  # the subject is already gone: supervision reads its status
+        return False  # the subject is already gone: supervision reads its status
     finally:
         os.close(fd)
 
