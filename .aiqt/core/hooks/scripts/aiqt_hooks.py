@@ -663,6 +663,11 @@ class _UncertainHashError(ValueError):
         self.backquote = backquote
         self.fork = None  # the lex's _LexFork where the lex can resume at that '#', set by _lex_pass
         self.first = None  # the first reading's _LexFork, at the command's first uncertain '#' (_lex_readings)
+        # True when the readings were abandoned because one failed to lex for another reason
+        # (_lex_readings): a partial lex of the same command does not raise there, it returns every
+        # reading's recovered segments, so a caller that would resume from first must take the full
+        # partial lex instead or it reads only the prefix before that '#' (_gate_recovered_sink).
+        self.reading_failed = False
 
 
 # The most uncertain '#' characters the lexer judges under both readings (2 ** 4 = 16 readings at most).
@@ -1986,8 +1991,10 @@ def _lex_resume_partial(command, exc, locale=False, skip_empty=False):
     it recovers what it read, so it resumes where that reading stopped (exc.first, when there is one) instead
     of lexing the text before it again. Returns the partial-mode (segments, complete, in_progress) of
     _lex_command. A caller that itself caught that error from a full lex passes it here to read the recovered
-    prefix without a second pass over that text (_gate_recovered_sink); exc must come from a lex of this same
-    command with this locale and skip_empty, whose state the fork carries."""
+    prefix without a second pass over that text, unless the error marks a reading that failed to lex
+    (reading_failed), where a partial lex recovers every reading's segments and the caller must lex partially
+    in full (_gate_recovered_sink); exc must come from a lex of this same command with this locale and
+    skip_empty, whose state the fork carries."""
     lexed, misread = _lex_reading(command, True, None, locale, skip_empty, exc.first)
     readings = _beside_main_reading(command, True, locale, [lexed], skip_empty) if misread else [lexed]
     return ([seg for segs, _complete, _open in readings for seg in segs],
@@ -2049,6 +2056,7 @@ def _lex_readings(command, partial=False, locale=False, skip_empty=False):
                 raise
             doubt = _UncertainHashError("a reading of an uncertain '#' does not lex: {}".format(exc))
             doubt.first = first
+            doubt.reading_failed = True
             raise doubt from exc
         else:
             readings.append(lexed)
@@ -3971,9 +3979,10 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
                 same.append(locale)  # the readings differ only at a $" (_read_word): one serves for both
             break
         try:
-            # skip_empty: this reader takes only each segment's words (never its separator, raw slice or
-            # place in the list), and a segment with no word and no redirect has none, so a long run of
-            # separators builds and feeds it no record.
+            # skip_empty: this reader decides on each segment's words, and the equality below lets one
+            # reading serve for both locales by comparing the kept (argv, sep_after) records, so nothing
+            # it reads comes from a segment with no word and no redirect; a long run of separators builds
+            # and feeds it no record.
             segments = _segments(command, locale=locale, skip_empty=True)
         except ValueError as exc:
             error = error or exc
@@ -10789,8 +10798,10 @@ _RAW_FLOW_RE = re.compile(r"<<<|<\(|>\(")
 _RAW_SINK_WORD_RE = re.compile(r"\b(?:head|tail|cut)\b")
 # A pipe and then, in the same stage (after any wrapper), a sink word the gatdis deny tier lists
 # (_truncating_sink_kind): gate_weakening's deny test when a '#' whose comment reading the lexer cannot judge
-# under both readings stops it (read over _hash_doubt_scan).
-_GATE_DOUBT_SINK_RE = re.compile(r"\|&?[^|;&\n]*\b(?:head|tail|grep|egrep|fgrep|rg)\b")
+# under both readings stops it (read over _hash_doubt_scan). The whitespace right after the pipe may hold
+# newlines, since bash continues the pipeline past a newline after '|' or '|&'; the rest of the match stays
+# on one line, since a newline anywhere else ends the pipeline.
+_GATE_DOUBT_SINK_RE = re.compile(r"\|&?\s*[^|;&\n]*\b(?:head|tail|grep|egrep|fgrep|rg)\b")
 _RAW_COMMIT_MSG_GIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
 _RAW_COMMIT_MSG_MARKER_RE = re.compile(r"`|\$\(")
 
@@ -11491,10 +11502,14 @@ def _gate_recovered_sink(command, doubt=None):
     partial lex of command recovers prove, or None: gate_weakening's first check on a lex that fails, before
     its raw fallback. The in-progress segment the lexer was inside is dropped, since its unseen tokens could
     change it; a construct that begins a new segment leaves every recovered segment complete. doubt, when
-    given, is the _UncertainHashError the caller's own full lex of command just raised: the partial lex then
-    resumes from the fork it carries (_lex_resume_partial) instead of lexing the text before the command's
-    first uncertain '#' a second time."""
-    if doubt is not None:
+    given, is the _UncertainHashError the caller's own full lex of command just raised: where a partial lex
+    of the same command would raise it too, the partial lex resumes from the fork it carries
+    (_lex_resume_partial) instead of lexing the text before the command's first uncertain '#' a second time.
+    A doubt raised because a reading failed to lex (reading_failed) takes the full partial lex instead: a
+    partial lex does not raise there, it returns every reading's recovered segments, so resuming from the
+    fork would drop the segments of the readings that lex whole and miss a sink past the first uncertain
+    '#'."""
+    if doubt is not None and not doubt.reading_failed:
         recovered, _complete, in_progress = _lex_resume_partial(command, doubt)
     else:
         recovered, _complete, in_progress = _lex_command(command, partial=True)

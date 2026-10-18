@@ -11419,6 +11419,22 @@ def _main_isolated(monitor):
                               ("'-'-no-verify", False), ("$x '' $y", False)):
             texpect("(tok-17r7) _hash_doubt_opaque({!r})".format(_ocmd), aiqt_hooks._hash_doubt_opaque(_ocmd),
                     _owant)
+        # A RUN of one repeated ';', '(' or ')' builds its empty records in one batch (_lex_pass), which must
+        # leave every record and every piece of state exactly as the per-character path leaves them: one empty
+        # record per further character of the run carrying the run's separator, the nesting stack moved as
+        # _nest_track moves it for that character, and, for ')', the glued-word index just past the run.
+        texpect("(tok-seprun-semi) each ';' of a run ends one empty record carrying ';' as its separator",
+                [(s.argv, s.sep_after, s.raw) for s in aiqt_hooks._lex_command("a;;;b")],
+                [(["a"], ";", "a"), ([], ";", ""), ([], ";", ""), (["b"], "", "b")])
+        texpect("(tok-seprun-paren) each '(' of a run ends one empty record carrying '(' as its separator",
+                [(s.argv, s.sep_after, s.raw) for s in aiqt_hooks._lex_command("a((((b")],
+                [(["a"], "(", "a"), ([], "(", ""), ([], "(", ""), ([], "(", ""), (["b"], "", "b")])
+        texpect("(tok-seprun-pop) a ')' run pops only open parentheses, so the backquote under them still "
+                "closes and the '#' after it is a comment",
+                _argv_or_error("`(a)))` #c"), [["`"], ["a"], [], [], ["`"]])
+        texpect("(tok-seprun-glued) a word right after a ')' run is read as glued to the run's last ')'",
+                [s.argv_opaque for s in aiqt_hooks._lex_command("(a))x")],
+                [[], [False], [], [True]])
         # The lexer vectors: bash 5.3.9 runs the RAN or RUN command in each (bash -c printed RUN for a and b,
         # RAN for c to i), and before the comment rule the lexer read each one without an error while the
         # command sat inside a misread quote or comment. Each '#' here is right after a ')' (a case pattern,
@@ -11874,11 +11890,18 @@ def _main_isolated(monitor):
         # two-pass bound and the floor's cost: before those three changes this code took at most 0.062 s,
         # 0.541 s, 0.183 s and 0.238 s on them, the code before main's reading took 0.063 s, 0.557 s, 0.182 s
         # and 0.200 s, so they pass there too, and with the counted nesting stack put back to a plain list
-        # retry-deep-nesting takes 8.7 s in gate_weakening (one run), so that row still fails superlinear
-        # nesting code.
+        # retry-deep-nesting takes 8.7 s in gate_weakening (one run), so that row still fails such a plain-list
+        # stack. The batch leaves the deep-nesting rows' contiguous parenthesis runs off the per-character
+        # path, so code superlinear only in the per-character work of a '(' or ')' (an O(depth) copy on every
+        # '(' in _nest_track) fits every row above: the spaced-deep-nesting row separates each '(' with a
+        # blank, which breaks every run, so each '(' takes the per-character path. With such a copy added to
+        # _nest_track that row took 12.5 s in gate_weakening and 12.2 s in bash_absolute_paths (one run each)
+        # while every row above fit that code, and unchanged it takes at most 0.18 s (max of five runs,
+        # gate_weakening), a margin of about five times against the same 1 s bound.
         _cost_form = "git commit -m \"$(cat <<'EOF'\n# Don't\nEOF\n)\"\n"
         _cost_inputs = (("long-comment-line", 'echo "$(echo ' + "# " * (128 * 1024) + '\n)"\ngit status'),
                         ("deep-nesting", "(" * 56000 + " `a`" * (56000 // 3)),
+                        ("spaced-deep-nesting", "( " * (128 * 1024)),
                         ("retry-long-comment-line", _cost_form + 'echo "$(echo ' + "# " * (128 * 1024) + '\n)"\ngit status'),
                         ("retry-deep-nesting", _cost_form + "(" * 56000 + " `a`" * (56000 // 3)),
                         ("floor-long-words", _cost_form + "echo " + "a " * (128 * 1024)),
@@ -13482,6 +13505,40 @@ def _main_isolated(monitor):
                 'echo "pre $(echo a \\\n# it\'s\n) post"; git commit --no-verify -m x # \')"', "deny")
         gexpect("(gw-bsnl-blank) a blank line before the pair, the pair immediately before the '#', denies",
                 'echo "$(echo a\n\\\n# it\'s\n)"; git commit --no-verify -m x # \')"', "deny")
+
+        # A reading of an uncertain '#' that fails to lex abandons the readings, and the sink check then runs
+        # on the partial lex of the WHOLE command, which recovers every reading's segments: a verification run
+        # piped into a truncating sink past the first uncertain '#' is still proven and denied, with the sink
+        # stage on the pipe's own line or after the newline that continues the pipeline. In each vector the
+        # here-string or process substitution fails one reading of the '#' inside the parameter expansion
+        # while the other reading recovers the pipeline whole.
+        gexpect("(gw-rfail-sink-nl) a failed reading does not hide a verification run piped into a sink "
+                "stage after a pipeline-continuation newline, denies",
+                "pytest |\nhead 3</dev/null${x# #} 4<<<x", "deny")
+        gexpect("(gw-rfail-sink-line) control: the same-line sink stage denies too",
+                "pytest | head 3</dev/null${x# #} 4<<<x", "deny")
+        gexpect("(gw-rfail-sink-redir) the sink stage carrying the failing redirects itself still denies",
+                "pytest |\nhead 2>${x:- #} 3> >(cat)", "deny")
+        gexpect("(gw-rfail-benign) control: the same failed-reading shape with no verification run or "
+                "sink allows",
+                "ls ${x# #} <<<x", "allow")
+
+        # Behind a '#' the lexer cannot judge under both readings, the raw fallback's sink probe reads a pipe
+        # into a listed sink across the newline that continues the pipeline (bash reads the stage after '|'
+        # or '|&' past any newlines). Here the '#' sits inside an open '(' and its word-text reading fails on
+        # the quote it opens, while the comment reading leaves the pipeline after a subshell prefix the deny
+        # tier does not read past (_gate_benign_prefix), so the raw probe is the deciding layer.
+        gexpect("(gw-dbt-sink-nl) the doubt fallback reads the sink stage after a pipeline-continuation "
+                "newline, denies",
+                "(true #'\n)\npytest |\nhead", "deny")
+        gexpect("(gw-dbt-sink-line) control: the same-line sink stage denies too",
+                "(true #'\n)\npytest | head", "deny")
+        gexpect("(gw-dbt-sink-amp) a '|&' pipe before the continuation newline denies too",
+                "(true #'\n)\npytest |&\nhead", "deny")
+        gexpect("(gw-dbt-sink-stage) a pass-through stage between the pipe and the sink keeps the deny",
+                "(true #'\n)\npytest |\ncat |\nhead", "deny")
+        gexpect("(gw-dbt-sink-wc) control: a stage off the sink list after the continuation newline allows",
+                "(true #'\n)\nls |\nwc", "allow")
 
         # === gatdis deny tier: a VERIFICATION RUN whose output reaches a truncating sink =====================
         # Two tiers: the narrow verification-run predicate piped into a truncating sink DENIES; everything else
