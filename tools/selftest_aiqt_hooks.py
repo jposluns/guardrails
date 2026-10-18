@@ -2610,6 +2610,82 @@ def _procsubst_skip_failures(count=20000, seed=20261018):
     return out
 
 
+def _procsubst_walk_calls(walk, command):
+    """[(text, start, stack)] for each _skip_quoting_from call walk(command) makes, recorded by a wrapper
+    installed on that module attribute for the run and restored after it; _skip_quoting reaches the walk
+    through the same attribute, so a call through it is recorded too, with the text it passed."""
+    inner = aiqt_hooks._skip_quoting_from
+    calls = []
+
+    def recording(text, i, n, stack):
+        calls.append((text, i, list(stack)))
+        return inner(text, i, n, stack)
+
+    aiqt_hooks._skip_quoting_from = recording
+    try:
+        walk(command)
+    finally:
+        aiqt_hooks._skip_quoting_from = inner
+    return calls
+
+
+def _procsubst_walk_problems(walk, command):
+    """What walk(command)'s recorded _skip_quoting_from calls (_procsubst_walk_calls) get wrong against the
+    in-place read of a command whose only quoting constructs are its process substitutions: one call for
+    each substitution's '(', in order, each on `command` itself (never on a copy of its tail) from just
+    past that '(' with the one open paren context. Phrases, [] for none, at most three."""
+    wants = [i for i in range(1, len(command)) if command[i] == "(" and command[i - 1] in "<>"]
+    calls = _procsubst_walk_calls(walk, command)
+    out = []
+    if len(calls) != len(wants):
+        out.append("made {} _skip_quoting_from call(s) for {} substitution(s)".format(len(calls), len(wants)))
+    for (text, start, stack), i in zip(calls, wants):
+        if text != command:
+            out.append("walked a copy of {} character(s) for the substitution at {} (want the command in "
+                       "place, {} characters)".format(len(text), i, len(command)))
+        elif (start, stack) != (i + 1, ["paren"]):
+            out.append("walked from {} with contexts {} for the substitution at {} (want from {} with "
+                       "['paren'])".format(start, stack, i, i + 1))
+        if len(out) == 3:
+            break
+    return out
+
+
+def _procsubst_copying_walk(command):
+    """A wrong segments walk for _procsubst_taken_failures: at each process substitution's '(' it walks a
+    copy of the rest of the command prefixed with '$', the call shape the in-place read replaced."""
+    n = len(command)
+    for i in range(1, n):
+        if command[i] == "(" and command[i - 1] in "<>":
+            aiqt_hooks._skip_quoting("$" + command[i:], 0, n - i + 1)
+
+
+def _procsubst_taken_failures():
+    """(dl-procsubst-taken) The in-place walk is TAKEN by the production split: on a command of many
+    adjacent process substitutions ending in a protected force-push, _raw_push_segments calls
+    _skip_quoting_from once per substitution on the command itself, never on a copy of its tail
+    (_procsubst_walk_problems; the command holds no backslash-newline pair, so the joined text the split
+    walks equals the command), and _raw_push_match still matches the force-push segment
+    (dl-procsubst-taken-match). The equivalence
+    check above holds just as well for a split that copies, so only this record pins the call site; the
+    bounded timed rows do not (the copying split stayed under the 1 MB CPU bound when measured). The
+    copying call shape it replaced must be caught by the same record (dl-procsubst-taken-red), so the
+    record discriminates."""
+    if not callable(getattr(aiqt_hooks, "_skip_quoting_from", None)):
+        return ["(dl-procsubst-taken-missing) aiqt_hooks has no _skip_quoting_from to record the walk on"]
+    command = "cat " + "<(x) >(x) " * 1200 + "; git push --force origin main"
+    out = []
+    for problem in _procsubst_walk_problems(aiqt_hooks._raw_push_segments, command):
+        out.append("(dl-procsubst-taken) _raw_push_segments {}".format(problem))
+    if not aiqt_hooks._raw_push_match(command):
+        out.append("(dl-procsubst-taken-match) _raw_push_match misses the protected force-push after {} "
+                   "process substitutions".format(command.count("(x)")))
+    if not _procsubst_walk_problems(_procsubst_copying_walk, command):
+        out.append("(dl-procsubst-taken-red) a walk that copies the rest of the command for each substitution "
+                   "passes the call record")
+    return out
+
+
 # Commands for the continuation-join fast path: with no backslash-newline pair (backslashes, newlines and
 # quoting apart from each other) and with pairs at top level, inside quotes, substitutions, an expansion and
 # comments, including pairs the walk keeps.
@@ -2903,6 +2979,13 @@ _DEADLINE_SHAPES = {
     # force-push to a protected branch.
     "mirror_cfg_run_after": lambda n, base: ("Bash", {"command": "git push " + _repeat(
         "'-c'remote.", n - 9, "; git push --force origin main")}),
+    # A run of adjacent process substitutions, which the push backstop's segment split walked by copying
+    # the rest of the command for each one, in time quadratic in the length of the run (4.7 s at 1 MB,
+    # in-process on a 24-core host, 2026-10-18), then a force-push to a protected branch. The bounds
+    # here are not what pins the in-place walk (the copying split stayed under the 1 MB CPU bound when
+    # measured); the call record (dl-procsubst-taken) does.
+    "procsubst_run_after": lambda n, base: ("Bash", {"command": "cat " + _repeat(
+        "<(x) >(x) ", n - 4, "; git push --force origin main")}),
     "write_content": lambda n, base: ("Write", {"file_path": base + "/notes.txt", "content": "a" * n}),
     "write_secretish": lambda n, base: ("Write", {"file_path": base + "/notes.txt", "content": _repeat("a=", n)}),
     "write_deep_path": lambda n, base: ("Write", {"file_path": base + _repeat("/a", n - len(base)),
@@ -2930,7 +3013,8 @@ _DEADLINE_CASES = {
     "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
     "orch_untracked_wait_loop": ("git_words", "nest_cmdsubst"),
     "orch_yield_tool": ("wakeup_long",),
-    "protected_line": ("git_words_unbal_dq", "push_force_after", "mirror_cfg_run_after"),
+    "protected_line": ("git_words_unbal_dq", "push_force_after", "mirror_cfg_run_after",
+                       "procsubst_run_after"),
     "review_dispatch_pin": ("git_add_parsed", "nest_cmdsubst"),
     "secrets_shift_left": ("cd_git_fetch_unbal", "nest_cmdsubst", "write_secretish"),
     "write_scope_guard": ("write_content", "write_deep_path"),
@@ -2939,7 +3023,8 @@ _DEADLINE_CASES = {
 _DEADLINE_DENY_CASES = frozenset((
     ("commit_msg_subst", "subst_after"), ("diff_source_pretool", "diff_after"),
     ("gate_weakening", "noverify_after"), ("git_explicit_binding", "breadth_push_after_unbal"),
-    ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after")))
+    ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
+    ("protected_line", "procsubst_run_after")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
 # CPU time, plus that of the child processes it reaped). Over two runs on a 24-core host with Python
@@ -5206,6 +5291,7 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_raw_sequence_failures())
     failures.extend(_raw_mirror_failures())
     failures.extend(_procsubst_skip_failures())
+    failures.extend(_procsubst_taken_failures())
     failures.extend(_join_fast_failures())
     failures.extend(_lex_skip_failures())
     child_tmp = tmp / "deadline"
