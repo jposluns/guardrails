@@ -40,7 +40,7 @@
 #                        that an operation is a preview (secprv.5 to secprv.10) and its carve-out was reworded
 #                        (secprv.11): rule files 115525 -> 116234 (+709 units); managed block 360 and file
 #                        headers 16136 unchanged.
-#                        Raised 132730 -> 132775 for content, within maintainer decision D-505-R8-BUDGET of
+#                        Raised 132730 -> 132775 for content, within the maintainer's decision of
 #                        2026-10-11 (a raise of at most 45 units): preview-has-no-side-effects names the user
 #                        as the recipient of the fallback's uncertainty disclosure (secprv.8, secprv.9) and
 #                        admits only reference docs produced and published independently of the assistant's

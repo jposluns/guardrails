@@ -15058,7 +15058,7 @@ def _init_echo(line, err=False):
     sys.displayhook, an alias to an out-of-graph helper, an import alias such as
     from os import writev as ascii, or a spelled callback such as
     sorted(..., key=os.system)) is therefore refused because the reference is not
-    allowed where it appears. RESIDUAL (D-STATIC-PIN-RESIDUAL, stated exactly): a
+    allowed where it appears. RESIDUAL (what the static pin cannot see, stated exactly): a
     static reference check cannot see what an ALLOWED reference does at runtime
     with hostile VALUES (an allowed method spelling invoked on a rebound object),
     code in ANOTHER MODULE (the sibling _opf_* modules the init path calls into,
@@ -15295,7 +15295,7 @@ def _init_refusal_message(exc):
     the handler formats those characters and nothing a subclass chooses.
     Deliberate in-process forgery of the private attribute around raw text,
     and in-process rebinding of these functions, are hostile code already
-    running in this interpreter, the stated D-STATIC-PIN-RESIDUAL."""
+    running in this interpreter, the residual _init_echo's docstring states."""
     text = _init_exact_str(exc)
     try:
         proven = exc._opf_rendered_message
@@ -16559,7 +16559,7 @@ def _cmd_init(rest):
     traceback shows the dispatcher's source lines and the interrupt type; by
     then no exception is being handled, so it interpolates no init value: this
     qualifier holds for this post-return window only). What a static scan
-    still cannot prove is stated in _init_echo's docstring (D-STATIC-PIN-RESIDUAL)."""
+    still cannot prove is stated in _init_echo's docstring (its RESIDUAL paragraph)."""
     try:
         return _init_main(rest)
     except BaseException as exc:  # noqa: BLE001  the last-resort rendering boundary
