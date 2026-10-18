@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "c946982ce0d35829ef3bf5a45b0e75c8b1aae7c0fe25dc3d1ca302e55ed132fe"
+tree-sha256 = "29516a67204591fb41cf16f1594412921dbf7e5106b5b3c2cb13743d84a4e6e4"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -821,8 +821,8 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 10833
-sha256 = "036b7d9fa713e424f5555c1674b6398e2253bf512b108375c407e1b44244f3c2"
+bytes = 11151
+sha256 = "1af3e3f38d727b3ff57790df0440829d0253b584ca8fd37bfa0718b6d7acdff7"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -2371,8 +2371,8 @@ sha256 = "aaf972bbdd8b8520076c1bb6f9d701fab580ed6fd34a91c2ba125d39d463aa11"
 
 [[sources]]
 path = "README.md"
-bytes = 5065
-sha256 = "696054a84813b5ac285d5086cfdc132d3d1bd5c6754e951609064b75171b59a0"
+bytes = 5197
+sha256 = "eba8940b2f426b60b099e7bb282981aab99c887847c4b5b199f7e544fd22b113"
 
 [[sources]]
 path = "RELEASING.md"
@@ -3171,8 +3171,8 @@ sha256 = "b58efc0e9a4fbdcfc05d18178292d32f047be4aa8bed31648fa7684c06d9dd60"
 
 [[sources]]
 path = "site/index.html"
-bytes = 17363
-sha256 = "cbf43cf00b489514e7d60fb20b1dc9550d129ca77aa083dd24c574e20378ca65"
+bytes = 17364
+sha256 = "3b5b6f10c4c139ad180e05502cb9b7bbca267a540ea7493f5ee1a0844e243e6d"
 
 [[sources]]
 path = "site/install.html"
@@ -3476,8 +3476,8 @@ sha256 = "0446386ea3b2d5f4b6dafefe6f56905661f775e9b926271b465de2e70445a195"
 
 [[sources]]
 path = "tools/check_reference_facts.py"
-bytes = 203407
-sha256 = "59beabcaa121edc4450c465e2cc776b847e193536ad18b18c851a55acfa332a4"
+bytes = 204380
+sha256 = "cf3741e4e19636e0d4f56f22d24de87484d9011764951b522519d139bbaa8d2f"
 
 [[sources]]
 path = "tools/check_release_build.py"
@@ -3646,8 +3646,8 @@ sha256 = "87ae9d0e400cca86d0a583f7f0e99271efce494255abddc76d85c51ac836bfaf"
 
 [[sources]]
 path = "tools/gen_reference_facts.py"
-bytes = 11675
-sha256 = "26ead77672a53c0477ef6f4ed11c459c3a41a9278f64b381c4e258b965c92e14"
+bytes = 39033
+sha256 = "0c98e01903beaf63e943dffc50416fcd76cc5148b62273ea09493848e0d97d70"
 
 [[sources]]
 path = "tools/gen_renderers.py"
