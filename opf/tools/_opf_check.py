@@ -197,9 +197,9 @@ HOMES2_CHECKS = ("C-EVIDENCE-ENUM",)
 # the self-test asserts imported_content_checks_landed below: once SUPPORTED_SPEC_VERSION reaches
 # IMPORTED_SPEC_VERSION this roster must be non-empty, NEW ids in the exact imported-check grammar
 # (_IMPORTED_ID_RE below), disjoint from REQUIRED_CHECKS and HOMES2_CHECKS, and inside
-# required_checks(h) for EVERY homes generation h from 1 through SUPPORTED_HOMES (activating the
-# imported series and activating homes 2 are separate gates; today an active series is graded
-# against required_checks(1)), so raising that
+# required_checks(h) for EVERY homes generation h from 1 through SUPPORTED_HOMES (an active series is
+# graded only at homes 2, imported_series_active, so the every-generation bound is the stricter
+# fail-closed requirement), so raising that
 # constant alone, or with a placeholder roster, cannot ship. At activation these ids join the
 # required roster of every generation the way HOMES2_CHECKS joins the homes-2 roster: the wiring
 # must place the imported ids inside required_checks(h) for EVERY supported generation while
@@ -233,9 +233,13 @@ def imported_series_active(manifest_data):
     it). The 1.3.0 imported-series content activates only inside the 2.0.0 declaration, so a homes-1
     store never activates it, whatever spec_version it declares, and raising either tooling constant
     alone activates nothing. False for every store this tooling validates today (SUPPORTED_HOMES is
-    1). The doctor driver (the roster, C-IMPORTED-SCHEMA and the containment registration) and the
-    write guard (_opf_write_guard.plan_write_scope) read this ONE flag, so they cannot disagree on
-    the imported managed set."""
+    1). Every imported-series reader takes this ONE flag: the doctor driver derives it once for
+    C-COUNTERS, C-ID-SPACE, C-NO-DELETION, C-CONTIGUITY, the across-time checks and the C-CONTAINMENT
+    registration (classify_containment and its activation tripwire); the write guard
+    (_opf_write_guard.plan_write_scope) passes it to the same classify_containment; and the observer's
+    prior imported baseline (_opf_observe._reconstruct_imported) and the record counter proof
+    (_opf_record._counter_state) read it too. So they cannot disagree on which stores carry the
+    imported series or on the imported managed set."""
     return (_opf_store.homes_generation(manifest_data) >= 2
             and _opf_store.imported_series_declared(manifest_data))
 
@@ -255,10 +259,11 @@ def imported_content_checks_landed():
     any other character is refused, never stripped or case-folded into a match), disjoint from
     REQUIRED_CHECKS and HOMES2_CHECKS (a placeholder reusing an existing id such as C-CONTAINMENT
     implements no imported-content grading, so reuse never stands in), and inside
-    required_checks(h) for EVERY homes generation h from 1 through SUPPORTED_HOMES. Activating the
-    imported series (SUPPORTED_SPEC_VERSION) and activating homes 2 (SUPPORTED_HOMES) are SEPARATE
-    gates: today an active series is graded against required_checks(1), so ids wired only into the
-    homes-2 roster would bind no generation an active store is actually graded against. Raising
+    required_checks(h) for EVERY homes generation h from 1 through SUPPORTED_HOMES. An active series
+    is graded only at homes 2 (imported_series_active requires the graded homes-2 declaration), but
+    this predicate keeps the stricter every-generation bound: ids wired into some supported
+    generation's roster only read red, a red on a legitimate alternative rather than a green on an
+    unwired generation. Raising
     the support constant without landing the checks, or landing a placeholder roster, therefore
     fails the suite through this predicate, and the runtime tripwire never stands alone. This
     predicate grades ROSTER STRUCTURE only -- the ids exist, match the grammar, are NEW, and are
@@ -2359,13 +2364,14 @@ def classify_containment(manifest_data, machine_rel, imported=False):
     adoption-content managed set from, so a second consumer cannot diverge from it by construction (F10-1).
     `enabled_types` and `layout` are derived internally from `manifest_data` by the SAME pure helpers the
     caller uses (D2), so the classification cannot drift from the manifest the caller validated.
-    `imported` is the EXPLICIT imported-series activation flag (spec 8.2/4.2): the caller derives it
-    through _opf_store.imported_series_declared, which requires BOTH the declared spec_version AND
-    this tooling's own support (SUPPORTED_SPEC_VERSION at or above IMPORTED_SPEC_VERSION), so it is
-    False for every store this tooling validates today, the accepted 2.0.0 / homes = 2 reservation
-    included. When True, the imported managed leaves join the managed set; the default False keeps
-    every current store's grading unchanged, so the registration ships inert until activation
-    raises SUPPORTED_SPEC_VERSION to 1.3.0. Returns a ContainmentClassification."""
+    `imported` is the EXPLICIT imported-series activation flag (spec 8.2/4.2): the doctor driver and the
+    write guard both derive it through imported_series_active, which requires the graded 2.0.0 /
+    homes = 2 declaration AND this tooling's own imported-series support (SUPPORTED_HOMES at 2 or
+    above and SUPPORTED_SPEC_VERSION at or above IMPORTED_SPEC_VERSION), so it is False for every
+    store this tooling validates today, the accepted 2.0.0 / homes = 2 reservation included. When
+    True, the imported managed leaves join the managed set; the default False keeps every current
+    store's grading unchanged, so the registration ships inert until activation raises both
+    constants. Returns a ContainmentClassification."""
     mrel = machine_rel
     dp = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
     layout = dp.get("layout") if isinstance(dp, dict) else None
@@ -2419,11 +2425,11 @@ def classify_containment(manifest_data, machine_rel, imported=False):
     # (accepted-if-present, never required). Ledger importer types (none today) are excluded.
     importer_index_types = frozenset(IMPORTER_TYPES) - _LEDGER_TYPES
     # The imported-series managed leaves (spec 8.2/4.2): part of the managed set ONLY under the
-    # explicit `imported` activation flag (never true today: imported_series_declared also requires
-    # SUPPORTED_SPEC_VERSION to reach IMPORTED_SPEC_VERSION, so even the reserved 2.0.0 / homes = 2
-    # declaration C-MANIFEST accepts stays inactive until activation raises it), and
-    # admitted ONLY directly in the machine store. The names derive from the enabled-type roster in
-    # _opf_store, so the leaf set cannot drift from the imported id/counter namespace set; the
+    # explicit `imported` activation flag (never true today: imported_series_active also requires
+    # SUPPORTED_HOMES to reach 2 and SUPPORTED_SPEC_VERSION to reach IMPORTED_SPEC_VERSION, so even the
+    # reserved 2.0.0 / homes = 2 declaration C-MANIFEST accepts stays inactive until activation raises
+    # both), and admitted ONLY directly in the machine store. The names derive from the enabled-type
+    # roster in _opf_store, so the leaf set cannot drift from the imported id/counter namespace set; the
     # importer-only legacy_fragment contributes no leaf.
     imported_leaves = _opf_store.imported_leaf_names(enabled_types) if imported else frozenset()
     archive_root = _rel(mrel, ARCHIVE_DIRNAME)
@@ -3007,8 +3013,8 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # The imported-series activation flag, derived ONCE (imported_series_active: the graded homes-2
     # declaration and this tooling's imported-series support, so every store graded today is inactive and
     # the per-series id grading ships inert). It is the ONLY input C-COUNTERS, C-ID-SPACE, C-NO-DELETION,
-    # C-CONTIGUITY and the across-time checks read for the imported series, so they cannot disagree about
-    # which stores carry it.
+    # C-CONTIGUITY, the across-time checks and the C-CONTAINMENT registration read for the imported series,
+    # so they cannot disagree about which stores carry it.
     imported = imported_series_active(manifest_data)
 
     # --- C-ROSTER: reconcile the manifest [types] against the authoritative roster (spec 9/8.1) -------
@@ -3404,14 +3410,12 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- C-CONTAINMENT: whole-tree path / unmanaged-path containment (spec 14.2/11) -------------------
     rep.ran("C-CONTAINMENT")
-    # The explicit imported-series activation flag (spec 8.2/4.2), derived through
-    # _opf_store.imported_series_declared: the declared spec_version AND this tooling's own
-    # support. False for every store this tooling validates: the helper itself answers False until
-    # activation raises SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION, which
-    # C-MANIFEST alone does not guarantee (it accepts the reserved 2.0.0 / homes = 2 declaration
-    # today, spec 4.2).
-    _check_containment(root_fd, machine_rel, manifest_data, import_status, rep,
-                       imported=_opf_store.imported_series_declared(manifest_data))
+    # The SAME imported-series activation flag derived once above (imported_series_active, spec
+    # 8.2/4.2), so the managed set registers the imported leaves exactly where the per-series id
+    # checks grade them. False for every store this tooling validates: C-MANIFEST accepts the reserved
+    # 2.0.0 / homes = 2 declaration today (spec 4.2), but the flag stays False until activation raises
+    # both SUPPORTED_HOMES and SUPPORTED_SPEC_VERSION.
+    _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, imported=imported)
 
     # --- C-VIEW-DRIFT: byte-level drift of every declared deterministic view (spec 5.8/10) ------------
     rep.ran("C-VIEW-DRIFT")
@@ -4418,14 +4422,14 @@ def self_test():
               and any("legacy_fragment" in m and "schema-deferred" in m
                       for m in rlfr.by_check.get("C-RECORDS", [])))
         # OPF-IMPORTED-SERIES IS-2: the imported-series managed leaves (spec 8.2/4.2), behind the
-        # explicit `imported` activation flag. ACTIVE (imported=True, the spec_version >= 1.3.0 store):
-        # worklog.imported.toml and each enabled non-ledger type <type>.imported.index.toml are managed
-        # leaves DIRECTLY in the machine store; the importer-only legacy_fragment contributes none (its
-        # LF namespace is outside the imported series), and a deeper path of a leaf name stays a stray.
-        # The pure legs drive classify_containment directly; the full-doctor legs below cover the
-        # INACTIVE grading (the 1.2.0 store and the accepted 2.0.0 / homes = 2 reservation) and,
-        # with SUPPORTED_SPEC_VERSION patched to IMPORTED_SPEC_VERSION inside the vector, the
-        # ACTIVATED grading end to end through the driver's own derived flag.
+        # explicit `imported` activation flag. ACTIVE (imported=True, the activated 2.0.0 / homes = 2
+        # store): worklog.imported.toml and each enabled non-ledger type <type>.imported.index.toml are
+        # managed leaves DIRECTLY in the machine store; the importer-only legacy_fragment contributes none
+        # (its LF namespace is outside the imported series), and a deeper path of a leaf name stays a
+        # stray. The pure legs drive classify_containment directly; the full-doctor legs below cover the
+        # INACTIVE grading (the 1.2.0 store and the accepted 2.0.0 / homes = 2 reservation) and, with
+        # SUPPORTED_HOMES patched to 2 and SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION inside the
+        # vector, the ACTIVATED grading end to end through the driver's own derived flag.
         _is2_m = base_manifest()
         _is2_m["types"]["legacy_fragment"] = {"namespace": "LF"}
         _is2_on = classify_containment(_is2_m, ".working/toml", imported=True)
@@ -4465,7 +4469,8 @@ def self_test():
         # The accepted 2.0.0 / homes = 2 reservation (spec 4.2) is the ONE store C-MANIFEST
         # validates today with a spec_version above IMPORTED_SPEC_VERSION, so it is exactly where a
         # declaration-only gate would activate early: the imported leaves must stay unregistered
-        # strays there too (red if imported_series_declared ever reads the declaration alone), and
+        # strays there too (red if the activation flag ever reads the declaration without this
+        # tooling's support), and
         # the clean pair itself stays VALID (the planted leaves, never the declaration, cause the
         # findings; the planted bytes are not even TOML, so a VALID verdict would certify files
         # nothing read).
@@ -4495,12 +4500,30 @@ def self_test():
               == frozenset({(_opf_store.IMPORTED_WORKLOG_NAME if t in _LEDGER_TYPES
                              else t + _opf_store.IMPORTED_INDEX_SUFFIX)
                             for t, ns in _is2_roster.items() if ns in IMPORTED_NAMESPACES}))
-        # ACTIVATED full-doctor fixtures: SUPPORTED_SPEC_VERSION is patched to
-        # IMPORTED_SPEC_VERSION inside the vector (the spec 1.3.0 activation, the same per-vector
-        # patch idiom check_opf_homes uses for SUPPORTED_HOMES), so a spec_version 1.3.0 store
-        # validates and the driver-derived flag is True end to end.
+        # ACTIVATED full-doctor fixtures. The imported series activates only inside the graded
+        # 2.0.0 / homes = 2 declaration (imported_series_active), so BOTH tooling gates are patched
+        # inside the vector, SUPPORTED_HOMES to 2 and SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION
+        # (the per-vector patch idiom check_opf_homes uses for SUPPORTED_HOMES), and the store
+        # declares the 2.0.0 pair, so the driver-derived flag is True end to end. _is2_active() is
+        # that store with the zero high-water every imported counter needs once active (spec 8.2),
+        # and _is2_prior() the prior with the empty imported baseline the across-time checks need.
+        def _is2_active():
+            m = clean_machine()
+            m["manifest.toml"]["opf"]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
+            m["manifest.toml"]["opf"]["homes"] = 2
+            m["counters.toml"]["counters"].update(
+                {"imported:" + ns: 0 for ns in sorted(set(BASELINE_TYPES.values()))})
+            return m
+
+        def _is2_prior():
+            o = clean_prior()
+            o["prior"]["imported"] = {}
+            return o
+
         _is2_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
+        _is2_prev_homes = _opf_store.SUPPORTED_HOMES
         try:
+            _opf_store.SUPPORTED_HOMES = 2
             _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
             # The clean activated store with both imported leaves present REGISTERS them: no
             # unregistered-stray finding (red when EITHER flag-forwarding step, the driver to
@@ -4509,11 +4532,10 @@ def self_test():
             # run to CANNOT-EVALUATE with the deferred C-IMPORTED-* roster as the ONLY cant, never
             # VALID, because nothing reads the leaves' content yet (red if an activated store ever
             # certifies while the imported-content checks are deferred).
-            _is2_act = clean_machine()
-            _is2_act["manifest.toml"]["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
+            _is2_act = _is2_active()
             _is2_act["worklog.imported.toml"] = {"schema": 1, "entry": []}
             _is2_act["backlog_item.imported.index.toml"] = idx([])
-            _is2_act_run = run(copy.deepcopy(_is2_act))
+            _is2_act_run = run(copy.deepcopy(_is2_act), obs=_is2_prior())
             check("containment-imported-leaf-registered-when-activated",
                   _is2_act_run is not None and not _is2_act_run.findings
                   and _is2_act_run.status == CANNOT_EVALUATE
@@ -4526,7 +4548,7 @@ def self_test():
             # activation-tripwire cant dominates the finding, so the status is asserted as
             # not-VALID, and the discriminating assertion is the unregistered finding itself.
             _is2_act["release.imported.index.toml"] = idx([])
-            _is2_dis_run = run(_is2_act)
+            _is2_dis_run = run(_is2_act, obs=_is2_prior())
             check("containment-disabled-type-imported-leaf-stray-when-activated",
                   _is2_dis_run is not None and _is2_dis_run.status != VALID
                   and any("C-CONTAINMENT" in f and "release.imported.index.toml" in f
@@ -4537,12 +4559,10 @@ def self_test():
             # (red when the write guard falls back to the default flag: it would then plan writes
             # over a declaration the doctor flags as colliding).
             import _opf_write_guard
-            _is2_wg_m = base_manifest()
-            _is2_wg_m["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
+            _is2_wg_m = _is2_active()["manifest.toml"]
             _is2_wg_m["unmanaged"] = dict(paths=[".working/toml/worklog.imported.toml"])
             _is2_wg_cls = classify_containment(
-                _is2_wg_m, ".working/toml",
-                imported=_opf_store.imported_series_declared(_is2_wg_m))
+                _is2_wg_m, ".working/toml", imported=imported_series_active(_is2_wg_m))
             try:
                 _opf_write_guard.plan_write_scope(".working/toml", _is2_wg_m,
                                                   (".working/toml/manifest.toml",), "upgrade")
@@ -4558,11 +4578,10 @@ def self_test():
             # verbatim (red when the write guard falls back to the default flag while the
             # doctor-derived flag is True: the writer would then plan writes over a
             # declaration the doctor flags as colliding).
-            _is2_agx = clean_machine()
-            _is2_agx["manifest.toml"]["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
+            _is2_agx = _is2_active()
             _is2_agx["manifest.toml"]["unmanaged"] = dict(
                 paths=[".working/toml/worklog.imported.toml"])
-            _is2_agx_run = run(copy.deepcopy(_is2_agx))
+            _is2_agx_run = run(copy.deepcopy(_is2_agx), obs=_is2_prior())
             try:
                 _opf_write_guard.plan_write_scope(".working/toml", _is2_agx["manifest.toml"],
                                                   (".working/toml/manifest.toml",), "upgrade")
@@ -4581,17 +4600,17 @@ def self_test():
             # check deferred nothing reads them, so a VALID verdict would certify files nothing
             # read. The tripwire routes the ACTIVE store to CANNOT-EVALUATE naming the deferred
             # checks (red if an activated store with unread imported leaves ever certifies).
-            _is2_p1 = clean_machine()
-            _is2_p1["manifest.toml"]["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
+            _is2_p1 = _is2_active()
             _is2_p1["worklog.imported.toml"] = "deliberately invalid TOML ["
             _is2_p1["backlog_item.imported.index.toml"] = "garbage = ["
-            _is2_p1_run = run(_is2_p1)
+            _is2_p1_run = run(_is2_p1, obs=_is2_prior())
             check("containment-activated-garbage-leaf-never-certified",
                   _is2_p1_run is not None and _is2_p1_run.status == CANNOT_EVALUATE
                   and any("C-IMPORTED" in m and "unread" in m
                           for m in _is2_p1_run.cannot_evaluate))
         finally:
             _opf_store.SUPPORTED_SPEC_VERSION = _is2_prev_ssv
+            _opf_store.SUPPORTED_HOMES = _is2_prev_homes
         # The writer/doctor agreement in the OTHER direction, at the SHIPPED support (the derived
         # flag False): an [unmanaged] declaration of an imported-leaf NAME is a legitimate
         # declaration while the series is inactive (the name is not a managed leaf), so the FULL
@@ -4614,13 +4633,77 @@ def self_test():
               and not any("worklog.imported.toml" in f for f in _is2_agi_run.findings)
               and _is2_agi_scope is not None
               and ".working/toml/manifest.toml" in _is2_agi_scope["store"])
+        # The homes-1 activation vector: C-CONTAINMENT and plan_write_scope read the ONE activation
+        # flag (imported_series_active), never its declaration-and-support arm
+        # (_opf_store.imported_series_declared) alone, in BOTH directions the two can disagree. A
+        # homes-1 store declaring IMPORTED_SPEC_VERSION, with support raised (alone, and with
+        # SUPPORTED_HOMES at 2 as well), is declared but INACTIVE: its [unmanaged] declaration of an
+        # imported-leaf name stays legitimate, so the doctor certifies the store with C-CONTAINMENT
+        # passing, and the writer plans the SAME manifest (red when either reads the declaration arm:
+        # the doctor then registers the leaf, trips the tripwire and flags the collision, or the
+        # writer refuses). The reverse: the shipped 1.2.0 homes-1 store, whose declaration arm is
+        # False, with the flag forced ACTIVE (imported_series_active substituted in this module and in
+        # the module the write guard imports, both restored in finally): C-CONTAINMENT carries the
+        # tripwire and the collision, and the writer refuses naming that SAME collision (red when
+        # either reads the declaration arm, which never activates there).
+        _is2_h1 = clean_machine()
+        _is2_h1["manifest.toml"]["unmanaged"] = dict(paths=[".working/toml/worklog.imported.toml"])
+        _is2_h1["worklog.imported.toml"] = "unmanaged legacy bytes, never read ["
+
+        def _is2_h1_plan(manifest):
+            try:
+                return _opf_write_guard.plan_write_scope(
+                    ".working/toml", manifest, (".working/toml/manifest.toml",), "upgrade"), None
+            except _opf_write_guard.WriteGuardError as exc:
+                return None, str(exc)
+
+        _is2_h1_off = []
+        _is2_h1_prev = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
+        try:
+            for _is2_h1_homes in (1, 2):
+                _opf_store.SUPPORTED_HOMES = _is2_h1_homes
+                _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
+                _is2_h1d = copy.deepcopy(_is2_h1)
+                _is2_h1d["manifest.toml"]["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
+                _is2_h1d_m = copy.deepcopy(_is2_h1d["manifest.toml"])
+                _is2_h1d_run = run(_is2_h1d)
+                _is2_h1d_scope, _is2_h1d_refused = _is2_h1_plan(_is2_h1d_m)
+                _is2_h1_off.append(
+                    _opf_store.imported_series_declared(_is2_h1d_m)
+                    and not imported_series_active(_is2_h1d_m)
+                    and _is2_h1d_run is not None and _is2_h1d_run.status == VALID
+                    and _is2_h1d_run.checks.get("C-CONTAINMENT") == "PASS"
+                    and _is2_h1d_refused is None
+                    and ".working/toml/manifest.toml" in _is2_h1d_scope["store"])
+        finally:
+            _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = _is2_h1_prev
+        check("containment-writer-inactive-on-homes1-declared-store", _is2_h1_off == [True, True])
+        _is2_flag_mods = {id(m): m for m in (sys.modules[__name__], _opf_write_guard._opf_check)}
+        _is2_flag_prev = {k: m.imported_series_active for k, m in _is2_flag_mods.items()}
+        try:
+            for _is2_mod in _is2_flag_mods.values():
+                _is2_mod.imported_series_active = lambda manifest_data: True
+            _is2_h1r_run = run(copy.deepcopy(_is2_h1))
+            _is2_h1r_scope, _is2_h1r_refused = _is2_h1_plan(copy.deepcopy(_is2_h1["manifest.toml"]))
+        finally:
+            for _is2_k, _is2_mod in _is2_flag_mods.items():
+                _is2_mod.imported_series_active = _is2_flag_prev[_is2_k]
+        _is2_h1r_cc = _is2_h1r_run.by_check.get("C-CONTAINMENT", []) if _is2_h1r_run is not None else []
+        _is2_h1r_coll = [m for m in _is2_h1r_cc if "collides" in m]
+        check("containment-writer-follow-active-flag-on-homes1-store",
+              not _opf_store.imported_series_declared(_is2_h1["manifest.toml"])
+              and _is2_h1r_run is not None and _is2_h1r_run.checks.get("C-CONTAINMENT") != "PASS"
+              and any("C-IMPORTED" in m and "unread" in m for m in _is2_h1r_cc)
+              and any("worklog.imported.toml" in m for m in _is2_h1r_coll)
+              and _is2_h1r_scope is None and _is2_h1r_refused is not None
+              and all(m in _is2_h1r_refused for m in _is2_h1r_coll))
         # The tooling-side tripwire at the SHIPPED constants (red on a bare activation): once
         # SUPPORTED_SPEC_VERSION reaches IMPORTED_SPEC_VERSION the imported-content checks must
         # exist, be NEW ids in the exact id grammar (never a placeholder reusing an id from
         # REQUIRED_CHECKS or HOMES2_CHECKS), and sit inside required_checks(h) for EVERY homes
-        # generation h from 1 through SUPPORTED_HOMES. Activating the imported series and
-        # activating homes 2 are SEPARATE gates: today an active series is graded against
-        # required_checks(1), so membership in the homes-2 roster alone binds nothing. The
+        # generation h from 1 through SUPPORTED_HOMES. An active series is graded only at homes 2
+        # (imported_series_active), and the predicate keeps the stricter every-generation bound,
+        # so membership in the homes-2 roster alone stays red. The
         # assertion calls the module predicate imported_content_checks_landed itself, so this
         # shipped-constants call and the controlled vectors below exercise the SAME code, and
         # the runtime tripwire above never stands alone.
@@ -4826,8 +4909,8 @@ def self_test():
                   _icc_battery(_icc_rotated, _icc_rotated_placed, lambda offender: None, 118, True))
             # Supported, the legitimate activation wiring: a NEW id joined into
             # required_checks(h) for every generation reads True, and the SAME id wired ONLY
-            # into the homes-2 roster stays red while generation 1 is supported, because an
-            # active series is graded against required_checks(1) today.
+            # into the homes-2 roster stays red while generation 1 is supported, because the
+            # predicate's bound is every supported generation (the stricter fail-closed bound).
             _icc_g["IMPORTED_CONTENT_CHECKS"] = ("C-IMPORTED-CONTENT",)
             _icc_g["required_checks"] = (
                 lambda homes, _rc=_icc_prev_rc: _rc(homes) + ("C-IMPORTED-CONTENT",))
@@ -4933,6 +5016,14 @@ def self_test():
 
         def _i3_tripwire_only(r):
             return _i3_tripwire(r) and _i3_bad(r) == {"C-CONTAINMENT"} and not r.findings
+
+        def _i3_rows_refused_inactive(r):
+            # C-COUNTERS on an INACTIVE store holding every imported row: each row, and nothing else,
+            # draws the former finding that refuses an imported key as a clean two-letter namespace.
+            return (r is not None and r.checks.get("C-COUNTERS") == "FINDING"
+                    and sorted(_i3_msgs(r, "C-COUNTERS")) == sorted(
+                        "counters.toml: [counters] key {!r} is not a two-letter uppercase namespace".format(
+                            "imported:" + ns) for ns in _i3_ns))
 
         _i3_bi2 = {"backlog_item.imported.index.toml": idx([_i3_row("imported:BI-1"), _i3_row("imported:BI-2")])}
         _i3_prev_homes = _opf_store.SUPPORTED_HOMES
@@ -5106,7 +5197,7 @@ def self_test():
             del _i3_h1["manifest.toml"]["opf"]["homes"]
             _i3_h1r = run(_i3_h1)
             check("imported-grading-off-on-homes1-130-store",
-                  _i3_h1r is not None and _i3_h1r.checks.get("C-COUNTERS") == "FINDING"
+                  _i3_rows_refused_inactive(_i3_h1r)
                   and _i3_h1r.checks.get("C-ID-SPACE") == "PASS" and _i3_h1r.checks.get("C-NO-DELETION") == "PASS")
             # Homes 2 supported WITHOUT imported-series support (SUPPORTED_SPEC_VERSION back at its shipped
             # value, which a 1.2.0 store needs to pass C-MANIFEST). Support alone never activates: a 1.2.0
@@ -5120,26 +5211,35 @@ def self_test():
                   _i3_sup is not None and _i3_sup.status == VALID)
             _i3_h2 = run(_i3_machine(imp={"imported:BI": 1}, leaves=_i3_bi2))
             check("imported-grading-off-at-homes2-without-imported-support",
-                  _i3_h2 is not None and _i3_h2.checks.get("C-EVIDENCE-ENUM") == "PASS"
-                  and _i3_h2.checks.get("C-COUNTERS") == "FINDING"
+                  _i3_rows_refused_inactive(_i3_h2) and _i3_h2.checks.get("C-EVIDENCE-ENUM") == "PASS"
                   and _i3_h2.checks.get("C-ID-SPACE") == "PASS" and _i3_h2.checks.get("C-NO-DELETION") == "PASS")
         finally:
             _opf_store.SUPPORTED_HOMES = _i3_prev_homes
             _opf_store.SUPPORTED_SPEC_VERSION = _i3_prev_ssv
-        # imported_series_active is defined once at module level: a parallel change that carries the same
-        # definition must leave ONE copy when both merge, and a textual merge can keep two without a
-        # conflict (red when the module defines it twice).
+        # imported_series_active is bound once in this module, by its module-level def: a parallel change
+        # that carries the same definition must leave ONE copy when both merge, and a textual merge can keep
+        # two without a conflict. Every binding form is counted, anywhere in the source (a def, a class, an
+        # assignment or other name store, an import alias, an except name), so a second binding by
+        # assignment or import is caught as well as a second def (red when the module binds it twice).
         import ast
         import inspect
-        _i3_defs = [n for n in ast.parse(inspect.getsource(sys.modules[__name__])).body
-                    if isinstance(n, ast.FunctionDef) and n.name == "imported_series_active"]
-        check("imported-series-active-defined-once", len(_i3_defs) == 1)
+        _i3_tree = ast.parse(inspect.getsource(sys.modules[__name__]))
+        _i3_binds = [n for n in ast.walk(_i3_tree)
+                     if (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                         and n.name == "imported_series_active")
+                     or (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+                         and n.id == "imported_series_active")
+                     or (isinstance(n, ast.alias) and (n.asname or n.name) == "imported_series_active")
+                     or (isinstance(n, ast.ExceptHandler) and n.name == "imported_series_active")]
+        check("imported-series-active-defined-once",
+              len(_i3_binds) == 1 and isinstance(_i3_binds[0], ast.FunctionDef)
+              and _i3_binds[0] in _i3_tree.body)
         # The declaration alone never activates either: at the shipped SUPPORTED_HOMES the declared pair
         # grades generation 1, so an imported counter row is still the former C-COUNTERS finding and the
         # leaves are never read (red when the flag reads the declaration without tooling support).
         _i3_off = run(_i3_machine(imp={"imported:BI": 1}, leaves=_i3_bi2))
         check("imported-grading-off-at-shipped-support",
-              _i3_off is not None and _i3_off.checks.get("C-COUNTERS") == "FINDING"
+              _i3_rows_refused_inactive(_i3_off)
               and _i3_off.checks.get("C-ID-SPACE") == "PASS" and _i3_off.checks.get("C-NO-DELETION") == "PASS")
         # Inactive prior handling is unchanged: an imported counter key keeps the malformed-prior verdict,
         # and an imported member is ignored.

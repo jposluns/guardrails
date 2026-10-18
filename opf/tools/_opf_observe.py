@@ -1079,21 +1079,37 @@ def self_test_isolated():
     "untracked"; and the imported baseline of a homes-2 HEAD (empty unless the imported series is active,
     the committed leaf rows under the engine's digest once it is, the whole prior omitted on a row with no
     id). Judged ONLY on gather's RETURNED structure (never by grepping git's stdout for verdicts).
-    Returns 0 clean, 1 on a failed check, 2 on a harness error. When git is not on PATH at all it SKIPs
-    clean, like the POSIX-signal watchdogs, since every path depends on git."""
+    Returns 0 clean, 1 on a failed check, 2 on a harness error or when git is not on PATH: every vector
+    gathers from a git fixture, so without git none of them runs, which is cannot-evaluate, never a
+    clean exit a gate would read as the vectors having passed."""
+    import contextlib as _contextlib
+    import io as _io
     import shutil as _shutil
     import tempfile as _tempfile
 
     git = _git_path()
     if git is None:
-        print("opf observe self-test: SKIP (git not found on PATH)")
-        return 0
+        print("opf observe self-test: CANNOT-EVALUATE (git not found on PATH; no gather vector ran)",
+              file=sys.stderr)
+        return 2
 
     failures = []
 
     def check(name, cond):
         if not cond:
             failures.append(name)
+
+    # The git-absent path: with _git_path substituted to find no git, this function returns 2 and names
+    # the cannot-evaluate at once, running no vector (red when that path exits clean). Restored in finally.
+    _saved_git_path = globals()["_git_path"]
+    globals()["_git_path"] = lambda: None
+    try:
+        with _contextlib.redirect_stderr(_io.StringIO()) as _absent_err:
+            _absent_rc = self_test_isolated()
+    finally:
+        globals()["_git_path"] = _saved_git_path
+    check("git-absent-cannot-evaluate",
+          _absent_rc == 2 and "CANNOT-EVALUATE (git not found on PATH" in _absent_err.getvalue())
 
     # F-TOML-BARE-VALUEERROR-CLASS: a committed prior TOML whose parse overflows (tomllib raises RecursionError,
     # not a ValueError) or carrying an over-long integer literal (a BARE ValueError) is OMITTED with a note
