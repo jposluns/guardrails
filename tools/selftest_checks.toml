@@ -913,6 +913,19 @@ expected-check-ids = [
   "attest/failed-write-finding-names-it",
   "attest/broken-chain-finding",
   "attest/broken-chain-stop-holds",
+  "attest/anchor-seq-zero-holds",
+  "attest/anchor-seq-negative-holds",
+  "attest/anchor-seq-false-holds",
+  "attest/anchor-digest-short-holds",
+  "attest/anchor-digest-short-names-malformed",
+  "attest/anchor-non-object-holds",
+  "attest/anchor-non-object-names-malformed",
+  "attest/anchor-valid-after-shape-vectors-ok",
+  "attest/anchor-live-symlink-holds",
+  "attest/anchor-directory-symlink-holds-naming-link",
+  "attest/anchor-fifo-holds-without-blocking",
+  "attest/anchor-regular-after-type-vectors-ok",
+  "attest/git-failure-tracked-decision-holds",
   # ---------- GD-127: the systemic-lapse lifecycle (verdict-preservation legs) ----------
   "lapse/klass-recorded",
   "lapse/no-bypass-still-denies",
@@ -2479,4 +2492,57 @@ expected-check-ids = [
   "revert/r7-red",
   "revert/r7-request-red",
   "revert/every-flip-ran",
+]
+
+[[suite]]
+id = "hook-latency-selftest"
+runner = "tools/measure_hook_latency.py"
+expected-check-ids = [
+  # ---------- the command line ----------
+  "args/bounds",
+  "args/defaults",
+  "args/unknown-refused",
+  # ---------- the statistics and the synthetic inputs ----------
+  "summary/order-statistics",
+  "summary/outcome-classified",
+  "inputs/bash-command-at-cap",
+  "inputs/write-sizes-exact",
+  "inputs/write-line-scans-clean",
+  "inputs/startup-payload-rejected",
+  # ---------- hooks.json ----------
+  "hooks/real-hooks-json-resolves",
+  "hooks/malformed-refused",
+  "hooks/missing-id-named",
+  "hooks/unknown-selection-named",
+  "hooks/unmeasured-id-refused",
+  "hooks/unhooked-case-refused",
+  # ---------- the fixture and the child environment ----------
+  "fixture/git-fixture-shape",
+  "env/child-pinned",
+  # ---------- a measurement over stub hooks ----------
+  "measure/each-case-n-samples",
+  "report/exit-zero-all-valid",
+  "measure/timed-out-never-a-time",
+  "measure/timeout-kills-child",
+  "measure/inside-timeout-is-a-time",
+  "report/exit-zero-with-timeouts",
+  "report/json-conditions",
+  "report/table-plain",
+  "report/json-existing-refused",
+  # ---------- failed samples and the version probe ----------
+  "measure/failed-sample-no-time",
+  "measure/mixed-row-valid-only",
+  "report/no-valid-sample-shown",
+  "report/json-write-failure-exit-two",
+  "measure/failed-startup-sample-exit-three",
+  "report/control-ids-escaped",
+  "measure/version-probe-failure-refused",
+  # ---------- the fixture root and interrupts ----------
+  "measure/fixture-root-removed",
+  "measure/interrupt-cause-kept",
+  "measure/signal-during-removal-held",
+  "measure/signal-handlers-restored",
+  "measure/interrupt-sigterm-cleans-up",
+  "measure/interrupt-sigint-cleans-up",
+  "measure/interrupt-sighup-cleans-up",
 ]

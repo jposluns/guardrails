@@ -982,7 +982,22 @@ def _join_continuations(command):
     quotes nest, as in _skip_quoting. DISCLOSED divergences: inside a QUOTED heredoc body bash keeps the
     pair and this join removes it (heredocs are not modelled; any '<<' marks the lex uncertain anyway),
     and a 'case' pattern ')' inside a substitution is read as closing it (any '$(' or backtick marks the
-    lex uncertain anyway). Linear, never raises."""
+    lex uncertain anyway). Linear, never raises.
+
+    A command that holds no backslash immediately followed by a newline returns (command, the identity
+    index) at once, without the context walk (_join_continuations_walk). The result is identical: the
+    walk removes characters only at a backslash whose next character is a newline, and every other step
+    copies the characters it passes in order, so with no such pair nothing is removed in any context and
+    the walk returns the command unchanged with raw_index[k] == k. The pair test is a plain substring
+    test, so a pair the walk keeps (inside single quotes or a comment) still takes the walk."""
+    if chr(92) + "\n" not in command:
+        return command, list(range(len(command) + 1))
+    return _join_continuations_walk(command)
+
+
+def _join_continuations_walk(command):
+    """The context walk behind _join_continuations, with no fast path: the same (joined, raw_index)
+    for every command. The self-test compares the two on commands with and without a continuation."""
     n = len(command)
     out = []
     raw_index = []
@@ -1237,7 +1252,7 @@ def _lex_uncertain(command):
     return bool(_lex_uncertain_causes(command))
 
 
-def _lex_command(command, partial=False, locale=False):
+def _lex_command(command, partial=False, locale=False, skip_empty=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
     '{fd}>' redirect, or a malformed redirect), so the caller falls back conservatively rather than acting on
@@ -1260,7 +1275,13 @@ def _lex_command(command, partial=False, locale=False):
     default partial=False keeps the list-returning, raise-on-error contract every other caller relies on.
 
     locale is passed to _read_word for every word: True reads a bash locale quote $"..." as a double-quoted
-    string, and the default False keeps the reading every other caller relies on."""
+    string, and the default False keeps the reading every other caller relies on.
+
+    skip_empty True leaves out every segment with no word and no redirect, whose record would be
+    _Segment([], sep, [], raw, False, [], []), so a long run of separators ('((((', ';;;;') builds no record,
+    list or tuple for it; every other record, its order and the partial-mode flags are unchanged. Only a
+    caller that reads nothing from such a segment (not its sep_after, its raw slice, or its place in the
+    list) passes it; the default False keeps every record."""
     n = len(command)
     segments = []
     argv = []
@@ -1272,14 +1293,17 @@ def _lex_command(command, partial=False, locale=False):
     pending_heredocs = []  # queued (delim, strip_tabs) for QUOTED heredocs whose bodies to skip (finding 17)
 
     def end_segment(sep, op_start, next_start):
-        segments.append(_Segment(list(argv), sep, list(redirects),
-                                  command[seg_start[0]:op_start], opaque[0], list(argv_opaque),
-                                  list(argv_leading_tilde)))
-        del argv[:]
-        del argv_opaque[:]
-        del argv_leading_tilde[:]
-        del redirects[:]
-        opaque[0] = False
+        # With no word and no redirect there is nothing to reset: argv_opaque, argv_leading_tilde and opaque
+        # change only together with argv, so a skipped segment leaves them empty and False as well.
+        if argv or redirects or not skip_empty:
+            segments.append(_Segment(list(argv), sep, list(redirects),
+                                      command[seg_start[0]:op_start], opaque[0], list(argv_opaque),
+                                      list(argv_leading_tilde)))
+            del argv[:]
+            del argv_opaque[:]
+            del argv_leading_tilde[:]
+            del redirects[:]
+            opaque[0] = False
         seg_start[0] = next_start
 
     def consume_redirect(op, oplen, at, src_fd):
@@ -1388,7 +1412,7 @@ def _lex_command(command, partial=False, locale=False):
     return segments
 
 
-def _segments(command, locale=False):
+def _segments(command, locale=False, skip_empty=False):
     """Compatibility projection over _lex_command: a list of (argv, sep_after) tuples, argv being the
     quote-decoded words with shell REDIRECTION removed (so a leading/interspersed/trailing redirect no
     longer pollutes the token stream) and sep_after the ending operator or "". Raises ValueError on a
@@ -1396,8 +1420,9 @@ def _segments(command, locale=False):
     (protected_line, gate_weakening, git_explicit_binding, git_discard, find_ai_authorship) read
     redirect-free argv automatically; diff_source_pretool uses the richer _Segment records directly.
     locale is passed to _lex_command; only the commit-identity reader (_cmtidn_line_ai) sets it, and it reads
-    each line with it set and unset."""
-    return [(seg.argv, seg.sep_after) for seg in _lex_command(command, locale=locale)]
+    each line with it set and unset. skip_empty is passed to _lex_command, for a caller that reads nothing
+    from a segment with no word and no redirect."""
+    return [(seg.argv, seg.sep_after) for seg in _lex_command(command, locale=locale, skip_empty=skip_empty)]
 
 
 # A leading inline shell env-var assignment (FOO=bar or the APPEND form FOO+=bar) that PREFIXES a command,
@@ -3349,7 +3374,8 @@ def bash_absolute_paths(data):
     # cd/redirect in the parseable PREFIX still ASKS. Only a cd/redirect position WITHIN or AFTER the
     # unparseable construct is left to the human's own permission flow (a disclosed residual), rather than
     # over-asking on every such command. This is the conservative-floor boundary, not a proof of safety.
-    segments = _lex_command(command, partial=True)[0]
+    # The loop reads only each segment's words and redirects, so a segment with neither is skipped unbuilt.
+    segments = _lex_command(command, partial=True, skip_empty=True)[0]
     reasons = []       # relative/opaque cd or NON-destructive redirect: an allow-note convention nudge
     deny_reasons = []  # a DESTRUCTIVE truncating redirect to a relative/opaque target: fail-closed deny
     for seg in segments:
@@ -4083,7 +4109,9 @@ def git_stash_ref(data):
             "its git target and scope could not be checked. This is a binding convention, not a hazard, so "
             "it is allowed; prefer an explicit '-C' target and enumerated scope.")
     try:
-        segments = _segments(command)
+        # The loop below passes over a segment with no word (it has no command word), so one with no word
+        # and no redirect is not built at all.
+        segments = _segments(command, skip_empty=True)
     except ValueError:
         return _allow()
 
@@ -6677,7 +6705,7 @@ def _uncertain_line_lossy(command):
     found = []
     for line in _join_continuations(command)[0].split("\n"):
         try:
-            line_segments = _segments(line)
+            line_segments = _segments(line, skip_empty=True)  # a segment with no word names no verb
         except ValueError:
             continue  # a line the lexer cannot read alone contributes no name
         for tokens, _sep in line_segments:
@@ -6803,7 +6831,11 @@ def git_discard(data):
     if not isinstance(command, str):
         return _allow()  # boundary: unreadable/malformed command container
     try:
-        segments = _segments(command)
+        # Segments with no word and no redirect are skipped unbuilt: the lossy scan below passes over a
+        # segment with no command word, and _pristine_single_bare_git returns before reading the segments
+        # when the command holds any shell metacharacter (every separator and the newline among them), so
+        # it reads only the single segment that ends the command, and drops that one too when it has no word.
+        segments = _segments(command, skip_empty=True)
     except ValueError:
         # Conservative raw scan, not a silent allow (the unparseable-command fallback): an unparseable command the raw scan
         # flags is denied outright; only a command the scan clears is allowed at the true boundary.
@@ -9270,14 +9302,17 @@ def branch_root(data):
             "command string, so branch creation could not be checked; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule brnrot, fail-closed).")
     try:
-        segments = _segments(command)
+        # The loop below passes over a segment with no word (it has no command word), so one with no word
+        # and no redirect is not built at all, here or in the partial reread.
+        segments = _segments(command, skip_empty=True)
     except ValueError:
         # An unsupported LATER construct (a heredoc, a process substitution) must not discard a
         # proven-complete creation already recovered in the prefix: partial-lex and judge the recovered
         # segments, so a canonical orphan creation still DENIES (DENY outranks the parse error). A command
         # with no recovered creation falls back to the open-grammar allow (best-effort, disclosed).
         try:
-            segments = [(seg.argv, seg.sep_after) for seg in _lex_command(command, partial=True)[0]]
+            segments = [(seg.argv, seg.sep_after)
+                        for seg in _lex_command(command, partial=True, skip_empty=True)[0]]
         except ValueError:
             return _allow()  # even partial recovery failed: open grammar, best-effort
 
@@ -17366,12 +17401,19 @@ def _orch_register_authority(root, path):
     except (OSError, ValueError):
         rel = None
     if rel and not rel.startswith(os.pardir + os.sep) and rel != os.pardir:
+        # The tracked/untracked DECISION is an authority read (the same rule as the gate's
+        # verify_append_only): git confirms "not tracked" only with exit 1; any other exit (a
+        # corrupt index: 128, a non-repository root), launch error or timeout leaves the
+        # question open and is a HOLD, never a fall-through into the anchor leg.
         try:
-            tracked = subprocess.run(["git", "-C", root, "ls-files", "--error-unmatch", rel],
-                                     capture_output=True, timeout=10, env=env).returncode == 0
+            probe = subprocess.run(["git", "-C", root, "ls-files", "--error-unmatch", rel],
+                                   capture_output=True, timeout=10, env=env)
         except (OSError, subprocess.SubprocessError) as exc:
             return ("hold", "cannot determine register tracking ({})".format(exc), None)
-        if tracked:
+        if probe.returncode not in (0, 1):
+            return ("hold", "cannot determine register tracking (git ls-files exited "
+                    "{})".format(probe.returncode), None)
+        if probe.returncode == 0:
             try:
                 base = subprocess.run(["git", "-C", root, "merge-base", "HEAD", "origin/HEAD"],
                                       capture_output=True, text=True, timeout=10, env=env)
@@ -17390,15 +17432,48 @@ def _orch_register_authority(root, path):
                         "register is not an append-only extension of its merge-base state", None)
             return _orch_register_tip(lines)
     anchor = path + ".anchor"
+    # The gate's anchor rule: the anchor is opened ONCE, non-blocking and without following a
+    # final symlink, its type is checked on the OPENED descriptor, and its bytes are read from
+    # that same descriptor, so a symlink (live or dangling), a directory, a FIFO or any other
+    # non-regular entry is a HOLD, never a file the link names and never a blocked hook.
     try:
-        with open(anchor, "r", encoding="utf-8") as fh:
-            a = json.load(fh)
-        n, digest = int(a["seq"]), str(a["digest"])
-    except (OSError, ValueError, KeyError, TypeError):
+        fd = os.open(anchor, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+                     | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return ("hold", "the register anchor is a symlink, which is never followed", None)
         return ("hold", "declared register has no readable anchor authority", None)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ("hold", "the register anchor is not a regular file", None)
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except OSError:
+        return ("hold", "declared register has no readable anchor authority", None)
+    finally:
+        os.close(fd)
+    try:
+        a = json.loads(b"".join(chunks).decode("utf-8"))
+    except ValueError:
+        return ("hold", "declared register has no readable anchor authority", None)
+    # The same strict anchor shape as the gate: an object whose seq is an int (bools excluded)
+    # of at least 1 and whose digest is 64 lowercase hex. A zero, negative or false seq, a
+    # wrong-length or non-hex digest, and a non-object anchor are each a HOLD, never a
+    # bypassed digest comparison.
+    n = a.get("seq") if isinstance(a, dict) else None
+    digest = a.get("digest") if isinstance(a, dict) else None
+    if (not isinstance(n, int) or isinstance(n, bool) or n < 1
+            or not isinstance(digest, str) or len(digest) != 64
+            or set(digest) - set("0123456789abcdef")):
+        return ("hold", "the register anchor is malformed (an anchor is an object with an "
+                "integer seq >= 1 and a 64-hex digest)", None)
     if len(lines) < n:
         return ("hold", "register is shorter than its verified anchor (rows removed)", None)
-    if n > 0 and _orch_sha256_hex(lines[n - 1]) != digest:
+    if _orch_sha256_hex(lines[n - 1]) != digest:
         return ("hold", "the anchored row was rewritten (tamper or reorder)", None)
     return _orch_register_tip(lines)
 
