@@ -16,10 +16,16 @@ with exit 2). This gate holds where it runs:
      main()), the canonical file's entry ends in that line, and each dispatcher's main() holds HOOK_BLOCK as the
      statements right after its is_fail_open assignment.
   4. launchers: the first run_gate line of tools/run_all_checks.sh and of opf/tools/run_all_checks.sh is the
-     probe, and no non-comment line above it names python3 or a .py file (read in line order through
-     check_ci_parity.read_runner_text); in every job of every workflow under .github/workflows/ with a
-     non-comment line that names python3 or a .py file, the first step after the setup-python step is
-     PROBE_STEP; every hook command registered in the plugin's hooks.json is exactly "command": "python3" with
+     probe, and no line above it names Python (read in line order through check_ci_parity.read_runner_text).
+     A line names Python when, unless it is a whole-line comment, it holds an interpreter word (python with
+     any path before it and any version after it) or a .py word; a # later in the line hides nothing, as it
+     can sit inside a word or a quoted string. In a workflow under .github/workflows/ that names Python, every
+     line that names it sits inside a job the gate parses (a key at two spaces with nothing after its colon,
+     under a top-level jobs: line), after that job's one setup-python step and the PROBE_STEP that is the
+     first step after it, and its interpreter words are python3 or python only: a line before the probe, a
+     line outside every parsed job (a job key at other indentation or with a trailing comment, a line outside
+     jobs:) and an absolute or versioned interpreter (/usr/bin/python3, python3.14) are each a finding. Every
+     hook command registered in the plugin's hooks.json is exactly "command": "python3" with
      "args": ["-I", HOOK_TARGET, <mode>] (the shape tools/gen_hooks.py writes), its mode a HANDLERS key with a
      HANDLER_EVENT entry; and every .py word on a non-comment line of a shell launcher (tools/*.sh,
      opf/**/*.sh, and the declared EXTRA_SHELL_LAUNCHERS opf/enforcement/precommit/pre-commit and
@@ -45,16 +51,20 @@ with exit 2). This gate holds where it runs:
      a LAUNCHER or RESIDUAL entry is a finding whether listed or not, so the residual list must then be empty.
 
 The scan counts an import of subprocess, multiprocessing, pty or _posixsubprocess (asyncio.subprocess and
-concurrent.futures.process too), any attribute or from-import of os or posix (or an alias of either) named
-fork, forkpty, wait, wait3, wait4, waitid, waitpid, system, popen, posix_spawn, posix_spawnp, spawn* or exec*,
-a star import from os or posix, and any name, attribute or asyncio or concurrent.futures from-import spelled
+concurrent.futures.process too) and a literal sys.modules subscript naming one of them; any attribute or
+from-import of os or posix named fork, forkpty, wait, wait3, wait4, waitid, waitpid, system, popen,
+posix_spawn, posix_spawnp, spawn* or exec*, the module spelled as a name bound to it (an alias included), an
+attribute named os or posix (os.path.os) or a literal sys.modules subscript (sys.modules['os']); a star import
+from os or posix; and any name, attribute or asyncio or concurrent.futures from-import spelled
 create_subprocess_exec, create_subprocess_shell, subprocess_exec, subprocess_shell (the asyncio loop methods)
 or ProcessPoolExecutor. Local imports are followed from the importing file's own directory, then tools/ and
 opf/tools/ (imports inside functions included; a package is read at its __init__.py only). A call that loads a
-module or code at run time (__import__ as a name or an attribute, exec, eval, import_module,
-spec_from_file_location, exec_module, load_module, run_path, run_module) in a file the scan would otherwise
-call NOT-APPLICABLE is cannot-evaluate, unless the file's row in DYNAMIC_LOADS_REVIEWED names every load call
-in it by its exact text (ast.unparse), so a changed load target unreviews the file.
+module or code at run time (exec or eval as a name; __import__, import_module, spec_from_file_location,
+exec_module, load_module, run_path, run_module or the resolvers pkgutil.resolve_name and pydoc.locate as an
+attribute, a bare name or a from-import alias) in a file the scan would otherwise call NOT-APPLICABLE is
+cannot-evaluate, unless the file's row in DYNAMIC_LOADS_REVIEWED names every load call in it by its exact text
+(ast.unparse). That text pins a literal target, so a changed literal target unreviews the file; a target held
+in a variable or computed is pinned only by the expression the call spells (R13).
 
   check_child_status_coverage.py                       check the repository
   check_child_status_coverage.py --self-test           the coverage vectors (suite child-status-coverage-selftest)
@@ -81,15 +91,23 @@ after the probe fails, so later gates may print PASS lines in a run that ends RE
 multi-threaded process warns, so every guard runs at entry or at the top of the dispatcher's main; R10 the
 static scan over-approximates through whole-closure imports, and it does not see a spawn reached (a) inside a
 module it does not read, the standard library or a third-party package (platform.architecture and
-ctypes.util.find_library each start a child through subprocess), (b) through getattr, a variable or any other
-computed name, (c) in a package submodule no import names (a package is read at its __init__.py only), (d) in
-a C extension or through ctypes, or (e) through a star import from a module other than os, posix or a spawn
-module; R11 process-group and child-subreaper interplay (PR_SET_CHILD_SUBREAPER) is not checked; R12 a shell
-launcher's Python launch is recognised by a .py word on a non-comment line only, an override such as OPF_TOOL
-set by the operator replaces the default the gate resolves, here and dir are read from their plain here= and
-dir= assignments only, and a relative word is resolved from the repository root, so a launcher started from
-another directory reads it from there. Whether a real launcher starts these tools with SIGCHLD ignored, and whether the steps of
-one CI job share one disposition, are not established; the per-job probe tests the latter per job.
+ctypes.util.find_library each start a child through subprocess), (b) through getattr, sys.modules.get, a
+variable or any other computed name (a sys.modules subscript with a computed key included), (c) in a package
+submodule no import names (a package is read at its __init__.py only), (d) in a C extension or through ctypes,
+or (e) through a star import from a module other than os, posix or a spawn module; R11 process-group and
+child-subreaper interplay (PR_SET_CHILD_SUBREAPER) is not checked; R12 a shell launcher's Python launch is
+recognised by a .py word on a non-comment line only, an override such as OPF_TOOL set by the operator replaces
+the default the gate resolves, here and dir are read from their plain here= and dir= assignments only, and a
+relative word is resolved from the repository root, so a launcher started from another directory reads it from
+there; the walk for launchers under opf/ does not descend into a symlinked directory (os.walk follows none), so
+a launcher reached only through one is not read; R13 a reviewed load whose target is held in a variable or
+computed stays reviewed when the assignment, argument or computation changes, since its row pins the call text
+only, and the scan then follows the row's targets, not the new one (the self-test shows this limit); R14 a
+workflow or runner line that starts Python through a variable ($PY, ${{ env.PY }}), a console script (pip,
+pytest) or any other name the interpreter pattern does not match is not seen as naming Python. Whether a real
+launcher starts these tools with SIGCHLD ignored, and whether the steps of one CI job share one disposition, are
+not established: each job's probe step reads the disposition of its own step only, so it cannot show what the
+job's other steps inherit.
 """
 import sys
 
@@ -168,7 +186,11 @@ PROBE_STEP = ("- name: Child exit status observable (before any gate)", "shell: 
               "run: python3 -I -B " + CANONICAL_REL)
 SETUP_PYTHON_RE = re.compile(r"\s*- uses: actions/setup-python@")
 JOB_RE = re.compile(r"  ([A-Za-z0-9_-]+):")
-PYTHON_RUN_RE = re.compile(r"(?<![\w./-])python3?(?=\s)")
+# An interpreter word: python with any path before it and any version or ABI letter after it (/usr/bin/python3,
+# python3.14, python3.14t), not part of a longer word (setup-python, python-version, check_python_floor.py).
+# Only PLAIN_INTERPRETERS are accepted in a workflow: the interpreter setup-python puts on PATH.
+PYTHON_WORD_RE = re.compile(r"(?<![\w.])(?<![A-Za-z0-9]-)(?:[^\s;|&()<>=]*/)?python[0-9.]*[a-z]?(?![\w.-])")
+PLAIN_INTERPRETERS = ("python3", "python")
 PY_LAUNCH_RE = re.compile(r"(?<![\w./-])python3?\s+(?:-[A-Za-z]+\s+)*([A-Za-z0-9_./-]+\.py)(?![\w.])")
 PY_WORD_RE = re.compile(r"[A-Za-z0-9_./${}:-]*\.py(?![\w.])")
 EXTRA_SHELL_LAUNCHERS = ("opf/enforcement/precommit/pre-commit", "opf/enforcement/ci/github-actions.yml")
@@ -190,8 +212,10 @@ SPAWN_NAMES = frozenset(("create_subprocess_exec", "create_subprocess_shell", "s
                          "ProcessPoolExecutor"))
 SPAWN_NAME_PACKAGES = ("asyncio", "concurrent")
 DYNAMIC_NAMES = frozenset(("__import__", "exec", "eval"))
+# Load calls counted as an attribute, a bare name or a from-import alias: the importlib and runpy loaders and the
+# resolvers that turn a dotted string into a module attribute (pkgutil.resolve_name, pydoc.locate).
 DYNAMIC_ATTRS = frozenset(("__import__", "import_module", "spec_from_file_location", "exec_module", "load_module",
-                           "run_path", "run_module"))
+                           "run_path", "run_module", "resolve_name", "locate"))
 LOCAL_DIRS = ("tools", "opf/tools")
 CHILD_TIMEOUT = 120
 
@@ -324,10 +348,11 @@ DIRECT_LAUNCH_RESIDUAL = (
 
 # Run-time code loads reviewed by hand: (file, the exact text (ast.unparse) of every load call the scan sees in
 # it, sorted, the repository files those calls load, which the scan then follows as imports, and what is
-# loaded). The call text carries the load target, so a file whose load calls or their targets differ from its
-# row is unreviewed again (cannot-evaluate when nothing else in it reads a child's status), and a row that no
-# longer matches its file is a stale finding. A target held in a variable is pinned by the expression the call
-# spells, not by the value assigned to it elsewhere.
+# loaded). The call text carries a literal load target, so a file whose load calls or literal targets differ
+# from its row is unreviewed again (cannot-evaluate when nothing else in it reads a child's status), and a row
+# that no longer matches its file is a stale finding. A target held in a variable or computed is pinned only by
+# the expression the call spells: a changed assignment, argument or computation leaves the row reviewed, and the
+# scan follows the row's targets, not the new one (R13; the self-test shows this limit).
 DYNAMIC_LOADS_REVIEWED = (
     ("opf/tools/check_opf_init_contract.py", ("runpy.run_path(str(ROOT / 'opf/tools/_opf_init_contract.py'))",),
      ("opf/tools/_opf_init_contract.py",), "runpy.run_path of the literal opf/tools/_opf_init_contract.py"),
@@ -451,9 +476,12 @@ def hook_block_finding(rel, tree):
 # ---------------------------------------------------------------------------------------- leg 4: launchers
 
 def _names_python(line):
-    """True when a runner or workflow line, outside a trailing comment, names python3 or a .py file."""
-    code = line.split("#", 1)[0]
-    return bool(PYTHON_RUN_RE.search(code) or PY_WORD_RE.search(code))
+    """True when a runner or workflow line names Python: an interpreter word or a .py word. Only a whole-line
+    comment is skipped; a # later in the line can sit inside a word or a quoted string, where it starts no
+    comment, so the whole line is read."""
+    if line.lstrip().startswith("#"):
+        return False
+    return bool(PYTHON_WORD_RE.search(line) or PY_WORD_RE.search(line))
 
 
 def runner_first_gate_finding(rel, text, probe_line):
@@ -469,24 +497,39 @@ def runner_first_gate_finding(rel, text, probe_line):
 
 
 def workflow_findings(rel, text):
-    """Findings for every job that names python3 or a .py file without the probe as the first step after
-    setup-python."""
+    """Findings for a workflow that names Python: each line that names it must sit inside a job the gate parses,
+    after that job's one setup-python step and the probe step right after it, and name no interpreter outside
+    PLAIN_INTERPRETERS. A line read neither as a job key nor as a job's body (another indentation, a key with a
+    trailing comment) ends the current job, so the lines after it sit outside every job until the next key."""
     lines = text.splitlines()
-    launches = any(_names_python(line) for line in lines)
+    named = [index for index, line in enumerate(lines) if _names_python(line)]
+    if not named:
+        return []
+    out = ["{}:{}: names the interpreter {}, not the python3 or python setup-python puts on PATH".format(
+        rel, index + 1, word) for index in named for word in PYTHON_WORD_RE.findall(lines[index])
+        if word not in PLAIN_INTERPRETERS]
     if "jobs:" not in lines:
-        return ["{}: launches python3 with no top-level jobs: line".format(rel)] if launches else []
-    jobs = []
-    for line in lines[lines.index("jobs:") + 1:]:
+        return out + ["{}: names Python with no top-level jobs: line".format(rel)]
+    jobs, current = [], None
+    for index in range(lines.index("jobs:") + 1, len(lines)):
+        line = lines[index]
         match = JOB_RE.fullmatch(line)
         if match:
-            jobs.append((match.group(1), []))
+            current = (match.group(1), [])
+            jobs.append(current)
         elif line and not line.startswith((" ", "#")):
             break
-        elif jobs:
-            jobs[-1][1].append(line)
-    out = []
-    for job, body in jobs:
-        if not any(_names_python(line) for line in body):
+        elif line.startswith("   ") or not line.strip() or line.lstrip().startswith("#"):
+            if current is not None:
+                current[1].append(index)
+        else:
+            current = None
+    named_set, owned = set(named), set()
+    for job, indexes in jobs:
+        owned.update(indexes)
+        body = [lines[index] for index in indexes]
+        python_at = [position for position, index in enumerate(indexes) if index in named_set]
+        if not python_at:
             continue
         setup = [index for index, line in enumerate(body) if SETUP_PYTHON_RE.match(line)]
         if len(setup) != 1:
@@ -498,6 +541,11 @@ def workflow_findings(rel, text):
         if got != PROBE_STEP:
             out.append("{}: job {}: the first step after setup-python is not the child-status probe step".format(
                 rel, job))
+            continue
+        out.extend("{}:{}: job {}: names Python before the child-status probe step".format(
+            rel, indexes[position] + 1, job) for position in python_at if position < step)
+    out.extend("{}:{}: names Python outside every job the gate parses (a job key it does not read, or a line "
+               "outside jobs:)".format(rel, index + 1) for index in named if index not in owned)
     return out
 
 
@@ -614,14 +662,34 @@ def _dict_keys(tree, name):
 
 # ------------------------------------------------------------------------------------ leg 5: completeness
 
+def _modules_key(node):
+    """The literal string key of a modules[...] subscript (sys.modules['os']), or None."""
+    if (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute) and node.value.attr == "modules"
+            and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str)):
+        return node.slice.value
+    return None
+
+
+def _spells_os(node, os_names):
+    """True when node spells the os or posix module statically: a name bound to it, an attribute named os or
+    posix (os.path.os) or a literal sys.modules subscript (sys.modules['os'])."""
+    if isinstance(node, ast.Name):
+        return node.id in os_names
+    if isinstance(node, ast.Attribute):
+        return node.attr in OS_MODULES
+    return _modules_key(node) in OS_MODULES
+
+
 def module_reads(tree):
     """(reads, dynamic loads, imports) of one module: reads as sorted names, dynamic loads as the sorted exact
     text (ast.unparse) of each load call, imports as (module name, level) pairs, imports inside functions
     included."""
-    os_names = set(OS_MODULES)
+    os_names, load_names = set(OS_MODULES), set(DYNAMIC_NAMES | DYNAMIC_ATTRS)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             os_names.update(alias.asname for alias in node.names if alias.name in OS_MODULES and alias.asname)
+        elif isinstance(node, ast.ImportFrom):
+            load_names.update(alias.asname for alias in node.names if alias.name in DYNAMIC_ATTRS and alias.asname)
     reads, dynamic, imports = set(), set(), []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -644,16 +712,20 @@ def module_reads(tree):
             if module:
                 imports.append((module, node.level))
         elif isinstance(node, ast.Attribute):
-            if isinstance(node.value, ast.Name) and node.value.id in os_names and OS_SPAWN_RE.fullmatch(node.attr):
+            if _spells_os(node.value, os_names) and OS_SPAWN_RE.fullmatch(node.attr):
                 reads.add("os." + node.attr)
             if node.attr in SPAWN_NAMES:
                 reads.add(node.attr)
+        elif isinstance(node, ast.Subscript):
+            key = _modules_key(node)
+            if key is not None and (key.split(".")[0] in SPAWN_MODULES or key in SPAWN_SUBMODULES):
+                reads.add("sys.modules[{!r}]".format(key))
         elif isinstance(node, ast.Name):
             if node.id in SPAWN_NAMES:
                 reads.add(node.id)
         elif isinstance(node, ast.Call):
             callee = node.func
-            if isinstance(callee, ast.Name) and callee.id in DYNAMIC_NAMES:
+            if isinstance(callee, ast.Name) and callee.id in load_names:
                 dynamic.add(ast.unparse(node))
             elif isinstance(callee, ast.Attribute) and callee.attr in DYNAMIC_ATTRS:
                 dynamic.add(ast.unparse(node))
@@ -682,8 +754,9 @@ def resolve_import(rel, name, level, exists):
 
 def closure_reads(rel, load, exists, reviewed=None):
     """(reads, dynamic loads) of rel and its local import closure, each as sorted (file, name or call text)
-    pairs. A file whose load calls, by exact call text and so by target, are exactly its reviewed set
-    (DYNAMIC_LOADS_REVIEWED) has them followed as imports of the files they load instead."""
+    pairs. A file whose load calls, by exact call text (and so by target where the target is a literal), are
+    exactly its reviewed set (DYNAMIC_LOADS_REVIEWED) has them followed as imports of the files its row names
+    instead."""
     reviewed = {} if reviewed is None else reviewed
     seen, stack, reads, dynamic = set(), [rel], set(), set()
     while stack:
@@ -949,7 +1022,12 @@ def _inputs():
     opf_probe = 'run_gate "child-status"                python3 -I -B "$here/_child_status.py"\n'
     quality = real[WORKFLOWS_REL + "/quality.yml"]
     step = "      " + PROBE_STEP[0] + "\n        " + PROBE_STEP[1] + "\n        " + PROBE_STEP[2] + "\n"
-    lone = "jobs:\n  lone:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Gate\n        shell: bash\n"
+    head = "    runs-on: ubuntu-latest\n    steps:\n"
+    gate = "      - name: Gate\n        shell: bash\n"
+    lone = "jobs:\n  lone:\n" + head + gate
+    setup = "      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.14'\n"
+    guarded = "jobs:\n  lone:\n" + head + setup + step
+    launch = "        run: python3 -I -B tools/check_leaks.py\n"
     here_line = 'here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 2\n'
     texts = {
         "runner": real[LOCAL_RUNNER], "runner-moved": _swap(real[LOCAL_RUNNER], probe_line, ""),
@@ -957,8 +1035,17 @@ def _inputs():
                                        "python3 -I -B tools/check_leaks.py\n" + probe_line),
         "opf-runner": real[OPF_RUNNER], "opf-runner-moved": _swap(real[OPF_RUNNER], opf_probe, ""),
         "quality": quality, "quality-step-gone": quality.replace(step, "", 1),
-        "no-setup": lone + "        run: python3 -I -B tools/check_leaks.py\n",
+        "no-setup": lone + launch,
         "shebang-job": lone + "        run: tools/check_leaks.py\n",
+        "no-jobs-line": "on: push\nsteps:\n  - run: python3 -I -B tools/check_leaks.py\n",
+        "python-before-setup": lone + launch + setup + step,
+        "job-key-indented": "jobs:\n    lone:\n      runs-on: ubuntu-latest\n      steps:\n"
+                            "        - run: python3 -I -B tools/check_leaks.py\n",
+        "job-key-comment": guarded + gate + launch + "  later:  # a second job\n" + head + gate + launch,
+        "interpreter-path-job": lone + "        run: /usr/bin/python3 -m tools.check_leaks\n",
+        "interpreter-spelling": guarded + gate + "        run: /usr/bin/python3 -m tools.check_leaks\n" + gate
+                                + "        run: python3.14 -I -B tools/check_leaks.py\n",
+        "hash-inside-word": lone + "        run: echo a#b; python3 -I -B tools/check_leaks.py\n",
         "shell-unguarded": "#!/bin/sh\n# python3 tools/opf.py in a comment is not a launch\n"
                            "python3 -I -B tools/check_leaks.py\n",
         "shell-outside": "#!/bin/sh\npython3 -I -B /tmp/opf.py\n" + here_line
@@ -966,6 +1053,7 @@ def _inputs():
         "shell-same-name": "#!/bin/sh\n" + here_line + "python3 -I -B tools/opf.py\n"
                            'opf_tool=${OPF_TOOL:-$here/../tools/opf.py}\n',
         "shell-here-unbound": _swap(real[SHELL_REAL[0]], here_line, "here=$(pwd)\n"),
+        "shell-dir-unbound": _swap(real[SHELL_REAL[1]], 'dir=$(dirname -- "$0")', "dir=$(pwd)"),
         "hooks": real[HOOKS_JSON_REL],
         "hooks-unregistered": _swap(real[HOOKS_JSON_REL], '"absolute_paths"\n', '"no_such_mode"\n'),
         "hooks-echo": _hook_edit(real[HOOKS_JSON_REL], "command", lambda old: "echo"),
@@ -987,23 +1075,35 @@ API_SNIPPETS = ("import subprocess\n", "from subprocess import run\n", "import m
                 "import _posixsubprocess\n", "from concurrent.futures import ProcessPoolExecutor\n",
                 "import concurrent.futures\nconcurrent.futures.ProcessPoolExecutor()\n",
                 "from concurrent.futures import *\nProcessPoolExecutor()\n", "loop.subprocess_exec(None, 'true')\n",
-                "loop.subprocess_shell(None, 'true')\n", "from asyncio import *\ncreate_subprocess_exec('true')\n")
+                "loop.subprocess_shell(None, 'true')\n", "from asyncio import *\ncreate_subprocess_exec('true')\n",
+                "import os.path\nos.path.os.system('true')\n", "import sys\nsys.modules['os'].system('true')\n",
+                "import sys\nsys.modules['subprocess'].run(['true'])\n")
 # A run-time load per line: each, alone in a module, is a dynamic load the scan must see.
 LOAD_SNIPPETS = ("__import__('subprocess')\n", "import importlib\nimportlib.__import__('subprocess')\n",
                  "import builtins\nbuiltins.__import__('subprocess')\n", "exec('pass')\n", "eval('1')\n",
                  "import importlib\nimportlib.import_module('subprocess')\n", "import runpy\nrunpy.run_path('x.py')\n",
                  "import runpy\nrunpy.run_module('x')\n", "spec.loader.exec_module(module)\n",
                  "loader.load_module('x')\n",
-                 "import importlib.util\nimportlib.util.spec_from_file_location('x', 'x.py')\n")
+                 "import importlib.util\nimportlib.util.spec_from_file_location('x', 'x.py')\n",
+                 "from importlib import import_module\nimport_module('subprocess')\n",
+                 "from importlib import import_module as load\nload('subprocess')\n",
+                 "import pkgutil\npkgutil.resolve_name('subprocess:run')\n",
+                 "import pydoc\npydoc.locate('subprocess.run')\n",
+                 "from pydoc import locate\nlocate('subprocess.run')\n")
 # A synthetic entry tree for the completeness vectors: (rel, source).
 SYNTHETIC = (("tools/new_reader.py", "import helper_mod\n"), ("tools/helper_mod.py", "import subprocess\n"),
              ("tools/plain.py", "import json\n"), ("tools/dynamic.py", "import importlib\nimportlib.import_module(name)\n"),
              ("tools/launched.py", "import os\nos.waitpid(1, 0)\n"),
              ("tools/loader.py", "import runpy\nrunpy.run_path('tools/helper_mod.py')\n"),
-             ("tools/loader_moved.py", "import runpy\nrunpy.run_path('tools/plain.py')\n"))
-# One reviewed row per loader, both naming the load of tools/helper_mod.py; tools/loader_moved.py loads another.
+             ("tools/loader_moved.py", "import runpy\nrunpy.run_path('tools/plain.py')\n"),
+             ("tools/loader_var.py", "import runpy\ntarget = 'tools/helper_mod.py'\nrunpy.run_path(target)\n"),
+             ("tools/loader_var_moved.py", "import runpy\ntarget = 'tools/plain.py'\nrunpy.run_path(target)\n"))
+# One reviewed row per loader, each naming the load of tools/helper_mod.py: tools/loader_moved.py loads another
+# literal target, and tools/loader_var_moved.py assigns another target to the variable its unchanged call reads.
 SYNTHETIC_REVIEWED = {rel: (("runpy.run_path('tools/helper_mod.py')",), ("tools/helper_mod.py",))
                       for rel in ("tools/loader.py", "tools/loader_moved.py")}
+SYNTHETIC_REVIEWED.update((rel, (("runpy.run_path(target)",), ("tools/helper_mod.py",)))
+                          for rel in ("tools/loader_var.py", "tools/loader_var_moved.py"))
 
 
 def _synthetic_reads(module, reviewed=None):
@@ -1069,6 +1169,7 @@ def _vectors(module, trees, texts, canonical_tree):
     every_launcher = ["tools/a.sh", "opf/seen.sh"] + list(m.EXTRA_SHELL_LAUNCHERS)
     reviewed_reads = _synthetic_reads(m, SYNTHETIC_REVIEWED)
     ci_launcher = "opf/enforcement/ci/x.sh"
+    outside = "names Python outside every job the gate parses (a job key it does not read, or a line outside jobs:)"
 
     vectors = (
         ("copies/real-copies-identical", lambda: not copies("opf", m.CANONICAL_NAMES)
@@ -1106,6 +1207,21 @@ def _vectors(module, trees, texts, canonical_tree):
             "lone", texts["no-setup"]))),
         ("launchers/workflow-names-py-file", lambda: any("0 setup-python" in finding for finding in
                                                          m.workflow_findings("lone", texts["shebang-job"]))),
+        ("launchers/workflow-no-jobs-line", lambda: m.workflow_findings("w", texts["no-jobs-line"])
+         == ["w: names Python with no top-level jobs: line"]),
+        ("launchers/workflow-python-before-setup", lambda: m.workflow_findings("w", texts["python-before-setup"])
+         == ["w:7: job lone: names Python before the child-status probe step"]),
+        ("launchers/workflow-job-key-indented", lambda: m.workflow_findings("w", texts["job-key-indented"])
+         == ["w:5: " + outside]),
+        ("launchers/workflow-job-key-comment", lambda: m.workflow_findings("w", texts["job-key-comment"])
+         == ["w:19: " + outside]),
+        ("launchers/workflow-interpreter-path-needs-probe", lambda: any(
+            "0 setup-python" in finding for finding in m.workflow_findings("w", texts["interpreter-path-job"]))),
+        ("launchers/workflow-interpreter-spelling", lambda: m.workflow_findings("w", texts["interpreter-spelling"])
+         == ["w:13: names the interpreter /usr/bin/python3, not the python3 or python setup-python puts on PATH",
+             "w:16: names the interpreter python3.14, not the python3 or python setup-python puts on PATH"]),
+        ("launchers/workflow-hash-inside-word", lambda: any(
+            "0 setup-python" in finding for finding in m.workflow_findings("w", texts["hash-inside-word"]))),
         ("launchers/hook-command-exact", lambda: [finding.split(": ", 1)[1] for finding in hooks("hooks-echo")]
          == ["a hook command runs 'echo', not exactly 'python3'"]),
         ("launchers/hook-args-exact", lambda: [finding.split(": ", 1)[1].split(" are ")[0]
@@ -1121,6 +1237,9 @@ def _vectors(module, trees, texts, canonical_tree):
             "launches ${OPF_TOOL:-$here/../tools/opf.py, resolved to opf/enforcement/tools/opf.py, which is not a "
             "self-guarded entry"]),
         ("launchers/shell-here-unbound", lambda: shell(SHELL_REAL[0], "shell-here-unbound") == [
+            "launches ${OPF_TOOL:-$here/../../tools/opf.py, which does not resolve to a path inside the "
+            "repository"]),
+        ("launchers/shell-dir-unbound", lambda: shell(SHELL_REAL[1], "shell-dir-unbound") == [
             "launches ${OPF_TOOL:-$here/../../tools/opf.py, which does not resolve to a path inside the "
             "repository"]),
         ("launchers/unreadable-dir-cannot-evaluate", lambda: launchers() == (every_launcher, [])
@@ -1158,6 +1277,10 @@ def _vectors(module, trees, texts, canonical_tree):
          == ([("tools/helper_mod.py", "import subprocess")], [])
          and reviewed_reads("tools/loader_moved.py") == ([], [("tools/loader_moved.py",
                                                                "runpy.run_path('tools/plain.py')")])),
+        # The limit (R13): the call text pins a variable target's expression, not its value, so the moved
+        # assignment stays reviewed and the scan follows the row's target, not the one now assigned.
+        ("completeness/reviewed-variable-target-limit", lambda: reviewed_reads("tools/loader_var_moved.py")
+         == reviewed_reads("tools/loader_var.py") == ([("tools/helper_mod.py", "import subprocess")], [])),
         ("completeness/scan-follows-local-imports",
          lambda: reads_of("tools/new_reader.py")[0] == [("tools/helper_mod.py", "import subprocess")]),
         ("completeness/scan-clean-module", lambda: reads_of("tools/plain.py") == ([], [])),
@@ -1184,8 +1307,22 @@ MUTANTS = (
      "launchers/runner-prelude-launch"),
     ("workflow-step", "        if got != PROBE_STEP:\n", "        if False:\n", "launchers/workflow-first-step"),
     ("workflow-setup", "        if len(setup) != 1:\n", "        if False:\n", "launchers/workflow-no-setup"),
-    ("workflow-py-word", "return bool(PYTHON_RUN_RE.search(code) or PY_WORD_RE.search(code))",
-     "return bool(PYTHON_RUN_RE.search(code))", "launchers/workflow-names-py-file"),
+    ("workflow-py-word", "return bool(PYTHON_WORD_RE.search(line) or PY_WORD_RE.search(line))",
+     "return bool(PYTHON_WORD_RE.search(line))", "launchers/workflow-names-py-file"),
+    ("workflow-no-jobs", "    if \"jobs:\" not in lines:\n", "    if False:\n", "launchers/workflow-no-jobs-line"),
+    ("workflow-early", "for position in python_at if position < step)", "for position in python_at if False)",
+     "launchers/workflow-python-before-setup"),
+    ("workflow-outside", "for index in named if index not in owned)", "for index in named if False)",
+     "launchers/workflow-job-key-indented"),
+    ("workflow-job-reset", "        else:\n            current = None\n", "        else:\n            pass\n",
+     "launchers/workflow-job-key-comment"),
+    ("workflow-interpreter", "if word not in PLAIN_INTERPRETERS]", "if False]",
+     "launchers/workflow-interpreter-spelling"),
+    ("workflow-interpreter-word", r"(?<![\w.])(?<![A-Za-z0-9]-)(?:[^\s;|&()<>=]*/)?python[0-9.]*[a-z]?(?![\w.-])",
+     r"(?<![\w./-])python3?(?=\s)", "launchers/workflow-interpreter-path-needs-probe"),
+    ("comment-split", "return bool(PYTHON_WORD_RE.search(line) or PY_WORD_RE.search(line))",
+     "return bool(PYTHON_WORD_RE.search(line.split(\"#\", 1)[0]) or PY_WORD_RE.search(line.split(\"#\", 1)[0]))",
+     "launchers/workflow-hash-inside-word"),
     ("hook-command", "        if command.get(\"command\") != HOOK_COMMAND:\n", "        if False:\n",
      "launchers/hook-command-exact"),
     ("hook-args", "and len(args) == len(HOOK_ARGS) + 1 and args[:-1] == HOOK_ARGS",
@@ -1197,6 +1334,8 @@ MUTANTS = (
     ("shell-climb", "    if path == \"..\" or path.startswith(\"../\"):\n", "    if False:\n",
      "launchers/shell-outside-repository"),
     ("shell-here", "    return form is not None\n", "    return True\n", "launchers/shell-here-unbound"),
+    ("shell-dir", "        return _single_binding(lines, DIR_ASSIGN_RE, (DIR_BINDING,)) is not None\n",
+     "        return True\n", "launchers/shell-dir-unbound"),
     ("walk-error", "walk(Path(root) / \"opf\", onerror=_fail)", "walk(Path(root) / \"opf\")",
      "launchers/unreadable-dir-cannot-evaluate"),
     ("listdir-error", "    except OSError as exc:\n        raise CannotEvaluate(\"{}: cannot be listed",
@@ -1216,16 +1355,30 @@ MUTANTS = (
      "        if False:\n            findings.append(", "completeness/gone-residual-is-finding"),
     ("dynamic", "            if dynamic:\n", "            if False:\n", "completeness/dynamic-load-cannot-evaluate"),
     ("switch", "        if direct_check:\n", "        if False:\n", "completeness/switch-flips"),
-    ("scan-os", "and node.value.id in os_names and OS_SPAWN_RE.fullmatch(node.attr):",
-     "and False:", "completeness/scan-sees-every-api"),
+    ("scan-os", "if _spells_os(node.value, os_names) and OS_SPAWN_RE.fullmatch(node.attr):",
+     "if False:", "completeness/scan-sees-every-api"),
+    ("scan-os-chain", "        return node.attr in OS_MODULES\n", "        return False\n",
+     "completeness/scan-sees-every-api"),
+    ("scan-os-modules", "    return _modules_key(node) in OS_MODULES\n", "    return False\n",
+     "completeness/scan-sees-every-api"),
+    ("scan-modules-spawn", "            if key is not None and (key.split", "            if False and (key.split",
+     "completeness/scan-sees-every-api"),
     ("scan-os-star", "os_spawn = alias.name == \"*\" or OS_SPAWN_RE.fullmatch(alias.name)",
      "os_spawn = OS_SPAWN_RE.fullmatch(alias.name)", "completeness/scan-sees-every-api"),
     ("scan-names", "            if node.id in SPAWN_NAMES:\n", "            if False:\n",
      "completeness/scan-sees-every-api"),
     ("scan-load-attr", "            elif isinstance(callee, ast.Attribute) and callee.attr in DYNAMIC_ATTRS:\n",
      "            elif False:\n", "completeness/scan-sees-every-load"),
+    ("scan-load-name", "if isinstance(callee, ast.Name) and callee.id in load_names:",
+     "if isinstance(callee, ast.Name) and callee.id in DYNAMIC_NAMES:", "completeness/scan-sees-every-load"),
+    ("scan-load-alias", "load_names.update(alias.asname for alias in node.names if alias.name in DYNAMIC_ATTRS",
+     "load_names.update(alias.asname for alias in node.names if False", "completeness/scan-sees-every-load"),
+    ("scan-resolvers", "\"run_path\", \"run_module\", \"resolve_name\", \"locate\"))",
+     "\"run_path\", \"run_module\"))", "completeness/scan-sees-every-load"),
     ("reviewed-target", "and tuple(loads) == reviewed[current][0]:", "and len(loads) == len(reviewed[current][0]):",
      "completeness/reviewed-load-target-pinned"),
+    ("reviewed-follow", "            stack.extend(reviewed[current][1])\n", "            pass\n",
+     "completeness/reviewed-variable-target-limit"),
     ("scan-closure", "                stack.append(target)\n", "                pass\n",
      "completeness/scan-follows-local-imports"),
 )
@@ -1393,7 +1546,8 @@ def self_test(lane, report_path=None):
         for check_id, _index in (("repro/ignored-reads-failed-child-as-zero", 0),
                                  ("repro/default-reads-failed-child", 1), ("live/default-passes", 2),
                                  ("live/ignored-refuses-by-name", 3), ("layer/handler-seen-by-disposition", 4),
-                                 ("layer/lost-status-seen-by-probe", 5), ("layer/no-fork-nothing-probed", 6)):
+                                 ("layer/lost-status-seen-by-probe", 5), ("layer/no-fork-nothing-probed", 6),
+                                 ("layer/no-sigchld-nothing-probed", 7)):
             check(check_id, got.get(check_id, (False, "not run"))[0], got.get(check_id, (False, "not run"))[1])
     else:
         this = sys.modules[__name__]
@@ -1408,10 +1562,17 @@ def self_test(lane, report_path=None):
                                 ("launchers/runner-first-gate", 0), ("launchers/opf-runner-first-gate", 0),
                                 ("launchers/runner-prelude-launch", 0),
                                 ("launchers/workflow-first-step", 0), ("launchers/workflow-no-setup", 0),
-                                ("launchers/workflow-names-py-file", 0), ("launchers/hook-command-exact", 0),
+                                ("launchers/workflow-names-py-file", 0), ("launchers/workflow-no-jobs-line", 0),
+                                ("launchers/workflow-python-before-setup", 0),
+                                ("launchers/workflow-job-key-indented", 0),
+                                ("launchers/workflow-job-key-comment", 0),
+                                ("launchers/workflow-interpreter-path-needs-probe", 0),
+                                ("launchers/workflow-interpreter-spelling", 0),
+                                ("launchers/workflow-hash-inside-word", 0), ("launchers/hook-command-exact", 0),
                                 ("launchers/hook-args-exact", 0),
                                 ("launchers/shell-target-unguarded", 0), ("launchers/shell-outside-repository", 0),
                                 ("launchers/shell-same-name-unguarded", 0), ("launchers/shell-here-unbound", 0),
+                                ("launchers/shell-dir-unbound", 0),
                                 ("launchers/unreadable-dir-cannot-evaluate", 0),
                                 ("launchers/unlistable-dir-cannot-evaluate", 0),
                                 ("launchers/absent-declared-launcher", 0),
@@ -1423,6 +1584,7 @@ def self_test(lane, report_path=None):
                                 ("completeness/dynamic-load-cannot-evaluate", 0), ("completeness/switch-flips", 0),
                                 ("completeness/scan-sees-every-api", 0), ("completeness/scan-sees-every-load", 0),
                                 ("completeness/reviewed-load-target-pinned", 0),
+                                ("completeness/reviewed-variable-target-limit", 0),
                                 ("completeness/scan-follows-local-imports", 0),
                                 ("completeness/scan-clean-module", 0)):
             check(check_id, vectors.get(check_id), sorted(key for key, ok in vectors.items() if not ok))

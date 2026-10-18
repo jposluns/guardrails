@@ -133,13 +133,16 @@ HANDLER_CHILD = (_LOAD_PROBE + "signal.signal(signal.SIGCHLD, lambda signum, fra
 # probe refuses.
 LOST_CHILD = (_LOAD_PROBE + "signal.signal(signal.SIGCHLD, signal.SIG_IGN); "
               "signal.getsignal = lambda signum: signal.SIG_DFL; print(probe._child_status_refusal())")
-# A platform without fork: the guard refuses nothing, and the PASS line says that nothing was probed.
+# A platform without fork, then one without SIGCHLD (fork kept, so only the SIGCHLD test can say so): the guard
+# refuses nothing, and the PASS line says that nothing was probed.
 NO_FORK_CHILD = _LOAD_PROBE + "del os.fork; print(probe._child_status_refusal()); probe.main([])"
+NO_SIGCHLD_CHILD = _LOAD_PROBE + "del signal.SIGCHLD; print(probe._child_status_refusal()); probe.main([])"
 NOTHING_PROBED = ("PASS: child-status: this platform has no SIGCHLD or no fork, so nothing was probed and the "
                   "guard refuses nothing")
 PROBE_CHECK_IDS = ("repro/ignored-reads-failed-child-as-zero", "repro/default-reads-failed-child",
                    "live/default-passes", "live/ignored-refuses-by-name", "layer/handler-seen-by-disposition",
-                   "layer/lost-status-seen-by-probe", "layer/no-fork-nothing-probed")
+                   "layer/lost-status-seen-by-probe", "layer/no-fork-nothing-probed",
+                   "layer/no-sigchld-nothing-probed")
 
 
 def child_env():
@@ -200,8 +203,10 @@ def self_test_results(path=None):
     got = run_child(["-c", LOST_CHILD, path])
     out.append(("layer/lost-status-seen-by-probe", got[:2] == (
         0, "the probe child was reaped before its exit status could be read (ECHILD)\n"), got))
-    got = run_child(["-c", NO_FORK_CHILD, path])
-    out.append(("layer/no-fork-nothing-probed", got[:2] == (0, "None\n" + NOTHING_PROBED + "\n"), got))
+    for check_id, child in (("layer/no-fork-nothing-probed", NO_FORK_CHILD),
+                            ("layer/no-sigchld-nothing-probed", NO_SIGCHLD_CHILD)):
+        got = run_child(["-c", child, path])
+        out.append((check_id, got[:2] == (0, "None\n" + NOTHING_PROBED + "\n"), got))
     return out
 
 
@@ -217,8 +222,8 @@ def self_test():
     print("SELF-TEST PASS: child-status {} checks (an ignoring Python reader reads a failed child as 0 and a "
           "default one reads its status; the probe passes at SIG_DFL and, under an inherited SIG_IGN read by a "
           "bash parent, refuses by name with exit 2; the disposition layer sees a Python-level handler the fork "
-          "probe passes, and the fork layer sees a lost status the disposition read cannot; without fork it "
-          "refuses nothing and says that nothing was probed)".format(len(results)))
+          "probe passes, and the fork layer sees a lost status the disposition read cannot; without fork, and "
+          "without SIGCHLD, it refuses nothing and says that nothing was probed)".format(len(results)))
     return 0
 
 
