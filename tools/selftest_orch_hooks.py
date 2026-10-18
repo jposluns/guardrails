@@ -9317,14 +9317,28 @@ def _main_isolated(report_path=None):
         check("trunc/floor-pipe-shell-tail-denies", _verdict(bg("echo x | sh; python3 build.py | tail")), "deny")
         # Cost: 64 KiB of xargs or find followed by tens of thousands of shell-option words is read in time linear
         # in its length (every shell word of a segment shares one option walk), under the 1 s per-guard CPU bound
-        # of the shell-string cost rows in tools/selftest_aiqt_hooks.py.
+        # of the shell-string cost rows in tools/selftest_aiqt_hooks.py, and the background command takes the
+        # unprovable note it takes with no shell-string reading. A regression guard: these rows passed before the
+        # pipeline posture was made linear. The pipe rows: 64 KiB of a pipeline of bare shells (echo x | sh | ...
+        # | cat), and the same with a producer piped into a truncating sink only at the far end, carry no early
+        # hazard, so the shared reading builds the pipeline's posture text; it is built once per pipeline, so
+        # each stays under the bound with the note, and the far-end sink still denies. Measured before that
+        # change this guard stayed under the bound on these rows too, so they are regression guards as well.
         import time as _cost_time
-        for cid, prefix in (("trunc/cost-xargs-sh-o-under-bound", "printf x | xargs "),
-                            ("trunc/cost-find-sh-o-under-bound", "find . -exec ")):
-            cost_cmd = prefix + "sh -o " * (((64 << 10) - len(prefix) - 30) // 6) + "; git commit --no-verify -m y"
+        _pipe_shells = "echo x | " + "sh | " * (((64 << 10) - 40) // 5)
+        for cid, cost_cmd, want in (
+                ("trunc/cost-xargs-sh-o-under-bound",
+                 "printf x | xargs " + "sh -o " * (((64 << 10) - 17 - 30) // 6) + "; git commit --no-verify -m y",
+                 "warn"),
+                ("trunc/cost-find-sh-o-under-bound",
+                 "find . -exec " + "sh -o " * (((64 << 10) - 13 - 30) // 6) + "; git commit --no-verify -m y",
+                 "warn"),
+                ("trunc/cost-pipe-shells-under-bound", _pipe_shells + "cat", "warn"),
+                ("trunc/cost-pipe-shells-far-sink-denies-under-bound",
+                 _pipe_shells + "cat; python3 build.py | tail", "deny")):
             cost_start = _cost_time.process_time()
-            bg(cost_cmd)
-            check(cid, _cost_time.process_time() - cost_start < 1.0, True)
+            cost_verdict = _verdict(bg(cost_cmd))
+            check(cid, (cost_verdict, _cost_time.process_time() - cost_start < 1.0), (want, True))
         check("trunc/tilde-allows-note", _verdict(bg("cat ~/notes.txt")), "warn")
         check("trunc/foreground-plain-allows", _verdict(bg("python3 build.py", rib=False)), "allow")
         check("trunc/foreground-pipe-allows", _verdict(bg("python3 build.py | tail -5", rib=False)), "allow")
@@ -10779,21 +10793,37 @@ def _main_isolated(report_path=None):
               _verdict(wl('eval "$(ssh-agent -s)"; while true; do gh pr checks 42; sleep 30; done &')), "deny")
         check("wl/floor-shell-c-opaque-loop-denies",
               _verdict(wl('bash -c "$X"; while true; do gh pr checks 42; sleep 30; done &')), "deny")
-        # A string whose placed segments add a bare '&' makes the shared reading indeterminate; the flat lex still
-        # classifies the loop as the canonical shape, so the poll loop denies as it does with no reading.
+        # A string whose last command ends with '&' takes the separator after the shell command in its place, so the
+        # shared reading keeps one bare '&' and classifies the loop as the canonical shape: a regression guard. A
+        # string with a bare '&' before its last command adds a second bare '&' to the shared reading, which no
+        # longer classifies the loop; the flat lex still does, so the poll loop denies as it does with no reading
+        # (that row fails without the flat classification).
         check("wl/floor-placed-detach-loop-denies",
               _verdict(wl("bash -c 'true &'; while true; do gh pr checks 42; sleep 30; done &")), "deny")
+        check("wl/floor-placed-amp-loop-denies",
+              _verdict(wl("bash -c 'sleep 1 & wait'; while true; do gh pr checks 42; sleep 30; done &")), "deny")
         # A poll loop inside a shell -c string is read through the shared reading and denies.
         check("wl/shell-c-inner-loop-denies",
               _verdict(wl("bash -c 'while true; do gh pr checks 42; sleep 30; done &'")), "deny")
-        # Cost: 64 KiB of xargs or find followed by shell-option words stays under the 1 s per-guard CPU bound.
+        # Cost: 64 KiB of xargs or find followed by shell-option words, and 64 KiB of a pipeline of bare shells with
+        # and without a detached poll loop at the far end, stay under the 1 s per-guard CPU bound with the decision
+        # each takes (no loop: allow; the far-end loop: deny). Regression guards: measured before the pipeline
+        # posture was made linear, this guard stayed under the bound on each of them.
         import time as _wl_cost_time
-        for cid, prefix in (("wl/cost-xargs-sh-o-under-bound", "printf x | xargs "),
-                            ("wl/cost-find-sh-o-under-bound", "find . -exec ")):
-            cost_cmd = prefix + "sh -o " * (((64 << 10) - len(prefix) - 30) // 6) + "; git commit --no-verify -m y"
+        _wl_pipe = "echo x | " + "sh | " * (((64 << 10) - 70) // 5)
+        for cid, cost_cmd, want in (
+                ("wl/cost-xargs-sh-o-under-bound",
+                 "printf x | xargs " + "sh -o " * (((64 << 10) - 17 - 30) // 6) + "; git commit --no-verify -m y",
+                 "allow"),
+                ("wl/cost-find-sh-o-under-bound",
+                 "find . -exec " + "sh -o " * (((64 << 10) - 13 - 30) // 6) + "; git commit --no-verify -m y",
+                 "allow"),
+                ("wl/cost-pipe-shells-under-bound", _wl_pipe + "cat", "allow"),
+                ("wl/cost-pipe-shells-far-loop-denies-under-bound",
+                 _wl_pipe + "cat; while true; do gh pr checks 42; sleep 30; done &", "deny")):
             cost_start = _wl_cost_time.process_time()
-            wl(cost_cmd)
-            check(cid, _wl_cost_time.process_time() - cost_start < 1.0, True)
+            cost_verdict = _verdict(wl(cost_cmd))
+            check(cid, (cost_verdict, _wl_cost_time.process_time() - cost_start < 1.0), (want, True))
         # fail-open: non-Bash tool, non-str command, absent registry -> silent allow even on a match command.
         check("wl/failopen-nonbash", _verdict(aiqt_hooks.orch_untracked_wait_loop(
             w.payload("PreToolUse", "Write", {"command": BASE}))), "allow")

@@ -410,13 +410,17 @@ _Redirect = collections.namedtuple(
 # carries a quote or escape, e.g. ~"/x" or ~\/x, are correctly NOT read as an expanded '~').
 _Segment = collections.namedtuple(
     "_Segment", ("argv", "sep_after", "redirects", "raw", "opaque_shell", "argv_opaque",
-                 "argv_leading_tilde", "stdin_script", "shell_uncertain"))
+                 "argv_leading_tilde", "stdin_script", "shell_uncertain", "shell_scope"))
 # stdin_script is the text of the QUOTED here-document bodies the segment's command reads on standard input
 # (each body with its closing delimiter line), which _lex_flat skips as data, or None when it opens none; only
-# a shell that reads its script from standard input consults it (_shell_reading). shell_uncertain is the text a
-# guard's uncertain-segment posture reads for a segment whose shell string the shared reading could not read
-# (_expand_shell_strings), or None. Both are defaulted so the positional _Segment(...) builds need not pass them.
-_Segment.__new__.__defaults__ = (None, None)
+# a shell that reads its script from standard input consults it (_shell_reading). shell_uncertain is None, or
+# the (kind, text) pairs a guard's uncertain-segment posture reads for a segment holding a shell string the
+# shared reading could not read, or a shell reading its script from standard input (_expand_shell_strings,
+# _shell_uncertain_texts). shell_scope is the child-shell scope a segment runs in: () for the command's own
+# shell, and for a segment placed from a child shell's -c string or a trap action, a tuple naming that string,
+# so a cd there is known not to move the commands after the string (_scope_moved). All three are defaulted so
+# the positional _Segment(...) builds need not pass them.
+_Segment.__new__.__defaults__ = (None, None, ())
 
 
 def _skip_quoting(command, i, n):
@@ -1200,19 +1204,22 @@ def _lex_uncertain(command):
     return bool(_lex_uncertain_causes(command))
 
 
-def _lex_command(command, partial=False, locale=False, _depth=0):
+def _lex_command(command, partial=False, locale=False, _depth=0, _scopes=None):
     """The shared segment reading every lexical Bash guard reads: _lex_flat's segments of the raw command, with
     the command string of each shell -c, eval or trap segment read as a command line of its own and its
     segments placed in the list as if written in place (_expand_shell_strings), so no guard needs its own copy
     of that reading. partial and locale keep _lex_flat's contracts, and _lex_flat's own refusals still raise
     ValueError. A shell string the reading cannot read never raises: the segment that holds it is kept as
     _lex_flat lexed it and carries shell_uncertain, so only that segment is uncertain. _depth is the
-    shell-string nesting depth of `command` (0 for the command itself)."""
+    shell-string nesting depth of `command` (0 for the command itself); _scopes is the one-item list counting the
+    child scopes the reading of the whole command has named, shared by every nested string so no two child
+    scopes share a name."""
+    scopes = [0] if _scopes is None else _scopes
     if not partial:
-        return _expand_shell_strings(_lex_flat(command, locale=locale), locale, _depth)
+        return _expand_shell_strings(_lex_flat(command, locale=locale), locale, _depth, scopes)
     segments, complete, in_progress = _lex_flat(command, partial=True, locale=locale)
     closed = segments[:-1] if in_progress else segments
-    out = _expand_shell_strings(closed, locale, _depth)
+    out = _expand_shell_strings(closed, locale, _depth, scopes)
     if in_progress:
         out.append(segments[-1])  # the segment the lexer was still inside: its words may be incomplete
     return out, complete, in_progress
@@ -1409,15 +1416,22 @@ def _segments(command, locale=False):
 #     uncertain. That segment is kept exactly as _lex_flat lexed it, carrying shell_uncertain, and every other
 #     segment is kept too, so a hazard elsewhere in the command still decides as it did;
 #   - each guard reads an uncertain segment under its own uncertain-segment posture: the raw fallback it takes
-#     on a parse failure, run over that segment's text only (_shell_uncertain_text) and returned only where it
-#     is stricter than the guard's own decision, or no posture beyond the flat reading of that segment;
+#     on a parse failure, run over each of that segment's texts alone (_shell_uncertain_texts, never a join of
+#     several) and returned only where it is stricter than the guard's own decision, or no posture beyond the
+#     flat reading of that segment;
 #   - a guard whose decision rests on the whole command's shape rather than on one segment (the orchestration
 #     poll-loop classifier) also classifies the flat lex and denies when either reading matches;
 #   - git_discard, which takes recovery snapshots, reads the flat lex only.
+# A string a child shell runs (a shell's -c string, under a wrapper, find or xargs too) or a trap action runs
+# apart from the commands after it, so its placed segments carry a scope of their own (shell_scope): a cd there
+# moves only the later commands of that same string (_scope_moved), never the parent shell's. An eval string,
+# and a DEBUG, ERR or RETURN trap action (run by the current shell between its commands), share the scope of
+# the segment that holds them.
 # COST. Every word of a segment is scanned once: the option walk of every shell word in a segment shares one
-# memo (_shell_option_walk), each string operand is read once, and under a wrapper only the first eval word is
-# read (its string holds every later word), so the reading costs time linear in the command's length at each
-# of the _SHELL_STRING_DEPTH levels.
+# memo (_shell_option_walk), the programs a wrapper launches are resolved in one pass (_launched_programs), and
+# each string operand is read once; a pipeline's posture text is built once, from one list of its stages, for
+# the last shell in it that reads its script from the pipe, and each posture text is kept once. So the reading
+# costs time and memory linear in the command's length at each of the _SHELL_STRING_DEPTH levels.
 # The POSIX shells, by basename, whose -c option runs its first operand as a command line.
 _SHELL_C_SHELLS = frozenset(("bash", "sh", "dash", "zsh", "ksh"))
 # The single-letter shell options that take the next word as their value (-o and +o option names, -O and +O
@@ -1425,15 +1439,80 @@ _SHELL_C_SHELLS = frozenset(("bash", "sh", "dash", "zsh", "ksh"))
 # read as the command string.
 _SHELL_C_VALUE_LETTERS = frozenset("oO")
 _SHELL_C_VALUE_LONG = frozenset(("--rcfile", "--init-file"))
-# Programs that START another program whose own words carry a shell -c string or an eval: find runs the command
-# after each -exec/-execdir/-ok/-okdir primary, and xargs runs the command built from its operands. Their own
-# options and operands are not parsed; every later word that names a shell is read as one, and the first later
-# eval word as eval (a safe-direction over-read, as for the gate wrappers _GATE_NOTE_WRAPPERS), so a find -exec
-# sh -c '<body>' reads <body> as a command line. A command find runs directly (find -exec git commit ... \;, no
-# shell -c) is NOT read as a command line here, a disclosed residual. xargs feeds its standard input to its own
-# operands, never to the shell it starts, so a shell under xargs is never read as running a script from a pipe
-# or a here-document.
-_SHELL_STRING_WRAPPERS = frozenset(("xargs", "find"))
+# Programs that START another program: find runs the program after each -exec/-execdir/-ok/-okdir primary,
+# xargs runs the program its options are followed by, and the wrappers of _LAUNCH_GRAMMARS run the program
+# after their own options and operands. _launched_programs resolves the program each one actually launches, so a
+# shell -c string, an eval or interpreter code is read only where that program is the shell, eval or the
+# interpreter (printf x | xargs echo sh -c '...' runs echo, and nothing is read). A command find runs directly
+# (find -exec git commit ... \;, no shell -c) is NOT read as a command line here, a disclosed residual. xargs
+# feeds its standard input to its own operands, never to the program it starts, so a shell under xargs is never
+# read as running a script from a pipe or a here-document.
+# Each wrapper's option grammar, as the program it launches is found after it: 'value' letters take the rest of
+# the cluster or else the next word, 'flags' letters take none, 'attached' letters take only the rest of the
+# cluster (xargs -i[R]); 'long_value' long options take '=VALUE' or the next word, 'long_flags' take none (or an
+# attached '=VALUE'); 'operands' is the number of operands before the program (timeout's duration, chrt's
+# priority, taskset's mask, flock's lock file); 'assign' tells whether VAR=value words may precede the program
+# (env, sudo); 'none' letters and 'long_none' long options make the wrapper launch no program (command -v,
+# sudo -l, ionice -p); a digit cluster (nice -10) is a value-free option. An option outside a wrapper's grammar
+# (env -S, which re-splits a string, among them) leaves what it launches unknown: every later word that names a
+# shell, eval or an interpreter is then read as one, the earlier safe-direction over-read.
+_LAUNCH_GRAMMARS = {
+    "env": dict(value="uC", flags="i0v", attached="", long_value=("--unset", "--chdir"),
+                long_flags=("--ignore-environment", "--null", "--debug", "--block-signal", "--default-signal",
+                            "--ignore-signal", "--list-signal-handling"), operands=0, assign=True),
+    "sudo": dict(value="ugpCDrtTURh", flags="AbEHiKkPSsnBN", attached="", none="elvKV",
+                 long_value=("--user", "--group", "--prompt", "--close-from", "--chdir", "--role", "--type",
+                             "--command-timeout", "--other-user", "--chroot", "--host"),
+                 long_flags=("--askpass", "--background", "--preserve-env", "--set-home", "--login",
+                             "--reset-timestamp", "--non-interactive", "--preserve-groups", "--stdin", "--shell",
+                             "--bell"),
+                 long_none=("--edit", "--list", "--validate", "--remove-timestamp", "--version", "--help"),
+                 operands=0, assign=True),
+    "doas": dict(value="u", flags="ns", attached="", none="CL", operands=0),
+    "nice": dict(value="n", flags="", attached="", long_value=("--adjustment",), operands=0),
+    "timeout": dict(value="sk", flags="fpv", attached="", long_value=("--signal", "--kill-after"),
+                    long_flags=("--foreground", "--preserve-status", "--verbose"), operands=1),
+    "time": dict(value="of", flags="apqv", attached="", long_value=("--output", "--format"),
+                 long_flags=("--append", "--portability", "--quiet", "--verbose"), operands=0),
+    "command": dict(value="", flags="p", attached="", none="vV", operands=0),
+    "builtin": dict(value="", flags="", attached="", operands=0),
+    "exec": dict(value="a", flags="cl", attached="", operands=0),
+    "nohup": dict(value="", flags="", attached="", operands=0),
+    "stdbuf": dict(value="ioe", flags="", attached="", long_value=("--input", "--output", "--error"),
+                   operands=0),
+    "setsid": dict(value="", flags="cfw", attached="", long_flags=("--ctty", "--fork", "--wait"), operands=0),
+    "ionice": dict(value="cn", flags="t", attached="", none="pPu",
+                   long_value=("--class", "--classdata"), long_flags=("--ignore",),
+                   long_none=("--pid", "--pgid", "--uid"), operands=0),
+    "taskset": dict(value="", flags="ac", attached="", none="p", long_flags=("--all-tasks", "--cpu-list"),
+                    long_none=("--pid",), operands=1),
+    "chrt": dict(value="TPD", flags="abdfiormRv", attached="", none="p", operands=1),
+    "xvfb-run": dict(value="efnpsw", flags="adl", attached="",
+                     long_value=("--error-file", "--auth-file", "--server-num", "--xauth-protocol",
+                                 "--server-args", "--wait"),
+                     long_flags=("--auto-servernum", "--auto-display", "--listen-tcp"), operands=0),
+    "unbuffer": dict(value="", flags="p", attached="", operands=0),
+    "busybox": dict(value="", flags="", attached="", operands=0),
+    "watch": dict(value="nq", flags="tbegcxpwrC", attached="d", long_value=("--interval", "--equexit"),
+                  long_flags=("--differences", "--no-title", "--beep", "--errexit", "--chgexit", "--color",
+                              "--no-color", "--exec", "--precise", "--no-wrap", "--no-rerun", "--no-linewrap"),
+                  operands=0),
+    "flock": dict(value="Ew", flags="sxunoF", attached="", long_value=("--conflict-exit-code", "--timeout"),
+                  long_flags=("--shared", "--exclusive", "--unlock", "--nonblock", "--close", "--no-fork",
+                              "--verbose"), operands=1),
+    "strace": dict(value="abeoOpPsSuEIXU", flags="cCdDfFhiknqrtTvVwxyzZ", attached="", operands=0),
+    "ltrace": dict(value="aAeDFlnopsuwx", flags="bcCfhiLrStTV", attached="", operands=0),
+    "xargs": dict(value="ILnPsdaE", flags="0rtpx", attached="ile",
+                  long_value=("--arg-file", "--delimiter", "--max-args", "--max-procs", "--max-lines", "--max-chars",
+                              "--process-slot-var"),
+                  long_flags=("--null", "--no-run-if-empty", "--verbose", "--interactive", "--exit", "--open-tty",
+                              "--show-limits", "--replace", "--eof"), operands=0),
+}
+# The wrappers that run a shell builtin in the current shell: eval is read under these alone, since every other
+# wrapper launches a program, and eval is not one.
+_LAUNCH_BUILTIN_WRAPPERS = frozenset(("command", "builtin"))
+# find's primaries that run the program after them, up to a ';' word or a '+' word after '{}'.
+_FIND_EXEC_PRIMARIES = frozenset(("-exec", "-execdir", "-ok", "-okdir"))
 # How deep shell strings are read inside one another: the command itself is depth 0, a string it runs is depth
 # 1, and strings down to depth _SHELL_STRING_DEPTH are read; a string inside a string at that depth is not read,
 # and the segment holding it is uncertain instead. Four levels cover the nesting a command line plausibly needs
@@ -1450,16 +1529,17 @@ def _shell_c_option(token):
     return token[:1] == "-" and token[:2] != "--" and "c" in token[1:]
 
 
-def _shell_option_walk(argv, opaque, start, memo):
+def _shell_option_walk(argv, opaque, start, memo, end=None):
     """The outcome of reading shell options from argv[start] on, as bash and the other POSIX shells read them:
     every option cluster up to the first operand, '-' or '--' ending the options, each 'o' or 'O' letter in a
     cluster taking the next word as its value, and --rcfile/--init-file taking the next word. Returns (kind,
     index, has_c, has_s): kind 'end' when the words run out before an operand, 'operand' with the index of the
     first operand, or 'opaque' with the index of an opaque word standing where an option can be; has_c and has_s
-    tell whether a -c or -s option appears among the options read. memo is shared by every shell word of one
-    segment: the walk from a position is the same whichever shell word reached it, so each position is walked
-    once and the walks of all the segment's shell words cost time linear in its length."""
-    n = len(argv)
+    tell whether a -c or -s option appears among the options read. The words end at `end` (the segment's end, or
+    the ';' or '+' that ends a find -exec program's words). memo is shared by every shell word of one segment
+    whose words end there: the walk from a position is the same whichever shell word reached it, so each position
+    is walked once and the walks of all the segment's shell words cost time linear in its length."""
+    n = len(argv) if end is None else end
     path = []
     i = start
     while True:
@@ -1508,19 +1588,22 @@ def _eval_string(argv, opaque, k):
 
 
 def _trap_string(argv, opaque, k):
-    """(text, unread) for trap, the command word argv[k]: text is the action it runs when its condition fires,
-    the first operand after trap's options (-l lists signal names and -p prints traps, each setting no action),
-    or None when trap sets no command: it lists or prints, has no action operand, has no condition after the
-    action (a lone 'trap ACTION', which bash does not read as setting a handler), or the action is '-' (reset to
-    default) or '' (ignore). unread is True when the action operand, or a word before it, is an opaque word."""
+    """(text, unread, in_place) for trap, the command word argv[k]: text is the action it runs when its
+    condition fires, the first operand after trap's options (-l lists signal names and -p prints traps, each
+    setting no action), or None when trap sets no command: it lists or prints, has no action operand, has no
+    condition after the action (a lone 'trap ACTION', which bash does not read as setting a handler), or the
+    action is '-' (reset to default) or '' (ignore). unread is True when the action operand, or a word before it,
+    is an opaque word. in_place is True when a condition is DEBUG, ERR or RETURN (the current shell runs the
+    action between its own commands, so a cd there moves the commands after it) or an opaque word that may be
+    one; an EXIT or signal action runs apart from the commands after the trap."""
     n = len(argv)
     i = k + 1
     while i < n:
         if opaque[i]:
-            return None, True
+            return None, True, False
         tok = argv[i]
         if tok in ("-l", "-p"):
-            return None, False  # trap -l / -p lists or prints; it sets no handler
+            return None, False, False  # trap -l / -p lists or prints; it sets no handler
         if tok == "--":
             i += 1
             break
@@ -1529,13 +1612,14 @@ def _trap_string(argv, opaque, k):
             continue
         break
     if i >= n:
-        return None, False
+        return None, False, False
     if opaque[i]:
-        return None, True
+        return None, True, False
     if i + 1 >= n:
-        return None, False  # an action with no condition after it: bash does not read it as setting a handler
+        return None, False, False  # an action with no condition after it: bash does not read it as a handler
     action = argv[i]
-    return (action if action not in ("-", "") else None), False
+    in_place = any(opaque[c] or argv[c].upper() in ("DEBUG", "ERR", "RETURN") for c in range(i + 1, n))
+    return (action if action not in ("-", "") else None), False, in_place
 
 
 def _command_start(argv):
@@ -1551,61 +1635,182 @@ def _command_start(argv):
     return i
 
 
+def _launch_walk(argv, opaque, k, word, end):
+    """(kind, index) for the wrapper argv[k], whose _gate_word is `word` (a _LAUNCH_GRAMMARS key), its words
+    ending at `end`: kind 'program' with the index of the program it launches, read after its options with
+    its grammar, then its VAR=value words where it takes them, then its operands; 'none' when it launches no
+    program (an option that only looks up, lists or reports, or no word left for the program); 'unknown' when an
+    option outside its grammar, or an opaque word, leaves the program unknown."""
+    grammar = _LAUNCH_GRAMMARS[word]
+    i = k + 1
+    while i < end:
+        if opaque[i]:
+            return "unknown", None
+        tok = argv[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok == "-" and word == "env":
+            i += 1  # env -: the same as env -i
+            continue
+        if tok.startswith("--"):
+            name, eq, _value = tok.partition("=")
+            if name in grammar.get("long_none", ()):
+                return "none", None
+            if name in grammar.get("long_value", ()):
+                i += 1 if eq else 2
+                continue
+            if name in grammar.get("long_flags", ()):
+                i += 1
+                continue
+            return "unknown", None
+        if len(tok) < 2 or tok[0] != "-":
+            break
+        body = tok[1:]
+        step = 1
+        if not body.isdigit():  # a digit cluster (nice -10) takes no value
+            for j, letter in enumerate(body):
+                if letter in grammar.get("none", ""):
+                    return "none", None
+                if letter in grammar["value"]:
+                    step = 1 if j + 1 < len(body) else 2
+                    break
+                if letter in grammar["attached"]:
+                    break
+                if letter not in grammar["flags"]:
+                    return "unknown", None
+        i += step
+    if grammar.get("assign"):
+        while i < end and not opaque[i] and _ENV_ASSIGN_RE.match(argv[i]):
+            i += 1
+    for _operand in range(grammar["operands"]):
+        if i < end and opaque[i]:
+            return "unknown", None
+        i += 1
+    if i >= end:
+        return "none", None
+    if opaque[i]:
+        return "unknown", None
+    return "program", i
+
+
+def _launched_programs(argv, opaque, start):
+    """(programs, overread) for the segment whose command word is argv[start]. programs lists, as (index, end,
+    through_xargs, builtin_ok), every program the segment runs after the wrappers that launch it: the command word
+    itself when it is no wrapper; the program a _LAUNCH_GRAMMARS wrapper launches after its options and operands
+    (_launch_walk), followed through further wrappers; and the program after each find -exec/-execdir/-ok/-okdir
+    primary, whose words end at the ';' word, or the '+' word after '{}', that ends them (end). through_xargs
+    tells that an xargs stands between the segment and the program, so the program never reads the segment's
+    standard input; builtin_ok tells that only command or builtin wrappers stand there, so the program may be a
+    shell builtin such as eval. overread is None, or (index, through_xargs) for a wrapper whose option outside its
+    grammar left what it launches unknown, after which every word naming a shell, eval or an interpreter is read
+    as one (the earlier safe-direction over-read). A find's own scan passes over each -exec program's words, and
+    those are walked once by that program, so the resolution costs time linear in the segment's length."""
+    n = len(argv)
+    programs = []
+    overread = None
+    terminators = []  # terminators[j]: the index of the first find terminator at or after j; built on first need
+    work = [(start, n, False, True)]
+    while work:
+        k, end, xargs, builtin_ok = work.pop()
+        if k >= end:
+            continue
+        word = "" if opaque[k] else _gate_word(argv[k])
+        if word in _LAUNCH_GRAMMARS:
+            kind, program = _launch_walk(argv, opaque, k, word, end)
+            if kind == "program":
+                work.append((program, end, xargs or word == "xargs",
+                             builtin_ok and word in _LAUNCH_BUILTIN_WRAPPERS))
+            elif kind == "unknown" and (overread is None or k < overread[0]):
+                overread = (k, xargs or word == "xargs")
+            continue
+        if word == "find":
+            if not terminators:
+                following = n
+                terminators.extend([n] * (n + 1))
+                for m in range(n - 1, -1, -1):
+                    if not opaque[m] and (argv[m] == ";" or (argv[m] == "+" and m and argv[m - 1] == "{}")):
+                        following = m
+                    terminators[m] = following
+            j = k + 1
+            while j < end:
+                if argv[j] in _FIND_EXEC_PRIMARIES and not opaque[j]:
+                    stop = min(terminators[j + 1], end)
+                    work.append((j + 1, stop, xargs, False))
+                    j = stop + 1
+                    continue
+                j += 1
+            continue
+        programs.append((k, end, xargs, builtin_ok))
+    return programs, overread
+
+
 def _shell_reading(seg):
-    """(strings, unread, stdin) for one segment. strings are the command strings it runs through a shell's -c
-    option, through eval, or as a trap action, in word order; unread is True when a string is there that the
-    reading does not have (an opaque word, _shell_option_walk, _eval_string, _trap_string); stdin is True when a
-    shell word in it reads its SCRIPT from standard input: no -c option, and -s given or no operand after its
-    options (a shell with a script FILE operand, bash script.sh, reads its script from that file, so a pipe or a
-    here-document feeding it is data). The command word is found after leading reserved words and VAR=value
-    words (_command_start); it is a shell (_SHELL_C_SHELLS), eval or trap by its _gate_word name. When it is a
-    wrapper instead (_GATE_NOTE_WRAPPERS, or find or xargs, _SHELL_STRING_WRAPPERS), the wrapper's own options
-    and operands are not parsed: every later word that names a shell is read as one and the first later eval
-    word as eval (a safe-direction over-read), the -c reading and the standard-input reading alike, except that
-    a shell under xargs never reads a script from standard input; trap under a wrapper is not read (a shell
-    builtin, not a program a wrapper starts). Each word is scanned once (_shell_option_walk shares one memo, and
-    each string operand is read once)."""
+    """(strings, unread, stdin) for one segment. strings are (text, child) for the command strings it runs
+    through a shell's -c option, through eval, or as a trap action, in word order: child is True for a shell's
+    -c string and a trap action that runs apart from the commands after it (_trap_string), False for eval and a
+    DEBUG, ERR or RETURN trap action, which the current shell runs. unread is True when a string is there that
+    the reading does not have (an opaque word, _shell_option_walk, _eval_string, _trap_string); stdin is True
+    when a shell word in it reads its SCRIPT from standard input: no -c option, and -s given or no operand after
+    its options (a shell with a script FILE operand, bash script.sh, reads its script from that file, so a pipe
+    or a here-document feeding it is data). The command word is found after leading reserved words and VAR=value
+    words (_command_start), and the programs it runs are resolved through the wrappers that launch them
+    (_launched_programs): a shell -c string is read only where that program is a shell (_SHELL_C_SHELLS), eval
+    only where it is eval reached directly or through command or builtin, and trap only as the command word; a
+    shell under xargs never reads a script from standard input. Each word is scanned once (_shell_option_walk
+    shares one memo per word range, and each string operand is read once)."""
     argv = seg.argv
     opaque = seg.argv_opaque
     n = len(argv)
     i = _command_start(argv)
     if i >= n:
         return [], False, False
-    word = _gate_word(argv[i])
-    if word in _GATE_NOTE_WRAPPERS or word in _SHELL_STRING_WRAPPERS:
-        names = [_gate_word(argv[k]) for k in range(i + 1, n)]
-        shells = [i + 1 + j for j, name in enumerate(names) if name in _SHELL_C_SHELLS]
-        evals = [i + 1 + j for j, name in enumerate(names) if name == "eval"][:1]
-        trap = None
-        stdin_ok = word != "xargs"
-    else:
-        shells = [i] if word in _SHELL_C_SHELLS else []
-        evals = [i] if word == "eval" else []
-        trap = i if word == "trap" else None
-        stdin_ok = True
-    found = []  # (word index, string)
+    programs, overread = _launched_programs(argv, opaque, i)
+    shells = []  # (word index, end, stdin_ok)
+    evals = []
+    trap = None
+    for k, end, xargs, builtin_ok in programs:
+        name = _gate_word(argv[k])
+        if name in _SHELL_C_SHELLS:
+            shells.append((k, end, not xargs))
+        elif name == "eval" and builtin_ok:
+            evals.append(k)
+        elif name == "trap" and k == i:
+            trap = k
+    if overread is not None:
+        later_eval = False
+        for k in range(overread[0] + 1, n):
+            if opaque[k]:
+                continue
+            name = _gate_word(argv[k])
+            if name in _SHELL_C_SHELLS:
+                shells.append((k, n, not overread[1]))
+            elif name == "eval" and not later_eval:
+                later_eval = True  # the first later eval word only: its string holds every later word
+                evals.append(k)
+    found = []  # (word index, string, child)
     unread = False
     stdin = False
-    memo = {}
+    memos = {}
     read_operands = set()
-    c_after = []  # c_after[j]: a -c option cluster stands at or after argv[j]; built on first need
+    c_before = []  # c_before[j]: the number of -c option clusters in argv[:j]; built on first need
 
-    def c_option_at_or_after(j):
-        if not c_after:
-            later = False
-            c_after.extend([False] * (n + 1))
-            for m in range(n - 1, -1, -1):
-                later = later or _shell_c_option(argv[m])
-                c_after[m] = later
-        return c_after[j] if j <= n else False
+    def c_option_in(j, end):
+        if not c_before:
+            count = 0
+            c_before.append(0)
+            for token in argv:
+                count += 1 if _shell_c_option(token) else 0
+                c_before.append(count)
+        return j < end and c_before[end] - c_before[min(j, end)] > 0
 
-    for k in shells:
-        kind, j, has_c, has_s = _shell_option_walk(argv, opaque, k + 1, memo)
+    for k, end, stdin_ok in shells:
+        kind, j, has_c, has_s = _shell_option_walk(argv, opaque, k + 1, memos.setdefault(end, {}), end)
         if kind == "opaque":
             # an opaque word where an option can stand: with a -c option given or still to come, the string
             # or an option is built at run time; otherwise, after -s it is a positional parameter (the script
             # still comes from standard input), and with no -s a script operand built at run time
-            unread = unread or has_c or c_option_at_or_after(j + 1)
+            unread = unread or has_c or c_option_in(j + 1, end)
             stdin = stdin or (stdin_ok and has_s and not has_c)
         elif has_c:
             if kind == "operand" and j not in read_operands:
@@ -1613,85 +1818,107 @@ def _shell_reading(seg):
                 if opaque[j]:
                     unread = True  # a shell -c string built at run time
                 else:
-                    found.append((j, argv[j]))
+                    found.append((j, argv[j], True))
         elif stdin_ok and (has_s or kind == "end"):
             stdin = True
     for k in evals:
         text, eval_unread = _eval_string(argv, opaque, k)
         unread = unread or eval_unread
         if text is not None:
-            found.append((k, text))
+            found.append((k, text, False))
     if trap is not None:
-        text, trap_unread = _trap_string(argv, opaque, trap)
+        text, trap_unread, in_place = _trap_string(argv, opaque, trap)
         unread = unread or trap_unread
         if text is not None:
-            found.append((trap, text))
+            found.append((trap, text, not in_place))
     found.sort(key=lambda item: item[0])
-    return [text for _k, text in found], unread, stdin
+    return [(text, child) for _k, text, child in found], unread, stdin
 
 
-def _shell_string_in_place(inner, seg):
+def _shell_string_in_place(inner, seg, scope):
     """The segments of a string that segment `seg` runs, placed as if written in place of it: each carries
     seg's redirects before its own (the shell's redirects apply to everything the string runs, and the
-    string's own come later and win), and the last one ends with ';' when the string ended its own list.
-    Trailing empty segments (a string ending in a newline) are dropped first."""
+    string's own come later and win) and runs in `scope` followed by its own scope within the string (the scope
+    of seg for an eval string, a new child scope for a child shell's string or a trap action), and the last one
+    ends with ';' when the string ended its own list. Trailing empty segments (a string ending in a newline) are
+    dropped first."""
     inner = list(inner)
     while inner and not inner[-1].argv and not inner[-1].redirects and inner[-1].sep_after == "":
         inner.pop()
-    if seg.redirects:
-        placed = [rec._replace(redirects=list(seg.redirects) + list(rec.redirects)) for rec in inner]
-    else:
-        placed = inner
+    placed = [rec._replace(redirects=list(seg.redirects) + list(rec.redirects), shell_scope=scope + rec.shell_scope)
+              for rec in inner]
     if placed and not placed[-1].sep_after:
         placed[-1] = placed[-1]._replace(sep_after=";")
     return placed
 
 
-def _expand_shell_strings(segments, locale, depth):
+_PIPE_SEPS = frozenset(("|", "|&"))
+
+
+def _expand_shell_strings(segments, locale, depth, scopes):
     """The segments, with the segments of each shell -c, eval or trap string a segment runs placed right after it
     as if written in place (_shell_string_in_place). The segment that runs a string is kept, its argv and
     redirects unchanged; its separator moves to the last placed segment and it ends with ';' instead, so a pipe,
     list operator or '&' after the shell command reads from the string's last command (a pipe INTO the shell
     command still reads as feeding that segment, not the string's first command). Strings are read with
-    _lex_command at depth + 1, so a string inside a string is read too, down to _SHELL_STRING_DEPTH.
-    Nothing here raises. A segment is marked uncertain (shell_uncertain, the text its guard's posture reads) and
-    kept as lexed when it holds a string the reading does not have (_shell_reading), a string past the depth
-    bound, a string that does not lex, a string whose own reading _lex_uncertain_causes reports uncertain (its
-    segments are still placed), or a string whose placement would pass _SHELL_PLACE_BUDGET; the text is the
-    segment's own raw text. A shell that reads its script from standard input is marked too: fed by a pipe (not
-    under xargs), its text is the raw text of the pipeline up to and including it; fed by a here-document, its
-    text is its raw text and the here-document bodies (stdin_script). Every other segment is left as lexed."""
+    _lex_command at depth + 1, so a string inside a string is read too, down to _SHELL_STRING_DEPTH. The segments
+    of a child shell's string or a trap action that runs apart get a child scope (shell_scope) of their own, named
+    from the counter `scopes` that every nested reading of the command shares.
+    Nothing here raises. A segment is marked uncertain (shell_uncertain, the (kind, text) pairs its guard's
+    posture reads, _shell_uncertain_texts) and kept as lexed when it holds a string the reading does not have
+    (_shell_reading), a string past the depth bound, a string that does not lex, a string whose own reading
+    _lex_uncertain_causes reports uncertain (its segments are still placed), or a string whose placement would
+    pass _SHELL_PLACE_BUDGET; the text is the segment's own raw text ('segment'). A shell that reads its script
+    from standard input is marked too: fed by a here-document, with its raw text and the here-document bodies
+    (stdin_script, 'segment'); fed by a pipe (not under xargs), with its own raw text ('stage'), and the last
+    such shell of a pipeline also with the raw text of the pipeline up to and including it, each stage followed
+    by the here-document bodies it reads ('pipeline'), built once per pipeline from one list of its stages so
+    the texts cost memory linear in the command's length. Every other segment is left as lexed."""
     out = []
+    marks = {}  # index in out -> the (kind, text) pairs of that segment, in order
     prev_sep = None
-    pipeline = ""
+    stages = []  # the current pipeline's raw text pieces, in order
+    last_stdin = None  # (index in out, len(stages)) for the pipeline's last shell reading its script from the pipe
     for seg in segments:
-        fed_by_pipe = prev_sep in ("|", "|&")
-        pipeline = pipeline + prev_sep + seg.raw if fed_by_pipe else seg.raw
+        fed_by_pipe = prev_sep in _PIPE_SEPS
+        if not fed_by_pipe:
+            if last_stdin is not None:
+                marks.setdefault(last_stdin[0], []).append(("pipeline", "".join(stages[:last_stdin[1]])))
+            del stages[:]
+            last_stdin = None
+        stages.append(prev_sep + seg.raw if fed_by_pipe else seg.raw)
+        if seg.stdin_script:
+            stages.append("\n" + seg.stdin_script)
         prev_sep = seg.sep_after
         strings, unread, stdin = _shell_reading(seg)
-        uncertain = [seg.raw] if unread else []
+        uncertain = [("segment", seg.raw)] if unread else []
         if stdin and fed_by_pipe:
-            uncertain.append(pipeline)
+            uncertain.append(("stage", seg.raw))
+            last_stdin = (len(out), len(stages))
         if stdin and seg.stdin_script:
-            uncertain.append(seg.raw + "\n" + seg.stdin_script)
+            uncertain.append(("segment", seg.raw + "\n" + seg.stdin_script))
         placed = []
-        for text in strings:
+        for text, child in strings:
             if depth >= _SHELL_STRING_DEPTH:
-                uncertain.append(seg.raw)
+                uncertain.append(("segment", seg.raw))
                 continue
+            scope = seg.shell_scope
+            if child:
+                scopes[0] += 1  # named before the string is read, so the string's own child scopes follow it
+                scope = scope + (scopes[0],)
             try:
-                inner = _lex_command(text, locale=locale, _depth=depth + 1)
+                inner = _lex_command(text, locale=locale, _depth=depth + 1, _scopes=scopes)
             except ValueError:
-                uncertain.append(seg.raw)  # a string that does not lex
+                uncertain.append(("segment", seg.raw))  # a string that does not lex
                 continue
             if len(seg.redirects) * len(inner) > _SHELL_PLACE_BUDGET:
-                uncertain.append(seg.raw)
+                uncertain.append(("segment", seg.raw))
                 continue
             if _lex_uncertain_causes(text):
-                uncertain.append(seg.raw)  # read and placed, but its own reading is uncertain
-            placed.extend(_shell_string_in_place(inner, seg))
+                uncertain.append(("segment", seg.raw))  # read and placed, but its own reading is uncertain
+            placed.extend(_shell_string_in_place(inner, seg, scope))
         if uncertain:
-            seg = seg._replace(shell_uncertain="\n".join(dict.fromkeys(uncertain)))
+            marks.setdefault(len(out), []).extend(uncertain)
         if not placed:
             out.append(seg)
             continue
@@ -1699,26 +1926,50 @@ def _expand_shell_strings(segments, locale, depth):
             placed[-1] = placed[-1]._replace(sep_after=seg.sep_after)
         out.append(seg._replace(sep_after=";"))
         out.extend(placed)
+    if last_stdin is not None:
+        marks.setdefault(last_stdin[0], []).append(("pipeline", "".join(stages[:last_stdin[1]])))
+    for index, pairs in marks.items():
+        out[index] = out[index]._replace(shell_uncertain=tuple(dict.fromkeys(pairs)))
     return out
 
 
-def _shell_uncertain_text(segments):
-    """The texts the uncertain segments of `segments` carry (shell_uncertain, set by _expand_shell_strings), joined
-    by newlines; "" when no segment is uncertain. A guard's uncertain-segment posture reads this text: the raw
-    fallback the guard takes on a parse failure, run over these segments only and returned only where it is
-    stricter than the guard's own decision, so the other segments are judged as the flat lex judges them. A
-    plain reading helper: it builds no decision."""
-    return "\n".join(seg.shell_uncertain for seg in segments if seg.shell_uncertain)
+def _shell_uncertain_texts(segments, stage=False):
+    """The texts the uncertain segments of `segments` carry (shell_uncertain, set by _expand_shell_strings), each
+    once, in order; [] when no segment is uncertain. A guard's uncertain-segment posture reads each text ALONE,
+    never a join of several: the raw fallback the guard takes on a parse failure, run over that text and returned
+    only where it is stricter than the guard's own decision, so the other segments are judged as the flat lex
+    judges them. For a shell reading its script from a pipe the texts hold the pipeline up to the shell; with
+    stage True they hold that shell's own stage instead (protected_line, whose raw backstop already reads the
+    whole command when no git command was lexed). A plain reading helper: it builds no decision."""
+    skip = "pipeline" if stage else "stage"
+    texts = {}
+    for seg in segments:
+        for kind, text in seg.shell_uncertain or ():
+            if kind != skip:
+                texts[text] = None
+    return list(texts)
+
+
+def _scope_moved(moved, scope):
+    """True when a segment in shell scope `scope` (shell_scope) runs in a directory a cd in one of the scopes of
+    `moved` changed: a cd moves the later commands of its own scope and of the child scopes inside it, never those
+    of an enclosing or a sibling scope (a cd inside a child shell's -c string, or an EXIT or signal trap action,
+    leaves the parent shell where it was). Reads each of the scope's at most _SHELL_STRING_DEPTH + 1 prefixes."""
+    return any(scope[:length] in moved for length in range(len(scope) + 1))
 
 
 # --- interpreters given inline code ---------------------------------------------------------------------
 # A command an interpreter runs from inline code (python -c, perl -e/-E, ruby -e, node -e/-p/--eval/--print) is
-# NOT shell, so the shared segment reading cannot read it as a command line. Four guards read it instead:
-# gate_weakening, commit_msg_subst, commit_identity and git_explicit_binding. Each reads ONLY the arguments of
-# the execution forms in the code (_interp_exec_text: os.system, subprocess calls, the os.exec and spawn
-# families, perl and ruby system/exec/backquotes/qx/%x, node child_process calls) and denies when that text
-# names a spelling the guard denies; a spelling in printed or quoted text outside an execution form is never
-# read, so it is never denied. No other guard reads interpreter code.
+# NOT shell, so the shared segment reading cannot read it as a command line. Four guards read the structure of
+# that code instead: gate_weakening, commit_msg_subst, commit_identity and git_explicit_binding. Each reads ONLY
+# the execution forms in the code (_interp_exec_forms: os.system, subprocess calls, the os.exec and spawn
+# families, perl and ruby system/exec/backquotes/qx/%x and a pipe open, node child_process calls), judges each
+# form's own command text ALONE (never a join of several forms), and denies when that text names a spelling the
+# guard denies; a spelling in a comment, or in printed or quoted text outside an execution form, is never read,
+# so it is never denied. This structured reading is separate from the raw-text scans that read interpreter code
+# only as raw text, as they did before it: protected_line's backstop scans the whole raw command text for a push
+# or commit spelling when no git command was lexed, and git_discard's scope scan reads the raw text of every
+# command. No other guard reads the execution forms of interpreter code.
 # The interpreter families by command word, with each family's option grammar: 'code' letters take the inline
 # code (the rest of the cluster when 'attached' and the rest is not empty, else the next word); 'ends' tells
 # whether the code ends the options (python and node) or more code options may follow (perl and ruby, whose -e
@@ -1754,9 +2005,24 @@ _INTERP_EXEC_NAMES = {
                        "pipeline_start", "open")),
     "node": frozenset(("exec", "execSync", "execFile", "execFileSync", "spawn", "spawnSync")),
 }
+# The python callee names that are an execution form only when bound to subprocess, as the code shows it: called
+# through a name the code imports subprocess as (import subprocess, import subprocess as sp; subprocess itself
+# is read so too), or a bare name it imports from subprocess (from subprocess import run). Any other run or call
+# (asyncio.run, a function of the code's own) is not one.
+_INTERP_PY_QUALIFIED = frozenset(("run", "call"))
+_INTERP_PY_IMPORT_RE = re.compile(r"\bimport\s+([A-Za-z_][\w.]*(?:\s+as\s+\w+)?(?:\s*,\s*[A-Za-z_][\w.]*"
+                                  r"(?:\s+as\s+\w+)?)*)")
+_INTERP_PY_FROM_RE = re.compile(r"\bfrom\s+subprocess\s+import\s+\(?\s*([\w\s,*]+)")
+# The python, perl and ruby callee names of the argv form: when the first argument is a list literal of string
+# literals (python), or for perl and ruby system/exec/spawn there are two or more string-literal arguments, the
+# call runs the program those words name with no shell between (_interp_argv_text).
+_INTERP_ARGV_LIST_FAMILIES = frozenset(("python",))
+_INTERP_ARGV_ARGS = {"perl": frozenset(("system", "exec")), "ruby": frozenset(("system", "exec", "spawn"))}
 _INTERP_BARE_CALLS = {"perl": frozenset(("system", "exec")), "ruby": frozenset(("system", "exec"))}
 _INTERP_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _INTERP_CLOSERS = {"(": ")", "[": "]", "{": "}", "<": ">"}
+# perl's quote-like operators, after which a '#' is their delimiter, not a comment.
+_INTERP_PERL_QUOTE_OPS = frozenset(("q", "qq", "qw", "qx", "qr", "m", "s", "tr", "y"))
 
 
 def _interp_family(word):
@@ -1768,16 +2034,17 @@ def _interp_family(word):
     return next(group for group in match.groups() if group)
 
 
-def _interp_codes(argv, opaque, start, family, visited, codes):
+def _interp_codes(argv, opaque, start, family, visited, codes, end=None):
     """Append to codes the inline code the interpreter whose options start at argv[start] runs, read with its
     family's grammar (_INTERP_GRAMMARS): clustered and separated spellings alike (python3 -Ic CODE, -I -c CODE,
     -cCODE; perl -we CODE, -E CODE, -lne CODE, several -e; node -e, -p, -pe, --eval CODE, --eval=CODE). The
-    walk stops at the first operand (a script, '-', '--' or an opaque word), at a stop letter, or after the code
-    where the code ends the options. An opaque code word is skipped: its text is not the reading's to have.
-    visited holds the (family, position) pairs already walked in this segment, so a position reached from a
-    second interpreter word is not walked again and every word is scanned once."""
+    walk stops at the first operand (a script, '-', '--' or an opaque word), at a stop letter, after the code
+    where the code ends the options, or at `end` (the end of a find -exec program's words). An opaque code word
+    is skipped: its text is not the reading's to have. visited holds the (family, position) pairs already walked
+    in this segment, so a position reached from a second interpreter word is not walked again and every word is
+    scanned once."""
     grammar = _INTERP_GRAMMARS[family]
-    n = len(argv)
+    n = len(argv) if end is None else end
     i = start
     while i < n and (family, i) not in visited:
         visited.add((family, i))
@@ -1845,10 +2112,36 @@ def _interp_skip_string(code, i, family):
     return n
 
 
+def _interp_skip_comment(code, i, family):
+    """The index just past the comment opening at code[i], or None when none opens there: '#' to the end of its
+    line in python and ruby, and in perl unless it follows '$' ($#array) or a quote-like operator name (s#a#b#);
+    '//' to the end of its line and '/*' to its '*/' in node. A comment is not code, so no execution form is
+    read inside it."""
+    c = code[i]
+    if c == "#" and family in ("python", "ruby", "perl"):
+        if family == "perl" and i:
+            if code[i - 1] == "$":
+                return None
+            back = i
+            while back and (code[back - 1].isalnum() or code[back - 1] == "_"):
+                back -= 1
+            if code[back:i] in _INTERP_PERL_QUOTE_OPS and code[back - 1:back] not in ("$", "@", "%"):
+                return None
+        end = code.find("\n", i)
+        return len(code) if end == -1 else end
+    if c == "/" and family == "node" and code[i + 1:i + 2] in ("/", "*"):
+        if code[i + 1] == "/":
+            end = code.find("\n", i)
+            return len(code) if end == -1 else end
+        end = code.find("*/", i + 2)
+        return len(code) if end == -1 else end + 2
+    return None
+
+
 def _interp_region_end(code, i, family, closer):
     """The index where the region starting at code[i] ends (exclusive): the `closer` that balances the bracket
     just before i (closer one of ')', ']', '}', '>'), or, with closer None, the end of the statement (an unquoted
-    ';' or newline); len(code) when neither comes. String literals inside are skipped whole."""
+    ';' or newline); len(code) when neither comes. String literals and comments inside are skipped whole."""
     n = len(code)
     opener = {")": "(", "]": "[", "}": "{", ">": "<"}.get(closer)
     depth = 1
@@ -1857,6 +2150,11 @@ def _interp_region_end(code, i, family, closer):
         if c in "'\"" or (c == "`" and family != "python"):
             i = _interp_skip_string(code, i, family)
             continue
+        if c in "#/":
+            skipped = _interp_skip_comment(code, i, family)
+            if skipped is not None:
+                i = skipped
+                continue
         if closer is None:
             if c in ";\n":
                 return i
@@ -1870,12 +2168,164 @@ def _interp_region_end(code, i, family, closer):
     return n
 
 
+def _interp_python_bindings(code):
+    """(modules, names) for python inline code: the names the code imports subprocess as (subprocess itself
+    always among them), and the bare names it imports from subprocess ('*' for a star import), as its import
+    statements show them."""
+    modules = {"subprocess"}
+    names = set()
+    for match in _INTERP_PY_IMPORT_RE.finditer(code):
+        for item in match.group(1).split(","):
+            parts = item.split()
+            if parts and parts[0] == "subprocess":
+                modules.add(parts[-1])
+    for match in _INTERP_PY_FROM_RE.finditer(code):
+        for item in match.group(1).split(","):
+            parts = item.split()
+            if parts:
+                names.add(parts[-1])
+    return modules, names
+
+
+def _interp_qualifier(code, i):
+    """The name before the '.' that ends just before code[i] (the 'subprocess' of subprocess.run), '' when the
+    callee is not written as an attribute of a plain name, or None when no '.' precedes it."""
+    j = i
+    while j and code[j - 1] in " \t":
+        j -= 1
+    if not j or code[j - 1] != ".":
+        return None
+    j -= 1
+    while j and code[j - 1] in " \t":
+        j -= 1
+    end = j
+    while j and (code[j - 1].isalnum() or code[j - 1] == "_"):
+        j -= 1
+    return code[j:end]
+
+
+def _interp_literal_items(text, family):
+    """The string-literal items of `text`, a comma-separated list of arguments or list elements, as their
+    contents in order, or None when an item is anything but one plain string literal (a name, a call, an
+    f-string, a concatenation, a nested list), so the caller reads the raw text instead."""
+    items = []
+    i = 0
+    n = len(text)
+    while True:
+        while i < n and text[i] in " \t\n,":
+            i += 1
+        if i >= n:
+            return items
+        if text[i] not in "'\"":
+            return None
+        end = _interp_skip_string(text, i, family)
+        literal = text[i:end]
+        if len(literal) < 2 or literal[-1] != literal[0] or literal[:3] in ('"""', "'''"):
+            return None
+        if "\\" in literal or (family in ("perl", "ruby") and literal[0] == '"' and ("$" in literal
+                                                                                     or "#{" in literal
+                                                                                     or "@" in literal)):
+            return None  # an escape or an interpolation: the word's run-time text is not this literal
+        items.append(literal[1:-1])
+        i = end
+        while i < n and text[i] in " \t\n":
+            i += 1
+        if i < n and text[i] != ",":
+            return None
+
+
+def _interp_argv_text(words):
+    """The command text an argv-form execution runs, its words given: the program is resolved through the
+    wrappers that launch it (_launched_programs); the words of a git program, or a shell's -c string, are
+    returned; any other program's words are data it receives, so nothing ("") is."""
+    if not words:
+        return ""
+    opaque = [False] * len(words)
+    programs, overread = _launched_programs(words, opaque, 0)
+    texts = []
+    for k, end, _xargs, _builtin in programs:
+        name = _gate_word(words[k])
+        if name == "git":
+            texts.append(" ".join(words[k:end]))
+        elif name in _SHELL_C_SHELLS:
+            kind, j, has_c, _has_s = _shell_option_walk(words, opaque, k + 1, {}, end)
+            if has_c and kind == "operand":
+                texts.append(words[j])
+    if overread is not None:
+        texts.append(" ".join(words))  # a wrapper option outside its grammar: read every word, as before
+    return "\n".join(texts)
+
+
+def _interp_form_text(family, name, args):
+    """The command text of one execution form, `args` being its argument text. An argv form (a python call
+    whose first argument is a list or tuple of string literals; a perl or ruby system, exec or spawn with two or
+    more string-literal arguments; a node execFile, execFileSync, spawn or spawnSync naming its program and a
+    list of string-literal arguments) runs its program with no shell between, so only a git program's words or a
+    shell's -c string are read (_interp_argv_text); a perl or ruby open runs a command only through a pipe
+    (perl's '-|' or '|-' mode, or a '|' at either end of its file argument; ruby's '|' at the start), so any other
+    open is no execution form (None); every other form's argument text is read whole, as the command line a shell
+    runs."""
+    if name == "open":
+        items = []
+        depth = 0
+        start = 0
+        for pos, c in enumerate(args):
+            if c in "([{":
+                depth += 1
+            elif c in ")]}":
+                depth -= 1
+            elif c == "," and depth == 0:
+                items.append(args[start:pos])
+                start = pos + 1
+        items.append(args[start:])
+        literals = [item.strip()[1:-1].strip() for item in items
+                    if len(item.strip()) >= 2 and item.strip()[0] in "'\"" and item.strip()[-1] == item.strip()[0]]
+        if family == "perl" and any(lit in ("-|", "|-") or lit.startswith(("-|", "|-")) or lit.startswith("|")
+                                    or lit.endswith("|") for lit in literals):
+            return args
+        if family == "ruby" and items and items[0].strip()[1:2] == "|":
+            return args
+        return None
+    if family in _INTERP_ARGV_LIST_FAMILIES:
+        stripped = args.lstrip()
+        if stripped.startswith(("[", "(")):
+            closer = "]" if stripped[0] == "[" else ")"
+            end = _interp_region_end(stripped, 1, family, closer)
+            words = _interp_literal_items(stripped[1:end], family)
+            if words is not None:
+                return _interp_argv_text(words)
+        return args
+    if name in _INTERP_ARGV_ARGS.get(family, ()):
+        words = _interp_literal_items(args, family)
+        if words is not None and len(words) >= 2:
+            return _interp_argv_text(words)
+        return args
+    if family == "node" and name in ("execFile", "execFileSync", "spawn", "spawnSync"):
+        comma = args.find(",")
+        program = _interp_literal_items(args[:comma] if comma != -1 else args, family)
+        rest = args[comma + 1:].strip() if comma != -1 else ""
+        if program is not None and len(program) == 1:
+            words = [program[0]]
+            if rest[:1] == "[":
+                end = _interp_region_end(rest, 1, family, "]")
+                listed = _interp_literal_items(rest[1:end], family)
+                if listed is None:
+                    return args
+                words.extend(listed)
+            return _interp_argv_text(words)
+        return args
+    return args
+
+
 def _interp_exec_regions(code, family):
-    """The texts of the execution forms in inline code `code` of `family` (_INTERP_EXEC_NAMES and the
-    backquote, qx and %x forms), in order. Names inside string literals are not read, since a string is data
-    until an execution form runs it."""
+    """The command texts of the execution forms in inline code `code` of `family` (_INTERP_EXEC_NAMES and the
+    backquote, qx and %x forms), one per form, in order (_interp_form_text). Names inside string literals and
+    comments are not read, since a string is data until an execution form runs it and a comment is not code; a
+    python run or call is a form only when bound to subprocess (_INTERP_PY_QUALIFIED, _interp_python_bindings);
+    a form whose text names nothing (an argv form running another program) is left out."""
     names = _INTERP_EXEC_NAMES[family]
     bare = _INTERP_BARE_CALLS.get(family, frozenset())
+    bindings = None
     regions = []
     n = len(code)
     i = 0
@@ -1889,6 +2339,11 @@ def _interp_exec_regions(code, family):
         if c in "'\"" or c == "`":
             i = _interp_skip_string(code, i, family)
             continue
+        if c in "#/":
+            skipped = _interp_skip_comment(code, i, family)
+            if skipped is not None:
+                i = skipped
+                continue
         match = _INTERP_NAME_RE.match(code, i) if (c.isalpha() or c == "_") else None
         if match is None:
             i += 1
@@ -1911,29 +2366,46 @@ def _interp_exec_regions(code, family):
             k += 1
         if name in names and k < n and code[k] == "(":
             end = _interp_region_end(code, k + 1, family, ")")
-            regions.append(code[k + 1:end])
+            qualified = True
+            if family == "python" and name in _INTERP_PY_QUALIFIED:
+                if bindings is None:
+                    bindings = _interp_python_bindings(code)
+                qualifier = _interp_qualifier(code, i)
+                qualified = (qualifier in bindings[0] if qualifier is not None
+                             else name in bindings[1] or "*" in bindings[1])
+            elif family == "ruby" and name == "open":
+                qualified = _interp_qualifier(code, i) in (None, "Kernel")  # File.open and URI.open run nothing
+            text = _interp_form_text(family, name, code[k + 1:end]) if qualified else None
+            if text is None:
+                i = j  # no execution form: its arguments are read on, as any other code
+                continue
+            if text:
+                regions.append(text)
             i = end + 1
             continue
         if name in bare and k > j and k < n:
             end = _interp_region_end(code, k, family, None)
-            regions.append(code[k:end])
+            text = _interp_form_text(family, name, code[k:end])
+            if text:
+                regions.append(text)
             i = end
             continue
         i = j
     return regions
 
 
-def _interp_exec_text(records):
-    """The arguments of every execution form in the inline code of each interpreter segment of `records`, joined
-    by newlines ("" when none), so a guard reads every command an interpreter runs at once. An interpreter
-    segment has a command word (after leading reserved words and VAR=value words, _command_start) whose
-    _gate_word names an interpreter family (_interp_family); when that command word is a wrapper
-    (_GATE_NOTE_WRAPPERS, or find or xargs) every later word naming an interpreter is read as one, as the shell
-    reading reads shells (a safe-direction over-read). Its inline code is read with the family's option grammar
-    (_interp_codes), and only the execution forms in that code are returned (_interp_exec_regions). Disclosed
-    residuals: a command the code holds in a variable or builds at run time (cmd = '...'; os.system(cmd)), an
-    execution form the lists do not name, an option outside the grammars that takes a separate value (read as
-    the script operand, which ends the walk), and an interpreter family off the list."""
+def _interp_exec_forms(records):
+    """The command text of every execution form in the inline code of each interpreter segment of `records`, one
+    text per form, in order ([] when none), so a guard judges each form ALONE and never a join of several. An
+    interpreter segment runs a program (after leading reserved words and VAR=value words, _command_start, and the
+    wrappers that launch it, _launched_programs) whose _gate_word names an interpreter family (_interp_family);
+    after a wrapper option outside its grammar every later word naming an interpreter is read as one (the
+    earlier safe-direction over-read). Its inline code is read with the family's option grammar (_interp_codes),
+    and only the execution forms in that code are returned (_interp_exec_regions). Disclosed residuals: a command
+    the code holds in a variable or builds at run time (cmd = '...'; os.system(cmd)), an execution form the lists
+    do not name or a run or call reached through a name the code's imports do not bind to subprocess, a form
+    inside a string the code interpolates (an f-string, ruby's #{...}), an option outside the grammars that takes
+    a separate value (read as the script operand, which ends the walk), and an interpreter family off the list."""
     texts = []
     for seg in records:
         argv = seg.argv
@@ -1942,21 +2414,22 @@ def _interp_exec_text(records):
         i = _command_start(argv)
         if i >= n:
             continue
-        word = _gate_word(argv[i])
-        if word in _GATE_NOTE_WRAPPERS or word in _SHELL_STRING_WRAPPERS:
-            starts = range(i + 1, n)
-        else:
-            starts = (i,)
+        programs, overread = _launched_programs(argv, opaque, i)
+        starts = [(k, end) for k, end, _xargs, _builtin in programs]
+        if overread is not None:
+            starts.extend((k, n) for k in range(overread[0] + 1, n))
         visited = set()
-        for k in starts:
+        for k, end in starts:
+            if opaque[k]:
+                continue
             family = _interp_family(_gate_word(argv[k]))
             if family is None:
                 continue
             codes = []
-            _interp_codes(argv, opaque, k + 1, family, visited, codes)
+            _interp_codes(argv, opaque, k + 1, family, visited, codes, end)
             for code in codes:
                 texts.extend(_interp_exec_regions(code, family))
-    return "\n".join(texts)
+    return texts
 
 
 def _interp_records(command):
@@ -1976,6 +2449,16 @@ def _raw_names_gate_bypass(text):
     read here, left to the broad note tier. "" is False."""
     return bool(text and ((_RAW_NOVERIFY_VERB_RE.search(text) and _RAW_NOVERIFY_RE.search(text))
                           or (_RAW_SHORT_NOVERIFY_VERB_RE.search(text) and _RAW_SHORT_N_RE.search(text))))
+
+
+def _raw_names_gate_note(text):
+    """True when raw text `text` (an uncertain segment's text) holds the note shape of _gate_weakening_fallback:
+    a checker keyword beside a raw swallow or truncating-pipe spelling, or beside a head/tail/cut fed by a
+    process substitution or a here-string. A plain predicate over the raw text; it builds no decision. "" is
+    False."""
+    return bool(text and _RAW_CHECKER_RE.search(text)
+                and (_RAW_SWALLOW_RE.search(text) or _RAW_TRUNCATE_RE.search(text)
+                     or (_RAW_FLOW_RE.search(text) and _RAW_SINK_WORD_RE.search(text))))
 
 
 # A leading inline shell env-var assignment (FOO=bar or the APPEND form FOO+=bar) that PREFIXES a command,
@@ -2923,11 +3406,11 @@ def diff_source_pretool(data):
     possibles = [(index, seg) for index, seg in enumerate(segments) if _is_possible_producer(seg)]
     if not possibles:
         # An uncertain segment (a shell string the reading cannot read, or a shell reading its script from a pipe
-        # or a here-document) is read under this guard's posture: the raw fallback over that segment's text only,
+        # or a here-document) is read under this guard's posture: the raw fallback over each of its texts alone,
         # which notes an apparent diff producer there. The other segments are judged as the flat lex judges them.
-        uncertain = _shell_uncertain_text(segments)
-        if uncertain:
-            return _diff_source_fallback(uncertain)
+        for text in _shell_uncertain_texts(segments):
+            if _RAW_DIFF_PRODUCER_RE.search(text):
+                return _diff_source_fallback(text)  # the posture's note on an apparent producer in that text
         return _allow()  # no producer-capable form anywhere: the bounded true boundary allows
     # AIRTIGHT-NARROW ALLOW: only when the WHOLE command is one of the five closed proofs.
     if (_diff_proof_help(command) or _diff_proof_summary(command)
@@ -3688,10 +4171,10 @@ def commit_identity(data):
     author, committer, or co-author. No escape hatch: the rule is absolute. A git command inside a shell -c or
     eval string, a trap action, or a find/xargs shell -c string is read as a command line (_lex_command) and
     judged here. A segment whose string the reading cannot read, or a shell reading its script from a pipe or a
-    here-document, is uncertain alone: the raw-identity fallback (_commit_identity_fallback) reads that segment's
-    text (_shell_uncertain_text), and every other segment is judged as before. An interpreter's inline code is
-    read only in its execution forms (_interp_exec_text), and an AI author, committer or co-author spelling in
-    them denies through the same fallback."""
+    here-document, is uncertain alone: the raw-identity fallback (_commit_identity_fallback) reads each of that
+    segment's texts alone (_shell_uncertain_texts), and every other segment is judged as before. An interpreter's
+    inline code is read only in its execution forms, each alone (_interp_exec_forms), and an AI author, committer
+    or co-author spelling in one denies through the same fallback."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: commit_identity wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -3712,18 +4195,19 @@ def commit_identity(data):
         return _commit_identity_fallback(command, str(exc))
     if hit is None:
         # An uncertain segment (a shell string the reading cannot read, or a shell reading its script from a pipe
-        # or a here-document) is read under this guard's posture: the raw-identity fallback over that segment's
-        # text only, returned where it finds an AI identity there. The other segments were judged above.
-        uncertain = _shell_uncertain_text(_interp_records(command))
-        if uncertain and _raw_identity_hit(uncertain):
-            return _commit_identity_fallback(uncertain, "")
-        # An interpreter given inline code is not shell, so find_ai_authorship never read its code: the
-        # arguments of its execution forms (os.system, subprocess calls, system, backquotes, ...) are read by this
-        # guard's own raw-identity scan, which denies an AI author, committer or co-author spelling in them;
-        # printed or quoted text outside an execution form is not read.
-        _inline = _interp_exec_text(_interp_records(command))
-        if _inline:
-            return _commit_identity_fallback(_inline, "")
+        # or a here-document) is read under this guard's posture: the raw-identity fallback over each of its texts
+        # alone, returned where it finds an AI identity there. The other segments were judged above.
+        records = _interp_records(command)
+        for text in _shell_uncertain_texts(records):
+            if _raw_identity_hit(text):
+                return _commit_identity_fallback(text, "")
+        # An interpreter given inline code is not shell, so find_ai_authorship never read its code: the command
+        # text of each of its execution forms (os.system, subprocess calls, system, backquotes, ...) is read alone
+        # by this guard's own raw-identity scan, which denies an AI author, committer or co-author spelling there;
+        # a comment, and printed or quoted text outside an execution form, are not read.
+        for text in _interp_exec_forms(records):
+            if _raw_identity_hit(text):
+                return _commit_identity_fallback(text, "")
         return _allow()
     reason = ("AIQT rule cmtidn (commit-identity): a recorded change carries the human maintainer's "
               "own identity, with no AI as author, committer, or co-author; this git command sets an "
@@ -4567,10 +5051,12 @@ def git_explicit_binding(data):
     'git add <path>' are not breadth and are unaffected. It never asks. A breadth-then-publish inside a shell -c
     or eval string, a trap action, or a find/xargs shell -c string is read as a command line (_lex_command) and
     denied here. A segment whose string the reading cannot read, or a shell reading its script from a pipe or a
-    here-document, is uncertain alone: the raw fallback (_expbnd_fallback) reads that segment's text
-    (_shell_uncertain_text), and every other segment is judged as before. An interpreter's inline code is read
-    only in its execution forms (_interp_exec_text): a breadth stage paired with a publish there denies (the one
-    deny; a cd-then-mutate there keeps the posture, allow)."""
+    here-document, is uncertain alone: the raw fallback (_expbnd_fallback) reads each of that segment's texts
+    alone (_shell_uncertain_texts), and every other segment is judged as before. A cd placed from a child shell's
+    -c string or an EXIT or signal trap action moves only the later commands of that string (_scope_moved). An
+    interpreter's inline code is read only in its execution forms, each alone (_interp_exec_forms): a breadth
+    stage paired with a publish in one form denies (the one deny; a breadth stage and a publish in two separate
+    forms, and a cd-then-mutate there, keep the posture, allow)."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: git_explicit_binding wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -4587,9 +5073,10 @@ def git_explicit_binding(data):
             "its git target and scope could not be checked. This is a binding convention, not a hazard, so "
             "it is allowed; prefer an explicit '-C' target and enumerated scope.")
     try:
-        segments = _segments(command)
+        records = _lex_command(command)
     except ValueError:
         return _expbnd_fallback(command)
+    segments = [(seg.argv, seg.sep_after) for seg in records]
 
     # ROUND-2 FINDING 11 PRE-SCAN: a whole-tree BREADTH stage ('git add -A/./:/', 'git commit -a/--all')
     # FOLLOWED BY a PUBLISH ('git push') ANYWHERE later in the command DENIES-and-educates, regardless of any
@@ -4609,12 +5096,13 @@ def git_explicit_binding(data):
         if _git_is_breadth(s, a):
             breadth_before_push = s
     # An uncertain segment (a shell string the reading cannot read, or a shell reading its script from a pipe or a
-    # here-document) is read under this guard's posture: the raw fallback over that segment's text only. Its deny
+    # here-document) is read under this guard's posture: the raw fallback over each of its texts alone. Its deny
     # (a breadth stage paired with a publish there) is checked here, ahead of the notes below; its note (a cd
     # before a git mutation there) is checked last. The other segments are judged as the flat lex judges them.
-    uncertain = _shell_uncertain_text(_interp_records(command))
-    if uncertain and _RAW_EXPBND_BREADTH_RE.search(uncertain) and _RAW_EXPBND_PUSH_RE.search(uncertain):
-        return _expbnd_breadth_publish_deny("breadth operation")
+    uncertain = _shell_uncertain_texts(records)
+    for text in uncertain:
+        if _RAW_EXPBND_BREADTH_RE.search(text) and _RAW_EXPBND_PUSH_RE.search(text):
+            return _expbnd_breadth_publish_deny("breadth operation")
 
     # A cd/pushd/popd SHIFTS the target out of the session cwd (popd lands on an unknowable stack-top
     # directory, so it too confuses a following git segment). The shift confuses a git segment only when it
@@ -4624,32 +5112,36 @@ def git_explicit_binding(data):
     # only through a "||" (git runs only on the prior command's failure, so the cwd is unchanged) or a "|"
     # (a subshell cd) is conservatively treated as preceding: a safe over-ASK, not a silent allow. The
     # breadth+publish deny is handled by the pre-scan above; a breadth op after a cd with NO publish is only
-    # the relocate convention nudge.
-    saw_dir_change = False
-    for tokens, _sep in segments:
-        eff = _expbnd_effective_tokens(tokens)
+    # the relocate convention nudge. A cd placed from a child shell's -c string or a trap action that runs apart
+    # moves only the later commands of that string (its shell_scope, _scope_moved), not the commands after it.
+    moved = set()  # the shell scopes a cd/pushd/popd has moved so far
+    for seg in records:
+        eff = _expbnd_effective_tokens(seg.argv)
         word = _command_word(eff)
         if word in _CD_BUILTINS or word == "popd":
-            saw_dir_change = True
+            moved.add(seg.shell_scope)
             continue
         if word != "git":
             continue
         sub, args = _git_sub_and_args(eff)
         if sub is None:
             continue
+        saw_dir_change = bool(moved) and _scope_moved(moved, seg.shell_scope)
         if (_git_is_mutating(sub, args) and not _git_target_is_explicit(eff)
                 and saw_dir_change):
             return _expbnd_target_ask(sub)
         if _git_is_breadth(sub, args) and saw_dir_change:
             return _expbnd_breadth_ask(sub)
-    # An interpreter given inline code is not shell, so the segments above never read its code: when the
-    # arguments of its execution forms (_interp_exec_text) name a whole-tree breadth stage followed by a publish
-    # (the one deny of this guard's raw fallback), it DENIES; otherwise it keeps its posture (allow).
-    _inline = _interp_exec_text(_interp_records(command))
-    if _inline and _RAW_EXPBND_BREADTH_RE.search(_inline) and _RAW_EXPBND_PUSH_RE.search(_inline):
-        return _expbnd_breadth_publish_deny("breadth operation")
-    if uncertain:
-        return _expbnd_fallback(uncertain)  # the posture's note, or its allow; its deny was checked above
+    # An interpreter given inline code is not shell, so the segments above never read its code: when the command
+    # text of one of its execution forms (_interp_exec_forms), read alone, names a whole-tree breadth stage and a
+    # publish (the one deny of this guard's raw fallback), it DENIES; otherwise it keeps its posture (allow).
+    for text in _interp_exec_forms(records):
+        if _RAW_EXPBND_BREADTH_RE.search(text) and _RAW_EXPBND_PUSH_RE.search(text):
+            return _expbnd_breadth_publish_deny("breadth operation")
+    for text in uncertain:
+        if (_RAW_EXPBND_CD_RE.search(text)
+                and (_RAW_EXPBND_MUTATE_RE.search(text) or _RAW_EXPBND_PRUNING_FETCH_RE.search(text))):
+            return _expbnd_fallback(text)  # the posture's note (a cd before a git mutation); its deny ran above
     return _allow()
 
 
@@ -8307,7 +8799,10 @@ def _commit_command_syntax(command):
         apparent = apparent or any(_commit_apparent_segment(seg) for seg in partial)
         status = "unverifiable" if apparent else "outside"
         return _CommitSyntax(status, tuple(partial), (), (), "incomplete shell parse")
-    if len(records) > _COMMIT_MAX_SEGMENTS:
+    # The budget counts the segments the command itself holds (the flat lex), as before the shell-string
+    # reading: the segments placed from a shell -c, eval or trap string are judged below, but a long script
+    # inside one string does not exhaust the budget by itself.
+    if len(records) > _COMMIT_MAX_SEGMENTS and len(_lex_flat(command)) > _COMMIT_MAX_SEGMENTS:
         return _CommitSyntax("unverifiable", records, (), (), "segment budget exhausted")
     steps = tuple(_commit_syntax_step(seg) for seg in records)
     if any(not _commit_quote_bytes_known(seg.raw)
@@ -9402,12 +9897,14 @@ def protected_line(data):
     except ValueError:
         return _protected_line_fallback(command)
     # An uncertain segment (a shell string the reading cannot read, or a shell reading its script from a pipe or a
-    # here-document) is read under this guard's posture: the raw fallback over that segment's text only, returned
-    # where it denies there (an apparent commit, or a force, delete or mirror push). The other segments are judged
-    # below as the flat lex judges them.
-    uncertain = _shell_uncertain_text(seg_records)
-    if uncertain and _protected_line_fallback_denies(uncertain):
-        return _protected_line_fallback(uncertain)
+    # here-document) is read under this guard's posture: the raw fallback over each of its texts alone, returned
+    # where it denies there (an apparent commit, or a force, delete or mirror push). For a shell reading its script
+    # from a pipe the text is that shell's own stage, never the words of the other stages (the raw backstop below
+    # reads the whole command when no git command was lexed). The other segments are judged below as the flat lex
+    # judges them.
+    for text in _shell_uncertain_texts(seg_records, stage=True):
+        if _protected_line_fallback_denies(text):
+            return _protected_line_fallback(text)
     cwd = data.get("cwd")
     pending_deny = None
     for seg in seg_records:
@@ -9924,14 +10421,14 @@ def branch_root(data):
             "command string, so branch creation could not be checked; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule brnrot, fail-closed).")
     try:
-        segments = _segments(command)
+        records = _lex_command(command)
     except ValueError:
         # An unsupported LATER construct (a heredoc, a process substitution) must not discard a
         # proven-complete creation already recovered in the prefix: partial-lex and judge the recovered
         # segments, so a canonical orphan creation still DENIES (DENY outranks the parse error). A command
         # with no recovered creation falls back to the open-grammar allow (best-effort, disclosed).
         try:
-            segments = [(seg.argv, seg.sep_after) for seg in _lex_command(command, partial=True)[0]]
+            records = _lex_command(command, partial=True)[0]
         except ValueError:
             return _allow()  # even partial recovery failed: open grammar, best-effort
 
@@ -9942,16 +10439,20 @@ def branch_root(data):
     # pending_deny so a confirmed orphan elsewhere wins first.
     pending_deny = None
     pending_note = None
-    saw_dir_change = False
-    for tokens, _sep in segments:
+    moved = set()  # the shell scopes a cd/pushd/popd has moved so far
+    for seg in records:
+        tokens = seg.argv
         word = _command_word(tokens)
         if word in _CD_BUILTINS or word == "popd":
             # a cd/pushd/popd BEFORE the git segment moves the target out of the session cwd; popd lands on
             # an unknowable stack-top directory, so it too routes the following creation to a fail-safe deny.
-            saw_dir_change = True
+            # A cd placed from a child shell's -c string or a trap action that runs apart moves only the later
+            # commands of that string (its shell_scope), never the parent shell's (_scope_moved).
+            moved.add(seg.shell_scope)
             continue
         if word != "git" or _has_info_flag(tokens):
             continue
+        saw_dir_change = bool(moved) and _scope_moved(moved, seg.shell_scope)
         sub, args = _git_sub_and_args(tokens)
         start = _branch_creation_start(sub, args)
         if start is None:
@@ -10838,11 +11339,12 @@ def gate_weakening(data):
     otherwise the raw fallback stands. A command inside a shell -c or eval string, a trap action, or a find
     -exec/-execdir/-ok/-okdir or xargs shell -c string is read as if written in
     place (_lex_command), so a --no-verify there denies. A segment whose string that reading cannot read, and a
-    shell that reads its script from a pipe or a here-document, are uncertain alone: the raw fallback reads that
-    segment's text (_shell_uncertain_text), and every other segment is judged as before. Inline interpreter code
-    is not shell, so it cannot be read as a command line; a --no-verify spelling in the arguments of its
-    execution forms (_interp_exec_text, _raw_names_gate_bypass) denies, and printed or quoted text outside an
-    execution form is not read, so the interpreter command otherwise keeps its posture.
+    shell that reads its script from a pipe or a here-document, are uncertain alone: the raw fallback reads each
+    of that segment's texts alone (_shell_uncertain_texts), and every other segment is judged as before. Inline
+    interpreter code is not shell, so it cannot be read as a command line; a --no-verify spelling in the command
+    text of one of its execution forms, read alone (_interp_exec_forms, _raw_names_gate_bypass), denies, and a
+    comment, or printed or quoted text outside an execution form, is not read, so the interpreter command
+    otherwise keeps its posture.
     Disclosed residuals: R1 a check inside a shell string piped into a sink notes rather than denies
     (the shell command before it is an earlier command the deny tier does not count as benign), and a check
     inside an xargs or find body that runs no shell, or a string built at run time, is not read; R2 an alias or shell
@@ -10933,20 +11435,22 @@ def gate_weakening(data):
         reason, banner = _verification_sink_message(hit)
         return _deny(reason, banner)
     # An uncertain segment (a shell string the reading cannot read, or a shell reading its script from a pipe or a
-    # here-document) is read under this guard's posture: the raw fallback over that segment's text only. Its deny
-    # (a --no-verify spelling, or a short -n on git commit or am, there) is checked here; its note (a checker
-    # beside a swallow or truncating pipe there) is checked last. The other segments were judged above.
-    uncertain = _shell_uncertain_text(records)
-    if uncertain and _raw_names_gate_bypass(uncertain):
-        return _gate_weakening_fallback(uncertain)
-    # An interpreter given inline code is not shell, so the segments above never read its code: when the
-    # arguments of its execution forms (_interp_exec_text: os.system, subprocess calls, system, backquotes, ...)
-    # name a git verification-hook bypass this guard denies (a --no-verify spelling, or a short -n on git
-    # commit/am - _raw_names_gate_bypass), it DENIES; printed or quoted text outside an execution form is
-    # not read, and otherwise the command keeps its posture (a checker piped to a sink inside the code is only
-    # a note, left to the broad note tier below, so the existing '| head' note on an interpreter command is
-    # unchanged).
-    if _raw_names_gate_bypass(_interp_exec_text(records)):
+    # here-document) is read under this guard's posture: the raw fallback over each of its texts alone. Its deny
+    # (a --no-verify spelling, or a short -n on git commit or am, there) is checked here, ahead of the notes
+    # below, so a note elsewhere in the command never hides it; its note (a checker beside a swallow or
+    # truncating pipe there) is checked last. The other segments were judged above.
+    uncertain = _shell_uncertain_texts(records)
+    for text in uncertain:
+        if _raw_names_gate_bypass(text):
+            return _gate_weakening_fallback(text)
+    # An interpreter given inline code is not shell, so the segments above never read its code: when the command
+    # text of one of its execution forms (_interp_exec_forms: os.system, subprocess calls, system, backquotes,
+    # ...), read alone, names a git verification-hook bypass this guard denies (a --no-verify spelling, or a short
+    # -n on git commit/am - _raw_names_gate_bypass), it DENIES; a comment, and printed or quoted text outside an
+    # execution form, are not read, and otherwise the command keeps its posture (a checker piped to a sink inside
+    # the code is only a note, left to the broad note tier below, so the existing '| head' note on an interpreter
+    # command is unchanged).
+    if any(_raw_names_gate_bypass(text) for text in _interp_exec_forms(records)):
         return _deny(
             "AIQT rule gatdis (gate-discipline): this command runs inline interpreter code (python -c, "
             "perl -e, and the like) whose execution form (os.system, a subprocess call, system, a backquote, "
@@ -10961,8 +11465,9 @@ def gate_weakening(data):
     flow_note = _gate_flow_note(records, command)
     if flow_note is not None:
         return _allow_note(flow_note)
-    if uncertain:
-        return _gate_weakening_fallback(uncertain)  # the posture's note, or its allow; its deny was checked above
+    for text in uncertain:
+        if _raw_names_gate_note(text):
+            return _gate_weakening_fallback(text)  # the posture's note; its deny was checked above
     return _allow()
 
 
@@ -11074,9 +11579,10 @@ def commit_msg_subst(data):
     A git commit inside a shell -c or eval string, a trap action, or a find/xargs shell -c string is read as a
     command line (_lex_command) and judged here. A segment whose string the reading cannot read, or a shell
     reading its script from a pipe or a here-document, is uncertain alone: the raw fallback
-    (_commit_msg_subst_fallback) reads that segment's text (_shell_uncertain_text), and every other segment is
-    judged as before. An interpreter's inline code is read only in its execution forms (_interp_exec_text),
-    where a git commit carrying a substitution marker denies through the same fallback."""
+    (_commit_msg_subst_fallback) reads each of that segment's texts alone (_shell_uncertain_texts), and every
+    other segment is judged as before. An interpreter's inline code is read only in its execution forms, each
+    alone (_interp_exec_forms), where a git commit carrying a substitution marker denies through the same
+    fallback."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: commit_msg_subst wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -11113,18 +11619,19 @@ def commit_msg_subst(data):
             "AIQT guardrail: denied a git commit argument that appears to carry an executable command "
             "substitution (rule sectvl); re-issue single-quoted, escaped, or via -F <file>.")
     # An uncertain segment (a shell string the reading cannot read, or a shell reading its script from a pipe or a
-    # here-document) is read under this guard's posture: the raw fallback over that segment's text only, returned
+    # here-document) is read under this guard's posture: the raw fallback over each of its texts alone, returned
     # where it denies there (an apparent git commit with a substitution marker). The other segments were judged
     # above.
-    uncertain = _shell_uncertain_text(segments)
-    if uncertain and _RAW_COMMIT_MSG_GIT_RE.search(uncertain) and _RAW_COMMIT_MSG_MARKER_RE.search(uncertain):
-        return _commit_msg_subst_fallback(uncertain)
-    # An interpreter given inline code is not shell: the arguments of its execution forms (_interp_exec_text)
-    # are read by this guard's own raw fallback, which denies a git commit carrying a substitution marker in
-    # them, else allows (its posture); printed or quoted text outside an execution form is not read.
-    _inline = _interp_exec_text(segments)
-    if _inline:
-        return _commit_msg_subst_fallback(_inline)
+    for text in _shell_uncertain_texts(segments):
+        if _RAW_COMMIT_MSG_GIT_RE.search(text) and _RAW_COMMIT_MSG_MARKER_RE.search(text):
+            return _commit_msg_subst_fallback(text)
+    # An interpreter given inline code is not shell: the command text of each of its execution forms
+    # (_interp_exec_forms) is read alone by this guard's own raw fallback, which denies a git commit carrying a
+    # substitution marker there, else allows (its posture); a comment, and printed or quoted text outside an
+    # execution form, are not read.
+    for text in _interp_exec_forms(segments):
+        if _RAW_COMMIT_MSG_GIT_RE.search(text) and _RAW_COMMIT_MSG_MARKER_RE.search(text):
+            return _commit_msg_subst_fallback(text)
     return _allow()
 
 
