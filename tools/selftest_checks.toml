@@ -988,7 +988,7 @@ expected-check-ids = [
   "stop-hook-active/string-denies",
   "stop-hook-active/true-yields-with-findings",
   "stop-hook-active/forced-exit-recorded",
-  # ---------- round 21: a failed guard-events append on a deny is warned about ----------
+  # ---------- a failed guard-events append on a deny is warned about ----------
   "r21/stop-deny-holds-and-warns",
   "r21/stop-deny-counted",
   "r21/teammate-idle-deny-holds-and-warns",
@@ -1803,7 +1803,7 @@ expected-check-ids = [
   "revert/conditional-file-imports-red",
   "revert/comment-join-red",
   "revert/flow-quoted-comma-red",
-  # ---------- round 5: .claude/CLAUDE.md, file headers, an @ inside a word, imported scopes ----------
+  # ---------- .claude/CLAUDE.md, file headers, an @ inside a word, imported scopes ----------
   "exit/comment-split-after-space-2",
   "exit/comment-email-0",
   "revert/comment-email-red",
@@ -1814,7 +1814,7 @@ expected-check-ids = [
   "exit/imported-file-scope-grammar-2",
   "revert/imported-file-scope-grammar-red",
   "doc/budget-source-pack-description",
-  # ---------- round 6: resolved header paths, case variants of the fixed names ----------
+  # ---------- resolved header paths, case variants of the fixed names ----------
   "count/symlinked-rule-file-header-resolved-path",
   "count/symlinked-rule-dir-header-resolved-path",
   "count/symlinked-claude-md-header-resolved-path",
@@ -2008,6 +2008,31 @@ expected-check-ids = [
   "pins/sibling-key-passes",
   "pins/block-scalar-text-cannot-evaluate",
   "pins/block-scalar-pin-finding",
+  "pins/host-patch-host-job-passes",
+  "pins/host-patch-other-job-finding",
+  "pins/host-patch-other-workflow-finding",
+  "pins/host-patch-outside-jobs-finding",
+  "pins/host-patch-unplain-job-id-finding",
+  "pins/newest-legs-at-host-patch-finding",
+  "pins/other-patch-workflow-finding",
+  "pins/host-patch-template-finding",
+  "pins/host-patch-source-missing-cannot-evaluate",
+  "pins/host-patch-source-malformed-cannot-evaluate",
+  "pins/host-patch-source-long-component-cannot-evaluate",
+  "pins/off-floor-host-patch-finding",
+  "pins/host-patch-source-deep-nesting-cannot-evaluate",
+  "pins/host-patch-source-long-dotted-key-cannot-evaluate",
+  "pins/host-patch-source-long-integer-cannot-evaluate",
+  "pins/host-patch-source-injected-recursion-error-cannot-evaluate",
+  "pins/host-patch-source-injected-memory-error-cannot-evaluate",
+  "pins/host-patch-source-injected-value-error-cannot-evaluate",
+  "pins/host-patch-source-capped-parser-injected-memory-error-cannot-evaluate",
+  "pins/host-patch-source-capped-parser-injected-value-error-cannot-evaluate",
+  "pins/host-patch-parser-none-position-named-failure",
+  "pins/host-patch-parser-negative-position-named-failure",
+  "pins/host-patch-parser-past-end-position-named-failure",
+  "pins/host-patch-parser-bool-position-named-failure",
+  "pins/host-patch-parser-non-str-key-part-named-failure",
   "pins/explicit-key-quoted-value-cannot-evaluate",
   "pins/plain-continuation-cannot-evaluate",
   "pins/range-continuation-cannot-evaluate",
@@ -2534,4 +2559,57 @@ expected-check-ids = [
   "revert/r7-red",
   "revert/r7-request-red",
   "revert/every-flip-ran",
+]
+
+[[suite]]
+id = "hook-latency-selftest"
+runner = "tools/measure_hook_latency.py"
+expected-check-ids = [
+  # ---------- the command line ----------
+  "args/bounds",
+  "args/defaults",
+  "args/unknown-refused",
+  # ---------- the statistics and the synthetic inputs ----------
+  "summary/order-statistics",
+  "summary/outcome-classified",
+  "inputs/bash-command-at-cap",
+  "inputs/write-sizes-exact",
+  "inputs/write-line-scans-clean",
+  "inputs/startup-payload-rejected",
+  # ---------- hooks.json ----------
+  "hooks/real-hooks-json-resolves",
+  "hooks/malformed-refused",
+  "hooks/missing-id-named",
+  "hooks/unknown-selection-named",
+  "hooks/unmeasured-id-refused",
+  "hooks/unhooked-case-refused",
+  # ---------- the fixture and the child environment ----------
+  "fixture/git-fixture-shape",
+  "env/child-pinned",
+  # ---------- a measurement over stub hooks ----------
+  "measure/each-case-n-samples",
+  "report/exit-zero-all-valid",
+  "measure/timed-out-never-a-time",
+  "measure/timeout-kills-child",
+  "measure/inside-timeout-is-a-time",
+  "report/exit-zero-with-timeouts",
+  "report/json-conditions",
+  "report/table-plain",
+  "report/json-existing-refused",
+  # ---------- failed samples and the version probe ----------
+  "measure/failed-sample-no-time",
+  "measure/mixed-row-valid-only",
+  "report/no-valid-sample-shown",
+  "report/json-write-failure-exit-two",
+  "measure/failed-startup-sample-exit-three",
+  "report/control-ids-escaped",
+  "measure/version-probe-failure-refused",
+  # ---------- the fixture root and interrupts ----------
+  "measure/fixture-root-removed",
+  "measure/interrupt-cause-kept",
+  "measure/signal-during-removal-held",
+  "measure/signal-handlers-restored",
+  "measure/interrupt-sigterm-cleans-up",
+  "measure/interrupt-sigint-cleans-up",
+  "measure/interrupt-sighup-cleans-up",
 ]

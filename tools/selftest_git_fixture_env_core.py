@@ -1877,9 +1877,9 @@ def _member_bound_checks(roster):
     every override and for one non-member argv that keeps the default (red when the lookup is
     bypassed).
     config/member-roster-figures: the sizing comment's roster figures hold against the live
-    roster (108 members, 106 in the malformed lane) and, with the sizing account's fixed
+    roster (111 members, 109 in the malformed lane) and, with the sizing account's fixed
     coverage (89 members timed or bounded, ten measured under the malformed lane), the derived
-    figures (19 members with no recorded time, 96 malformed-lane members unmeasured); red when
+    figures (22 members with no recorded time, 99 malformed-lane members unmeasured); red when
     a roster change leaves that comment stale."""
     from unittest.mock import patch
 
@@ -1887,10 +1887,10 @@ def _member_bound_checks(roster):
                  if _command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"]}
     # 89 and 10 are the sizing account's fixed coverage (see the SIZING comment above
     # CONFIG_MEMBER_BOUND_DEFAULT in the engine); the roster counts are live, so a roster change
-    # turns that comment's figures (108, 106, 19 and 96) red here.
+    # turns that comment's figures (111, 109, 22 and 99) red here.
     check("config/member-roster-figures",
           (len(roster), len(malformed), len(roster) - 89, len(malformed) - 10),
-          (108, 106, 19, 96))
+          (111, 109, 22, 99))
 
     record = ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert")
     opf_selftest = ("opf/tools/opf.py", "--self-test")
@@ -2533,7 +2533,9 @@ def _core_lanes(base):
             ("scope/qa-adapter", "tools/_qa_adapter.py", "_self_test", "_self_test_isolated"),
             ("scope/gen-manifest", "tools/gen_manifest.py", "self_test_main",
              "_self_test_main_isolated"),
-            ("scope/check-portability", "tools/check_portability.py", "self_test_main",
+            # Its public self_test_main names a setup failure as a NOT RUN in except handlers, so the
+            # lifecycle entry this row holds is the function that public entry delegates to.
+            ("scope/check-portability", "tools/check_portability.py", "_self_test_main_scoped",
              "_self_test_main_isolated"),
             ("scope/selftest-orch-hooks", "tools/selftest_orch_hooks.py", "main",
              "_main_isolated"),
