@@ -15,9 +15,10 @@
 #
 # A rename is one covered row whose successor is the new id. A new row names a control live at the comparison
 # base, so a row for a control that was never there is a finding. Rows are append-only: a row stays unchanged
-# once it lands, and is deleted only when its control comes back, because no row may name a control live at
-# the head. A row lands in the same change that removes its control: a row already at the base that names a
-# control still live there is a finding, so a stale row cannot stand in for a later removal. Every field
+# once it lands, and is deleted only while its control is live at the head, because no row may name a control
+# live at the head. A row lands in the same change that removes its control: a removal cannot rely on a row
+# already at the base that named its control while still live, so that stale row is a finding in the change
+# that removes the control, and is repaired by deleting it while its control stays live. Every field
 # holds a string (anything else cannot be evaluated). The gate checks that each field, optional evidence
 # included, is present and well-formed; whether the evidence is true and the authorization was given is for
 # review.

@@ -25,8 +25,9 @@ key order, row order and string quoting are not compared. Every row field holds 
 any other type, at either end, cannot be evaluated (exit 2). A row may name only a control absent at the
 head, and a row new at the head only a control live at the base (one the change removes); a row the base
 already holds that names a control absent at both ends is history and stays. A base row naming a control
-still live at the base is a finding: a disposition lands in the change that removes its control, so a row
-recorded ahead of the removal cannot stand in for it.
+live at the base cannot stand in for a removal in this range: when the head removes that control, the stale
+row is a finding and the removal needs its own row. While the control stays live at the head, deleting the
+stale row is the repair, which the append-only check allows for a control live at the head.
 
 Base binding. On a pull request (GITHUB_EVENT_NAME=pull_request or GITHUB_BASE_REF set) the base is the
 unique merge base of HEAD and refs/remotes/origin/<GITHUB_BASE_REF>, and --base is refused. On a GitHub
@@ -140,6 +141,12 @@ class CannotEvaluate(Exception):
     """An input the gate cannot resolve, read or parse; the run exits 2."""
 
 
+class OwnershipRefused(CannotEvaluate):
+    """git refused to read the checkout because another account owns it; the run exits 2 with a note
+    naming who can evaluate (the refusal class, not a message scan, selects the note, so a caller-supplied
+    revision name such as safe.directory cannot draw the note onto an unrelated refusal)."""
+
+
 def _git_env():
     """The hermetic git environment (git_fixture_env) with replace objects, optional locks and prompts off: no
     GIT_-prefixed variable redirects a read, and no global, XDG or system configuration reaches it. A scratch
@@ -153,8 +160,14 @@ def _git_env():
 
 def _finish(result, label):
     if result.returncode != 0:
-        raise CannotEvaluate("{} exited {}: {}".format(
-            label, result.returncode, result.stderr.decode("utf-8", "replace").strip()))
+        stderr = result.stderr.decode("utf-8", "replace")
+        detail = "{} exited {}: {}".format(label, result.returncode, stderr.strip())
+        # The ownership refusal is recognized only on a line git itself begins, never inside an echoed
+        # argument, so a revision name carrying the phrase stays an ordinary refusal.
+        if any(line.startswith("fatal: detected dubious ownership in repository at")
+               for line in stderr.splitlines()):
+            raise OwnershipRefused(detail)
+        raise CannotEvaluate(detail)
     return result.stdout
 
 
@@ -201,7 +214,8 @@ def _commit(root, env, revision):
     try:
         raw = _rev_parse(root, env, "--verify", "--quiet", "--end-of-options", revision + "^{commit}")
     except CannotEvaluate as exc:
-        raise CannotEvaluate("{} does not resolve to a commit ({})".format(revision, exc))
+        # The refusal keeps its class, so an ownership refusal stays recognizable through the wrap.
+        raise type(exc)("{} does not resolve to a commit ({})".format(revision, exc))
     value = raw.decode("ascii", "replace").strip()
     if not OID_RE.fullmatch(value) or raw.count(b"\n") != 1:
         raise CannotEvaluate("{} does not resolve to one commit".format(revision))
@@ -503,8 +517,11 @@ def evaluate(base_read, head_read):
     for number, row in enumerate(base_rows, 1):
         # A disposition lands in the change that removes its control, so a base row whose control is
         # still live at the base was recorded ahead of any removal and cannot stand in for a later one.
+        # The finding is bound to the removal (the control absent at the head): while the control stays
+        # live, deleting the stale row is the repair, and the row itself is reported by the head-row
+        # still-live check for as long as it is kept.
         base_control = row.get("control")
-        if isinstance(base_control, str) and base_control in base_live:
+        if isinstance(base_control, str) and base_control in base_live and base_control not in head_live:
             findings.append("{} base row {} ({}): names a control live at the base; a disposition is "
                             "recorded in the change that removes its control".format(
                                 LEDGER_REL, number, base_control))
@@ -521,10 +538,11 @@ def run(root, base_arg=None, environ=None):
         count, findings = evaluate(_base_reader(root, _git_env(), base), _head_reader(root))
     except CannotEvaluate as exc:
         print("error: cannot evaluate control retirement ({}); fail-closed".format(exc), file=sys.stderr)
-        message = str(exc)
-        if "dubious ownership" in message or "safe.directory" in message:
+        if isinstance(exc, OwnershipRefused):
             # git's advice above suggests a global safe.directory entry, but this gate reads git with the
             # global and system configuration pinned to os.devnull, so that advice cannot take effect.
+            # The refusal class, set where git's own ownership line is read, selects this note; a message
+            # that merely mentions ownership or safe.directory does not.
             print("note: only the checkout owner or CI can evaluate this checkout; this gate reads git "
                   "with no global or system configuration, so a safe.directory entry cannot reach it.",
                   file=sys.stderr)
@@ -750,6 +768,16 @@ def _fixtures(base_dir):
     add("ledger/base-row-live-at-base", _snapshot(ledger=[_covered()]),
         _snapshot(suites=renamed, ledger=[_covered()]), 1,
         ("base row 1 (" + DROPPED + "): names a control live at the base", "1 finding(s)"))
+    # The repair for such a stale row: delete it while its control stays live. Nothing is removed in the
+    # range and the append-only check allows deleting a row whose control is live at the head, so the
+    # repair passes; binding the stale-row finding to the removal is what keeps this change acceptable.
+    add("ledger/base-row-live-repair", _snapshot(ledger=[_covered()]), _snapshot(ledger=()), 0,
+        ("0 control(s) removed",))
+    # Keeping the stale row while its control lives stays refused through the head-row still-live check
+    # alone: the stale-row finding is bound to the removal, so this is exactly one finding.
+    stale = dict(control=DROPPED, state="disclosed", authorization="recorded ahead of any removal")
+    add("ledger/base-row-live-kept", _snapshot(ledger=[stale]), _snapshot(ledger=[stale]), 1,
+        ("names a control still live at head", "1 finding(s)"))
     # Non-string fields in base rows are refused the same way as in head rows (see row/state-array).
     add("ledger/base-control-array", _snapshot(ledger=[
         dict(control=["gate:x"], state="disclosed", authorization="recorded")]), _snapshot(), 2,
@@ -786,6 +814,11 @@ def _fixtures(base_dir):
         2, ("head tools/selftest_checks.toml: schema-invalid",))
     add("base/gate-without-id", dict(base, **{GATES_REL: '[[gate]]\nscript = "tools/x.py"\n'}), _snapshot(), 2,
         ("base .aiqt/core/gates/manifest.toml: [[gate]] #1 has no usable id",))
+    # The same id-less row at both ends: without the id check both snapshots collapse to the same unusable
+    # key and nothing is removed, so this is the fixture a reverted id check accepts.
+    add("base/gate-without-id-both-ends", dict(base, **{GATES_REL: '[[gate]]\nscript = "tools/x.py"\n'}),
+        dict(_snapshot(), **{GATES_REL: '[[gate]]\nscript = "tools/x.py"\n'}), 2,
+        ("base .aiqt/core/gates/manifest.toml: [[gate]] #1 has no usable id",))
     add("base/hooks-missing", dict(base, **{HOOKS_REL: None}), _snapshot(), 2,
         ("base .aiqt/core/hooks/manifest.toml: missing",))
     add("head/ledger-missing", base, _snapshot(ledger=None), 2, ("head tools/control_retirements.toml: missing",))
@@ -801,6 +834,17 @@ def _fixtures(base_dir):
     add("local/base-arg", base, _snapshot(suites=dropped), 1, (DROPPED + ": present at base", "--base HEAD"),
         base_arg="HEAD", branch="trunk")
     add("local/base-arg-option", base, _snapshot(), 2, ("is not a usable commit name",), base_arg="--all")
+
+    def committed_drop(root, run_env):
+        # The removal is already committed on a feature branch; only refs/heads/main still holds the base.
+        # Binding the local base to HEAD instead of main would judge the head against itself and pass.
+        subprocess.run(["git", "-C", str(root), "switch", "-q", "-c", "feature"],
+                       check=True, capture_output=True, timeout=TIMEOUT, env=git_fixture_env())
+        _write(root, _snapshot(suites=dropped))
+        _fixture_commit(root)
+
+    add("local/committed-drop-no-row", base, {}, 1,
+        (DROPPED + ": present at base", "merge base of HEAD and " + LOCAL_TARGET), prepare=committed_drop)
     add("env/scratch-home-unavailable", base, _snapshot(), 2, ("scratch home not created",),
         patch=(_git_fixture_env, "_scratch_home", _no_scratch_home))
 
@@ -831,6 +875,10 @@ def _fixtures(base_dir):
     add("ci/pr-no-base-ref", base, _snapshot(), 2, ("without a usable GITHUB_BASE_REF",),
         env=dict(pr, GITHUB_BASE_REF=""))
     add("ci/pr-base-ref-unresolved", base, _snapshot(), 2, ("refs/remotes/origin/main",), env=pr)
+    # Revision syntax in GITHUB_BASE_REF: main~0 is not a branch name but still resolves under git's
+    # revision grammar, so without the branch-name check the gate would bind the base to it and pass.
+    add("ci/pr-base-ref-revision-syntax", base, _snapshot(), 2, ("without a usable GITHUB_BASE_REF",),
+        env=dict(pr, GITHUB_BASE_REF="main~0"), prepare=origin_main)
 
     def payload(before):
         def prepare(root, run_env):
@@ -851,6 +899,11 @@ def _fixtures(base_dir):
         prepare=payload(None))
     add("ci/unsupported-event", base, _snapshot(), 2, ("unsupported GitHub Actions event 'workflow_dispatch'",),
         env=dict(push, GITHUB_EVENT_NAME="workflow_dispatch"))
+    # The same unsupported event carrying a usable push payload: without the event check the gate would
+    # read the payload as a push base and pass, so this is the fixture a reverted event check accepts.
+    add("ci/dispatch-with-payload", base, _snapshot(), 2,
+        ("unsupported GitHub Actions event 'workflow_dispatch'",),
+        env=dict(push, GITHUB_EVENT_NAME="workflow_dispatch"), prepare=payload(None))
     return vectors
 
 
@@ -888,7 +941,9 @@ def _patched(owner, name, replacement):
 
 
 # Each mutant reverts one check (or one fail-closed path) in the gate half of this file's source, and the
-# self-test loads it as a scratch module. The mutants are separated by what a revert honestly shows:
+# self-test loads it as a scratch module. The mutants are separated by what a revert is shown to do, not by
+# where its line sits: a revert under which some input the gate refuses is accepted is an enforcement
+# revert, wherever it lives.
 #
 # ENFORCEMENT_MUTANTS (mutant id, the exact source text, its replacement, an invalid vector): a mutant
 # reverting an acceptance-guarding check counts as caught ONLY when its named invalid fixture becomes
@@ -896,9 +951,10 @@ def _patched(owner, name, replacement):
 # crashes, or merely changes a diagnostic while the fixture stays rejected, earns no credit here.
 #
 # DIAGNOSTIC_MUTANTS (mutant id, the exact source text, its replacement, a vector, the exact exit under the
-# mutant, output fragments under the mutant): reverting a refusal path, an exception handler or a diagnostic
-# cannot make an invalid fixture accepted, so each is pinned to its exact outcome instead (a different
-# refusal message, a wrong-base finding, or a named uncaught crash), never loosely counted as caught.
+# mutant, output fragments under the mutant): a revert that cannot make any invalid fixture accepted,
+# because it changes only a refusal message, an exception handler or a crash class, or because it
+# re-tightens the stale-row repair (refusing a valid fixture, never accepting an invalid one). Each is
+# pinned to its exact outcome under the mutant, never loosely counted as caught.
 ENFORCEMENT_MUTANTS = (
     ("removal-leg", "        if control not in rows_by_control:\n", "        if False:\n", "drop/check-no-row"),
     ("gate-set", '    live |= control_ids(_required(read, where, GATES_REL), "gate", "gate", where + " " + GATES_REL,'
@@ -930,7 +986,8 @@ ENFORCEMENT_MUTANTS = (
      "            if (False\n", "row/names-nothing-removed"),
     ("append-only", "        if row not in head_rows and row.get(\"control\") not in head_live:\n",
      "        if False:\n", "ledger/append-edit"),
-    ("base-row-live", "        if isinstance(base_control, str) and base_control in base_live:\n",
+    ("base-row-live",
+     "        if isinstance(base_control, str) and base_control in base_live and base_control not in head_live:\n",
      "        if False:\n", "ledger/base-row-live-at-base"),
     ("base-registry-rows",
      "        raise CannotEvaluate(\"{}: [[suite]] must be a non-empty array of tables\".format(label))\n",
@@ -947,6 +1004,12 @@ ENFORCEMENT_MUTANTS = (
     ("pr-binding", 'target = "refs/remotes/origin/" + base_ref', 'target = "HEAD"', "ci/pr-base-ref-unresolved"),
     ("push-base-arg", "            raise CannotEvaluate(\"a push derives its base from the event payload; --base is refused\")\n",
      "            pass\n", "ci/push-base-arg-refused"),
+    ("local-target", 'LOCAL_TARGET = "refs/heads/main"', 'LOCAL_TARGET = "HEAD"', "local/committed-drop-no-row"),
+    ("control-id", "        if not isinstance(cid, str) or not id_ok(cid):\n", "        if False:\n",
+     "base/gate-without-id-both-ends"),
+    ("actions-event", '        if event != "push":\n', "        if False:\n", "ci/dispatch-with-payload"),
+    ("pr-base-ref", '        if not BRANCH_RE.fullmatch(base_ref) or ".." in base_ref or base_ref.endswith((".lock", "/")):\n',
+     "        if False:\n", "ci/pr-base-ref-revision-syntax"),
 )
 DIAGNOSTIC_MUTANTS = (
     ("row-field-type", "            if not isinstance(row[key], str):\n", "            if False:\n",
@@ -957,8 +1020,6 @@ DIAGNOSTIC_MUTANTS = (
     ("padded-id", "        return bool(sep) and _id_text(suite) and bool(slash) and _id_text(cid)\n",
      "        return bool(sep) and _id_text(suite) and bool(slash) and _id_text(cid) and cid == cid.strip()\n",
      "rename/padded-check-id", 1, ("control must be gate:<id>, hook:<id> or check:<suite>/<check id>",)),
-    ("local-target", 'LOCAL_TARGET = "refs/heads/main"', 'LOCAL_TARGET = "HEAD"', "base/missing-main", 1,
-     (DROPPED + ": present at base",)),
     ("toml-parse", "    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:\n"
      "        raise CannotEvaluate(\"{}: malformed ({})\".format(label, type(exc).__name__))\n",
      "    except ZeroDivisionError as exc:\n        raise CannotEvaluate(str(exc))\n", "base/unparseable-registry",
@@ -971,8 +1032,6 @@ DIAGNOSTIC_MUTANTS = (
      "base/registry-extra-key", 2, ("base tools/selftest_checks.toml: schema-invalid",)),
     ("base-id-grammar", "    id_ok = _head_id_ok if head else _id_text\n", "    id_ok = _head_id_ok\n",
      "base/id-outside-head-grammar", 2, ("base .aiqt/core/gates/manifest.toml: [[gate]] #3 has no usable id",)),
-    ("control-id", "        if not isinstance(cid, str) or not id_ok(cid):\n", "        if False:\n",
-     "base/gate-without-id", 1, ("gate:None: present at base",)),
     ("scratch-home-refused", "    except OSError as exc:\n        raise CannotEvaluate(\"hermetic git environment",
      "    except ZeroDivisionError as exc:\n        raise CannotEvaluate(\"hermetic git environment",
      "env/scratch-home-unavailable", "crashed (FileNotFoundError)", ()),
@@ -981,14 +1040,14 @@ DIAGNOSTIC_MUTANTS = (
      ("base .aiqt/core/hooks/manifest.toml: [[hook]] must be a non-empty array of tables",)),
     ("option-revision", 'if not revision or revision.startswith("-"):', "if not revision:",
      "local/base-arg-option", 2, ("does not resolve to a commit",)),
-    ("pr-base-ref", '        if not BRANCH_RE.fullmatch(base_ref) or ".." in base_ref or base_ref.endswith((".lock", "/")):\n',
-     "        if False:\n", "ci/pr-no-base-ref", 2, ("does not resolve to a commit",)),
     ("push-before-zero", 'or not before.strip("0"):', ":", "ci/push-zero-before", 2,
      ("does not resolve to a commit",)),
     ("push-payload", '    if not path:\n        raise CannotEvaluate("push event without GITHUB_EVENT_PATH")\n', "",
      "ci/push-no-payload", 2, ("push event payload unreadable",)),
-    ("actions-event", '        if event != "push":\n', "        if False:\n", "ci/unsupported-event", 2,
-     ("push event without GITHUB_EVENT_PATH",)),
+    ("base-row-repair",
+     "        if isinstance(base_control, str) and base_control in base_live and base_control not in head_live:\n",
+     "        if isinstance(base_control, str) and base_control in base_live:\n",
+     "ledger/base-row-live-repair", 1, ("names a control live at the base",)),
 )
 
 
@@ -1163,6 +1222,8 @@ def _self_test_isolated(executed, real_git):
                 ("vector/ledger-append-delete", "ledger/append-delete"),
                 ("vector/ledger-readopted-row-deleted", "ledger/readopted-row-deleted"),
                 ("vector/ledger-base-row-live-at-base", "ledger/base-row-live-at-base"),
+                ("vector/ledger-base-row-live-repair", "ledger/base-row-live-repair"),
+                ("vector/ledger-base-row-live-kept", "ledger/base-row-live-kept"),
                 ("vector/ledger-base-control-array", "ledger/base-control-array"),
                 ("vector/ledger-base-state-table", "ledger/base-state-table"),
                 ("vector/boundary-exact-rows", "boundary/exact-rows"),
@@ -1175,6 +1236,7 @@ def _self_test_isolated(executed, real_git):
                 ("vector/base-id-outside-head-grammar", "base/id-outside-head-grammar"),
                 ("vector/head-schema-invalid-registry", "head/schema-invalid-registry"),
                 ("vector/base-gate-without-id", "base/gate-without-id"),
+                ("vector/base-gate-without-id-both-ends", "base/gate-without-id-both-ends"),
                 ("vector/base-hooks-missing", "base/hooks-missing"),
                 ("vector/base-shallow", "base/shallow"),
                 ("vector/head-ledger-missing", "head/ledger-missing"),
@@ -1183,16 +1245,19 @@ def _self_test_isolated(executed, real_git):
                 ("vector/head-duplicate-hook-id", "head/duplicate-hook-id"),
                 ("vector/local-base-arg", "local/base-arg"),
                 ("vector/local-base-arg-option", "local/base-arg-option"),
+                ("vector/local-committed-drop-no-row", "local/committed-drop-no-row"),
                 ("vector/env-scratch-home-unavailable", "env/scratch-home-unavailable"),
                 ("vector/ci-pr-drop-no-row", "ci/pr-drop-no-row"),
                 ("vector/ci-pr-base-arg-refused", "ci/pr-base-arg-refused"),
                 ("vector/ci-pr-no-base-ref", "ci/pr-no-base-ref"),
                 ("vector/ci-pr-base-ref-unresolved", "ci/pr-base-ref-unresolved"),
+                ("vector/ci-pr-base-ref-revision-syntax", "ci/pr-base-ref-revision-syntax"),
                 ("vector/ci-push-drop-no-row", "ci/push-drop-no-row"),
                 ("vector/ci-push-zero-before", "ci/push-zero-before"),
                 ("vector/ci-push-no-payload", "ci/push-no-payload"),
                 ("vector/ci-push-base-arg-refused", "ci/push-base-arg-refused"),
-                ("vector/ci-unsupported-event", "ci/unsupported-event")):
+                ("vector/ci-unsupported-event", "ci/unsupported-event"),
+                ("vector/ci-dispatch-with-payload", "ci/dispatch-with-payload")):
             checked.append(vector)
             check(check_id, *outcome.get(vector, missing))
         by_name = dict((vector[0], vector) for vector in vectors)
@@ -1249,25 +1314,57 @@ def _self_test_isolated(executed, real_git):
 
         # 3b. the ownership refusal names who can act: git's safe.directory advice suggests a global config
         # entry the gate pins to os.devnull, so the refusal adds that only the checkout owner or CI can
-        # evaluate this checkout; every other refusal stays without the note.
+        # evaluate this checkout; every other refusal stays without the note. The refusal class is set only
+        # on a line git itself begins, so an echoed argument carrying the phrase, the strongest spoof a
+        # caller-supplied revision can produce, stays an ordinary refusal.
+        ownership_stderr = (b"fatal: detected dubious ownership in repository at '/x'\n"
+                            b"To add an exception for this directory, call:\n\n"
+                            b"\tgit config --global --add safe.directory /x\n")
+        spoof_stderr = (b"fatal: ambiguous argument 'fatal: detected dubious ownership in repository at': "
+                        b"unknown revision or path not in the working tree.\n")
+
+        def _classify(stderr):
+            try:
+                _finish(subprocess.CompletedProcess([], 128, b"", stderr), "git rev-parse")
+            except CannotEvaluate as exc:
+                return type(exc).__name__
+            return "no exception"
+
+        check("diagnostic/ownership-classified",
+              (_classify(ownership_stderr), _classify(spoof_stderr)) == ("OwnershipRefused", "CannotEvaluate"),
+              (_classify(ownership_stderr), _classify(spoof_stderr)))
+
         advice = ("git rev-parse exited 128: fatal: detected dubious ownership in repository at '/x'\n"
                   "To add an exception for this directory, call:\n\n"
                   "\tgit config --global --add safe.directory /x")
 
-        def _refuse(message):
+        def _refuse(exc_class, message):
             def raiser(root, base_arg, environ):
-                raise CannotEvaluate(message)
+                raise exc_class(message)
             return raiser
 
         noted, plain = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stderr(noted), _patched(this, "resolve_base", _refuse(advice)):
+        with contextlib.redirect_stderr(noted), _patched(this, "resolve_base", _refuse(OwnershipRefused, advice)):
             noted_code = this.run(ROOT)
-        with contextlib.redirect_stderr(plain), _patched(this, "resolve_base", _refuse("shallow repository")):
+        with contextlib.redirect_stderr(plain), _patched(
+                this, "resolve_base", _refuse(CannotEvaluate, "shallow repository")):
             plain_code = this.run(ROOT)
-        note = "only the checkout owner or CI can evaluate this checkout"
+        # An ordinary refusal whose message mentions safe.directory, here an unresolvable revision of that
+        # name: exit 2 without the note, because the refusal class, not the message text, selects the note.
+        environ = {key: value for key, value in os.environ.items() if not key.startswith("GITHUB_")}
+        try:
+            named = _repo(base_dir, "diag-safe-directory-revision", _snapshot(), _snapshot())
+            named_code, named_out = _gate(this, ("diag/safe-directory-revision", named, environ,
+                                                 "safe.directory", 2, (), None))
+        except (OSError, subprocess.SubprocessError) as exc:
+            named_code, named_out = "fixture build failed: {}".format(exc), ""
+        note = ("only the checkout owner or CI can evaluate this checkout; this gate reads git "
+                "with no global or system configuration, so a safe.directory entry cannot reach it.")
         check("diagnostic/ownership-note",
-              (noted_code, note in noted.getvalue(), plain_code, note in plain.getvalue()) == (2, True, 2, False),
-              (noted_code, noted.getvalue(), plain_code, plain.getvalue()))
+              (noted_code, note in noted.getvalue(), plain_code, note in plain.getvalue(), named_code,
+               "safe.directory does not resolve to a commit" in named_out,
+               "only the checkout owner" in named_out) == (2, True, 2, False, 2, True, False),
+              (noted_code, noted.getvalue(), plain_code, plain.getvalue(), named_code, named_out))
 
         # 4. caller git configuration: with a malformed HOME, XDG and system config in the run and process
         # environments, every git read the gate makes is pinned off them, so each vector gives the same exit and
@@ -1329,11 +1426,13 @@ def _self_test_isolated(executed, real_git):
     print("SELF-TEST PASS: control-retirement {} checks ({} vectors: removed gate, hook and check ids without a "
           "row are findings; covered, unreachable and disclosed rows are held to their fields, optional fields "
           "included; every row field is a string or the record cannot be evaluated; a rename is one row; a new "
-          "row names a control live at the base; a base row names no control live at the base; the record is "
+          "row names a control live at the base; a stale base row cannot stand in for a removal, and deleting "
+          "it while its control lives is the repair; the record is "
           "append-only; the base is read by id only; unresolvable bases, malformed inputs and an unavailable "
           "scratch home fail closed; an ownership refusal says only the checkout owner or CI can evaluate; {} "
           "enforcement mutants each caught by an accepted invalid fixture, {} diagnostic and refusal mutants "
-          "each pinned to an exact outcome, every refusing vector discriminating; a poisoned caller HOME, XDG "
+          "each pinned to an exact outcome, every refusing vector deviating under at least one mutant, a crash "
+          "counted as a deviation; a poisoned caller HOME, XDG "
           "and system git configuration, each shown to break a read that honours it, changes no result)".format(
               len(results), len(vectors), len(ENFORCEMENT_MUTANTS), len(DIAGNOSTIC_MUTANTS)))
     return 0
