@@ -599,7 +599,16 @@ source-path = ".aiqt/core/rules/accur-read-before-characterizing.md"
 start-line = 14
 end-line = 15
 canonical-text = "Never assert what a file, interface, or system contains, lacks, or requires without reading it first.\nCharacterize a thing only after examining it."
-source-digest = "0bc2aa52717e6ce8ab222b6009b650484484e7b658d99dc197a381611d518698"
+source-digest = "0f3ab20e561d75181f5e5c573688f78154add9c115e51a2eeaa85aaabc7fffb5"
+
+[[clause]]
+clause-id = "rdbchr.2"
+corpus-id = "rdbchr"
+source-path = ".aiqt/core/rules/accur-read-before-characterizing.md"
+start-line = 16
+end-line = 17
+canonical-text = "A restatement keeps its source's force and scope: a must, must not, or never stays a requirement, and\na platform, version, or condition qualifier is neither dropped nor added."
+source-digest = "0f3ab20e561d75181f5e5c573688f78154add9c115e51a2eeaa85aaabc7fffb5"
 
 [[clause]]
 clause-id = "refcap.1"
@@ -5793,7 +5802,7 @@ source-path = ".aiqt/core/rules/accur-citation-from-opened-file.md"
 start-line = 13
 end-line = 14
 canonical-text = "The assistant cites a path and line number only from a file it opened this session at the commit under\nreview, never from memory, a prior report, or an inferred layout."
-source-digest = "e3c4fb5b1fb13e8014beb2a81315090fbb37d38f8a9ee59485fe17b0c7b9ca39"
+source-digest = "8c02d57fd2a9df42d6709f6df4f6432317354f874adfb60262f8db186c66c0e2"
 
 [[clause]]
 clause-id = "citint.2"
@@ -5802,7 +5811,7 @@ source-path = ".aiqt/core/rules/accur-citation-from-opened-file.md"
 start-line = 14
 end-line = 15
 canonical-text = "Where it is unsure of the line, it\ncites the symbol alone rather than guessing a number."
-source-digest = "e3c4fb5b1fb13e8014beb2a81315090fbb37d38f8a9ee59485fe17b0c7b9ca39"
+source-digest = "8c02d57fd2a9df42d6709f6df4f6432317354f874adfb60262f8db186c66c0e2"
 
 [[clause]]
 clause-id = "citint.3"
@@ -5811,7 +5820,16 @@ source-path = ".aiqt/core/rules/accur-citation-from-opened-file.md"
 start-line = 15
 end-line = 16
 canonical-text = "Code or document text is quoted only from what\nthe assistant actually read, so a quotation is an excerpt, never a reconstruction presented as one."
-source-digest = "e3c4fb5b1fb13e8014beb2a81315090fbb37d38f8a9ee59485fe17b0c7b9ca39"
+source-digest = "8c02d57fd2a9df42d6709f6df4f6432317354f874adfb60262f8db186c66c0e2"
+
+[[clause]]
+clause-id = "citint.4"
+corpus-id = "citint"
+source-path = ".aiqt/core/rules/accur-citation-from-opened-file.md"
+start-line = 17
+end-line = 18
+canonical-text = "Before delivering, re-open each cited range at its stated lines and confirm that it starts and ends\non lines that carry the cited content, not on a blank line, a comment banner, or a closing delimiter."
+source-digest = "8c02d57fd2a9df42d6709f6df4f6432317354f874adfb60262f8db186c66c0e2"
 
 [[clause]]
 clause-id = "attint.1"

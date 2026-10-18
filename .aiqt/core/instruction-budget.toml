@@ -60,12 +60,18 @@
 #                        exemption (setcmp.9, setcmp.10): rule files 117124 -> 117367 (+243 units); managed
 #                        block 360 and file headers 16136 unchanged. This raise and the one above await the
 #                        maintainer's recorded approval.
+#                        Raised 133863 -> 134241 on 2026-10-18 when citation-from-opened-file gained its
+#                        sentence on re-opening each cited range before delivery to confirm that its stated
+#                        lines carry the cited content (citint.4) and read-before-characterizing gained its
+#                        sentence that a restatement keeps its source's force and scope (rdbchr.2): rule
+#                        files 117367 -> 117745 (+378 units); managed block 360 and file headers 16136
+#                        unchanged. Recorded approval: the maintainer, 2026-10-18.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 133863
+ratchet = 134241
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
