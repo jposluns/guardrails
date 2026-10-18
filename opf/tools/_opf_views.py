@@ -642,6 +642,13 @@ def _lines(title, body_lines):
 
 _MD_CTRL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
+# The Unicode line boundaries beyond LF and CR that str.splitlines() (and any reader following Unicode
+# line breaking) splits on: U+0085 NEXT LINE, U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR.
+# _md_text collapses each to a single space, exactly as it collapses LF and CR, in a step of its own so
+# the frozen C0/DEL class above stays unchanged. The remaining splitlines() boundaries (VT, FF and
+# U+001C..U+001E) are C0 controls that _MD_CTRL_RE already drops.
+_MD_LINESEP_RE = re.compile("[\x85\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]")
+
 # CommonMark 2.4 backslash-escapable ASCII punctuation that is structurally ACTIVE for a free-text value
 # in this sink's position. A view value is a single line (newlines are collapsed below) always emitted
 # behind a structural prefix (`- `, `## `, `<col>: `), never at column 0. In that position the active
@@ -732,8 +739,11 @@ def _md_text(value):
     ref.kind), so the free-text fields (title, locator, note, summary) always render mid-line.
 
     Newlines/carriage returns collapse to a single space (a view field is one line) and other C0/DEL
-    control characters are dropped (U+0009 TAB is preserved as inline whitespace, inert mid-line); then
-    the value is split on the GFM extended-autolink triggers. Each
+    control characters are dropped (U+0009 TAB is preserved as inline whitespace, inert mid-line).
+    U+0085 NEXT LINE, U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR collapse to a single space
+    too, one space per character as for a lone LF (only CR LF pairs into one space), so no character
+    str.splitlines() treats as a line boundary survives into a view line; the store keeps the owner's
+    text as written. Then the value is split on the GFM extended-autolink triggers. Each
     autolink token (a bare URL, `www.` domain, or email) is wrapped in a CODE SPAN, which a GFM renderer
     never autolinks and never treats as raw HTML, so the address renders as inert monospace text with
     every character preserved. Every non-token segment is escaped by `_md_escape_inline`. A value with no
@@ -757,6 +767,7 @@ def _md_text(value):
     _render_resolved)."""
     s = str(value)
     s = s.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    s = _MD_LINESEP_RE.sub(" ", s)
     s = _MD_CTRL_RE.sub("", s)
     # Coalesce CONTIGUOUS autolink matches (no text between them) into ONE code span over the original
     # substring: two abutting code spans would sit fence-to-fence, forming a two-backtick run CommonMark
@@ -2732,9 +2743,12 @@ def self_test():
         check("md-text-collapses-lf", _md_text("a\nb") == "a b")
         check("md-text-lf-no-forged-list", _md_text("a\n- FORGED") == "a - FORGED")
         _nl_markers = ["- ", "+ ", "* ", "# ", "> ", "1. ", "`", "|", "    "]
-        _nl_vectors = [nl + mk + "x" for nl in ("\n", "\r", "\r\n") for mk in _nl_markers]
+        _nl_vectors = [nl + mk + "x" for nl in ("\n", "\r", "\r\n", "\x85", "\N{LINE SEPARATOR}",
+                                                "\N{PARAGRAPH SEPARATOR}")
+                       for mk in _nl_markers]
         check("md-text-output-single-line",
-              all("\n" not in _md_text("v)" + s) and "\r" not in _md_text("v)" + s) for s in _nl_vectors))
+              all("\n" not in _md_text("v)" + s) and "\r" not in _md_text("v)" + s)
+                  and len(_md_text("v)" + s).splitlines()) == 1 for s in _nl_vectors))
         # round-12 (codex round-11 BLOCKER+2 MAJOR, each confirmed via a real CommonMark parser): the
         # round-10/11 pins exercised only SINGLE-occurrence inputs, so a bounded-count regression
         # (.replace(...,1) / sub(...,count=1) / first-backtick-run only) left a LATER occurrence to break out
@@ -2838,6 +2852,29 @@ def self_test():
               "\n" not in _md_text(("x\n- F") * _N) and "\r" not in _md_text(("a\r") * _N))
         check("md-text-hi-count-crlf-single-space", _md_text("a\r\n" * _N) == "a " * _N)
         check("md-text-hi-count-control-stripped", _MD_CTRL_RE.search(_md_text("a\x07" * _N)) is None)
+        # U+0085 NEL, U+2028 and U+2029 are line boundaries for str.splitlines(), so a stored value holding
+        # one would split a view line for such a reader. Each collapses to one space as a lone LF does:
+        # alone, beside an LF or a CR (a CR LF pair still collapses to one space), at either end of the
+        # value, and repeated (three in a row, and at the high count). The class is frozen, and the
+        # codepoints just outside it on each side (U+0084, U+0086, U+2027, U+202A) pass through untouched,
+        # so a widened class flips a boundary pin.
+        check("md-linesep-re-frozen",
+              _MD_LINESEP_RE.pattern == "[\x85\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]")
+        for _ls_name, _ls in (("nel", "\x85"), ("u2028", "\N{LINE SEPARATOR}"),
+                              ("u2029", "\N{PARAGRAPH SEPARATOR}")):
+            check("md-text-collapses-" + _ls_name, _md_text("a" + _ls + "b") == "a b")
+            check("md-text-" + _ls_name + "-beside-lf",
+                  _md_text("a" + _ls + "\nb") == "a  b" and _md_text("a\n" + _ls + "b") == "a  b")
+            check("md-text-" + _ls_name + "-beside-cr",
+                  _md_text("a" + _ls + "\rb") == "a  b" and _md_text("a\r" + _ls + "b") == "a  b"
+                  and _md_text("a\r\n" + _ls + "b") == "a  b" and _md_text("a" + _ls + "\r\nb") == "a  b")
+            check("md-text-" + _ls_name + "-at-ends", _md_text(_ls + "ab" + _ls) == " ab ")
+            check("md-text-" + _ls_name + "-repeated", _md_text("a" + _ls * 3 + "b") == "a   b")
+            check("md-text-" + _ls_name + "-hi-count", _md_text(("a" + _ls) * _N) == "a " * _N)
+            check("md-text-" + _ls_name + "-no-forged-list", _md_text("a" + _ls + "- FORGED") == "a - FORGED")
+        for _ob_name, _ob in (("u0084", "\x84"), ("u0086", "\x86"), ("u2027", "\N{HYPHENATION POINT}"),
+                              ("u202a", "\N{LEFT-TO-RIGHT EMBEDDING}")):
+            check("md-text-" + _ob_name + "-untouched", _md_text("a" + _ob + "b") == "a" + _ob + "b")
         # soup carries EVERY _MD_ESCAPE_RE metacharacter (incl. backslash -- round-18 QA: an omitted char let a
         # per-char bound on it, e.g. backslash, escape the escape-completeness check) plus & < >.
         _md_soup = _md_text("\\`*_{}[]()#+!|~&<>" * _N)
@@ -3645,6 +3682,46 @@ def self_test():
         forged_view = (forgeroot / WORKING_DIRNAME / "REFERENCES.md").read_text(encoding="utf-8")
         check("forged-heading-neutralized", "\n# Forged heading" not in body_of(forged_view))
         check("forged-comment-neutralized", "<!-- injected -->" not in forged_view)
+
+        # --- A stored U+2028/U+2029/U+0085 in a reference's summary, locator and note never reaches a
+        # rendered view: the parsed record holds them (written as TOML escapes below), and every written view
+        # then carries none of them, so str.splitlines() finds exactly as many lines as there are LFs. The
+        # locator is the field REFERENCES.md renders; summary and note are carried too, so a future sink
+        # for either is covered by the same whole-view assertion.
+        lsroot = new_root()
+        write_toml(lsroot, "manifest.toml", manifest)
+        empty_indexes(lsroot)
+        write_toml(lsroot, "reference.index.toml", "\n".join([
+            "schema = 1", "", "[[record]]",
+            'id = "RF-1"', 'type = "reference"', 'status = "recorded"', 'title = "a source"',
+            'created_at = "2026-01-01T00:00:00Z"', 'updated_at = "2026-01-02T00:00:00Z"',
+            'actor = { kind = "maintainer" }',
+            'summary = "sum\\u2028mary\\u2029text\\u0085end"',
+            'refs = [{ kind = "doc", locator = "loc\\u2028a\\u2029b\\u0085c", note = "n\\u2028o\\u2029te" }]',
+        ]) + "\n")
+        # The fixture preconditions (escaped in the source, the render succeeds, the views are written) are
+        # folded into each assertion below, so a vacuous pass on a failed or empty render is impossible.
+        ls_src = (lsroot / WORKING_DIRNAME / "toml" / "reference.index.toml").read_text(encoding="utf-8")
+        ls_seps = ("\x85", "\N{LINE SEPARATOR}", "\N{PARAGRAPH SEPARATOR}")
+        ls_pre = (all(ch not in ls_src for ch in ls_seps) and "\\u2028" in ls_src
+                  and render_write(lsroot) == EXIT_OK)
+        ls_views = {}
+        for _dirpath, _dirnames, _filenames in os.walk(str(lsroot / WORKING_DIRNAME)):
+            _dirnames[:] = [d for d in _dirnames if d != "toml"]
+            for _fn in _filenames:
+                with open(os.path.join(_dirpath, _fn), encoding="utf-8") as _vf:
+                    ls_views[_fn] = _vf.read()
+        if (lsroot / "VERSION").is_file():
+            with open(str(lsroot / "VERSION"), encoding="utf-8") as _vf:
+                ls_views["VERSION"] = _vf.read()
+        ls_pre = ls_pre and "REFERENCES.md" in ls_views and "BLOCK-INDEX.md" in ls_views and "VERSION" in ls_views
+        check("linesep-references-locator-collapsed",
+              ls_pre
+              and body_of(ls_views["REFERENCES.md"]) == "\n# REFERENCES\n\n- RF-1 a source\n  - doc: loc a b c\n")
+        check("linesep-views-no-separator",
+              ls_pre and all(ch not in text for text in ls_views.values() for ch in ls_seps))
+        check("linesep-views-splitlines-equals-lf",
+              ls_pre and all(len(text.splitlines()) == text.count("\n") for text in ls_views.values()))
 
         # --- F-05: a per-record store is a CLEAR cannot-evaluate (deferred), not a silent inline render --
         prroot = new_root()
