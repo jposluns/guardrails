@@ -2407,7 +2407,12 @@ def _test_git_stash_ref(failures):
 
 # The inline_errexit mutants: each is the live hook source with one rule removed by exact source edits
 # ((anchor, replacement) pairs, each anchor occurring once), loaded from tmp with importlib. A row that the
-# real handler passes and its mutant fails shows that the removed rule is what decides that row.
+# real handler passes and its mutant fails shows that the removed rule is what decides that row. Four
+# entries make two edits each: "raw-text" (reading quoted text as code needs both the de-quoted lex and a set
+# read anywhere in a segment), "case-pattern-end" (the one rule that a case pattern ends at its ), in the
+# header line and on a later line), and, for rows two rules decide alike, "or-and-never" (the || branch
+# handles the failure, and true or exit gives errexit nothing to stop at) and "lone-dash" (a lone - ends the
+# set options both as an end-of-options word and as a word too short to be an option).
 _IE_MUTANTS = {
     "e-cluster": (('if letter == "e":', 'if arg == "-e":'),),
     "o-option": (('elif letter == "o" and i < len(args):', 'elif False:'),),
@@ -2415,6 +2420,8 @@ _IE_MUTANTS = {
     "plus-sign": (('on = arg[0] == "-"', 'on = True'),),
     "dashdash": (('if arg in ("-", "--"):', 'if False:'),),
     "operand": (('if arg[:1] not in ("-", "+") or len(arg) < 2:', 'if False:'),),
+    "lone-dash": (('if arg in ("-", "--"):', 'if arg == "--":'),
+                  ('if arg[:1] not in ("-", "+") or len(arg) < 2:', 'if arg[:1] not in ("-", "+"):')),
     "shopt": (('if words[0] == "shopt":', 'if False:'),),
     "shopt-unset": (("return False  # shopt -u -o errexit turns errexit off", "return True"),),
     "no-fallback": ((r"""quoted = _ERREXIT_UNQUOTED_HEREDOC_RE.sub(r"<<\1\2'\3'", command)""",
@@ -2429,32 +2436,76 @@ _IE_MUTANTS = {
                   'effect = _errexit_set_effect(words[words.index("set"):] if "set" in words else words)')),
     "initial-on": (("on = False  # errexit starts off: only a set or shopt in the command turns it on",
                     "on = True"),),
-    "condition": (('_ERREXIT_CONDITION_WORDS = frozenset(("if", "elif", "while", "until", "!"))',
+    "condition": (('_ERREXIT_CONDITION_WORDS = frozenset(("if", "elif", "while", "until"))',
                    "_ERREXIT_CONDITION_WORDS = frozenset()"),),
+    "condition-list": (("last, negated, joiner, piped, continued = None, False, None, False, False  # a new "
+                        "statement", "last, negated, joiner, piped, continued, exempt = None, False, None, False, "
+                        "False, False"),),
+    "negation": (("negated = True  # and in a pipeline negated by !", "pass"),),
+    "negation-pipeline": (("negated = False  # ! negates one pipeline only", "pass"),),
     "branch": (("armed = False  # else and elif open another branch, which the branch before does not run on "
                 "into", "pass"),),
+    "if-carry": (("frames[-1][1] = frames[-1][1] or armed  # a step of the branch before can still fail before "
+                  "fi", "pass"),),
     "closer": (('_ERREXIT_CLOSER_WORDS = frozenset(("fi", "done", "esac", "}"))',
                 "_ERREXIT_CLOSER_WORDS = frozenset()"),),
-    "header": (('_ERREXIT_HEADER_WORDS = frozenset(("for", "select", "case", "function"))',
-                "_ERREXIT_HEADER_WORDS = frozenset()"),),
-    "set-exempt": (('exempt = words[0] in ("set", "shopt")  # an option change is no step whose failure '
-                    'matters', "exempt = False"),),
-    "exit-guard": (("exempt = True  # 'a || exit 1' stops at a failure itself", "pass"),),
-    "any-or-guard": (('if joiner == "||" and words[0] in ("exit", "return"):', "if joiner is not None:"),),
-    "statement-start": (("last = (on, exempt)", "last = (last[0] if last else on, exempt)"),),
+    "header": (('_ERREXIT_HEADER_WORDS = frozenset(("for", "select"))', "_ERREXIT_HEADER_WORDS = frozenset()"),),
+    "case-pattern-end": (('frames.append(["case", False, kind != "close"])',
+                          'frames.append(["case", False, True])'),
+                         ("arms[2] = False  # the pattern ends at its ), and the arm's body follows", "pass")),
+    "case-branch": (("armed = False  # ;; ends the arm: the next arm is another branch, not a later step",
+                     "pass"),),
+    "case-carry": (("arms[1] = arms[1] or armed  # a step of this arm can still fail before esac", "pass"),),
+    "or-handled": (("if after_or:", "if False:"),),
+    "or-and-never": (("if after_or:", "if False:"),
+                     ('_ERREXIT_NEVER_FAILS = frozenset(("true", ":", "exit", "set", "shopt"))',
+                      '_ERREXIT_NEVER_FAILS = frozenset(("set", "shopt"))')),
+    "or-false": (('cannot_succeed = word == "false"  # a || branch that cannot succeed handles nothing',
+                  "cannot_succeed = False"),),
+    "or-return-top": (("cannot_succeed = not in_function  # return fails outside a function body",
+                       "cannot_succeed = False"),),
+    "lone-return": (("return not in_function  # a lone return fails outside a function body, and ends the "
+                     "function inside one", "return False"),),
+    "never-fails": (('_ERREXIT_NEVER_FAILS = frozenset(("true", ":", "exit", "set", "shopt"))',
+                     '_ERREXIT_NEVER_FAILS = frozenset(("set", "shopt"))'),),
+    "set-exempt": (('_ERREXIT_NEVER_FAILS = frozenset(("true", ":", "exit", "set", "shopt"))',
+                    '_ERREXIT_NEVER_FAILS = frozenset(("true", ":", "exit"))'),),
+    "piped": (("return not after_or  # a pipeline of several commands counts unless it handles a failure after "
+               "||", "return False"),),
+    "piped-or": (("return not after_or  # a pipeline of several commands counts unless it handles a failure "
+                  "after ||", "return True"),),
+    "and-final": (('_errexit_stops(last[1], joiner == "||", piped, functions > 0)',
+                   '_errexit_stops(last[1], joiner is not None, piped, functions > 0)'),),
+    "function-body": (('_errexit_stops(last[1], joiner == "||", piped, functions > 0)',
+                       '_errexit_stops(last[1], joiner == "||", piped, False)'),),
+    "function-header": (('if kind == "open" and i < count and pairs[i] == ([], ")") and (', "if False and ("),),
+    "function-keyword": (('elif word == "function" and k + 1 < len(words):', "elif False:"),),
+    "function-scope": (("armed = outside  # the definition itself runs nothing", "pass"),),
+    "set-conditional": (('if effect is not None and joiner is None and not piped and kind not in ("pipe", '
+                         '"background"):', "if effect is not None:"),),
+    "substitution": (("on = False  # bash runs a $(...) command substitution with errexit off", "pass"),),
+    "substitution-status": (("last = (on, None)  # a command of assignments only takes the substitution's "
+                             "status", "pass"),),
+    "statement-start": (("last = (on, words[0])  # errexit as the pipeline's last command starts",
+                         "last = (last[0] if last else on, words[0])"),),
     "and-or": (('{"&&": "and-or", "||": "and-or",', '{"&&": "list", "||": "list",'),),
     "newline": (('";": "list", "": "list",', '";": "list", "": "pipe",'),),
+    "pipe-amp": (('"|": "pipe", "|&": "pipe",', '"|": "pipe", "|&": "list",'),),
     "background": (('"&": "background",', '"&": "list",'),),
     "continuation": (('elif kind == "list" and not words and continued:', "elif False:"),),
     "subshell-later": (("return True  # the subshell is a later statement", "pass"),),
-    "subshell-open": (("scopes.append((on, armed, exempt_statement, joiner))", "return False"),),
-    "subshell-errexit": (("on = saved[0]  # an errexit setting made inside (...) ends with the subshell",
+    "subshell-open": (("scopes.append((on, armed, last,", "return False and ((on, armed, last,"),),
+    "subshell-errexit": (("on = outside_on  # an errexit setting made inside (...) ends with the subshell",
                           "pass"),),
-    "subshell-step": (("armed = saved[1]  # and so does a step inside it: what follows the subshell runs "
+    "subshell-step": (("armed = outside_armed  # and so does a step inside it: what follows the subshell runs "
                        "either way", "pass"),),
+    "subshell-ignored": (("ignored = ignored or exempt or negated  # so does a subshell in a condition or after !",
+                          "pass"),),
     "later-step": (("armed = True  # a later statement of this scope would run after this one failed",
                     "return True"),),
-    "tail": (("return armed and bool(tail)", "return False"),),
+    "tail": (("return armed and tail is not None", "return False"),),
+    "tail-redirect": (("return armed and tail is not None", "return armed and bool(tail)"),),
+    "nothing-after": (("return armed and tail is not None", "return on"),),
 }
 
 # (label, command, mutant): rows the real handler must note, each silent under its mutant.
@@ -2466,7 +2517,7 @@ _IE_FIRE_ROWS = (
     ("(ie-f4b) e after another letter", "set -xe; a; b", "e-cluster"),
     ("(ie-f4c) e inside a long cluster with -o", "set -Eeuo pipefail; a; b", "e-cluster"),
     ("(ie-f5) errexit on inside an and-or list", "set -e && git apply /abs/p.diff; make", "statement-start"),
-    ("(ie-f6) an && list is still a step that can fail", "set -e; a && b; c", "any-or-guard"),
+    ("(ie-f6) the last pipeline after && is a step that can fail", "set -e; a && b; c", "and-final"),
     ("(ie-f7) inside a subshell", "(set -e; a; b)", "subshell-open"),
     ("(ie-f8) after a quoted heredoc that writes a file",
      "cat <<'EOF' > /abs/s.sh\nx\nEOF\nset -e; a; b", "quoted-body-end"),
@@ -2474,21 +2525,39 @@ _IE_FIRE_ROWS = (
      "cat <<EOF > /abs/out.txt\nbody $X\nEOF\nset -e; a; b", "no-fallback"),
     ("(ie-f10) shopt -so errexit", "shopt -so errexit; a; b", "shopt"),
     ("(ie-f11) shopt -s -o errexit", "shopt -s -o errexit; a; b", "shopt"),
-    ("(ie-f12) a || branch other than exit or return is no guard", "set -e; a || recover; b", "any-or-guard"),
     ("(ie-f13) a later statement the lexer stopped inside", "set -e; a; b <(true)", "tail"),
     ("(ie-f14) a subshell is a later statement", "set -e; a; (b)", "subshell-later"),
     ("(ie-f15) a multi-line if body", "set -e\nif a\nthen\n  b\n  c\nfi", "newline"),
+    ("(ie-f16) || return at top level fails, so it handles nothing", "set -e; false || return; echo after",
+     "or-return-top"),
+    ("(ie-f17) || return 1 at top level", "set -e; a || return 1; b", "or-return-top"),
+    ("(ie-f18) a || branch that is a lone false", "set -e; a || false; b", "or-false"),
+    ("(ie-f19) a lone return at top level fails", 'set -e; [ -n "$x" ] && return 0; work', "lone-return"),
+    ("(ie-f20) a one-line case arm with two steps", "set -e; case $x in a) foo; bar;; esac", "case-pattern-end"),
+    ("(ie-f21) a multi-line case arm with two steps", "set -e\ncase $x in\n  a) foo; bar;;\nesac",
+     "case-pattern-end"),
+    ("(ie-f22) a step of a case arm still counts after esac", "set -e; case $x in a) foo;; esac; b",
+     "case-carry"),
+    ("(ie-f23) a step of the then branch still counts after fi", "set -e; if a; then b; else exit 1; fi; c",
+     "if-carry"),
+    ("(ie-f24) ! negates one pipeline only", "set -e; ! a && b; c", "negation-pipeline"),
+    ("(ie-f25) a pipeline of several commands ending in true", "set -euo pipefail; a | true; b", "piped"),
+    ("(ie-f26) an assignment takes its substitution's status", "set -e; v=$(git describe); echo $v",
+     "substitution-status"),
+    ("(ie-f27) a later statement the lexer stopped inside that holds only a redirect",
+     "set -e; a; > /abs/out <(b)", "tail-redirect"),
 )
 
 # (label, command, mutant): rows the real handler must leave silent, each noted by its mutant. "over-broad"
-# is the stub that notes whenever the raw text holds set -e or errexit, for the rows whose rule is that no
-# later step exists to run at all.
+# is a stub that notes whenever the raw text holds set -e or errexit and shares no code with the hook; n35
+# uses it as a vacuity check for a disclosed bound (the text after a construct the lexer refuses is never
+# read), which no single source edit removes.
 _IE_SILENT_ROWS = (
     ("(ie-n1) a ; chain with no inline errexit", "bash /abs/s.sh; echo done", "initial-on"),
     ("(ie-n2) a script file run with bash after set -e", "set -e; bash /abs/s.sh", "later-step"),
     ("(ie-n3) the chain inside bash -c", "bash -c 'set -e; a; b'", "raw-text"),
-    ("(ie-n4) a lone set -e", "set -e", "over-broad"),
-    ("(ie-n5) a lone set -euo pipefail", "set -euo pipefail", "over-broad"),
+    ("(ie-n4) a lone set -e", "set -e", "nothing-after"),
+    ("(ie-n5) a lone set -euo pipefail", "set -euo pipefail", "nothing-after"),
     ("(ie-n6) set -e joined by &&", "set -e && a && b", "and-or"),
     ("(ie-n7) one && statement after set -e", "set -e; a && b", "and-or"),
     ("(ie-n8) one step after set -e", "set -e; a", "later-step"),
@@ -2505,9 +2574,8 @@ _IE_SILENT_ROWS = (
      "cat <<'EOF' > /abs/s.sh\nset -e\na\nb\nEOF\nbash /abs/s.sh", "quoted-body"),
     ("(ie-n19) set -e only in an unquoted heredoc body",
      "cat <<EOF > /abs/out.txt\nset -e\na\nb\nEOF\necho done", "unquoted-body"),
-    ("(ie-n20) a step guarded by || exit", "set -e; a || exit 1; b", "exit-guard"),
-    ("(ie-n21) a step guarded by || return", "set -e; a || return 1; b", "exit-guard"),
-    ("(ie-n22) every earlier step guarded", "set -e; a || exit; b || exit 1; c", "exit-guard"),
+    ("(ie-n20) a step guarded by || exit", "set -e; a || exit 1; b", "or-and-never"),
+    ("(ie-n22) every earlier step guarded", "set -e; a || exit; b || exit 1; c", "or-and-never"),
     ("(ie-n23) an option change is no step that can fail", "set -e; set -u; a", "set-exempt"),
     ("(ie-n24) a background step", "set -e; a & b", "background"),
     ("(ie-n25) errexit set inside a subshell ends with it", "(set -e; a); b; c", "subshell-errexit"),
@@ -2516,7 +2584,7 @@ _IE_SILENT_ROWS = (
     ("(ie-n27) a newline after && continues the statement",
      "set -e\ngit apply /abs/p.diff &&\nmake test\n", "continuation"),
     ("(ie-n28) a loop condition", "set -e; while a; do :; done", "condition"),
-    ("(ie-n29) a negated pipeline", "set -e; ! a; b", "condition"),
+    ("(ie-n29) a negated pipeline", "set -e; ! a; b", "negation"),
     ("(ie-n30) fi runs nothing", "set -e; if a; then b; fi", "closer"),
     ("(ie-n31) a loop header", "set -e; for f in x y; do a; done", "header"),
     ("(ie-n32) else opens another branch", "set -e; if a; then b; else c; fi", "branch"),
@@ -2524,6 +2592,32 @@ _IE_SILENT_ROWS = (
     ("(ie-n34) set -o errexit turned off by +o", "set -o errexit; set +o errexit; a; b", "plus-sign"),
     ("(ie-n35) nothing after a construct the lexer refuses is read (disclosed bound)",
      "set -e <(true); a; b", "over-broad"),
+    ("(ie-n36) a || branch handles the failure before it", "set -e; a || recover; b", "or-handled"),
+    ("(ie-n37) a || true branch", "set -e; x || true; b", "or-and-never"),
+    ("(ie-n38) an && list ending in true", "set -e; a && true; b", "never-fails"),
+    ("(ie-n39) an && list ending in exit", "set -e; a && exit 0; b", "never-fails"),
+    ("(ie-n40) || return inside a function keyword body", "set -e; function f { a || return 1; b; }",
+     "function-keyword"),
+    ("(ie-n41) || return inside a name () body", "set -e; f() { a || return 1; b || return 1; }; f",
+     "function-header"),
+    ("(ie-n42) a lone return inside a function body", 'set -e; f() { [ -n "$x" ] && return 0; work; }',
+     "function-body"),
+    ("(ie-n43) a function definition runs nothing", "set -e; f() { a; }; b", "function-scope"),
+    ("(ie-n44) case arms are branches", "set -e; case $x in a) foo;; b) bar;; c) baz;; esac", "case-branch"),
+    ("(ie-n45) a pipeline after || handles the failure", "set -e; a || b | c; d", "piped-or"),
+    ("(ie-n46) a set after || may not run", "true || set -e; a; b", "set-conditional"),
+    ("(ie-n47) a set in a pipeline runs in a subshell", "set -e | cat; a; b", "set-conditional"),
+    ("(ie-n48) a command substitution runs with errexit off", "set -e; v=$(cd /abs/x; git describe)",
+     "substitution"),
+    ("(ie-n49) a condition list up to then", "set -e; if a; b; then c; fi", "condition-list"),
+    ("(ie-n50) a negated subshell", "set -e; ! (a; b; c)", "subshell-ignored"),
+    ("(ie-n51) an until condition", "set -e; until a; do :; done; b", "condition"),
+    ("(ie-n52) a select header", "set -e; select f in x y; do a; done", "header"),
+    ("(ie-n53) elif opens another branch", "set -e; if a; then b; elif c; then d; fi", "branch"),
+    ("(ie-n54) a newline after || continues the statement", "set -e; a ||\n  recover; b", "continuation"),
+    ("(ie-n55) a newline after a pipe continues the pipeline", "set -e; a ||\n  b |\n  c; d", "continuation"),
+    ("(ie-n56) |& joins one pipeline", "set -e; a || b |& c; d", "pipe-amp"),
+    ("(ie-n57) a lone - ends the set options", "set - -e; a; b", "lone-dash"),
 )
 
 
@@ -2561,10 +2655,94 @@ def _ie_mutant_handlers(failures, tmp):
     return handlers
 
 
+def _ie_dispatch_failures():
+    """(ie-dispatch-*) main() never blocks inline_errexit on an error path (NOTE_ONLY_PRETOOL_MODES): a bad
+    invocation, an unreadable payload, a handler crash or malformed result, its deadline and an unwritable
+    stdout each warn on exit 0, while a miswired event still hard-blocks with exit 2 and a fail-closed
+    PreToolUse mode still exits 2 on an unreadable payload. A stand-in for _DeadlineWindow keeps every timer out
+    of this process (the deadline child times the real one), records the budget main() gives the mode, and
+    lets a stub raise its deadline."""
+    out = []
+    windows = []
+
+    class Window:
+        def __init__(self, seconds):
+            self.seconds = seconds
+            self.pending_at_entry = False
+            windows.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    class Unwritable(io.StringIO):
+        def write(self, text):
+            raise OSError("ie-unwritable")
+
+    def dispatch(argv, stdin_text, handler=None, stdout=None):
+        saved = (sys.stdin, aiqt_hooks._DeadlineWindow, aiqt_hooks.HANDLERS["inline_errexit"])
+        buf, err = io.StringIO() if stdout is None else stdout, io.StringIO()
+        try:
+            sys.stdin = io.StringIO(stdin_text)
+            aiqt_hooks._DeadlineWindow = Window
+            if handler is not None:
+                aiqt_hooks.HANDLERS["inline_errexit"] = handler
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+                code = aiqt_hooks.main(argv)
+        finally:
+            sys.stdin, aiqt_hooks._DeadlineWindow, aiqt_hooks.HANDLERS["inline_errexit"] = saved
+        return code, ("" if stdout is not None else buf.getvalue()), err.getvalue()
+
+    noting = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                         "tool_input": {"command": "set -e; a; b"}})
+
+    def crash(_data):
+        raise RuntimeError("ie-crash")
+
+    def deadline(_data):
+        raise aiqt_hooks._HookDeadline(windows[-1])
+
+    code, stdout, _err = dispatch(["inline_errexit"], noting)
+    if code != 0 or "rule nocncl" not in stdout:
+        out.append("(ie-dispatch-note) a noting command must exit 0 with the note, got exit {} and {!r}".format(
+            code, stdout))
+    if not windows or windows[-1].seconds != aiqt_hooks.PRETOOL_BUDGET_SECONDS:
+        out.append("(ie-dispatch-window) main() must give inline_errexit the PreToolUse deadline, got {!r}".format(
+            [window.seconds for window in windows]))
+    for label, argv, stdin_text, handler, needle in (
+            ("(ie-dispatch-argv)", ["inline_errexit", "extra"], noting, None, "bad invocation"),
+            ("(ie-dispatch-unreadable)", ["inline_errexit"], "{", None, "unreadable payload"),
+            ("(ie-dispatch-crash)", ["inline_errexit"], noting, crash, "RuntimeError: ie-crash"),
+            ("(ie-dispatch-result)", ["inline_errexit"], noting, lambda _data: (1, None, None), "handler crash"),
+            ("(ie-dispatch-deadline)", ["inline_errexit"], noting, deadline, "no decision within its deadline")):
+        code, stdout, err = dispatch(argv, stdin_text, handler)
+        if code != 0 or needle not in stdout or "non-blocking" not in stdout:
+            out.append("{} the error path must warn on exit 0 naming {!r}, got exit {}, stdout {!r} and stderr "
+                       "{!r}".format(label, needle, code, stdout, err))
+    code, _stdout, err = dispatch(["inline_errexit"], noting, stdout=Unwritable())
+    if code != 0:
+        out.append("(ie-dispatch-stdout) a note that cannot be written must keep exit 0, got exit {} and {!r}"
+                   .format(code, err))
+    miswired = json.dumps({"hook_event_name": "Stop", "tool_name": "Bash",
+                           "tool_input": {"command": "set -e; a; b"}})
+    code, _stdout, err = dispatch(["inline_errexit"], miswired)
+    if code != 2 or "inline_errexit wired to unexpected event" not in err:
+        out.append("(ie-dispatch-event) a miswired event is the one path that blocks (exit 2), got exit {} and "
+                   "{!r}".format(code, err))
+    code, _stdout, err = dispatch(["git_stash_ref"], "{")
+    if code != 2:
+        out.append("(ie-dispatch-control) a fail-closed PreToolUse mode must still exit 2 on an unreadable "
+                   "payload, got exit {} and {!r}".format(code, err))
+    return out
+
+
 def _test_inline_errexit(failures, tmp):
     """(ie-*) inline_errexit, called directly; no submitted Bash command is executed. Each fire row must
     allow with the note and no decision, and each silent row must allow silently; each row must then flip
-    under its own mutant (_IE_MUTANTS), so every row is red when the rule it tests is removed."""
+    under its mutant (_IE_MUTANTS, or the over-broad stub for n35), so every row is red when the rule, or
+    for the "or-and-never" rows the two rules, that decide it are removed."""
     handler = aiqt_hooks.inline_errexit
     mutants = _ie_mutant_handlers(failures, tmp)
     used = set()
@@ -2606,11 +2784,14 @@ def _test_inline_errexit(failures, tmp):
         if handler(payload(command)) != aiqt_hooks._allow_note(want):
             failures.append("{} expected the note {!r} for {!r}".format(label, want, command))
 
-    # _lex_command's real partial return shape: the segment it stopped inside is the tail, never a set.
+    # _lex_command's real partial return shape: the segment it stopped inside is the tail, never a set; a
+    # tail holding only a redirect is [], and a command with no tail gives None.
     for label, command, want in (
             ("(ie-lex-tail)", "set -e; a; b <(true)", ([(["set", "-e"], ";"), (["a"], ";")], ["b"], False)),
+            ("(ie-lex-tail-redirect)", "set -e; a; > /abs/out <(b)",
+             ([(["set", "-e"], ";"), (["a"], ";")], [], False)),
             ("(ie-lex-set-unread)", "set -e <(true); a; b", ([], ["set", "-e"], False)),
-            ("(ie-lex-complete)", "set -e; a", ([(["set", "-e"], ";"), (["a"], "")], [], True))):
+            ("(ie-lex-complete)", "set -e; a", ([(["set", "-e"], ";"), (["a"], "")], None, True))):
         got = aiqt_hooks._errexit_statements(command)
         if got != want:
             failures.append("{} _errexit_statements({!r}) gave {!r}, want {!r}".format(label, command, got, want))
@@ -2639,8 +2820,10 @@ def _test_inline_errexit(failures, tmp):
         failures.append("(ie-event) an unexpected event must use the sibling hard-block contract")
 
     if (aiqt_hooks.HANDLERS.get("inline_errexit") is not aiqt_hooks.inline_errexit or
-            aiqt_hooks.HANDLER_EVENT.get("inline_errexit") != aiqt_hooks.PRETOOL):
-        failures.append("(ie-wiring) inline_errexit handler/event wiring is missing or wrong")
+            aiqt_hooks.HANDLER_EVENT.get("inline_errexit") != aiqt_hooks.PRETOOL or
+            "inline_errexit" not in aiqt_hooks.NOTE_ONLY_PRETOOL_MODES):
+        failures.append("(ie-wiring) inline_errexit handler/event/note-only wiring is missing or wrong")
+    failures.extend(_ie_dispatch_failures())
 
 
 # === PreToolUse deadline posture ======================================================================
@@ -2999,6 +3182,12 @@ _DEADLINE_SHAPES = {
                                                + ")" * (n // 3 - 3)}),
     "nest_cmdsubst_background": lambda n, base: ("Bash", {"command": "echo " + "$(" * (n // 3 - 3) + "true"
                                                           + ")" * (n // 3 - 3), "run_in_background": True}),
+    "errexit_guarded": lambda n, base: ("Bash", {"command": "set -e\n" + _repeat("a || exit 1\n", n - 7)}),
+    "errexit_nest_parens": lambda n, base: ("Bash", {"command": "set -e; " + "(" * (n // 2 - 6) + "true"
+                                                     + ")" * (n // 2 - 6)}),
+    "errexit_case_arms": lambda n, base: ("Bash", {"command": "set -e; case $x in "
+                                                   + _repeat("a) true;; ", n - 24) + "esac"}),
+    "errexit_note_after": lambda n, base: ("Bash", {"command": "set -e; " + _repeat("true; ", n - 8, "a; b")}),
     "diff_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, "; git diff")}),
     "push_force_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, "; git push --force origin main")}),
     "noverify_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, "; git commit --no-verify -m x")}),
@@ -3027,7 +3216,8 @@ _DEADLINE_CASES = {
     "git_discard": ("git_segments_reset", "nest_parens"),
     "git_explicit_binding": ("git_add_unbal", "cd_git_fetch_unbal", "breadth_push_after_unbal"),
     "git_stash_ref": ("sep_semicolon", "cd_git_fetch_unbal", "nest_parens"),
-    "inline_errexit": ("sep_semicolon", "heredocs", "nest_parens", "cd_git_fetch_unbal"),
+    "inline_errexit": ("sep_semicolon", "heredocs", "nest_parens", "cd_git_fetch_unbal", "errexit_guarded",
+                       "errexit_nest_parens", "errexit_case_arms", "errexit_note_after"),
     "orch_ask_guard": ("ask_long",),
     "orch_resume_barrier": ("git_words", "write_content"),
     "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
@@ -3043,6 +3233,9 @@ _DEADLINE_DENY_CASES = frozenset((
     ("commit_msg_subst", "subst_after"), ("diff_source_pretool", "diff_after"),
     ("gate_weakening", "noverify_after"), ("git_explicit_binding", "breadth_push_after_unbal"),
     ("protected_line", "push_force_after")))
+# The (handler, shape) cases whose note must still arrive, each within its bound: errexit is on for the
+# whole long prefix, and the hazard is at its end.
+_DEADLINE_NOTE_CASES = frozenset((("inline_errexit", "errexit_note_after"),))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
 # CPU time, plus that of the child processes it reaped). Over two runs on a 24-core host with Python
@@ -3134,6 +3327,8 @@ def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
             wall, _DEADLINE_WALL_BOUND))
     if (name, shape) in _DEADLINE_DENY_CASES and outcome != "deny":
         problems.append("expected deny, got {}".format(outcome))
+    elif (name, shape) in _DEADLINE_NOTE_CASES and outcome != "allow-note":
+        problems.append("expected allow-note, got {}".format(outcome))
     elif outcome not in ("allow", "allow-note", "deny"):
         problems.append("ended {}".format(outcome))
     return problems
@@ -3275,14 +3470,25 @@ def _sleeper(seconds, result=(0, None, None)):
 
 
 def _deadline_path_failures():
-    """(dl-fires, dl-read, dl-fail-open, dl-cancelled) The deadline path, driven by handler stubs that sleep
-    past a short test budget: every PreToolUse mode exits 2 with the refusal naming the handler, the budget
-    and the input size; a deadline during the payload read exits 2 too; a fail-open mode keeps its result
-    (no deadline); and the timer is cancelled, with the caller's SIGALRM disposition back, before the
+    """(dl-fires, dl-note-only, dl-read, dl-fail-open, dl-cancelled) The deadline path, driven by handler stubs
+    that sleep past a short test budget: every PreToolUse mode exits 2 with the refusal naming the handler,
+    the budget and the input size, except a note-only one (NOTE_ONLY_PRETOOL_MODES), whose deadline fires as
+    soon and warns on exit 0; a deadline during the payload read exits 2 too; a fail-open mode keeps its
+    result (no deadline); and the timer is cancelled, with the caller's SIGALRM disposition back, before the
     decision is written."""
     out = []
     size = len(_DEADLINE_PAYLOAD.encode("utf-8"))
     for mode, event in sorted(aiqt_hooks.HANDLER_EVENT.items()):
+        if mode in aiqt_hooks.NOTE_ONLY_PRETOOL_MODES:
+            printed = io.StringIO()
+            with _stub_handler(mode, _sleeper(1.0)):
+                code, err, seconds = _main_run(mode, budget=0.1, stdout=printed)
+            if (code != 0 or "no decision within its deadline" not in printed.getvalue() or seconds >= 0.8
+                    or "could not reach a decision" in err):
+                out.append("(dl-note-only-{}) a note-only mode's deadline must warn on exit 0 within 0.8s, got "
+                           "exit {} after {:.2f}s, stdout {!r} and stderr {!r}".format(
+                               mode, code, seconds, printed.getvalue(), err))
+            continue
         if event in aiqt_hooks.FAIL_OPEN_EVENTS:
             with _stub_handler(mode, _sleeper(0.3)):
                 code, err, _seconds = _main_run(mode, budget=0.05)
@@ -17173,10 +17379,12 @@ def _main_isolated(monitor):
             failures.append("(eb-e22) git_explicit_binding handler/event wiring is missing or wrong")
 
         # (pf-modes) PYTHON-FLOOR: the floor guard runs before HANDLER_EVENT exists, so it carries its own
-        # FLOOR_FAIL_OPEN_MODES literal; it must name exactly the handlers whose event is fail-open, or an
-        # older interpreter would block a Stop-type event (or wave a PreToolUse one through).
+        # FLOOR_FAIL_OPEN_MODES literal; it must name exactly the handlers whose event is fail-open and the
+        # note-only PreToolUse handlers, or an older interpreter would block a Stop-type event or a note-only
+        # check (or wave a blocking PreToolUse one through).
         _pf_want = tuple(sorted(name for name, event in aiqt_hooks.HANDLER_EVENT.items()
-                                if event in aiqt_hooks.FAIL_OPEN_EVENTS))
+                                if event in aiqt_hooks.FAIL_OPEN_EVENTS
+                                or name in aiqt_hooks.NOTE_ONLY_PRETOOL_MODES))
         if aiqt_hooks.FLOOR_FAIL_OPEN_MODES != _pf_want:
             failures.append("(pf-modes) FLOOR_FAIL_OPEN_MODES {!r} differs from the fail-open handlers in "
                             "HANDLER_EVENT {!r}".format(aiqt_hooks.FLOOR_FAIL_OPEN_MODES, _pf_want))
