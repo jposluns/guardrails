@@ -27,7 +27,7 @@ over, and the few config-neutralizing variables git genuinely needs are re-appli
 a timeout; a timeout, an OS launch failure, or a read the scrub breaks all fail SAFE to omit-plus-note,
 never a silent allow. git is resolved via shutil.which and absolutized (os.path.abspath), so the launched
 child is pinned to an absolute path and cannot be re-resolved at exec time; when git is absent from PATH
-entirely the observations are all omitted (and `self_test` SKIPs clean, like the POSIX-signal watchdogs).
+entirely the observations are all omitted (and `self_test` returns 2, cannot-evaluate, since every vector needs git).
 
 Stdlib only (`subprocess`, `tomllib`, `shutil`); imports `_opf_check` (for the per-record body digest) and
 `_opf_emit` (for its EmitError). Launched via opf.py under `-I -B`.
@@ -1099,13 +1099,15 @@ def self_test_isolated():
         if not cond:
             failures.append(name)
 
-    # The git-absent path: with _git_path substituted to find no git, this function returns 2 and names
-    # the cannot-evaluate at once, running no vector (red when that path exits clean). Restored in finally.
+    # The git-absent path: with _git_path substituted to find no git, self_test returns 2 and names the
+    # cannot-evaluate at once, running no vector (red when that path exits clean). Restored in finally.
+    # It enters through self_test, the isolating wrapper that __main__ and the opf.py roster call, so the
+    # vector pins the exit code those callers read; this function is reached only through that wrapper.
     _saved_git_path = globals()["_git_path"]
     globals()["_git_path"] = lambda: None
     try:
         with _contextlib.redirect_stderr(_io.StringIO()) as _absent_err:
-            _absent_rc = self_test_isolated()
+            _absent_rc = self_test()
     finally:
         globals()["_git_path"] = _saved_git_path
     check("git-absent-cannot-evaluate",
