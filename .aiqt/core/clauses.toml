@@ -2984,7 +2984,7 @@ source-path = ".aiqt/core/rules/security-seci-dependency-provenance.md"
 start-line = 31
 end-line = 32
 canonical-text = "Dependencies, tools, external servers, and any model or artefact file that executes on load come from trusted\nsources with pinned provenance."
-source-digest = "e7da6f0169d1b771456821bc569051e3582eaada65638955aff9723377168451"
+source-digest = "3c14a6ea288a902ba213b62ad9cc8b555eb3e107319188d1e02c53fb4a8e71d3"
 
 [[clause]]
 clause-id = "secsup.2"
@@ -2993,7 +2993,7 @@ source-path = ".aiqt/core/rules/security-seci-dependency-provenance.md"
 start-line = 31
 end-line = 32
 canonical-text = "Dependencies, tools, external servers, and any model or artefact file that executes on load come from trusted\nsources with pinned provenance."
-source-digest = "e7da6f0169d1b771456821bc569051e3582eaada65638955aff9723377168451"
+source-digest = "3c14a6ea288a902ba213b62ad9cc8b555eb3e107319188d1e02c53fb4a8e71d3"
 
 [[clause]]
 clause-id = "secsup.3"
@@ -3002,7 +3002,7 @@ source-path = ".aiqt/core/rules/security-seci-dependency-provenance.md"
 start-line = 32
 end-line = 33
 canonical-text = "A file that runs code when loaded is scanned before use, and none is\nintroduced on the strength of its name or popularity alone."
-source-digest = "e7da6f0169d1b771456821bc569051e3582eaada65638955aff9723377168451"
+source-digest = "3c14a6ea288a902ba213b62ad9cc8b555eb3e107319188d1e02c53fb4a8e71d3"
 
 [[clause]]
 clause-id = "secsup.4"
@@ -3011,7 +3011,7 @@ source-path = ".aiqt/core/rules/security-seci-dependency-provenance.md"
 start-line = 32
 end-line = 33
 canonical-text = "A file that runs code when loaded is scanned before use, and none is\nintroduced on the strength of its name or popularity alone."
-source-digest = "e7da6f0169d1b771456821bc569051e3582eaada65638955aff9723377168451"
+source-digest = "3c14a6ea288a902ba213b62ad9cc8b555eb3e107319188d1e02c53fb4a8e71d3"
 
 [[clause]]
 clause-id = "secsup.5"
@@ -3020,7 +3020,7 @@ source-path = ".aiqt/core/rules/security-seci-dependency-provenance.md"
 start-line = 33
 end-line = 36
 canonical-text = "Before relying on a tool, MCP server,\nconnector, or external server, the active surface is reconciled against the approved pinned inventory; an\nunrecognized, shadow, changed, or unpinned entry is treated as unavailable until it is reviewed and\nauthorized."
-source-digest = "e7da6f0169d1b771456821bc569051e3582eaada65638955aff9723377168451"
+source-digest = "3c14a6ea288a902ba213b62ad9cc8b555eb3e107319188d1e02c53fb4a8e71d3"
 
 [[clause]]
 clause-id = "secsup.6"
@@ -3029,7 +3029,16 @@ source-path = ".aiqt/core/rules/security-seci-dependency-provenance.md"
 start-line = 33
 end-line = 36
 canonical-text = "Before relying on a tool, MCP server,\nconnector, or external server, the active surface is reconciled against the approved pinned inventory; an\nunrecognized, shadow, changed, or unpinned entry is treated as unavailable until it is reviewed and\nauthorized."
-source-digest = "e7da6f0169d1b771456821bc569051e3582eaada65638955aff9723377168451"
+source-digest = "3c14a6ea288a902ba213b62ad9cc8b555eb3e107319188d1e02c53fb4a8e71d3"
+
+[[clause]]
+clause-id = "secsup.7"
+corpus-id = "secsup"
+source-path = ".aiqt/core/rules/security-seci-dependency-provenance.md"
+start-line = 36
+end-line = 38
+canonical-text = "A tag or branch name is a movable label, not pinned provenance: a source fetched by one is\npinned to the commit or digest it resolved to, and where the fetched content declares its own version, a\nmismatch with the version the label names is a changed entry."
+source-digest = "3c14a6ea288a902ba213b62ad9cc8b555eb3e107319188d1e02c53fb4a8e71d3"
 
 [[clause]]
 clause-id = "secfcl.1"
