@@ -539,16 +539,20 @@ PRECHECK_ABORT_LINES = dict((
 
 # D-400-SPECIAL-FILE-PRECHECK bootstrap: the ONE accepted shell test-and-abort line that must run
 # BEFORE the precheck invocation itself, in each runner and in every CI precheck step: python3 would
-# block LOADING the precheck module if the script path were a FIFO, so a POSIX [ -f ] && [ ! -h ] test
-# refuses a non-regular or symlinked script by name first (the residual that remains is the
+# block LOADING the precheck module if the script path were a FIFO, so a POSIX [ -f ] test plus a
+# negated [ -h ] test refuses a non-regular or symlinked script by name first (the residual that remains is the
 # interpreter binary and the runner script itself, both read before this line can run). Keyed by exact
 # spelling (the local runner and the CI workflow share the tools/ spelling; the standalone OPF runner
 # matches AFTER adapt_standalone_runner rebases "$here/ to "opf/tools/); the value is the tools path
 # the shadow scan must see accounted for on that line. The line registers NO roster member: the member
 # is the precheck invocation itself, which the runners and the workflow carry right after it, and the
 # precheck-ORDER pass below holds every workflow job to the full two-line canonical step.
+# SPELLING: the tools line negates with "! [ -h ... ]", never "[ ! -h ... ]": this line runs in
+# quality.yml jobs that tools/check_python_host_pin.py reads with a line model refusing "[ !" as a
+# YAML anchor, alias or tag opener, so the "[ !" form would make that gate unable to evaluate the
+# file. The OPF containment line appears in no workflow, so its "[ ! -h ]" spelling stays.
 PRECHECK_BOOTSTRAP_LINES = dict((
-    ('[ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }',
+    ('[ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }',
      "tools/_gen_common.py"),
     ('[ -f "opf/tools/_containment.py" ] && [ ! -h "opf/tools/_containment.py" ] || { echo "error: opf/tools/_containment.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }',
      "opf/tools/_containment.py"),
@@ -558,7 +562,7 @@ PRECHECK_BOOTSTRAP_LINES = dict((
 # before any other post-checkout run step, exactly and in order: the bootstrap test-and-abort line,
 # then the precheck invocation.
 PRECHECK_STEP_RUN_LINES = (
-    '[ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }',
+    '[ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }',
     "python3 -I -B tools/_gen_common.py --precheck",
 )
 
@@ -3719,7 +3723,7 @@ def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
         (root / "tools").mkdir()
         runner = root / "tools" / "run_all_checks.sh"
         runner.write_text(text, encoding="utf-8")
-        # The live runner's precheck BOOTSTRAP line tests this path with [ -f ] && [ ! -h ] before
+        # The live runner's precheck BOOTSTRAP line tests this path with [ -f ] && ! [ -h ] before
         # any stub can run; give the scratch tree a regular file there. Data only: the stub python3
         # never reads its script argument, and nothing executes this file.
         (root / "tools" / "_gen_common.py").write_text("", encoding="utf-8")
@@ -7213,12 +7217,25 @@ def self_test():
     if got.diagnostics or "tools/_gen_common.py --precheck" not in got.members:
         failures.append(
             "35 the CI bootstrap line was not accepted cleanly: {!r}".format(got.diagnostics))
-    got = extract_ci(ci_bootstrap_fixture.replace("[ ! -h tools/_gen_common.py ]",
-                                                  "[ ! -h tools/x.py ]", 1))
+    got = extract_ci(ci_bootstrap_fixture.replace("! [ -h tools/_gen_common.py ]",
+                                                  "! [ -h tools/x.py ]", 1))
     if not any(diagnostic.code in ("unclassified-command", "shadow-miss")
                for diagnostic in got.diagnostics):
         failures.append(
             "35 a respelled CI bootstrap line must be unclassified, got {!r}".format(
+                got.diagnostics))
+
+    # D-400-SPECIAL-FILE-PRECHECK bootstrap spelling: the "[ ! -h ...]" negation is exactly the form
+    # the Python host pin gate's outside-job line model refuses as a YAML opener (see the SPELLING
+    # note on PRECHECK_BOOTSTRAP_LINES), so it must stay a refused respelling here: were it accepted,
+    # a workflow carrying it would read as parity-clean while that gate cannot evaluate the file.
+    count += 1
+    got = extract_ci(ci_bootstrap_fixture.replace("! [ -h tools/_gen_common.py ]",
+                                                  "[ ! -h tools/_gen_common.py ]", 1))
+    if not any(diagnostic.code in ("unclassified-command", "shadow-miss")
+               for diagnostic in got.diagnostics):
+        failures.append(
+            "35b the former bracket-first bootstrap spelling must be unclassified, got {!r}".format(
                 got.diagnostics))
 
     # D-400-SPECIAL-FILE-PRECHECK order: the LIVE workflow files must order-check clean, and each

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a80ce6a77f118353b68738d3a9b4bfb2b5b73bb2346a5a35e80d16a5d9f87ca6"
+tree-sha256 = "9cc626b394d607e6acb5f3126c43bdd4fdd756aedde73d93b8f52e04ad0e8a73"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -137,7 +137,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3068
-sha256 = "295bb403304727d2bfe27e97287d00bfc64a9a9dff65fe1af21880c0514a7435"
+sha256 = "a007ec7ecd237d225fc057a7ab69f951d704a16fcfd07872d5c10fc7f0d1ba41"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -3252,7 +3252,7 @@ sha256 = "385dc36013a49036e40c8b2c9f26db811ae20189ff6a49508988bf0ffe6a0468"
 [[sources]]
 path = "tools/_gen_common.py"
 bytes = 74864
-sha256 = "17c3320f8a8f8f8c9144eab987d5b46a65b35c5521f269f2ff31b86b7a34cfd8"
+sha256 = "0640c2ca7ba8dc474c5d9e5bcfdcd90d2dde6ee90806c5ffb5858a0d2f4a32e8"
 
 [[sources]]
 path = "tools/_git_fixture_env.py"
@@ -3326,8 +3326,8 @@ sha256 = "41360f1cc7595248ad23d30104cd93dd8a20a99920fdb11e0335ede7d1b9db50"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 433858
-sha256 = "1e99dbc1aa31f85f6eaf1a5667de44fdb588c199fb31200fc741698d7efcc8c2"
+bytes = 435128
+sha256 = "c2459fd41f6c8171525422e401ba1948bba654f1e38f760898cab32e4a36b723"
 
 [[sources]]
 path = "tools/check_cited_standards.py"
@@ -3742,7 +3742,7 @@ sha256 = "437cee6111bc3f7bb14b283b3e5764b29a5b3b703a923e714b131e38187838d0"
 [[sources]]
 path = "tools/run_all_checks.sh"
 bytes = 25098
-sha256 = "8873031a0dcfee1c39bb7242b2ab0211926c490b2fd6d21391f6698150ef6ffa"
+sha256 = "2b7d19306feb04f6349fdfd51df81fcb3a6b51bcd8ce73cc30037b5480dfd368"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"

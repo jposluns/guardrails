@@ -78,7 +78,7 @@ jobs:
       - name: Special-file precheck
         shell: bash
         run: |
-          [ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+          [ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
           python3 -I -B tools/_gen_common.py --precheck
 
       - name: Secrets (project scanner)
@@ -153,7 +153,7 @@ jobs:
       - name: Special-file precheck
         shell: bash
         run: |
-          [ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+          [ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
           python3 -I -B tools/_gen_common.py --precheck
 
       - name: Dashes
@@ -244,7 +244,7 @@ jobs:
       - name: Special-file precheck
         shell: bash
         run: |
-          [ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+          [ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
           python3 -I -B tools/_gen_common.py --precheck
 
       - name: OPF homes contract self-test
@@ -398,7 +398,7 @@ jobs:
       - name: Special-file precheck
         shell: bash
         run: |
-          [ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+          [ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
           python3 -I -B tools/_gen_common.py --precheck
 
       - name: OPF standalone-closure gate
@@ -420,7 +420,7 @@ jobs:
       - name: Special-file precheck
         shell: bash
         run: |
-          [ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+          [ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
           python3 -I -B tools/_gen_common.py --precheck
 
       - name: Corpus-core library self-test
@@ -569,7 +569,7 @@ jobs:
       - name: Special-file precheck
         shell: bash
         run: |
-          [ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+          [ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
           python3 -I -B tools/_gen_common.py --precheck
 
       - name: Rules self-test
@@ -743,7 +743,7 @@ jobs:
       - name: Special-file precheck
         shell: bash
         run: |
-          [ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+          [ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
           python3 -I -B tools/_gen_common.py --precheck
 
       - name: Selftest-execution gate self-test
@@ -792,7 +792,7 @@ jobs:
       - name: Special-file precheck
         shell: bash
         run: |
-          [ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+          [ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
           python3 -I -B tools/_gen_common.py --precheck
 
       - name: Git-fixture-env core behaviour self-test (execution-reconciled)
@@ -814,7 +814,7 @@ jobs:
       - name: Special-file precheck
         shell: bash
         run: |
-          [ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+          [ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
           python3 -I -B tools/_gen_common.py --precheck
 
       - name: Git-fixture-env combined config-injection lane (execution-reconciled)
@@ -836,7 +836,7 @@ jobs:
       - name: Special-file precheck
         shell: bash
         run: |
-          [ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+          [ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
           python3 -I -B tools/_gen_common.py --precheck
 
       - name: Git-fixture-env malformed-config lane (execution-reconciled)
@@ -858,7 +858,7 @@ jobs:
       - name: Special-file precheck
         shell: bash
         run: |
-          [ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+          [ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
           python3 -I -B tools/_gen_common.py --precheck
 
       - name: Git-fixture-env system-config lane (execution-reconciled)
@@ -954,7 +954,7 @@ jobs:
       - name: Special-file precheck
         shell: bash
         run: |
-          [ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+          [ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
           python3 -I -B tools/_gen_common.py --precheck
 
       - name: Record-drift self-test
@@ -1190,7 +1190,7 @@ jobs:
       - name: Special-file precheck
         shell: bash
         run: |
-          [ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+          [ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
           python3 -I -B tools/_gen_common.py --precheck
       - name: Byte canon self-test (vectors)
         shell: bash

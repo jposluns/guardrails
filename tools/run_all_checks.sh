@@ -49,7 +49,7 @@ failed_names=""
 # itself if that path were a FIFO, so a non-regular or symlinked script is refused by name before
 # python3 touches it. Residual: the interpreter binary and THIS runner script are read before the
 # bootstrap line can run. Every gate and self-test below then acts on a checked tree.
-[ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+[ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
 python3 -I -B tools/_gen_common.py --precheck || exit 2
 
 run_gate() {

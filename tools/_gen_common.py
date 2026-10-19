@@ -468,7 +468,7 @@ def precheck_special_files(root):
     module file must derive the same real root, so a tools/ or opf/tools/ directory replaced by a
     symlink cannot move the walk out of the invoked tree; and the root must be confirmed by
     _git_toplevel whenever git can answer. BOOTSTRAP: the
-    runners and the CI steps first test, in shell ([ -f ] && [ ! -h ]), that the precheck module
+    runners and the CI steps first test, in shell ([ -f ] && ! [ -h ]), that the precheck module
     itself is a regular non-symlink file, because python3 would block LOADING a FIFO planted at the
     script path before any line of this code could run. Residuals that remain OUTSIDE the precheck:
     the interpreter binary and the runner script itself (both are read before the bootstrap line can

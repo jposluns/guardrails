@@ -32,7 +32,7 @@ jobs:
           python-version: '3.14'
       - name: Special-file precheck
         run: |
-          [ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+          [ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
           python3 -I -B tools/_gen_common.py --precheck
 
       # Real audit against today's date: exit 1 (a manifest past its FAIL threshold) or exit 2 (a
