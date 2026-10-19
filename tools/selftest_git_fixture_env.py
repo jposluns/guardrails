@@ -917,8 +917,9 @@ def _config_poison_fixture(base):
 # CONFIG_MEMBER_BOUND_DEFAULT. config/member-bound-table pins this table (every key an exact
 # registered roster argv, each override, the default), config/member-bound-opf-selftest pins
 # the opf.py --self-test entry, config/member-bound-reaches-run pins that _run_config_member
-# hands the looked-up bound to _run_bounded, and config/member-roster-figures pins this
-# comment's roster figures against _registered_selftests() (all in _member_bound_checks); none
+# hands the looked-up bound to _run_bounded, and config/member-roster-figures pins the SIZING_*
+# constants below against _registered_selftests() through _roster_figures and prints the
+# figures it derives (all in _member_bound_checks); none of them reads this comment, and none
 # of them tests any sizing.
 # Figures in this comment carry one of four labels: MEASURED (run for SIZING below), ESTIMATED
 # (derived by the SIZING formula), REPORTED (an earlier account, not reproduced here) or
@@ -963,35 +964,18 @@ def _config_poison_fixture(base):
 # _config_injection_lane itself), over opf.py, check_opf_record.py --red-on-revert,
 # _opf_adopt_observe.py, check_release_delta.py and check_opf_init.py --self-test plus six shorter
 # opf/tools self-tests (_opf_adopt.py, _opf_oplock.py, _opf_init_operation.py,
-# check_opf_upgrade.py, check_opf_homes.py and check_opf_doctor.py), eleven members, twice (load5
-# 24.02 to 29.29, then 29.29 to 33.68); once over the whole combined roster, 101 members (load5
-# 27.35 to 32.99); and once under the malformed lane's configuration over those eleven members
-# less its exclusion, ten members (load5 30.01 to 32.14). Every member exited 0 with no hook,
+# check_opf_upgrade.py, check_opf_homes.py and check_opf_doctor.py), eleven members
+# (SIZING_MEASURED), twice (load5 24.02 to 29.29, then 29.29 to 33.68); once over the whole
+# combined roster as registered then, SIZING_ACCOUNT_ROSTER (load5 27.35 to 32.99); and once
+# under the malformed lane's configuration over those eleven members less its exclusion, ten
+# members (SIZING_MALFORMED_MEASURED, load5 30.01 to 32.14). Every member exited 0 with no hook,
 # fsmonitor or exposure record in every run. Each entry below gives its lane time per run.
-# Those runs predate the 2026-10-13 merge from main that added four roster members
-# (opf/tools/_opf_adopt_discover.py --self-test, tools/check_brief_capability.py, the same with
-# --self-test, and tools/check_selftest_execution.py --suite brief-capability-selftest): the
-# whole-roster run above was measured over the then 101 members, before those four existed. The
-# 2026-10-14 merge from main added a fifth (.github/check_cited_standards_contract.py
-# --self-test). The 2026-10-15 merge from main added a sixth (opf/tools/_opf_import_batch.py
-# --self-test). The merged roster was then 107 members, 105 of them in the malformed lane
-# (counted by running _registered_selftests() on the merged tree, 2026-10-15). The 2026-10-16
-# merge of main into the change adding tools/gen_agents.py --self-test made that self-test a
-# seventh addition. The 2026-10-16 merges of the host-patch CI legs and of the leak, reference
-# facts and launcher-isolation input fixes added an eighth and a ninth:
-# tools/check_python_host_pin.py --self-test and tools/check_leaks.py --self-test. The
-# hook-latency harness added a tenth (tools/check_selftest_execution.py --suite
-# hook-latency-selftest; the bare runner that step expands to is a CONFIG_EXCLUSIONS["all"]
-# entry). The change adding tools/orch_register.py --self-test adds an eleventh, that member
-# itself, not one a merge brought in. The merged roster is 112 members, 110 of them in the
-# malformed lane (counted by
-# running _registered_selftests() on the merged tree, 2026-10-17; config/member-roster-figures
-# asserts these counts and the two derived counts below against _registered_selftests(), so a
-# later roster change turns this comment red instead of stale).
+# SIZING_ACCOUNT_ROSTER is the set _registered_selftests() returns at commit e5191908, the parent
+# of the commit that recorded these runs; a member registered later is outside the account.
 # NOT MEASURED, though these bounds govern those reruns all the same: the system lane; the
-# malformed lane's configuration for the 100 of its 110 members outside those ten; and the
-# fsmonitor pass's own configuration (fsmonitor set in both config files, ignore and attributes
-# files removed, its four members run one at a time).
+# malformed lane's configuration for every member of that lane outside SIZING_MALFORMED_MEASURED;
+# and the fsmonitor pass's own configuration (fsmonitor set in both config files, ignore and
+# attributes files removed, its four members run one at a time).
 # The opf.py --self-test times above and below and its 3600 s entry were sized before the
 # 2026-10-13 merge added the opf-write-guard delegate to opf.py --self-test; the delegate's own
 # self-test, MEASURED standalone on the merged tree (2026-10-13), exited 0 in 0.23 s wall, so the
@@ -1001,18 +985,25 @@ def _config_poison_fixture(base):
 # (opf.py's 1192 s lane run, and the opf.py and check_opf_record.py lane runs that reached a 1200 s
 # bound) are not fed to the formula; the factor's headroom is meant to allow for them, but a run
 # that reached a bound has no known length, so no bound here is shown to cover it (below).
-# Roster coverage: the account of the whole-roster run gives a time or an upper bound for 89 of
-# the 112 members (every member registered when it was taken; the nine added by the 2026-10-13,
-# 2026-10-14, 2026-10-15 and 2026-10-16 merges, the hook-latency suite step, and the eleventh
-# that the orch_register change adds, are outside it).
-# Five took over 180 s and carry the entries below. The other 84 took 180 s or less: nine named
-# here (the six shorter opf/tools self-tests, check_python_floor.py, check_release_cut.py
-# --self-test --red-on-revert and check_selftest_execution.py --suite orch-behaviour-selftest),
-# the slowest 142.55 s; and 75 REPORTED by that account as each 62.42 s or less, with no
-# per-member time and no names given. The remaining 23 roster members have no recorded time (the
-# 12 the account does not name, plus the nine added by those merges, the hook-latency suite
-# step and the orch_register self-test, named above), so their default bound is NOT sized from
-# a measurement.
+# Roster coverage: the account of the whole-roster run gives a time or an upper bound for
+# SIZING_ACCOUNT_TIMED of the SIZING_ACCOUNT_ROSTER members. Five took over 180 s and carry the
+# entries below. Nine more are named here (the six shorter opf/tools self-tests,
+# check_python_floor.py, check_release_cut.py --self-test --red-on-revert and
+# check_selftest_execution.py --suite orch-behaviour-selftest), the slowest 142.55 s; and 75 are
+# REPORTED by that account as each 62.42 s or less, with no per-member time and no names given.
+# The other account members, which the account does not name, have no recorded time; nor does a
+# member registered after the account unless SIZING_LATER_MEASURED records a measurement of it.
+# Their default bound is NOT sized from a measurement. _roster_figures derives the live counts
+# from these constants (members, malformed-lane members, members outside the account, members
+# with no recorded time, malformed-lane members not measured in that lane), and
+# config/member-roster-figures prints them with one line per member outside the account.
+# A bound sized from a measurement taken after the account (an entry whose own comment says it
+# was sized outside SIZING) is allowed only when SIZING_LATER_MEASURED maps its argv to a
+# one-line citation of that measurement; _roster_figures reports any other CONFIG_MEMBER_BOUNDS
+# key with no measurement behind it. A later measurement counts as a recorded time for a member
+# outside the account. It never lowers the count of malformed-lane members not measured in that
+# lane, which reflects only the account's malformed-lane run, nor the account's own count of
+# members with no recorded time, whose members the account does not name.
 # For every member, reaching its bound is cannot-evaluate, never a pass.
 # The factor is 40 / 24 * 4. 40 / 24 covers load5 40 under the model that wall time grows in
 # proportion to load5 once load5 exceeds the 24 CPUs, and not below (every measured run had load5
@@ -1044,6 +1035,148 @@ CONFIG_MEMBER_BOUNDS = {
     # (malformed). ESTIMATED: 229.02 * 20 / 3 = 1526.8, so 1800 s.
     ("opf/tools/check_opf_init.py", "--self-test"): 1800,
 }
+# The sizing account's frozen facts (see SIZING above); _roster_figures derives the live figures
+# from them and config/member-roster-figures pins them against _registered_selftests().
+# SIZING_ACCOUNT_ROSTER: every argv the whole-roster run covered, as registered when it was taken.
+SIZING_ACCOUNT_ROSTER = frozenset({
+    ("opf/tools/_journal.py", "--self-test"),
+    ("opf/tools/_opf_adopt.py", "--self-test"),
+    ("opf/tools/_opf_adopt_apply.py", "--self-test"),
+    ("opf/tools/_opf_adopt_hook.py", "--self-test"),
+    ("opf/tools/_opf_adopt_observe.py", "--self-test"),
+    ("opf/tools/_opf_init.py", "--self-test"),
+    ("opf/tools/_opf_init_contract.py", "--self-test"),
+    ("opf/tools/_opf_init_operation.py", "--self-test"),
+    ("opf/tools/_opf_init_substrate.py", "--self-test"),
+    ("opf/tools/_opf_observe.py", "--self-test"),
+    ("opf/tools/_opf_oplock.py", "--self-test"),
+    ("opf/tools/_opf_pack_manifest.py", "--self-test"),
+    ("opf/tools/check_opf_doctor.py", "--self-test"),
+    ("opf/tools/check_opf_drift.py", "--self-test"),
+    ("opf/tools/check_opf_homes.py", "--self-test"),
+    ("opf/tools/check_opf_init.py", "--self-test"),
+    ("opf/tools/check_opf_init_contract.py", "--self-test"),
+    ("opf/tools/check_opf_init_observe.py", "--self-test", "--red-on-revert"),
+    ("opf/tools/check_opf_init_p0.py", "--self-test", "--red-on-revert"),
+    ("opf/tools/check_opf_prompt_pack.py", "--self-test"),
+    ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert"),
+    ("opf/tools/check_opf_upgrade.py", "--self-test"),
+    ("opf/tools/opf.py", "--self-test"),
+    ("opf/tools/selftest_commonmark_conformance.py",),
+    ("opf/tools/selftest_commonmark_headings.py",),
+    ("tools/_qa_adapter.py", "--self-test"),
+    ("tools/aei_backlog_md.py", "--self-test"),
+    ("tools/audit_reference.py", "--self-test"),
+    ("tools/check_applies.py", "--self-test"),
+    ("tools/check_artifact_checksums.py", "--self-test"),
+    ("tools/check_branch_root.py", "--self-test"),
+    ("tools/check_byte_canon.py", "--self-test"),
+    ("tools/check_ci_parity.py", "--self-test"),
+    ("tools/check_cited_standards.py", "--self-test"),
+    ("tools/check_clauses.py", "--self-test"),
+    ("tools/check_crosswalk.py", "--self-test"),
+    ("tools/check_derived_command_parameters.py", "--self-test"),
+    ("tools/check_entry_guard.py",),
+    ("tools/check_footer.py", "--self-test"),
+    ("tools/check_gensrc_failclose.py", "--self-test"),
+    ("tools/check_git_option_table.py", "--self-test"),
+    ("tools/check_hooks_preview.py", "--self-test"),
+    ("tools/check_install_page.py", "--self-test"),
+    ("tools/check_instruction_budget.py",),
+    ("tools/check_instruction_budget.py", "--self-test"),
+    ("tools/check_internal_names.py", "--self-test"),
+    ("tools/check_license_qualification.py", "--self-test"),
+    ("tools/check_manifest.py", "--self-test"),
+    ("tools/check_mistakes_register.py", "--self-test"),
+    ("tools/check_msg_leaks.py", "--self-test"),
+    ("tools/check_newtab.py", "--self-test"),
+    ("tools/check_no_dashes.py", "--self-test"),
+    ("tools/check_opf_enforce_platforms.py", "--self-test"),
+    ("tools/check_overclaim.py", "--self-test"),
+    ("tools/check_portability.py", "--self-test"),
+    ("tools/check_python_floor.py",),
+    ("tools/check_python_launcher_isolation.py", "--self-test"),
+    ("tools/check_record_drift.py", "--self-test"),
+    ("tools/check_record_sections.py", "--self-test"),
+    ("tools/check_reference_facts.py", "--self-test"),
+    ("tools/check_release_build.py", "--self-test"),
+    ("tools/check_release_cut.py", "--self-test", "--red-on-revert"),
+    ("tools/check_release_delta.py", "--self-test"),
+    ("tools/check_secrets.py", "--self-test"),
+    ("tools/check_selftest_execution.py", "--self-test"),
+    ("tools/check_selftest_execution.py", "--suite", "ci-status-behaviour-selftest"),
+    ("tools/check_selftest_execution.py", "--suite", "entry-guard-selftest"),
+    ("tools/check_selftest_execution.py", "--suite", "instruction-budget-selftest"),
+    ("tools/check_selftest_execution.py", "--suite", "orch-behaviour-selftest"),
+    ("tools/check_selftest_execution.py", "--suite", "python-floor-selftest"),
+    ("tools/check_site.py", "--self-test"),
+    ("tools/check_site_versions.py", "--self-test"),
+    ("tools/check_sized_instructions.py", "--self-test"),
+    ("tools/check_standards_currency.py", "--self-test"),
+    ("tools/check_version_monotonicity.py", "--self-test"),
+    ("tools/conformance.py", "--self-test"),
+    ("tools/doctor.py", "--self-test"),
+    ("tools/gen_char_policy.py", "--self-test"),
+    ("tools/gen_crosswalk.py", "--self-test"),
+    ("tools/gen_cursor.py", "--self-test"),
+    ("tools/gen_disclosure.py", "--self-test"),
+    ("tools/gen_enforceability.py", "--self-test"),
+    ("tools/gen_enforcement_register.py", "--self-test"),
+    ("tools/gen_first_pin_demo.py", "--self-test"),
+    ("tools/gen_gensrc.py", "--self-test"),
+    ("tools/gen_hooks.py", "--self-test"),
+    ("tools/gen_install.py", "--self-test"),
+    ("tools/gen_manifest.py", "--self-test"),
+    ("tools/gen_reference_facts.py", "--self-test"),
+    ("tools/gen_renderers.py", "--self-test"),
+    ("tools/gen_rules.py", "--self-test"),
+    ("tools/gen_skill.py", "--self-test"),
+    ("tools/gen_worker_pack.py", "--self-test"),
+    ("tools/import_cwe.py", "--self-test"),
+    ("tools/migrate.py", "--self-test"),
+    ("tools/pin.py", "--self-test"),
+    ("tools/selftest_aiqt_corpus.py",),
+    ("tools/selftest_aiqt_hooks.py",),
+    ("tools/selftest_ci_status.py",),
+    ("tools/selftest_opf_render.py",),
+    ("tools/selftest_orch_hooks.py",),
+})
+# How many SIZING_ACCOUNT_ROSTER members the account gives a time or an upper bound for.
+SIZING_ACCOUNT_TIMED = 89
+# The eleven members of the two shorter-roster combined-lane runs (each timed again in the
+# whole-roster run).
+SIZING_MEASURED = frozenset({
+    ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert"),
+    ("opf/tools/opf.py", "--self-test"),
+    ("opf/tools/_opf_adopt_observe.py", "--self-test"),
+    ("tools/check_release_delta.py", "--self-test"),
+    ("opf/tools/check_opf_init.py", "--self-test"),
+    ("opf/tools/_opf_adopt.py", "--self-test"),
+    ("opf/tools/_opf_oplock.py", "--self-test"),
+    ("opf/tools/_opf_init_operation.py", "--self-test"),
+    ("opf/tools/check_opf_upgrade.py", "--self-test"),
+    ("opf/tools/check_opf_homes.py", "--self-test"),
+    ("opf/tools/check_opf_doctor.py", "--self-test"),
+})
+# The SIZING_MEASURED members the malformed-lane run measured, written out rather than computed
+# from CONFIG_EXCLUSIONS, so a later change to that lane's exclusions on a measured member is
+# reported instead of silently moving what the run is said to have covered.
+SIZING_MALFORMED_MEASURED = frozenset({
+    ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert"),
+    ("opf/tools/opf.py", "--self-test"),
+    ("opf/tools/_opf_adopt_observe.py", "--self-test"),
+    ("opf/tools/check_opf_init.py", "--self-test"),
+    ("opf/tools/_opf_adopt.py", "--self-test"),
+    ("opf/tools/_opf_oplock.py", "--self-test"),
+    ("opf/tools/_opf_init_operation.py", "--self-test"),
+    ("opf/tools/check_opf_upgrade.py", "--self-test"),
+    ("opf/tools/check_opf_homes.py", "--self-test"),
+    ("opf/tools/check_opf_doctor.py", "--self-test"),
+})
+# Measurements taken after the account: registered argv -> a one-line citation of where that
+# measurement and its config-lane times are recorded (normally the bound entry's own comment).
+# A CONFIG_MEMBER_BOUNDS key needs its argv here or in SIZING_MEASURED.
+SIZING_LATER_MEASURED = {}
 # After the process-group kill: the bounded drain of output still held by a descendant that left
 # the group (setsid or setpgid), the bounded reap of the leader, and the bounded wait for the group
 # to be confirmed empty (_member_group_empty).
@@ -1059,6 +1192,50 @@ PIDFD_SIGNAL_PROCESS_GROUP = getattr(signal, "PIDFD_SIGNAL_PROCESS_GROUP", 1 << 
 
 def _config_member_bound(member):
     return CONFIG_MEMBER_BOUNDS.get(tuple(member), CONFIG_MEMBER_BOUND_DEFAULT)
+
+
+def _roster_figures(roster):
+    """The live roster figures derived from the frozen sizing account, and the problems that stop
+    that account applying to roster (the registered roster, _registered_selftests()). Pure:
+    nothing is launched or read. figures: members; malformed (members in the malformed lane);
+    later (the sorted members outside SIZING_ACCOUNT_ROSTER); no_recorded_time (the account
+    members it gives no time for, plus each later member SIZING_LATER_MEASURED does not cover);
+    malformed_unmeasured (malformed-lane members outside SIZING_MALFORMED_MEASURED). problems, in
+    this order: an account member no longer registered (the account's counts no longer say which
+    registered members they cover); a measured member outside the account, or a malformed-lane
+    measurement outside SIZING_MEASURED; a measured member whose malformed-lane membership
+    differs from what was measured; a stale or unreasoned SIZING_LATER_MEASURED entry (not
+    registered, or its citation not one nonblank line); a CONFIG_MEMBER_BOUNDS key in neither
+    SIZING_MEASURED nor SIZING_LATER_MEASURED."""
+    members = {tuple(argv) for argv in roster}
+    malformed = {argv for argv in members
+                 if _command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"]}
+    problems = ["sizing account member not registered: {!r}".format(argv)
+                for argv in sorted(SIZING_ACCOUNT_ROSTER - members)]
+    problems += ["measured member outside the sizing account: {!r}".format(argv)
+                 for argv in sorted(SIZING_MEASURED - SIZING_ACCOUNT_ROSTER)]
+    problems += ["malformed-lane measurement outside SIZING_MEASURED: {!r}".format(argv)
+                 for argv in sorted(SIZING_MALFORMED_MEASURED - SIZING_MEASURED)]
+    problems += ["malformed-lane membership changed on a measured member: {!r}".format(argv)
+                 for argv in sorted(SIZING_MEASURED)
+                 if (_command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"])
+                 != (argv in SIZING_MALFORMED_MEASURED)]
+    # One nonblank line means no line-boundary character at all, not just LF and CR: splitlines
+    # recognizes the full set (VT, FF, FS, GS, RS, NEL and the Unicode separators), and the
+    # padding makes a leading or trailing boundary split too.
+    problems += ["stale or unreasoned later measurement: {!r}".format(argv)
+                 for argv, citation in sorted(SIZING_LATER_MEASURED.items())
+                 if argv not in members or not citation.strip()
+                 or len(("x" + citation + "x").splitlines()) != 1]
+    problems += ["bound with no measurement behind it: {!r}".format(argv)
+                 for argv in sorted(CONFIG_MEMBER_BOUNDS)
+                 if argv not in SIZING_MEASURED and argv not in SIZING_LATER_MEASURED]
+    later = sorted(members - SIZING_ACCOUNT_ROSTER)
+    figures = {"members": len(members), "malformed": len(malformed), "later": later,
+               "no_recorded_time": len(SIZING_ACCOUNT_ROSTER) - SIZING_ACCOUNT_TIMED
+               + len([argv for argv in later if argv not in SIZING_LATER_MEASURED]),
+               "malformed_unmeasured": len(malformed - SIZING_MALFORMED_MEASURED)}
+    return figures, problems
 
 
 # THE MEMBER REGISTRY. Every bounded child (_run_bounded) leads its own session and process group
@@ -3771,6 +3948,12 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_adopt_apply.py": "Apply-shell refusal, evidence and journal vectors over temporary filesystem fixtures.",
     "opf/tools/_opf_adopt_discover.py": "Read-only source-discovery vectors over temporary filesystem fixtures.",
     "opf/tools/_opf_adopt_hook.py": "Pure enable-hook merge vectors over synthetic registration bytes.",
+    "opf/tools/_opf_adopt_state.py": ("Containment vectors over temporary product trees in a replaced "
+                                       "environment (private empty HOME, no system git config, C locale, "
+                                       "umask 022); its fixtures commit through plumbing only "
+                                       "(_opf_adopt_apply._selftest_git_commit and the S16 add, "
+                                       "write-tree, commit-tree, update-ref helper), never a hook."),
+    "opf/tools/_opf_adopt_complete.py": "Completion-check vectors over temporary post-apply filesystem fixtures.",
     "opf/tools/_opf_import_batch.py": "Pure batch parsing, canonical emission and digest vectors over in-memory bytes.",
     "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
