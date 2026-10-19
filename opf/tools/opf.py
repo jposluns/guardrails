@@ -15058,7 +15058,7 @@ def _init_echo(line, err=False):
     sys.displayhook, an alias to an out-of-graph helper, an import alias such as
     from os import writev as ascii, or a spelled callback such as
     sorted(..., key=os.system)) is therefore refused because the reference is not
-    allowed where it appears. RESIDUAL (D-STATIC-PIN-RESIDUAL, stated exactly): a
+    allowed where it appears. RESIDUAL (what the static pin cannot see, stated exactly): a
     static reference check cannot see what an ALLOWED reference does at runtime
     with hostile VALUES (an allowed method spelling invoked on a rebound object),
     code in ANOTHER MODULE (the sibling _opf_* modules the init path calls into,
@@ -15295,7 +15295,7 @@ def _init_refusal_message(exc):
     the handler formats those characters and nothing a subclass chooses.
     Deliberate in-process forgery of the private attribute around raw text,
     and in-process rebinding of these functions, are hostile code already
-    running in this interpreter, the stated D-STATIC-PIN-RESIDUAL."""
+    running in this interpreter, the residual _init_echo's docstring states."""
     text = _init_exact_str(exc)
     try:
         proven = exc._opf_rendered_message
@@ -16559,7 +16559,7 @@ def _cmd_init(rest):
     traceback shows the dispatcher's source lines and the interrupt type; by
     then no exception is being handled, so it interpolates no init value: this
     qualifier holds for this post-return window only). What a static scan
-    still cannot prove is stated in _init_echo's docstring (D-STATIC-PIN-RESIDUAL)."""
+    still cannot prove is stated in _init_echo's docstring (its RESIDUAL paragraph)."""
     try:
         return _init_main(rest)
     except BaseException as exc:  # noqa: BLE001  the last-resort rendering boundary
@@ -17245,11 +17245,15 @@ def _upgrade_run(root):
         minor = sv == _UPGRADE_MID
 
         # PRECONDITION (spec 9.2): re-emitting the UNCHANGED parsed model reproduces the on-disk bytes
-        # exactly, proving the file is canonical and comment-free so the bounded rewrite loses nothing.
-        if _opf_emit.emit_checked(manifest_model).encode("utf-8") != manifest_bytes:
+        # exactly, proving the file is canonical and comment-free so the bounded rewrite loses nothing. A file
+        # an earlier emitter wrote with a literal U+2028 or U+2029 inside a basic string still passes when
+        # that is its only difference (_opf_emit.matches_store_bytes); the rewrite re-spells it.
+        if not _opf_emit.matches_store_bytes(
+                manifest_bytes, _opf_emit.emit_checked(manifest_model).encode("utf-8")):
             raise _UpgradeError("manifest is not in canonical new-document form (hand-edited or comment-"
                                 "bearing); refusing a model rewrite that could lose content (fail-closed)")
-        if _opf_emit.emit_checked(counters_model).encode("utf-8") != counters_bytes:
+        if not _opf_emit.matches_store_bytes(
+                counters_bytes, _opf_emit.emit_checked(counters_model).encode("utf-8")):
             raise _UpgradeError("counters.toml is not in canonical new-document form; refusing (fail-closed)")
 
         new_manifest, new_counters, added_ns, origin = (
@@ -17257,6 +17261,24 @@ def _upgrade_run(root):
         origin_version = _UPGRADE_MID if minor else _UPGRADE_FROM
         new_manifest_bytes = _opf_emit.emit_checked(new_manifest).encode("utf-8")
         new_counters_bytes = _opf_emit.emit_checked(new_counters).encode("utf-8")
+        empty_index = _opf_emit.emit_checked(
+            {"schema": _opf_schema.SUPPORTED_SCHEMA, "record": []}).encode("utf-8")
+
+        # PRECONDITION (store-read cap): every store file this upgrade would publish must stay readable
+        # by the store reader, which refuses any store file LARGER than _opf_store.MAX_STORE_READ_BYTES
+        # (a file of exactly that size still reads, so only a larger emission refuses here). Re-spelling
+        # a literal U+2028/U+2029 as its six-byte escape, like the schema delta itself, grows the
+        # emission, so a legacy file near the cap could otherwise be rewritten into one the reader then
+        # refuses, leaving a store that no longer resolves. Refuse BEFORE the cleanliness probes, the
+        # lease, and any write, so the store is left byte-for-byte unchanged (fail-closed).
+        for publish_rel, publish_bytes in ((manifest_rel, new_manifest_bytes),
+                                           (counters_rel, new_counters_bytes),
+                                           ("an upgrade-created empty index", empty_index)):
+            if len(publish_bytes) > _opf_store.MAX_STORE_READ_BYTES:
+                raise _UpgradeError(
+                    "upgraded {} would be {} bytes, over the {}-byte store-read cap its reader "
+                    "enforces; refusing before any write, the store is unchanged (fail-closed)".format(
+                        publish_rel, len(publish_bytes), _opf_store.MAX_STORE_READ_BYTES))
 
         # STEP 3: derive the scope from this delta and its POST-delta render declarations. The same
         # destinations drive the cleanliness gate, index creation, recovery, and staging advice.
@@ -17304,8 +17326,6 @@ def _upgrade_run(root):
             _upgrade_replace(root_fd, manifest_rel, new_manifest_bytes)
             if new_counters_bytes != counters_bytes:
                 _upgrade_replace(root_fd, counters_rel, new_counters_bytes)
-            empty_index = _opf_emit.emit_checked(
-                {"schema": _opf_schema.SUPPORTED_SCHEMA, "record": []}).encode("utf-8")
             created_indexes = []
             for idx_rel in write_scope["indexes"]:
                 if _upgrade_create_index(root_fd, idx_rel, empty_index):
