@@ -2522,9 +2522,10 @@ def _token_boundaries():
     dead zero-or-below comparison remains in _pid_token). The width clause is held by entries only it can
     refuse: digit strings past the integer-conversion limit (sys.get_int_max_str_digits), bytes and str,
     which int would refuse with ValueError, so with the width clause removed those entries read as a raise,
-    never as None (on a host that has disabled the conversion limit, where int would convert any width, the
-    default limit is set around the judgements and the disabled state restored after them, so those entries
-    still read as a raise there and never as the numeric bound's None); the ten- and
+    never as None (in an interpreter that has disabled the conversion limit, a per-interpreter setting, where
+    int would convert any width, the default limit is set around the judgements and the disabled state
+    restored after them, so those entries still read as a raise there and never as the numeric bound's None,
+    with the restore held by _conversion_limit_restored); the ten- and
     eleven-digit entries hold the width end itself, though past it the numeric bound refuses them too. A
     raise inside _pid_token is recorded as the mismatch, never an escape: (ok, mismatches)."""
     saved = sys.get_int_max_str_digits()
@@ -2554,6 +2555,44 @@ def _token_boundaries():
         if not saved:
             sys.set_int_max_str_digits(saved)
     return not mismatched, mismatched
+
+
+def _conversion_limit_restored():
+    """_token_boundaries leaves the caller's integer-conversion setting as it found it, the setting read back
+    independently (sys.get_int_max_str_digits) after each call rather than trusted from the fixture's verdict:
+    from the disabled setting (0, the only state _token_boundaries changes) and from the default limit (never
+    written), each on the return path and with an injected judgement escape (a BaseException the judgement
+    recorder does not catch, so it unwinds through the restore and must still be re-raised, never swallowed).
+    A call that leaves the setting moved, on either path from either starting setting, is a failure, so a
+    removed or ineffective restore reads red here while the token verdicts alone stay green: (ok, detail)."""
+    this, entry = sys.modules[__name__], sys.get_int_max_str_digits()
+
+    class Escape(BaseException):
+        pass
+
+    def escaping(token):
+        raise Escape("judgement escape of the self-test")
+    outcomes = {}
+    try:
+        for caller in (0, sys.int_info.default_max_str_digits):
+            sys.set_int_max_str_digits(caller)
+            held, mismatched = _token_boundaries()
+            outcomes["returned-from-{}".format(caller)] = (
+                held is True and not mismatched and sys.get_int_max_str_digits() == caller,
+                dict(after=sys.get_int_max_str_digits(), mismatched=mismatched))
+            sys.set_int_max_str_digits(caller)
+            escaped = None
+            try:
+                with _patched(this, "_pid_token", escaping):
+                    _token_boundaries()
+            except Escape as exc:
+                escaped = str(exc)
+            outcomes["escaped-from-{}".format(caller)] = (
+                escaped == "judgement escape of the self-test" and sys.get_int_max_str_digits() == caller,
+                dict(after=sys.get_int_max_str_digits(), escaped=escaped))
+    finally:
+        sys.set_int_max_str_digits(entry)
+    return _combined(ok for ok, _seen in outcomes.values()), outcomes
 
 
 def _probe_event_masks():
@@ -3283,7 +3322,10 @@ def _descendant_walk_held(adopted):
     ("/proc scan", reason) entry naming the probe, with no candidate derived from the incomplete walk and
     nothing signalled (_broken_walk_witnessed, EACCES and EIO driven). Leg tokens: each clause of _pid_token
     at its boundaries, str and bytes, just inside, at and just outside each end, the width clause held by
-    conversion-limit-sized entries only it can refuse. Leg probe-events: the probe
+    conversion-limit-sized entries only it can refuse. Leg tokens-restore: that fixture leaves the caller's
+    integer-conversion setting as it found it, the setting read back after each call, from the disabled and
+    the default settings, on the return path and under an escaping judgement (_conversion_limit_restored).
+    Leg probe-events: the probe
     decides by the event mask (POLLIN or POLLHUP is the exit; POLLERR and POLLNVAL each raise, never read as
     an exit or as alive). Legs probe-error-recorded and probe-error-accept: a poll-error event at the
     recording, and at the acceptance, is the named problem of the walk, end to end through the real probe.
@@ -3343,6 +3385,7 @@ def _descendant_walk_held(adopted):
     outcomes["witnessed-probe"] = _probe_broken_witnessed()
     outcomes["probe-interrupt"] = _recording_swept()
     outcomes["tokens"] = _token_boundaries()
+    outcomes["tokens-restore"] = _conversion_limit_restored()
     outcomes["probe-events"] = _probe_event_masks()
     outcomes["probe-error-recorded"] = _probe_error_recorded()
     outcomes["probe-error-accept"] = _probe_error_accepted()
@@ -3964,10 +4007,14 @@ def _unreaped_hang_uncredited():
     attached) and is None under a mutant, so that mutant is not caught by it (an exposure here, from a bare
     "unreaped" read as a completed run, is the regression); a run that returns with its child unreaped is
     None under a mutant as well. The confirmation re-run refuses both unreaped forms the same way, held by
-    injected _gate result sequences, an initial hang then each unreaped form: the outcome is None, both
-    aggregate verdicts are unresolved, and the two runs were made at GATE_TIMEOUT then BLOCK_CONFIRM (a
-    confirmation run whose killed child is still unreaped read as a completed run, an exposure crediting
-    the mutant, is the regression): (ok, detail)."""
+    injected _gate result sequences, an initial hang then each unreaped form. The injected gate reports
+    expiry as the real runner does, calling expiring with a pid for a run that reads hung, so the hung
+    unreaped re-run carries evidence and a refusal narrowed to evidence-free runs is exposed; a gate call
+    past the scripted sequence reads as one more hung run, failing the expected call list, never an escaping
+    error. The outcome is None, both aggregate verdicts are unresolved, the two runs were made at
+    GATE_TIMEOUT then BLOCK_CONFIRM, and expiry was reported once for the hung form and never for the
+    returned form (a confirmation run whose killed child is still unreaped read as a completed run, an
+    exposure crediting the mutant, is the regression): (ok, detail)."""
     this, real = sys.modules[__name__], _reap_within
 
     def reaping(pid, wait):
@@ -3976,15 +4023,19 @@ def _unreaped_hang_uncredited():
     vector = ("scratch/unreaped", ROOT, 0, "PASS", None)
 
     def confirmed(form):
-        results, calls = [("hung", ""), (form, "")], []
+        results, calls, expired = [("hung", ""), (form, "")], [], []
 
         def gate(module, root, timeout=GATE_TIMEOUT, forked=None, expiring=None):
             calls.append(timeout)
-            return results.pop(0)
+            got = results.pop(0) if results else ("hung", "")
+            if got[0].startswith("hung") and expiring is not None:
+                expired.append(os.getpid())
+                expiring(expired[-1])
+            return got
         with _patched(this, "_gate", gate):
             outcome = _vector_outcome(this, vector, "scratch-mutant")[0]
         verdicts = _mutation_verdicts([("scratch-mutant", vector[0], {vector[0]: outcome})], [vector[0]])[:2]
-        return outcome, verdicts, calls
+        return outcome, verdicts, calls, len(expired)
     with _patched(this, "_reap_within", reaping), _patched(this, "GATE_TIMEOUT", WITNESS_TIMEOUT):
         hung = _vector_outcome(types.SimpleNamespace(run=lambda root: time.sleep(HANG_SECONDS)), vector,
                                "scratch-mutant")
@@ -3993,8 +4044,9 @@ def _unreaped_hang_uncredited():
     confirm = dict((form, confirmed(form)) for form in ("unreaped (scripted)", "hung; unreaped (scripted)"))
     ok = (hung[0] is None and str(hung[1][0]).startswith("hung; unreaped (") and returned[0] is None
           and str(returned[1][0]).startswith("unreaped (") and caught is None
-          and all(result == (None, (None, None), [GATE_TIMEOUT, BLOCK_CONFIRM])
-                  for result in confirm.values()))
+          and all(confirm[form] == (None, (None, None), [GATE_TIMEOUT, BLOCK_CONFIRM],
+                                    1 if form.startswith("hung") else 0)
+                  for form in confirm))
     return ok, dict(hung=hung, returned=returned, caught=caught, confirm=confirm)
 
 
