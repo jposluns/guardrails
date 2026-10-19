@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T90)
+  check_opf_record.py --self-test                    the fixture suite (T1-T92)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
                                                      through an assertion (_discriminate)
 
@@ -397,8 +397,8 @@ Each case runs on its own copy of that template; the root is removed in a finall
       reserves derive the same numbers; the first reserves through the production claim-and-reserve
       path, and the second is refused at the held revalidation with no reservation of its own, no
       transaction and no operand published; re-planned, it derives the next numbers, both
-      reservations standing disjoint (flips: the derivation flip of T79; a reservation step with no
-      fresh scan and no stale-plan comparison)
+      reservations standing disjoint (flips: the derivation flip of T79; a reservation step that passes
+      the seam no planned claims to compare)
   T81 the homes-2 high-water reads every journal kind's reservations, the homes enumerated from
       JOURNAL_KINDS: an import-kind reservation of BI-1 and WL-1 moves the next create to BI-2 and
       WL-2, which records, exit 0, the final doctor reading that reservation too, and a malformed
@@ -517,6 +517,14 @@ Each case runs on its own copy of that template; the root is removed in a finall
       under the cap the same create records, re-spells the legacy index, and stays doctor-VALID
       (flip: the size guard removed, so the over-cap index is published and the byte comparison
       turns red)
+  T91 five runs each reserving one BI id through the reservation seam alone (no planner), each under
+      its own acquired and released operation capability, claim the counter's base + 1 to base + 5:
+      the seam derives every claim from counters.toml and every earlier reservation (flip: the
+      seam's reservation scan returning nothing, so every run reserves the same number)
+  T92 concurrent runs never share a number: forked processes released together each take the
+      operation capability (retrying while another holds it) and reserve one BI id, claiming exactly
+      base + 1 to base + their count; two threads sharing one held capability either reserve or are
+      refused as the capability being used, and no two reservations share a number (flip: T91's)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), or, when no assertion fails, a
@@ -3162,23 +3170,24 @@ def flip_t22_validator():
 
 
 # One flip per reservation-entry branch the unreadable and wrong-type cases of T22 and T81 test, each
-# disabling that branch alone.
+# disabling that branch alone. The reader is the reservation seam's own (_opf_journal), which both the
+# planner's scan and the seam's derivation under the held capability call, so a flip there reaches both.
 
 @contextlib.contextmanager
 def flip_unreadable_reservation_skipped():
     """The reservation reader's read-failure handler turned into a skip for an OS-level error: an entry
     whose open fails (an OSError) reads as holding no reservation. A read failure the journal layer
     reports (a JournalError, such as a non-regular entry) still refuses."""
-    real = record._read_reservation
+    real = record._opf_journal._read_reservation
 
     def skipping(afd, kind, entry):
         try:
             return real(afd, kind, entry)
-        except record.RecordError as exc:
+        except journal.JournalError as exc:
             if str(exc).startswith("cannot read the id reservation ") and isinstance(exc.__context__, OSError):
                 return {}
             raise
-    with patch.object(record, "_read_reservation", skipping):
+    with patch.object(record._opf_journal, "_read_reservation", skipping):
         yield
 
 
@@ -3187,7 +3196,8 @@ def flip_string_claims_admitted():
     """The reservation claims check without its type test for a string: a claims value that is a decimal
     string is checked as the integer it spells, so the reader no longer refuses it as malformed, and the
     scan's high-water comparison of that string with an integer crashes (the injection its declared
-    backstop is bound to, recorded where it leaves _kind_reservation_high; T22 and T81 both reach it)."""
+    backstop is bound to, recorded where it leaves _opf_journal._kind_reservation_high; T22 and T81
+    both reach it)."""
     real = record._opf_journal._check_claims
 
     def lenient(kind, claims):
@@ -3196,7 +3206,7 @@ def flip_string_claims_admitted():
                           for ns, n in claims.items())
         return real(kind, claims)
     with patch.object(record._opf_journal, "_check_claims", lenient), \
-            _crash_point("t22-t81-string-claims", record, "_kind_reservation_high",
+            _crash_point("t22-t81-string-claims", record._opf_journal, "_kind_reservation_high",
                          TypeError("'>' not supported between instances of 'str' and 'int'")):
         yield
 
@@ -6732,9 +6742,10 @@ def t79_kill_after_reserve(fx):
 
 
 def flip_t79():
-    """A derivation that ignores the reservation scan: an orphaned reservation gets its numbers
-    issued again."""
-    return patch.object(record, "_reservation_high", lambda ctx: {})
+    """A derivation that ignores the reservation scan, in the planner and in the reservation seam
+    alike (both read _opf_journal.reservation_high): an orphaned reservation gets its numbers issued
+    again."""
+    return patch.object(record._opf_journal, "reservation_high", lambda root_fd, exclude=None: {})
 
 
 def flip_t79_doctor():
@@ -6807,10 +6818,12 @@ def t80_two_runs_never_same_id(fx):
 
 
 def flip_t80_no_recheck():
-    """A held reservation step with no fresh scan and no stale-plan comparison: the planned claims are
-    reserved as they stand, so a reservation landing after planning is never noticed."""
+    """A held reservation step with no stale-plan comparison: the seam is asked for the run's demand
+    without the planned claims as `expected`, so a reservation landing after planning is never noticed
+    and the stale plan's ids go out under another run's numbers."""
     def no_recheck(ctx, plan, cap, run_id):
-        record._opf_journal.reserve_allocation(cap, "record", run_id, ctx.claims)
+        record._opf_journal.reserve_allocation(cap, "record", run_id,
+                                               {ns: ctx.demand.count(ns) for ns in ctx.demand})
     return patch.object(record, "_reserve_claim", no_recheck)
 
 
@@ -6892,9 +6905,12 @@ def t81_cross_kind_reservations(fx):
 
 
 def flip_t81():
-    """The reviewed head's single hard-coded home: only the record kind's reservations are read."""
-    return patch.object(record, "_reservation_high",
-                        lambda ctx: record._kind_reservation_high(ctx, "record", record._ALLOCATIONS_REL))
+    """The reviewed head's single hard-coded home: only the record kind's reservations are read, by the
+    planner and by the reservation seam alike."""
+    def record_home_only(root_fd, exclude=None):
+        skip = exclude[1] + ".toml" if exclude is not None and exclude[0] == "record" else None
+        return record._opf_journal._kind_reservation_high(root_fd, "record", record._ALLOCATIONS_REL, skip)
+    return patch.object(record._opf_journal, "reservation_high", record_home_only)
 
 
 def flip_t81_doctor():
@@ -7135,14 +7151,16 @@ def _t85_leg(fx, kind, shape):
                 refused_untouched(env, root, CREATE, "cannot list the {} allocations home {} ([Errno {}] "
                                   "synthetic unlistable allocations home".format(kind, rel, errno.EIO))
         elif shape == "underivable":
-            real = record._allocations_rel
+            # The derivation the scan reads is the reservation seam's own (_opf_journal), which the
+            # planner's scan and the seam's derivation under the held capability both call.
+            real = record._opf_journal._allocations_rel
             error = KeyError if kind == "import" else ValueError
 
             def underivable(k):
                 if k == kind:
                     raise error("synthetic underivable {} home".format(kind))
                 return real(k)
-            with patch.object(record, "_allocations_rel", underivable):
+            with patch.object(record._opf_journal, "_allocations_rel", underivable):
                 refused_untouched(env, root, CREATE, "the journal kind {!r} has no reservation home this "
                                   "build can derive (".format(kind))
         else:
@@ -7157,8 +7175,10 @@ def _t85(kind, shape):
 
 
 # The reservation scan's four broken-home handlers, each with its own flip that turns that handler alone
-# into `return {}`: in _kind_reservation_high, the walk to the home's parent (_journal._open_parent), the
-# home's own no-follow open, and its listing; in _reservation_high, the derivation of a kind's home (two
+# into `return {}`, in the reservation seam's own scan (_opf_journal), which the planner and the seam's
+# derivation under the held capability both call: in _kind_reservation_high, the walk to the home's parent
+# (_journal._open_parent), the home's own no-follow open, and its listing; in reservation_high, the
+# derivation of a kind's home (two
 # flips, one per underivable leg, because only the record kind's leg then crashes past the scan, so only
 # its flip expects that crash, _INTENDED_BACKSTOPS). A
 # wrapper returns {} exactly where its handler raises, which is where the handler would have returned,
@@ -7168,7 +7188,7 @@ T85_DERIVE_REFUSAL = "has no reservation home this build can derive"
 
 
 def _t85_home_handler(exc):
-    """The _kind_reservation_high handler that raised the RecordError `exc`: "open-parent" when the error it
+    """The _kind_reservation_high handler that raised the JournalError `exc`: "open-parent" when the error it
     handled was raised inside _journal._open_parent, "open" for the home's own open, "listing", or None
     for any other refusal."""
     message = str(exc)
@@ -7187,16 +7207,16 @@ def _t85_home_handler(exc):
 @contextlib.contextmanager
 def _t85_home_handler_returns_empty(handler):
     """_kind_reservation_high with its `handler` (as _t85_home_handler names it) turned into return {}."""
-    kind_high = record._kind_reservation_high
+    kind_high = record._opf_journal._kind_reservation_high
 
-    def returning_empty(ctx, kind, home):
+    def returning_empty(root_fd, kind, home, skip=None):
         try:
-            return kind_high(ctx, kind, home)
-        except record.RecordError as exc:
+            return kind_high(root_fd, kind, home, skip)
+        except journal.JournalError as exc:
             if _t85_home_handler(exc) == handler:
                 return {}
             raise
-    with patch.object(record, "_kind_reservation_high", returning_empty):
+    with patch.object(record._opf_journal, "_kind_reservation_high", returning_empty):
         yield
 
 
@@ -7221,19 +7241,19 @@ def flip_t85_listing():
 
 @contextlib.contextmanager
 def flip_t85_derive():
-    """The derivation handler of _reservation_high turned into return {}: a kind whose home cannot be
+    """The derivation handler of reservation_high turned into return {}: a kind whose home cannot be
     derived ends the scan with no reservations, every kind's included (the import kind's underivable
     leg, which then records)."""
-    high = record._reservation_high
+    high = record._opf_journal.reservation_high
 
-    def returning_empty(ctx):
+    def returning_empty(root_fd, exclude=None):
         try:
-            return high(ctx)
-        except record.RecordError as exc:
+            return high(root_fd, exclude)
+        except journal.JournalError as exc:
             if T85_DERIVE_REFUSAL in str(exc):
                 return {}
             raise
-    with patch.object(record, "_reservation_high", returning_empty):
+    with patch.object(record._opf_journal, "reservation_high", returning_empty):
         yield
 
 
@@ -7248,6 +7268,158 @@ def flip_t85_derive_record():
             _crash_point("t85-record-underivable", record, "_read_reservation",
                          ValueError("synthetic underivable record home")):
         yield
+
+
+# --- T91, T92: the seam's own next-ID derivation (spec 8.2) ---------------------------------------------
+
+def _seam_reservation_bi(root, run_id):
+    """The BI claim of the record reservation `run_id` on the store `root`, whose bytes must be the
+    canonical payload its own content declares."""
+    rel = record._opf_store.allocation_record("record", run_id)
+    payload = model(root, rel)
+    assert read(root, rel) == record._opf_journal.reservation_payload(
+        "record", run_id, payload["operation_id"], payload["claims"]), ("canonical reservation", rel)
+    return payload["claims"]["BI"]
+
+
+def t91_seam_five_sequential_distinct(fx):
+    """Five runs each reserving one BI id through the reservation seam alone (no planner), each under
+    an operation capability of its own acquired and released in turn, never share a number: the seam
+    derives every claim under the held capability from counters.toml and every earlier reservation,
+    so the runs claim the counter's base + 1 to base + 5 in order, five reservations standing."""
+    root = fx.case("t91-homes2-five-runs")
+    with _self_test_homes2_active(root):
+        base = model(root, COUNTERS)["counters"]["BI"]
+        runs = ["record-20260928T00000{}Z-".format(n) + "e" * 16 for n in range(1, 6)]
+        for run_id in runs:
+            cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+            try:
+                record._opf_journal.reserve_allocation(cap, "record", run_id, {"BI": 1})
+            finally:
+                record._opf_oplock.release_operation(cap)
+        claims = [_seam_reservation_bi(root, run_id) for run_id in runs]
+        assert claims == [base + n for n in range(1, 6)], ("T91 five runs claim five distinct numbers", base,
+                                                            claims)
+        assert sorted(os.listdir(Path(root) / record._ALLOCATIONS_REL)) == sorted(r + ".toml" for r in runs), \
+            "T91 five reservations stand"
+
+
+def flip_t91_scan_ignored():
+    """The seam deriving from counters.toml alone (the reservation scan returns nothing): every run
+    reserves the same next number."""
+    return patch.object(record._opf_journal, "reservation_high", lambda root_fd, exclude=None: {})
+
+
+T92_CHILDREN = 6
+# Each child's own bound on retrying a contended acquisition, and the parent's bound on reaping them.
+T92_CHILD_DEADLINE = 60.0
+T92_REAP_DEADLINE = 120.0
+
+
+def _t92_child(root, run_id, go_fd, parent_end):
+    """A forked T92 child: close its inherited copy of the parent's write end of the start pipe, wait
+    for the parent's start byte, take the operation capability (retrying while another child holds it,
+    up to T92_CHILD_DEADLINE), reserve one BI id, release, and exit 0; any failure exits 1. It never
+    returns."""
+    code = 1
+    try:
+        os.close(parent_end)
+        os.read(go_fd, 1)
+        deadline = time.monotonic() + T92_CHILD_DEADLINE
+        while True:
+            try:
+                cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+                break
+            except record._opf_oplock.OpLockError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.01)
+        try:
+            record._opf_journal.reserve_allocation(cap, "record", run_id, {"BI": 1})
+        finally:
+            record._opf_oplock.release_operation(cap)
+        code = 0
+    except BaseException:  # noqa: BLE001  the exit status is the child's only verdict
+        code = 1
+    finally:
+        os._exit(code)
+
+
+def _t92_reap(pids):
+    """The wait status of each of this test's own children, in order, None for one that outlived
+    T92_REAP_DEADLINE; such a child, and only such a child of this test, is killed and reaped."""
+    statuses = {}
+    deadline = time.monotonic() + T92_REAP_DEADLINE
+    while len(statuses) < len(pids) and time.monotonic() < deadline:
+        for pid in pids:
+            if pid not in statuses:
+                waited, status = os.waitpid(pid, os.WNOHANG)
+                if waited == pid:
+                    statuses[pid] = status
+        time.sleep(0.05)
+    for pid in pids:
+        if pid not in statuses:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+    return [statuses.get(pid) for pid in pids]
+
+
+def t92_seam_concurrent_distinct(fx):
+    """Concurrent runs never share a number. T92_CHILDREN forked processes, released together through a
+    pipe, each take the operation capability (retrying while another holds it: the anchor flock is
+    non-blocking, so a contender is refused, never queued) and reserve one BI id through the seam: every
+    child exits 0 and the claims are exactly base + 1 to base + T92_CHILDREN. Then two threads share ONE
+    held capability and each reserve one BI id: each either reserves or is refused as the capability
+    being used, at least one reserves, and no two reservations on the store share a BI number."""
+    root = fx.case("t92-homes2-concurrent")
+    with _self_test_homes2_active(root):
+        base = model(root, COUNTERS)["counters"]["BI"]
+        runs = ["record-20260928T0001{:02d}Z-".format(n) + "f" * 16 for n in range(T92_CHILDREN)]
+        go_read, go_write = os.pipe()
+        pids = []
+        try:
+            for run_id in runs:
+                pid = os.fork()
+                if pid == 0:
+                    _t92_child(root, run_id, go_read, go_write)
+                pids.append(pid)
+            os.write(go_write, b"g" * len(pids))
+        finally:
+            os.close(go_read)
+            os.close(go_write)
+            statuses = _t92_reap(pids)
+        assert all(s is not None and os.WIFEXITED(s) and os.WEXITSTATUS(s) == 0 for s in statuses), \
+            ("T92 every child reserved and exited 0", statuses)
+        claims = sorted(_seam_reservation_bi(root, run_id) for run_id in runs)
+        assert claims == list(range(base + 1, base + 1 + T92_CHILDREN)), \
+            ("T92 concurrent runs claim distinct consecutive numbers", base, claims)
+        threaded = ["record-20260928T0002{:02d}Z-".format(n) + "f" * 16 for n in range(2)]
+        outcomes = [None, None]
+        barrier = threading.Barrier(2)
+
+        def worker(index):
+            barrier.wait(timeout=30)
+            try:
+                record._opf_journal.reserve_allocation(cap, "record", threaded[index], {"BI": 1})
+                outcomes[index] = "reserved"
+            except journal.JournalError as exc:
+                outcomes[index] = str(exc)
+        cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+        try:
+            threads = [threading.Thread(target=worker, args=(index,)) for index in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=60)
+        finally:
+            record._opf_oplock.release_operation(cap)
+        assert not any(thread.is_alive() for thread in threads), "T92 both threads finished"
+        assert "reserved" in outcomes and all(
+            o == "reserved" or "being released or used" in o for o in outcomes), ("T92 thread outcomes", outcomes)
+        standing = [n[:-len(".toml")] for n in os.listdir(Path(root) / record._ALLOCATIONS_REL)]
+        numbers = [_seam_reservation_bi(root, run_id) for run_id in standing]
+        assert len(numbers) == T92_CHILDREN + outcomes.count("reserved") and len(set(numbers)) == len(numbers), \
+            ("T92 no two reservations share a BI number", numbers)
 
 
 # --- T86: the discriminator binds each flip to an assertion, never a backstop or harness fault ---------
@@ -8646,9 +8818,9 @@ _DECLARED_INJECTIONS = {
 # run, so its recovery flip meets it too; the T84 flip restores a lease parse that lets the RecursionError of a
 # deeply nested payload reach the backstop, recorded where it leaves _closed_lease_model; the string-claims
 # flip of T22 and T81 admits a string claims value, and the TypeError the scan's high-water comparison then
-# raises is recorded where it leaves _kind_reservation_high; and the T85 record-kind derivation flip ends the
-# scan empty, so the leg's own ValueError is raised again at the publication boundary's reservation read,
-# recorded where it leaves _read_reservation.
+# raises is recorded where it leaves _opf_journal._kind_reservation_high; and the T85 record-kind
+# derivation flip ends the scan empty, so the leg's own ValueError is raised again at the publication
+# boundary's reservation read, recorded where it leaves _read_reservation.
 _INTENDED_BACKSTOPS = {
     flip_t18_requires: ("t18-requires",),
     flip_t18_together: ("t18-together",),
@@ -8952,6 +9124,8 @@ TESTS = (
                                                                             flip_t89_strict)),
     ("T89-prior-separator-spelling-bounded", t89_bounded_acceptance, flip_t89_any_bytes),
     ("T90-store-read-cap-before-publication", t90_reader_cap, flip_t90_no_cap),
+    ("T91-seam-five-sequential-distinct", t91_seam_five_sequential_distinct, flip_t91_scan_ignored),
+    ("T92-seam-concurrent-distinct", t92_seam_concurrent_distinct, flip_t91_scan_ignored),
 )
 
 

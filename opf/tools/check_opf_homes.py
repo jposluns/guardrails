@@ -2994,7 +2994,19 @@ def boundary_self_test():
                                                  [dict(op="create", path=reservation_rel)],
                                                  lambda _name: b"")) or ""))
     check("reservation-no-caller-path", lambda: list(inspect.signature(
-        home_journal.reserve_allocation).parameters) == ["cap", "kind", "run_id", "claims"])
+        home_journal.reserve_allocation).parameters) == ["cap", "kind", "run_id", "demand", "expected"])
+    # The seam derives the claims (spec 8.2); a caller states only how many ids it takes per counter
+    # key. The demand grammar is the claims key grammar for the reserving kind, each count in
+    # 1..2**63 - 1, each bound tested just inside, at, and just outside it.
+    for bad in (None, {}, [("BI", 1)], {"BI": 0}, {"BI": -1}, {"BI": True}, {"bi": 1}, {"ZZ": 1},
+                {"imported:BI": 1}, {"BI": 2 ** 63}, {"BI": "1"}):
+        check("reservation-demand-refused-{!r}".format(bad), lambda b=bad: journal_refuses(
+            lambda: home_journal._check_demand("record", b)))
+    check("reservation-demand-bounds", lambda: not journal_refuses(
+        lambda: home_journal._check_demand("record", {"BI": 1, "WL": 2 ** 63 - 1})))
+    check("reservation-import-demand-series", lambda: not journal_refuses(
+        lambda: home_journal._check_demand("import", {"imported:BI": 1, "BI": 1}))
+        and journal_refuses(lambda: home_journal._check_demand("import", {"imported:LF": 1})))
     check("reservation-typed-record", lambda: tomllib.loads(home_journal.reservation_payload(
         "record", record_run, "held-operation", {"WL": 12, "BI": 7}).decode()) == {
         "format": "opf.journal.allocation/v1", "kind": "record", "run_id": record_run,
@@ -3028,8 +3040,11 @@ def boundary_self_test():
                                          ("foreign-run", "record", run)):
             check("reservation-identity-" + label, lambda k=bad_kind, r=bad_run: journal_refuses(
                 lambda: home_journal.reserve_allocation(object(), k, r, {"BI": 1})))
-        check("reservation-claims-before-capability", lambda: "claims" in (refusal(
+        check("reservation-demand-before-capability", lambda: "demand" in (refusal(
             lambda: home_journal.reserve_allocation(object(), "record", record_run, {})) or ""))
+        check("reservation-expected-before-capability", lambda: "claims" in (refusal(
+            lambda: home_journal.reserve_allocation(object(), "record", record_run, {"BI": 1},
+                                                    expected={"BI": 0})) or ""))
     check("reservation-capability-required", lambda: journal_refuses(
         lambda: home_journal.reserve_allocation(object(), "record", record_run, {"BI": 1})))
 
@@ -3037,10 +3052,13 @@ def boundary_self_test():
     def held_root(_cap):
         yield 100
 
-    held = SimpleNamespace(op_id="held-operation")
+    held = SimpleNamespace(op_id="held-operation", machine_rel=".working/toml")
     trace = []
     with patch.object(home_journal, "_held_root", held_root), \
-            patch.object(journal, "ensure_journal_dirs") as mkdirs, \
+            patch.object(home_journal, "_derive_claims",
+                         side_effect=lambda *args: (trace.append("derive"), {"BI": 7})[1]) as derive, \
+            patch.object(journal, "ensure_journal_dirs",
+                         side_effect=lambda *args: trace.append("mkdirs")) as mkdirs, \
             patch.object(journal, "_open_parent", return_value=(106, record_run + ".toml")) as parent, \
             patch.object(journal, "_lstat_at",
                          side_effect=lambda *args: trace.append("existence")) as prior, \
@@ -3057,8 +3075,13 @@ def boundary_self_test():
         # The order is judged on the one recorded trace: garbage retired, THEN the final name
         # judged, THEN publication; call arguments alone cannot show it (fix round 1, codex
         # MEDIUM; claude MINOR-1).
-        check("reservation-garbage-removed-first", lambda: trace == ["garbage", "existence", "publish"]
+        check("reservation-garbage-removed-first", lambda: trace[-3:] == ["garbage", "existence", "publish"]
               and garbage.call_args.args == (106, record_run + ".toml", "id reservation"))
+        # The derivation runs first inside the held scope, before any directory is created, so a
+        # refused derivation writes nothing (spec 8.2: one atomic claim under the store's lock).
+        check("reservation-derived-before-writes", lambda: trace == [
+            "derive", "mkdirs", "garbage", "existence", "publish"]
+            and derive.call_args.args == (100, ".working/toml", "record", record_run, {"BI": 7}))
         check("reservation-published-exact-payload", lambda: reserved.call_args.args ==
               (106, record_run + ".toml", reserved_payload, "id reservation") and reserved_payload ==
               home_journal.reservation_payload("record", record_run, "held-operation", {"BI": 7}))
@@ -3076,6 +3099,18 @@ def boundary_self_test():
             check("reservation-existing-idempotent", lambda: home_journal.reserve_allocation(
                 held, "record", record_run, {"BI": 7}) == reserved_payload
                 and reserved.call_count == 1)
+        # A planned caller's `expected` claims that the derivation no longer matches refuse with the
+        # dedicated error, before any directory is created or anything published.
+        made, published = mkdirs.call_count, reserved.call_count
+
+        def mismatch():
+            try:
+                home_journal.reserve_allocation(held, "record", record_run, {"BI": 7}, expected={"BI": 8})
+            except home_journal.ReservationDerivationChanged as exc:
+                return str(exc)
+            return None
+        check("reservation-expected-mismatch-refused", lambda: "changed from the planned claims" in (
+            mismatch() or "") and mkdirs.call_count == made and reserved.call_count == published)
 
     check("evidence-homes2-roster", lambda: "C-EVIDENCE-ENUM" not in doctor.REQUIRED_CHECKS
           and doctor.required_checks(2).index("C-EVIDENCE-ENUM") == doctor.REQUIRED_CHECKS.index("C-ARCHIVE-ENUM") + 1
@@ -3910,10 +3945,19 @@ def _self_test_vectors():
             return str(exc)
         return None
 
+    def counters_text(table):
+        # A counters.toml the seam reads (spec 8.2): the schema marker and one quoted key per counter.
+        return "schema = 1\n\n[counters]\n" + "".join(
+            "\"{}\" = {}\n".format(key, value) for key, value in table.items())
+
     with tempfile.TemporaryDirectory(prefix="opf-homes-") as tmp:
         root = Path(tmp) / "store"
         machine_dir = root / ".working" / "toml"
         machine_dir.mkdir(parents=True)
+        # The seam derives each claim above the counters.toml high-water (spec 8.2), so the fixture
+        # carries one; at zero, a demand of n claims exactly n while no other reservation stands.
+        (machine_dir / "counters.toml").write_text(
+            counters_text({"BI": 0, "WL": 0, "imported:BI": 0}), encoding="utf-8")
         anchor_file = root / "anchor"
         anchor_file.write_bytes(b"")
         cap = oplock.OpCapability.__new__(oplock.OpCapability)
@@ -4023,18 +4067,26 @@ def _self_test_vectors():
             torn = target.parent / oplock._staging_name(run2 + ".toml")
             torn.write_bytes(b"torn")
             payload2 = home_journal.reserve_allocation(cap, "record", run2, {"BI": 9})
+            # run2 derives above the record_run reservation (BI = 7): 7 + 9.
             check("reservation-crash-before-link-completes", lambda: not torn.exists()
-                  and (target.parent / (run2 + ".toml")).read_bytes() == payload2)
+                  and (target.parent / (run2 + ".toml")).read_bytes() == payload2
+                  and payload2 == home_journal.reservation_payload(
+                      "record", run2, "held-operation", {"BI": 16}))
+            # Each squat below binds the requesting run's OWN name, which the derivation leaves out
+            # of its scan, so the refusal is the read-back's; the squat is removed after its check,
+            # since any other run's scan refuses a non-reservation entry.
             run3 = "record-20260917T120002Z-0123456789abcdef"
             (target.parent / (run3 + ".toml")).mkdir()
             check("reservation-occupied-refused", lambda: "non-regular entry" in (reservation_refusal(
                 lambda: home_journal.reserve_allocation(cap, "record", run3, {"BI": 1})) or ""))
+            (target.parent / (run3 + ".toml")).rmdir()
             # A symlink squat cannot be read back through the O_NOFOLLOW non-blocking read
             # and refuses naming the read-back, never implying held numbers.
             run4 = "record-20260917T120004Z-0123456789abcdef"
             os.symlink("elsewhere", target.parent / (run4 + ".toml"))
             check("reservation-symlink-refused", lambda: "cannot read back" in (reservation_refusal(
                 lambda: home_journal.reserve_allocation(cap, "record", run4, {"BI": 1})) or ""))
+            os.unlink(target.parent / (run4 + ".toml"))
             # A final name appearing only between the existence check and the exclusive link
             # (unreachable under the held capability) refuses with the reservation-specific
             # message, never the oplock anchor-recovery advice (fix round 1, claude MINOR-4).
@@ -4139,6 +4191,7 @@ def _self_test_vectors():
                 os.waitpid(fifo_child, 0)
             check("reservation-fifo-refused-bounded", lambda s=fifo_status: s is not None
                   and os.WIFEXITED(s) and os.WEXITSTATUS(s) == 7)
+            os.unlink(target.parent / (run5 + ".toml"))
             # Fix round 2 (codex MEDIUM-1), reworked in fix round 3 (both reviews, MAJOR):
             # _project's EXISTING-projection branch restores the same ancestor and
             # containing-directory durability a fresh publication gets, and it retires staging
@@ -4215,6 +4268,250 @@ def _self_test_vectors():
                     cap, "record", "record-20260917T120003Z-0123456789abcdef", {"BI": 1})) is not None)
         finally:
             os.close(cap._anchor_fd)
+
+    # The spec 8.2 next-ID rule inside the seam: every call derives its claims under the held
+    # capability from counters.toml and every other reservation of every journal kind, so runs that
+    # each ask for one id never share it, and an input the derivation cannot read and validate
+    # refuses with nothing written (no reservation and no directory). Each case runs on a store of
+    # its own (derivation_store), with a fixture capability built as above.
+    import contextlib
+    import errno
+
+    @contextlib.contextmanager
+    def derivation_store(table, op_id="derive-operation"):
+        with tempfile.TemporaryDirectory(prefix="opf-homes-derive-") as derive_tmp:
+            store_root = Path(derive_tmp) / "store"
+            machine = store_root / ".working" / "toml"
+            machine.mkdir(parents=True)
+            if table is not None:
+                (machine / "counters.toml").write_text(counters_text(table), encoding="utf-8")
+            (store_root / "anchor").write_bytes(b"")
+            held = oplock.OpCapability.__new__(oplock.OpCapability)
+            held._claim = threading.Lock()
+            held._claimant = None
+            held._released = False
+            held._acquirer_pid = os.getpid()
+            held._acquirer_pid_start = native_journal._pid_start(os.getpid())
+            held._anchor_fd = os.open(str(store_root / "anchor"), os.O_RDONLY)
+            try:
+                anchor_ident = os.fstat(held._anchor_fd)
+                held._anchor_ident = (anchor_ident.st_dev, anchor_ident.st_ino)
+                machine_ident = os.stat(machine)
+                held._machine_ident = (machine_ident.st_dev, machine_ident.st_ino)
+                held.store_root = store_root
+                held.machine_rel = ".working/toml"
+                held.op_id = op_id
+                held.holder = "fixture"
+                yield store_root, held
+            finally:
+                os.close(held._anchor_fd)
+
+    def derive_run(kind, number):
+        return "{}-20260918T{:06d}Z-0123456789abcdef".format(store._HOME_RUN_PREFIXES[kind], number)
+
+    def derived(held, kind, run_id, demand, claims):
+        # The call publishes exactly the canonical reservation of `claims` (and nothing else is judged).
+        return home_journal.reserve_allocation(held, kind, run_id, demand) == \
+            home_journal.reservation_payload(kind, run_id, held.op_id, claims)
+
+    def set_counters(store_root, table):
+        (store_root / ".working" / "toml" / "counters.toml").write_text(counters_text(table), encoding="utf-8")
+
+    def refused_unwritten(store_root, thunk, *needles):
+        # A refusal naming every needle, with no journals directory created at all.
+        message = reservation_refusal(thunk)
+        return (message is not None and all(needle in message for needle in needles)
+                and not (store_root / ".working" / "journals").exists())
+
+    def five_sequential():
+        with derivation_store({"BI": 0, "WL": 0}) as (derive_root, held):
+            runs = [derive_run("record", n) for n in range(1, 6)]
+            ok = all(derived(held, "record", r, {"BI": 1}, {"BI": n}) for n, r in enumerate(runs, 1))
+            home = derive_root / ".working" / "journals" / "record" / "allocations"
+            return ok and sorted(os.listdir(home)) == sorted(r + ".toml" for r in runs)
+    check("reservation-five-sequential-distinct", five_sequential)
+
+    def counter_high_water():
+        with derivation_store({"BI": 40, "WL": 0}) as (_derive_root, held):
+            return derived(held, "record", derive_run("record", 1), {"BI": 1}, {"BI": 41})
+    check("reservation-counter-high-water-respected", counter_high_water)
+
+    def counter_versus_reservations():
+        with derivation_store({"BI": 3}) as (derive_root, held):
+            planted = derived(held, "record", derive_run("record", 1), {"BI": 7}, {"BI": 10})
+            above_reservation = derived(held, "record", derive_run("record", 2), {"BI": 1}, {"BI": 11})
+            set_counters(derive_root, {"BI": 20})
+            above_counter = derived(held, "record", derive_run("record", 3), {"BI": 1}, {"BI": 21})
+            return planted and above_reservation and above_counter
+    check("reservation-max-counter-vs-reservations", counter_versus_reservations)
+
+    def cross_kind():
+        with derivation_store({"BI": 0}) as (derive_root, held):
+            imported_run = derive_run("import", 1)
+            planted = derived(held, "import", imported_run, {"BI": 10}, {"BI": 10})
+            before = (derive_root / store.allocation_record("import", imported_run)).read_bytes()
+            above = derived(held, "record", derive_run("record", 2), {"BI": 1}, {"BI": 11})
+            return planted and above and (
+                derive_root / store.allocation_record("import", imported_run)).read_bytes() == before
+    check("reservation-cross-kind-scan", cross_kind)
+
+    def series_independent():
+        with derivation_store({"BI": 0, "imported:BI": 0}) as (derive_root, held):
+            planted = derived(held, "import", derive_run("import", 1), {"imported:BI": 50},
+                              {"imported:BI": 50})
+            clean = derived(held, "record", derive_run("record", 2), {"BI": 1}, {"BI": 1})
+            set_counters(derive_root, {"BI": 0, "imported:BI": 5})
+            imported = derived(held, "import", derive_run("import", 3), {"imported:BI": 1},
+                               {"imported:BI": 51})
+            return planted and clean and imported
+    check("reservation-series-independent", series_independent)
+
+    def foreign_garbage():
+        with derivation_store({"BI": 0}) as (derive_root, held):
+            home = derive_root / ".working" / "journals" / "record" / "allocations"
+            home.mkdir(parents=True)
+            leftover = home / oplock._staging_name(derive_run("record", 9) + ".toml")
+            leftover.write_bytes(b"torn")
+            return derived(held, "record", derive_run("record", 1), {"BI": 1}, {"BI": 1}) \
+                and leftover.read_bytes() == b"torn"
+    check("reservation-foreign-garbage-skipped", foreign_garbage)
+
+    foreign_run = derive_run("import", 7)
+    foreign_name = foreign_run + ".toml"
+    foreign_canonical = home_journal.reservation_payload("import", foreign_run, "op", {"BI": 1})
+
+    @contextlib.contextmanager
+    def unreadable_foreign():
+        real_open = os.open
+
+        def opening(path, flags, *args, **kwargs):
+            if path == foreign_name and kwargs.get("dir_fd") is not None:
+                raise PermissionError(errno.EACCES, "synthetic unreadable reservation", path)
+            return real_open(path, flags, *args, **kwargs)
+        with _patch.object(os, "open", opening), \
+                _patch.object(os, "supports_dir_fd", set(os.supports_dir_fd) | {opening}):
+            yield
+
+    # Each bad entry stands in the import kind's home, so the refused record run must leave its own
+    # home uncreated: nothing written, not even a directory.
+    for label, name, plant, needle in (
+            ("nonregular", foreign_name, lambda p: p.mkdir(), "is not a regular file"),
+            ("malformed", foreign_name, lambda p: p.write_bytes(b"not toml ["), "is malformed"),
+            ("misnamed", "junk.txt", lambda p: p.write_bytes(b"x"), "is not an id reservation"),
+            ("conflicting", foreign_name, lambda p: p.write_bytes(home_journal.reservation_payload(
+                "ingest", foreign_run, "op", {"BI": 1})), "conflicts with the exact canonical reservation"),
+            ("unreadable", foreign_name, lambda p: p.write_bytes(foreign_canonical),
+             "synthetic unreadable reservation")):
+        def foreign_refused(name=name, plant=plant, needle=needle, label=label):
+            with derivation_store({"BI": 0}) as (derive_root, held):
+                home = derive_root / ".working" / "journals" / "import" / "allocations"
+                home.mkdir(parents=True)
+                plant(home / name)
+                with unreadable_foreign() if label == "unreadable" else contextlib.nullcontext():
+                    message = reservation_refusal(lambda: home_journal.reserve_allocation(
+                        held, "record", derive_run("record", 1), {"BI": 1}))
+                return (message is not None and needle in message
+                        and not (derive_root / ".working" / "journals" / "record").exists())
+        check("reservation-foreign-{}-refused".format(label), foreign_refused)
+
+    # Every counters.toml the derivation cannot read and validate refuses, naming the file, with
+    # nothing written; an absent counter is never read as 0.
+    def plant_symlink(machine):
+        (machine / "counters-real.toml").write_text(counters_text({"BI": 0}), encoding="utf-8")
+        os.symlink("counters-real.toml", machine / "counters.toml")
+
+    def plant_hardlink(machine):
+        (machine / "counters.toml").write_text(counters_text({"BI": 0}), encoding="utf-8")
+        os.link(machine / "counters.toml", machine / "counters-second.toml")
+
+    def plant_bytes(data):
+        return lambda machine: (machine / "counters.toml").write_bytes(data)
+
+    oversize = _patch.object(native_journal, "_MAX_PRODUCT_READ_BYTES", 8)
+    for label, plant, needle, context in (
+            ("absent", lambda machine: None, "[Errno {}]".format(errno.ENOENT), None),
+            ("symlink", plant_symlink, "cannot read", None),
+            ("hardlink", plant_hardlink, "hard links", None),
+            ("not-toml", plant_bytes(b"not toml ["), "is malformed", None),
+            ("not-utf8", plant_bytes(b"\xff\xfe"), "is malformed", None),
+            ("no-schema", plant_bytes(b"[counters]\nBI = 0\n"), "schema marker", None),
+            ("unknown-key", plant_bytes(b"schema = 1\nextra = 1\n\n[counters]\nBI = 0\n"),
+             "unknown top-level key", None),
+            ("key-absent", plant_bytes(b"schema = 1\n\n[counters]\nWL = 0\n"), "no high-water for BI", None),
+            ("bool", plant_bytes(b"schema = 1\n\n[counters]\nBI = true\n"), "non-negative integer", None),
+            ("negative", plant_bytes(b"schema = 1\n\n[counters]\nBI = -1\n"), "non-negative integer", None),
+            ("non-table", plant_bytes(b"schema = 1\ncounters = 1\n"), "is not a table", None),
+            ("oversize", plant_bytes(counters_text({"BI": 0}).encode()), "read cap", oversize)):
+        def counters_refused(plant=plant, needle=needle, context=context):
+            with derivation_store(None) as (derive_root, held):
+                plant(derive_root / ".working" / "toml")
+                with context if context is not None else contextlib.nullcontext():
+                    return refused_unwritten(derive_root, lambda: home_journal.reserve_allocation(
+                        held, "record", derive_run("record", 1), {"BI": 1}), "counters.toml", needle)
+        check("reservation-counters-{}-refused".format(label), counters_refused)
+
+    # A FIFO at counters.toml refuses AT ONCE (the read opens non-blocking), judged in a BOUNDED child
+    # that exits 7 only on that refusal with nothing written; a blocking read turns this red at the
+    # deadline instead of hanging the suite.
+    with derivation_store(None) as (derive_root, held):
+        os.mkfifo(derive_root / ".working" / "toml" / "counters.toml")
+        counters_child = os.fork()
+        if counters_child == 0:
+            code = 1
+            try:
+                held._acquirer_pid = os.getpid()
+                held._acquirer_pid_start = native_journal._pid_start(os.getpid())
+                if refused_unwritten(derive_root, lambda: home_journal.reserve_allocation(
+                        held, "record", derive_run("record", 1), {"BI": 1}),
+                        "counters.toml", "not a regular file"):
+                    code = 7
+            except BaseException:
+                code = 1
+            finally:
+                os._exit(code)
+        counters_deadline = time.monotonic() + 30.0
+        counters_status = None
+        while time.monotonic() < counters_deadline:
+            waited, raw_status = os.waitpid(counters_child, os.WNOHANG)
+            if waited == counters_child:
+                counters_status = raw_status
+                break
+            time.sleep(0.05)
+        if counters_status is None:
+            os.kill(counters_child, signal.SIGKILL)
+            os.waitpid(counters_child, 0)
+        check("reservation-counters-fifo-refused", lambda s=counters_status: s is not None
+              and os.WIFEXITED(s) and os.WEXITSTATUS(s) == 7)
+
+    # The exhaustion boundary (2**63 - 1, the largest value a reservation carries): just inside, at,
+    # and just outside it, plus a counter already at and above it.
+    top = 2 ** 63 - 1
+    for label, counter, demand, claim in (("inside", top - 2, 1, top - 1), ("at", top - 2, 2, top),
+                                          ("outside", top - 2, 3, None), ("full", top, 1, None),
+                                          ("above-range", top + 1, 1, None)):
+        def exhaustion(counter=counter, demand=demand, claim=claim):
+            with derivation_store({"BI": counter}) as (derive_root, held):
+                run_id = derive_run("record", 1)
+                if claim is not None:
+                    return derived(held, "record", run_id, {"BI": demand}, {"BI": claim})
+                return refused_unwritten(derive_root, lambda: home_journal.reserve_allocation(
+                    held, "record", run_id, {"BI": demand}), "range is used up")
+        check("reservation-exhaustion-" + label, exhaustion)
+
+    # A repeat under the same capability derives again: once counters.toml has advanced, the derived
+    # claims differ from the published ones, so the repeat is refused as different bytes and the
+    # reservation stands unchanged.
+    def repeat_after_advance():
+        with derivation_store({"BI": 0}) as (derive_root, held):
+            run_id = derive_run("record", 1)
+            first = derived(held, "record", run_id, {"BI": 1}, {"BI": 1})
+            published = (derive_root / store.allocation_record("record", run_id)).read_bytes()
+            set_counters(derive_root, {"BI": 5})
+            message = reservation_refusal(lambda: home_journal.reserve_allocation(
+                held, "record", run_id, {"BI": 1}))
+            return first and message is not None and "already exists with different content" in message \
+                and (derive_root / store.allocation_record("record", run_id)).read_bytes() == published
+    check("reservation-repeat-after-counter-advance-refused", repeat_after_advance)
 
     # PR-3 fix round 1 (codex MAJOR), reworked in fix round 2 (codex MEDIUM-2): ensure_journal_dirs
     # makes each component entry durable on EVERY call. mkdir and fsync are recorded on ONE shared
