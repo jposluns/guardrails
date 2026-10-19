@@ -110,7 +110,9 @@ run_gate "opf-upgrade" python3 -I -B opf/tools/check_opf_upgrade.py
 run_gate "opf-record-selftest" python3 -I -B opf/tools/check_opf_record.py --self-test --red-on-revert
 run_gate "opf-adopt-selftest" python3 -I -B opf/tools/_opf_adopt.py --self-test
 run_gate "opf-adopt-apply-selftest" python3 -I -B opf/tools/_opf_adopt_apply.py --self-test
+run_gate "opf-adopt-state-selftest" python3 -I -B opf/tools/_opf_adopt_state.py --self-test
 run_gate "opf-adopt-hook-selftest" python3 -I -B opf/tools/_opf_adopt_hook.py --self-test
+run_gate "opf-adopt-complete-selftest" python3 -I -B opf/tools/_opf_adopt_complete.py --self-test
 run_gate "opf-import-batch-selftest" python3 -I -B opf/tools/_opf_import_batch.py --self-test
 run_gate "opf-pack-manifest-selftest" python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
 run_gate "opf-adopt-observe-selftest" python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
@@ -276,6 +278,12 @@ run_gate "ci-parity"          python3 -I -B tools/check_ci_parity.py
 # and an independently maintained role catalog, failing on membership or write-role drift.
 run_gate "git-option-table-selftest" python3 -I -B tools/check_git_option_table.py --self-test
 run_gate "git-option-table" python3 -I -B tools/check_git_option_table.py
+
+# Dangerous-API AST lint (plan item 6): unsafe deserialization, disabled TLS verification, and
+# shell or code execution sinks in the repo's own Python, with a reviewed in-gate allowlist; an
+# unreadable or unparseable file is cannot-evaluate.
+run_gate "dangerous-api-selftest" python3 -I -B tools/check_dangerous_api.py --self-test
+run_gate "dangerous-api" python3 -I -B tools/check_dangerous_api.py
 
 # QA-suite foundation: the discovery-seam / result-contract adapter, the trivial reference audit that
 # proves the harness end to end, and the internal-name leak gate. Their self-tests are gating (a broken

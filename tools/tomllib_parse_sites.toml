@@ -30,9 +30,89 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/_opf_adopt_apply.py"
+function = "_finish_ops_self_test.bound_digests.doc"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_init_store_git_checks"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_init_store_self_test"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
 function = "_self_test_checks"
 form = "call"
-count = 3
+count = 14
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_self_test_checks._sheet"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_self_test_checks._sheet.<genexpr>"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_self_test_checks.aliased_view"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_self_test_checks.bound"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_self_test_checks.smuggling_emit"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_self_test_checks.unbound"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_self_test_checks.with_manifest"
+form = "call"
+count = 1
 class = "EXEMPT"
 reason = "test-code"
 
@@ -44,6 +124,102 @@ form = "call"
 count = 2
 class = "EXEMPT"
 reason = "self-emitted-bytes"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "_entries"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "_fixture"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "_parity_sweep"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "_rereceipt"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "_reseal_inventory"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "_retoml"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "_toml_file"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "_unclaim"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "_walker_stops"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "self_test._discovery"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "self_test._refused"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "self_test._tamper_seal"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
 
 [[site]]
 path = "opf/tools/_opf_adopt_discover.py"
@@ -264,6 +440,30 @@ count = 1
 class = "EXEMPT"
 reason = "test-code"
 
+[[site]]
+path = "opf/tools/_opf_adopt_state.py"
+function = "_self_test_checks"
+form = "call"
+count = 9
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_state.py"
+function = "_self_test_checks.freeze"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_state.py"
+function = "_self_test_checks.plan_digest_of"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
 # the round-trip reparse of the bytes emit_checked itself just emitted; the cancellation and
 # decode-error clauses are hostile-tomllib seams the scan cannot read, and the ordered BaseException
 # backstop converts everything else to EmitError
@@ -391,6 +591,14 @@ path = "opf/tools/_opf_init_operation.py"
 function = "_run_self_test_isolated"
 form = "call"
 count = 3
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_init_operation.py"
+function = "_seam_tests"
+form = "call"
+count = 1
 class = "EXEMPT"
 reason = "test-code"
 
@@ -817,6 +1025,14 @@ reason = "test-code"
 [[site]]
 path = "opf/tools/opf.py"
 function = "_cli_self_test._adopt_leg"
+form = "call"
+count = 4
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/opf.py"
+function = "_cli_self_test._adopt_leg.<genexpr>"
 form = "call"
 count = 1
 class = "EXEMPT"
