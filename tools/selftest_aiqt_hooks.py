@@ -13729,14 +13729,23 @@ def _main_isolated(monitor):
         gexpect("(gw-dbt-nv-otherverb) control: a git subcommand outside the --no-verify set keeps its "
                 "option behind the '#'",
                 "(true #'\n)\ngit status -s", "allow")
-        # The option test needs a character after the '-' that does not end the token in bash, so a lone
-        # '-' (git am's stdin operand) allows when a shell operator ends it just as when a blank does (the
-        # blank-ended 'git am -' control allowed before this rule too). A character bash does not split
+        # The option test needs a character after an unquoted '-' that does not end the token in bash, so
+        # a lone '-' (git am's stdin operand) allows when a shell operator ends it just as when a blank or
+        # the end of the command does. The end, space, tab and newline controls allowed before this rule
+        # too; each fails if its blank is dropped from the ending set. A character bash does not split
         # on, a carriage return included, stays in the token and counts; a process substitution glued to
-        # the '-' forms the dash-prefixed word '-/dev/fd/N' and counts too (a guard: it denied before this
-        # rule, and a rule that excluded '<' and '>' alone would let it allow).
-        gexpect("(gw-dbt-nv-lone) control: a lone '-' stdin operand ended by a blank allows",
+        # the '-' forms the dash-prefixed word '-/dev/fd/N' and counts too, in either direction (guards:
+        # both denied before this rule, and a rule that excluded '<' and '>' alone, or kept only '<(',
+        # would let one allow). No control ends a lone '-' with '(': bash refuses 'git am -(x)' as a
+        # syntax error, so no runnable command has that shape.
+        gexpect("(gw-dbt-nv-lone) control: a lone '-' stdin operand ended by the end of the command allows",
                 "(true #'\n)\ngit am -", "allow")
+        gexpect("(gw-dbt-nv-lonespace) control: a lone '-' ended by a space allows",
+                "(true #'\n)\ngit am - <p", "allow")
+        gexpect("(gw-dbt-nv-lonetab) control: a lone '-' ended by a tab allows",
+                "(true #'\n)\ngit am -\t<p", "allow")
+        gexpect("(gw-dbt-nv-lonenl) control: a lone '-' ended by a newline allows",
+                "(true #'\n)\ngit am -\ntrue", "allow")
         gexpect("(gw-dbt-nv-lonesemi) control: a lone '-' ended by ';' allows",
                 "(true #'\n)\ngit am -;true", "allow")
         gexpect("(gw-dbt-nv-lonelt) control: a lone '-' ended by a '<' redirect allows",
@@ -13753,6 +13762,45 @@ def _main_isolated(monitor):
                 "(true #'\n)\ngit commit -\rn", "deny")
         gexpect("(gw-dbt-nv-procsub) regression guard: a process substitution glued to the '-' denies",
                 "(true #'\n)\ngit am -<(true)", "deny")
+        gexpect("(gw-dbt-nv-procsubout) regression guard: an output process substitution glued to the '-' "
+                "denies",
+                "(true #'\n)\ngit am ->(true)", "deny")
+        # A quote character or backslash between the token start and the '-' can keep the next character
+        # from ending the word, and the de-quoted half of the scan no longer shows that it was protected:
+        # '"-;"' is the one word '-;' to bash, not a lone '-' before a ';'. Such a '-' counts whatever
+        # follows it, so each of these denies (each allowed when the operator test read the de-quoted
+        # text alone). A backslash-newline inside the quotes is removed first, as bash removes it, so it
+        # does not hide the '-'. The stated cost: a lone '-' spelled with a quote next to it denies too.
+        gexpect("(gw-dbt-nv-q-semi) a quoted '-;' word denies", "(true #'\n)\ngit am \"-;\"", "deny")
+        gexpect("(gw-dbt-nv-q-lt) a quoted '-<' word denies", "(true #'\n)\ngit am \"-<\"", "deny")
+        gexpect("(gw-dbt-nv-q-gt) a quoted '->' word denies", "(true #'\n)\ngit am \"->\"", "deny")
+        gexpect("(gw-dbt-nv-q-parens) a quoted '-()' word denies", "(true #'\n)\ngit am \"-()\"", "deny")
+        gexpect("(gw-dbt-nv-q-amp) a quoted '-&' word denies", "(true #'\n)\ngit am \"-&\"", "deny")
+        gexpect("(gw-dbt-nv-q-pipe) a quoted '-|' word denies", "(true #'\n)\ngit am \"-|\"", "deny")
+        gexpect("(gw-dbt-nv-q-escsemi) a quoted '-' then an escaped ';' (the word '-;') denies",
+                "(true #'\n)\ngit am \"-\"\\;", "deny")
+        gexpect("(gw-dbt-nv-q-semin) a quoted '-;n 1' word on git commit denies",
+                "(true #'\n)\ngit commit \"-;n 1\"", "deny")
+        gexpect("(gw-dbt-nv-q-lparenn) a quoted '-(n ' word denies",
+                "(true #'\n)\ngit commit \"-(n \"", "deny")
+        gexpect("(gw-dbt-nv-q-escsemin) a quoted '-' then an escaped ';n' (the word '-;n') denies",
+                "(true #'\n)\ngit commit \"-\"\\;n", "deny")
+        gexpect("(gw-dbt-nv-q-pipen) a quoted '-|n 1' word denies",
+                "(true #'\n)\ngit commit \"-|n 1\"", "deny")
+        gexpect("(gw-dbt-nv-sq-lt) a single-quoted '-<x ' word denies",
+                "(true #'\n)\ngit commit '-<x '", "deny")
+        gexpect("(gw-dbt-nv-q-split) a quoted '-' then a quoted ';' (the word '-;') denies",
+                "(true #'\n)\ngit commit \"-\"\";\"", "deny")
+        gexpect("(gw-dbt-nv-q-ampn) a quoted '-&n 1' word on git am denies",
+                "(true #'\n)\ngit am \"-&n 1\"", "deny")
+        gexpect("(gw-dbt-nv-q-rparenn) a quoted '-)n ' word denies",
+                "(true #'\n)\ngit commit \"-)n \"", "deny")
+        gexpect("(gw-dbt-nv-esc-dash) an escaped '-' then an escaped ';' (the word '-;') denies",
+                "(true #'\n)\ngit am \\-\\;", "deny")
+        gexpect("(gw-dbt-nv-q-bsnl) a backslash-newline inside the quotes before '-;' (the word '-;') denies",
+                "(true #'\n)\ngit am \"\\\n-;\"", "deny")
+        gexpect("(gw-dbt-nv-q-overdeny) the stated over-denial: a quoted lone '-' denies behind the '#'",
+                "(true #'\n)\ngit am \"-\"", "deny")
         # The checker-shaped test behind the unjudged '#' calls the parsed recognizer's own name splitter
         # and lexicon (_gate_doubt_checker), so its boundary semantics are the splitter's: a non-ASCII
         # letter (the dotless 'ı' below) separates name parts exactly as _name_parts_hit separates
