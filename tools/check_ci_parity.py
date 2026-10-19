@@ -5708,6 +5708,7 @@ def self_test():
     # call and Trace2 event logs (the F-367 maintenance probe), write the
     # selftest report, read the config-member timeout control's pid file
     # and /proc stat, split the timeout controls' captured diagnostics,
+    # split an in-memory citation string from an in-module table,
     # or split text the reader or a screen has already
     # validated. A read
     # spelled another way (getattr, an alias) is outside this tripwire, as
@@ -5785,6 +5786,13 @@ def self_test():
             ("_pid_state", "open-text"): 1,
             ("_registered_selftests", "splitlines"): 1,
             ("_require_wrapper_observed", "splitlines"): 1,
+            # Not a read at all: splits an in-memory string, a
+            # later-measurement citation from the in-module table (a
+            # mutable dict meant to grow, not a frozen constant) padded
+            # at both ends, to require exactly one nonblank line. No
+            # file, runner or workflow text is opened or read at this
+            # site.
+            ("_roster_figures", "splitlines"): 1,
             # The suite's own source again, parsed for ast to classify the
             # kill-sweep call sites in _config_results (_sweep_call_sites,
             # the same reviewed pattern as _close_lock_sites above): no
