@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "80bc9dd95a210bef73d6fecbebba40c719ccc3a64aced6e64bd104b93f18b8f9"
+tree-sha256 = "f712e8aa0d7f2c4e9506204584e6e4db22ab2dfb5e21a1ace62586f6d067f326"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3351,8 +3351,8 @@ sha256 = "d7d7614791529f4ba2fc961b84e7a8dee7fcc832fd6c2d034c682fcfc1b7549c"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
-bytes = 124011
-sha256 = "7820794efe0a542150425e28f6ca8d5bab9600900c67e181482dc62e7b6f8cc0"
+bytes = 125393
+sha256 = "2676a378e37453288e7233305e731d97486b13b3aa840eb9880f8397df51f2af"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
@@ -3661,8 +3661,8 @@ sha256 = "87ae9d0e400cca86d0a583f7f0e99271efce494255abddc76d85c51ac836bfaf"
 
 [[sources]]
 path = "tools/gen_reference_facts.py"
-bytes = 39033
-sha256 = "0c98e01903beaf63e943dffc50416fcd76cc5148b62273ea09493848e0d97d70"
+bytes = 39477
+sha256 = "500883313823218dbe609c1d8acca1a18f168ec30de03f7845158b5211686dc0"
 
 [[sources]]
 path = "tools/gen_renderers.py"

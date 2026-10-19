@@ -345,6 +345,9 @@ ALLOWLIST = (
      _SAVED),
     ("tools/selftest_git_fixture_env_core.py", "_member_close_controls", "shell", 1, _SAVED),
     ("tools/selftest_git_fixture_env_core.py", "_member_timeout_controls", "shell", 1, _SAVED),
+    ("tools/selftest_git_fixture_env_config_system.py", "_lifecycle_probe", "shell", 1,
+     _SAVED + " (the injectable runner default of the lifecycle probe, whose call passes its own"
+     " sys.executable -I -B -c argv list)"),
     ("tools/check_python_floor.py", "_tomllib_catches", "code", 1,
      "static analysis: getattr(builtins, name) resolves an except-clause name in a scanned"
      " file's AST and accepts it only as an exception class for issubclass; never called"),
@@ -410,6 +413,10 @@ ALLOWLIST = (
     ("opf/tools/opf.py", "_watchdog_completion_case.resolve_exception_classes", "code", 1,
      "static analysis: getattr(builtins, name) resolves an except-clause name in the"
      " repository's own _opf_emit source and asserts it is an exception class; never called"),
+    ("opf/tools/opf.py", "_watchdog_closeout_vectors", "code", 1,
+     "self-test harness: exec_module loads a private copy of the repository's own _opf_emit.py"
+     " beside this file (or a vector's literal mutant source), never registered in sys.modules,"
+     " the equivalent of an import; no external input"),
     ("opf/tools/opf.py", "_cli_self_test._import_leg", "code", 5,
      "self-test probes: types.FunctionType rebinds the repository's own _cmd_import code object"
      " (or a planted swap of it compiled from this file's own source) to a probe namespace, and"
@@ -491,6 +498,17 @@ ALLOWLIST = (
      _SAVED + " (the no-maintenance vector's recorder of the template git argv lists)"),
     ("tools/check_release_build.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_release_delta.py", "_self_test_main_isolated", "shell", 1, _SAVED),
+    ("tools/check_mistakes_register.py", "self_test", "shell", 2,
+     _SAVED + " (the saved real runs the git cat-file fault injectors delegate to and restore)"),
+    ("tools/orch_register.py", "self_test", "shell", 1,
+     _SAVED + " (the saved real run the git cat-file fault injector delegates to and restores)"),
+    ("tools/gen_hooks.py", "self_test_main", "shell", 1,
+     _SAVED + " (the saved real Popen the spawn-failure vector restores after patching)"),
+    ("tools/gen_hooks.py", "self_test_main._communicate_fault_case", "shell", 3,
+     _SAVED + " (the saved real Popen.communicate the fault case wraps and restores)"),
+    ("tools/gen_hooks.py", "self_test_main._secondary_fault_case", "shell", 9,
+     _SAVED + " (the saved real Popen.communicate, kill and wait the staged-cleanup vectors"
+     " wrap and restore)"),
     ("opf/tools/_opf_adopt_observe.py", "_runner_red_checks", "shell", 2, _SAVED),
     ("opf/tools/_opf_pack_manifest.py", "_runner_red_checks", "shell", 3, _SAVED),
     ("opf/tools/check_opf_doctor.py", "_self_test_isolated._doctor_suite", "shell", 3, _SAVED),
