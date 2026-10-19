@@ -33,8 +33,10 @@ Each case runs on its own copy of that template; the root is removed in a finall
       The spec 8.5 at-most-one-current handoff rule additionally holds CONTINUOUSLY, not only once
       reconciled: at every kill point the matrix asserts that the on-disk handoff index, wherever its
       bytes parse at all, holds at most one clean current handoff, so no intermediate on-disk state of a
-      post ever shows a reader a second current handoff (a torn, unparseable payload counts none and is
-      recovery's business).
+      post ever shows a reader a second current handoff (a torn, unparseable payload, and a parsed index
+      whose record value is not an array, count none and are recovery's business; a RecursionError or
+      MemoryError at the parse turns on the stack and memory left to the run, not on the bytes alone, so
+      the check cannot evaluate, never a pass).
       The next run releases that confirmed-dead holder's
       leftover lease through its own reconciliation (spec 5.7, the T74 dead-run release clause) and
       reconciles, leaving the operands exactly the prestate or exactly the poststate, the poststate iff
@@ -44,7 +46,9 @@ Each case runs on its own copy of that template; the root is removed in a finall
       index at a parseable two-current state inside the journaled apply, which the write-ahead evidence
       cannot catch: the continuous at-most-one-current assertion turns red on the exposure itself, at the
       kill point, where without it the corruption would surface only later and indirectly, as the
-      reconciliation refusing a changed operand)
+      reconciliation refusing a changed operand; that flip counts only when that assertion is the one
+      that turns red, by its scenario, kill point and count, and with the assertion disarmed the
+      discrimination must fail)
   T6  an assistant `transition BI done` lands done/proposed with zero receipts; an assistant
       done-with-receipt refuses before the store is resolved, and a maintainer `transition BI done`
       refuses, both with every byte untouched; a maintainer done-with-receipt (ratifying done/proposed, or
@@ -1403,6 +1407,12 @@ def _two_current(fd, data, i):
 _journal._maybe_torn_payload = _two_current
 """
 
+# The message of the continuous at-most-one-current assertion, and the one red FLIP_T5_TWO_CURRENT must
+# produce: that assertion, at the handoff-superseding scenario's torn-payload kill of its handoff index
+# (operand 1 of counters, handoff index, worklog), seeing two clean current handoffs.
+T5_TWO_CURRENT = "T5 an intermediate on-disk state holds two current handoffs"
+T5_TWO_CURRENT_EXPOSURE = (T5_TWO_CURRENT, ("handoff-supersede", "torn-payload:1"), 2)
+
 
 def child(env, root, args, kill=None, flip=""):
     script = _CHILD.format(tools=str(TOOLS), flip=flip)
@@ -1438,13 +1448,18 @@ def _clean_current_handoffs(data):
     """The clean (non-importer) current-handoff count of one on-disk handoff index state (the spec 8.5/8.6
     join over these bytes alone). Bytes that do not parse as TOML, and a parsed index whose record value
     is not an array, count no handoff: a torn payload is neither state, shows a reader no second current
-    handoff, and is recovery's business (the write-ahead evidence assertion)."""
+    handoff, and is recovery's business (the write-ahead evidence assertion). A RecursionError or a
+    MemoryError at the parse is CannotEvaluate, never a count: it depends on the stack and memory left
+    to this process, not on the index bytes alone, so it shows nothing about how many current handoffs
+    the bytes hold."""
     try:
         rows = tomllib.loads(data.decode("utf-8")).get("record", [])
-    except (ValueError, RecursionError, MemoryError):
-        # ValueError: tomllib.TOMLDecodeError, a UnicodeDecodeError and an over-long integer literal;
-        # RecursionError: deep nesting; MemoryError: a parse that exhausts memory.
+    except ValueError:
+        # tomllib.TOMLDecodeError, a UnicodeDecodeError and an over-long integer literal.
         return 0
+    except (RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("the handoff index count could not finish its parse ({!r}); a two-current "
+                             "index is not ruled out".format(exc)[:400]) from None
     if not isinstance(rows, list):
         return 0
     return sum(1 for r in rows if isinstance(r, dict) and r.get("type") == "handoff"
@@ -1455,35 +1470,40 @@ def _clean_current_handoffs(data):
 def t5_handoff_count_malformed(fx):
     """The count behind the continuous at-most-one-current assertion reads a torn or malformed handoff
     index as no handoff, never as a crash of the matrix: undecodable bytes, a TOML syntax error, an
-    over-long integer literal (a bare ValueError), deep nesting (RecursionError), a parse that exhausts
-    memory (MemoryError, injected at the parser) and a record value that is not an array each count 0.
-    Well-formed indexes count exactly their clean current handoffs (one or two current, while a
-    superseded or importer-authored one counts nothing), so a count that reads every index as empty is
+    over-long integer literal (a bare ValueError) and a record value that is not an array (an integer, a
+    boolean, a string or a single [record] table) each count 0. Deep nesting (RecursionError) and a
+    parse that exhausts memory (MemoryError, injected at the parser over a well-formed index) are
+    cannot-evaluate, never 0: neither is a property of the bytes alone, so neither may pass the
+    assertion. Well-formed indexes count exactly their clean current handoffs (one or two current, while
+    a superseded or importer-authored one counts nothing), so a count that reads every index as empty is
     red too. Every vector runs and every wrong count is named, so a red lists each vector it reaches."""
     current = '[[record]]\ntype = "handoff"\nstatus = "current"\n'
+    cannot = "cannot-evaluate"
     wrong = []
 
     def expect(label, data, want):
         try:
             got = _clean_current_handoffs(data)
+        except CannotEvaluate:
+            got = cannot
         except (ValueError, RecursionError, MemoryError, TypeError) as exc:
             got = "escaped {!r}".format(exc)[:160]
         if got != want:
             wrong.append((label, got, want))
-    for label, data in (("undecodable", b"\xff" + current.encode()),
-                        ("unparseable", b"[[record]\n"),
-                        ("over-long-integer", ("x = 1" + "0" * 5000 + "\n").encode()),
-                        ("deeply-nested", ("x = " + "[" * 5000 + "]" * 5000 + "\n").encode()),
-                        ("integer-record", b"record = 5\n"),
-                        ("boolean-record", b"record = true\n"),
-                        ("string-record", b'record = "handoff"\n'),
-                        ("table-record", b'[record]\ntype = "handoff"\nstatus = "current"\n')):
-        expect(label, data, 0)
+    for label, data, want in (("undecodable", b"\xff" + current.encode(), 0),
+                              ("unparseable", b"[[record]\n", 0),
+                              ("over-long-integer", ("x = 1" + "0" * 5000 + "\n").encode(), 0),
+                              ("deeply-nested", ("x = " + "[" * 5000 + "]" * 5000 + "\n").encode(), cannot),
+                              ("integer-record", b"record = 5\n", 0),
+                              ("boolean-record", b"record = true\n", 0),
+                              ("string-record", b'record = "handoff"\n', 0),
+                              ("table-record", b'[record]\ntype = "handoff"\nstatus = "current"\n', 0)):
+        expect(label, data, want)
 
     def exhausted(text):
         raise MemoryError("synthetic parse exhaustion")
     with patch.object(tomllib, "loads", exhausted):
-        expect("memory-exhausting", current.encode(), 0)
+        expect("memory-exhausting", current.encode(), cannot)
     for label, data, want in (("one-current", current, 1),
                               ("two-current", current + "\n" + current, 2),
                               ("superseded", current.replace("current", "superseded"), 0),
@@ -1494,8 +1514,11 @@ def t5_handoff_count_malformed(fx):
 
 def flip_t5_count_narrow():
     """The pre-fix count: only a UnicodeDecodeError or a TOMLDecodeError reads as no handoff, so a bare
-    ValueError, a RecursionError or a MemoryError escapes the parse, and a scalar record value raises
-    TypeError when iterated."""
+    ValueError, a RecursionError or a MemoryError escapes the parse, and an integer or boolean record
+    value raises TypeError when iterated. A string or table record value iterates (its characters, its
+    keys) without error and yields no row, so it counts 0 here as in the fixed count: those two vectors
+    stay green under this flip. flip_t5_count_table_row reds the table one; the string one stays green
+    under every flip here and only pins the rule."""
     def narrow(data):
         try:
             rows = tomllib.loads(data.decode("utf-8")).get("record", [])
@@ -1510,6 +1533,40 @@ def flip_t5_count_narrow():
 def flip_t5_count_empty():
     """A count that reads every index as holding no handoff, malformed or not."""
     return patch.object(sys.modules[__name__], "_clean_current_handoffs", lambda data: 0)
+
+
+def flip_t5_count_host_zero():
+    """The count that read a RecursionError or a MemoryError at the parse as no handoff: an index the
+    parser could not finish, two-current or not, passes the at-most-one-current assertion."""
+    real = _clean_current_handoffs
+
+    def host_zero(data):
+        try:
+            return real(data)
+        except CannotEvaluate:
+            return 0
+    return patch.object(sys.modules[__name__], "_clean_current_handoffs", host_zero)
+
+
+def flip_t5_count_table_row():
+    """A count that reads a single [record] table as a one-row array, so a table record value holding a
+    current handoff counts it, where every production reader refuses a record value that is not an
+    array."""
+    def table_row(data):
+        try:
+            rows = tomllib.loads(data.decode("utf-8")).get("record", [])
+        except ValueError:
+            return 0
+        except (RecursionError, MemoryError) as exc:
+            raise CannotEvaluate("the handoff index count could not finish its parse ({!r})".format(
+                exc)[:400]) from None
+        rows = [rows] if isinstance(rows, dict) else rows
+        if not isinstance(rows, list):
+            return 0
+        return sum(1 for r in rows if isinstance(r, dict) and r.get("type") == "handoff"
+                   and r.get("status") == "current"
+                   and not (isinstance(r.get("actor"), dict) and r["actor"].get("kind") == "importer"))
+    return patch.object(sys.modules[__name__], "_clean_current_handoffs", table_row)
 
 
 def _t5_scenarios(fx):
@@ -1536,6 +1593,27 @@ def _t5_scenarios(fx):
 def t5_crash(fx):
     for label, base, args, operands in _t5_scenarios(fx):
         _t5_matrix(fx, label, base, args, operands)
+
+
+class _T5OtherRed(Exception):
+    """FLIP_T5_TWO_CURRENT turned t5_crash red through an assertion other than the continuous
+    at-most-one-current one at the exposure: not an assertion, so the discriminator fails by name."""
+
+
+def t5_two_current_exposed(fx):
+    """t5_crash as the two-current discriminator runs it. Unflipped it is t5_crash, every assertion its
+    own. Under FLIP_T5_TWO_CURRENT the one red that counts is the continuous at-most-one-current
+    assertion itself, by identity (T5_TWO_CURRENT_EXPOSURE: its message, scenario, kill point and a count
+    of two); any other assertion, such as a later recovery assertion that sees the same corruption only
+    indirectly as a reconciliation refusal, is raised as _T5OtherRed instead, so removing the immediate
+    assertion cannot leave the discrimination green."""
+    try:
+        t5_crash(fx)
+    except AssertionError as exc:
+        if _t5_flip[0] == FLIP_T5_TWO_CURRENT and exc.args != (T5_TWO_CURRENT_EXPOSURE,):
+            raise _T5OtherRed("the two-current flip went red through another assertion: {!r}".format(
+                exc.args)[:1200]) from None
+        raise
 
 
 def _t5_matrix(fx, label, base, args, operands):
@@ -1570,14 +1648,17 @@ def _t5_matrix(fx, label, base, args, operands):
             "T5 an operand changed with no journal transaction to drive recovery", point)
         # The spec 8.5 at-most-one-current rule holds CONTINUOUSLY, not only once reconciled: at every
         # kill point, wherever the on-disk handoff index parses at all, it holds at most one clean
-        # current handoff, so no intermediate state of a post shows a reader a second current handoff.
+        # current handoff, so no intermediate state of a post shows a reader a second current handoff
+        # (bytes that do not parse, or whose record value is not an array, count none; a parse ended by
+        # a RecursionError or a MemoryError is cannot-evaluate, never a count).
         # The write-ahead evidence above cannot catch this (a two-current intermediate can sit inside a
         # journaled apply): this assertion reds on the exposure itself, at the kill point, where the
         # later recovery assertions would see it only indirectly, as a reconciliation refusal of a
-        # changed operand. FLIP_T5_TWO_CURRENT drives it red.
+        # changed operand. FLIP_T5_TWO_CURRENT drives it red, and its discriminator credits only this
+        # assertion (T5_TWO_CURRENT_EXPOSURE).
         if HO_INDEX in operands:
             seen = _clean_current_handoffs(interim[HO_INDEX])
-            assert seen <= 1, ("T5 an intermediate on-disk state holds two current handoffs", point, seen)
+            assert seen <= 1, (T5_TWO_CURRENT, point, seen)
         result = record_cli(env, root, CREATE)
         refused(result, "was reconciled")
         assert "leftover single-writer lease" in result[2], ("T5 the released leftover lease is named",
@@ -9304,7 +9385,9 @@ TESTS = (
     ("T23-homes2-crash-typed", t23_homes2_crash, flip_t23),
     ("T5-flip-unjournaled-write", t5_flip_write, None),     # FLIP_T5 itself is T5's discriminator
     ("T5-handoff-count-malformed-index", t5_handoff_count_malformed, (flip_t5_count_narrow,
-                                                                      flip_t5_count_empty)),
+                                                                      flip_t5_count_empty,
+                                                                      flip_t5_count_host_zero,
+                                                                      flip_t5_count_table_row)),
     ("T24-broken-manifest-fail-closed", t24_broken_manifest, flip_t24),
     ("T25-recovery-plan-under-capability", t25_plan_under_capability, flip_t25),
     ("T26-complete-before-projection", t26_complete_before_projection, flip_t26),
@@ -9494,9 +9577,9 @@ def _self_test_isolated():
             check("red-on-revert-T5-handoff-unjournaled-index",
                   lambda: _discriminate("T5-handoff", lambda: t5_crash(fx),
                                         lambda: _child_flip_handoff(fx)))
-            check("red-on-revert-T5-handoff-two-current-interim",
-                  lambda: _discriminate("T5-two-current", lambda: t5_crash(fx),
-                                        lambda: _child_flip_two_current(fx)))
+            check("red-on-revert-T5-handoff-two-current-interim", lambda: _discriminate_two_current(fx))
+            check("red-on-revert-T5-handoff-two-current-interim-disarmed",
+                  lambda: t5_two_current_counter(fx))
             check("red-on-revert-T75-concurrent-recovery-single-writer",
                   lambda: _discriminate("T75", lambda: t75_concurrent_recovery(fx),
                                         lambda: _t75_child_flip(fx)))
@@ -9554,6 +9637,27 @@ def _child_flip_two_current(fx):
         yield
     finally:
         _t5_flip[0] = ""
+
+
+def _discriminate_two_current(fx):
+    """FLIP_T5_TWO_CURRENT must turn T5 red through the continuous at-most-one-current assertion at the
+    exposure itself (t5_two_current_exposed), and the unflipped T5 must stay green around it."""
+    _discriminate("T5-two-current", lambda: t5_two_current_exposed(fx), lambda: _child_flip_two_current(fx))
+
+
+def t5_two_current_counter(fx):
+    """With the continuous at-most-one-current assertion disarmed (its count reads every handoff index
+    as holding none, flip_t5_count_empty), FLIP_T5_TWO_CURRENT still turns T5 red, later, through a
+    recovery assertion; the two-current discriminator must refuse that red and fail, naming the other
+    assertion (_T5OtherRed), not on an unrelated fault."""
+    with flip_t5_count_empty():
+        try:
+            _discriminate_two_current(fx)
+        except AssertionError as exc:
+            assert "_T5OtherRed(" in str(exc), ("T5 the disarmed two-current discriminator failed, but not "
+                                                "on another assertion", str(exc)[:1200])
+            return
+    raise AssertionError("T5 the two-current discriminator stayed green with its assertion disarmed")
 
 
 @contextlib.contextmanager
