@@ -549,6 +549,18 @@ def _history_vectors(tmp, check):
 
 
 def self_test():
+    """Isolate fixture git configuration and restore the caller even on failure: the fixture git
+    calls (built through _scrubbed_env, which carries HOME) must read a fresh, empty HOME and
+    XDG_CONFIG_HOME with the system config disabled, never the caller's or the host's, so the
+    self-test stays hermetic under an injected caller or system git configuration."""
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-prompt-pin-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return _self_test_isolated()
+
+
+def _self_test_isolated():
     """0 every vector returned its exact status and guard (and turned green with its covering check
     disabled), 1 a discriminator failed, 2 harness error."""
     failures = []
