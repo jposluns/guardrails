@@ -256,7 +256,7 @@ review-round = 4
 
 [[path]]
 path = "tools/check_clauses.py"
-review-round = 34
+review-round = 36
 
 [[path]]
 path = "tools/check_crosswalk.py"
@@ -286,13 +286,14 @@ review-round = 130
 
 [[path]]
 path = "tools/check_release_delta.py"
-review-round = 336
-reviewer-source = 50
+review-round = 566
+reviewer-source = 80
 
 [[path]]
 path = "tools/check_secrets.py"
-review-round = 1
+review-round = 48
 qa-round = 1
+reviewer-source = 4
 
 [[path]]
 path = "tools/check_selftest_execution.py"
