@@ -58,11 +58,13 @@ check = _gfe.check
 # stated exception), not a completion budget. The probe's whole intended work is one module import
 # plus the entry's own isolation setup up to its FIRST delegate call, where the stub stops it;
 # nothing it is meant to run waits on anything. Reaching it is attributed to the deadline: the
-# probe's timeout message names the probe and ONLY the last stage it reported (the probe emits a
-# stage inside the delegate stub and another after the entry unwound, so a hang after the delegate
-# is never read as one before it) and is recorded as cannot-evaluate, never a lifecycle finding
-# (which needs an observed wrong isolation) and never "scheduling" by assumption: a hanging entry
-# and a starved host both end here, and the named stage is all this message asserts.
+# probe's timeout message names the probe and ONLY what was observed, the last stage it reported
+# or that it reported none (the probe emits a stage inside the delegate stub and another after the
+# entry unwound, so a hang after the delegate is never read as one before it, and an import can
+# finish without its stage line being observed, so no observed stage never reads as an unfinished
+# import) and is recorded as cannot-evaluate, never a lifecycle finding (which needs an observed
+# wrong isolation) and never "scheduling" by assumption: a hanging entry and a starved host both
+# end here, and the reported stage, or its absence, is all this message asserts.
 _LIFECYCLE_PROBE_SECONDS = 60
 
 
