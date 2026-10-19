@@ -1,0 +1,1346 @@
+# The tomllib parse-site table read by the tomllib leg of tools/check_python_floor.py (see its docstring).
+# A tomllib.load or tomllib.loads call that is not HANDLED in its own function (per class, for each of
+# RecursionError, MemoryError and ValueError, the FIRST handler that would catch it must be readable and
+# must dispose of it without a possible re-raise) must have one row here: class CALLER names the function
+# in the same file whose handler covers the call (the callee is matched by its full qualified name), and
+# class EXEMPT gives a reason from the closed vocabulary test-code, self-emitted-bytes, already-validated
+# or valueerror-passthrough (call forms only; the scan verifies that the deciding handler's only re-raise
+# is the single statement of `if isinstance(<bound name>, ValueError): raise`, so nothing but the
+# ValueError family can escape to the callers the site's docstring binds). A form the scan cannot resolve
+# (form alias) is EXEMPT only. count is the number of unhandled calls or forms in that function; a row
+# whose function no longer holds one, or holds another number, fails the gate.
+
+format-version = 1
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_finish_ops_self_test"
+form = "call"
+count = 5
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_finish_ops_self_test.<genexpr>"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_finish_ops_self_test.bound_digests.doc"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_init_store_git_checks"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_init_store_self_test"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_self_test_checks"
+form = "call"
+count = 14
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_self_test_checks._sheet"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_self_test_checks._sheet.<genexpr>"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_self_test_checks.aliased_view"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_self_test_checks.bound"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_self_test_checks.smuggling_emit"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_self_test_checks.unbound"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_self_test_checks.with_manifest"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+# reparses the event bytes emit_checked just emitted and round-trip checked
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "adoption_record"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "self-emitted-bytes"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "_entries"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "_fixture"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "_parity_sweep"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "_rereceipt"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "_reseal_inventory"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "_retoml"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "_toml_file"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "_unclaim"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "_walker_stops"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "self_test._discovery"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "self_test._refused"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_complete.py"
+function = "self_test._tamper_seal"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_discover.py"
+function = "self_test.DiscoveryTests.store_manifest"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_discover.py"
+function = "self_test.DiscoveryTests.test_excludes_unmanaged_content"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_discover.py"
+function = "self_test.DiscoveryTests.test_proposals_feed_investigate_only_when_passed"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+# plan maps the classes to CANNOT-EVALUATE
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "_bind_registrations"
+form = "call"
+count = 2
+class = "CALLER"
+caller = "plan"
+
+# parses the resolved manifest and the generated one; _investigate maps the classes to CANNOT-EVALUATE
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "_inventory"
+form = "call"
+count = 2
+class = "CALLER"
+caller = "_investigate"
+
+# plan maps the classes to CANNOT-EVALUATE
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "_managed_destinations"
+form = "call"
+count = 1
+class = "CALLER"
+caller = "plan"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.make_plan"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.setUp"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_ancestry_marks_re_adoption"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_ancestry_marks_re_adoption.ancestry"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_ancestry_store_debris_is_re_adoption"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_ancestry_store_debris_is_re_adoption.ancestry"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_control_area_never_selected"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_default_move_destination"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_default_move_store_base_unobservable"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_deliverables_need_disposition"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_foreign_working_preserves_resolver_status"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_frozen_digests_and_no_effects"
+form = "call"
+count = 3
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_hook_replacement_binds_observed_bytes"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_migrate_resolves_keep_frozen"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_move_requires_observed_absence"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_occupied_destinations"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_plan_v2_bindings"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_platform_detection_roots"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_registration_rewrites_manifest"
+form = "call"
+count = 3
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_resolved_store_exclusions"
+form = "call"
+count = 5
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_store_identity_and_generated_effects"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_state.py"
+function = "_self_test_checks"
+form = "call"
+count = 9
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_state.py"
+function = "_self_test_checks.freeze"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_state.py"
+function = "_self_test_checks.plan_digest_of"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+# the round-trip reparse of the bytes emit_checked itself just emitted; the cancellation and
+# decode-error clauses are hostile-tomllib seams the scan cannot read, and the ordered BaseException
+# backstop converts everything else to EmitError
+[[site]]
+path = "opf/tools/_opf_emit.py"
+function = "emit_checked"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "self-emitted-bytes"
+
+[[site]]
+path = "opf/tools/_opf_emit.py"
+function = "self_test"
+form = "alias"
+count = 9
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_emit.py"
+function = "self_test"
+form = "call"
+count = 5
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_emit.py"
+function = "self_test._round_trips"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+# only the ValueError family reaches the @_validation wrapper, which refuses it as MALFORMED;
+# RecursionError and MemoryError are mapped into it with the same detail
+[[site]]
+path = "opf/tools/_opf_init_p0.py"
+function = "_manifest"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "valueerror-passthrough"
+
+[[site]]
+path = "opf/tools/_opf_fuzz.py"
+function = "run"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_fuzz.py"
+function = "run.<lambda>"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+# reparses the bytes emit_checked just emitted
+[[site]]
+path = "opf/tools/_opf_init.py"
+function = "_emit_validated"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "self-emitted-bytes"
+
+# reparses the bytes emit_checked just emitted
+[[site]]
+path = "opf/tools/_opf_init.py"
+function = "build_counters"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "self-emitted-bytes"
+
+# reparses the bytes emit_checked just emitted
+[[site]]
+path = "opf/tools/_opf_init.py"
+function = "build_index"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "self-emitted-bytes"
+
+[[site]]
+path = "opf/tools/_opf_init_operation.py"
+function = "_b6_tests"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+# the on-disk counters the source group just re-verified byte-exact against the validated plan payload
+[[site]]
+path = "opf/tools/_opf_init_operation.py"
+function = "_final_check"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "already-validated"
+
+# the validated plan's counters payload (validate_init_plan parsed it)
+[[site]]
+path = "opf/tools/_opf_init_operation.py"
+function = "_health_check"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "already-validated"
+
+[[site]]
+path = "opf/tools/_opf_init_operation.py"
+function = "_physical_tests"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_init_operation.py"
+function = "_run_self_test_isolated"
+form = "call"
+count = 3
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_init_operation.py"
+function = "_seam_tests"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_manifest_regressions.py"
+function = "_profile_emission_cases"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_manifest_regressions.py"
+function = "manifest_cases"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_observe.py"
+function = "self_test_isolated"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_observe.py"
+function = "self_test_isolated"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+# the active record bytes the recovery liveness gate already read and validated
+[[site]]
+path = "opf/tools/_opf_oplock.py"
+function = "_recorded_operation"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "already-validated"
+
+[[site]]
+path = "opf/tools/_opf_oplock.py"
+function = "_t_c3_c11_mandatory_lease_and_bytes"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_oplock.py"
+function = "_t_h4_quote"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_oplock.py"
+function = "_t_i2_attach_mints_bound_capability"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_oplock.py"
+function = "_t_toml_class_read_control"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_pack_manifest.py"
+function = "self_test"
+form = "alias"
+count = 4
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_record.py"
+function = "_self_test_units"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_schema.py"
+function = "self_test"
+form = "call"
+count = 15
+class = "EXEMPT"
+reason = "test-code"
+
+# the self-test seam that rebinds tomllib._parser.parse_key to emulate the key-part cap
+[[site]]
+path = "opf/tools/_opf_store.py"
+function = "_StKeyPartCap.__enter__"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+# the seam's restore of tomllib._parser.parse_key
+[[site]]
+path = "opf/tools/_opf_store.py"
+function = "_StKeyPartCap.__exit__"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_store.py"
+function = "self_test"
+form = "call"
+count = 36
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_store.py"
+function = "self_test._toctou_orf"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_views.py"
+function = "self_test"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_views.py"
+function = "self_test"
+form = "call"
+count = 9
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_worklog.py"
+function = "_self_test"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_worklog_regressions.py"
+function = "_Fixture.__init__"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_worklog_regressions.py"
+function = "_entry_point_regressions"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_worklog_regressions.py"
+function = "_manifest_intake_regressions"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_worklog_regressions.py"
+function = "_manifest_intake_regressions"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_worklog_regressions.py"
+function = "_upgrade_preflight_regressions"
+form = "call"
+count = 3
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_write_guard.py"
+function = "_self_test_vectors.<lambda>"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_homes.py"
+function = "boundary_self_test"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_homes.py"
+function = "boundary_self_test.<lambda>"
+form = "call"
+count = 5
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_homes.py"
+function = "boundary_self_test.planned"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_init.py"
+function = "_suite_isolated.valid_sources"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_init_qa.py"
+function = "InitQA.test_completed_provenance_bound_to_plan"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_init_qa.py"
+function = "InitQA.test_library_pinned_b6_seed"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "_self_test_homes2_active"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "_t74_dead_pid"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "flip_t74_schema.loose"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "flip_t74_verb.unbound"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "flip_t84.narrow"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "model"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "t22_homes2_claim_reserves"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "t2_round_trip"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "t74_never_seize_dead_run_release"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "t79_kill_after_reserve"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "t80_two_runs_never_same_id"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "t81_cross_kind_reservations"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "t8_collision.<genexpr>"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+# fixture parses inside the isolated suite harness (its own try maps a harness exception to exit 2)
+[[site]]
+path = "opf/tools/check_opf_upgrade.py"
+function = "_suite_isolated"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_upgrade.py"
+function = "_suite_isolated.<genexpr>"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_upgrade.py"
+function = "_suite_isolated._p1_variant"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_upgrade.py"
+function = "_suite_isolated._plan_refuses"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_upgrade.py"
+function = "_suite_isolated.canon_cnt"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_upgrade.py"
+function = "_suite_isolated.canon_man"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_upgrade.py"
+function = "_suite_isolated.cnt_of"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_upgrade.py"
+function = "_suite_isolated.man_of"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/opf.py"
+function = "_cli_self_test._adopt_leg"
+form = "call"
+count = 4
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/opf.py"
+function = "_cli_self_test._adopt_leg.<genexpr>"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/_qa_adapter.py"
+function = "_self_test_isolated"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+# callers fail closed on the ValueError family by contract; RecursionError and MemoryError are
+# mapped into it at the parse locus (F-TOML-BARE-VALUEERROR-CLASS)
+[[site]]
+path = "tools/_gen_common.py"
+function = "load_toml"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "valueerror-passthrough"
+
+# the self-test seam that reads tomllib.loads and tomllib.load as bound: the injection saves and restores
+# them around an injected MemoryError at the parse call (real memory exhaustion cannot be provoked
+# safely), and the restoration checks compare them with the pair bound at import
+[[site]]
+path = "tools/check_brief_capability.py"
+function = "_tomllib_parsers"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/check_crosswalk.py"
+function = "self_test"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/check_derived_command_parameters.py"
+function = "self_test_main"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/check_manifest.py"
+function = "_self_test_main_isolated"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/check_manifest.py"
+function = "_self_test_main_isolated"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/check_newtab.py"
+function = "_self_test"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+# the self-test seam that rebinds and restores tomllib._parser.parse_key (_key_part_capped)
+[[site]]
+path = "tools/check_python_floor.py"
+function = "_key_part_capped"
+form = "alias"
+count = 3
+class = "EXEMPT"
+reason = "test-code"
+
+# the self-test seam that reads tomllib._parser to rebind and restore parse_key for the injected
+# key-depth and parse-class cases (_host_parse_refusal)
+[[site]]
+path = "tools/check_python_floor.py"
+function = "_host_parse_refusal"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+# the self-test seam that reads tomllib._parser to damage parse_key results (_malformed_host_refusal)
+[[site]]
+path = "tools/check_python_floor.py"
+function = "_malformed_host_refusal"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+# the self-test seam that reads tomllib._parser to rebind and restore parse_key for the injected
+# key-depth and parse-class cases (_parse_refusal)
+[[site]]
+path = "tools/check_python_host_pin.py"
+function = "_parse_refusal"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+# the self-test seam that reads tomllib._parser to damage parse_key results (_malformed_refusal)
+[[site]]
+path = "tools/check_python_host_pin.py"
+function = "_malformed_refusal"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/check_portability.py"
+function = "_self_test_main_isolated"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/check_record_sections.py"
+function = "_self_test_isolated"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/check_release_build.py"
+function = "_self_test_main_isolated"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+# head bytes its caller parsed under a full handler; the predecessor differs by one removed tag line
+[[site]]
+path = "tools/check_release_delta.py"
+function = "_changelog_tag_toml_ok"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "already-validated"
+
+[[site]]
+path = "tools/check_release_delta.py"
+function = "_edit_clause_consistently"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/check_release_delta.py"
+function = "_self_test_main_isolated"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/check_selftest_execution.py"
+function = "self_test"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/check_standards_currency.py"
+function = "self_test_main"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/check_version_monotonicity.py"
+function = "self_test_main"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/gen_agents.py"
+function = "self_test_main"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/gen_crosswalk.py"
+function = "self_test"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+# reparses the TOML this generator just rendered
+[[site]]
+path = "tools/gen_first_pin_demo.py"
+function = "build"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "self-emitted-bytes"
+
+[[site]]
+path = "tools/gen_first_pin_demo.py"
+function = "self_test_main.demo_of"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/gen_site.py"
+function = "_self_test"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+# build_outputs surfaces the ValueError family as exit 2 by contract; RecursionError and
+# MemoryError are mapped into it at the parse locus (F-TOML-BARE-VALUEERROR-CLASS)
+[[site]]
+path = "tools/gen_skill.py"
+function = "plugin_identity"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "valueerror-passthrough"
+
+[[site]]
+path = "tools/gen_skill.py"
+function = "self_test_main"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+# reparses the TOML this importer just rendered
+[[site]]
+path = "tools/import_cwe.py"
+function = "render"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "self-emitted-bytes"
+
+[[site]]
+path = "tools/migrate.py"
+function = "self_test"
+form = "alias"
+count = 5
+class = "EXEMPT"
+reason = "test-code"
+
+# the ValueError family passes unchanged to do_pin's handler by contract; RecursionError and
+# MemoryError become a fail-closed PinError at the parse locus (F-TOML-BARE-VALUEERROR-CLASS)
+[[site]]
+path = "tools/pin.py"
+function = "_read_release"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "valueerror-passthrough"
+
+[[site]]
+path = "tools/pin.py"
+function = "self_test"
+form = "alias"
+count = 5
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/selftest_ci_status.py"
+function = "_expected_check_ids"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/selftest_git_fixture_env.py"
+function = "_expected_check_ids"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/selftest_orch_hooks.py"
+function = "_expected_check_ids"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"

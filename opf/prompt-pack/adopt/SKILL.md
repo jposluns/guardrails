@@ -36,6 +36,7 @@ Three rules govern everything else:
 
 | Stage | How it runs | Status in this build |
 |---|---|---|
+| Discover sources | the read-only `discover_sources` entry (section 3) | runs; writes nothing |
 | Investigate | the planner's read-only `investigate` entry (section 3) | runs; writes nothing |
 | Plan | `opf adopt plan --inputs FILE [--root DIR]` | runs; prints the frozen plan; writes nothing |
 | Status | `opf adopt status [--root DIR]` | runs; writes nothing |
@@ -60,8 +61,12 @@ The reference tooling requires Python 3.14 or newer. Its exit convention is 0 cl
    tooling's artifact digest and compare it with the published hashes at posluns.dev/hashes.txt.
    Proceed only on a match. If the digests differ or the reference evidence is unavailable,
    stop and report.
-2. Tell the adopter what you will read: the scope in section 3, plus any old operational files
-   they name. Investigation is read-only, but the adopter should know its scope before it runs.
+2. Tell the adopter what you will read: source discovery resolves the store as investigation
+   does (the pointer files and `manifest.toml` in each immediate `.working` subdirectory), then
+   walks the product tree outside the areas section 3 excludes, reading file names and the start
+   of Markdown and plain-text files; investigation reads the scope in section 3 plus the sources
+   the adopter confirms. Both are read-only, but the adopter should know their scope before they
+   run.
 3. Run `opf adopt status --root <product root>`. Exit 0 with "no adoption run exists" is the
    expected first-adoption result. Exit 0 listing an adoption run, exit 1 (a held journal lock,
    an interrupted transaction, an evidence bundle that does not verify, or a directory at the
@@ -102,20 +107,78 @@ Investigation records a digest-stamped inventory and tells first adoption from r
 `VERSION`, `CHANGELOG.md` and `release-notes.toml`) and the deliverable destinations (the
 product-root `VERSION`, each declared deliverable target, and each declared view target outside
 `.working`, taken from the resolved store's manifest, or else from the default manifest), plus
-the sources and targets you name. It never enters `.git`.
+the sources and targets you pass. It never enters `.git`.
 
 - **Sources** are the old operational files outside those roots that the adoption must account
-  for: a hand-kept TODO list, a decisions log, release notes, an issue export. Ask the adopter;
-  a file you do not name is not inventoried, and detection is by path, not by content.
-- **Targets** are paths the plan will create outside the scanned roots, for example a pre-commit
-  hook path such as `.opf/hooks/pre-commit`. The planner needs to see that each is absent.
+  for: a hand-kept TODO list, a decisions log, release notes, an issue export. A file that is not
+  passed as a source is not inventoried. You find them by discovery; the adopter confirms them.
+- **Targets** are paths the plan will create outside the scanned roots, for example `opf`, the
+  directory of the OPF pack mirror. The plan installs there only the members it names: the
+  pre-commit hook at `opf/enforcement/precommit/pre-commit` with `install.sh` beside it, the CI
+  recipe and the tool entry point `opf/tools/opf.py`. The modules that entry point imports come
+  from a later install step (section 4). The planner needs to see that each target is absent.
 
-This build has no `opf adopt` subcommand that prints the observation. Use the planner's
-read-only library entry, with an absolute product root and the tooling directory that holds
+**Discover the sources first.** Do not ask the adopter which old files exist; find them. Run the
+read-only discovery entry, with an absolute product root and the tooling directory that holds
 `opf.py`:
 
 ```
-python3 -I -B -c "import sys; sys.path.insert(0, '<opf tools directory>'); import _opf_adopt_plan as p; r = p.investigate('<absolute product root>', sources=['TODO.md'], targets=['.opf/hooks/pre-commit']); print(r.status, list(r.findings), file=sys.stderr); sys.stdout.write(r.observation.decode() if r.observation else '')"
+python3 -I -B -c "import sys; sys.path.insert(0, '<opf tools directory>'); import _opf_adopt_discover as d; print(d.report(d.discover_sources('<absolute product root>')))"
+```
+
+`discover_sources` opens nothing for writing. It walks the product root without following a
+symlink and proposes each file whose name, or a Markdown heading near its start, looks like an
+old operational record: a TODO list or backlog, a decisions log, release notes, an issue export.
+It never enters `.git` or `.aiqt`, the detection roots and deliverable destinations above
+(investigation reads those itself), a path registered under `[unmanaged]` (section 14.2: ordinary
+tooling must not read it), or generated tool output such as `node_modules`. It compares `.git`,
+`.aiqt`, `.working` and `[unmanaged]` paths ignoring case and Unicode normalization, so a variant
+spelling is ruled out too, a variant of an `[unmanaged]` path with its own reason. That
+comparison follows Unicode case folding, not a filesystem's own rule: two names a filesystem treats
+as one but Unicode folding keeps apart are not caught. Before the walk it resolves the store exactly
+as investigation does: it reads the two pointer files and probes `manifest.toml` in each immediate
+subdirectory of `.working`, control-area names included, reading each one present, and reads
+nothing else in the store tree. It refuses a `.working` that holds a `.git` or `.aiqt` directory
+before resolving, but one added while resolution runs can be opened to probe its `manifest.toml`.
+The output has one item per line: the status, then each finding,
+proposal, ruled-out entry and searched directory. Every path and reason is escaped to printable
+ASCII, so a backslash sequence such as `\n` stands for a character in a file name; a file name
+cannot add a line.
+
+- Status VALID: present the whole result to the adopter in one message: each proposal with its
+  reason, the directories searched, and each ruled-out entry with its reason (an excluded area, a
+  symlink, a hard-linked or oversized file). Say that the signals are a heuristic: a proposal can
+  be wrong, and an old record under an unusual name or heading is not proposed. Discovery compares
+  samples, not a snapshot: a change made after discovery last observes a byte or an entry can
+  escape, including a write that leaves file metadata equal, such as one through a shared memory
+  mapping, made to the start of a proposed file while discovery reads it for the last time. So VALID
+  does not mean the list describes one consistent state of the tree. Such an equal-metadata change
+  made earlier is detected only at the start of a file proposed for its heading. A change that
+  escapes can leave the list missing a file, naming one that is gone, proposing a file for a heading
+  it no longer has, or reflecting the store as store resolution read it before the walk.
+- Status CANNOT-EVALUATE: report the findings. Any of these leaves no list at all, never a
+  partial one: a bound reached (a tree or store too large or too deep to walk); a store that does
+  not resolve; a `.working` holding a `.git` or `.aiqt` directory; an `[unmanaged]` entry that
+  overlaps a reserved store path or equals or contains a pointer file or a store manifest that
+  resolution reads; or a change during discovery that it detects, during the walk or at its recheck:
+  a change to the metadata (identity, type and mode, link count, size, timestamps) of the product
+  root, of any examined entry or of any store input, or to the start of a file proposed for its
+  heading. Then ask the adopter which old operational
+  files exist, and say why you are asking.
+
+The adopter confirms or removes each proposal and adds any file discovery did not propose. Only
+that confirmed list becomes `sources`. The confirmation is your rule to follow, not a tooling
+check: `investigate` takes whatever list you pass and records no confirmation. Section 14.2 forbids
+post-adoption import from authorizing an incidental discovery; apply the same rule to proposals.
+Never pass a proposal the adopter has not confirmed, and never treat a ruled-out entry as a
+source.
+
+**Then investigate.** This build has no `opf adopt` subcommand that prints the observation. Use
+the planner's read-only library entry, with an absolute product root, the tooling directory that
+holds `opf.py`, and the confirmed sources:
+
+```
+python3 -I -B -c "import sys; sys.path.insert(0, '<opf tools directory>'); import _opf_adopt_plan as p; r = p.investigate('<absolute product root>', sources=['TODO.md'], targets=['opf']); print(r.status, list(r.findings), file=sys.stderr); sys.stdout.write(r.observation.decode() if r.observation else '')"
 ```
 
 `investigate` opens nothing for writing. A status other than VALID is a stop: report its
@@ -126,7 +189,7 @@ findings. In the observation TOML, read:
   or content at a reserved `.working` name makes it re-adoption.
 - `resolution.status`: whether a store already resolves. A store that does not resolve needs an
   `init-store` operation in the plan; a store that resolves must not have one.
-- `candidates`: every path that needs a disposition. These are the sources you named, foreign
+- `candidates`: every path that needs a disposition. These are the confirmed sources, foreign
   files under `.working/`, and pre-existing files at a declared view or deliverable
   destination, such as the product-root `VERSION` or `CHANGELOG.md`.
 - `empty_directories`: an empty directory in scope blocks planning, and this build offers no
@@ -156,7 +219,12 @@ frozen plan marks each source `occupying = true` or `occupying = false`.
   so before the adopter chooses it.
 - **move**: relocate it to a named destination outside the managed store, or by default to
   `.working/archive/moved/<source-path>`, after the green completion check. An occupied
-  destination is a collision, never an overwrite.
+  destination is a collision, never an overwrite. A named destination whose file name is
+  `opf.yml`, `opf-ci.sh`, `pre-commit` or `install.sh`, in any mix of upper and lower case,
+  refuses with exit 2 when you plan, unless it lies beneath `.working/archive/moved/`. Those
+  are the enforcement launcher names, and a moved file is never checked as an enforcement
+  member. Take the default destination, or give the file another name such as
+  `pre-commit.old`.
 
 The reserved store control area (`.working/archive`, `imported`, `staging`, `journals`) is never
 adopter content, and no decision may name it.
@@ -174,7 +242,7 @@ schema = 1
 product = "opf"
 expected_observation_digest = "<observation_digest from section 3>"
 sources = ["TODO.md"]
-targets = [".opf/hooks/pre-commit"]
+targets = ["opf"]
 
 [[decisions]]
 path = "TODO.md"
@@ -204,6 +272,14 @@ residuals = ["server-side-protection-adopter-attested"]
 path = ".github/workflows/opf.yml"
 digest = "<digest of the bytes to install there>"
 
+[[bindings.enforcement.members]]
+path = "opf/enforcement/ci/opf-ci.sh"
+digest = "<digest of the bytes to install there>"
+
+[[bindings.enforcement.members]]
+path = "opf/tools/opf.py"
+digest = "<digest of the bytes to install there>"
+
 [[bindings.enforcement]]
 platform = "pre-commit"
 means = "staged-pre-commit"
@@ -211,7 +287,15 @@ residuals = ["per-clone-installation-and-bypass", "canonical-hand-edits",
              "same-user-tampering"]
 
 [[bindings.enforcement.members]]
-path = ".opf/hooks/pre-commit"
+path = "opf/enforcement/precommit/pre-commit"
+digest = "<digest of the bytes to install there>"
+
+[[bindings.enforcement.members]]
+path = "opf/enforcement/precommit/install.sh"
+digest = "<digest of the bytes to install there>"
+
+[[bindings.enforcement.members]]
+path = "opf/tools/opf.py"
 digest = "<digest of the bytes to install there>"
 
 [[bindings.enforcement]]
@@ -323,7 +407,19 @@ path = ".github/workflows/opf.yml"
 digest = "<digest of the bytes to install there>"
 
 [[ops.members]]
-path = ".opf/hooks/pre-commit"
+path = "opf/enforcement/ci/opf-ci.sh"
+digest = "<digest of the bytes to install there>"
+
+[[ops.members]]
+path = "opf/tools/opf.py"
+digest = "<digest of the bytes to install there>"
+
+[[ops.members]]
+path = "opf/enforcement/precommit/pre-commit"
+digest = "<digest of the bytes to install there>"
+
+[[ops.members]]
+path = "opf/enforcement/precommit/install.sh"
 digest = "<digest of the bytes to install there>"
 
 [[ops.members]]
@@ -348,7 +444,10 @@ How to fill it:
 - `product` is `opf` for standalone OPF, or `aiqt` when OPF is adopted as part of AIQT.
 - `sources` and `targets` repeat exactly what you investigated.
 - One `[[decisions]]` row per candidate, with exactly `path`, `disposition` and the `actor` who
-  chose it. A `move` row may add `destination`; without one it takes the default.
+  chose it. A `move` row may add `destination`; without one it takes the default. A
+  `destination` whose file name is one of the four launcher names below, in any case, refuses
+  with exit 2 unless it lies beneath `.working/archive/moved/`; use the default or another file
+  name.
 - `bindings` carries exactly `revision`, `release`, `prompt_pack`, `enforcement` and
   `skip_policy`. `anchor_sha256` must equal `manifest_sha256`. `skip_policy` is `no-skip` or
   `attributed-skip`.
@@ -364,8 +463,80 @@ How to fill it:
   `instructions` carries `unverified-platform-denial`. Across all rows, the plan must disclose
   each of `per-clone-installation-and-bypass`, `canonical-hand-edits`,
   `shell-or-interpreter-wrapping`, `same-user-tampering` and `unverified-platform-denial` at
-  least once. Each row lists the member files that carry it. The sample's member paths are
-  examples; name the files you would install.
+  least once. Each row lists the member files that carry it. The `claude-code`, `codex`,
+  `gemini-cli` and `cursor` member paths in the sample are examples; name the files you would
+  install. The `ci` and `pre-commit` paths are fixed by the pack. Each of their files runs another
+  file at a path relative to itself, and that path must land inside the `opf/` mirror the plan
+  installs. So the pre-commit hook sits at `opf/enforcement/precommit/pre-commit` with
+  `install.sh` beside it, the CI recipe sits at `opf/enforcement/ci/opf-ci.sh`, where the
+  workflow's `run:` line points, and both rows name `opf/tools/opf.py`, the tool those files run.
+  The sample names only that entry point. The modules it imports sit beside it in the release's
+  `opf/tools/` directory, which a later install step mirrors; that step is not executable in
+  this build. The planner treats a member named `opf.yml`, `opf-ci.sh`, `pre-commit` or
+  `install.sh`, in any row and in any mix of upper and lower case (`PRE-COMMIT` or `Pre-Commit`
+  too), as that file, whichever of `install-pack`, `plant-governance` or `enable-hook` installs
+  it. If the path it runs lies outside `opf/` or above the product root, or no `install-pack` or
+  `plant-governance` operation in the plan creates that path, the plan refuses with exit 2. The
+  `ci` row must still name members whose file names are exactly `opf.yml` and `opf-ci.sh`, and
+  the `pre-commit` row members named exactly `pre-commit` and `install.sh`, in lower case as the
+  pack ships them. A case variant such as `INSTALL.SH` is still treated as that launcher: what
+  it runs is resolved and checked, and a file written under that name must be named in a row.
+  But it does not meet this requirement, nor stand in for a file a launcher runs, which is named
+  at its exact path. A hook at the former `.opf/hooks/pre-commit`, for example, would run
+  `tools/opf.py`, outside the
+  mirror. In a `ci` or `pre-commit` row, each file that one of those files runs must be named in
+  the same row too, so the hook beside `install.sh` and the recipe the workflow runs are checked
+  in turn; a row that leaves one out refuses with exit 2. Every other installed file in that row
+  must be one that a file named as above in the same row runs; any other refuses with exit 2,
+  because the planner cannot tell what it runs. A file named as above in another platform's row
+  must still run a file the plan creates in `opf/`, but that file need not be named in any row;
+  give no other platform's member one of those four names. Every file that any operation in the
+  plan writes under one of the four names, in any case, must be named in some row, or the plan
+  refuses with exit 2, so a launcher the plan writes is never left out while a decoy is named.
+  That covers each file that `install-pack`, `init-store`, `render-views`, `create-file`,
+  `plant-governance` or `record-adoption` creates, each `move-file` destination, and each file
+  that `enable-hook` or `repoint-consumer` rewrites, such as `.git/hooks/pre-commit` or
+  `.husky/pre-commit`. The one exception is a `move-file` destination under the store's Move
+  archive, `.working/archive/moved/`, where a `move` decision files an old hook away: moving the
+  former `.opf/hooks/pre-commit` there is accepted. A file moved there is not checked, so do not
+  run it from there. A `move` destination under one of the four names anywhere else is refused
+  before the plan is built (exit 2), because no row can name a moved file: a member must be
+  installed by an `install-pack`, `plant-governance` or `enable-hook` operation, which would then
+  write that path a second time. The copy the plan keeps of a retired, migrated or occupying
+  source is not an operation's write and is not checked by this rule either. The planner applies
+  this check, like every other exit-2 check in this paragraph, only when every operation row is
+  well formed; this check also needs every row's member list to be well formed, with an
+  `install-pack`, `plant-governance` or `enable-hook` operation installing each member path,
+  whatever its digest. Otherwise those defects refuse the plan with exit 1, unless the plan is
+  refused with exit 2 for another reason first. No other defect holds the check back, so a plan
+  whose operation rows are well formed but which also has, say, a member digest that no
+  operation installs can refuse with exit 2 before its exit-1 findings are reported. Two paths
+  that differ only in case and end in one of the four names, where the plan writes at least one
+  of them (a copy the plan keeps of a source counts as written here) and the other is written
+  too or is a source that stays in place at apply, refuse with exit 1, because a
+  case-insensitive filesystem holds them as one file. That exit-1 refusal is reported only when
+  the exit-2 checks above find nothing, so a variant the plan writes that no row names refuses
+  with exit 2 instead whenever the check above applies. The planner never reads
+  member bytes, so it cannot see a renamed copy of one of those files outside the `ci` and
+  `pre-commit` rows (in another platform's row, or written but named in no row), nor one
+  installed at a path that a file in the row runs, such as hook bytes installed as
+  `opf/tools/opf.py`. Its case comparison is Python's `str.casefold`, which some filesystems'
+  case rules do not match. A `ci` row that names no `opf.yml`, or a `pre-commit` row that names
+  no `install.sh`, spelled exactly so, refuses with exit 2 when an operation writes a file under
+  that name, in any case, outside the Move archive exception, no row names that file, every
+  operation row is well formed, and every row's member list is well formed with each member path
+  installed as described above. Otherwise it refuses with exit 1, unless the plan is refused
+  with exit 2 for another reason first. Neither another platform's row naming that file instead,
+  nor a row naming a member path that no operation installs, nor a malformed operation row is an
+  exit-2 reason on its own.
+- Compatibility with earlier worksheets: the samples in prompt pack 0.4.0 and 0.4.1 named only
+  the workflow in the `ci` row, placed the pre-commit hook alone at `.opf/hooks/pre-commit`, and
+  listed that path in `targets`. A plan from such a worksheet now refuses with exit 2, because
+  its workflow runs `opf/enforcement/ci/opf-ci.sh` and its hook runs `tools/opf.py`, and the
+  plan installs neither in the mirror. Installing the hook with `enable-hook` instead refuses
+  the same way. Rewrite the `ci` and `pre-commit` rows and the `install-pack` members as the
+  sample shows, replace the target with `opf`, and investigate again, because the targets
+  changed.
 - `init-store` is required when no store resolves and refused when one does. `render-views`
   lists exactly the views the planned store declares, one member each; with no store yet, those
   are the thirteen views of the default manifest, as in the sample. Every enforcement member is
@@ -375,7 +546,7 @@ How to fill it:
   decisions; never list them under `ops`.
 - Every planned creation needs an observed absence, and every replacement needs matching
   observed bytes. A path outside the scanned roots is observed only when you list it in
-  `targets`, as the sample does for `.opf/hooks/pre-commit`.
+  `targets`, as the sample does for `opf`.
 
 Some values are caller-asserted. The planner checks the shape of the release identity, the
 prompt-pack binding, the enforcement member digests and the `init-store` and `render-views`
@@ -404,13 +575,16 @@ Run `opf adopt plan --inputs <worksheet> --root <product root>`:
   enforcement member that no `install-pack`, `plant-governance` or `enable-hook` row installs
   with the same path and digest; an `anchor_sha256` that differs from `manifest_sha256`; and a
   `move` destination the frozen plan refuses, such as one inside the store tree but not beneath
-  `.working/archive/moved/`, or one that another effect of the plan also writes. Fix the
-  worksheet and rerun.
+  `.working/archive/moved/`, or one that another effect of the plan also writes (a destination
+  under a launcher name outside `.working/archive/moved/` refuses with exit 2 first, as below).
+  Fix the worksheet and rerun.
 - Exit 2: cannot-evaluate. A worksheet that is unreadable, malformed or carries an unknown key
   refuses here. So do the decision-row faults the planner finds before it freezes the plan: a
   missing or unknown key, an unknown disposition or a field it does not take (a `retire` with a
   `destination`), an empty actor, a path that is not a candidate or that two rows name, a
-  `keep` of an occupying candidate, and a `move` destination with no observed absence. So do a
+  `keep` of an occupying candidate, a `move` destination with no observed absence, and a `move`
+  destination whose file name is `opf.yml`, `opf-ci.sh`, `pre-commit` or `install.sh`, in any
+  case, outside `.working/archive/moved/` (take the default or another file name). So do a
   value outside its closed vocabulary (an operation name, `product`, `skip_policy`, or an
   enforcement `platform`, `means` or residual) and a planner binding rule, such as a missing
   `init-store` row or `render-views` members that are not exactly the declared views.
@@ -481,7 +655,8 @@ instructions to follow.
 
 ## 9. Reporting
 
-Report every command you ran with its exit code and the lines that matter. Pass on the
-investigation's residuals and exclusions. Say which stages ran and which are pending. Never
-describe a project as adopted, or a plan as approved or applied, before the tooling has
-recorded that state: in this build no adoption run reaches approval.
+Report every command you ran with its exit code and the lines that matter. Pass on what source
+discovery searched and ruled out, and the investigation's residuals and exclusions. Say which
+stages ran and which are pending. Never describe a project as adopted, or a plan as approved or
+applied, before the tooling has recorded that state: in this build no adoption run reaches
+approval.

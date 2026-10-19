@@ -19,7 +19,7 @@ Outputs (all under the reserved site/downloads/aiqt/ subtree, plus the standalon
   site/downloads/aiqt-skill.zip       the public download, packed deterministically from that SKILL.md
   site/downloads/aiqt-skill-1.0.6.zip the version-numbered copy the site links to (byte-identical alias)
 
-Latest only, allow-listed (D-SKILL-LATEST-ONLY): only the current skill version is served, and the top
+Latest only, allow-listed: only the current skill version is served, and the top
 level of site/downloads admits ONLY declared outputs: this generator's (aiqt-instructions.txt,
 aiqt-skill.zip, the current aiqt-skill-<version>.zip), the generated aiqt/ directory, and the top-level
 outputs of the two sibling owners, read from each owner's own table (gen_mappings.GENSRC_OUTPUTS:
@@ -35,7 +35,7 @@ input is read, and every walk starts from that one descriptor; each parent compo
 is opened with O_DIRECTORY|O_NOFOLLOW from it, the temporary file is created O_EXCL|O_NOFOLLOW at the
 parent's descriptor, fsynced, and renamed over the target with os.replace anchored to the same descriptor.
 
-Threat model (D-399-STATIC-THREAT-MODEL): the generator defends against hostile STATIC tree state, anything a
+Threat model: the generator defends against hostile STATIC tree state, anything a
 hostile commit can plant (a symlink at any component, a hard link, a FIFO or device, a wrong type, an orphan,
 an unknown entry), and fails closed on it: such an entry is refused or named, never read through, written
 through or deleted. That holds for every output and for every other input this generator reads: LICENSE,
@@ -137,7 +137,7 @@ ATTRIBUTION_SOURCE_URL = "https://github.com/jposluns/guardrails"
 # it to site/evidence.html); this gate verifies, it never writes there.
 EVIDENCE_PARTS = ("docs", "evidence.md")
 # Canonical form, judged on the RAW page text (comments and markup included), so the gate never models how a
-# styled form renders. Scope (D-399-EVIDENCE-SCOPE): the check catches a FORGOTTEN bump, a stale or missing
+# styled form renders. Scope: the check catches a FORGOTTEN bump, a stale or missing
 # plain sentence; it is not a defence against a deliberately misleading page. What the counter checks: the
 # phrase 'served from the' with plain whitespace between its words (any case, any whitespace run, so a wrapped
 # line counts) must occur EXACTLY ONCE, and that one occurrence must be the plain canonical sentence 'served
@@ -529,7 +529,7 @@ def _remove_hint(rel_posix):
 
 
 def latest_only_problems(root_fd, current_versioned, require_current):
-    """Latest-only plus ALLOW-LIST (D-SKILL-LATEST-ONLY) scan of the top level of site/downloads, opened from
+    """Latest-only plus ALLOW-LIST scan of the top level of site/downloads, opened from
     the run's root descriptor by _open_dir_fd and judged by lstat relative to it, never following a link. The
     only entries permitted are this generator's declared outputs (the instructions file, the alias
     aiqt-skill.zip, and current_versioned), each a regular file, the sibling owners' declared top-level
@@ -857,10 +857,17 @@ def plugin_identity(root, root_fd=None):
     path = root.joinpath(*IDENTITY_MANIFEST_PARTS)
     try:
         data = tomllib.loads(_read_input(root_fd, root, IDENTITY_MANIFEST_PARTS))
-    except RecursionError as exc:
-        # tomllib raises RecursionError (a RuntimeError, not a ValueError) on a deeply nested array or inline
-        # table; map it into the ValueError family build_outputs surfaces as exit 2
-        # (F-TOML-BARE-VALUEERROR-CLASS).
+    except (ValueError, RecursionError, MemoryError) as exc:
+        # A ValueError (a TOMLDecodeError or an over-long integer literal) is already the family
+        # build_outputs surfaces as exit 2 and passes unchanged. tomllib raises RecursionError (a RuntimeError)
+        # on a deeply nested array or inline table and, from CPython 3.14.8, on a key of more than 1000 dotted
+        # parts, and MemoryError on a many-part key under a memory limit; map each into that family
+        # (F-TOML-BARE-VALUEERROR-CLASS). A MemoryError is named as the resource failure it is, never as
+        # nesting.
+        if isinstance(exc, ValueError):
+            raise
+        if isinstance(exc, MemoryError):
+            raise ValueError("{}: out of memory parsing TOML ({})".format(path, exc)) from exc
         raise ValueError("{}: TOML nesting is too deep to parse ({})".format(path, exc)) from exc
     plugin = data.get("plugin") if isinstance(data, dict) else None
     name = plugin.get("author-name") if isinstance(plugin, dict) else None
@@ -969,7 +976,7 @@ def run_gen(root, check):
         print("error: {}".format(exc))
         return 2
     try:
-        # Latest-only plus allow-list (D-SKILL-LATEST-ONLY), run FIRST, before any write: exactly one
+        # Latest-only plus allow-list, run FIRST, before any write: exactly one
         # version-numbered skill zip is served, named for the skill meta version (build_outputs has already
         # asserted ZIP_VERSIONED_PARTS spells it), beside the alias, and the ONLY other top-level entries
         # permitted are the declared sibling outputs and the reserved aiqt/ directory. The generator never
@@ -1321,6 +1328,28 @@ def self_test_main():
         finally:
             tomllib.loads, tomllib.load = real_loads, real_load
 
+        # F-TOML-BARE-VALUEERROR-CLASS, memory leg: an injected MemoryError at the parse maps into the same
+        # ValueError family but is named as a memory failure, never as nesting.
+        def oom_loads(text, **kwargs):
+            if "injected-overflow" in text:
+                raise MemoryError("injected memory exhaustion")
+            return real_loads(text, **kwargs)
+
+        tomllib.loads = oom_loads
+        tomllib.load = lambda fp, **kwargs: oom_loads(fp.read().decode("utf-8"), **kwargs)
+        try:
+            plugin_identity(deep)
+            failures.append("an identity manifest memory failure must fail closed (ValueError -> exit 2)")
+        except ValueError as exc:
+            if "out of memory parsing TOML (injected memory exhaustion)" not in str(exc):
+                failures.append(
+                    "an identity manifest memory failure must be named a memory failure, not nesting "
+                    "({})".format(exc))
+        except MemoryError:
+            failures.append("an identity manifest memory failure let a bare MemoryError escape plugin_identity")
+        finally:
+            tomllib.loads, tomllib.load = real_loads, real_load
+
         good = tmp / "good"
         good.mkdir()
         _write_fixture(good, good_src)
@@ -1469,7 +1498,7 @@ def self_test_main():
             if kind not in out or is_versioned_zip(fn) != (i == 0):
                 failures.append("{} expected to be classed as {!r}, got\n{}".format(fn, kind, out))
 
-        # 9. Latest-only (D-SKILL-LATEST-ONLY) scans by lstat and refuses (never skips) a non-regular entry
+        # 9. Latest-only scans by lstat and refuses (never skips) a non-regular entry
         #    at a skill zip name; it also names a missing current copy. Each case is red if the scan reverts
         #    to os.path.isfile (a link to a file passes, a directory is skipped) or drops its lstat filter.
         latest = tmp / "latest"

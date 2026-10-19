@@ -12,7 +12,9 @@ def main():
     declaration = Path(__file__).resolve().parents[1] / ".aiqt/newtab.toml"
     try:
         actual = tomllib.loads(declaration.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError, MemoryError) as exc:
+        # tomllib refuses deep nesting and (CPython 3.14.8 on) a 1001-part key with RecursionError, and a
+        # many-part key under a memory limit with MemoryError: each is exit 2, never a traceback.
         print("error: cannot read NEWTAB repository declaration: {}".format(exc), file=sys.stderr)
         return 2
     expected = {"roots": ["site", "opf/site"]}

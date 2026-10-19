@@ -1,0 +1,31 @@
+# .aiqt/license-qualification.toml: the licence-qualification gate configuration read by
+# tools/check_license_qualification.py (class 3, licence-waiver contradiction).
+#
+# licence: the project's declared licence identity, an identity from the gate's closed
+# LICENCE_IDENTITIES table. The gate VERIFIES the declaration against the licence file (exactly one of
+# LICENSE, LICENSE.md, LICENSE.txt, COPYING may be present; one leading U+FEFF byte-order mark is
+# dropped before it is read): that identity's canonical opening must be the file's LEADING non-blank
+# text, ending on a complete token boundary, and no other identity's opening may appear anywhere in
+# the file (markdown emphasis, heading, list, and blockquote markers are read as spaces). A declared
+# rights-waiving identity (CC0-1.0, Unlicense) must further be the WHOLE canonical text of that
+# licence, token for token and case-insensitively, with only whitespace tolerated. An absent
+# key falls back to inference only for a rights-RESERVING identity whose opening leads the file; a
+# rights-waiving identity is NEVER inferred and must be declared here; anything else is
+# cannot-evaluate (exit 2).
+#
+# Each [[exception]] row excuses EXACTLY ONE waiver-phrase occurrence on ONE scanned surface and MUST
+# carry these keys:
+#   path        the repo-relative POSIX path of the scanned surface the occurrence sits on
+#   phrase      the excused phrase, a member of the closed WAIVER_PHRASES list in the gate
+#   reason      a nonempty explanation of why this occurrence is not a rights-waiver claim
+# and exactly ONE binder:
+#   line        the exact text of the line the occurrence starts on (trailing CR/LF excluded)
+#   occurrence  the 1-based index of that phrase's match within that file, in position order
+# A row that matches no present occurrence is STALE and the gate is cannot-evaluate (exit 2), under a
+# rights-waiving licence too (rows are validated whether or not class 3 scans); a second
+# occurrence beside an excused one still flags. An absent file means no declaration and no exceptions
+# (adopters own their configuration, like .aiqt/newtab.toml); a present but malformed file is
+# cannot-evaluate (exit 2), never a clean pass. This repository needs no exceptions, so this file
+# declares the licence identity and no [[exception]] rows.
+
+licence = "Apache-2.0"

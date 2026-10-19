@@ -199,7 +199,16 @@ def validate_staging_membership(raw_plan, staged_paths):
 def _manifest(raw):
     _require(type(raw) is bytes and 0 < len(raw) <= store.MAX_STORE_READ_BYTES,
              "INPUT", "manifest", "expected bounded, non-empty bytes")
-    return tomllib.loads(raw.decode("utf-8", "strict"))
+    try:
+        return tomllib.loads(raw.decode("utf-8", "strict"))
+    except (ValueError, RecursionError, MemoryError) as exc:
+        # A ValueError (undecodable bytes, a TOMLDecodeError, an over-long integer literal) passes unchanged
+        # to the @_validation wrapper, which refuses it as MALFORMED. tomllib raises RecursionError on deep
+        # nesting and (CPython 3.14.8 on) a 1001-part key, and MemoryError on a many-part key under a memory
+        # limit: each becomes that ValueError, with the same detail, so it is the same MALFORMED refusal.
+        if isinstance(exc, ValueError):
+            raise
+        raise ValueError(str(exc)) from exc
 
 
 def _compatibility(manifest, provenance):

@@ -350,7 +350,7 @@ def load_config(path):
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise ConfigError("malformed assurance config {}: {}".format(path, exc))
     # SCHEMA validation, past mere parseability: the config must be a table with a [surfaces] table, and
     # each declared surface must be a table whose `adapter` is a string and whose `required`/`enabled`
