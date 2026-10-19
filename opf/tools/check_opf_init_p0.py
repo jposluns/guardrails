@@ -1434,7 +1434,9 @@ _SETTLE_SECONDS = 60.0
 def _gate_exit(code):
     """Settle and END the process: before a passing verdict, wait (up to _SETTLE_SECONDS in all) for every
     other thread still running, so a fault it raises later is recorded, never killed silently by the exit,
-    and fail closed (exit 2) if one still runs at the bound; force a recorded background fault to exit 2
+    and fail closed (exit 2) if one still runs at the bound (the census covers threading's threads; a worker
+    started through the low-level _thread entry points is invisible to it, so only a fault such a worker
+    has already raised is recorded: a disclosed residual, not closed); force a recorded background fault to exit 2
     over a passing verdict, flush both streams, re-check the record AFTER the flushes (a fault recorded
     while a flush was blocked, on a full pipe say, must still fail the verdict; its late marker is written
     straight to fd 2, past the buffers), then os._exit, so no atexit callback registered by loaded code
@@ -1451,12 +1453,18 @@ def _gate_exit(code):
         # The code object is never formatted: a loaded object's __str__ must not run here.
         sys.stderr.write("{}: a non-int SystemExit code at the gate entry; exit 1\n".format(_FAULT_MARKER))
         code = 1
-    if code != 0 and (code & 0xFF) == 0:
+    low = code & 0xFF
+    if code != 0 and low == 0:
         # os._exit truncates its status to the low 8 bits, so this non-zero code would end the
         # process with exit status 0, a silent pass; fail closed instead.
         sys.stderr.write("{}: a SystemExit code outside the exit-status range at the gate entry; exit 2\n".format(
             _FAULT_MARKER))
         code = 2
+    else:
+        # os._exit refuses a code outside the C int range (OverflowError) instead of exiting, and
+        # that escape would let atexit callbacks registered by loaded code run after the verdict:
+        # take the low byte, the status any in-range code would report, so the exit below always runs.
+        code = low
     if code == 0:
         current = _threads.current_thread()
         deadline = time.monotonic() + _SETTLE_SECONDS
@@ -1568,6 +1576,18 @@ _FAULT_CHANNEL_CASES = (
     ("exit-status-256", "raise SystemExit(256)\n", 2, True, None),
     ("exit-status-257", "raise SystemExit(257)\n", 1, False, None),
     ("exit-status-negative-256", "raise SystemExit(-256)\n", 2, True, None),
+    # The ends of the C int range: os._exit raises OverflowError on a code beyond either end instead
+    # of exiting, which would let the loaded code's atexit callbacks run after the verdict; the gate
+    # takes the low byte first, so the exit always runs. The codes AT both ends have a zero low byte
+    # and fail closed as exit 2 like any other non-zero multiple of 256.
+    ("exit-status-wide-positive", "import atexit, sys\n"
+     "atexit.register(sys.stderr.write, 'FAULT-FIXTURE-ATEXIT-RAN\\n')\n"
+     "raise SystemExit(2**31 + 1)\n", 1, False, "FAULT-FIXTURE-ATEXIT-RAN"),
+    ("exit-status-wide-negative", "import atexit, sys\n"
+     "atexit.register(sys.stderr.write, 'FAULT-FIXTURE-ATEXIT-RAN\\n')\n"
+     "raise SystemExit(-(2**31) - 1)\n", 255, False, "FAULT-FIXTURE-ATEXIT-RAN"),
+    ("exit-status-boundary-positive", "raise SystemExit(2**31)\n", 2, True, None),
+    ("exit-status-boundary-negative", "raise SystemExit(-(2**31))\n", 2, True, None),
 )
 
 

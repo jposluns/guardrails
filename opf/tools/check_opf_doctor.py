@@ -2245,7 +2245,7 @@ def _claude_hook_self_test():
     real path), a symlinked store tree fails closed, the registration is protected at its real
     path, the reserved imports store home denies, TodoWrite takes R7's scan, and a malformed
     unknown-tool envelope (a null tool_input, no session cwd, an empty tool_name) fails closed.
-    The round-6 change inverts the Bash rule (D-DISCARD-SOUND-RULE): instead of soundly lexing
+    The round-6 decision inverts the Bash rule: instead of soundly lexing
     every exotic shell form, the hook decides PROVABLY PLAIN first (plain words, simple whole-word
     quotes, no substitution, no parameter or arithmetic expansion, no eval, no line continuation, no
     ANSI-C or locale quoting, no unquoted here-document, no interpreter with inline code; a QUOTED
@@ -3158,7 +3158,7 @@ def _claude_hook_self_test():
             deny("edit-frozen-real-dir-denied",
                  payload("Edit", dict(file_path=os.path.join(root4, "site_docs", "OLD.md"),
                                       old_string="a", new_string="b"), root4), "frozen")
-            # ROUND 6 (QA round 6, D-DISCARD-SOUND-RULE): the hook decides PROVABLY PLAIN first and
+            # ROUND 6 (QA round 6, sound-lexing rule dropped): the hook decides PROVABLY PLAIN first and
             # judges every other command coarsely (deny when the cwd or a literal path word lies in
             # a product root, else allow). The three round-6 bypass reproductions each hid the
             # protected path from the old sound scan; each now denies as not-provably-plain from a
@@ -3437,7 +3437,7 @@ def _claude_hook_self_test():
                  env=dict(GIT_TRACE=os.path.join(root, "TODO.md")))
             allow("bash-r9-ambient-git-trace-flag-allowed",
                   payload("Bash", dict(command="git status"), elsewhere), env=dict(GIT_TRACE="1"))
-            # ROUND 10 (QA round 10, ruling D-RESCOPES-A): the container rule kept losing to
+            # ROUND 10 (QA round 10 ruling): the container rule kept losing to
             # spelling, so it no longer parses toward completeness. (1) A directory-plus-basename
             # join is container-checked even when another word already resolves to it (one extra
             # word spelling the joined directory, a cp backup suffix or a second operand, hid it).
@@ -4344,7 +4344,7 @@ def _claude_hook_self_test():
           "structured deny, an empty tool_name exits 2, and a single-quoted literal newline "
           "keeps a writer spelling non-pristine. ROUND 6: the Bash rule decides "
           "provably plain first and judges every other command by a coarse "
-          "product-root check (D-DISCARD-SOUND-RULE); an unquoted here-document "
+          "product-root check (sound-lexing rule dropped); an unquoted here-document "
           "substitution, a commented-parenthesis command substitution and a line "
           "continuation before ANSI-C quoting each deny from a product cwd (the "
           "round-6 reproductions), a plain command touching nothing protected and "
@@ -4575,7 +4575,9 @@ _SETTLE_SECONDS = 60.0
 def _gate_exit(code):
     """Settle and END the process: before a passing verdict, wait (up to _SETTLE_SECONDS in all) for every
     other thread still running, so a fault it raises later is recorded, never killed silently by the exit,
-    and fail closed (exit 2) if one still runs at the bound; force a recorded background fault to exit 2
+    and fail closed (exit 2) if one still runs at the bound (the census covers threading's threads; a worker
+    started through the low-level _thread entry points is invisible to it, so only a fault such a worker
+    has already raised is recorded: a disclosed residual, not closed); force a recorded background fault to exit 2
     over a passing verdict, flush both streams, re-check the record AFTER the flushes (a fault recorded
     while a flush was blocked, on a full pipe say, must still fail the verdict; its late marker is written
     straight to fd 2, past the buffers), then os._exit, so no atexit callback registered by loaded code
@@ -4592,12 +4594,18 @@ def _gate_exit(code):
         # The code object is never formatted: a loaded object's __str__ must not run here.
         sys.stderr.write("{}: a non-int SystemExit code at the gate entry; exit 1\n".format(_FAULT_MARKER))
         code = 1
-    if code != 0 and (code & 0xFF) == 0:
+    low = code & 0xFF
+    if code != 0 and low == 0:
         # os._exit truncates its status to the low 8 bits, so this non-zero code would end the
         # process with exit status 0, a silent pass; fail closed instead.
         sys.stderr.write("{}: a SystemExit code outside the exit-status range at the gate entry; exit 2\n".format(
             _FAULT_MARKER))
         code = 2
+    else:
+        # os._exit refuses a code outside the C int range (OverflowError) instead of exiting, and
+        # that escape would let atexit callbacks registered by loaded code run after the verdict:
+        # take the low byte, the status any in-range code would report, so the exit below always runs.
+        code = low
     if code == 0:
         current = _threads.current_thread()
         deadline = time.monotonic() + _SETTLE_SECONDS
@@ -4709,6 +4717,18 @@ _FAULT_CHANNEL_CASES = (
     ("exit-status-256", "raise SystemExit(256)\n", 2, True, None),
     ("exit-status-257", "raise SystemExit(257)\n", 1, False, None),
     ("exit-status-negative-256", "raise SystemExit(-256)\n", 2, True, None),
+    # The ends of the C int range: os._exit raises OverflowError on a code beyond either end instead
+    # of exiting, which would let the loaded code's atexit callbacks run after the verdict; the gate
+    # takes the low byte first, so the exit always runs. The codes AT both ends have a zero low byte
+    # and fail closed as exit 2 like any other non-zero multiple of 256.
+    ("exit-status-wide-positive", "import atexit, sys\n"
+     "atexit.register(sys.stderr.write, 'FAULT-FIXTURE-ATEXIT-RAN\\n')\n"
+     "raise SystemExit(2**31 + 1)\n", 1, False, "FAULT-FIXTURE-ATEXIT-RAN"),
+    ("exit-status-wide-negative", "import atexit, sys\n"
+     "atexit.register(sys.stderr.write, 'FAULT-FIXTURE-ATEXIT-RAN\\n')\n"
+     "raise SystemExit(-(2**31) - 1)\n", 255, False, "FAULT-FIXTURE-ATEXIT-RAN"),
+    ("exit-status-boundary-positive", "raise SystemExit(2**31)\n", 2, True, None),
+    ("exit-status-boundary-negative", "raise SystemExit(-(2**31))\n", 2, True, None),
 )
 
 

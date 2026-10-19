@@ -1699,7 +1699,7 @@ expected-check-ids = [
   "revert/prefix-scan-red",
   "revert/scope-normalizer-red",
   "revert/comment-shape-red",
-  # ---------- enumerated grammar (D-389-ENUMERATED-GRAMMAR) ----------
+  # ---------- enumerated grammar (input outside it exits 2) ----------
   "exit/byte-order-mark-2",
   "exit/dotted-key-frontmatter-2",
   "exit/at-value-frontmatter-2",
@@ -1758,6 +1758,10 @@ expected-check-ids = [
   "harness/fault-channel-exit-status-256-exit-2",
   "harness/fault-channel-exit-status-257-low-byte-1",
   "harness/fault-channel-exit-status-negative-256-exit-2",
+  "harness/fault-channel-exit-status-wide-positive-low-byte-1",
+  "harness/fault-channel-exit-status-wide-negative-low-byte-255",
+  "harness/fault-channel-exit-status-boundary-positive-exit-2",
+  "harness/fault-channel-exit-status-boundary-negative-exit-2",
   "harness/fault-channel-flush-window-recheck-exit-2",
   "harness/fault-channel-entry-wiring-exact",
   "revert/character-set-red",

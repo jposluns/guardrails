@@ -105,15 +105,18 @@ def _ending_kind(exc):
 # loaded code's cleanup itself: it waits for every other thread (_CHILD_SETTLE_SECONDS in all), runs the
 # atexit callbacks the loaded code registered and collects garbage. An atexit callback or a collected
 # destructor can itself start a worker, which the settle (taken before those cleanup phases) never saw:
-# every Thread.start during the cleanup phases is recorded, and the thread list is enumerated afresh
-# after them, so a worker started by cleanup is a fault whether it finishes or not. Only when no fault
+# every thread-start entry is wrapped from BEFORE the load (threading.Thread.start and the low-level
+# _thread entry points, so a start method the loaded code saved at load time still lands in the wrapper),
+# a start during the cleanup phases is recorded, and the thread list is enumerated afresh after them, so
+# a worker started by cleanup is a fault whether it finishes or not (a low-level worker never joins
+# threading's census, so recording its start is what refuses it). Only when no fault
 # was recorded, no worker was started by cleanup and no other thread still runs does it write the
 # result, LAST, and end by os._exit(0) bound before the load, so no loaded code runs after the result
 # is written (an os._exit at load, in the membership test, in a worker or in an atexit callback ends
 # the child before the result). The parent accepts only exit 0, both streams empty and a well-formed
 # result.
 _CHILD_SETTLE_SECONDS = 60.0
-_LOADED_CHILD = """import atexit, gc, json, os, runpy, sys, threading, time
+_LOADED_CHILD = """import atexit, gc, json, os, runpy, sys, threading, time, _thread
 validator, out, settle = sys.argv[1], sys.argv[2], float(sys.argv[3])
 views = sys.argv[4:]
 end = os._exit
@@ -132,6 +135,18 @@ def record_thread(args):
     previous_thread(args)
 sys.unraisablehook = record_unraisable
 threading.excepthook = record_thread
+in_cleanup = False
+started = []
+def record_starts(original):
+    def record(*args, **kwargs):
+        if in_cleanup:
+            started.append("cleanup-started-worker")
+        return original(*args, **kwargs)
+    return record
+threading.Thread.start = record_starts(threading.Thread.start)
+for entry in ("start_new_thread", "start_new", "start_joinable_thread"):
+    if hasattr(_thread, entry):
+        setattr(_thread, entry, record_starts(getattr(_thread, entry)))
 ns = runpy.run_path(validator)
 live = ns.get("_RESERVED")
 if type(live) is not tuple:
@@ -146,15 +161,9 @@ while True:
     if not running or time.monotonic() >= deadline:
         break
     running[0].join(min(max(deadline - time.monotonic(), 0.0), 0.5))
-started = []
-original_start = threading.Thread.start
-def record_start(worker):
-    started.append("cleanup-started-worker")
-    return original_start(worker)
-threading.Thread.start = record_start
+in_cleanup = True
 atexit._run_exitfuncs()
 gc.collect()
-threading.Thread.start = original_start
 late = [worker for worker in threading.enumerate() if worker is not current and worker.is_alive()]
 if faults or running or started or late:
     sys.stderr.write("LOADED-CODE-FAULT: the validator child recorded a fault, a running thread, "
@@ -183,8 +192,10 @@ def _validator_missing(path, views):
     callback included), a sys.exit or SystemExit (0 or None included), a KeyboardInterrupt, a signal
     handler it installs, any other BaseException, a background fault (a worker's exception or unsuccessful
     SystemExit, a destructor or atexit fault, recorded in the child), a worker its atexit callbacks or
-    garbage collection start (re-checked after those cleanup phases, a fault whether or not it finishes),
-    or a thread still running at the
+    garbage collection start (every start entry is wrapped from before the load, threading.Thread.start
+    and the low-level _thread entry points alike, so a start method saved at load time is still seen;
+    a start during those cleanup phases is a fault whether or not the worker finishes, and the thread
+    list is re-enumerated after them), or a thread still running at the
     bound, leaves a missing result, a non-zero exit, or a non-empty stream, and is CANNOT-EVALUATE (exit
     2), never this gate's pass: the loaded code never runs in this gate's process, so the os._exit channel
     of the in-process load is unreachable here, not disclosed. An operator's Ctrl-C is a KeyboardInterrupt
@@ -382,6 +393,32 @@ def _expect(condition, message=None):
         raise AssertionError(message)
 
 
+def _child_outcome(child_source, body):
+    """"ACCEPTED" when the child at child_source accepts the validator source body (exit 0, both streams
+    empty, a result written), "REFUSED" when it ran and refused, "NO-RUN" when it did not run (distinct,
+    so a control expecting either outcome fails on a dead child); the leg controls drive a deliberately
+    weakened copy of _LOADED_CHILD through this to show which refusal leg carries each cleanup-worker
+    vector."""
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="opf-init-contract-leg-control-") as tmp:
+        child_py = Path(tmp) / "loaded_child.py"
+        child_py.write_text(child_source, encoding="utf-8")
+        val = Path(tmp) / "validator.py"
+        val.write_text(body, encoding="utf-8")
+        out = Path(tmp) / "result.json"
+        try:
+            child = subprocess.run(
+                [sys.executable, "-I", "-B", str(child_py), str(val), str(out),
+                 str(_CHILD_SETTLE_SECONDS), "a.md"],
+                capture_output=True, timeout=600)
+        except (OSError, subprocess.SubprocessError):
+            return "NO-RUN"
+        if child.returncode == 0 and not child.stdout and not child.stderr and out.is_file():
+            return "ACCEPTED"
+        return "REFUSED"
+
+
 def _loaded_exit_failure(label, path, expect_missing=None):
     """None when _validator_missing over the validator at path ends as the case requires, else the failure.
     A refused case (expect_missing is None) must end exit 2 with the CANNOT-EVALUATE line (the child
@@ -426,9 +463,13 @@ def _self_test_loaded_exit():
     atexit os._exit(0) or fault, a worker still running at the bound), and its thread wait has a clean
     case (a worker finishing after the load) that is refused without it. A worker started by the child's
     OWN cleanup run (an atexit callback or a destructor the child's garbage collection runs) is refused
-    whether it finishes, faults later or never ends: those four cases are red when the running-thread
-    list is taken only before the cleanup phases, while the clean finishing-worker case above shows a
-    load-started worker the settle waits out still passes. The exit-status leg, which no
+    whether it finished before cleanup returned, faults later or never ends, started through a start
+    method saved at load time and through the low-level _thread entry points alike: those cases are red
+    when the start record is installed only around the cleanup phases or covers only
+    threading.Thread.start; the joined-worker case is red without the start record (its leg control
+    shows a record-disabled child accepts it); the never-ending case is red without the late census
+    (the same control child still refuses it through the census alone); and the clean finishing-worker
+    case above shows a load-started worker the settle waits out still passes. The exit-status leg, which no
     loaded code reaches once the child ends by its own os._exit(0) after the result, is pinned by
     _child_contract_kept's own cases. A clean child must still return the exact missing-views list, red if
     the child result is not read back. Run by _self_test in a CHILD of the self-test (_LOADED_EXIT_PROBE),
@@ -478,9 +519,29 @@ def _self_test_loaded_exit():
          "threading.Thread(target=fault).start()\n"),
         ("worker still running at the bound after a valid result",
          valid + "import threading\nthreading.Thread(target=threading.Event().wait, daemon=True).start()\n"),
-        ("worker started by an atexit callback, finishing",
+        ("worker started by an atexit callback, still running at the late census",
          valid + "import atexit, threading, time\ndef cleanup():\n"
          "    threading.Thread(target=time.sleep, args=(0.2,)).start()\n"
+         "atexit.register(cleanup)\n"),
+        ("worker started and joined by an atexit callback, finished before it returns",
+         valid + "import atexit, threading\ndef cleanup():\n"
+         "    worker = threading.Thread(target=lambda: None)\n"
+         "    worker.start()\n    worker.join()\n"
+         "atexit.register(cleanup)\n"),
+        ("worker started by an atexit callback through a start method saved at load",
+         valid + "import atexit, threading\n"
+         "worker = threading.Thread(target=lambda: None)\n"
+         "saved_start = worker.start\ndef cleanup():\n"
+         "    saved_start()\n    worker.join()\n"
+         "atexit.register(cleanup)\n"),
+        ("low-level thread worker started by an atexit callback, faulting later",
+         valid + "import atexit, _thread, time\ndef fault():\n    time.sleep(0.3)\n"
+         "    raise RuntimeError('loaded')\ndef cleanup():\n"
+         "    _thread.start_new_thread(fault, ())\n"
+         "atexit.register(cleanup)\n"),
+        ("low-level thread worker started by an atexit callback, never ending",
+         valid + "import atexit, _thread, threading\ndef cleanup():\n"
+         "    _thread.start_new_thread(threading.Event().wait, ())\n"
          "atexit.register(cleanup)\n"),
         ("worker started by an atexit callback, faulting later",
          valid + "import atexit, threading, time\ndef fault():\n    time.sleep(0.3)\n"
@@ -523,6 +584,25 @@ def _self_test_loaded_exit():
             if failure is not None:
                 failures.append(failure)
     _expect(not failures, "loaded-exit vectors: " + "; ".join(failures))
+    # Leg controls: each refusal leg added for cleanup-started workers must carry weight on its own. A
+    # copy of the child with the start record disabled (the recording line replaced, required to exist)
+    # shows the joined-worker vector above is refused by the start record alone (that copy accepts it:
+    # nothing else can see a cleanup worker that already finished), and shows the late census still
+    # refuses a cleanup worker the disabled record missed (red if the census is taken only before the
+    # cleanup phases).
+    record_off = _LOADED_CHILD.replace('started.append("cleanup-started-worker")', "pass")
+    _expect(record_off != _LOADED_CHILD, "leg control: the start-recording line is present to disable")
+    joined = (valid + "import atexit, threading\ndef cleanup():\n"
+              "    worker = threading.Thread(target=lambda: None)\n"
+              "    worker.start()\n    worker.join()\n"
+              "atexit.register(cleanup)\n")
+    _expect(_child_outcome(record_off, joined) == "ACCEPTED",
+            "leg control: the joined cleanup worker is refused by the start record alone")
+    never = (valid + "import atexit, threading\ndef cleanup():\n"
+             "    threading.Thread(target=threading.Event().wait, daemon=True).start()\n"
+             "atexit.register(cleanup)\n")
+    _expect(_child_outcome(record_off, never) == "REFUSED",
+            "leg control: the late census refuses a cleanup worker the start record missed")
 
 
 # The loaded-exit vectors run in a child of the self-test that must end 0 with exactly this file's
@@ -658,7 +738,9 @@ _SETTLE_SECONDS = 60.0
 def _gate_exit(code):
     """Settle and END the process: before a passing verdict, wait (up to _SETTLE_SECONDS in all) for every
     other thread still running, so a fault it raises later is recorded, never killed silently by the exit,
-    and fail closed (exit 2) if one still runs at the bound; force a recorded background fault to exit 2
+    and fail closed (exit 2) if one still runs at the bound (the census covers threading's threads; a worker
+    started through the low-level _thread entry points is invisible to it, so only a fault such a worker
+    has already raised is recorded: a disclosed residual, not closed); force a recorded background fault to exit 2
     over a passing verdict, flush both streams, re-check the record AFTER the flushes (a fault recorded
     while a flush was blocked, on a full pipe say, must still fail the verdict; its late marker is written
     straight to fd 2, past the buffers), then os._exit, so no atexit callback registered by loaded code
@@ -675,12 +757,18 @@ def _gate_exit(code):
         # The code object is never formatted: a loaded object's __str__ must not run here.
         sys.stderr.write("{}: a non-int SystemExit code at the gate entry; exit 1\n".format(_FAULT_MARKER))
         code = 1
-    if code != 0 and (code & 0xFF) == 0:
+    low = code & 0xFF
+    if code != 0 and low == 0:
         # os._exit truncates its status to the low 8 bits, so this non-zero code would end the
         # process with exit status 0, a silent pass; fail closed instead.
         sys.stderr.write("{}: a SystemExit code outside the exit-status range at the gate entry; exit 2\n".format(
             _FAULT_MARKER))
         code = 2
+    else:
+        # os._exit refuses a code outside the C int range (OverflowError) instead of exiting, and
+        # that escape would let atexit callbacks registered by loaded code run after the verdict:
+        # take the low byte, the status any in-range code would report, so the exit below always runs.
+        code = low
     if code == 0:
         current = _threads.current_thread()
         deadline = time.monotonic() + _SETTLE_SECONDS
@@ -794,6 +882,18 @@ _FAULT_CHANNEL_CASES = (
     ("exit-status-256", "raise SystemExit(256)\n", 2, True, None),
     ("exit-status-257", "raise SystemExit(257)\n", 1, False, None),
     ("exit-status-negative-256", "raise SystemExit(-256)\n", 2, True, None),
+    # The ends of the C int range: os._exit raises OverflowError on a code beyond either end instead
+    # of exiting, which would let the loaded code's atexit callbacks run after the verdict; the gate
+    # takes the low byte first, so the exit always runs. The codes AT both ends have a zero low byte
+    # and fail closed as exit 2 like any other non-zero multiple of 256.
+    ("exit-status-wide-positive", "import atexit, sys\n"
+     "atexit.register(sys.stderr.write, 'FAULT-FIXTURE-ATEXIT-RAN\\n')\n"
+     "raise SystemExit(2**31 + 1)\n", 1, False, "FAULT-FIXTURE-ATEXIT-RAN"),
+    ("exit-status-wide-negative", "import atexit, sys\n"
+     "atexit.register(sys.stderr.write, 'FAULT-FIXTURE-ATEXIT-RAN\\n')\n"
+     "raise SystemExit(-(2**31) - 1)\n", 255, False, "FAULT-FIXTURE-ATEXIT-RAN"),
+    ("exit-status-boundary-positive", "raise SystemExit(2**31)\n", 2, True, None),
+    ("exit-status-boundary-negative", "raise SystemExit(-(2**31))\n", 2, True, None),
 )
 
 
@@ -882,41 +982,6 @@ def _entry_wiring_failures():
     if last is None or ast.dump(last) != ast.dump(expected):
         failures.append("fault-channel/entry-wiring: the final __main__ block is not the expected "
                         "fail-closed form")
-    return failures
-
-def _fault_channel_vectors():
-    """One failure string per fault-channel case whose child did not end as required: the expected exit
-    code, the fault marker exactly when a fault must be recorded, and for the atexit case no trace of the
-    callback (it must never run). Red without the entry wrapper (the probe then ends 1, AttributeError on
-    _fail_closed_main, where clean and atexit expect 0) and red with the wrapper reverted to a plain exit
-    (the thread and destructor children then end 0 with the default hooks' output alone, where exit 2 with
-    the marker is required, and the atexit child then runs the callback)."""
-    import subprocess
-    import tempfile
-    failures = []
-    tool = str(Path(__file__).resolve())
-    with tempfile.TemporaryDirectory(prefix="check-footer-fault-channel-") as tmp:
-        probe = Path(tmp) / "probe.py"
-        probe.write_text(_FAULT_CHANNEL_PROBE, encoding="utf-8")
-        for index, (label, body, expected, marked, absent) in enumerate(_FAULT_CHANNEL_CASES):
-            case = Path(tmp) / "fault_channel_{}.py".format(index)
-            case.write_text(body, encoding="utf-8")
-            try:
-                child = subprocess.run([sys.executable, "-I", "-B", str(probe), tool, str(case)],
-                                       capture_output=True, text=True, timeout=120)
-            except (OSError, subprocess.SubprocessError) as exc:
-                failures.append("fault-channel/{}: probe did not run ({})".format(label, type(exc).__name__))
-                continue
-            if child.returncode != expected:
-                failures.append("fault-channel/{}: expected exit {}, got {}".format(
-                    label, expected, child.returncode))
-            elif marked != ((_FAULT_MARKER + ":") in child.stderr):
-                failures.append("fault-channel/{}: fault marker {}".format(
-                    label, "absent" if marked else "present"))
-            elif absent is not None and absent in child.stderr:
-                failures.append("fault-channel/{}: the atexit callback ran".format(label))
-    failures.extend(_flush_window_failures())
-    failures.extend(_entry_wiring_failures())
     return failures
 
 
