@@ -71,7 +71,7 @@ HANG_SECONDS (60 s) between a witnessed run's deadline and its kill, after which
 of a witness that takes WITNESS_WAIT (5 s) after its run to die; the outer 2 * WITNESS_WAIT (10 s) bound of the
 parent-death vector (a stall of WITNESS_WAIT in its stand-in reads cannot-evaluate, not a failure); and the
 CHILD_TIMEOUT (60 s) bounds of the timer vector, the unarmed and audited descendant legs, the window sweeps, the
-_launch of each run/* and own-entry/* leg, and the live legs.
+conversion-limit observation, the _launch of each run/* and own-entry/* leg, and the live legs.
 
 The self-test requires Linux: its gate runner and witnesses use os.waitid with WNOWAIT, fcntl.F_SETSIG,
 os.pidfd_open and /proc. Elsewhere it never passes (the parent-death check fails without F_SETSIG, and a missing
@@ -2557,14 +2557,22 @@ def _token_boundaries():
     return not mismatched, mismatched
 
 
+# The integer-conversion settings a caller of _token_boundaries starts from in the restore legs: disabled (0,
+# the only state it changes), the smallest limit the interpreter accepts, the default limit, and one above it.
+CONVERSION_SETTINGS = (0, sys.int_info.str_digits_check_threshold, sys.int_info.default_max_str_digits,
+                       2 * sys.int_info.default_max_str_digits)
+
+
 def _conversion_limit_restored():
     """_token_boundaries leaves the caller's integer-conversion setting as it found it, the setting read back
     independently (sys.get_int_max_str_digits) after each call rather than trusted from the fixture's verdict:
-    from the disabled setting (0, the only state _token_boundaries changes) and from the default limit (never
-    written), each on the return path and with an injected judgement escape (a BaseException the judgement
-    recorder does not catch, so it unwinds through the restore and must still be re-raised, never swallowed).
-    A call that leaves the setting moved, on either path from either starting setting, is a failure, so a
-    removed or ineffective restore reads red here while the token verdicts alone stay green: (ok, detail)."""
+    from each of CONVERSION_SETTINGS (the disabled setting, the only state _token_boundaries changes, and three
+    limits it must never write: the smallest, the default and one above it), each on the return path and with an
+    injected judgement escape (a BaseException the judgement recorder does not catch, so it unwinds through the
+    restore and must still be re-raised, never swallowed). A call that leaves the setting moved, on either path
+    from any starting setting, is a failure, so a removed or ineffective restore, or a write of any fixed limit,
+    reads red here while the token verdicts alone stay green. This function's own final restore of its caller's
+    setting is held by _conversion_limit_observed: (ok, detail)."""
     this, entry = sys.modules[__name__], sys.get_int_max_str_digits()
 
     class Escape(BaseException):
@@ -2574,7 +2582,7 @@ def _conversion_limit_restored():
         raise Escape("judgement escape of the self-test")
     outcomes = {}
     try:
-        for caller in (0, sys.int_info.default_max_str_digits):
+        for caller in CONVERSION_SETTINGS:
             sys.set_int_max_str_digits(caller)
             held, mismatched = _token_boundaries()
             outcomes["returned-from-{}".format(caller)] = (
@@ -2593,6 +2601,30 @@ def _conversion_limit_restored():
     finally:
         sys.set_int_max_str_digits(entry)
     return _combined(ok for ok, _seen in outcomes.values()), outcomes
+
+
+def _conversion_limit_observed():
+    """_conversion_limit_restored, run from each of CONVERSION_SETTINGS, holds and leaves that setting as it found
+    it, read back after it returns, so its own final restore is held as well as the restores it reads inside
+    _token_boundaries (with that restore removed, the last setting it exercised is left behind). The whole
+    observation runs in a disposable child (_in_child, bounded by CHILD_TIMEOUT) that sets the setting freely and
+    then exits, so this process's own setting is never written and no restore here is left unobserved; it is
+    read before and after the child and must be unchanged. A child that does not report its readings (hung,
+    crashed or unreaped) is a failure, never a pass: (ok, detail)."""
+    before = sys.get_int_max_str_digits()
+
+    def observed():
+        seen = []
+        for entry in CONVERSION_SETTINGS:
+            sys.set_int_max_str_digits(entry)
+            held, outcomes = _conversion_limit_restored()
+            seen.append([entry, held is True, sys.get_int_max_str_digits(),
+                         sorted(name for name, (ok, _seen) in outcomes.items() if ok is not True)])
+        return seen
+    done, seen = _in_child(observed, CHILD_TIMEOUT)
+    want = [[entry, True, entry, []] for entry in CONVERSION_SETTINGS]
+    after = sys.get_int_max_str_digits()
+    return done is True and seen == want and after == before, dict(seen=seen, before=before, after=after)
 
 
 def _probe_event_masks():
@@ -3323,8 +3355,10 @@ def _descendant_walk_held(adopted):
     nothing signalled (_broken_walk_witnessed, EACCES and EIO driven). Leg tokens: each clause of _pid_token
     at its boundaries, str and bytes, just inside, at and just outside each end, the width clause held by
     conversion-limit-sized entries only it can refuse. Leg tokens-restore: that fixture leaves the caller's
-    integer-conversion setting as it found it, the setting read back after each call, from the disabled and
-    the default settings, on the return path and under an escaping judgement (_conversion_limit_restored).
+    integer-conversion setting as it found it, the setting read back after each call, from the disabled
+    setting and three limits (the smallest, the default and one above it), on the return path and under an
+    escaping judgement (_conversion_limit_restored), and that check's own restore is read back after it
+    returns, all in a disposable child, so this process's setting is never written (_conversion_limit_observed).
     Leg probe-events: the probe
     decides by the event mask (POLLIN or POLLHUP is the exit; POLLERR and POLLNVAL each raise, never read as
     an exit or as alive). Legs probe-error-recorded and probe-error-accept: a poll-error event at the
@@ -3385,7 +3419,7 @@ def _descendant_walk_held(adopted):
     outcomes["witnessed-probe"] = _probe_broken_witnessed()
     outcomes["probe-interrupt"] = _recording_swept()
     outcomes["tokens"] = _token_boundaries()
-    outcomes["tokens-restore"] = _conversion_limit_restored()
+    outcomes["tokens-restore"] = _conversion_limit_observed()
     outcomes["probe-events"] = _probe_event_masks()
     outcomes["probe-error-recorded"] = _probe_error_recorded()
     outcomes["probe-error-accept"] = _probe_error_accepted()
@@ -4006,48 +4040,74 @@ def _unreaped_hang_uncredited():
     to WITNESS_TIMEOUT: a run that hangs reads "hung; unreaped (...)" (the hang visible, the reap failure
     attached) and is None under a mutant, so that mutant is not caught by it (an exposure here, from a bare
     "unreaped" read as a completed run, is the regression); a run that returns with its child unreaped is
-    None under a mutant as well. The confirmation re-run refuses both unreaped forms the same way, held by
-    injected _gate result sequences, an initial hang then each unreaped form. The injected gate reports
-    expiry as the real runner does, calling expiring with a pid for a run that reads hung, so the hung
-    unreaped re-run carries evidence and a refusal narrowed to evidence-free runs is exposed; a gate call
-    past the scripted sequence reads as one more hung run, failing the expected call list, never an escaping
-    error. The outcome is None, both aggregate verdicts are unresolved, the two runs were made at
-    GATE_TIMEOUT then BLOCK_CONFIRM, and expiry was reported once for the hung form and never for the
-    returned form (a confirmation run whose killed child is still unreaped read as a completed run, an
-    exposure crediting the mutant, is the regression): (ok, detail)."""
+    None under a mutant as well. The confirmation re-run refuses both unreaped forms the same way whatever
+    evidence it carries, held by injected _gate result sequences, an initial hang then each unreaped form,
+    for an undeclared pair and for a pair declared in BLOCK_CREDIT, each with no evidence, with a reading
+    that shows no FIFO open wait and with one that shows it. The injected gate reports expiry with
+    FAKE_PID_BASE + 1 (never a live process) whenever the case scripts a reading, and _fifo_open_evidence is
+    replaced by a reader that returns that scripted reading. The real runner reports expiry only for a run
+    that reads hung, and with that run's own child; scripting a reading for the returned form as well holds
+    the refusal independent of evidence, so a refusal narrowed by evidence of any kind is exposed. The
+    positive reading is shown to be crediting evidence by controls on the declared pair: an initial hang
+    then a plain hang with that reading reads "blocked", crediting the mutant, while with no evidence or the
+    negative reading it reads None, each with the same two runs and reader calls. A
+    gate call past the scripted sequence reads as one more hung run, failing the expected call list, never an
+    escaping error. In every unreaped case the outcome is None, both aggregate verdicts are unresolved, the
+    two runs were made at GATE_TIMEOUT then BLOCK_CONFIRM, and the reader was called once with the reported
+    pid when a reading was scripted and never otherwise (a confirmation run whose killed child is still
+    unreaped read as a completed run, or as a block, an exposure crediting the mutant, is the regression):
+    (ok, detail)."""
     this, real = sys.modules[__name__], _reap_within
+    reported = FAKE_PID_BASE + 1
 
     def reaping(pid, wait):
         real(pid, wait)
         return UNREAPED
     vector = ("scratch/unreaped", ROOT, 0, "PASS", None)
+    undeclared, declared = ("scratch-mutant", vector[0]), ("open-nonblock", "registry/fifo")
+    readings = (("absent", None), ("negative", (False, "scripted reading: another wait")),
+                ("positive", (True, "scripted reading: a FIFO open wait")))
 
-    def confirmed(form):
-        results, calls, expired = [("hung", ""), (form, "")], [], []
+    def confirmed(pair, form, reading):
+        mutant, vid = pair
+        results, calls, read = [("hung", ""), (form, "")], [], []
 
         def gate(module, root, timeout=GATE_TIMEOUT, forked=None, expiring=None):
             calls.append(timeout)
             got = results.pop(0) if results else ("hung", "")
-            if got[0].startswith("hung") and expiring is not None:
-                expired.append(os.getpid())
-                expiring(expired[-1])
+            if expiring is not None and reading is not None:
+                expiring(reported)
             return got
-        with _patched(this, "_gate", gate):
-            outcome = _vector_outcome(this, vector, "scratch-mutant")[0]
-        verdicts = _mutation_verdicts([("scratch-mutant", vector[0], {vector[0]: outcome})], [vector[0]])[:2]
-        return outcome, verdicts, calls, len(expired)
+
+        def evidence(pid):
+            read.append(pid)
+            return reading
+        with _patched(this, "_gate", gate), _patched(this, "_fifo_open_evidence", evidence):
+            outcome = _vector_outcome(this, (vid, ROOT, 0, "PASS", None), mutant)[0]
+        verdicts = _mutation_verdicts([(mutant, vid, {vid: outcome})], [vid])[:2]
+        return outcome, verdicts, calls, read
     with _patched(this, "_reap_within", reaping), _patched(this, "GATE_TIMEOUT", WITNESS_TIMEOUT):
         hung = _vector_outcome(types.SimpleNamespace(run=lambda root: time.sleep(HANG_SECONDS)), vector,
                                "scratch-mutant")
         returned = _vector_outcome(types.SimpleNamespace(run=lambda root: 1), vector, "scratch-mutant")
     caught = _mutation_verdicts([("scratch-mutant", vector[0], {vector[0]: hung[0]})], [vector[0]])[0]
-    confirm = dict((form, confirmed(form)) for form in ("unreaped (scripted)", "hung; unreaped (scripted)"))
+    confirm, want = {}, {}
+    for pair in (undeclared, declared):
+        for form in ("unreaped (scripted)", "hung; unreaped (scripted)"):
+            for name, reading in readings:
+                key = "{} {} {}: {}".format(pair[0], pair[1], name, form)
+                confirm[key] = confirmed(pair, form, reading)
+                want[key] = (None, (None, None), [GATE_TIMEOUT, BLOCK_CONFIRM],
+                             [] if reading is None else [reported])
+    controls = dict((name, confirmed(declared, "hung", reading)) for name, reading in readings)
+    credited = dict((name, (("blocked", (True, True)) if name == "positive" else (None, (None, None)))
+                     + ([GATE_TIMEOUT, BLOCK_CONFIRM], [] if reading is None else [reported]))
+                    for name, reading in readings)
     ok = (hung[0] is None and str(hung[1][0]).startswith("hung; unreaped (") and returned[0] is None
           and str(returned[1][0]).startswith("unreaped (") and caught is None
-          and all(confirm[form] == (None, (None, None), [GATE_TIMEOUT, BLOCK_CONFIRM],
-                                    1 if form.startswith("hung") else 0)
-                  for form in confirm))
-    return ok, dict(hung=hung, returned=returned, caught=caught, confirm=confirm)
+          and declared in BLOCK_CREDIT and undeclared not in BLOCK_CREDIT and confirm == want
+          and controls == credited)
+    return ok, dict(hung=hung, returned=returned, caught=caught, confirm=confirm, controls=controls)
 
 
 def _credit_verdict(detail):
@@ -4099,8 +4159,8 @@ def _hang_credit(vectors, base):
     held, reads False with no re-run. With every run hung and no evidence, every vector fails against this gate
     and neither aggregate passes. Each half of the evidence is necessary on its own (_evidence_halves). A run
     whose killed child is still unreaped, hung or not, is None under a mutant, never an exposure, on the
-    initial run through the real _gate and on the confirmation re-run through injected result sequences
-    (_unreaped_hang_uncredited). The cases
+    initial run through the real _gate and on the confirmation re-run through injected result sequences,
+    with or without evidence of a FIFO open wait (_unreaped_hang_uncredited). The cases
     that need no reading from the FIFO subject, the undeclared pair's stall among them, are decided first and
     fail as False; only when every one of them holds and that subject never showed its wait is the verdict None
     (cannot evaluate). The decision is _credit_verdict, held over injected details by _stall_decided."""
