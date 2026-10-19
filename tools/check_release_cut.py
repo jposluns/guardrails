@@ -1455,6 +1455,15 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
     (("tools/selftest_orch_hooks.py", "subprocess.run:src/a.py"),
      (1, "a git grep over the fixture repository; src/a.py is a pathspec argument of the probe, git "
       "executes no Python here")),
+    (("opf/tools/_opf_adopt_apply.py", "subprocess.run:<no-py-literal>"),
+     (11, "git children (the engine's one read-only rev-parse revision observation and the self-test's "
+      "neutralized-config fixture plumbing) plus self-test children that re-enter THIS module through "
+      "sys.executable with an argv built from __file__; the module is itself enumerated, and an argv "
+      "built at runtime that names any other in-tree module is the named LIMITS residue")),
+    (("opf/tools/_opf_adopt_state.py", "subprocess.run:<no-py-literal>"),
+     (5, "self-test fixture git plumbing (add, write-tree, rev-parse, commit-tree, update-ref) run in the "
+      "test's own scratch repository with neutralized configuration; no .py literal and no in-tree "
+      "module in any argv")),
 ))
 
 
@@ -3161,7 +3170,7 @@ def _raw_read_lint(root):
     return failures, (len(modules), len(got_all), total, finding_total)
 
 
-_RAW_READ_PENDING = ("unconverted pre-existing raw read(s), pending conversion and tracked by this pin, which\n                     only shrinks. The special-file precheck walk (which descends ignored directories and nested\n                     .git directories and refuses every symlink to a directory outside the root) certifies\n                     IN-ROOT inputs as defence in depth, but it can never certify a configuration-declared\n                     out-of-root path, a directory the walk does not enter or a post-walk write, so\n                     this pin is NOT a per-site certification; sites with a verified per-site reason are\n                     in RAW_READ_SITE_REASONS instead")
+_RAW_READ_PENDING = ("unconverted pre-existing raw read(s), pending conversion and tracked by this pin, which\n                     only shrinks. The special-file precheck walk (which descends ignored directories and nested\n                     .git directories and refuses every symlink to a directory outside the root) certifies\n                     IN-ROOT inputs as defence in depth, but it can never certify a configuration-declared\n                     out-of-root path, a directory the walk does not enter or a post-walk write, so\n                     this pin is NOT a per-site certification; sites with a verified per-site reason are\n                     in RAW_READ_SITE_REASONS instead. This pin was set once, at the lint's landing, over the merge of main 5db83d8f (reads written before the lint existed), and only shrinks from there.")
 
 RAW_READ_ALLOWLIST = dict((
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_commit_run::os.read", 1),
@@ -3176,6 +3185,15 @@ RAW_READ_ALLOWLIST = dict((
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_escape_stat::os.open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_forced_exit_findings::open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_git_toplevel_has_registry::os.open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_append_checked::os.open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_load::os.read", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory::os.open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory::os.read", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory_save::os.open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_open::os.open", 4),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_prove::os.open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_verify::os.open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_write_field::os.open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_merge_pending_findings::open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_mode_read::os.open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_mode_read::os.read", 1),
@@ -3183,6 +3201,8 @@ RAW_READ_ALLOWLIST = dict((
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_pending_haystack::open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_read_jsonl::open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_register_authority::open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_register_authority::os.open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_register_authority::os.read", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_registry::os.open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_registry::os.read", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_registry_walk::os.open", 2),
@@ -3195,6 +3215,7 @@ RAW_READ_ALLOWLIST = dict((
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_blob_id::os.read", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_read_fd::os.read", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_read_small::os.open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_read_text::os.open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_record_read::os.open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_record_write::os.open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_registry_dir::os.open", 1),
@@ -3330,6 +3351,7 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/_journal.py::_recreate_file::os.open", 1),
     ("opf/tools/_journal.py::_restore_preimage::os.open", 2),
     ("opf/tools/_journal.py::_st_fd_table_eio::os.open", 1),
+    ("opf/tools/_journal.py::_st_fd_table_fails_closed::os.open", 1),
     ("opf/tools/_journal.py::_st_stale_listing_check::os.open", 5),
     ("opf/tools/_journal.py::_truncate_log::os.open", 1),
     ("opf/tools/_journal.py::acquire_lock::os.open", 1),
@@ -3347,14 +3369,48 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/_journal.py::read_lock_owner_at::os.open", 1),
     ("opf/tools/_journal.py::reconcile_and_claim_stale::os.open", 1),
     ("opf/tools/_opf_adopt.py::self_test::read_text", 1),
+    ("opf/tools/_opf_adopt_apply.py::_anon_ident::read_bytes", 1),
+    ("opf/tools/_opf_adopt_apply.py::_bytes::read_bytes", 1),
+    ("opf/tools/_opf_adopt_apply.py::_close_class_sweep_checks::os.open", 2),
     ("opf/tools/_opf_adopt_apply.py::_finish_ops_self_test::read_bytes", 2),
-    ("opf/tools/_opf_adopt_apply.py::_self_test_checks::os.open", 2),
-    ("opf/tools/_opf_adopt_apply.py::_self_test_checks::read_bytes", 20),
+    ("opf/tools/_opf_adopt_apply.py::_init_store_git_checks::open", 3),
+    ("opf/tools/_opf_adopt_apply.py::_init_store_recorded_plan::os.open", 2),
+    ("opf/tools/_opf_adopt_apply.py::_init_store_txn_clear::os.open", 2),
+    ("opf/tools/_opf_adopt_apply.py::_init_store_view_digests::os.open", 2),
+    ("opf/tools/_opf_adopt_apply.py::_journal_listing::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::_kill_injection_child::read_text", 1),
+    ("opf/tools/_opf_adopt_apply.py::_listing_close_run::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::_lock_identity::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::_run_class_sweep_child::read_text", 1),
+    ("opf/tools/_opf_adopt_apply.py::_scan_fault_named::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::_self_test_checks::os.open", 17),
+    ("opf/tools/_opf_adopt_apply.py::_self_test_checks::read_bytes", 35),
+    ("opf/tools/_opf_adopt_apply.py::_snapshot::read_bytes", 1),
+    ("opf/tools/_opf_adopt_apply.py::acquire_then_reopen::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::acquire_then_reuse::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::cleaned_then_ensure::os.open", 1),
     ("opf/tools/_opf_adopt_apply.py::dir_at::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::foreign_open::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::hook_failing_inventory::read_bytes", 1),
+    ("opf/tools/_opf_adopt_apply.py::live_digest::open", 1),
+    ("opf/tools/_opf_adopt_apply.py::path_ident::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::peer_thread_after::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::plant_stage::os.open", 1),
     ("opf/tools/_opf_adopt_apply.py::preserved_now::read_bytes", 2),
     ("opf/tools/_opf_adopt_apply.py::read_retained::os.open", 1),
-    ("opf/tools/_opf_adopt_apply.py::snapshot::read_bytes", 2),
+    ("opf/tools/_opf_adopt_apply.py::record::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::site_vector::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::snapshot::read_bytes", 1),
+    ("opf/tools/_opf_adopt_apply.py::tree_state::read_bytes", 1),
+    ("opf/tools/_opf_adopt_apply.py::walk::os.open", 1),
     ("opf/tools/_opf_adopt_apply.py::watching_restore::read_bytes", 2),
+    ("opf/tools/_opf_adopt_complete.py::_rereceipt::open", 2),
+    ("opf/tools/_opf_adopt_complete.py::_restore_exercise::open", 1),
+    ("opf/tools/_opf_adopt_complete.py::_retoml::open", 1),
+    ("opf/tools/_opf_adopt_complete.py::_toml_file::open", 1),
+    ("opf/tools/_opf_adopt_complete.py::_tree::open", 1),
+    ("opf/tools/_opf_adopt_complete.py::_unclaim::open", 1),
+    ("opf/tools/_opf_adopt_complete.py::self_test::open", 1),
     ("opf/tools/_opf_adopt_discover.py::_read_prefix::os.open", 1),
     ("opf/tools/_opf_adopt_discover.py::_read_prefix::os.read", 1),
     ("opf/tools/_opf_adopt_discover.py::_recheck_store::os.open", 2),
@@ -3391,14 +3447,27 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/_opf_adopt_plan.py::_read::os.open", 1),
     ("opf/tools/_opf_adopt_plan.py::_read::os.read", 1),
     ("opf/tools/_opf_adopt_plan.py::_require_no_store_manifest::os.open", 2),
+    ("opf/tools/_opf_adopt_plan.py::children::os.open", 1),
     ("opf/tools/_opf_adopt_plan.py::snapshot::read_bytes", 1),
     ("opf/tools/_opf_adopt_plan.py::test_default_move_collision::read_bytes", 1),
     ("opf/tools/_opf_adopt_plan.py::test_move_requires_observed_absence::read_bytes", 1),
     ("opf/tools/_opf_adopt_plan.py::test_preservation_destination_occupied::read_bytes", 1),
-    ("opf/tools/_opf_adopt_plan.py::visit::os.open", 1),
+    ("opf/tools/_opf_adopt_state.py::_self_test_checks::os.open", 5),
+    ("opf/tools/_opf_adopt_state.py::_self_test_checks::read_bytes", 11),
+    ("opf/tools/_opf_adopt_state.py::commit::os.open", 1),
+    ("opf/tools/_opf_adopt_state.py::commit::read_bytes", 1),
+    ("opf/tools/_opf_adopt_state.py::contain::os.open", 1),
+    ("opf/tools/_opf_adopt_state.py::counting_read_fd::os.read", 1),
+    ("opf/tools/_opf_adopt_state.py::occ_retire::os.open", 1),
+    ("opf/tools/_opf_adopt_state.py::relist::read_bytes", 1),
+    ("opf/tools/_opf_adopt_state.py::retire::os.open", 1),
+    ("opf/tools/_opf_adopt_state.py::snapshot::read_bytes", 1),
+    ("opf/tools/_opf_adopt_state.py::state_of::os.open", 1),
+    ("opf/tools/_opf_adopt_state.py::unit_retired::os.open", 1),
     ("opf/tools/_opf_check.py::_list_contained::os.open", 1),
     ("opf/tools/_opf_check.py::_q_vector::os.open", 2),
     ("opf/tools/_opf_check.py::self_test::os.open", 3),
+    ("opf/tools/_opf_check.py::tree::read_bytes", 1),
     ("opf/tools/_opf_emit.py::_fixture_await_ack::os.read", 1),
     ("opf/tools/_opf_emit.py::_fixture_children::os.open", 1),
     ("opf/tools/_opf_emit.py::_fixture_children::os.read", 1),
@@ -3414,6 +3483,7 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/_opf_fuzz.py::_scan_sites::read_text", 1),
     ("opf/tools/_opf_fuzz.py::_skn_call_sites::read_text", 1),
     ("opf/tools/_opf_init_observe.py::graft_snapshot::os.open", 1),
+    ("opf/tools/_opf_init_operation.py::_bytes::open", 1),
     ("opf/tools/_opf_init_operation.py::_expected_views::os.open", 1),
     ("opf/tools/_opf_init_operation.py::_fsync_dir_at::os.open", 1),
     ("opf/tools/_opf_init_operation.py::_journal_ensure_txn::os.open", 1),
@@ -3424,6 +3494,7 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/_opf_init_operation.py::_read_or_none::open", 1),
     ("opf/tools/_opf_init_operation.py::_read_plan::open", 1),
     ("opf/tools/_opf_init_operation.py::_read_regular::os.open", 1),
+    ("opf/tools/_opf_init_operation.py::_seam_tests::open", 3),
     ("opf/tools/_opf_init_operation.py::_snapshot_all::open", 1),
     ("opf/tools/_opf_init_operation.py::_stage_and_publish::os.open", 1),
     ("opf/tools/_opf_init_operation.py::_stage_and_publish::os.pread", 1),
@@ -3443,7 +3514,9 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/_opf_journal.py::_existing_reservation::os.open", 1),
     ("opf/tools/_opf_observe.py::_capture_bounded::os.read", 1),
     ("opf/tools/_opf_observe.py::_worktree_open_succeeds::os.open", 1),
+    ("opf/tools/_opf_observe.py::held_case::read_text", 1),
     ("opf/tools/_opf_observe.py::self_test_isolated::open", 1),
+    ("opf/tools/_opf_observe.py::self_test_isolated::read_text", 1),
     ("opf/tools/_opf_oplock.py::_chmod_bound::os.open", 1),
     ("opf/tools/_opf_oplock.py::_classify_git_entry::os.open", 1),
     ("opf/tools/_opf_oplock.py::_close_then_reuse::os.open", 1),
@@ -3491,6 +3564,7 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/_opf_pack_manifest.py::_runner_registration_test::read_text", 1),
     ("opf/tools/_opf_pack_manifest.py::_runner_routes::read_text", 1),
     ("opf/tools/_opf_pack_manifest.py::check_competing_log::read_bytes", 1),
+    ("opf/tools/_opf_record.py::_kind_reservation_high::os.open", 1),
     ("opf/tools/_opf_record.py::_self_test_units::os.open", 1),
     ("opf/tools/_opf_store.py::_open_dir_nofollow::os.open", 2),
     ("opf/tools/_opf_store.py::_open_root_fd::os.open", 1),
@@ -3564,6 +3638,7 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/check_opf_init_qa.py::test_worklog_gap_above_floor_is_a_deletion::read_bytes", 2),
     ("opf/tools/check_opf_prompt_pack.py::_read_regular::os.open", 1),
     ("opf/tools/check_opf_prompt_pack.py::_snapshot::read_bytes", 1),
+    ("opf/tools/check_opf_record.py::_oop_reap::os.read", 1),
     ("opf/tools/check_opf_record.py::_self_test_homes2_active::read_bytes", 1),
     ("opf/tools/check_opf_record.py::assert_no_auto_maintenance::read_text", 1),
     ("opf/tools/check_opf_record.py::bounded::os.open", 1),
@@ -3572,10 +3647,14 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/check_opf_record.py::snapshot::read_bytes", 1),
     ("opf/tools/check_opf_record.py::spec15_text::read_text", 1),
     ("opf/tools/check_opf_record.py::t12_recovery_lease::os.open", 1),
+    ("opf/tools/check_opf_record.py::t22_homes2_claim_reserves::read_bytes", 2),
     ("opf/tools/check_opf_record.py::t29_git_lifecycle::read_text", 1),
     ("opf/tools/check_opf_record.py::t38_staging_removal_disclosed::read_bytes", 1),
     ("opf/tools/check_opf_record.py::t43_publish_names_removals::read_bytes", 1),
     ("opf/tools/check_opf_record.py::t77_report_every_failure::os.open", 1),
+    ("opf/tools/check_opf_record.py::t79_kill_after_reserve::read_bytes", 4),
+    ("opf/tools/check_opf_record.py::t80_two_runs_never_same_id::read_bytes", 3),
+    ("opf/tools/check_opf_record.py::t81_cross_kind_reservations::read_bytes", 3),
     ("opf/tools/check_opf_upgrade.py::_snapshot::read_bytes", 1),
     ("opf/tools/check_opf_upgrade.py::_suite_isolated::open", 1),
     ("opf/tools/check_opf_upgrade.py::_suite_isolated::read_bytes", 42),
@@ -3583,8 +3662,10 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/check_opf_upgrade.py::cnt_of::read_text", 1),
     ("opf/tools/check_opf_upgrade.py::man_of::read_text", 1),
     ("opf/tools/opf.py::_adopt_leg::os.open", 2),
-    ("opf/tools/opf.py::_adopt_read_inputs::os.open", 1),
+    ("opf/tools/opf.py::_adopt_read_bounded::os.open", 1),
     ("opf/tools/opf.py::_close_exc_safe_vectors_self_test::os.open", 1),
+    ("opf/tools/opf.py::_fixture_fd_census::read_bytes", 1),
+    ("opf/tools/opf.py::_fixture_fd_census_pins::os.open", 3),
     ("opf/tools/opf.py::_import_leg::open", 1),
     ("opf/tools/opf.py::_init_inventory::os.open", 1),
     ("opf/tools/opf.py::_retained_close_offpath_self_test::os.open", 5),
@@ -3605,6 +3686,7 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/opf.py::call::os.open", 1),
     ("opf/tools/opf.py::children::read_text", 1),
     ("opf/tools/opf.py::children_of::read_bytes", 1),
+    ("opf/tools/opf.py::eio_ack::os.open", 1),
     ("opf/tools/opf.py::exercise::read_text", 4),
     ("opf/tools/opf.py::frozen_pair::read_text", 1),
     ("opf/tools/opf.py::frozen_tree::read_text", 2),
@@ -3616,6 +3698,9 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/opf.py::outer::os.open", 1),
     ("opf/tools/opf.py::parse::read_text", 1),
     ("opf/tools/opf.py::probe::os.read", 1),
+    ("opf/tools/opf.py::proc_cpu::read_text", 1),
+    ("opf/tools/opf.py::proc_state::read_text", 1),
+    ("opf/tools/opf.py::refusing_capture::os.open", 1),
     ("opf/tools/opf.py::state::read_bytes", 13),
     ("opf/tools/opf.py::tree_running::read_text", 1),
     ("opf/tools/opf.py::tree_snapshot::open", 2),
@@ -3634,6 +3719,15 @@ RAW_READ_ALLOWLIST = dict((
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_escape_stat::os.open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_forced_exit_findings::open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_git_toplevel_has_registry::os.open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_append_checked::os.open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_load::os.read", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory::os.open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory::os.read", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory_save::os.open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_open::os.open", 4),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_prove::os.open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_verify::os.open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_write_field::os.open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_merge_pending_findings::open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_mode_read::os.open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_mode_read::os.read", 1),
@@ -3641,6 +3735,8 @@ RAW_READ_ALLOWLIST = dict((
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_pending_haystack::open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_read_jsonl::open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_register_authority::open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_register_authority::os.open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_register_authority::os.read", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_registry::os.open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_registry::os.read", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_registry_walk::os.open", 2),
@@ -3653,11 +3749,17 @@ RAW_READ_ALLOWLIST = dict((
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_rdp_blob_id::os.read", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_rdp_read_fd::os.read", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_rdp_read_small::os.open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_rdp_read_text::os.open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_rdp_record_read::os.open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_rdp_record_write::os.open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_rdp_registry_dir::os.open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_rdp_worktree_entry::os.open", 3),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_wrtscp_read_json_artifact::open", 1),
+    ("tools/_adapter_compose.py::_open_dir_component::os.open", 1),
+    ("tools/_adapter_compose.py::_read_target::os.open", 1),
+    ("tools/_adapter_compose.py::_target_dir_fd::os.open", 1),
+    ("tools/_adapter_compose.py::_write_target::os.open", 2),
+    ("tools/_adapter_compose.py::load_registry::read_bytes", 2),
     ("tools/_close_selftest.py::_st_stale_listing_check::os.open", 5),
     ("tools/_close_selftest.py::devnull::os.open", 1),
     ("tools/_gen_common.py::_gitfile_target::os.open", 1),
@@ -3716,9 +3818,19 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/check_internal_names.py::_read_present_text::read_text", 1),
     ("tools/check_internal_names.py::_self_test::read_bytes", 1),
     ("tools/check_internal_names.py::_self_test::read_text", 1),
+    ("tools/check_leaks.py::_read_bytes::os.open", 1),
     ("tools/check_leaks.py::load_denylist::read_text", 1),
+    ("tools/check_leaks.py::read_archive::attr.open", 1),
+    ("tools/check_license_qualification.py::_read_file_text::read_text", 1),
     ("tools/check_manifest.py::_self_test_main_isolated::read_bytes", 4),
     ("tools/check_manifest.py::_self_test_main_isolated::read_text", 6),
+    ("tools/check_mistakes_register.py::_read_regular::os.open", 1),
+    ("tools/check_mistakes_register.py::_read_regular::os.read", 1),
+    ("tools/check_mistakes_register.py::_read_text_nonblocking::os.open", 1),
+    ("tools/check_mistakes_register.py::_read_text_nonblocking::os.read", 1),
+    ("tools/check_mistakes_register.py::self_test::read_bytes", 1),
+    ("tools/check_mistakes_register.py::self_test::read_text", 16),
+    ("tools/check_mistakes_register.py::update_anchor::os.open", 1),
     ("tools/check_newtab.py::_self_test::read_bytes", 1),
     ("tools/check_no_dashes.py::load_policy::os.open", 1),
     ("tools/check_no_dashes.py::load_policy::os.read", 1),
@@ -3727,6 +3839,8 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/check_opf_enforce_platforms.py::_edit::read_text", 1),
     ("tools/check_opf_enforce_platforms.py::_read::read_bytes", 1),
     ("tools/check_opf_enforce_platforms.py::_swap_codex_gemini_rows::read_text", 1),
+    ("tools/check_opf_standalone_closure.py::_bounds_self_test::read_text", 1),
+    ("tools/check_opf_standalone_closure.py::_parse::read_text", 1),
     ("tools/check_opf_standalone_closure.py::self_test_main::read_text", 1),
     ("tools/check_overclaim.py::_asset_closure_self_test::attr.open", 1),
     ("tools/check_overclaim.py::_collector_self_test::attr.open", 2),
@@ -3734,12 +3848,20 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/check_overclaim.py::_page_bound_source_self_test::read_text", 1),
     ("tools/check_overclaim.py::_read_regular_bounded::os.read", 1),
     ("tools/check_overclaim.py::inject_and_scan::read_text", 1),
+    ("tools/check_portability.py::_drain_pipes_unreaped::os.read", 1),
+    ("tools/check_portability.py::_not_run_vectors::open", 1),
+    ("tools/check_portability.py::_ready_line_complete::open", 1),
     ("tools/check_portability.py::load_identity::open", 1),
     ("tools/check_portability.py::scan_file::read_text", 1),
     ("tools/check_python_floor.py::_read_text::read_bytes", 1),
+    ("tools/check_python_host_pin.py::_read_text::read_bytes", 1),
+    ("tools/check_python_host_pin.py::_self_test_cases::read_bytes", 1),
+    ("tools/check_python_launcher_isolation.py::_read_file_text::read_text", 1),
     ("tools/check_python_launcher_isolation.py::self_test_main::read_text", 2),
     ("tools/check_record_sections.py::_self_test_isolated::read_text", 1),
     ("tools/check_record_sections.py::load_config::read_bytes", 1),
+    ("tools/check_reference_facts.py::_path_is_code::open", 1),
+    ("tools/check_reference_facts.py::_path_is_code::read_text", 1),
     ("tools/check_reference_facts.py::_read::read_text", 1),
     ("tools/check_release_build.py::_first_pin_evidence_findings::read_bytes", 1),
     ("tools/check_release_build.py::_self_test_main_isolated::attr.open", 2),
@@ -3786,7 +3908,12 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/check_sized_instructions.py::_source_hash::read_bytes", 1),
     ("tools/check_sized_instructions.py::run::read_text", 2),
     ("tools/check_sized_instructions.py::skill_version::read_text", 1),
+    ("tools/check_version_monotonicity.py::_drain_pipes_unreaped::os.read", 1),
+    ("tools/check_version_monotonicity.py::_not_run_vectors::open", 1),
+    ("tools/check_version_monotonicity.py::_ready_line_complete::open", 1),
     ("tools/check_versions.py::main::read_bytes", 1),
+    ("tools/conformance.py::_adapter_drift::read_bytes", 1),
+    ("tools/conformance.py::_agents_drift::read_bytes", 1),
     ("tools/conformance.py::_build_conformant::read_text", 1),
     ("tools/conformance.py::_build_mapped_tree::read_text", 1),
     ("tools/conformance.py::_claude_drift::read_text", 2),
@@ -3799,6 +3926,11 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/doctor.py::assert_open_journal::os.open", 1),
     ("tools/doctor.py::call::os.open", 1),
     ("tools/doctor.py::self_test::os.open", 2),
+    ("tools/gen_agents.py::open_fds::os.open", 1),
+    ("tools/gen_agents.py::read::read_bytes", 1),
+    ("tools/gen_agents.py::self_test_main::os.open", 1),
+    ("tools/gen_agents.py::self_test_main::read_bytes", 7),
+    ("tools/gen_agents.py::to_held_fifo::os.open", 1),
     ("tools/gen_char_policy.py::_self_test::read_bytes", 1),
     ("tools/gen_char_policy.py::run::read_bytes", 2),
     ("tools/gen_claude.py::main::read_text", 1),
@@ -3824,11 +3956,11 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/gen_enforceability.py::_readable_regular::open", 1),
     ("tools/gen_enforceability.py::replace_in::read_text", 1),
     ("tools/gen_enforceability.py::roster_scripts::read_text", 1),
-    ("tools/gen_enforceability.py::self_test_main::read_text", 9),
+    ("tools/gen_enforceability.py::self_test_main::read_text", 13),
     ("tools/gen_enforcement_register.py::compose_page::read_text", 1),
     ("tools/gen_enforcement_register.py::load_ledger::read_text", 1),
     ("tools/gen_enforcement_register.py::replace_in::read_text", 1),
-    ("tools/gen_enforcement_register.py::self_test_main::read_text", 12),
+    ("tools/gen_enforcement_register.py::self_test_main::read_text", 15),
     ("tools/gen_first_pin_demo.py::bad_utf8::read_bytes", 1),
     ("tools/gen_first_pin_demo.py::demo_of::read_text", 1),
     ("tools/gen_first_pin_demo.py::hand_edited::read_text", 1),
@@ -3844,6 +3976,7 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/gen_hooks.py::_secondary_fault_case::read_text", 1),
     ("tools/gen_hooks.py::authoring_tree::open", 1),
     ("tools/gen_hooks.py::build_desired::read_text", 1),
+    ("tools/gen_hooks.py::deadline_case::read_text", 1),
     ("tools/gen_hooks.py::run::read_text", 1),
     ("tools/gen_hooks.py::self_test_main::read_bytes", 1),
     ("tools/gen_hooks.py::self_test_main::read_text", 8),
@@ -3878,6 +4011,13 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/import_cwe.py::render::read_bytes", 1),
     ("tools/import_cwe.py::render::read_text", 1),
     ("tools/import_cwe.py::self_test::read_text", 5),
+    ("tools/measure_hook_latency.py::_interrupt_vectors::read_text", 1),
+    ("tools/measure_hook_latency.py::_real_hooks_vectors::read_text", 1),
+    ("tools/measure_hook_latency.py::_stub_cli_rows::read_text", 1),
+    ("tools/measure_hook_latency.py::command_budget::open", 1),
+    ("tools/measure_hook_latency.py::load_hooks::open", 1),
+    ("tools/measure_hook_latency.py::self_test::read_bytes", 2),
+    ("tools/measure_hook_latency.py::self_test::read_text", 1),
     ("tools/migrate.py::_c_p3_reuse::os.open", 1),
     ("tools/migrate.py::_c_reuse::os.open", 1),
     ("tools/migrate.py::_open_root_fd::os.open", 1),
@@ -3890,7 +4030,22 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/migrate.py::self_test::os.open", 34),
     ("tools/migrate.py::self_test::read_bytes", 8),
     ("tools/opf_render.py::materialize::read_text", 1),
+    ("tools/orch_register.py::_declared_family::read_text", 1),
+    ("tools/orch_register.py::_dir_synced::os.open", 1),
+    ("tools/orch_register.py::_dirs_created::os.open", 2),
+    ("tools/orch_register.py::_fd_bytes::os.pread", 1),
     ("tools/orch_register.py::_lines::read_text", 1),
+    ("tools/orch_register.py::_made_dirs_swept::os.open", 3),
+    ("tools/orch_register.py::cmd_append::os.open", 3),
+    ("tools/orch_register.py::cmd_append::os.read", 1),
+    ("tools/orch_register.py::dir_state::read_bytes", 1),
+    ("tools/orch_register.py::probing::os.open", 1),
+    ("tools/orch_register.py::rewrite_in_place::open", 1),
+    ("tools/orch_register.py::self_test::os.open", 1),
+    ("tools/orch_register.py::self_test::os.pread", 1),
+    ("tools/orch_register.py::self_test::read_bytes", 12),
+    ("tools/orch_register.py::self_test::read_text", 7),
+    ("tools/orch_register.py::state::read_bytes", 1),
     ("tools/pin.py::_atomic_publish::os.open", 1),
     ("tools/pin.py::_blocking_open_journal::os.open", 1),
     ("tools/pin.py::_load_staged_ops::read_bytes", 1),
@@ -3912,7 +4067,9 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/selftest_aiqt_hooks.py::_note_site_inventory::read_text", 1),
     ("tools/selftest_aiqt_hooks.py::_stop_field_claim_failures::read_bytes", 1),
     ("tools/selftest_aiqt_hooks.py::_stop_field_claim_failures::read_text", 1),
+    ("tools/selftest_aiqt_hooks.py::_test_note_literal_sites::read_text", 1),
     ("tools/selftest_aiqt_hooks.py::_test_note_shape_pins::read_text", 1),
+    ("tools/selftest_aiqt_hooks.py::_test_stop_dispatch_note_sites::read_text", 1),
     ("tools/selftest_ci_status.py::_run_checks::read_text", 2),
     ("tools/selftest_ci_status.py::invoke::read_text", 6),
     ("tools/selftest_git_fixture_env.py::_auto_maintenance_children::read_text", 1),
@@ -3938,6 +4095,15 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/selftest_orch_hooks.py::_cell::read_text", 1),
     ("tools/selftest_orch_hooks.py::_doc_barrier_read::open", 1),
     ("tools/selftest_orch_hooks.py::_event_rows::read_text", 1),
+    ("tools/selftest_orch_hooks.py::_leasehb_cases::os.open", 1),
+    ("tools/selftest_orch_hooks.py::_leasehb_cases::read_bytes", 6),
+    ("tools/selftest_orch_hooks.py::_leasehb_cases::read_text", 21),
+    ("tools/selftest_orch_hooks.py::_leasehb_fix2_cases::os.open", 20),
+    ("tools/selftest_orch_hooks.py::_leasehb_fix2_cases::os.read", 2),
+    ("tools/selftest_orch_hooks.py::_leasehb_fix2_cases::read_bytes", 34),
+    ("tools/selftest_orch_hooks.py::_leasehb_fix2_cases::read_text", 16),
+    ("tools/selftest_orch_hooks.py::_leasehb_status_and_parse_cases::read_bytes", 12),
+    ("tools/selftest_orch_hooks.py::_leasehb_write_integrity_cases::read_bytes", 6),
     ("tools/selftest_orch_hooks.py::_main_isolated::os.open", 6),
     ("tools/selftest_orch_hooks.py::_main_isolated::read_bytes", 8),
     ("tools/selftest_orch_hooks.py::_main_isolated::read_text", 40),
@@ -3950,115 +4116,9 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/selftest_orch_hooks.py::_rdp_cases::open", 2),
     ("tools/selftest_orch_hooks.py::_rdp_cases::os.open", 1),
     ("tools/selftest_orch_hooks.py::_rdp_cases::read_text", 1),
+    ("tools/selftest_orch_hooks.py::_rdp_draft_cases::read_text", 1),
     ("tools/selftest_orch_hooks.py::_rdp_scope_cases::read_text", 2),
     ("tools/selftest_orch_hooks.py::_spoof_detail::read_text", 1),
-    ("tools/selftest_orch_hooks.py::open::open", 1),
-    ("tools/selftest_orch_hooks.py::turn_state::read_text", 1),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_append_checked::os.open", 1),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_load::os.read", 1),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory::os.open", 1),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory::os.read", 1),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory_save::os.open", 1),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_open::os.open", 4),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_prove::os.open", 1),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_verify::os.open", 1),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_write_field::os.open", 1),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_register_authority::os.open", 1),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_register_authority::os.read", 1),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_read_text::os.open", 1),
-    ("opf/tools/_opf_check.py::tree::read_bytes", 1),
-    ("opf/tools/_opf_observe.py::held_case::read_text", 1),
-    ("opf/tools/_opf_observe.py::self_test_isolated::read_text", 1),
-    ("opf/tools/_opf_record.py::_kind_reservation_high::os.open", 1),
-    ("opf/tools/check_opf_record.py::_oop_reap::os.read", 1),
-    ("opf/tools/check_opf_record.py::t22_homes2_claim_reserves::read_bytes", 2),
-    ("opf/tools/check_opf_record.py::t79_kill_after_reserve::read_bytes", 4),
-    ("opf/tools/check_opf_record.py::t80_two_runs_never_same_id::read_bytes", 3),
-    ("opf/tools/check_opf_record.py::t81_cross_kind_reservations::read_bytes", 3),
-    ("opf/tools/opf.py::eio_ack::os.open", 1),
-    ("opf/tools/opf.py::proc_cpu::read_text", 1),
-    ("opf/tools/opf.py::proc_state::read_text", 1),
-    ("opf/tools/opf.py::refusing_capture::os.open", 1),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_append_checked::os.open", 1),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_load::os.read", 1),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory::os.open", 1),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory::os.read", 1),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory_save::os.open", 1),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_open::os.open", 4),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_prove::os.open", 1),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_verify::os.open", 1),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_write_field::os.open", 1),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_register_authority::os.open", 1),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_register_authority::os.read", 1),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_rdp_read_text::os.open", 1),
-    ("tools/_adapter_compose.py::_open_dir_component::os.open", 1),
-    ("tools/_adapter_compose.py::_read_target::os.open", 1),
-    ("tools/_adapter_compose.py::_target_dir_fd::os.open", 1),
-    ("tools/_adapter_compose.py::_write_target::os.open", 2),
-    ("tools/_adapter_compose.py::load_registry::read_bytes", 2),
-    ("tools/check_leaks.py::_read_bytes::os.open", 1),
-    ("tools/check_leaks.py::read_archive::attr.open", 1),
-    ("tools/check_license_qualification.py::_read_file_text::read_text", 1),
-    ("tools/check_mistakes_register.py::_read_regular::os.open", 1),
-    ("tools/check_mistakes_register.py::_read_regular::os.read", 1),
-    ("tools/check_mistakes_register.py::_read_text_nonblocking::os.open", 1),
-    ("tools/check_mistakes_register.py::_read_text_nonblocking::os.read", 1),
-    ("tools/check_mistakes_register.py::self_test::read_bytes", 1),
-    ("tools/check_mistakes_register.py::self_test::read_text", 16),
-    ("tools/check_mistakes_register.py::update_anchor::os.open", 1),
-    ("tools/check_portability.py::_drain_pipes_unreaped::os.read", 1),
-    ("tools/check_portability.py::_not_run_vectors::open", 1),
-    ("tools/check_portability.py::_ready_line_complete::open", 1),
-    ("tools/check_python_host_pin.py::_read_text::read_bytes", 1),
-    ("tools/check_python_host_pin.py::_self_test_cases::read_bytes", 1),
-    ("tools/check_python_launcher_isolation.py::_read_file_text::read_text", 1),
-    ("tools/check_reference_facts.py::_path_is_code::open", 1),
-    ("tools/check_reference_facts.py::_path_is_code::read_text", 1),
-    ("tools/check_version_monotonicity.py::_drain_pipes_unreaped::os.read", 1),
-    ("tools/check_version_monotonicity.py::_not_run_vectors::open", 1),
-    ("tools/check_version_monotonicity.py::_ready_line_complete::open", 1),
-    ("tools/conformance.py::_adapter_drift::read_bytes", 1),
-    ("tools/conformance.py::_agents_drift::read_bytes", 1),
-    ("tools/gen_agents.py::open_fds::os.open", 1),
-    ("tools/gen_agents.py::read::read_bytes", 1),
-    ("tools/gen_agents.py::self_test_main::os.open", 1),
-    ("tools/gen_agents.py::self_test_main::read_bytes", 7),
-    ("tools/gen_agents.py::to_held_fifo::os.open", 1),
-    ("tools/gen_hooks.py::deadline_case::read_text", 1),
-    ("tools/measure_hook_latency.py::_interrupt_vectors::read_text", 1),
-    ("tools/measure_hook_latency.py::_real_hooks_vectors::read_text", 1),
-    ("tools/measure_hook_latency.py::_stub_cli_rows::read_text", 1),
-    ("tools/measure_hook_latency.py::command_budget::open", 1),
-    ("tools/measure_hook_latency.py::load_hooks::open", 1),
-    ("tools/measure_hook_latency.py::self_test::read_bytes", 2),
-    ("tools/measure_hook_latency.py::self_test::read_text", 1),
-    ("tools/orch_register.py::_declared_family::read_text", 1),
-    ("tools/orch_register.py::_dir_synced::os.open", 1),
-    ("tools/orch_register.py::_dirs_created::os.open", 2),
-    ("tools/orch_register.py::_fd_bytes::os.pread", 1),
-    ("tools/orch_register.py::_made_dirs_swept::os.open", 3),
-    ("tools/orch_register.py::cmd_append::os.open", 3),
-    ("tools/orch_register.py::cmd_append::os.read", 1),
-    ("tools/orch_register.py::dir_state::read_bytes", 1),
-    ("tools/orch_register.py::probing::os.open", 1),
-    ("tools/orch_register.py::rewrite_in_place::open", 1),
-    ("tools/orch_register.py::self_test::os.open", 1),
-    ("tools/orch_register.py::self_test::os.pread", 1),
-    ("tools/orch_register.py::self_test::read_bytes", 12),
-    ("tools/orch_register.py::self_test::read_text", 7),
-    ("tools/orch_register.py::state::read_bytes", 1),
-    ("tools/selftest_aiqt_hooks.py::_test_note_literal_sites::read_text", 1),
-    ("tools/selftest_aiqt_hooks.py::_test_stop_dispatch_note_sites::read_text", 1),
-    ("tools/selftest_orch_hooks.py::_leasehb_cases::os.open", 1),
-    ("tools/selftest_orch_hooks.py::_leasehb_cases::read_bytes", 6),
-    ("tools/selftest_orch_hooks.py::_leasehb_cases::read_text", 21),
-    ("tools/selftest_orch_hooks.py::_leasehb_fix2_cases::os.open", 20),
-    ("tools/selftest_orch_hooks.py::_leasehb_fix2_cases::os.read", 2),
-    ("tools/selftest_orch_hooks.py::_leasehb_fix2_cases::read_bytes", 34),
-    ("tools/selftest_orch_hooks.py::_leasehb_fix2_cases::read_text", 16),
-    ("tools/selftest_orch_hooks.py::_leasehb_status_and_parse_cases::read_bytes", 12),
-    ("tools/selftest_orch_hooks.py::_leasehb_write_integrity_cases::read_bytes", 6),
-    ("tools/selftest_orch_hooks.py::_rdp_draft_cases::read_text", 1),
     ("tools/selftest_orch_hooks.py::build::read_text", 1),
     ("tools/selftest_orch_hooks.py::declare::read_text", 1),
     ("tools/selftest_orch_hooks.py::declare_raw::read_text", 1),
@@ -4066,6 +4126,7 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/selftest_orch_hooks.py::fixture::read_text", 2),
     ("tools/selftest_orch_hooks.py::json_case::read_bytes", 2),
     ("tools/selftest_orch_hooks.py::meta::read_bytes", 1),
+    ("tools/selftest_orch_hooks.py::open::open", 1),
     ("tools/selftest_orch_hooks.py::r12c_state::read_bytes", 1),
     ("tools/selftest_orch_hooks.py::r7q_ids::os.open", 1),
     ("tools/selftest_orch_hooks.py::r8c_tfstat::os.open", 1),
@@ -4075,6 +4136,7 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/selftest_orch_hooks.py::set_horizon::read_text", 1),
     ("tools/selftest_orch_hooks.py::snap::read_bytes", 4),
     ("tools/selftest_orch_hooks.py::swap_holder::open", 1),
+    ("tools/selftest_orch_hooks.py::turn_state::read_text", 1),
 ))
 
 RAW_READ_REASONS = dict((
@@ -5294,12 +5356,6 @@ RAW_READ_SITE_REASONS = dict((
      "(c) the site opens with os.O_DIRECTORY, so the open of anything but a directory fails at "
      "once and a directory open cannot block; no file content is read through it; (a) the "
      "directory is a fixture store root the same test created beneath its own tempfile scratch"),
-    ("opf/tools/opf.py::_adopt_read_inputs::os.open",
-     "(c) a non-blocking reader whose literal chain carries os.O_NONBLOCK; pinned with its reason: "
-     "EVERY os.open site counts since round 6 (the predicate-rested exemption is removed), and the "
-     "module had already failed the retired round-5 predicate (positive since round 5: any "
-     "reflection reference forfeits exemption) (it calls setattr()), under which literal os.O_* "
-     "chains prove nothing (#400 re-cut rounds 4 and 5)"),
     ("opf/tools/opf.py::_upgrade_replace::os.open",
      "(c) a write-only creator: the flags carry O_CREAT and O_EXCL, so the open either creates a "
      "fresh regular file or fails EEXIST on any existing entry (a planted FIFO included) and can "
@@ -6014,6 +6070,176 @@ RAW_READ_SITE_REASONS = dict((
     ("tools/selftest_orch_hooks.py::swap_holder::open",
      "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
      "the repository tree"),
+    # Sites that arrived with the merge of main recorded in _RAW_READ_PENDING's
+    # one-time-growth sentence; each reason was checked against the site it names.
+    ("opf/tools/_journal.py::_st_fd_table_fails_closed::os.open",
+     "(c) a self-test probe: opens os.devnull read-only so the fd-table fault vector has a live "
+     "descriptor to misreport"),
+    ("opf/tools/_opf_adopt_apply.py::_anon_ident::read_bytes",
+     "(b) reads /proc/self/fdinfo, a kernel interface, to classify an anonymous-inode descriptor for "
+     "the fd census"),
+    ("opf/tools/_opf_adopt_apply.py::_bytes::read_bytes",
+     "(a) test-only: a self-test helper reading a file under the fixture tree the self-test created in "
+     "its temporary directory"),
+    ("opf/tools/_opf_adopt_apply.py::_close_class_sweep_checks::os.open",
+     "(c) opens os.devnull read-only: close-sweep probe descriptors in the self-test child interpreter"),
+    ("opf/tools/_opf_adopt_apply.py::_init_store_git_checks::open",
+     "(a) test-only: init-store vectors reading files of the real-git fixture store the vector created "
+     "under tempfile scratch"),
+    ("opf/tools/_opf_adopt_apply.py::_init_store_recorded_plan::os.open",
+     "(c) no-follow O_DIRECTORY opens of the substrate control directories under a held dir_fd; a "
+     "directory open cannot block, and the plan record below them is read by the substrate's bounded "
+     "JSON reader"),
+    ("opf/tools/_opf_adopt_apply.py::_init_store_txn_clear::os.open",
+     "(c) no-follow O_DIRECTORY opens of this run's own init-store transaction directory under the "
+     "held journal dir_fd; a directory open cannot block"),
+    ("opf/tools/_opf_adopt_apply.py::_init_store_view_digests::os.open",
+     "(c) no-follow O_DIRECTORY opens of the substrate journal directories under a held dir_fd; a "
+     "directory open cannot block, and the frames below them are read by the journal's contained "
+     "reader"),
+    ("opf/tools/_opf_adopt_apply.py::_journal_listing::os.open",
+     "(c) a no-follow O_DIRECTORY component open beneath the held product-root dir_fd; a directory "
+     "open cannot block"),
+    ("opf/tools/_opf_adopt_apply.py::_kill_injection_child::read_text",
+     "(a) test-only: the --selftest-child entry reading the spec file the parent self-test wrote under "
+     "its temporary directory"),
+    ("opf/tools/_opf_adopt_apply.py::_listing_close_run::os.open",
+     "(c) an O_DIRECTORY open of the self-test fixture root; a directory open cannot block"),
+    ("opf/tools/_opf_adopt_apply.py::_lock_identity::os.open",
+     "(c) opens O_RDONLY|O_NOFOLLOW|O_NONBLOCK beneath the held journal dir_fd, so a planted FIFO "
+     "returns at once instead of blocking"),
+    ("opf/tools/_opf_adopt_apply.py::_run_class_sweep_child::read_text",
+     "(a) test-only: reads the class-sweep result JSON the child interpreter wrote under the "
+     "TemporaryDirectory this function created"),
+    ("opf/tools/_opf_adopt_apply.py::_scan_fault_named::os.open",
+     "(c) opens os.devnull read-only: a fd-census fault-vector probe descriptor"),
+    ("opf/tools/_opf_adopt_apply.py::_self_test_checks::os.open",
+     "(a) test-only self-test probes: os.devnull, its parent directory, and O_DIRECTORY opens of "
+     "fixture roots the test created in its temporary directory; none of these opens can block"),
+    ("opf/tools/_opf_adopt_apply.py::_self_test_checks::read_bytes",
+     "(a) test-only: self-test assertions reading fixture files the test created in its temporary "
+     "directory"),
+    ("opf/tools/_opf_adopt_apply.py::_snapshot::read_bytes",
+     "(a) test-only: snapshots the fixture tree the self-test created in its temporary directory"),
+    ("opf/tools/_opf_adopt_apply.py::acquire_then_reopen::os.open",
+     "(c) opens the root directory with O_DIRECTORY in a close-sweep vector; a directory open cannot "
+     "block"),
+    ("opf/tools/_opf_adopt_apply.py::acquire_then_reuse::os.open",
+     "(c) opens os.devnull read-only in a close-sweep vector"),
+    ("opf/tools/_opf_adopt_apply.py::cleaned_then_ensure::os.open",
+     "(c) O_DIRECTORY opens of fixture directory components; a directory open cannot block"),
+    ("opf/tools/_opf_adopt_apply.py::foreign_open::os.open",
+     "(c) opens os.devnull read-only: the close sweep's foreign-descriptor probe"),
+    ("opf/tools/_opf_adopt_apply.py::hook_failing_inventory::read_bytes",
+     "(a) test-only: a failing-hook stub reading the registry fixture file the self-test created in "
+     "its temporary directory"),
+    ("opf/tools/_opf_adopt_apply.py::live_digest::open",
+     "(a) test-only: digests a live fixture file the init-store vector created under tempfile scratch"),
+    ("opf/tools/_opf_adopt_apply.py::path_ident::os.open",
+     "(c) an O_DIRECTORY open of a fixture directory; a directory open cannot block"),
+    ("opf/tools/_opf_adopt_apply.py::peer_thread_after::os.open",
+     "(a) test-only: re-opens, O_NOFOLLOW, the regular journal lock file the fixture itself created in "
+     "its temporary directory"),
+    ("opf/tools/_opf_adopt_apply.py::plant_stage::os.open",
+     "(c) creates fresh with O_CREAT|O_EXCL|O_NOFOLLOW (EEXIST on any existing entry, a planted FIFO "
+     "included)"),
+    ("opf/tools/_opf_adopt_apply.py::record::os.open",
+     "(c) creates fresh with O_CREAT|O_EXCL|O_NOFOLLOW under the held op dir_fd (EEXIST on any "
+     "existing entry)"),
+    ("opf/tools/_opf_adopt_apply.py::site_vector::os.open",
+     "(c) an O_DIRECTORY open of the vector's scratch directory; a directory open cannot block"),
+    ("opf/tools/_opf_adopt_apply.py::snapshot::read_bytes",
+     "(a) test-only: snapshots the fixture tree the self-test created in its temporary directory"),
+    ("opf/tools/_opf_adopt_apply.py::tree_state::read_bytes",
+     "(a) test-only: walks the fixture tree the self-test created in its temporary directory, "
+     "lstat-checking S_ISREG before each read"),
+    ("opf/tools/_opf_adopt_apply.py::walk::os.open",
+     "(c) a no-follow O_DIRECTORY walk open beneath the held product-root dir_fd; a directory open "
+     "cannot block"),
+    ("opf/tools/_opf_adopt_complete.py::_rereceipt::open",
+     "(a) test-only: re-reads bundle fixture files the self-test created under its TemporaryDirectory "
+     "root to re-emit the inventory"),
+    ("opf/tools/_opf_adopt_complete.py::_restore_exercise::open",
+     "(a) test-only: reads back the probe file this helper itself just created exclusively in the "
+     "fixture tree"),
+    ("opf/tools/_opf_adopt_complete.py::_retoml::open",
+     "(a) test-only: reads a fixture TOML artefact the self-test created under its TemporaryDirectory "
+     "root"),
+    ("opf/tools/_opf_adopt_complete.py::_toml_file::open",
+     "(a) test-only: parses a fixture TOML artefact the self-test created under its TemporaryDirectory "
+     "root"),
+    ("opf/tools/_opf_adopt_complete.py::_tree::open",
+     "(a) test-only: snapshots the fixture tree under the self-test's TemporaryDirectory root"),
+    ("opf/tools/_opf_adopt_complete.py::_unclaim::open",
+     "(a) test-only: reads the run's bundle inventory fixture the self-test created under its "
+     "TemporaryDirectory root"),
+    ("opf/tools/_opf_adopt_complete.py::self_test::open",
+     "(a) test-only: reads the CI floor fixture file under the fixture root the self-test built"),
+    ("opf/tools/_opf_adopt_plan.py::children::os.open",
+     "(c) a no-follow O_DIRECTORY open under the held parent dir_fd, fstat stamp-checked before and "
+     "after enumeration; a directory open cannot block"),
+    ("opf/tools/_opf_adopt_state.py::_self_test_checks::os.open",
+     "(a) test-only: O_DIRECTORY opens of fixture roots the self-test created in its temporary "
+     "directory; a directory open cannot block"),
+    ("opf/tools/_opf_adopt_state.py::_self_test_checks::read_bytes",
+     "(a) test-only: self-test assertions reading fixture files the test created in its temporary "
+     "directory"),
+    ("opf/tools/_opf_adopt_state.py::commit::os.open",
+     "(a) test-only: a fixture helper's O_DIRECTORY open of the test's own temporary root; a directory "
+     "open cannot block"),
+    ("opf/tools/_opf_adopt_state.py::commit::read_bytes",
+     "(a) test-only: hashes the inventory file the fixture helper itself just wrote in the test's "
+     "temporary directory"),
+    ("opf/tools/_opf_adopt_state.py::contain::os.open",
+     "(a) test-only: a fixture helper's O_DIRECTORY open of the test's own temporary root; a directory "
+     "open cannot block"),
+    ("opf/tools/_opf_adopt_state.py::counting_read_fd::os.read",
+     "(c) the byte-budget replacement for the journal's descriptor reader: it reads only descriptors "
+     "the journal's contained no-follow O_NONBLOCK reader opened and fstat-checked"),
+    ("opf/tools/_opf_adopt_state.py::occ_retire::os.open",
+     "(a) test-only: a fixture helper's O_DIRECTORY open of the test's own temporary root; a directory "
+     "open cannot block"),
+    ("opf/tools/_opf_adopt_state.py::relist::read_bytes",
+     "(a) test-only: re-reads fixture files the test created in its temporary directory to rebuild "
+     "inventory rows"),
+    ("opf/tools/_opf_adopt_state.py::retire::os.open",
+     "(a) test-only: a fixture helper's O_DIRECTORY open of the test's own temporary root; a directory "
+     "open cannot block"),
+    ("opf/tools/_opf_adopt_state.py::snapshot::read_bytes",
+     "(a) test-only: snapshots the fixture tree the self-test created in its temporary directory"),
+    ("opf/tools/_opf_adopt_state.py::state_of::os.open",
+     "(a) test-only: a fixture helper's O_DIRECTORY open of the test's own temporary root; a directory "
+     "open cannot block"),
+    ("opf/tools/_opf_adopt_state.py::unit_retired::os.open",
+     "(a) test-only: a fixture helper's O_DIRECTORY open of the test's own temporary root; a directory "
+     "open cannot block"),
+    ("opf/tools/_opf_init_operation.py::_bytes::open",
+     "(a) test-only: a seam-test helper reading a fixture file under the test's temporary directory"),
+    ("opf/tools/_opf_init_operation.py::_seam_tests::open",
+     "(a) test-only: seam tests reading files under the fixture store they created in their temporary "
+     "directory"),
+    ("opf/tools/opf.py::_adopt_read_bounded::os.open",
+     "(c) the planner's own bounded reader: a no-follow O_NONBLOCK open beneath a no-follow-walked "
+     "parent dir_fd, fstat-checked S_ISREG and single-link with a byte cap, so a special, symlinked, "
+     "multiply-linked or oversized input refuses instead of blocking; kept in place of the shared "
+     "readers, which carry none of these refusals"),
+    ("opf/tools/opf.py::_fixture_fd_census::read_bytes",
+     "(b) reads /proc/self/fdinfo entries, a kernel interface, for the self-test fd census"),
+    ("opf/tools/opf.py::_fixture_fd_census_pins::os.open",
+     "(c) opens os.devnull and its parent directory read-only as fd-census probe descriptors"),
+    ("tools/check_opf_standalone_closure.py::_bounds_self_test::read_text",
+     "pending conversion: the bounds self-test reads the repository's own CI workflow file, an in-root "
+     "input the special-file precheck walk certifies as defence in depth"),
+    ("tools/check_opf_standalone_closure.py::_parse::read_text",
+     "pending conversion: parses in-tree Python sources enumerated by the closure walk through "
+     "Path.read_text; in-root inputs the special-file precheck walk certifies as defence in depth, "
+     "tracked by this pin"),
+    ("tools/gen_enforceability.py::self_test_main::read_text",
+     "(a) test-only: self-test assertions reading ledger, manifest and preview fixtures the test built "
+     "under its tempfile scratch"),
+    ("tools/gen_enforcement_register.py::self_test_main::read_text",
+     "(a) test-only: self-test assertions reading the register pages the test rendered into fixture "
+     "trees under its tempfile scratch"),
 ))
 
 
@@ -11371,6 +11597,313 @@ RAW_READ_UNSUPPORTED_USES = dict((
      (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
       "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
       "this line is the reviewed site")),
+    # Finding lines that arrived with the merge of main recorded in
+    # _RAW_READ_PENDING's one-time-growth sentence; each reason was checked.
+    (("opf/tools/_journal.py",
+      "with mock.patch.object(os, \"fstat\", fstat_eio):"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "(\"close-held\", _close_held_caller, quiet_at, (os, \"fstat\"), 0,"),
+     (1, "test-only: a census vector row passes the os module and a member name to the self-test's "
+      "patching harness as data; nothing is read or called on this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "(\"journal-ensure-dirs\", _journal.ensure_journal_dirs, quiet_at, (os, \"fsync\"), 0,"),
+     (1, "test-only: a census vector row passes the os module and a member name to the self-test's "
+      "patching harness as data; nothing is read or called on this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "(\"journal-open-dir-contained\", _journal._open_dir_contained, quiet_at, (os, \"dup\"), 0,"),
+     (1, "test-only: a census vector row passes the os module and a member name to the self-test's "
+      "patching harness as data; nothing is read or called on this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "(\"journal-txn-dirs\", _journal._journal_txn_dirs, quiet_at, (os, \"open\"), 1,"),
+     (1, "test-only: a census vector row passes the os module and a member name to the self-test's "
+      "patching harness as data; nothing is read or called on this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "(\"store-open-working-dir\", store._open_working_dir_fd, exc_safe_at, (os, \"open\"), 0,"),
+     (1, "test-only: a census vector row passes the os module and a member name to the self-test's "
+      "patching harness as data; nothing is read or called on this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "(os, \"listdir\"), 0, lambda temp_s, fd: _opf_check._list_contained(fd, \".working\")),"),
+     (1, "test-only: a census vector row passes the os module and a member name to the self-test's "
+      "patching harness as data; nothing is read or called on this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "(os, \"open\"), 1, lambda temp_s, fd: store._open_dir_nofollow(os.path.join(temp_s, \".working\"))),"),
+     (1, "test-only: a census vector row passes the os module and a member name to the self-test's "
+      "patching harness as data; nothing is read or called on this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "_journal.capture_preimages, _journal.ensure_journal_dirs, _journal.release_lock, os.open)"),
+     (1, "test-only: the self-test saves the real os member (the opener included) so its stub can delegate "
+      "and restore it; the saved reference feeds only that vector")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "if not census or not hasattr(os, \"eventfd\"):"),
+     (1, "a capability probe: hasattr on the os module gates the eventfd census leg; it reads no file and "
+      "opens nothing")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"fork\", side_effect=spawned), \\"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"fstat\", fstat_w), \\"),
+     (5, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"fsync\", fsync_failing):"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"listdir\", journal_unlistable):"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"lstat\", lstat_w), \\"),
+     (5, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"open\", counting_open), \\"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"rmdir\", counting_rmdir), \\"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"rmdir\", faulting_rmdir), \\"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"stat\", stat_w), \\"),
+     (5, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"supports_dir_fd\", os.supports_dir_fd | {counting_open}):"),
+     (2, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"supports_dir_fd\", os.supports_dir_fd | {counting_rmdir}):"),
+     (2, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"supports_dir_fd\", os.supports_dir_fd | {faulting_rmdir}), \\"),
+     (2, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"supports_dir_fd\", os.supports_dir_fd | {nfs_unlink}):"),
+     (2, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"supports_dir_fd\", os.supports_dir_fd | {stat_w}), \\"),
+     (10, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"supports_follow_symlinks\","),
+     (5, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"system\", side_effect=spawned):"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "opener = mock.patch.object(os, \"open\", adopt_unopenable)"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "opener = mock.patch.object(os, \"open\", swap_before_open)"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "os.rmdir = rmdir"),
+     (1, "test-only: the self-test child interpreter (or the scrub around it) swaps os members for "
+      "counting stubs and restores the real ones before exit")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "os.supports_dir_fd.add(rmdir)"),
+     (1, "test-only: the self-test child interpreter (or the scrub around it) swaps os members for "
+      "counting stubs and restores the real ones before exit")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "os.supports_dir_fd.add(t_rmdir)"),
+     (1, "test-only: the self-test child interpreter (or the scrub around it) swaps os members for "
+      "counting stubs and restores the real ones before exit")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "os.supports_dir_fd.add(t_unlink)"),
+     (1, "test-only: the self-test child interpreter (or the scrub around it) swaps os members for "
+      "counting stubs and restores the real ones before exit")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "os.supports_dir_fd.discard(t_rmdir)"),
+     (1, "test-only: the self-test child interpreter (or the scrub around it) swaps os members for "
+      "counting stubs and restores the real ones before exit")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "os.supports_dir_fd.discard(t_unlink)"),
+     (1, "test-only: the self-test child interpreter (or the scrub around it) swaps os members for "
+      "counting stubs and restores the real ones before exit")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "os.supports_follow_symlinks | {stat_w, lstat_w}):"),
+     (5, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "os.unlink, os.rmdir, os.fsync = real_unlink, real_rmdir, real_fsync"),
+     (3, "test-only: the self-test child interpreter (or the scrub around it) swaps os members for "
+      "counting stubs and restores the real ones before exit")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "os.unlink, os.rmdir, os.fsync = t_unlink, t_rmdir, t_fsync"),
+     (3, "test-only: the self-test child interpreter (or the scrub around it) swaps os members for "
+      "counting stubs and restores the real ones before exit")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "real_capture, real_release, real_open = _journal.capture_preimages, _journal.release_lock, "
+      "os.open"),
+     (1, "test-only: the self-test saves the real os member (the opener included) so its stub can delegate "
+      "and restore it; the saved reference feeds only that vector")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "real_open_c, real_dup_c, real_pipe_c = os.open, os.dup, os.pipe"),
+     (1, "test-only: the self-test saves the real os member (the opener included) so its stub can delegate "
+      "and restore it; the saved reference feeds only that vector")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "real_open_here, absent_opens = os.open, []"),
+     (1, "test-only: the self-test saves the real os member (the opener included) so its stub can delegate "
+      "and restore it; the saved reference feeds only that vector")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "stack.enter_context(mock.patch.object(os, \"close\", close_then_raise))"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "stack.enter_context(mock.patch.object(os, \"dup\", noted_dup))"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "stack.enter_context(mock.patch.object(os, \"fsync\", lambda fd: None))"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "stack.enter_context(mock.patch.object(os, \"open\", noted_open))"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "stack.enter_context(mock.patch.object(os, \"pipe\", noted_pipe))"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "stack.enter_context(mock.patch.object(os, \"supports_dir_fd\", os.supports_dir_fd | {noted_open}))"),
+     (2, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(os, \"close\", close_q), mock.patch.object(os, \"fsync\", lambda fd: None):"),
+     (2, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(os, \"close\", close_r):"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(os, \"close\", ledger_close):"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(os, \"fstat\", fstat_eio) if read == \"fstat\" else \\"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(os, \"listdir\", journal_unlistable_once), \\"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(os, \"scandir\", unlistable):"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(os, \"stat\", star_unstatable):"),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(os, \"unlink\", nfs_unlink), mock.patch.object(os, \"close\", nfs_close), \\"),
+     (2, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(subprocess, \"Popen\", side_effect=spawned), \\"),
+     (1, "test-only: the self-test replaces the subprocess launcher with a stub or recorder so this vector "
+      "launches nothing real")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(subprocess, \"run\", lambda *a, **k: subprocess.CompletedProcess(a, 128, "
+      "b\"\", said)):"),
+     (1, "test-only: the self-test replaces the subprocess launcher with a stub or recorder so this vector "
+      "launches nothing real")),
+    (("opf/tools/opf.py",
+      "if hasattr(os, \"eventfd\"):"),
+     (1, "a capability probe: hasattr on the os module gates the eventfd census leg; it reads no file and "
+      "opens nothing")),
+    (("opf/tools/opf.py",
+      "with (patch.object(os, \"fstat\", fstat_eio) if read == \"fstat\""),
+     (1, "test-only fault injection: the module's own self-test passes the os module to mock.patch.object "
+      "to swap one member around a vector and restore it; no production read or launch flows through "
+      "this line")),
+    (("tools/check_dangerous_api.py",
+      "BUILTIN_NAMES = frozenset(builtins.__dict__)"),
+     (1, "the scanner's builtin-name roster, enumerated once from the builtins module's __dict__ at "
+      "import; it reads no file and never writes through the mapping")),
+    (("tools/check_dangerous_api.py",
+      "os.listdir = real_list"),
+     (1, "test-only: the self-test fixture swaps this os member for a refusing stub scoped to the fixture "
+      "path and restores the real one in its undo")),
+    (("tools/check_dangerous_api.py",
+      "os.listdir = refuse_list"),
+     (1, "test-only: the self-test fixture swaps this os member for a refusing stub scoped to the fixture "
+      "path and restores the real one in its undo")),
+    (("tools/check_dangerous_api.py",
+      "os.lstat = real"),
+     (1, "test-only: the self-test fixture swaps this os member for a refusing stub scoped to the fixture "
+      "path and restores the real one in its undo")),
+    (("tools/check_dangerous_api.py",
+      "os.lstat = refuse"),
+     (1, "test-only: the self-test fixture swaps this os member for a refusing stub scoped to the fixture "
+      "path and restores the real one in its undo")),
+    (("tools/check_dangerous_api.py",
+      "os.scandir = real"),
+     (1, "test-only: the self-test fixture swaps this os member for a refusing stub scoped to the fixture "
+      "path and restores the real one in its undo")),
+    (("tools/check_dangerous_api.py",
+      "os.scandir = refuse"),
+     (1, "test-only: the self-test fixture swaps this os member for a refusing stub scoped to the fixture "
+      "path and restores the real one in its undo")),
+    (("tools/check_dangerous_api.py",
+      "os.stat = real"),
+     (1, "test-only: the self-test fixture swaps this os member for a refusing stub scoped to the fixture "
+      "path and restores the real one in its undo")),
+    (("tools/check_dangerous_api.py",
+      "os.stat = refuse"),
+     (1, "test-only: the self-test fixture swaps this os member for a refusing stub scoped to the fixture "
+      "path and restores the real one in its undo")),
 ))
 
 
@@ -12632,6 +13165,9 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      _CS_LEGS.format("journal-root open (or None until one)")),
     ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "REBIND", "root_fd", "", 7,
      _CS_LEGS.format("_open_dir_nofollow")),
+    ("opf/tools/_opf_adopt_apply.py", "run_adopt_transaction", "TRY", "mine_held", "mine_held", 1,
+     "false positive: _close_held and _close_held_into pop each number out of the list before its one close, "
+     "so the final close-out's pass over a list the release path already emptied closes none twice"),
     ("opf/tools/_opf_emit.py", "_boom_close7", "AFTER", "fd", "fd", 1,
      "false positive: a self-test close stub; its swallowed close is followed by a raise in the same block, so the "
      "later close never runs after it"),
