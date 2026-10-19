@@ -51,7 +51,7 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
   R4 declared-view writes. Each machine-store manifest's views targets are declared view destinations;
      a target equal to one is denied (views change only through `opf render`; spec 5.8, 14.1).
   R5 Bash writes. EVERY Bash command is first classified PROVABLY PLAIN or not by ONE strict
-     classifier (D-DISCARD-SOUND-RULE; the shared plain-command specification, QA round 7, revised
+     classifier (sound-lexing rule dropped; the shared plain-command specification, QA round 7, revised
      2026-10-06), decided on the RAW command string before any lexing: (1) every character is
      printable ASCII (no tab, newline, carriage return, NUL or non-ASCII character, so no Unicode
      digit, homoglyph or invisible character); (2) no dollar sign, backquote, backslash, semicolon,
@@ -95,7 +95,7 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      directory-plus-basename target is such a directory (cp -r src/docs .); a tilde-headed
      spelling is judged in BOTH readings, literal under the cwd (bash keeps a quoted tilde
      literal) and expanded; and an absolute GIT_TRACE* value is one more inherited
-     spelling. Round 10 (D-RESCOPES-A) stops parsing toward completeness: every
+     spelling. Round 10 decided to stop parsing toward completeness: every
      directory-plus-basename join is container-checked even when another word already resolves
      to it (no dedupe across the two checks, so a cp backup suffix or a second operand spelling
      the joined directory no longer hides it); and git is read only through a small allowlisted
@@ -670,11 +670,11 @@ INLINE_RUNNERS = frozenset(("sh", "bash", "rbash", "dash", "ash", "zsh", "ksh", 
 # or runs a command string, and the options that name a command to run (rebase -x and clone -u are
 # matched on their own subcommands).
 GIT_VALUE_GLOBALS = frozenset(("-C", "--git-dir", "--work-tree"))
-# The SMALL allowlisted git global-option grammar (round 10, D-RESCOPES-A): the subcommand is
-# recognized only past these global options (a value global as a separate word, or --git-dir= and
-# --work-tree= glued); any other global option (git 2.53 accepts --attr-source <tree-ish> and
-# --shallow-file <file> as separate words, and a value word would otherwise be read as the
-# subcommand) makes the command NOT plain.
+# The SMALL allowlisted git global-option grammar (round 10, no parsing toward completeness): the
+# subcommand is recognized only past these global options (a value global as a separate word, or
+# --git-dir= and --work-tree= glued); any other global option (git 2.53 accepts --attr-source
+# <tree-ish> and --shallow-file <file> as separate words, and a value word would otherwise be read
+# as the subcommand) makes the command NOT plain.
 GIT_FLAG_GLOBALS = frozenset(("--no-pager", "-P", "--no-optional-locks", "--literal-pathspecs",
                               "--no-replace-objects", "--version"))
 # The git subcommands that rewrite the working tree or the index (round 11): in a BOUND product (a
