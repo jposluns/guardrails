@@ -73,7 +73,9 @@ handler's structured decision.
 
 It also covers the gate-weakening guard (gate_weakening, gatdis): a git verification-hook bypass
 (--no-verify on commit/merge/push/pull/rebase/am, exact or abbreviated; the short -n only on
-commit/am, where -n IS --no-verify) denies; a checker-shaped segment whose failure is swallowed
+commit/am, where -n IS --no-verify) denies; an option-region word an expansion can build into an
+option (a live '$'/'`'/'{' plus a '-' in one word, or a trailing unquoted '$(') denies fail-closed
+on every roster verb; a checker-shaped segment whose failure is swallowed
 (|| true, || :) or piped into an adjacent head or tail allows with a note, except that a narrow
 verification run on the allow-list whose output reaches a sink on the allow-list (head or tail with
 one positive line count, grep -m N/-q/-c/-l/-L, rg -q/-c/-l) denies; option-value, post-'--', and
@@ -12268,6 +12270,60 @@ def _main_isolated(monitor):
         gexpect("(gw-bd) a clustered -hn reads 'n' as the bypass, still denies "
                 "(disclosed clustered-help over-block)", "git commit -hn -m x", "deny")
 
+        # === gatdis: an option word an expansion can build (uncertain option words) ======================
+        # Bash rewrites an argument word carrying a live expansion BEFORE git parses options: '${x}-n',
+        # '$x-n', '`true`-n' and '{-n,}' each become a bare '-n' when the expansion is empty, so the
+        # commit hook is skipped while the option scan sees no '-'-initial word. The rule is bounded and
+        # fail-closed (no expansion modelling): on a verb that accepts --no-verify, an option-region word
+        # that is opaque (a live expansion), retains '$', '`' or '{', and contains a '-' DENIES naming
+        # the word; a trailing unquoted '$(' denies too (the lexer splits the segment there, hiding every
+        # later word, glued or not). Each deny here ALLOWED before this rule; the allow controls pin the
+        # rule's edges (no '-', single-quoted, escaped-only, post-'--', off-roster verb).
+        gexpect("(gw-eo-a) ${x}-n on commit denies (an empty expansion leaves a bare -n)",
+                "git commit ${x}-n -m y", "deny")
+        gexpect("(gw-eo-b) $x-n on commit denies", "git commit $x-n -m y", "deny")
+        gexpect("(gw-eo-c) a backquoted command glued to -n denies", "git commit `true`-n -m y", "deny")
+        gexpect("(gw-eo-d) the brace expansion {-n,} denies", "git commit {-n,} -m y", "deny")
+        gexpect("(gw-eo-e) ${x}-n inside a double-quoted word still substitutes, denies",
+                'git commit "${x}-n" -m y', "deny")
+        gexpect("(gw-eo-f) a glued unquoted $(true)-n denies (split-substitution case)",
+                "git commit $(true)-n -m y", "deny")
+        gexpect("(gw-eo-g) an unquoted $(true) followed by -n denies (the split hides the -n)",
+                "git commit $(true) -n -m y", "deny")
+        gexpect("(gw-eo-h) ${x}-n on am denies (-n IS --no-verify there too)",
+                "git am ${x}-n patch.mbox", "deny")
+        gexpect("(gw-eo-i) ${x}-n on push denies (word splitting can build --no-verify)",
+                "git push ${x}-n origin main", "deny")
+        # The unparseable fallback applies the same rule from the raw text.
+        gexpect("(gw-eo-j) unparseable ${x}-n on commit denies (raw fallback)",
+                'git commit ${x}-n -m "unbalanced', "deny")
+        gexpect("(gw-eo-k) ${x}-n beside a here-string denies (raw fallback)",
+                "git am ${x}-n <<<x", "deny")
+        # Allow controls: each edge of the rule, so an over-broad variant of it turns one red.
+        gexpect("(gw-eo-l) a double-quoted expansion value with no '-' in the word allows",
+                'git commit -m "$msg"', "allow")
+        gexpect("(gw-eo-m) an unquoted ${msg} value with no '-' in the word allows",
+                "git commit -m ${msg}", "allow")
+        gexpect("(gw-eo-n) git log is off the no-verify roster, ${x}-n allows",
+                "git log ${x}-n", "allow")
+        gexpect("(gw-eo-o) a single-quoted literal naming ${x}-n is never opaque, allows",
+                "git commit -m 'a ${x}-n b'", "allow")
+        gexpect("(gw-eo-p) an escaped \\$x-n is literal (no live expansion), allows",
+                "git commit -m \\$x-n", "allow")
+        gexpect("(gw-eo-q) a post-'--' ${y}-n is an operand, outside the option region, allows",
+                "git commit -m x -- ${y}-n", "allow")
+        gexpect("(gw-eo-r) a dash-free unparseable expansion word allows (raw fallback control)",
+                'git commit -m "$msg x', "allow")
+        # Disclosed word-level over-denials of the bounded rule (safe direction, never a silent allow):
+        # the expansion sits in a harmless position but shares its word with a '-'. Re-issue with the
+        # expansion in its own dash-free word (git commit --author "$a" -m x allows, gw-eo-u).
+        gexpect("(gw-eo-s) --author=\"$a\" denies (disclosed over-denial: '-' and a live expansion "
+                "share the word)", 'git commit --author="$a" -m x', "deny")
+        gexpect("(gw-eo-t) -m $(date) denies (disclosed over-denial via the split-substitution case)",
+                "git commit -m $(date)", "deny")
+        gexpect("(gw-eo-u) the separated --author \"$a\" form allows (the documented re-issue)",
+                'git commit --author "$a" -m x', "allow")
+
         # === L11: the F1/F2 redirect-pollution slips are CLOSED by the shared raw-aware tokenizer =========
         # A redirect anywhere no longer hides the --no-verify bypass or the checker command word.
         gexpect("(gw-l11a) redirect before the subcommand no longer hides --no-verify, denies",
@@ -18119,7 +18175,9 @@ def _main_isolated(monitor):
           "unclassifiable form and DENIES), and ALLOWS-WITH-NOTE only a redirect whose worktree it cannot pin "
           "(a --git-dir/GIT_DIR/-c form or an opaque -C/--work-tree) (finding 12); a rooted creation and "
           "non-creation commands ALLOW. "
-          "gatdis (gate_weakening) DENIES a --no-verify bypass and a known verification run whose output reaches "
+          "gatdis (gate_weakening) DENIES a --no-verify bypass, an option-region word an expansion can build "
+          "into an option (a live '$'/'`'/'{' plus a '-' in one word, or a trailing unquoted '$(', on a verb "
+          "that accepts --no-verify), and a known verification run whose output reaches "
           "a truncating sink on its allow-list (head or tail with one positive line count, grep -m N/-q/-c/-l/-L, "
           "rg -q/-c/-l; cut, any other spelling and a sed or awk program only note), and "
           "ALLOWS-WITH-NOTE every other checker-shaped segment whose failure is swallowed (|| true) or "

@@ -9503,6 +9503,11 @@ _RAW_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|merge|pus
 _RAW_NOVERIFY_RE = re.compile(r"(?i)--no-ver")
 _RAW_SHORT_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|am)\b")
 _RAW_SHORT_N_RE = re.compile(r"(?:^|\s)-[A-Za-z]*n\b")
+# The raw-text form of the uncertain-option-word rule (_gate_uncertain_option_word) for the unparseable
+# fallback: a whitespace-delimited word that mixes an expansion marker ('$', a backquote, or a '{' brace)
+# with a '-', in either order. Quoting is unknown on the raw path, so a quoted spelling over-denies
+# (the documented fallback posture: re-issue the command parseable), never a silent allow.
+_RAW_EXPANSION_DASH_WORD_RE = re.compile(r"(?:^|\s)(\S*(?:[$`{]\S*-|-\S*[$`{])\S*)")
 _RAW_CHECKER_RE = re.compile(
     r"(?i)\b(?:pytest|tox|nox|unittest|mypy|pyright|ruff|flake8|pylint|bandit|eslint|tsc|jest|"
     r"vitest|mocha|rspec|rubocop|phpunit|phpstan|golangci-lint|staticcheck|shellcheck|hadolint|"
@@ -9557,6 +9562,43 @@ def _no_verify_spelling(sub, args):
                     break
                 if ch == "n":
                     return "the short -n (--no-verify) in {!r}".format(tok[:40])
+    return None
+
+
+# The expansion markers a DECODED argument word retains: the lexer strips quotes but keeps a parameter
+# expansion, command or arithmetic substitution, backquote, or brace verbatim in the word text, and its
+# per-token opacity flag is set exactly when such a character was live for the shell (unquoted or
+# double-quoted), never when every one was single-quoted, ANSI-C-quoted or escaped.
+_GATE_EXPANSION_CHARS = ("$", "`", "{")
+
+
+def _gate_uncertain_option_word(seg, args):
+    """(word, how) for the first UNCERTAIN OPTION WORD on a no-verify git segment, or None. Bash rewrites
+    a word carrying a live expansion BEFORE git parses options: '${x}-n', '$x-n', a backquoted command
+    glued to '-n', and the brace '{-n,}' each become a bare '-n' when the expansion is empty, and word
+    splitting can build ANY option list ('--no-verify' included, so every _NOVERIFY_VERBS verb is in
+    scope, not only the short-n two). This guard does not model expansions, so the rule is BOUNDED and
+    FAIL-CLOSED: an option-region word (pre-'--', via _split_pre_post) whose opacity flag is set, whose
+    decoded text retains an expansion marker (_GATE_EXPANSION_CHARS), and which also contains a '-' is
+    read as an option the guard cannot bind, and DENIES naming the word. A trailing word that opens an
+    unquoted '$(' command substitution also qualifies: the lexer splits the segment at the '(', so the
+    words after it (a glued '$(true)-n' or a following '-n') cannot be bound at all. DISCLOSED
+    OVER-DENIAL (word-level, lexical): a word whose expansion sits in a harmless position still denies
+    when the word carries a '-' ('--author="$a"', an '-m' value glued to '$x-y', an escaped '\\${x}-n'
+    whose unquoted braces still mark the word opaque, '-m $(date)' via the split-substitution case);
+    re-issue with the option spelled literally and the expansion in its own dash-free word
+    ('--author "$a"'). A word with no '-' is unaffected ('-m "$msg"'), a single-quoted word is never
+    opaque, and a post-'--' operand is outside the option region."""
+    pre, _post, had_sep = _split_pre_post(args)
+    offset = len(seg.argv) - len(args)
+    for k, tok in enumerate(pre):
+        if not seg.argv_opaque[offset + k]:
+            continue  # every expansion-capable character in this word was quoted or escaped: literal
+        if "-" in tok and any(ch in tok for ch in _GATE_EXPANSION_CHARS):
+            return tok, "mixes a shell expansion, substitution or brace with a '-'"
+    if not had_sep and pre and seg.sep_after == "(" and pre[-1].endswith("$") and seg.argv_opaque[-1]:
+        return pre[-1] + "(", ("opens an unquoted $( command substitution, which splits the lexed " +
+                               "segment so the words after it cannot be bound")
     return None
 
 
@@ -10153,7 +10195,10 @@ def _gate_weakening_fallback(command):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): an apparent
     git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
     a short -n cluster ASKS (the raw string cannot bind the cluster to its subcommand, so it cannot
-    prove the -n is the bypass rather than an unrelated flag); a checker keyword next to a raw swallow
+    prove the -n is the bypass rather than an unrelated flag); a no-verify verb plus a raw word mixing
+    an expansion marker with a '-' (_RAW_EXPANSION_DASH_WORD_RE, the raw form of
+    _gate_uncertain_option_word) DENIES, since the shell could rewrite that word into the bypass flag;
+    a checker keyword next to a raw swallow
     or truncating-pipe spelling ASKS; anything else ALLOWS (the true boundary). Over-matching by
     design, the documented posture of the sibling fallbacks (_diff_source_fallback,
     _commit_identity_fallback, _protected_line_fallback): re-issue the command parseable."""
@@ -10173,6 +10218,22 @@ def _gate_weakening_fallback(command):
             .format(_GATE_ALTS),
             "AIQT guardrail: denied an unparseable git commit/am that appears to carry -n (--no-verify) "
             "(rule gatdis, fail-safe); run the hooks, do not bypass them.")
+    if _RAW_NOVERIFY_VERB_RE.search(command):
+        expansion_word = _RAW_EXPANSION_DASH_WORD_RE.search(command)
+        if expansion_word is not None:
+            word = expansion_word.group(1)
+            return _deny(
+                "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
+                "(likely unbalanced quotes), it appears to run a git subcommand that accepts --no-verify, "
+                "and the word {!r} mixes a shell expansion, substitution or brace with a '-'. The shell "
+                "rewrites such a word before git parses its options (an empty expansion leaves a bare "
+                "'-n' or '--no-verify', silently skipping the verification hooks), and the raw text "
+                "cannot bind it to a safe option, so it is denied fail-safe; quoting is unreadable here, "
+                "so a quoted spelling can over-deny: re-issue the command parseable, with every option "
+                "spelled literally and the expansion in its own word with no '-'. {}"
+                .format(word[:60], _GATE_ALTS),
+                "AIQT guardrail: denied an unparseable git command whose word {!r} could expand into an "
+                "option (rule gatdis, fail-safe).".format(word[:40]))
     if _RAW_CHECKER_RE.search(command) and (
             _RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
             or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command))):
@@ -10196,7 +10257,24 @@ def gate_weakening(data):
     that accepts it (commit, merge, push, pull, rebase, am), or the short -n on the two verbs where
     -n IS --no-verify (commit, am; on push -n is --dry-run and on merge/pull it is --no-stat, so it
     is deliberately not flagged there); the CONFIRMED --no-verify bypass DENIES (certain, returned
-    immediately). The checker-output check has TWO TIERS. DENY tier, held to one canonical shape whose two
+    immediately). UNCERTAIN OPTION WORDS also DENY, fail-closed, on every verb of the roster: an
+    option-region argument word that carries a live shell expansion (its per-token opacity flag is set
+    and its decoded text retains '$', a backquote or a '{': a parameter expansion, command or arithmetic
+    substitution, backquote, or brace expansion, unquoted or double-quoted) AND contains a '-' is an
+    option the shell can rewrite before git parses it ('${x}-n', '$x-n', a backquoted command glued to
+    '-n', '{-n,}', the same spellings double-quoted: each becomes a bare '-n' when the expansion is
+    empty, and word splitting can build any option list), so it is denied naming the word rather than
+    modelled; a trailing word opening an unquoted '$(' command substitution denies the same way, because
+    the lexer splits the segment there and the words after it cannot be bound. The rule is deliberately
+    OVER-BROAD (bounded, no expansion modelling), and that over-denial is: a word whose expansion sits
+    in a harmless position still denies when the word also carries a '-' (--author="$a", an option value
+    glued to an expansion plus a dash, an escaped \\${x}-n whose unquoted braces still mark the word
+    opaque, and -m $(date) via the split-substitution case; re-issue with the option spelled literally
+    and the expansion in its own dash-free word, as in --author "$a"). A word with no '-' is unaffected
+    (-m "$msg", -m ${msg}), a single-quoted word is never opaque, a post-'--' operand is outside the
+    option region, and a verb off the roster is untouched (git log ${x}-n). The unparseable fallback
+    applies the same rule over the raw text (quoting unreadable there, so a quoted spelling can
+    over-deny: re-issue parseable). The checker-output check has TWO TIERS. DENY tier, held to one canonical shape whose two
     ends are ALLOW-LISTS (_verification_sink): the first simple command of a pipeline is a KNOWN VERIFICATION
     INVOCATION (_is_verification_run: a run form in _GATE_VERIFY_RUNS, or a python script form) and pipes
     through pass-through stages (_gate_plain_filter: cat, tee, tr, uniq) into a sink on the sink allow-list
@@ -10264,6 +10342,20 @@ def gate_weakening(data):
                         "a pass; fix the artefact instead. {}".format(sub, spelling, _GATE_ALTS),
                         "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) "
                         "(rule gatdis).")
+                uncertain = _gate_uncertain_option_word(records[index], args)
+                if uncertain is not None:
+                    word, how = uncertain
+                    return _deny(
+                        "AIQT rule gatdis (gate-discipline): on this git {}, the argument word {!r} {}. "
+                        "The shell rewrites that word before git parses its options (an empty expansion "
+                        "leaves a bare '-n' or '--no-verify', silently skipping the verification hooks), "
+                        "and this guard does not model expansions, so it cannot bind the word to a safe "
+                        "option and denies fail-closed. Re-issue with every option spelled literally and "
+                        "the expansion in its own word with no '-' (for example --author \"$a\" rather "
+                        "than --author=\"$a\"), or single-quote a literal word. {}"
+                        .format(sub, word[:60], how, _GATE_ALTS),
+                        "AIQT guardrail: denied a git {} whose argument word {!r} could expand into an "
+                        "option (rule gatdis, fail-closed).".format(sub, word[:40]))
         if not _is_checker_segment(tokens):
             continue
         # The "immediately following" segment, advancing PAST any EMPTY segments (a bare
