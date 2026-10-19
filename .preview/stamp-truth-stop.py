@@ -82,8 +82,10 @@ its SHA-256 is recorded as pending (at most MAX_PENDING, 8, the OLDEST hash evic
 stored); a later record with that text is skipped ONCE (the pending entry is consumed) because it arrived
 after OFFSET only through transcript lag. The entry excuses one TRANSCRIPT record, never the SUPPLIED
 current final: a last_assistant_message matching the arrived record is checked like any other final, and
-the entry is spent by the EARLIEST matching record of that scan (by that checked final itself when nothing
-earlier matches), so it never excuses a later verbatim repeat. Pending entries are dropped at any new genuine user message and
+whether the final is supplied or read from the transcript the entry is spent by the EARLIEST matching
+record of that scan (a supplied final spends it itself, unexcused, when nothing earlier matches; a final
+read from the transcript is excused only when it is that earliest match, and otherwise checked), so it
+never excuses a later verbatim repeat, the final record included. Pending entries are dropped at any new genuine user message and
 when the transcript is reset (shorter than OFFSET, or the bytes before OFFSET changed), which also discards
 OFFSET and is RECORDED in the state (round 40, see BLOCK CAP). A blocked final message already in the transcript creates no exception. The boundary is never
 inferred from message text. State dir: $XDG_RUNTIME_DIR/clock-truth when XDG_RUNTIME_DIR is absolute, else
@@ -162,7 +164,8 @@ so a stored hash is consumed only by a record that lies after the stored boundar
 snapshot (a genuine user message there still invalidates them all), the pending entry excuses one
 transcript record and never the supplied final (a last_assistant_message matching the arrived record is
 re-checked; the entry is spent by the earliest matching record of the scan, the re-checked final itself
-when nothing earlier matches, so it never excuses a later verbatim repeat), and an arrival
+when nothing earlier matches, and a final read from the transcript is excused only as that earliest
+match, so it never excuses a later verbatim repeat), and an arrival
 appended between reads is either consumed AND covered by the saved boundary or neither (an earlier fix
 reconciled against a SECOND scan while the FIRST scan and its boundary were kept, so a record BEFORE the
 recovered boundary could consume a hash and a mid-fault arrival was consumed yet re-reported; the round
@@ -2015,8 +2018,15 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     elif lam is None and msgs:
         (final, final_ref), msgs = msgs[-1], msgs[:-1]
         h = _sha(final.strip())
-        if h in remaining:
-            remaining.remove(h)  # the already-reported final message arriving late: skipped once, consumed
+        if h in remaining and not any(text.strip() == final.strip() for text, _ in msgs):
+            # the already-reported final message arriving late: skipped once, consumed. The entry is
+            # spent by the EARLIEST matching record of this scan here too: with an earlier record
+            # matching, that record is the late arrival (the per-message loop below consumes the entry
+            # there, excused once) and this final is a verbatim repeat, checked like any other final
+            # (before, the entry was spent on this LAST record, so with the arrival and its repeat in
+            # one scan the repeat was excused, and under stop_hook_active the re-reported arrival was
+            # then discarded with the clean-final rule, so the pair passed in silence)
+            remaining.remove(h)
             final = None
         elif final_ref is None:
             final = None  # no trustworthy written_at
@@ -6640,10 +6650,119 @@ def _self_test():
                     # the violation named is the final's; the arrival earlier in the scan is excused,
                     # not re-reported
                     self.assertTrue(any("your final message" in v for v in report), (i, transient))
-                    self.assertFalse(any("earlier message" in v for v in report), (i, transient))
+                    if not transient:
+                        # discriminating only on the no-fault legs: after a state-read fault older
+                        # messages are never re-checked, so no "earlier message" line could appear
+                        # whether or not the arrival was consumed (there, the empty saved pending
+                        # list below carries the consumption check)
+                        self.assertFalse(any("earlier message" in v for v in report), (i, transient))
                     st = load_state(sdir, self.tr, {})
                     self.assertTrue(st[3], (i, transient))
                     self.assertEqual(st[2], [], (i, transient))  # spent at the arrival, never saved back
+
+        def test_r44_transcript_final_repeat_stays_checked_without_supplied_final(self):
+            # the defect: with no last_assistant_message, the pending entry was spent on the
+            # LAST transcript record before earlier records were scanned, so with the late arrival and
+            # its verbatim repeat in one scan the repeat, read from the transcript as the final, was
+            # exempted while the arrival, re-reported in its place, was discarded by the clean-final
+            # corrective-loop rule under an explicit stop_hook_active true, and after a transient
+            # state-read fault (older messages are never re-checked) the pair passed silently under
+            # every field setting. The entry is spent at the FIRST matching record in transcript order
+            # here too: the arrival is excused once and the identical final transcript record stays
+            # checked, for the field omitted, explicitly true and explicitly false alike, with and
+            # without a transient state-read fault
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load = load_state
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                for transient in (False, True):
+                    sdir = os.path.join(self.tmp, f"state44e{i}{int(transient)}")
+                    self.write([self.user("go")])
+                    self.assertEqual(self.r38_ev(sdir, missing)[0], "block", (i, transient))
+                    self.assertEqual(load_state(sdir, self.tr, {})[2], [_sha(missing)], (i, transient))
+                    # the late arrival and its verbatim repeat land in the SAME scan; no supplied
+                    # final, so the repeat is read from the transcript as the final message
+                    self.write([self.asst(missing), self.asst(missing)], "a")
+                    fails = []
+
+                    def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                        fails.append(1)
+                        globals()["load_state"] = real_load
+                        return 0, None, [], False
+                    payload = {"transcript_path": self.tr}
+                    payload.update(field)
+                    if transient:
+                        globals()["load_state"] = transient_load
+                    notes, report = [], []
+                    try:
+                        r = evaluate(dict(payload), self.now, self.start, sdir, notes, report)
+                    finally:
+                        globals()["load_state"] = real_load
+                    if transient:
+                        self.assertTrue(fails, (i, transient))  # the state load actually failed
+                    if transient and i < 2:
+                        self.assertIsNone(r, (i, transient))  # the counter is unknown: fail open, loudly
+                        self.assertTrue(notes and "block count unknown" in notes[0], (i, transient))
+                    else:
+                        self.assertIsNotNone(r, (i, transient))  # the final transcript record is refused
+                    # the violation named is the final's; the arrival earlier in the scan is excused,
+                    # not re-reported
+                    self.assertTrue(any("your final message" in v for v in report), (i, transient))
+                    if not transient:
+                        # discriminating only on the no-fault legs: after a state-read fault older
+                        # messages are never re-checked, so no "earlier message" line could appear
+                        # whether or not the arrival was consumed (there, the empty saved pending
+                        # list below carries the consumption check)
+                        self.assertFalse(any("earlier message" in v for v in report), (i, transient))
+                    st = load_state(sdir, self.tr, {})
+                    self.assertTrue(st[3], (i, transient))
+                    self.assertEqual(st[2], [], (i, transient))  # spent at the arrival, never saved back
+
+        def test_r44_transcript_final_single_arrival_excused_once(self):
+            # the control for the repeat test above: with no supplied final and the ONE late arrival
+            # as the last transcript record, that arrival is itself the earliest matching record of the
+            # scan, so the pending entry still excuses it exactly once, for the field omitted,
+            # explicitly true and explicitly false alike, with and without a transient state-read
+            # fault; the spent entry never excuses a later verbatim repeat
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load = load_state
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                for transient in (False, True):
+                    sdir = os.path.join(self.tmp, f"state44f{i}{int(transient)}")
+                    self.write([self.user("go")])
+                    self.assertEqual(self.r38_ev(sdir, missing)[0], "block", (i, transient))
+                    self.assertEqual(load_state(sdir, self.tr, {})[2], [_sha(missing)], (i, transient))
+                    self.write([self.asst(missing)], "a")  # the reported message ARRIVES as the last record
+                    fails = []
+
+                    def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                        fails.append(1)
+                        globals()["load_state"] = real_load
+                        return 0, None, [], False
+                    payload = {"transcript_path": self.tr}
+                    payload.update(field)
+                    if transient:
+                        globals()["load_state"] = transient_load
+                    notes, report = [], []
+                    try:
+                        r = evaluate(dict(payload), self.now, self.start, sdir, notes, report)
+                    finally:
+                        globals()["load_state"] = real_load
+                    if transient:
+                        self.assertTrue(fails, (i, transient))  # the state load actually failed
+                    self.assertIsNone(r, (i, transient))  # excused once: the arrival IS the final here
+                    self.assertEqual(report, [], (i, transient))
+                    self.assertEqual(notes, [], (i, transient))
+                    st = load_state(sdir, self.tr, {})
+                    self.assertTrue(st[3], (i, transient))
+                    self.assertEqual(st[2], [], (i, transient))  # consumed exactly once
+                    # the same text once more as the final transcript record on a new turn: the spent
+                    # entry never excuses it
+                    notes2, report2 = [], []
+                    self.write([self.asst(missing)], "a")
+                    r2 = evaluate({"transcript_path": self.tr, "stop_hook_active": False},
+                                  self.now, self.start, sdir, notes2, report2)
+                    self.assertIsNotNone(r2, (i, transient))
+                    self.assertTrue(any("your final message" in v for v in report2), (i, transient))
 
         def test_r44_pre_boundary_record_never_consumes_pending(self):
             # the defect: the earlier recovery reconciled against a SECOND scan from the
