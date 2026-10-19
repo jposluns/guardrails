@@ -906,7 +906,12 @@ def release_cut(version_data, worklog_data, new_version, date,
         changes the recomputed coverage digest, so the cut returns INVALID rather than certifying a cut
         over a rewritten frozen span (defense-in-depth, spec 6.2/13);
       - the unreleased tail is not a contiguous run from released_end+1 to the last worklog id (a gap in
-        the worklog would leave a span that cannot tile).
+        the worklog would leave a span that cannot tile). A number that an id reservation holds but no
+        entry carries is such a gap too: the cut reads no reservation, and no span can cover a number
+        without an entry (spec 6.1), so it refuses that tail even where doctor grades the store VALID
+        (doctor treats an orphaned reservation's number as issued, spec 8.2, and steps over it when it
+        grades deletion and contiguity). A reserved number above the last entry leaves the tail cuttable
+        only until a higher entry is published.
 
     The new release row covers [released_end+1 .. last worklog id] (or [] when the tail is empty, spec 6.1
     / 14.3) with the tail's coverage digest. After the cut the new unreleased tail is EMPTY by construction
@@ -998,7 +1003,9 @@ def release_cut(version_data, worklog_data, new_version, date,
         # SECA-resource-bounds; fail-closed to INVALID on a gap).
         if tail[0] != end + 1 or tail[-1] - end != len(tail):
             return CutResult(INVALID, ["cannot cut: the unreleased tail WL-{}..WL-{} is not contiguous "
-                                       "(a gap would break span tiling, spec 6.1)".format(end + 1, tail[-1])])
+                                       "(a gap would break span tiling, spec 6.1; a number an id reservation "
+                                       "holds but no entry carries is a gap too, even where doctor grades the "
+                                       "store VALID)".format(end + 1, tail[-1])])
         span_value = ["WL-{}".format(tail[0]), "WL-{}".format(tail[-1])]
         span_parsed = (tail[0], tail[-1])
 
@@ -1830,6 +1837,53 @@ def self_test():
     gap_cut = release_cut({"schema": 1, "release": []}, wl_gap_tail, "1.0.0", "2026-06-15T00:00:00Z")
     check("cut-interior-gap-tail-invalid", gap_cut.status == INVALID)
     check("cut-interior-gap-tail-named", any("not contiguous" in f for f in gap_cut.findings))
+
+    # The cut reads no id reservation, so a number an orphaned reservation holds (spec 8.2: issued, never
+    # reused) is a gap like any other, though doctor steps over it when grading deletion and contiguity.
+    # These pin the refusal wherever such a number stands below the highest entry (each turns VALID if the
+    # contiguity refusal is dropped or made to accept a reserved gap), and the acceptance while it stands
+    # above the highest entry.
+    cut_date = "2026-07-05T00:00:00Z"
+    # WL-1 reserved, never published; WL-2 and WL-3 present over an empty ledger.
+    start_cut = release_cut({"schema": 1, "release": []}, {"schema": 1, "entry": [entry(2), entry(3)]},
+                            "1.0.0", cut_date)
+    check("cut-reserved-start-gap-invalid", start_cut.status == INVALID and start_cut.version_data is None
+          and any("tail WL-1..WL-3 is not contiguous" in f for f in start_cut.findings))
+    # WL-1 and WL-2 released, WL-3 reserved, WL-4 present: the tail starts above the released end.
+    released12 = {"schema": 1, "release": [
+        {"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": ["WL-1", "WL-2"],
+         "coverage_digest": compute_span_digest({1: entry(1), 2: entry(2)}, (1, 2))}]}
+    hole_worklog = {"schema": 1, "entry": [entry(1), entry(2), entry(4)]}
+    hole_cut = release_cut(released12, hole_worklog, "1.1.0", cut_date)
+    check("cut-reserved-interior-gap-invalid", hole_cut.status == INVALID and hole_cut.version_data is None
+          and any("tail WL-3..WL-4 is not contiguous" in f for f in hole_cut.findings))
+    # WL-3 reserved at the top of the tail: the cut covers WL-1..WL-2 and leaves WL-3 to a later span; once
+    # WL-4 is published WL-3 stands below the highest entry and the next cut refuses.
+    top_cut = release_cut({"schema": 1, "release": []}, {"schema": 1, "entry": [entry(1), entry(2)]},
+                          "1.0.0", cut_date)
+    check("cut-reserved-top-accepted", top_cut.status == VALID and top_cut.frozen_span == ["WL-1", "WL-2"])
+    late_cut = (release_cut(top_cut.version_data, hole_worklog, "1.1.0", cut_date)
+                if top_cut.version_data is not None else None)
+    check("cut-reserved-top-then-refused", late_cut is not None and late_cut.status == INVALID
+          and late_cut.version_data is None
+          and any("tail WL-3..WL-4 is not contiguous" in f for f in late_cut.findings))
+    check("cut-refusal-names-reservation", all(
+        any("a number an id reservation holds but no entry carries is a gap too, even where doctor grades "
+            "the store VALID" in f for f in r.findings) for r in (start_cut, hole_cut, gap_cut)))
+    # No release row can stand over the hole either: a span covering WL-3 cannot be digested, and a stored
+    # row claiming it is reported by the frozen-coverage check.
+    by_hole, _hole_findings = _entries_by_id(hole_worklog)
+    try:
+        compute_span_digest(by_hole, (3, 4))
+        hole_digested = True
+    except ReleaseError:
+        hole_digested = False
+    over_hole = {"schema": 1, "release": released12["release"] + [
+        {"version": "1.1.0", "date": cut_date, "worklog_span": ["WL-3", "WL-4"],
+         "coverage_digest": "sha256:" + "0" * 64}]}
+    check("cut-span-over-hole-undigestable", not hole_digested and any(
+        "cannot recompute coverage digest" in f and "WL-3" in f
+        for f in check_frozen_coverage(over_hole, by_hole)))
 
     # --- retro hardening (opf-hardening branch): three whole-file adversarial-QA findings ------------
     # NF-1 (fail-closed soundness): _count_expected_absent's len(expected_ids) raises OverflowError, not
