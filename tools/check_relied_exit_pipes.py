@@ -18,26 +18,41 @@ is not a declared command never fires, which keeps false alarms low: `git log | 
 
 TWO EXEMPTIONS clear a flagged pipeline. Each is credited only for a closed set of spellings the gate
 can read with certainty; every other spelling refuses toward a finding, never toward a silent pass:
-  E1  pipefail is provably on. The credit needs BOTH: (1) every mention of `pipefail` anywhere in the
-      file (comments and strings included) sits on a line that IS a standalone top-level enable: the
-      line starts with `set` in column 1 (no wrapper, coproc, builtin, env, exec, nohup or timeout
-      before it), carries only enabling short options (`set -o pipefail`, or an option cluster
-      containing -o such as `set -euo pipefail`), and ends at the newline or one trailing ';' with
-      nothing after it; and (2) the file contains NO function definition, eval, source, `.` (dot
-      command), bash -c / sh -c / dash -c / zsh -c, builtin, `set +...`, `shopt -u...`, or `set` with a
-      variable-driven operand anywhere: each of those can move, disable or re-scope the option in ways
-      this gate does not model, so its mere presence withdraws the credit for the whole file. The
-      enable must additionally be a top-level statement in the lexed reading (not inside a block or
-      subshell, not a pipeline stage, not backgrounded, not the right arm of && or ||) and sit before
-      the pipeline. `set -- -o pipefail` sets positional parameters, never the option.
+  E1  pipefail is provably on. The credit is an ALLOWLIST over the WHOLE FILE: every line must be one
+      of a small closed set of forms, read from the shared lexer's dequoted words and the raw text
+      together: a blank line; a comment line; the standalone column-1 enable (`set` first, then only
+      '-' option clusters whose letters come from bash's own set-flag vocabulary and whose 'o'
+      letters consume names from bash's own `set -o` vocabulary, pipefail among them, ending at the
+      newline or one trailing ';' with nothing after it; an unknown letter or name makes bash reject
+      the set command and run on with pipefail OFF, so it earns nothing); a plain assignment; or a
+      command line of plain simple commands joined by |, |&, &&, ||, ';' or '&' whose every command
+      word is a literal unquoted name outside a refused set (set, eval, source, the '.' dot command,
+      builtin, command, exec, alias, unalias, enable, trap, function, sh/bash/dash/zsh/ksh, time,
+      coproc and every reserved word; shopt only with no 'o' or 'u' flag and no pipefail operand) and
+      that carries no '$', backquote, escape, parenthesis, brace, redirection or trailing comment.
+      Every mention of `pipefail` anywhere in the file must additionally sit on a line that IS the
+      standalone enable. ANY line outside the set withdraws the credit for the whole file (refusing
+      toward a finding; this over-refuses files that keep control flow, redirections, expansions or
+      trailing comments beside an enable, disclosed). The enable must additionally be a top-level
+      statement in the lexed reading (not inside a block or subshell, not a pipeline stage, not
+      backgrounded, not the right arm of && or ||) and sit before the pipeline. `set -- -o pipefail`
+      sets positional parameters, never the option. RESIDUAL, stated exactly: the gate reads only the
+      file, so inherited environment the file does not show (BASH_ENV, an exported shell function
+      shadowing a command word, a parent shell's options such as SHELLOPTS) is not modelled.
   E2  the script reads the command's own exit: the pipeline is a top-level statement ending at a
       newline or one ';' (never '&', '&&' or '||'), nothing but whitespace and at most that ';'
-      follows the final stage on its own line, and the IMMEDIATELY NEXT LINE is exactly one of a
-      closed set of read forms, matched on the lexically intact line (never on text with quotes
-      removed): NAME=${PIPESTATUS[N]} or NAME="${PIPESTATUS[N]}" with N exactly the flagged stage's
-      index, NAME=("${PIPESTATUS[@]}"), or declare -a NAME=("${PIPESTATUS[@]}"). A blank or comment
-      line before the read, an extra word on the read line, or any other spelling (an unquoted array
-      save, arithmetic, a different index) is not credited.
+      follows the final stage on its own line (text BEFORE the pipeline on that line is allowed), no
+      heredoc opens on any of the pipeline's lines, and the IMMEDIATELY NEXT LINE, which must also be
+      the immediately next LEXED record beginning exactly at that line, is one of a closed set of
+      read forms, matched on the lexically intact line (never on text with quotes removed):
+      NAME=${PIPESTATUS[N]} or NAME="${PIPESTATUS[N]}" with N exactly the flagged stage's index in
+      CANONICAL decimal (bash reads a leading-zero index as octal, so 010 earns nothing),
+      NAME=("${PIPESTATUS[@]}"), or declare -a NAME=("${PIPESTATUS[@]}"), the declare form only when
+      nothing visible in the file (an alias, unalias, enable, trap, eval, source, '.', builtin,
+      command, exec, a function definition, an expand_aliases operand) could redefine the `declare`
+      word. Only a space or tab may surround the read: CR, FF or NBSP is not shell whitespace. A
+      blank or comment line before the read, an extra word on the read line, or any other spelling
+      (an unquoted array save, arithmetic, a different index) is not credited.
 Any final stage counts as a sink, not only a truncating one: the exit is lost whatever the last stage is.
 
 Configuration schema (`.aiqt/relied-exit-pipes.toml`), adopter-authored:
@@ -54,9 +69,11 @@ Configuration schema (`.aiqt/relied-exit-pipes.toml`), adopter-authored:
                                       file it meets, never pruning or skipping them silently
   commands = ["record-tool"]          relied-on command basenames (matched at command-word position,
                                       after NAME=value assignments and the common wrappers used BARE;
-                                      a wrapper given ANY option word, and a declared command inside a
-                                      subshell, brace group, loop, function body, coproc, or behind
-                                      xargs/flock/eval/sh -c and kin, refuses with exit 2)
+                                      a wrapper given ANY option word, and a declared NAME inside a
+                                      subshell, brace group, loop, function body (one-line
+                                      definitions included), coproc, or among the words of
+                                      xargs/flock/find/eval/sh -c and kin, refuses with exit 2, even
+                                      where that name is only another command's argument data)
   subcommands = ["write"]             OPTIONAL: when present, only these first operands count as relied
 
   check_relied_exit_pipes.py               scan the surfaces the configuration declares
@@ -69,17 +86,21 @@ Exit convention (matches the repo's gates):
   2  cannot evaluate, fail-closed: a malformed, unreadable, uninspectable or non-regular (e.g. FIFO)
      configuration, an unmatched path, command or subcommand selector, a selector with an empty, '.'
      or '..' component or a symlinked component, a symlinked directory, symlinked file, .git or
-     __pycache__ entry, or non-regular file met in a directory walk, a non-regular or non-UTF-8
-     declared surface, a declared command inside or after shell the gate cannot parse (an unquoted
-     heredoc, a here-string, a process substitution, an unterminated construct; the refusal covers the
-     file's remainder from that point), a declared command inside the raw text of an `sh -c`,
-     `bash -c`, `dash -c`, `zsh -c` or `eval` argument (clustered options such as `-ec` included), in
-     the argument list of `xargs` or `flock`, beside a `coproc`, possibly hidden behind a wrapper's
-     option words (any option word after a wrapper: separate, attached with '=', or '--'), a declared
-     command whose subcommand sits behind option words, a declared command inside a subshell, brace
-     group, loop body or function body (constructs whose execution time or shell this gate does not
-     model), or a grouped or compound pipeline producer (a subshell, brace group, or loop piped
-     onward) in a file that mentions a declared command.
+     __pycache__ entry (directory, symlink or regular file), or non-regular file met in a directory
+     walk, a non-regular or non-UTF-8 declared surface, a declared command inside or after shell the
+     gate cannot parse (an unquoted heredoc, a here-string, a process substitution, an unterminated
+     construct; the refusal covers the file's remainder from that point), a declared command inside
+     the raw text of an `sh -c`, `bash -c`, `dash -c`, `zsh -c`, `ksh -c` or `eval` argument
+     (clustered options such as `-ec` included), among the argument words of `xargs`, `flock` or
+     `find`, beside a `coproc`, possibly hidden behind a wrapper's option words (any option word
+     after a wrapper: separate, attached with '=', or '--'), a declared command whose subcommand sits
+     behind option words, a declared NAME inside a subshell, brace group, loop body or function body
+     (one-line definitions and non-brace bodies included: constructs whose execution time or shell
+     this gate does not model; the name counts even where it is only another command's argument data,
+     a disclosed over-refusal), or a grouped or compound pipeline producer (a subshell, brace group,
+     or loop piped onward) in a file that mentions a declared command. Declared identity in raw text
+     is matched QUOTE-TOLERANTLY (to""ol, 'to''ol', to\\ol still count): failing to prove absence
+     never reads as clean.
 """
 import sys
 
@@ -121,7 +142,8 @@ BINDING_REQUIRED = frozenset(("id", "paths", "commands"))
 BINDING_OPTIONAL = frozenset(("subcommands",))
 # Wrapper words skipped at command-word position when used BARE: the real command follows them. Any
 # option word after one (separate, attached with '=', or '--') makes the segment opaque (fail-closed).
-WRAPPERS = frozenset(("env", "nice", "timeout", "time", "command", "exec", "nohup", "stdbuf", "sudo"))
+WRAPPERS = frozenset(("env", "nice", "timeout", "time", "command", "exec", "nohup", "stdbuf", "sudo",
+                      "ionice"))
 # Shell reserved words that keep the command-word position open (the real command follows). A reserved
 # word counts ONLY when spelled plain: a quoted or escaped spelling ("select") is a command name.
 RESERVED_SKIP = frozenset(("if", "then", "else", "elif", "do", "while", "until", "for", "case",
@@ -131,8 +153,10 @@ BLOCK_CLOSE = frozenset(("fi", "done", "esac", "}"))
 PIPE_SEPS = ("|", "|&")
 MAX_SUBST_DEPTH = 20
 # Commands that hand their argument words to another execution environment: a declared command among
-# them cannot be attributed to a pipeline stage, so it refuses (exit 2).
-ARG_EXECUTORS = frozenset(("xargs", "flock"))
+# them cannot be attributed to a pipeline stage, so it refuses (exit 2). find belongs here for its
+# -exec/-execdir/-ok arguments; a declared NAME anywhere among find's words refuses, even when it is
+# only a -name operand (an over-refusal, disclosed).
+ARG_EXECUTORS = frozenset(("xargs", "flock", "find"))
 # Block-opener kinds a declared command may not sit under: the construct's execution time (a loop, a
 # function called later) or count is not modelled, so the gate refuses rather than judging around it.
 # if/then/else and case arms stay walked: they run at most once, in this shell, where they sit.
@@ -418,6 +442,66 @@ def _plain_word(raw, word):
     return re.search(pattern, raw or "") is not None
 
 
+def _leading_plain(raw, argv):
+    """Per-TOKEN plainness for the leading words of one segment: flags[j] is True when argv[j] is
+    spelled in raw as one contiguous plain token (no quote or escape touches that token). A whole-text
+    search cannot tell WHICH token is quoted ("if" x if holds a quoted command word and a plain
+    argument of the same spelling), so this walks raw and argv together from the start, dequoting each
+    raw token the way the lexer does, and stops at the first token that no longer aligns (a
+    redirection, an operator, an ANSI-C quoting this walk does not decode); callers treat positions
+    past the returned list conservatively through _plain_word. A backslash-newline continuation inside
+    a token keeps it non-plain: the joined spelling is not one contiguous plain word in the source."""
+    flags = []
+    n = len(raw or "")
+    raw = raw or ""
+    i = 0
+    for word in argv:
+        while i < n and raw[i] in " \t\n":
+            i += 1
+        if i >= n or raw[i] in "<>()&|;":
+            break
+        token = []
+        plain = True
+        while i < n and raw[i] not in " \t\n<>()&|;":
+            c = raw[i]
+            if c == "\\":
+                if i + 1 < n and raw[i + 1] != "\n":
+                    token.append(raw[i + 1])
+                i += 2
+                plain = False
+                continue
+            if c == "'":
+                j = raw.find("'", i + 1)
+                if j == -1:
+                    return flags
+                token.append(raw[i + 1:j])
+                i = j + 1
+                plain = False
+                continue
+            if c == '"':
+                j = i + 1
+                while j < n and raw[j] != '"':
+                    if raw[j] == "\\" and j + 1 < n and raw[j + 1] in '"\\$`':
+                        token.append(raw[j + 1])
+                        j += 2
+                    else:
+                        token.append(raw[j])
+                        j += 1
+                if j >= n:
+                    return flags
+                i = j + 1
+                plain = False
+                continue
+            if c == "$" and i + 1 < n and raw[i + 1] == "'":
+                return flags
+            token.append(c)
+            i += 1
+        if "".join(token) != word:
+            break
+        flags.append(plain)
+    return flags
+
+
 def _command_word(argv, raw=None):
     """The command word of one segment: (index, basename, opens_before, opaque). Skips shell reserved
     words that keep the command position open (counting the block openers among them, so a command
@@ -426,16 +510,26 @@ def _command_word(argv, raw=None):
     wrapper (separate, value-attached with '=', or '--') makes the result OPAQUE (index and basename
     None, opaque True): whether the following words are option values or the command cannot be told
     from the text (nice -n 10 CMD versus nice -x CMD), so the caller fails closed when a declared name
-    could hide behind it. When raw is given, a reserved word is skipped only when `_plain_word` shows
-    it spelled plain: a quoted or escaped spelling is a command name in bash, so it is returned as the
-    command word instead (raw=None, used by the pure-argv unit layer, treats every word as plain)."""
+    could hide behind it. When raw is given, a reserved word is skipped only when its OWN token is
+    spelled plain (per-token through _leading_plain, falling back to _plain_word where that walk
+    stopped): a quoted or escaped spelling is a command name in bash, so it is returned as the command
+    word instead (raw=None, used by the pure-argv unit layer, treats every word as plain)."""
+    flags = _leading_plain(raw, argv) if raw is not None else None
+
+    def _plain_at(j, w):
+        if raw is None:
+            return True
+        if j < len(flags):
+            return flags[j]
+        return _plain_word(raw, w)
+
     opens = 0
     i = 0
     after_wrapper = False
     after_timeout = False
     while i < len(argv):
         w = argv[i]
-        if w in RESERVED_SKIP and (raw is None or _plain_word(raw, w)):
+        if w in RESERVED_SKIP and _plain_at(i, w):
             if w in BLOCK_OPEN:
                 opens += 1
             i += 1
@@ -525,44 +619,65 @@ def _set_pipefail_effect(argv):
     return effect
 
 
-# One enabling-set option token: a '-' sign followed by short option letters only. '--', a lone '-',
-# any '+' sign and any longer or quoted spelling fall outside the closed set and earn no credit.
-_E1_OPTION_RE = re.compile(r"^-[A-Za-z]+$")
-_E1_NAME_RE = re.compile(r"^[a-z]+$")  # an option-name operand after 'o' (pipefail, errexit, ...)
+# One enabling-set option token: a '-' sign followed only by letters from bash's own set-flag
+# vocabulary (help set). '--', a lone '-', any '+' sign, an UNKNOWN letter and any longer or quoted
+# spelling fall outside the closed set and earn no credit: bash rejects an unknown option letter and
+# keeps running with pipefail OFF, so such a line never proves the option on.
+_E1_OPTION_RE = re.compile(r"^-[abefhkmnoptuvxBCEHPT]+$")
+# The option-name operands `set -o` accepts (bash 5's closed vocabulary). An unknown name makes bash
+# reject the whole set command and keep running with pipefail off (set -o nonexistent -o pipefail
+# enables nothing), so only a line spelled entirely from this vocabulary earns credit.
+_E1_SET_O_NAMES = frozenset((
+    "allexport", "braceexpand", "emacs", "errexit", "errtrace", "functrace", "hashall", "histexpand",
+    "history", "ignoreeof", "interactive-comments", "keyword", "monitor", "noclobber", "noexec",
+    "noglob", "nolog", "notify", "nounset", "onecmd", "physical", "pipefail", "posix", "privileged",
+    "verbose", "vi", "xtrace"))
 
-# Constructs whose PRESENCE anywhere in a file withdraws the pipefail credit for that whole file: each
-# can define, defer, disable or re-scope the option in a way this bounded reader does not model (a
-# function body runs at its call sites, eval/source/'.'/sh -c run text the lexer never sees, builtin
-# reaches set indirectly, 'set +' and 'shopt -u' spell disables, and a '$' in a set line makes the
-# option variable-driven). Matching is textual and deliberately over-broad: a comment or string that
-# merely LOOKS like one of these also withdraws the credit, which refuses toward a finding, never
-# toward a silent pass.
-_E1_FILE_DISQUALIFIERS = (
-    re.compile(r"(?<![\w.$-])function(?![\w.-])"),               # function NAME { ... }
-    re.compile(r"[A-Za-z_][A-Za-z0-9_]*[ \t]*\([ \t]*\)"),       # NAME() { ... }
-    re.compile(r"(?<![\w.$-])eval(?![\w.-])"),
-    re.compile(r"(?<![\w.$-])source(?![\w.-])"),
-    re.compile(r"(?m)(?:^|(?<=[;&|( \t]))\.[ \t]"),              # the '.' (dot) command
-    re.compile(r"(?m)(?<![\w.$-])(?:ba|da|z)?sh[ \t][^\n]*?(?<=[ \t])-[A-Za-z]*c(?![\w-])"),  # sh ... -c
-    re.compile(r"(?<![\w.$-])builtin(?![\w.-])"),
-    re.compile(r"(?m)(?<![\w.$-])set[ \t]+[^\n]*\+"),            # set +o pipefail and every other '+' form
-    re.compile(r"(?m)(?<![\w.$-])shopt[ \t][^\n]*?(?<=[ \t])-[A-Za-z]*u(?![\w-])"),  # shopt -u / -uo
-    re.compile(r"(?m)(?<![\w.$-])set[ \t][^\n]*\$"),             # set with a variable-driven operand
-)
+# The closed LINE GRAMMAR for the whole-file pipefail credit. A credited file may contain ONLY: blank
+# lines, comment lines, the standalone column-1 enable, plain assignments, and command lines built from
+# plain simple commands. On a command line, every command word must be a literal unquoted name outside
+# this refused set, read from the lexer's DEQUOTED words (so sour''ce, "set" and e\\val are still their
+# commands) and from the raw text together. The refused names are the words that can change, defer or
+# hide the shell's option state: set reaches the options directly (shopt does too and is admitted only
+# through its own narrower rule in _e1_command_line); eval, source, '.', and the
+# sh family run text this reader never sees; builtin, command and exec reach set indirectly; alias,
+# unalias, enable and trap re-bind what a later word runs; function (and every reserved word) opens
+# control flow whose execution time or count this reader does not model. Everything here refuses
+# toward a finding, never toward a silent pass.
+_E1_REFUSED_WORDS = frozenset((
+    "set", "eval", "source", ".", "builtin", "command", "exec", "alias", "unalias",
+    "enable", "trap", "sh", "bash", "dash", "zsh", "ksh", "function", "time", "coproc",
+    "if", "then", "else", "elif", "fi", "while", "until", "for", "select", "do", "done",
+    "case", "esac", "in"))
+# A command word in the closed grammar: a literal name, never a path, an option or an expansion.
+_E1_WORD_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.+-]*$")
+# Separators a closed-grammar command line may use. '(' and ')' (subshells, function definitions,
+# case patterns) are outside the grammar; their raw characters are refused below anyway.
+_E1_LINE_SEPS = frozenset(("", ";", "&&", "||", "|", "|&", "&"))
+# Raw characters that take a line outside the closed grammar whatever the lexer reads: '$' and '`'
+# bring expansion or substitution, '\\' brings escapes and continuations, parentheses and braces bring
+# grouping and definitions, '<' and '>' bring redirections and heredocs, and '#' here is a TRAILING
+# comment (whole-line comments were already accepted). Refusing them over-refuses ordinary lines (a
+# redirection, "$var" as data); that is deliberate and disclosed: the grammar stays small and closed.
+_E1_RAW_FORBIDDEN = "$`\\(){}<>#"
 
 
 def _e1_enable_line(line):
     """True when `line` (one line of the file, without its newline) is exactly a standalone
-    pipefail-enabling set command: `set` first, then only plain short-option tokens whose 'o' letters
-    consume lowercase option-name operands, turning pipefail ON, with nothing else before the end of
-    the line or one trailing ';'. Anything outside this closed set (a wrapper before set, '--', a '+'
-    sign, an operand, a second command after ';', a trailing comment, a '$') earns no credit."""
-    s = line.strip()
+    pipefail-enabling set command: `set` first, then only plain short-option tokens from the validated
+    option vocabulary whose 'o' letters consume option names from the validated name vocabulary,
+    turning pipefail ON, with nothing else before the end of the line or one trailing ';'. Anything
+    outside this closed set (a wrapper before set, '--', a '+' sign, an unknown letter or name, an
+    operand, a second command after ';', a trailing comment, a '$', a non-ASCII or control character
+    that bash would read as part of a word) earns no credit."""
+    if re.fullmatch(r"[ -~\t]*", line) is None:
+        return False
+    s = line.strip(" \t")
     if s.endswith(";"):
-        s = s[:-1].rstrip()
+        s = s[:-1].rstrip(" \t")
     if ";" in s:
         return False
-    toks = s.split()
+    toks = [t for t in re.split(r"[ \t]+", s) if t]
     if len(toks) < 2 or toks[0] != "set":
         return False
     enabled = False
@@ -574,7 +689,7 @@ def _e1_enable_line(line):
         for ch in w[1:]:
             if ch == "o":
                 i += 1
-                if i >= len(toks) or not _E1_NAME_RE.match(toks[i]):
+                if i >= len(toks) or toks[i] not in _E1_SET_O_NAMES:
                     return False
                 if toks[i] == "pipefail":
                     enabled = True
@@ -582,20 +697,73 @@ def _e1_enable_line(line):
     return enabled
 
 
-def _e1_file_credit(text):
-    """True when this file may earn the pipefail exemption at all: no credit-withdrawing construct
-    appears anywhere (see _E1_FILE_DISQUALIFIERS), and every mention of 'pipefail' sits on a line that
-    is itself a standalone column-1 enabling set command (_e1_enable_line). A mention on any other line
-    (a disable, a conditional or wrapped enable, a comment, a string) withdraws the credit for the
-    whole file: the gate credits only what it can read with certainty."""
-    for rx in _E1_FILE_DISQUALIFIERS:
-        if rx.search(text):
+def _e1_command_line(line):
+    """True when `line` is one closed-grammar command line: only ASCII printable text, none of the
+    refused raw characters, and, in the lexed reading of the line on its own, only plain simple
+    commands (optionally after NAME=value assignments, or assignments alone) joined by the permitted
+    separators, each command word a literal name outside the refused set. A shopt command is admitted
+    only when no option word carries 'o' or 'u' (shopt -so can enable and shopt -uo can disable
+    pipefail) and no operand is 'pipefail', read from the DEQUOTED words so a quoted flag or operand
+    cannot slip. A line the lexer cannot finish on its own (an open quote, a continuation) is outside
+    the grammar."""
+    if any(ch in _E1_RAW_FORBIDDEN for ch in line):
+        return False
+    if re.fullmatch(r"[ -~\t]*", line) is None:
+        return False
+    hooks = _hooks()
+    try:
+        segments, complete, in_progress = hooks._lex_command(line, partial=True)
+    except (ValueError, RecursionError):
+        return False
+    if not complete or in_progress:
+        return False
+    for seg in segments:
+        if seg.sep_after not in _E1_LINE_SEPS:
             return False
+        argv = seg.argv
+        i = 0
+        while i < len(argv) and ENV_ASSIGN_RE.match(argv[i]):
+            i += 1
+        if i >= len(argv):
+            continue  # a blank record, or a plain assignment line
+        word = argv[i]
+        if not _E1_WORD_RE.match(word):
+            return False
+        if word in _E1_REFUSED_WORDS:
+            return False
+        if word == "shopt":
+            for w in argv[i + 1:]:
+                if w[:1] in ("-", "+") and ("o" in w or "u" in w):
+                    return False
+                if w == "pipefail":
+                    return False
+    return True
+
+
+def _e1_file_credit(text):
+    """True when this file may earn the pipefail exemption at all. The credit is an ALLOWLIST: every
+    mention of 'pipefail' must sit on a line that is itself a standalone column-1 enabling set command
+    (_e1_enable_line), and EVERY line of the file must be one of a small closed set of forms: blank, a
+    comment, the standalone enable, a plain assignment, or a closed-grammar command line
+    (_e1_command_line). Any line outside the set withdraws the credit for the whole file, refusing
+    toward a finding: the gate credits only what it can read with certainty. RESIDUAL, stated exactly:
+    the gate reads only the file, so inherited environment the file does not show (BASH_ENV, an
+    exported shell function shadowing a command word, a parent shell's options such as SHELLOPTS) is
+    not modelled; of these only an inherited ENABLE could wrongly extend the credit's reach, and an
+    exported function or BASH_ENV file can change what any credited line runs at all."""
     for m in re.finditer(r"pipefail", text):
         start = text.rfind("\n", 0, m.start()) + 1
         end = text.find("\n", m.start())
         line = text[start:] if end == -1 else text[start:end]
         if not (line.startswith("set ") or line.startswith("set\t")) or not _e1_enable_line(line):
+            return False
+    for line in text.split("\n"):
+        stripped = line.strip(" \t")
+        if stripped == "" or stripped.startswith("#"):
+            continue
+        if (line.startswith("set ") or line.startswith("set\t")) and _e1_enable_line(line):
+            continue
+        if not _e1_command_line(line):
             return False
     return True
 
@@ -629,16 +797,52 @@ def _executes(seg):
 # The closed set of PIPESTATUS read forms: a scalar save of one index (bare or double-quoted, the
 # quotes paired), a whole-array save, or a declare -a whole-array save. The whole line must be exactly
 # one of these, matched lexically intact: quotes are never removed before matching, so a spelling that
-# only LOOKS like an expansion once quotes are dropped ("$"{PIPESTATUS[0]}) never exempts.
-_E2_SCALAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=(")?\$\{PIPESTATUS\[(\d+)\]\}(")?$')
+# only LOOKS like an expansion once quotes are dropped ("$"{PIPESTATUS[0]}) never exempts. The index
+# must be spelled in CANONICAL decimal (no leading zero): bash reads 010 as octal 8, so a non-canonical
+# spelling would credit a different stage's status.
+_E2_SCALAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=(")?\$\{PIPESTATUS\[(0|[1-9][0-9]*)\]\}(")?$')
 _E2_ARRAY_RE = re.compile(r'^(?:declare -a )?[A-Za-z_][A-Za-z0-9_]*=\("\$\{PIPESTATUS\[@\]\}"\)$')
+
+# Dequoted words whose presence anywhere in a file can REDEFINE what the `declare` command word of the
+# declare -a read form runs (an alias, a re-enabled or trapped binding, text run outside this reader,
+# a function definition): with one present the declare spelling earns no credit. A plain assignment
+# read (NAME=... or NAME=(...)) has no command word, so nothing here can redefine it.
+_E2_READER_REDEFINERS = frozenset(("alias", "unalias", "enable", "trap", "eval", "source", ".",
+                                   "builtin", "command", "exec", "function"))
+
+
+def _e2_declare_reader_safe(text):
+    """True when nothing visible in this file could redefine the `declare` command word of the
+    declare -a read form: no word among _E2_READER_REDEFINERS in any context's DEQUOTED words (so a
+    quoted spelling such as ali""as still withdraws), no expand_aliases operand, no function
+    definition, and no text the lexer could not finish (fail-closed). A single-word record followed by
+    '(' is treated as a possible function definition even where it is an `if (...)` head: that only
+    withdraws this one credit, never adds a finding."""
+    hooks = _hooks()
+    for ctx in _contexts(text):
+        try:
+            segments = hooks._lex_command(ctx.text)
+            complete, in_progress = True, False
+        except ValueError:
+            segments, complete, in_progress = hooks._lex_command(ctx.text, partial=True)
+        if not complete or in_progress or ctx.truncated is not None:
+            return False
+        for seg in segments:
+            if seg.argv[:1] == ["function"] or (len(seg.argv) == 1 and seg.sep_after == "("):
+                return False
+            for w in seg.argv:
+                base = w.rsplit("/", 1)[-1] if w else ""
+                if base in _E2_READER_REDEFINERS or w == "expand_aliases":
+                    return False
+    return True
 
 
 def _e2_read_line(text, end, sep):
-    """The lexically intact line immediately after the pipeline's final line, or None when the read
-    cannot be adjacent: anything but whitespace and at most the one ';' separator follows the final
-    stage on its own line (a further command, a comment after ';', or end of file). `end` is the
-    absolute offset just past the final stage's raw text; `sep` is the pipeline's own separator."""
+    """The lexically intact line immediately after the pipeline's final line and the absolute offset of
+    its first character, or (None, None) when the read cannot be adjacent: anything but whitespace and
+    at most the one ';' separator follows the final stage on its own line (a further command, a comment
+    after ';', or end of file). `end` is the absolute offset just past the final stage's raw text;
+    `sep` is the pipeline's own separator."""
     i = end
     n = len(text)
     seen_semi = False
@@ -651,27 +855,34 @@ def _e2_read_line(text, end, sep):
             seen_semi = True
             i += 1
             continue
-        return None
+        return None, None
     if i >= n:
-        return None
+        return None, None
     j = text.find("\n", i + 1)
-    return text[i + 1:j if j != -1 else n]
+    return text[i + 1:j if j != -1 else n], i + 1
 
 
-def _e2_exempt(top_level, read_line, stage_index):
+def _e2_exempt(top_level, read_line, stage_index, declare_safe=True):
     """True when the script reads the flagged stage's own exit: the pipeline is a top-level statement
-    and the immediately next line is exactly one of the closed read forms, NAME=${PIPESTATUS[N]} or
-    NAME="${PIPESTATUS[N]}" with N this stage's index, NAME=("${PIPESTATUS[@]}"), or
-    declare -a NAME=("${PIPESTATUS[@]}"). Lexical only: the gate does not prove the script acts on the
-    value, and every other spelling (a bare unquoted array save, arithmetic, an extra word on the line)
-    is not recognized, which refuses toward a finding, never toward a silent pass."""
+    and the immediately next line (which the caller has already required to be the immediately next
+    LEXED record, with no heredoc on the pipeline's lines) is exactly one of the closed read forms,
+    NAME=${PIPESTATUS[N]} or NAME="${PIPESTATUS[N]}" with N this stage's index in canonical decimal,
+    NAME=("${PIPESTATUS[@]}"), or declare -a NAME=("${PIPESTATUS[@]}"); the declare form only when
+    declare_safe shows nothing in the file could redefine the reader. Only a space or tab may surround
+    the read: a carriage return, form feed or no-break space is not shell whitespace, so a line
+    carrying one is a different command and earns nothing. Lexical only: the gate does not prove the
+    script acts on the value, and every other spelling (a bare unquoted array save, arithmetic, an
+    extra word on the line) is not recognized, which refuses toward a finding, never toward a silent
+    pass."""
     if not top_level or read_line is None:
         return False
-    s = read_line.strip()
+    s = read_line.strip(" \t")
     m = _E2_SCALAR_RE.match(s)
     if m is not None and (m.group(1) or "") == (m.group(3) or ""):
-        return int(m.group(2)) == stage_index
-    return _E2_ARRAY_RE.match(s) is not None
+        return m.group(2) == str(stage_index)
+    if _E2_ARRAY_RE.match(s) is None:
+        return False
+    return declare_safe or not s.startswith("declare")
 
 
 def _judge(pending, events):
@@ -693,26 +904,35 @@ def _judge(pending, events):
 
 
 def _declared_regex(commands):
-    """A word-boundary regex matching any declared command name, for the fail-closed checks over text
-    the gate cannot read as parsed shell. A preceding '/' is allowed on purpose: /usr/local/bin/tool
-    and ./tool are path-qualified spellings of the declared basename, so they must match; a preceding
-    letter, digit, '_', '.' or '-' still means a longer, different name and does not."""
-    alts = "|".join(re.escape(c) for c in sorted(commands))
+    """A QUOTE-TOLERANT word-boundary regex matching any declared command name in raw text, for the
+    fail-closed checks over text the gate cannot read as parsed shell (sh -c and eval strings, unparsed
+    tails, masked substitution spans, the grouped-producer backstop). Between the name's characters it
+    tolerates quote and escape characters, so a quote-split or escaped spelling (to""ol, 'to''ol',
+    to\\ol) still establishes the declared identity: failing to prove absence must never become a clean
+    result just because the contiguous raw spelling is absent. A preceding '/' is allowed on purpose:
+    /usr/local/bin/tool and ./tool are path-qualified spellings of the declared basename, so they must
+    match; a preceding letter, digit, '_', '.' or '-' still means a longer, different name and does
+    not. The tolerance can also match a longer quoted word ('tool'x), which only ever refuses more,
+    never less."""
+    alts = "|".join("['\"\\\\]*".join(re.escape(ch) for ch in c) for c in sorted(commands))
     return re.compile(r"(?<![A-Za-z0-9_.-])(?:{})(?![A-Za-z0-9_./-])".format(alts))
 
 
-def _scan_context(ctx, original_text, rel, binding, telemetry, events, pending, declared_re):
+def _scan_context(ctx, original_text, rel, binding, telemetry, events, pending, declared_re,
+                  declare_safe):
     """Scan one context's segments: record set-pipefail events (crediting an enable only when it
     provably reaches this shell AND its line is the standalone column-1 closed form) and
     command/subcommand telemetry, raise GateError (exit 2) on a declared command inside unparseable
-    shell, inside an sh -c / bash -c / dash -c / zsh -c / eval argument (clustered options included),
-    in the argument list of xargs or flock, beside a coproc, possibly hidden behind wrapper option
-    words or an ambiguous subcommand position, inside a subshell, brace group, loop body or function
-    body, or beside a grouped pipeline producer this gate cannot attribute, and append a pending
-    finding for every declared relied-on command in a non-final pipeline stage that E2 does not clear.
-    Declared-command identity is read from the shell-DEQUOTED words and from the UNMASKED original
-    text (substitution bodies included), so a quoted spelling or a mention living only inside $( )
-    cannot slip a refused construct."""
+    shell, inside an sh -c / bash -c / dash -c / zsh -c / ksh -c / eval argument (clustered options
+    included), in the argument list of xargs, flock or find, beside a coproc, possibly hidden behind
+    wrapper option words or an ambiguous subcommand position, inside a subshell, brace group, loop
+    body or function body (a one-line `function NAME { ... }` definition included), or beside a
+    grouped pipeline producer this gate cannot attribute, and append a pending finding for every
+    declared relied-on command in a non-final pipeline stage that E2 does not clear. Declared-command
+    identity is read from the shell-DEQUOTED words and from the UNMASKED original text through the
+    quote-tolerant declared regex (substitution bodies included), so a quoted, split or escaped
+    spelling, or a mention living only inside $( ), cannot slip a refused construct; a declared NAME
+    counts even where it is only another command's argument data, a disclosed over-refusal."""
     hooks = _hooks()
     commands = set(binding["commands"])
     subcommands = set(binding.get("subcommands") or ())
@@ -783,6 +1003,17 @@ def _scan_context(ctx, original_text, rel, binding, telemetry, events, pending, 
         argv = seg.argv
         raw = seg.raw or ""
         cmd_i, base, opens_before, opaque = _command_word(argv, raw)
+        plain_flags = _leading_plain(raw, argv)
+
+        def plain_at(j, w, _flags=plain_flags, _raw=raw):
+            # Per-token plainness: a reserved word is syntax only when ITS token is spelled plain,
+            # never because the same spelling appears plain elsewhere in the segment ("if" x if).
+            # Where the leading walk stopped, fall back to the whole-segment search (fail toward
+            # treating syntax as a command word, which only ever refuses more).
+            if j < len(_flags):
+                return _flags[j]
+            return _plain_word(_raw, w)
+
         eff_depth = len(blocks) + paren_depth + opens_before
         relied = False
         seg_declared = declared_in_words(argv) or bool(declared_re.search(unmasked_span(idx, seg)))
@@ -795,7 +1026,12 @@ def _scan_context(ctx, original_text, rel, binding, telemetry, events, pending, 
             # pipeline stage (if/then/else and case arms are still walked). Inside a subshell, brace
             # group, loop or function body its execution time or shell is not modelled: refuse.
             construct = None
-            if paren_depth > 0:
+            if argv[:1] == ["function"] and plain_at(0, "function"):
+                # A one-line `function NAME { ... }` keeps the body's words in THIS segment, before
+                # the block stack can see the opener: a declared command here already sits inside the
+                # function body.
+                construct = REFUSED_BODIES["func"]
+            elif paren_depth > 0:
                 construct = "a subshell"
             else:
                 for kind in reversed(blocks):
@@ -803,21 +1039,22 @@ def _scan_context(ctx, original_text, rel, binding, telemetry, events, pending, 
                         construct = REFUSED_BODIES[kind]
                         break
             if construct is None:
-                for w in argv[:cmd_i] if cmd_i is not None else argv:
-                    if w in REFUSED_BODIES and _plain_word(raw, w):
+                prefix = argv[:cmd_i] if cmd_i is not None else argv
+                for j, w in enumerate(prefix):
+                    if w in REFUSED_BODIES and plain_at(j, w):
                         construct = REFUSED_BODIES[w]
                         break
             if construct is not None:
                 raise GateError("{}:{}: binding {!r}: a declared command inside {} is not a top-level "
                                 "simple command this gate can attribute; cannot evaluate".format(
                                     rel, line_of(abs_off), binding["id"], construct))
-            if cmd_i is not None and any(w == "coproc" and _plain_word(raw, w)
-                                         for w in argv[:cmd_i]):
+            if cmd_i is not None and any(w == "coproc" and plain_at(j, w)
+                                         for j, w in enumerate(argv[:cmd_i])):
                 raise GateError("{}:{}: binding {!r}: a declared command beside a coproc runs in a "
                                 "coprocess shell this gate does not model; cannot evaluate".format(
                                     rel, line_of(abs_off), binding["id"]))
         if base is not None:
-            if base == "eval" or (base in ("sh", "bash", "dash", "zsh") and any(
+            if base == "eval" or (base in ("sh", "bash", "dash", "zsh", "ksh") and any(
                     len(w) >= 2 and w[0] == "-" and w[1] != "-" and "c" in w[1:]
                     for w in argv[cmd_i + 1:])):
                 joined = " ".join(argv[cmd_i + 1:])
@@ -898,12 +1135,36 @@ def _scan_context(ctx, original_text, rel, binding, telemetry, events, pending, 
                 if top_level and seg.sep_after in ("", ";"):
                     # E2 needs the pipeline to end at a newline or one ';' (never '&', '&&' or '||'):
                     # only then can the immediately next line be the adjacent PIPESTATUS read.
-                    read_line = _e2_read_line(original_text, ctx.base + offs[idx] + len(raw),
-                                              seg.sep_after)
+                    read_line, read_start = _e2_read_line(original_text,
+                                                          ctx.base + offs[idx] + len(raw),
+                                                          seg.sep_after)
+                if read_line is not None:
+                    # The raw next line must ALSO be the next LEXED record, starting that line: when a
+                    # heredoc opens on the pipeline's lines, the raw "next line" is heredoc data the
+                    # shell never runs as the read, so the lexed reading and the raw one must agree.
+                    # Any '<<' on a stage's own text (a heredoc or here-string opener) withdraws the
+                    # credit outright, which over-refuses a quoted '<<' in a stage's data (disclosed).
+                    if any("<<" in (kept[si].raw or "") for si, _o2, _r2, _b2, _d2, _q2 in run_stages):
+                        read_line = None
+                    else:
+                        nidx = idx + 1
+                        while (nidx < len(kept) and not kept[nidx].argv
+                                and not kept[nidx].redirects and not (kept[nidx].raw or "").strip()):
+                            # a truly empty record (the lexer's artifact after ';'): nothing in the
+                            # source stands at its offset, so it is not the next lexed record.
+                            nidx += 1
+                        if nidx < len(kept):
+                            nraw = kept[nidx].raw or ""
+                            nlead = len(nraw) - len(nraw.lstrip())
+                            indent = len(read_line) - len(read_line.lstrip(" \t"))
+                            if ctx.base + offs[nidx] + nlead != read_start + indent:
+                                read_line = None
+                        else:
+                            read_line = None
                 for k, (sidx, soff, srelied, sbase, sdepth, _sq) in enumerate(_nonfinal(run_stages)):
                     if not srelied:
                         continue
-                    if _e2_exempt(top_level, read_line, k):
+                    if _e2_exempt(top_level, read_line, k, declare_safe):
                         continue
                     pending.append({"offset": soff, "rel": rel, "line": line_of(soff),
                                     "binding": binding["id"], "command": sbase,
@@ -913,32 +1174,42 @@ def _scan_context(ctx, original_text, rel, binding, telemetry, events, pending, 
         # In `function NAME {` the NAME is a definition, not a command, and would stop the reserved-word
         # walk before the '{' is counted; skip the keyword and the name so the body depth is tracked.
         # Either definition form (function NAME, or NAME followed by an empty '( )' pair) marks the
-        # next '{' as opening a FUNCTION body. A reserved word spelled quoted or escaped is a command
-        # name in bash, so it neither opens nor closes a block here.
+        # NEXT BLOCK OPENER as opening a FUNCTION body: bash accepts any compound command as the body
+        # (f() { ... }, f() if ...; fi, function f { ... }), so whatever block follows the definition
+        # is the deferred body, and the pending mark never leaks onto a later unrelated block. A
+        # reserved word spelled quoted or escaped is a command name in bash (judged per token), so it
+        # neither opens nor closes a block here.
         words = argv
-        if argv[:1] == ["function"] and _plain_word(raw, "function"):
+        word_base = 0
+        if argv[:1] == ["function"] and plain_at(0, "function"):
             func_pending = True
             words = argv[2:]
-        elif (len(argv) == 1 and seg.sep_after == "(" and not seg.redirects
-                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", argv[0] or "") is not None
-                and _plain_word(raw, argv[0])):
-            func_pending = True
-        for w in words:
-            if w in BLOCK_OPEN and _plain_word(raw, w):
-                blocks.append("func" if (w == "{" and func_pending) else w)
-                if w == "{":
-                    func_pending = False
+            word_base = 2
+        # The NAME '( )' form is recognized AFTER this segment's own walk: its pending mark belongs to
+        # the body that FOLLOWS the definition, never to an opener inside this same record (an `if (`
+        # head is a subshell after a walked `if`, not a function named if; a reserved word cannot name
+        # a function).
+        name_paren_def = (len(argv) == 1 and seg.sep_after == "(" and not seg.redirects
+                          and argv[0] not in RESERVED_SKIP
+                          and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", argv[0] or "") is not None
+                          and plain_at(0, argv[0]))
+        for j, w in enumerate(words, start=word_base):
+            if w in BLOCK_OPEN and plain_at(j, w):
+                blocks.append("func" if func_pending else w)
+                func_pending = False
                 if w == "case":
                     case_depth += 1
-            elif w in BLOCK_CLOSE and _plain_word(raw, w):
+            elif w in BLOCK_CLOSE and plain_at(j, w):
                 if blocks:
                     blocks.pop()
                 if w == "esac":
                     case_depth = max(0, case_depth - 1)
-            elif (w in RESERVED_SKIP and _plain_word(raw, w)) or ENV_ASSIGN_RE.match(w):
+            elif (w in RESERVED_SKIP and plain_at(j, w)) or ENV_ASSIGN_RE.match(w):
                 continue
             else:
                 break
+        if name_paren_def:
+            func_pending = True
         if case_depth == 0:
             # Inside a case statement a ')' ends a pattern, not a subshell, so the paren separators are
             # not depth boundaries there; case itself already holds the block depth above zero.
@@ -1176,16 +1447,22 @@ def scan_file(root, path, binding, telemetry):
     events = []
     pending = []
     try:
+        # The declare -a read form has a COMMAND word an alias or redefinition could re-bind; its
+        # credit is withheld for the whole file when anything visible could do that. The plain
+        # assignment read forms have no command word and need no such check.
+        declare_safe = "declare" not in text or _e2_declare_reader_safe(text)
         for ctx in _contexts(text):
-            _scan_context(ctx, text, rel, binding, telemetry, events, pending, declared_re)
+            _scan_context(ctx, text, rel, binding, telemetry, events, pending, declared_re,
+                          declare_safe)
     except RecursionError:
         raise GateError("configuration {} binding {!r}: surface {} exceeds the scanner's nesting bounds; "
                         "cannot evaluate".format(CONFIG_REL, binding["id"], rel))
     if events and not _e1_file_credit(text):
-        # The file holds a pipefail mention outside the standalone column-1 enable form, or a construct
-        # that can move or disable the option behind this reader's back (a function definition, eval,
-        # source, '.', sh -c and kin, builtin, a 'set +'/'shopt -u' spelling, a variable-driven set):
-        # the whole file loses the pipefail credit. Disables stay recorded; they only ever refuse.
+        # The file holds a pipefail mention outside the standalone column-1 enable form, or a line
+        # outside the closed credit grammar (anything but a blank, a comment, the standalone enable, a
+        # plain assignment, or a plain simple-command line): the whole file loses the pipefail credit.
+        # Disables stay recorded; they only ever refuse, and they hold this gate's verdict even under
+        # a regression of the whole-file credit (two independent layers).
         events = [event for event in events if event[1] == "off"]
     findings = []
     for rec in _judge(pending, events):
@@ -1269,16 +1546,23 @@ def run(root):
 
 
 # --- self-test ---------------------------------------------------------------------------------------
-# Every refuse case R1..R53 runs against the real gate (exit 1) AND against a mutant that never reports
-# (exit 0), so each case is shown to discriminate; targeted mutants additionally pin the mid-pipeline
-# stage index, the closed-form PIPESTATUS reader and the whole-file pipefail credit. Every control
-# C1..C27 runs against the real gate (exit 0) and names the over-broad implementation it catches; where
-# that implementation is a patchable predicate, the over-broad mutant is also run and must reach the
-# named wrong exit. Every cannot-evaluate case X1..X14 must exit 2 AND print the diagnostic of its OWN
-# check (asserted by a substring no other diagnostic contains), so a removed guard cannot hide behind
-# another refusal reaching the same exit code (such as unmatched-selector reconciliation). A case that
-# cannot run (no tempdir, no symlink or FIFO support, permission checks bypassed) is a NAMED failure,
-# never a skip.
+# Every refuse case (R1..R79 with R24 retired, plus Rb1) runs against the real gate (exit 1) AND
+# against a mutant that never reports (exit 0), so each case is shown to discriminate; targeted
+# mutants additionally pin the mid-pipeline stage index, the closed-form PIPESTATUS reader (its
+# canonical-decimal index and its redefinable-declare refusal), the whole-file pipefail credit, the
+# enable line's option vocabulary and the ionice wrapper entry; the quoted-disable fixtures are held
+# by TWO layers and are re-run under each layer's mutant alone (still refusing) and under both (then
+# passing). Every control (C1..C25 with C12/C14/C15/C17/C19 retired and C26/C27 converted to the
+# refusals R66/R67, plus C3a-C3c, C23b and C28..C32) runs against the real gate (exit 0) and names
+# the over-broad implementation it catches; where that implementation is a patchable predicate, the
+# over-broad mutant is also run and must reach the named wrong exit. Every cannot-evaluate case
+# X1..X15 must exit 2 AND print the diagnostic of its OWN check (asserted by a substring no other
+# check prints: the grouped-producer backstop's wording shares no needle with the construct
+# refusals), so a removed guard cannot hide behind another refusal reaching the same exit code (such
+# as unmatched-selector reconciliation or that backstop); the for/until loop entries and the find
+# executor entry are additionally pinned by roster mutants, and scan_file's pre-open layer is called
+# directly. A case that cannot run (no tempdir, no symlink or FIFO support, permission checks
+# bypassed) is a NAMED failure, never a skip.
 
 def _run_quiet(root):
     import io
@@ -1301,6 +1585,10 @@ CFG_NOSUB = ('format-version = 1\n\n[[binding]]\nid = "row-writer"\npaths = ["cm
              'commands = ["tool"]\n')
 CFG_PREFIX = ('format-version = 1\n\n[[binding]]\nid = "row-writer"\npaths = ["cmd/**"]\n'
               'commands = ["tool"]\nsubcommands = ["write"]\n')
+# A declared command NAMED like a reserved word: bash runs the quoted spelling as that command, so the
+# gate must read the quoted token as the command word, never as syntax.
+CFG_CMD_IF = ('format-version = 1\n\n[[binding]]\nid = "row-writer"\npaths = ["cmd/job.sh"]\n'
+              'commands = ["if"]\n')
 
 
 def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence of cases
@@ -1328,6 +1616,7 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                                          (["/usr/local/bin/tool", "write"], "tool", False),
                                          (["env", "A=1", "tool", "write"], "tool", False),
                                          (["nice", "tool", "write"], "tool", False),
+                                         (["ionice", "tool", "write"], "tool", False),
                                          (["timeout", "30", "tool", "write"], "tool", False),
                                          (["if", "tool", "write"], "tool", False),
                                          (["A=1"], None, False),
@@ -1335,6 +1624,7 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                                          # '--') makes the command word opaque: whether the following
                                          # words are values or the command cannot be read from text.
                                          (["nice", "-n", "10", "tool", "write"], None, True),
+                                         (["ionice", "-c", "2", "tool", "write"], None, True),
                                          (["sudo", "-u", "deploy", "tool", "write"], None, True),
                                          (["env", "--chdir=/x", "tool", "write"], None, True),
                                          (["env", "--", "tool", "write"], None, True),
@@ -1350,6 +1640,26 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
     if base != "select":
         failures.append("_command_word on a quoted 'select' expected the command word 'select', "
                         "got {!r}".format(base))
+    # Plainness is judged PER TOKEN: a later plain argument of the same spelling must not make a
+    # quoted command word read as syntax ("if" x if runs the command named if), and a plain later
+    # argument must not make a quoted first token refuse as a loop opener.
+    _i, base, _o, _q = _command_word(["if", "x", "if"], '"if" x if')
+    if base != "if":
+        failures.append("_command_word on a quoted leading 'if' with a plain 'if' argument expected "
+                        "the command word 'if', got {!r}".format(base))
+    for raw, argv, want in (("tool write", ["tool", "write"], [True, True]),
+                            ('"if" x if', ["if", "x", "if"], [False, True, True]),
+                            ('"select" tool write select', ["select", "tool", "write", "select"],
+                             [False, True, True, True]),
+                            ("to\\ol write", ["tool", "write"], [False, True]),
+                            ("'to''ol' write", ["tool", "write"], [False, True]),
+                            ("{ x=1", ["{", "x=1"], [True, True]),
+                            ("tool > f write", ["tool", "write"], [True]),
+                            ("echo 'a b' x", ["echo", "a b", "x"], [True, False, True])):
+        got = _leading_plain(raw, argv)
+        if got != want:
+            failures.append("_leading_plain({!r}, {!r}) expected {!r}, got {!r}".format(
+                raw, argv, want, got))
     for raw, word, want in (("tool write", "tool", True),
                             ('"select" tool write', "select", False),
                             ("to\\ol write", "tool", False),
@@ -1367,19 +1677,30 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
         if got is not want_sub and got != want_sub:
             failures.append("_first_operand({!r}) expected {!r}, got {!r}".format(argv, want_sub, got))
     # E2 admits only the closed set of read forms, matched on the lexically intact line: a scalar save
-    # of exactly the flagged index (bare or double-quoted, quotes paired), a quoted whole-array save,
-    # or its declare -a spelling. Everything else (another index, a bare array save, extra words, a
-    # literal or commented mention, a quote-mangled spelling) earns nothing.
+    # of exactly the flagged index in CANONICAL decimal (bare or double-quoted, quotes paired), a
+    # quoted whole-array save, or its declare -a spelling. Everything else (another index, a
+    # leading-zero index bash reads as octal, a bare array save, extra words, a literal or commented
+    # mention, a quote-mangled spelling, non-shell whitespace such as CR, FF or NBSP around the read)
+    # earns nothing. The index-10/010 pair tests the boundary from both sides.
     for line, k, want in (("rc=${PIPESTATUS[0]}", 0, True),
                           ('rc="${PIPESTATUS[0]}"', 0, True),
                           ('st=("${PIPESTATUS[@]}")', 0, True),
                           ('declare -a st=("${PIPESTATUS[@]}")', 5, True),
+                          ("\trc=${PIPESTATUS[0]}", 0, True),
                           ("rc=${PIPESTATUS[1]}", 0, False),
                           ("rc=${PIPESTATUS[0]}", 1, False),
+                          ("rc=${PIPESTATUS[10]}", 10, True),
+                          ("rc=${PIPESTATUS[010]}", 8, False),
+                          ("rc=${PIPESTATUS[010]}", 10, False),
+                          ("rc=${PIPESTATUS[00]}", 0, False),
                           ("all=(${PIPESTATUS[@]})", 0, False),
                           ('rc=("${PIPESTATUS[0]}")', 0, False),
                           ('rc="${PIPESTATUS[0]}', 0, False),
                           ("rc=${PIPESTATUS[0]} || exit 1", 0, False),
+                          ("\rrc=${PIPESTATUS[0]}", 0, False),
+                          ("rc=${PIPESTATUS[0]}\r", 0, False),
+                          ("\x0crc=${PIPESTATUS[0]}", 0, False),
+                          (' st=("${PIPESTATUS[@]}")', 0, False),
                           ("echo '${PIPESTATUS[0]}'", 0, False),
                           ("echo ok # ${PIPESTATUS[0]}", 0, False),
                           ("echo \\${PIPESTATUS[0]}", 0, False),
@@ -1388,8 +1709,27 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
             failures.append("_e2_exempt(True, {!r}, {}) expected {!r}".format(line, k, want))
     if _e2_exempt(False, "rc=${PIPESTATUS[0]}", 0):
         failures.append("_e2_exempt must never exempt a non-top-level pipeline")
-    # E1's closed form: the line is exactly a standalone enabling set command ending at the newline or
-    # one ';'. Each boundary is tested just inside, at, and just outside it.
+    # The declare -a spelling has a COMMAND word a visible alias or redefinition could re-bind: with
+    # declare_safe False it earns nothing, while the assignment forms (no command word) still do.
+    if _e2_exempt(True, 'declare -a st=("${PIPESTATUS[@]}")', 0, declare_safe=False):
+        failures.append("_e2_exempt must withhold the declare -a form when the reader may be redefined")
+    if not _e2_exempt(True, 'st=("${PIPESTATUS[@]}")', 0, declare_safe=False):
+        failures.append("_e2_exempt must keep the assignment array form when only declare is unsafe")
+    if not _e2_exempt(True, "rc=${PIPESTATUS[0]}", 0, declare_safe=False):
+        failures.append("_e2_exempt must keep the scalar form when only declare is unsafe")
+    for text, want in (("tool write | tail -1\ndeclare -a st=(\"${PIPESTATUS[@]}\")\n", True),
+                       ("alias declare='true; declare'\n", False),
+                       ("ali\"\"as declare='true; declare'\n", False),
+                       ("shopt -s expand_aliases\n", False),
+                       ("f() { :; }\n", False),
+                       ("function f { :; }\n", False),
+                       ("builtin alias d=x\n", False)):
+        if _e2_declare_reader_safe(text) != want:
+            failures.append("_e2_declare_reader_safe({!r}) expected {!r}".format(text, want))
+    # E1's closed form: the line is exactly a standalone enabling set command, spelled entirely from
+    # the validated option-letter and option-name vocabularies, ending at the newline or one ';'. Each
+    # boundary is tested just inside, at, and just outside it; an unknown letter or name makes bash
+    # reject the set command and run on with pipefail OFF, so it must earn nothing.
     for line, want in (("set -o pipefail", True),
                        ("set -euo pipefail", True),
                        ("set -Eeo pipefail", True),
@@ -1397,8 +1737,13 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                        ("set -o errexit -o pipefail", True),
                        ("set -o pipefail;", True),
                        ("set -o pipefail ;", True),
+                       ("set\t-o pipefail", True),
                        ("set -e", False),
                        ("set +o pipefail", False),
+                       ("set -Zo pipefail", False),
+                       ("set -o nonexistent -o pipefail", False),
+                       ("set -o pipefai", False),
+                       ("set -o pipefail\r", False),
                        ("set -- -o pipefail", False),
                        ("set -o pipefail extra", False),
                        ("set -o pipefail; true", False),
@@ -1411,27 +1756,61 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                        ("set", False)):
         if _e1_enable_line(line) != want:
             failures.append("_e1_enable_line({!r}) expected {!r}".format(line, want))
-    # The whole-file pipefail credit: withdrawn by any pipefail mention outside the closed form and by
-    # any construct that can move or disable the option behind this reader's back.
+    # The whole-file pipefail credit is an ALLOWLIST over every line: blank, comment, the standalone
+    # enable, a plain assignment, or a plain simple-command line (no refused command word read from the
+    # DEQUOTED spelling, no '$', backquote, escape, parenthesis, brace, redirection or trailing
+    # comment), plus the rule that every raw pipefail mention sits on an enable line. Any line outside
+    # the set withdraws the credit for the whole file.
     for text, want in (("set -o pipefail\ntool write | tail -1\n", True),
                        ("set -euo pipefail\n", True),
                        ("echo ok\n", True),
+                       ("A=1 tool write | tail -1\nset -o pipefail\n", True),
+                       ("opt=x\n# a comment\n\nset -o pipefail\ntool write |& tee x.log\n", True),
+                       ("set -o pipefail\nshopt -s nullglob\n", True),
+                       # a '.' that is an ARGUMENT is data, not the dot command: only the dequoted
+                       # COMMAND word withdraws, so these ordinary lines keep the credit.
+                       ("set -o pipefail\nfind . -name x\n", True),
+                       ("set -o pipefail\nls . | wc -l\n", True),
                        ("  set -o pipefail\n", False),
                        ("set -o pipefail && true\n", False),
+                       ("set -Zo pipefail\n", False),
+                       ("set -o nonexistent -o pipefail\n", False),
                        ("set -o pipefail\nset +o pipefail\n", False),
                        ("set -o pipefail\nset -- +o pipefail\n", False),
                        ("set -o pipefail\n# pipefail notes\n", False),
+                       ("opt=pipefail\n", False),
                        ("set -o pipefail\nf() { :; }\n", False),
                        ("set -o pipefail\nfunction f { :; }\n", False),
                        ("set -o pipefail\neval ':'\n", False),
+                       ("set -o pipefail\nev\"\"al ':'\n", False),
+                       ("set -o pipefail\ne\\val ':'\n", False),
                        ("set -o pipefail\nsource lib.sh\n", False),
+                       ("set -o pipefail\nsour''ce lib.sh\n", False),
                        ("set -o pipefail\n. lib.sh\n", False),
+                       ('set -o pipefail\n"." lib.sh\n', False),
                        ("set -o pipefail\nbash -c ':'\n", False),
                        ("set -o pipefail\ndash -ec ':'\n", False),
+                       ("set -o pipefail\nksh ok.sh\n", False),
                        ("set -o pipefail\nbuiltin :\n", False),
+                       ('set -o pipefail\n"set" +o pipe""fail\n', False),
                        ("set -o pipefail\nset +x\n", False),
                        ("set -o pipefail\nshopt -u extglob\n", False),
-                       ("set -o pipefail\nshopt -s nullglob\n", True),
+                       ('set -o pipefail\nshopt "-u" -o pipe""fail\n', False),
+                       ("set -o pipefail\nshopt -s expand_aliases\nnp\n", True),
+                       ("set -o pipefail\nalias np=x\n", False),
+                       ("set -o pipefail\nunalias -a\n", False),
+                       ("set -o pipefail\nenable -n set\n", False),
+                       ("set -o pipefail\ntrap 'x' DEBUG\n", False),
+                       ("set -o pipefail\nexec 3>&1\n", False),
+                       ("set -o pipefail\ncommand -p x\n", False),
+                       ("set -o pipefail\ntime tool write\n", False),
+                       ("set -o pipefail\nif true; then :; fi\n", False),
+                       ("set -o pipefail\ncase x in\nesac\n", False),
+                       ("set -o pipefail\ntool write > log\n", False),
+                       ('set -o pipefail\ntool write "$f" | tail -1\n', False),
+                       ("set -o pipefail\nrow=`tool write`\n", False),
+                       ("set -o pipefail\ntool write | tail -1 # note\n", False),
+                       ("set -o pipefail\ntool write \\\n | tail -1\n", False),
                        ("set -o pipefail\nset -o $opt\n", False)):
         if _e1_file_credit(text) != want:
             failures.append("_e1_file_credit({!r}) expected {!r}".format(text, want))
@@ -1501,7 +1880,7 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
             return r
 
         try:
-            # --- refuse cases R1..R53 (exit 1), each later re-run against the never-report mutant ---
+            # --- refuse cases R1..R79 (exit 1; R24 retired), each re-run against never-report ---
             refuse = [
                 ("R1", CFG, "set -e\ntool write --row 7 | tail -1\ntool write --row 8\n",
                  "the seed: a row writer piped into tail under set -e"),
@@ -1620,6 +1999,85 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                  "a quoted spelling of a declared command still resolves by its dequoted identity"),
                 ("R52", CFG, "tool write | tail -1\nrc=${PIPESTATUS[0]} || exit 1\n",
                  "an extra word on the read line is outside the closed read set"),
+                # --- the closed-grammar pipefail credit: invalid enable vocabulary ---
+                ("R54", CFG, "set -Zo pipefail\ntool write | tail -1\n",
+                 "an unknown set option letter makes bash reject the line and run with pipefail OFF; "
+                 "the validated vocabulary earns it no credit"),
+                ("R55", CFG, "set -o nonexistent -o pipefail\ntool write | tail -1\n",
+                 "an unknown set -o option name makes bash reject the whole command; no credit"),
+                # --- the closed-grammar pipefail credit: quoted and indirect option changers ---
+                ("R56", CFG, "set -o pipefail\nsour''ce ./lib.sh\ntool write | tail -1\n",
+                 "a quote-split source is still source by its dequoted word; the line is outside the "
+                 "closed grammar and withdraws the whole-file credit"),
+                ("R57", CFG, 'set -o pipefail\n"." ./lib.sh\ntool write | tail -1\n',
+                 "a quoted dot command is still the dot command; outside the closed grammar"),
+                ("R58", CFG, "set -o pipefail\nopt=pi''pefail\n\"set\" +o \"$opt\"\n"
+                             "tool write | tail -1\n",
+                 "a quoted set with a quote-split variable-driven operand withdraws the credit (the "
+                 "dequoted command word is set, and the '$' is outside the grammar)"),
+                ("R59", CFG, "enable -n set\nset -o pipefail\ntool write | tail -1\n",
+                 "enable can unbind the set builtin so the later enable line never enables; enable is "
+                 "outside the closed grammar"),
+                ("R60", CFG, "shopt -s expand_aliases\nalias set=true\nset -o pipefail\n"
+                             "tool write | tail -1\n",
+                 "an alias can make the enable line run something else; alias is outside the closed "
+                 "grammar"),
+                ("R61", CFG, "set -o pipefail\ntrap 'x' DEBUG\ntool write | tail -1\n",
+                 "a trap can run option-changing text between any two lines; trap is outside the "
+                 "closed grammar"),
+                ("R62", CFG, "set -o pipefail\nset `echo x` pipe\"\"fail\ntool write | tail -1\n",
+                 "a set line outside the standalone enable form (a command-substitution operand, a "
+                 "quote-split pipefail) withdraws the credit"),
+                ("R63", CFG, "set -o pipefail\nev\"\"al ':'\ntool write | tail -1\n",
+                 "a quote-split eval is still eval by its dequoted word; outside the closed grammar"),
+                ("R64", CFG, "set -o pipefail\ne\\val ':'\ntool write | tail -1\n",
+                 "an escaped eval is still eval by its dequoted word; outside the closed grammar"),
+                ("R65", CFG, "set -o pipefail\nbuil''tin se''t +o pipe''fail\ntool write | tail -1\n",
+                 "a quote-split builtin reaching a quote-split disable withdraws the credit by its "
+                 "dequoted command word"),
+                ("R66", CFG, "case x in\n  a) : ;;\nesac\nset -o pipefail\ntool write | tail -1\n",
+                 "control flow (case) is outside the closed credit grammar, so the file earns no "
+                 "credit (a disclosed over-refusal; formerly the control for case-depth tracking)"),
+                ("R67", CFG, "select v in a b; do : ; done\nset -o pipefail\n"
+                             "tool write | tail -1\n",
+                 "control flow (select) is outside the closed credit grammar (a disclosed "
+                 "over-refusal; formerly the control for select-depth tracking)"),
+                ("R68", CFG, "set -o pipefail\necho hi > log.txt\ntool write | tail -1\n",
+                 "a redirection is outside the closed credit grammar (a disclosed over-refusal)"),
+                # --- the PIPESTATUS read: heredocs, canonical index, odd whitespace, reader identity ---
+                ("R69", CFG, "tool write | cat <<'EOF'\nrc=${PIPESTATUS[0]}\nEOF\necho ok\n",
+                 "a heredoc opening on the pipeline's line makes the raw next line heredoc DATA the "
+                 "shell never runs; the lexed next record disagrees and the credit is refused"),
+                ("R70", CFG, "tool write <<'EOF' | head\nrc=${PIPESTATUS[0]}\nEOF\necho ok\n",
+                 "a quoted heredoc on the producer's own stage swallows the would-be read line"),
+                ("R71", CFG, "tool write | cat <<'EOF'\nst=(\"${PIPESTATUS[@]}\")\nEOF\necho ok\n",
+                 "a whole-array save inside a heredoc body is data, never a read"),
+                ("R72", CFG, "true | true | true | true | true | true | true | true | true | true | "
+                             "tool write | cat\nrc=${PIPESTATUS[010]}\n",
+                 "bash reads 010 as OCTAL index 8; only the canonical decimal spelling of the flagged "
+                 "stage's index (10) is credited"),
+                ("R73", CFG, "tool write | tail -1\n st=(\"${PIPESTATUS[@]}\")\n",
+                 "a no-break space is not shell whitespace: the read line is a different command"),
+                ("R74", CFG, "tool write | tail -1\n\rst=(\"${PIPESTATUS[@]}\")\n",
+                 "a carriage return is not shell whitespace the read may hide behind"),
+                ("R75", CFG, "shopt -s expand_aliases\nalias declare=\"true; declare\"\n"
+                             "tool write | tail -1\ndeclare -a st=(\"${PIPESTATUS[@]}\")\n",
+                 "an aliased declare runs an intervening command that overwrites PIPESTATUS; the "
+                 "declare read form is refused when anything visible could redefine it"),
+                # --- wrappers and quoted command words ---
+                ("R76", CFG, "ionice tool write | tail -1\ntool write --row 9\n",
+                 "ionice is a bare-transparent wrapper: the declared producer behind it still loses "
+                 "its exit to the pipe"),
+                ("R77", CFG_CMD_IF, '"if"\n"if" x if | tail -1\n',
+                 "a QUOTED leading 'if' is the declared command, judged per token: the plain 'if' "
+                 "argument later in the segment must not turn it back into syntax"),
+                # --- quoted disables: held by TWO independent layers (see the layered mutants below) ---
+                ("R78", CFG, 'set -o pipefail\n"set" +o pipe""fail\ntool write | tail -1\n',
+                 "a quoted set with a quote-split pipefail disables the option: the credit grammar "
+                 "withdraws on the dequoted command word AND the dequoted off-event cancels E1"),
+                ("R79", CFG, 'set -o pipefail\nshopt "-u" -o pipe""fail\ntool write | tail -1\n',
+                 "a quoted-flag shopt disable: the credit grammar withdraws on the dequoted 'o'/'u' "
+                 "flags AND the dequoted shopt off-event cancels E1"),
             ]
             roots = {}
             for name, config, body, note in refuse:
@@ -1654,16 +2112,37 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
 
             # Targeted mutants: each weakened predicate must flip its fixture to exit 0, proving the
             # fixture exercises THAT predicate and not a neighbouring check.
+            def _octal_blind(top, line, k, declare_safe=True):
+                if not top or line is None:
+                    return False
+                m = re.search(r"PIPESTATUS\[(\d+)\]", line.strip(" \t"))
+                return m is not None and int(m.group(1)) == k
+
             targeted = [
                 ("R13", "_nonfinal", lambda stages: stages[:1],
                  "a reader that judges only stage 0 must miss the mid-pipeline stage"),
                 ("R22", "_e2_exempt",
-                 lambda top, line, k: bool(line) and "PIPESTATUS" in line,
+                 lambda top, line, k, declare_safe=True: bool(line) and "PIPESTATUS" in line,
                  "a raw-text PIPESTATUS match must wrongly exempt the quoted literal"),
                 ("R41", "_e1_file_credit", lambda text: True,
                  "a credit blind to non-enabling pipefail mentions must wrongly exempt"),
                 ("R33", "_e1_file_credit", lambda text: True,
                  "a credit blind to function definitions must wrongly exempt"),
+                ("R54", "_e1_enable_line",
+                 lambda line: line.strip(" \t").split()[:1] == ["set"],
+                 "an enable reader blind to the option vocabulary must wrongly credit the unknown "
+                 "letter"),
+                ("R55", "_e1_enable_line",
+                 lambda line: line.strip(" \t").split()[:1] == ["set"],
+                 "an enable reader blind to the -o name vocabulary must wrongly credit the unknown "
+                 "name"),
+                ("R72", "_e2_exempt", _octal_blind,
+                 "an index reader that converts 010 as decimal must wrongly credit the octal "
+                 "spelling"),
+                ("R75", "_e2_declare_reader_safe", lambda text: True,
+                 "a reader blind to visible redefinitions must wrongly credit the aliased declare"),
+                ("R76", "WRAPPERS", frozenset(w for w in WRAPPERS if w != "ionice"),
+                 "without the wrapper entry the producer behind ionice is never resolved"),
             ]
             for name, attr, weak, why in targeted:
                 real = getattr(this, attr)
@@ -1676,7 +2155,46 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                     failures.append("{} under the weakened '{}' mutant: expected exit 0, got {} "
                                     "({})".format(name, attr, rc, why))
 
-            # --- controls C1..C19 (exit 0), each naming the over-broad implementation it catches ---
+            # Layered discrimination for the quoted disables: R78 is held by TWO independent guards,
+            # the closed-grammar credit withdrawal and the dequoted off-event. Each mutant alone must
+            # leave the refusal standing, and only disabling both flips it: a silent regression of
+            # either layer is caught here by the other layer's assertion.
+            real_credit = this._e1_file_credit
+            real_effect = this._set_pipefail_effect
+
+            def _on_only(argv, _real=real_effect):
+                return "on" if _real(argv) == "on" else None
+
+            this._e1_file_credit = lambda text: True
+            try:
+                for name, why in (("R78", "the dequoted set off-event alone must still cancel E1"),
+                                  ("R79", "the dequoted shopt off-event alone must still cancel E1")):
+                    rc, _text = _run_quiet(roots[name])
+                    if rc != 1:
+                        failures.append("{} under the forced-credit mutant: expected exit 1 ({}), "
+                                        "got {}".format(name, why, rc))
+            finally:
+                this._e1_file_credit = real_credit
+            this._set_pipefail_effect = _on_only
+            try:
+                rc, _text = _run_quiet(roots["R78"])
+                if rc != 1:
+                    failures.append("R78 under the dropped-off-events mutant: expected exit 1 (the "
+                                    "credit withdrawal alone must still refuse), got {}".format(rc))
+            finally:
+                this._set_pipefail_effect = real_effect
+            this._e1_file_credit = lambda text: True
+            this._set_pipefail_effect = _on_only
+            try:
+                rc, _text = _run_quiet(roots["R78"])
+                if rc != 0:
+                    failures.append("R78 under BOTH mutants together: expected exit 0 (the fixture is "
+                                    "held by exactly those two layers), got {}".format(rc))
+            finally:
+                this._e1_file_credit = real_credit
+                this._set_pipefail_effect = real_effect
+
+            # --- controls C1..C32 (exit 0), each naming the over-broad implementation it catches ---
             # C1: no configuration is NOT APPLICABLE. Catches a gate that requires a config.
             r = base_tmp / "C1"
             (r / "cmd").mkdir(parents=True, exist_ok=True)
@@ -1740,22 +2258,39 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
             _case("C22", CFG, "tool write | tail -1;\nrc=${PIPESTATUS[0]}\n", 0,
                   "catches 'refuse a semicolon-terminated pipeline'")
             # C23: a QUOTED "select" is a command name, not the reserved word: the declared name after
-            # it is that command's argument, never this pipeline's producer.
+            # it is that command's argument, never this pipeline's producer. A plain select LATER in
+            # the segment (an ordinary argument) must not turn the quoted token back into syntax:
+            # plainness is judged per token.
             c23 = _case("C23", CFG, '"select" tool write | tail -1\ntool write --row 9\n', 0,
                         "catches 'read a quoted word as a reserved word'")
+            _case("C23b", CFG, '"select" tool write select | tail -1\ntool write --row 9\n', 0,
+                  "catches 'judge a token's plainness by any same-spelled word in the segment'")
             # C24: a wrapper used BARE (no option words) stays transparent.
             c24 = _case("C24", CFG, "env tool write --row 9\n", 0,
                         "catches 'fail closed on every wrapper'")
             # C25: the double-quoted scalar read is inside the closed set.
             _case("C25", CFG, 'tool write | tail -1\nrc="${PIPESTATUS[0]}"\n', 0,
                   "catches 'refuse the quoted scalar read'")
-            # C26/C27: a top-level enable AFTER a properly closed case or select body still credits
-            # (the case-pattern ')' and the loop's done must restore the depth, not leak it).
-            _case("C26", CFG, "case x in\n  a) : ;;\nesac\nset -o pipefail\ntool write | tail -1\n",
-                  0, "catches 'leak case depth past esac'")
-            _case("C27", CFG, "select v in a b; do : ; done\nset -o pipefail\n"
-                              "tool write | tail -1\n",
-                  0, "catches 'leak select depth past done'")
+            # (The former case/select depth controls are now R66/R67: a case or select statement is
+            # outside the closed credit grammar, so those files earn no credit at all.)
+            # C28: the canonical decimal spelling of a two-digit stage index IS credited (R72 pins the
+            # octal spelling of the same stage as refused: the boundary is tested from both sides).
+            _case("C28", CFG, "true | true | true | true | true | true | true | true | true | true | "
+                              "tool write | cat\nrc=${PIPESTATUS[10]}\n", 0,
+                  "catches 'refuse every multi-digit PIPESTATUS index'")
+            # C29: shell whitespace (a tab) may surround the read; only non-shell blanks are refused.
+            _case("C29", CFG, "tool write | tail -1\n\trc=${PIPESTATUS[0]}\n", 0,
+                  "catches 'refuse an indented read line'")
+            # C30: text BEFORE the pipeline on its line does not break E2; only text after the final
+            # stage does (the docstring states exactly this bound).
+            _case("C30", CFG, "echo a; tool write | tail -1\nrc=${PIPESTATUS[0]}\n", 0,
+                  "catches 'require the pipeline to own its whole line'")
+            # C31: find without any declared mention stays clean (the find refusal is scoped).
+            _case("C31", CFG, "find /x -name y | head -1\ntool write --row 9\n", 0,
+                  "catches 'refuse every find'")
+            # C32: ionice used bare on a non-piped command stays transparent and clean.
+            _case("C32", CFG, "ionice tool write --row 9\n", 0,
+                  "catches 'fail closed on a bare ionice'")
 
             # Over-broad mutants: each patched predicate makes its control fixture reach the named
             # WRONG exit (a finding, or a refusal), so the control is shown to discriminate the
@@ -1764,14 +2299,15 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("C2", c2, "_declared_command", lambda base, commands: bool(base),
                  "flag every pipe", 1),
                 ("C3a", c3a, "_e1_exempt", lambda events, offset: False, "ignore pipefail", 1),
-                ("C4", c4, "_e2_exempt", lambda top, line, k: False, "ignore PIPESTATUS", 1),
+                ("C4", c4, "_e2_exempt", lambda top, line, k, declare_safe=True: False,
+                 "ignore PIPESTATUS", 1),
                 ("C5", c5, "_nonfinal", lambda stages: stages, "flag any stage", 1),
                 ("C9", c9, "_subcommand_ok", lambda subs, sub: True, "ignore subcommands", 1),
                 ("C13", c13, "_executes", lambda seg: True,
                  "treat a blank continuation record as a command", 1),
-                ("C20", c20, "_e2_exempt", lambda top, line, k: False,
+                ("C20", c20, "_e2_exempt", lambda top, line, k, declare_safe=True: False,
                  "ignore the whole-array save", 1),
-                ("C23", c23, "_plain_word", lambda raw, word: True,
+                ("C23", c23, "_leading_plain", lambda raw, argv: [True] * len(argv),
                  "read a quoted word as a reserved word", 2),
                 ("C24", c24, "_command_word", lambda argv, raw=None: (None, None, 0, True),
                  "treat every wrapper as opaque", 2),
@@ -1788,10 +2324,12 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                                     "(the control does not discriminate it)".format(name, label,
                                                                                     wrong_rc, rc))
 
-            # --- cannot-evaluate cases X1..X10 (exit 2, each asserting its OWN diagnostic) ---
+            # --- cannot-evaluate cases X1..X15 (exit 2, each asserting its OWN diagnostic) ---
+            # (X1a's needle must not be a substring of the SUBCOMMAND selector diagnostic, so it
+            # asserts the command-side wording "matched no command word".)
             _case("X1a", CFG_NOSUB, "echo hello\n", 2,
                   "a declared command matching nothing is cannot-evaluate",
-                  needle="command selector")
+                  needle="matched no command word")
             _case("X1b", CFG, "tool list\n", 2,
                   "a declared subcommand matching nothing is cannot-evaluate",
                   needle="subcommand selector")
@@ -1804,6 +2342,9 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
             _case("X2c", CFG, "tool write --row 9\n/usr/local/bin/tool write <(echo x) | tail -1\n", 2,
                   "a PATH-QUALIFIED declared command in unparseable shell is still seen",
                   needle="cannot parse")
+            _case("X2d", CFG, 'tool write --row 9\nto""ol write <(echo x) | tail -1\n', 2,
+                  "a QUOTE-SPLIT declared name in unparseable shell is still seen: the quote-tolerant "
+                  "regex establishes its identity in the raw tail", needle="cannot parse")
             _case("X3a", CFG, "bash -c 'tool write | tail -1'\n", 2,
                   "a declared command inside a bash -c string is cannot-evaluate",
                   needle="bash -c")
@@ -1823,6 +2364,12 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
             _case("X3f", CFG, "zsh -c 'tool write | tail -1'\ntool write --row 9\n", 2,
                   "a declared command inside a zsh -c string is cannot-evaluate",
                   needle="zsh -c")
+            _case("X3g", CFG, "ksh -c 'tool write | tail -1'\ntool write --row 9\n", 2,
+                  "a declared command inside a ksh -c string is cannot-evaluate",
+                  needle="ksh -c")
+            _case("X3h", CFG, "dash -c 'to\"\"ol write | tail -1'\ntool write --row 9\n", 2,
+                  "a QUOTE-SPLIT declared name inside a shell -c string is still seen: absence in the "
+                  "contiguous raw spelling proves nothing", needle="dash -c")
             _case("X4a", CFG, b"\xff\xfe not utf-8", 2,
                   "a non-UTF-8 declared surface is cannot-evaluate",
                   needle="not valid UTF-8")
@@ -1855,16 +2402,20 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                   "an ESCAPED declared name behind a wrapper option is read from the dequoted words",
                   needle="wrapper option")
             # X6: a declared command inside a group, subshell, loop or coproc, and a grouped producer
-            # piped onward, all fail closed: their execution shell or time is not modelled.
+            # piped onward, all fail closed: their execution shell or time is not modelled. Every
+            # needle here is a substring the grouped-producer backstop does NOT print ("inside a ...",
+            # or the quoted loop keyword), so a removed construct guard cannot hide behind the
+            # backstop's exit 2.
             _case("X6a", CFG, "(tool write) | tail -1\n", 2,
-                  "a declared command inside a subshell is cannot-evaluate", needle="subshell")
+                  "a declared command inside a subshell is cannot-evaluate", needle="inside a subshell")
             _case("X6b", CFG, "{ tool write; } | tail -1\n", 2,
-                  "a declared command inside a brace group is cannot-evaluate", needle="brace group")
+                  "a declared command inside a brace group is cannot-evaluate",
+                  needle="inside a brace group")
             _case("X6c", CFG, "while :; do tool write; done | tail -1\n", 2,
-                  "a declared command inside a loop is cannot-evaluate", needle="loop")
+                  "a declared command inside a loop is cannot-evaluate", needle="'while' loop")
             _case("X6d", CFG, '(to""ol write) | tail -1\n', 2,
                   "a QUOTED declared name inside a subshell is read from the dequoted words",
-                  needle="subshell")
+                  needle="inside a subshell")
             _case("X6e", CFG, "(true) | tail -1\ntool write --row 9\n", 2,
                   "a grouped producer in a file that mentions a declared command is cannot-evaluate "
                   "even when the group itself holds none (disclosed over-refusal)",
@@ -1873,10 +2424,40 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                   "a declared command beside a coproc is cannot-evaluate", needle="coproc")
             _case("X6g", CFG, "(x=$(tool write)) | tail -1\n", 2,
                   "a declared command living only inside a piped group's substitution is read from "
-                  "the UNMASKED text", needle="subshell")
+                  "the UNMASKED text", needle="inside a subshell")
             _case("X6h", CFG, "{ x=$(tool write); } | tail -1\n", 2,
                   "a declared command living only inside a piped brace group's substitution is read "
-                  "from the UNMASKED text", needle="brace group")
+                  "from the UNMASKED text", needle="inside a brace group")
+            x6i = _case("X6i", CFG, "until false; do tool write; done | tail -1\n", 2,
+                        "a declared command inside an until loop is cannot-evaluate",
+                        needle="'until' loop")
+            x6j = _case("X6j", CFG, "for i in 1 2; do tool write; done | tail -1\n", 2,
+                        "a declared command inside a for loop is cannot-evaluate",
+                        needle="'for' loop")
+            _case("X6k", CFG, '{ x=$(to""ol write); } | tail -1\n', 2,
+                  "a QUOTE-SPLIT declared name living only inside a piped group's substitution is "
+                  "still seen through the quote-tolerant regex over the unmasked text",
+                  needle="inside a brace group")
+            _case("X6l", CFG, "{ echo tool; }\ntool write --row 9\n", 2,
+                  "a declared NAME that is only another command's argument data inside a refused "
+                  "construct still refuses (a disclosed over-refusal: the gate does not separate "
+                  "argument mentions from command positions inside constructs it cannot attribute)",
+                  needle="inside a brace group")
+            # The for/until entries of REFUSED_BODIES are pinned by their own mutants: with the entry
+            # removed, the loop's diagnostic must disappear (the run then refuses through the grouped
+            # backstop, whose text does not contain the quoted keyword).
+            real_bodies = this.REFUSED_BODIES
+            for mut_name, dropped, root_dir, needle in (("X6i", "until", x6i, "'until' loop"),
+                                                        ("X6j", "for", x6j, "'for' loop")):
+                this.REFUSED_BODIES = {k: v for k, v in real_bodies.items() if k != dropped}
+                try:
+                    rc, text = _run_quiet(root_dir)
+                finally:
+                    this.REFUSED_BODIES = real_bodies
+                if needle in text:
+                    failures.append("{} under the dropped-'{}' REFUSED_BODIES mutant: the loop "
+                                    "diagnostic must disappear, proving the case pins that entry".format(
+                                        mut_name, dropped))
             # X7: configuration validation diagnostics (each discriminates its own check: with the
             # check removed the run would exit 0 or print another message, failing the needle).
             _case("X7a", CFG.replace('paths = ["cmd/job.sh"]',
@@ -1923,6 +2504,22 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                   "a declared command inside a function-body SUBSTITUTION is read from the unmasked "
                   "text and refused; the later disable can precede the call",
                   needle="function body")
+            _case("X12c", CFG, "tool write\nfunction f { tool write | tail -1; }\nf\n", 2,
+                  "a ONE-LINE function definition keeps the body's commands in the opener's own "
+                  "record, before the block stack sees it; the declared command there is already "
+                  "inside the function body", needle="function body")
+            _case("X12d", CFG, 'f() {\nx=$(to""ol write)\n}\nf | tail -1\n', 2,
+                  "a QUOTE-SPLIT declared name living only inside a function-body substitution is "
+                  "still seen through the quote-tolerant regex over the unmasked text",
+                  needle="function body")
+            _case("X12e", CFG, "f() if true; then tool write | tail -1; fi\nf\n", 2,
+                  "a function body that is an if compound (not a brace group) is still a function "
+                  "body: the opener after the definition is the deferred body",
+                  needle="function body")
+            _case("X12f", CFG, "f() if :; then :; fi\n{\ntool write | head\n}\n", 2,
+                  "the pending function mark is consumed by the if body and never leaks onto the "
+                  "LATER unrelated brace group, which is refused as the brace group it is",
+                  needle="inside a brace group")
             # X13/X14: argument-executing commands may run the declared command themselves.
             _case("X13", CFG, "flock /abs/l tool write | tail -1\ntool write --row 9\n", 2,
                   "a declared command in flock's argument list is cannot-evaluate",
@@ -1930,6 +2527,20 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
             _case("X14", CFG, "printf x | xargs tool write | tail -1\ntool write --row 9\n", 2,
                   "a declared command in xargs's argument list is cannot-evaluate",
                   needle="argument list of 'xargs'")
+            x13b = _case("X13b", CFG, "find /x -name y -exec tool write \\; | head\n"
+                                      "tool write --row 9\n", 2,
+                         "a declared command among find's arguments (-exec and kin can run it) is "
+                         "cannot-evaluate", needle="argument list of 'find'")
+            # The find entry is pinned by its own mutant: without it the fixture must pass clean.
+            real_exec = this.ARG_EXECUTORS
+            this.ARG_EXECUTORS = frozenset(w for w in real_exec if w != "find")
+            try:
+                rc, _text = _run_quiet(x13b)
+            finally:
+                this.ARG_EXECUTORS = real_exec
+            if rc != 0:
+                failures.append("X13b under the dropped-'find' ARG_EXECUTORS mutant: expected exit 0, "
+                                "got {} (the case does not discriminate that entry)".format(rc))
 
             # X8: an INACCESSIBLE configuration parent is never NOT APPLICABLE.
             r = _fresh("X8", CFG, {"cmd/job.sh": "tool write --row 9\n"})
@@ -1963,9 +2574,9 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                          "no symlink support ({})".format(exc))
             else:
                 rc, text = _run_quiet(r)
-                if rc != 2 or "symlink" not in text:
+                if rc != 2 or "crosses a symlink at cmd/job.sh" not in text:
                     failures.append("X9a: a symlinked declared surface expected exit 2 naming the "
-                                    "symlink, got {}".format(rc))
+                                    "symlinked final component itself, got {}".format(rc))
             # X9b: a symlinked SUBDIRECTORY under a dir/** selector is refused, never skipped.
             r = _fresh("X9b", CFG_PREFIX, {"cmd/good.sh": "tool write --row 9\n",
                                            "other/bad.sh": "tool write | tail -1\n"})
@@ -2000,9 +2611,13 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                          "no FIFO support ({})".format(exc))
             else:
                 rc, text = _run_quiet(r)
-                if rc != 2 or "not a regular file" not in text:
-                    failures.append("X9d: a FIFO declared surface expected exit 2 naming the "
-                                    "non-regular file, got {}".format(rc))
+                # The needle names the RESOLVER's own diagnostic: scan_file's second layer prints a
+                # different "not a regular file" sentence, so a removed resolver check cannot hide
+                # behind the fallback layer reaching the same exit code.
+                if rc != 2 or "path selector 'cmd/job.sh' is not a regular file" not in text:
+                    failures.append("X9d: a FIFO declared surface expected exit 2 with the resolver's "
+                                    "own non-regular-file diagnostic, got {} (another layer may have "
+                                    "produced the exit code)".format(rc))
             # X9e: a FIFO met during a dir/** walk is refused BEFORE any read (a read would block).
             r = _fresh("X9e", CFG_PREFIX, {"cmd/a.sh": "tool write --row 9\n"})
             try:
@@ -2058,6 +2673,37 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 if rc != 2 or "never silently pruned" not in text:
                     failures.append("X9i: a symlink named __pycache__ under dir/** expected exit 2 "
                                     "naming the metadata entry, got {}".format(rc))
+            # X9j/X9k: a regular FILE named .git or __pycache__ under dir/** refuses through the
+            # filenames branch of the walk (the directory fixtures above exercise only the dirnames
+            # branch; with this branch removed the file would be SCANNED and exit 1, failing these).
+            r = _fresh("X9j", CFG_PREFIX, {"cmd/a.sh": "tool write --row 9\n",
+                                           "cmd/.git": "tool write | tail -1\n"})
+            rc, text = _run_quiet(r)
+            if rc != 2 or "never silently pruned" not in text:
+                failures.append("X9j: a regular file named .git under dir/** expected exit 2 naming "
+                                "the metadata entry, got {}".format(rc))
+            r = _fresh("X9k", CFG_PREFIX, {"cmd/a.sh": "tool write --row 9\n",
+                                           "cmd/__pycache__": "tool write | tail -1\n"})
+            rc, text = _run_quiet(r)
+            if rc != 2 or "never silently pruned" not in text:
+                failures.append("X9k: a regular file named __pycache__ under dir/** expected exit 2 "
+                                "naming the metadata entry, got {}".format(rc))
+
+            # X15: scan_file's own second-layer regular-file check, exercised DIRECTLY (through run()
+            # the resolver refuses first, so this layer would otherwise ship untested). A directory
+            # target raises before any open; with the check removed the open would raise a different
+            # OSError sentence, failing the needle, and a FIFO there could block forever.
+            r = _fresh("X15", CFG, {"cmd/job.sh": "tool write --row 9\n"})
+            x15_binding = {"id": "row-writer", "paths": ["cmd/job.sh"], "commands": ["tool"],
+                           "subcommands": ["write"]}
+            try:
+                scan_file(r, r / "cmd", x15_binding, {"commands": set(), "subcommands": set()})
+            except GateError as exc:
+                if "is not a regular file; refusing to open it" not in str(exc):
+                    failures.append("X15: scan_file on a non-regular path expected its own "
+                                    "refusing-to-open diagnostic, got {!r}".format(str(exc)[:160]))
+            else:
+                failures.append("X15: scan_file on a non-regular path must raise before opening it")
 
             # X11: a FIFO at the CONFIGURATION path is refused before open (an open would block).
             r = base_tmp / "X11-fifo-config"
@@ -2086,9 +2732,10 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                          "no symlink support ({})".format(exc))
             else:
                 rc, text = _run_quiet(r)
-                if rc != 2 or "symlink" not in text:
+                if rc != 2 or "a symlinked configuration is not followed" not in text:
                     failures.append("X10-dangling-config: a dangling-symlink configuration expected "
-                                    "fail-closed exit 2 naming the symlink, got {}".format(rc))
+                                    "fail-closed exit 2 with the configuration-symlink check's own "
+                                    "diagnostic, got {}".format(rc))
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -2097,34 +2744,48 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
         for f in failures:
             print("  - " + f)
         return 1
-    print("SELF-TEST PASS: the refuse cases R1-R53 and Rb1 (the seed, substitution bodies, AND lists, "
-          "if conditions, |&, bare wrappers and absolute paths, every enable outside the standalone "
-          "column-1 closed form (piped, backgrounded, conditional, wrapped, coproc'd, continued, a "
-          "final stage, or sharing its line), every whole-file credit withdrawal (a disable at any "
-          "level, builtin, eval, source, a function definition on either side of the enable, a "
-          "variable-driven set, positional parameters mentioning pipefail), every read outside the "
-          "closed E2 set (a mismatched index, a late, quoted, commented, quote-mangled, bare-array, "
-          "extra-word or non-adjacent read, a pipeline ending in '&' or '||' or followed on its line), "
-          "a line continuation, a first and a MIDDLE pipeline stage asserted by index, a "
-          "substitution-body read, a nested dir/** finding asserted by file, a quoted declared name, "
-          "and the enable-after-pipeline boundary) each fire and each catches the never-report mutant; "
-          "the targeted stage-truncation, raw-text-PIPESTATUS and forced-file-credit mutants are each "
-          "caught; the controls C1-C27 (no config, undeclared producers, the accepted pipefail "
-          "spellings, the closed PIPESTATUS reads including both whole-array saves, the quoted scalar "
-          "and a semicolon-terminated pipeline, a line-ending pipe, a final-stage command, quoted and "
-          "commented text, an OR list, a quoted program string, an undeclared subcommand, a quoted "
-          "heredoc body, a redirect, an unrelated shopt, a clean dir/** walk, a bare wrapper, a "
-          "top-level enable after a closed case or select body, and a quoted 'select' command name) "
-          "each stay clean and the patchable ones catch their over-broad "
-          "mutants; and the cannot-evaluate cases X1-X14 (unmatched selectors, unparseable shell "
-          "beside a plain or path-qualified declared command, sh -c/bash -c/dash -c/zsh -c/eval "
-          "strings with plain and clustered options, wrapper-option and subcommand opacity, quoted and "
-          "escaped declared names behind wrappers and groups, declared commands in subshells, brace "
-          "groups, loops, coprocs, function bodies and xargs/flock argument lists, grouped producers, "
-          "malformed configurations and empty, dot and dot-dot selector components, an inaccessible "
-          "configuration parent, symlinked files, subdirectories, ancestors and configurations, FIFO "
-          "surfaces and configurations, and .git/__pycache__ entries refused rather than pruned) each "
-          "fail closed printing the diagnostic of their OWN check")
+    print("SELF-TEST PASS: the refuse cases R1-R79 (R24 retired) and Rb1 (the seed, substitution "
+          "bodies, AND lists, if conditions, |&, bare wrappers including ionice, absolute paths, "
+          "every enable outside the standalone column-1 closed form (piped, backgrounded, "
+          "conditional, wrapped, coproc'd, continued, a final stage, sharing its line, or spelled "
+          "outside the validated option and -o name vocabularies), every whole-file credit "
+          "withdrawal (a disable at any level, quoted and escaped eval/source/dot/builtin/set, "
+          "alias, enable, trap, control flow, redirections, substitutions, a variable-driven set, "
+          "positional parameters mentioning pipefail), every read outside the closed E2 set (a "
+          "mismatched or non-canonical octal index, a late, quoted, commented, quote-mangled, "
+          "bare-array, extra-word or non-adjacent read, non-shell whitespace around the read, a "
+          "heredoc on the pipeline's lines, a redefinable declare reader, a pipeline ending in '&' "
+          "or '||' or followed on its line), a line continuation, a first and a MIDDLE pipeline "
+          "stage asserted by index, a substitution-body read, a nested dir/** finding asserted by "
+          "file, quoted declared and reserved-word command names, and the enable-after-pipeline "
+          "boundary) each fire and each catches the never-report mutant; the targeted mutants "
+          "(stage truncation, raw-text PIPESTATUS, forced file credit, a vocabulary-blind enable "
+          "reader, an octal-blind index reader, a redefinition-blind declare reader, a wrapper "
+          "roster without ionice) are each caught, and the layered quoted-disable fixtures stand "
+          "under the forced-credit and dropped-off-events mutants one at a time and fall only under "
+          "both together; the controls C1-C25 (C12, C14, C15, C17 and C19 retired; C26/C27 became "
+          "the refusals R66/R67 when control flow left the closed credit grammar) plus C23b and "
+          "C28-C32 (no config, undeclared producers, the accepted pipefail spellings, the closed "
+          "PIPESTATUS reads including both whole-array saves, the canonical two-digit index, the "
+          "quoted scalar, tab-indented and semicolon-terminated reads, text before the pipeline on "
+          "its line, a line-ending pipe, a final-stage command, quoted and commented text, an OR "
+          "list, a quoted program string, an undeclared subcommand, a quoted heredoc body, a "
+          "redirect, an unrelated shopt, a clean dir/** walk, bare env and ionice wrappers, a clean "
+          "find, and quoted 'select' command names with and without a plain same-spelled argument) "
+          "each stay clean and the patchable ones catch their over-broad mutants; and the "
+          "cannot-evaluate cases X1-X15 (unmatched selectors, unparseable shell beside a plain, "
+          "path-qualified or quote-split declared command, sh -c/bash -c/dash -c/zsh -c/ksh -c/eval "
+          "strings with plain, clustered and quote-split contents, wrapper-option and subcommand "
+          "opacity, quoted and escaped declared names behind wrappers and groups, declared commands "
+          "in subshells, brace groups, while/until/for loops, coprocs, one-line and non-brace "
+          "function bodies, quote-split substitution identities, xargs/flock/find argument lists, "
+          "grouped producers, a declared name as argument data in a refused construct, malformed "
+          "configurations and empty, dot and dot-dot selector components, an inaccessible "
+          "configuration parent, symlinked files, subdirectories, ancestors and configurations, "
+          "FIFO surfaces and configurations, .git/__pycache__ directories, symlinks AND regular "
+          "files refused rather than pruned, and scan_file's own pre-open regular-file layer) each "
+          "fail closed printing the diagnostic of their OWN check, asserted by a substring no other "
+          "check prints")
     return 0
 
 
