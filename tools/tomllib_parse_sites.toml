@@ -287,7 +287,7 @@ reason = "test-code"
 path = "opf/tools/_opf_emit.py"
 function = "self_test"
 form = "call"
-count = 3
+count = 5
 class = "EXEMPT"
 reason = "test-code"
 
