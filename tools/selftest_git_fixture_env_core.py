@@ -1924,6 +1924,110 @@ def _member_bound_checks(roster):
            (" ".join(opf_init), 1800), ("opf/tools/opf.py", 1200)])
 
 
+_MEMBER_TIMEOUT_EXPECTED = [
+    ("bound-kill", "str", None, "timed-out", True, ""),
+    ("exit-1", "int", 1, "definite", True, ""),
+    ("signal", "int", -signal.SIGKILL, "definite", True, ""),
+    ("exit-2", "int", 2, "definite", True, ""),
+    ("oserror", "str", None, "definite", True, ""),
+    ("clean", "int", 0, "clean", True, ""),
+    ("bound-kill-unrecorded", [("tools/vector_member.py", "--self-test")], ()),
+    ("findings-printed-first", 1, True, True, ["vector_hooked", "vector_killed", "vector_other"],
+     [True, True], ""),
+]
+
+
+def _member_timeout_vectors(base):
+    """config/member-timeout-vectors, under the engine's exit and stream rules. Through the real
+    launch path (_run_config_member, each case against a private record and report): only a run
+    still going at its bound becomes a timeout message, recorded, and _registered_offenders
+    attributes a lane holding only it to that timeout; a member's own exit 1, signal status and
+    exit 2 (the member's own exit, never the suite's cannot-evaluate) and a launch error stay
+    member evidence, a definite offender, recorded nowhere; a clean exit is clean; nothing
+    reaches stderr. findings-printed-first: _verdict over a collected definite finding and a lane
+    holding a member that only timed out, one that timed out after leaving evidence (definite:
+    its evidence was observed), one that failed, one that ran a hook under exit 0 and a clean one
+    exits 1, its stdout leading with the definite findings, which name exactly the three definite
+    members, and only then listing both timeout messages under "also cannot evaluate"; stderr
+    stays empty. bound-kill-unrecorded pins the recording boundary's OTHER side: the same timeout
+    message left out of the record is a definite offender with no attribution (never folded into
+    cannot-evaluate), so dropping the recording turns a bound kill red here instead of silently
+    reclassifying it. These are regression pins over the engine's long-standing bound-kill path,
+    the same recording rule the lifecycle probes feed (their own vectors run in the system-config
+    lane). A case other than bound-kill that never finished inside its bound is recorded
+    (host load, no verdict either way) and attributed (_partial_timeout_cause)."""
+    import contextlib
+    import io
+    from unittest.mock import patch
+
+    fixture = base / "member-timeout-vectors"
+    fixture.mkdir()
+    member = fixture / "member.py"
+    member.write_text(
+        "import os, signal, sys, time\n"
+        "if sys.argv[1] == 'sleep':\n"
+        "    time.sleep(600)\n"
+        "if sys.argv[1] == 'signal':\n"
+        "    os.kill(os.getpid(), signal.SIGKILL)\n"
+        "sys.exit(int(sys.argv[1]))\n", encoding="utf-8")
+
+    def refuse(*args, **kwargs):
+        raise OSError(5, "injected launch refusal")
+
+    observed = []
+    for label, mode, bound in (("bound-kill", "sleep", 3), ("exit-1", "1", 120),
+                               ("signal", "signal", 120), ("exit-2", "2", 120),
+                               ("oserror", "0", 120), ("clean", "0", 120)):
+        argv, recorded = (str(member), mode), []
+        with contextlib.ExitStack() as stack:
+            leaked = stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            if label == "oserror":
+                stack.enter_context(patch.object(subprocess, "Popen", refuse))
+            rc = _run_config_member(argv, dict(os.environ), bound=bound,
+                                    cannot_evaluate=recorded, report=io.StringIO())
+        if label != "bound-kill" and _is_timeout(rc):
+            CANNOT_EVALUATE.append(rc)
+            observed.append(rc)
+            continue
+        offenders, cause = _registered_offenders({argv: (rc, b"", b"", b"")}, recorded)
+        observed.append((label, type(rc).__name__, rc if type(rc) is int else None,
+                         "timed-out" if cause else "definite" if offenders else "clean",
+                         recorded == ([rc] if label == "bound-kill" else []), leaked.getvalue()))
+
+    timeout = "TIMEOUT: tools/vector_member.py --self-test reached its 1 s bound (cannot evaluate)"
+    killed = "TIMEOUT: tools/vector_killed.py --self-test reached its 1 s bound (cannot evaluate)"
+    # The recording boundary's other side: the SAME timeout message, left
+    # unrecorded, is a definite offender with no attribution.
+    offenders, cause = _registered_offenders(
+        {("tools/vector_member.py", "--self-test"): (timeout, b"", b"", b"")}, [])
+    observed.append(("bound-kill-unrecorded", offenders, cause))
+    lane = dict([
+        (("tools/vector_member.py", "--self-test"), (timeout, b"", b"", b"")),
+        (("tools/vector_killed.py", "--self-test"),
+         (killed, b"killed-hook\n", b"killed-fsmonitor\n", b"killed-home\n")),
+        (("tools/vector_other.py", "--self-test"), (1, b"", b"", b"home\n")),
+        (("tools/vector_hooked.py", "--self-test"), (0, b"hook-ran\n", b"fsmonitor-ran\n", b"")),
+        (("tools/vector_clean.py", "--self-test"), (0, b"", b"", b""))])
+    # The lane's finding as check() records it (the id, got, want), attributed only when
+    # _registered_offenders returns a cause; this vector's ids never enter the suite's record.
+    offenders, cause = _registered_offenders(lane, [timeout, killed])
+    finding = "vector/registered-lane: got {!r}, want []".format(offenders)
+    failures = ["vector/collected-finding: got 1, want 0", finding]
+    with contextlib.redirect_stdout(io.StringIO()) as out, \
+            contextlib.redirect_stderr(io.StringIO()) as leaked:
+        code = _verdict(failures, [timeout, killed], {finding: cause} if cause else {})
+    head, also, tail = out.getvalue().partition("  also cannot evaluate")
+    printed = "".join(line for line in head.split("\n") if "vector/registered-lane" in line)
+    observed.append(("findings-printed-first", code, head.startswith("SELF-TEST FAIL:\n"),
+                     "vector/collected-finding" in head,
+                     [name for name in ("vector_clean", "vector_hooked", "vector_killed",
+                                        "vector_member", "vector_other") if name in printed],
+                     [bool(also) and entry in tail for entry in (timeout, killed)],
+                     leaked.getvalue()))
+    check("config/member-timeout-vectors", observed, _MEMBER_TIMEOUT_EXPECTED,
+          _partial_timeout_cause(observed, _MEMBER_TIMEOUT_EXPECTED))
+
+
 def _manifest_setup_failures(base):
     """A failed add or commit must raise even when the earlier init succeeded."""
     import gen_manifest
@@ -2314,6 +2418,7 @@ def _core_lanes(base):
     _roster_checks()
     _opf_lifecycle_graph_checks()
     _member_timeout_controls(base)
+    _member_timeout_vectors(base)
 
     # A lane RETURN VALUE can only fail the suite, never pass it: each vector runs the
     # production main() in a child over an injected lane that returns 0 (nothing executed;
