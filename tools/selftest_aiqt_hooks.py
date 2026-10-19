@@ -5208,7 +5208,7 @@ def _main_isolated(monitor):
         # === boundary: the true fail-open boundary ALLOWS ====================================
         expect("(bound-a) non-git command allows", "ls -la {}".format(rp), "allow")
         # An UNPARSEABLE command (unbalanced quote) is not a free ALLOW: a raw scan finds git AND a lossy
-        # verb (checkout) it cannot prove safe -> DENY (D-423-NARROW: the fallback denies every raw-flagged
+        # verb (checkout) it cannot prove safe -> DENY (the unparseable-command fallback denies every raw-flagged
         # unparseable command, with no snapshot); a non-lossy unparseable stays ALLOW. No override exists on
         # any path, so a command carrying the removed GUARDRAIL_ALLOW_DISCARD prefix gets
         # the same outcome as the bare one (tombstones of the retired opt-out: bound-b3, the r15-raw-* battery).
@@ -5908,7 +5908,7 @@ def _main_isolated(monitor):
         # exactly, and case (d) the same deny DECISION with the reason text differing (the prefix stays on
         # the pristine dir-simple path; FOO takes the view-override branch) - and
         # that can differ from the unprefixed command's decision. (c) On an unparseable command (an unquoted <<EOF heredoc whose body holds a lone quote) the
-        # fallback denies every raw-flagged command (D-423-NARROW), prefixed or not, so the prefixed and the
+        # fallback denies every raw-flagged command, prefixed or not, so the prefixed and the
         # FOO forms get exactly the bare command's deny. (d) A lossy keyword in the value brings 'git log -1'
         # into scope and it denies, where the unprefixed command is allowed silently.
         for _case, _bare_cmd, _v, _want_bare, _want_pref in (
@@ -6226,7 +6226,7 @@ def _main_isolated(monitor):
         # R7C MAJOR 5: a leading stdout redirect to a path other than /dev/null is not preserved -> DENIES.
         expect("(pristine-gram-lead-redirect) a leading redirect to a file now DENIES (R7C MAJOR 5)",
                "> log git reset --hard", "deny", cwd=rp)
-        # D-423-NARROW: every wrapper, interpreter, eval, reserved-word compound or substitution that
+        # Every wrapper, interpreter, eval, reserved-word compound or substitution that
         # reaches a git word is outside the closed grammar and denies (previously each snapshot-then-
         # allowed against the session cwd).
         for _flbl, _fcmd in (
@@ -6867,8 +6867,8 @@ def _main_isolated(monitor):
             failures.append("(rec-heredoc-snap) a DENIED heredoc discard must NOT write a recovery "
                             "ref (R8: refused, nothing lost)")
 
-        # (rec-unbalanced) an unbalanced-quote discard reaches _git_discard_fallback, which under
-        # D-423-NARROW DENIES every raw-flagged unparseable command and attempts NO recovery snapshot (the
+        # (rec-unbalanced) an unbalanced-quote discard reaches _git_discard_fallback, which, as the
+        # unparseable-command fallback, DENIES every raw-flagged unparseable command and attempts NO recovery snapshot (the
         # command is refused, so nothing is lost and no snapshot basis is claimed).
         rec_ub = _init_repo(tmp / "rec-unbalanced")
         (rec_ub / "file.txt").write_text("committed line\nunbalanced dirty\n", encoding="utf-8")
@@ -7012,7 +7012,7 @@ def _main_isolated(monitor):
         if not _recovery_refs(rec_fd):
             failures.append("(rec-fd-nonpristine-snap) expected a recovery ref on a non-pristine in-scope ASK "
                             "of a dirty tree (F-D EXPAND)")
-        # A non-pristine WRAPPED form is outside the closed grammar (D-423-NARROW): it DENIES, and no
+        # A non-pristine WRAPPED form is outside the closed allowlist grammar: it DENIES, and no
         # snapshot is taken (the command is refused, so the dirty tree is untouched).
         rec_fdw = _init_repo(tmp / "rec-fd-wrap")
         (rec_fdw / "file.txt").write_text("committed line\nwrapped fd\n", encoding="utf-8")
@@ -7297,7 +7297,7 @@ def _main_isolated(monitor):
             failures.append("(rec-ledger-nonfatal-snap) the successful snapshot ref must be present despite a "
                             "ledger fault")
 
-        # (rec-c6-subst/rec-c6-wrap/rec-c6-eval) D-423-NARROW: a non-pristine in-scope command that hides a
+        # (rec-c6-subst/rec-c6-wrap/rec-c6-eval) A non-pristine in-scope command that hides a
         # verb behind shell substitution ($(...)), a wrapper (sudo), or split-quoting/eval reaches a git
         # word outside the closed grammar, so it DENIES outright (previously snapshot-then-allow); nothing
         # runs, so no snapshot is warranted or taken.
@@ -7461,7 +7461,7 @@ def _main_isolated(monitor):
         # FINDING 3b: a WRAPPED git carrying a -C redirect to T loses T -> DENY (was allow-with-session-snap).
         expect("(r6-f3-wrapper) 'env git -C T restore' (wrapped + redirect) DENIES (finding 3)",
                "env git -C {} restore -- file.txt".format(r6tc), "deny", cwd=rp)
-        # D-423-NARROW: a subshell, substitution or wrapper reaching a git word is outside the closed
+        # A subshell, substitution or wrapper reaching a git word is outside the closed
         # grammar even with NO redirect, so these former snapshot-then-allow controls now DENY by design.
         expect("(r6-f3-ctl-subshell-nocd) '(git reset --hard)' with no internal cd denies (closed grammar)",
                "(git reset --hard)", "deny", cwd=rp)
@@ -7475,7 +7475,7 @@ def _main_isolated(monitor):
         expect("(r6-f4-fallback-redirect) unparseable 'git -C Tdirty restore <<EOF' on a clean cwd DENIES "
                "(finding 4)", "git -C {} restore -- file.txt <<EOF\nx\nEOF".format(r6tc), "deny",
                cwd=str(r6clean))
-        # D-423-NARROW: the fallback denies EVERY raw-flagged unparseable command, redirect or not, clean
+        # The unparseable-command fallback denies EVERY raw-flagged unparseable command, redirect or not, clean
         # session cwd or not (the disclosed fallback cost).
         expect("(r6-f4-ctl-noredirect) unparseable 'git checkout -- x <<EOF' with no redirect denies",
                "git checkout -- file.txt <<EOF\nx\nEOF", "deny", cwd=str(r6clean))
@@ -7489,7 +7489,7 @@ def _main_isolated(monitor):
                "deny", cwd=rp)
         # === PR #423 ROUND-4 (codex findings 1-3, claude MAJOR-1): wrapped and stash discards preserve
         # === or deny. Each vector below flips on the pinned base commit.
-        # (r9f1) D-423-NARROW: a WRAPPED work-losing verb is outside the closed grammar even after a
+        # (r9f1) A WRAPPED work-losing verb is outside the closed grammar even after a
         # resolvable cd, so it DENIES and takes no snapshot (the plain 'cd B && git reset --hard' spelling
         # is the accepted route, covered by r3f1b and the g423 preserve-then-allow battery).
         r9_sess = _init_repo(tmp / "r9-sess")                       # clean session repo
@@ -7784,7 +7784,7 @@ def _main_isolated(monitor):
         expect("(clf1-checkout-index) a -C-redirected 'checkout-index -a -f' DENIES (CLAUDE-F1)",
                "git -C {} checkout-index -a -f".format(rp), "deny", cwd=rp)
 
-        # === PR #423 D-423-NARROW (g423): the closed allowlist grammar, ONE representative per category =
+        # === PR #423 (g423): the closed allowlist grammar, ONE representative per category =
         # Every vector is RED ON REVERT of the narrowing: the allow categories assert the grammar's own
         # note text (the pin's note read "is not a pristine single bare ..." instead), each deny category
         # asserts the GRAMMAR reason (never a snapshot failure; the pin allow-noted these or denied with a
@@ -13524,7 +13524,7 @@ def _main_isolated(monitor):
         for _ct_label, _ct_cmd, _ct_want in _ct_r7:
             gexpect(_ct_label, _ct_cmd, _ct_want)
         # Round 8: printf is never a benign earlier command and echo is benign only with plain literal words; a run
-        # joined to an earlier command by '||' notes (by '&&' it denies since round 10, D-469-AND-DENY); a limiting
+        # joined to an earlier command by '||' notes (by '&&' it denies since round 10); a limiting
         # grep option is matched at any abbreviation length; a stage reads its stdin when any input operand or file
         # option names it; the rg grammar carries -./--hidden and the negations its --help names (r8-x: codex,
         # r8-c: claude).
@@ -13639,7 +13639,7 @@ def _main_isolated(monitor):
         # Round 10 (answers QA round 9): a grep directory mode is resolved in option order, so a later -d read or
         # skip undoes -r; every stdin name, file option and rg grammar entry has a pin its mutant fails; a stdin
         # path is normalised lexically; a run joined by '&&' to known-benign commands denies, by '||' notes
-        # (r9-x: codex, r9-c: claude, r9-d: decision D-469-AND-DENY).
+        # (r9-x: codex, r9-c: claude, r9-d: the decision that a '&&' join denies).
         _ct_r9 = [
             ('(gw-r9-x1.1) grep -r then -d read reads its stdin, notes',
              'pytest | grep -r -d read -m 1 x', 'allow-note'),
@@ -18528,7 +18528,7 @@ def _main_isolated(monitor):
           "inside the repo, a ref collision, an embedded-NUL or no-session cwd), when the command cannot "
           "be classified/resolved (an inline -c alias, an unrecognized flagged subcommand such as "
           "checkout-index or read-tree --reset, an unresolvable worktree), and when a non-pristine "
-          "in-scope command falls outside the D-423-NARROW closed allowlist grammar (a wrapper, "
+          "in-scope command falls outside the closed allowlist grammar (a wrapper, "
           "interpreter, eval, xargs, subshell or brace group reaching a git word; an unlisted global, "
           "-c key, leading assignment or subcommand; an unhonoured cd; or any raw-flagged unparseable "
           "command, which the fallback now denies outright with no snapshot); a provably-clean tree ALLOWS "
