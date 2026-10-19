@@ -11954,6 +11954,17 @@ def _main_isolated(monitor):
             failures.append("(lex-cost-doubt-note) gate_weakening decided {} on the doubt-comment-pipes input "
                             "instead of the checker-and-pipe note, so the row no longer runs the sink test to "
                             "the end of its scan".format(_cost_doubt_got))
+        # The note above proves the outcome, not the reach: a sink scan cut short of the text's end still
+        # gives the off-list 'wc' shape the same note within the CPU bound. Only a deny on the same long
+        # input with its terminal word swapped onto the deny list holds the scan to the input's end, so
+        # this positive is the reach check the 'wc' row is the negative control for (a scan truncated in
+        # memory to its first 1 KiB passes every check above and only this one catches it).
+        _cost_reach_cmd = "(true #'\n)\npytest |\n" + "# |\n" * (64 * 1024) + "head"
+        _cost_reach_got = _decision(aiqt_hooks.gate_weakening, _cost_reach_cmd)
+        if _cost_reach_got != "deny":
+            failures.append("(lex-cost-doubt-reach) gate_weakening decided {} on the long doubt input whose "
+                            "terminal word is on the sink deny list, instead of the fail-closed deny, so the "
+                            "sink test no longer reaches the end of its scan".format(_cost_reach_got))
         # The other scanners main's lexer helpers carry read a comment their own way, beside the lexer:
         # the continuation join keeps a backslash-newline after a '#' at a word start ('(' included) and removes
         # one after a '#' glued to a substitution's ')'; the uncertainty causes report any '#' outside quotes
@@ -13667,13 +13678,15 @@ def _main_isolated(monitor):
                 "silently",
                 "(true #'\n)\npytest", "allow")
 
-        # Behind the same unjudged '#', the raw fallback's bypass and checker probes read every spelling the
-        # parsed path reads: a clustered short -n with letters or digits after the 'n' ('-nm', '-anm',
-        # '-n3'), a long --no-verify abbreviation down to '--n' (the conservative-prefix rule), an
-        # underscore-separated checker name ('run_all_checks.sh' hits on 'checks'), and the 'clippy' and
-        # 'vet' name parts, so a hook bypass or checker shape the guard denies or notes readable never
-        # decides more quietly behind a '#' it cannot judge. The plain-commit control shows the cluster
-        # probe still needs an 'n' inside a dash cluster.
+        # Behind the same unjudged '#', the hook-bypass test is bounded and fail-closed by construction
+        # (_gate_doubt_bypass): text naming git with a subcommand that accepts --no-verify plus ANY
+        # dash-prefixed option token denies, whatever the option's spelling or ending, so no bypass
+        # spelling (a long abbreviation down to '--n' or '--no-', a cluster over any character set, a
+        # token ended by a shell operator) decides more quietly behind a '#' the guard cannot judge than
+        # it does readable. The stated cost is an over-denial, pinned by gw-dbt-nv-overdeny: a harmless
+        # option on those subcommands denies there too. The controls pin the bound the other way: a
+        # listed verb with no dash-prefixed token, and a git subcommand outside the --no-verify set,
+        # still allow.
         gexpect("(gw-dbt-nv-nm) behind the unjudged '#', a clustered -nm hook bypass denies",
                 "(true #'\n)\ngit commit -nm x", "deny")
         gexpect("(gw-dbt-nv-anm) a -anm cluster (the n after other flag letters) denies too",
@@ -13684,14 +13697,69 @@ def _main_isolated(monitor):
                 "(true #'\n)\ngit commit --no-ve", "deny")
         gexpect("(gw-dbt-nv-non) the shortest --n abbreviation denies",
                 "(true #'\n)\ngit commit --n", "deny")
-        gexpect("(gw-dbt-nv-plain) control: a commit with no bypass spelling behind the '#' allows",
-                "(true #'\n)\ngit commit -m x", "allow")
+        gexpect("(gw-dbt-nv-nodash) a bare --no- abbreviation denies",
+                "(true #'\n)\ngit commit --no-", "deny")
+        gexpect("(gw-dbt-nv-semi) an abbreviation the next ';' ends denies",
+                "(true #'\n)\ngit commit --n;true", "deny")
+        gexpect("(gw-dbt-nv-redir) an abbreviation a redirect ends denies",
+                "(true #'\n)\ngit commit --no-ve>/dev/null", "deny")
+        gexpect("(gw-dbt-nv-pipe) an abbreviation a pipe ends denies",
+                "(true #'\n)\ngit commit --no-v|cat", "deny")
+        gexpect("(gw-dbt-nv-lt) an abbreviation a '<' ends, on git am, denies",
+                "(true #'\n)\ngit am --no-v<p", "deny")
+        gexpect("(gw-dbt-nv-paren) an abbreviation a ')' ends, in a subshell, denies",
+                "(true #'\n)\n(git am --no-ve)", "deny")
+        gexpect("(gw-dbt-nv-amp) an abbreviation a '&' ends denies",
+                "(true #'\n)\ngit am --no-v&", "deny")
+        gexpect("(gw-dbt-nv-gt) an abbreviation a '>' ends denies",
+                "(true #'\n)\ngit am --no-v>o", "deny")
+        gexpect("(gw-dbt-nv-bang) a '-!n' cluster (a character off any letter-digit set) denies",
+                "(true #'\n)\ngit commit -!n", "deny")
+        gexpect("(gw-dbt-nv-dot) a '-.n' cluster denies",
+                "(true #'\n)\ngit commit -.n x", "deny")
+        gexpect("(gw-dbt-nv-uscr) a '-_n' cluster denies",
+                "(true #'\n)\ngit commit -_n x", "deny")
+        gexpect("(gw-dbt-nv-overdeny) the stated over-denial: a harmless option on a listed subcommand "
+                "denies behind the unjudged '#', since nothing there can prove any option harmless",
+                "(true #'\n)\ngit commit -m x", "deny")
+        gexpect("(gw-dbt-nv-noopt) control: a listed subcommand with no dash-prefixed token allows",
+                "(true #'\n)\ngit commit", "allow")
+        gexpect("(gw-dbt-nv-otherverb) control: a git subcommand outside the --no-verify set keeps its "
+                "option behind the '#'",
+                "(true #'\n)\ngit status -s", "allow")
+        # The checker-shaped test behind the unjudged '#' calls the parsed recognizer's own name splitter
+        # and lexicon (_gate_doubt_checker), so its boundary semantics are the splitter's: a non-ASCII
+        # letter (the dotless 'ı' below) separates name parts exactly as _name_parts_hit separates
+        # them, where a case-insensitive [a-z0-9] boundary read that letter as part of the name and
+        # missed the part. The 'latest' control pins the other side: only whole parts compare, never
+        # substrings.
         gexpect("(gw-dbt-note-uscore) an underscore-separated checker name piped to cut keeps the note",
                 "(true #'\n)\nrun_all_checks.sh | cut -c1", "allow-note")
         gexpect("(gw-dbt-note-clippy) cargo clippy piped to cut keeps the note",
                 "(true #'\n)\ncargo clippy | cut -c1", "allow-note")
         gexpect("(gw-dbt-note-vet) go vet piped to cut keeps the note",
                 "(true #'\n)\ngo vet ./... | cut -c1", "allow-note")
+        gexpect("(gw-dbt-note-uniprefix) a checker part right after a non-ASCII letter keeps the note, as "
+                "the parsed path notes the same command readable",
+                "(true #'\n)\npython3 tools/runıtest.py | cut -c1", "allow-note")
+        gexpect("(gw-dbt-note-unisuffix) a checker part right before a non-ASCII letter keeps the note too",
+                "(true #'\n)\ntools/testı.py | cut -c1", "allow-note")
+        gexpect("(gw-dbt-note-latest) control: 'latest' carries no checker part, allows",
+                "(true #'\n)\ntools/latest.py | cut -c1", "allow")
+        # The doubt tests run ONLY behind a '#' the lexer cannot judge under both readings: the plain
+        # parse-error fallback and the failed-main-reading floor keep the conservative raw probes, so
+        # these commands keep the allow the probes have always given them (each was denied while widened
+        # spelling probes ran on every fallback path, though no path here can read a bypass in them).
+        gexpect("(gw-fb-herestring) outside the doubt path, a here-string parse error with a '-name' "
+                "operand in another segment still allows",
+                "git commit -m x && find . -name z <<<y", "allow")
+        gexpect("(gw-fb-procsub) a process-substitution parse error passing '-Dname' through still allows",
+                "git commit -F <(echo \"pass -Dname through\")", "allow")
+        gexpect("(gw-fb-heredocfloor) on the failed-main-reading floor, a heredoc commit message carrying "
+                "'-Dname' still allows",
+                "git commit -m \"$(cat <<'EOF'\nPass -Dname through; don't drop it\nEOF\n)\"", "allow")
+        gexpect("(gw-fb-heredocno) the same floor with '--no' inside the quoted message body still allows",
+                "git commit -m \"$(cat <<'EOF'\nKeep --no in; don't drop it\nEOF\n)\"", "allow")
 
         # NO WEAKER THAN THE BASE COMMIT: every cannot-evaluate sink, bypass and checker-note shape above,
         # the combinations, and the off-list controls, beside the decision the base commit ac813196 gave
@@ -13729,9 +13797,27 @@ def _main_isolated(monitor):
             ("failed reading, redirects on the sink", "pytest |\nhead 2>${x:- #} 3> >(cat)", "D"),
             ("clustered -nm hook bypass", "(true #'\n)\ngit commit -nm x", "D"),
             ("'--no-ve' long abbreviation", "(true #'\n)\ngit commit --no-ve", "D"),
+            ("'--no-' abbreviation at the text's end", "(true #'\n)\ngit commit --no-", "D"),
+            ("'--n' abbreviation ended by ';'", "(true #'\n)\ngit commit --n;true", "D"),
+            ("'--no-ve' abbreviation ended by a redirect", "(true #'\n)\ngit commit --no-ve>/dev/null", "D"),
+            ("'--no-v' abbreviation ended by a pipe", "(true #'\n)\ngit commit --no-v|cat", "D"),
+            ("'--no-v' abbreviation ended by '<'", "(true #'\n)\ngit am --no-v<p", "D"),
+            ("'--no-ve' abbreviation ended by ')'", "(true #'\n)\n(git am --no-ve)", "D"),
+            ("'--no-v' abbreviation ended by '&'", "(true #'\n)\ngit am --no-v&", "D"),
+            ("'--no-v' abbreviation ended by '>'", "(true #'\n)\ngit am --no-v>o", "D"),
+            ("'-!n' cluster", "(true #'\n)\ngit commit -!n", "D"),
+            ("'-.n' cluster", "(true #'\n)\ngit commit -.n x", "D"),
+            ("'-_n' cluster", "(true #'\n)\ngit commit -_n x", "D"),
             ("underscore-named check into cut", "(true #'\n)\nrun_all_checks.sh | cut -c1", "N"),
             ("cargo clippy into cut", "(true #'\n)\ncargo clippy | cut -c1", "N"),
             ("go vet into cut", "(true #'\n)\ngo vet ./... | cut -c1", "N"),
+            ("checker part after a non-ASCII letter",
+             "(true #'\n)\npython3 tools/runıtest.py | cut -c1", "N"),
+            ("checker part before a non-ASCII letter", "(true #'\n)\ntools/testı.py | cut -c1", "N"),
+            ("over-denied harmless option", "(true #'\n)\ngit commit -m x", "A"),
+            ("control: listed verb, no dash-prefixed token", "(true #'\n)\ngit commit", "A"),
+            ("control: subcommand off the --no-verify set", "(true #'\n)\ngit status -s", "A"),
+            ("control: 'latest' into cut", "(true #'\n)\ntools/latest.py | cut -c1", "A"),
             ("control: off-list word, quoted-newline stage", "(true #'\n)\npytest | # note\nA=\"\n\" wc", "A"),
             ("control: off-list word, '2>&1'-led stage", "(true #'\n)\npytest | 2>&1 wc", "A"),
             ("control: checker with no pipe or flow", "(true #'\n)\npytest", "A"),

@@ -10781,30 +10781,23 @@ _GATE_ALTS = (
     "through a reviewed change, never bypassed for one run.")
 
 # Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct);
-# mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. The long probe
-# covers every spelling the parsed path reads as the bypass (any '--' token whose whole name, up to '=' or
-# the token's end, is a prefix of 'no-verify', the _has_long_prefix rule) plus the '--no-ver' substring,
-# which deliberately also hits '--no-verbose' (an over-deny on the unparseable path only); a distinct long
-# option ('--no-ff', '--amend') never matches, because its name runs past the probe's token end. The short
-# cluster probe requires a whitespace-preceded single-dash token, so a long option never matches, and
-# reads an 'n' ANYWHERE in the cluster ('-nm', '-anm', '-n3'): the raw text cannot bind a cluster letter
-# to a value-taking option the way the parsed path does, so a value cluster like '-mn' over-matches, the
-# safe direction.
+# mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. '--no-ver'
+# deliberately also hits '--no-verbose' (an over-deny on the unparseable path only); the short cluster
+# probe requires a whitespace-preceded single-dash token so a long option ('--amend') never matches.
+# These probes serve the plain parse-error fallback and the failed-main-reading floor, whose decisions
+# deliberately stand where they stood; behind a '#' whose comment reading the shared lexer could not
+# judge under both readings, gate_weakening takes the stricter bounded doubt tests below
+# (_gate_doubt_bypass, _gate_doubt_checker) instead of these spelling probes, so widening a spelling here
+# is never the mechanism that closes a doubt-path gap.
 _RAW_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|merge|push|pull|rebase|am)\b")
-_RAW_NOVERIFY_RE = re.compile(r"(?i)--no-ver|--n(?:o(?:-ve?)?)?(?=[=\s]|$)")
+_RAW_NOVERIFY_RE = re.compile(r"(?i)--no-ver")
 _RAW_SHORT_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|am)\b")
-_RAW_SHORT_N_RE = re.compile(r"(?:^|\s)-[A-Za-z0-9]*n")
-# The checker probe conservatively covers the broad recognizer's whole lexicon (_CHECKER_WORDS and every
-# _CHECKER_NAME_PARTS part), each counted between any non-alphanumeric boundaries exactly as
-# _NAME_SPLIT_RE splits a name ('run_all_checks.sh' hits on 'checks', 'latest' never hits on 'test'), so
-# a command the note tier marks in a readable spelling is never quieter here; a runner form needs no
-# probe of its own, since the operand that qualifies it carries a listed word or name part itself.
+_RAW_SHORT_N_RE = re.compile(r"(?:^|\s)-[A-Za-z]*n\b")
 _RAW_CHECKER_RE = re.compile(
-    r"(?i)(?<![a-z0-9])(?:pytest|tox|nox|unittest|mypy|pyright|ruff|flake8|pylint|bandit|eslint|tsc|jest|"
+    r"(?i)\b(?:pytest|tox|nox|unittest|mypy|pyright|ruff|flake8|pylint|bandit|eslint|tsc|jest|"
     r"vitest|mocha|rspec|rubocop|phpunit|phpstan|golangci-lint|staticcheck|shellcheck|hadolint|"
     r"yamllint|markdownlint|gitleaks|pre-commit|ctest|cppcheck|clang-tidy|"
-    r"tests?|selftests?|checks?|checker|lint\w*|verify|validate|audit|conformance|vet|clippy|gates?)"
-    r"(?![a-z0-9])")
+    r"tests?|selftests?|checks?|checker|lint\w*|verify|validate|audit|conformance)\b")
 _RAW_SWALLOW_RE = re.compile(r"\|\|\s*(?:true|:)(?=\s|$)")
 _RAW_TRUNCATE_RE = re.compile(r"\|\s*(?:head|tail)\b")
 # A process substitution or here-string (the lexer cannot parse either) with a head, tail or cut word: the
@@ -10833,6 +10826,49 @@ def _gate_doubt_sink(scan):
     could not judge under both readings (the comment above _GATE_DOUBT_SINK_WORD_RE)."""
     pipe = scan.find("|")
     return pipe >= 0 and _GATE_DOUBT_SINK_WORD_RE.search(scan, pipe) is not None
+
+
+# The hook-bypass test behind a '#' whose comment reading the shared lexer could not judge under both
+# readings. Like the sink test above it is fail-closed BY CONSTRUCTION, not spelling-matched: text that
+# names git with a subcommand that accepts --no-verify (commit, merge, push, pull, rebase, am) and
+# carries ANY dash-prefixed option token DENIES, because behind such a '#' nothing can bind an option to
+# that subcommand's grammar, so no dash-prefixed token can be proven harmless, and a probe that spells
+# out bypass forms (--no-verify abbreviations, -n cluster alphabets, token endings) misses the next
+# spelling it did not enumerate. An option token starts at the text's start, after whitespace or after a
+# shell operator character (; & | < > ( )) and needs one non-whitespace character after its '-', so a
+# lone '-' (a stdin operand) never matches, while '--' (the end-of-options word) does: behind the doubt
+# nothing proves the bypass sits after it. The deliberate cost is an OVER-DENIAL, stated in the
+# gate_weakening docstring and the manifest residue: behind such a '#' a harmless option on those
+# subcommands ('git commit -m x', 'git push --dry-run') also denies; put a blank before the '#' outside
+# any grouping or substitution, or drop it. The two searches run over the doubled _hash_doubt_scan text
+# independently, so the verb and the option need not share a segment: a cross-segment match only
+# over-denies, the fallback's safe direction, and each search is one linear pass. These doubt tests run
+# ONLY behind such an unjudged '#': the plain parse-error fallback and the failed-main-reading floor keep
+# the conservative spelling probes above, so a command outside the doubt path keeps its decision.
+_RAW_DOUBT_OPTION_RE = re.compile(r"(?:^|[\s;&|<>()])-\S")
+
+
+def _gate_doubt_bypass(scan):
+    """True when scan (a _hash_doubt_scan text) names git with a subcommand that accepts --no-verify and
+    carries a dash-prefixed option token anywhere (the comment above _RAW_DOUBT_OPTION_RE): the bounded
+    fail-closed hook-bypass test behind a '#' whose comment reading the shared lexer could not judge
+    under both readings."""
+    return _RAW_NOVERIFY_VERB_RE.search(scan) is not None and _RAW_DOUBT_OPTION_RE.search(scan) is not None
+
+
+def _gate_doubt_checker(scan):
+    """True when scan (a _hash_doubt_scan text) holds a checker-shaped word, judged with the parsed
+    recognizer's own name splitter and lexicon rather than a re-spelled probe: the parts _NAME_SPLIT_RE
+    leaves in the lowercased text (exactly how _name_parts_hit splits a command name, so a non-ASCII
+    letter separates here precisely as it separates there) hit on any _CHECKER_NAME_PARTS part
+    (_name_parts_hit itself) or on any _CHECKER_WORDS word, a multi-part word (pre-commit,
+    golangci-lint, clang-tidy) when every one of its parts is present. A multi-part word's parts standing
+    apart in the text can over-match, which costs the note tier's note only, the doubt path's safe
+    direction; 'latest' never hits, because only whole parts are compared."""
+    if _name_parts_hit(scan):
+        return True
+    parts = set(_NAME_SPLIT_RE.split(scan.lower()))
+    return any(all(part in parts for part in _NAME_SPLIT_RE.split(word)) for word in _CHECKER_WORDS)
 
 
 _RAW_COMMIT_MSG_GIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
@@ -11472,8 +11508,9 @@ def _gate_flow_note(records, command):
 def _gate_weakening_fallback(command):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): an apparent
     git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
-    a short -n cluster ASKS (the raw string cannot bind the cluster to its subcommand, so it cannot
-    prove the -n is the bypass rather than an unrelated flag); a checker keyword next to a raw swallow
+    a short -n cluster DENIES fail-safe too (the raw string cannot bind the cluster to its subcommand,
+    so it cannot prove the -n is the bypass rather than an unrelated flag, and it reads the cluster as
+    the bypass, the safe direction); a checker keyword next to a raw swallow
     or truncating-pipe spelling ASKS; anything else ALLOWS (the true boundary). Over-matching by
     design, the documented posture of the sibling fallbacks (_diff_source_fallback,
     _commit_identity_fallback, _protected_line_fallback): re-issue the command parseable. Which decision the
@@ -11581,10 +11618,17 @@ def gate_weakening(data):
     comment rule) is judged under both readings: the deny tier on each reading alone, everything else on the
     segments of all readings in turn. Where the lexer cannot judge it that way, text holding quoting
     _hash_doubt_scan does not decode (_hash_doubt_opaque) DENIES, a listed sink word in text that holds a
-    '|' DENIES wherever each stands (_gate_doubt_sink, fail-closed by construction over the doubled scan), the
-    raw fallback's probes read that text next, and remaining text holding a checker-shaped word and a pipe,
-    process substitution or here-string ALLOWS-WITH-NOTE, never a silent allow quieter than the note tier a
-    readable spelling of the same shape earns.
+    '|' DENIES wherever each stands (_gate_doubt_sink, fail-closed by construction over the doubled scan),
+    text naming git with a subcommand that accepts --no-verify plus ANY dash-prefixed option token DENIES
+    (_gate_doubt_bypass, fail-closed by construction: no list of bypass spellings is left for a new
+    abbreviation, cluster alphabet or token ending to escape, at the stated cost of a NEW OVER-DENIAL,
+    since a harmless option there, 'git commit -m x' behind such a '#', denies too), and remaining text
+    holding a checker-shaped word (_gate_doubt_checker, the parsed recognizer's own name splitter and
+    lexicon, called rather than re-spelled) and a pipe, process substitution or here-string
+    ALLOWS-WITH-NOTE, never a silent allow quieter than the note tier a readable spelling of the same
+    shape earns. These stricter doubt tests run ONLY on this path: the plain parse-error fallback and the
+    failed-main-reading floor keep the conservative raw probes, so a command outside the doubt path keeps
+    the decision it had.
     Where a lex read a quoted here-document's body that main's lexer reads otherwise (MAIN'S DECISION AS A
     FLOOR, above _MainHashReading), main's reading is one more reading here where it lexes. Where it fails, the
     decision of the path main's failed lex takes is a floor: the sink that main's partial lex proves past the
@@ -11637,8 +11681,8 @@ def gate_weakening(data):
         # (head, tail, grep, egrep, fgrep, rg) anywhere in text that holds a '|' may receive a verification
         # run's output past that '#' whatever stands between or around them (a blank or comment continuation
         # line, a redirect, an assignment, a quoted newline; the doubled scan makes a word before the pipe
-        # count too), so it denies fail-closed (_gate_doubt_sink); the raw fallback also reads the text with
-        # its backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan).
+        # count too), so it denies fail-closed (_gate_doubt_sink); the doubt tests below read the same text,
+        # with its backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan).
         scan = _hash_doubt_scan(command)
         if _gate_doubt_sink(scan):
             return _deny(
@@ -11649,15 +11693,28 @@ def gate_weakening(data):
                 _GATE_ALTS,
                 "AIQT guardrail: denied a possible verification run piped into a truncating sink behind a '#' "
                 "this guard could not read (rule gatdis, fail-closed).")
-        # The raw fallback's own probes decide next: a bypass spelling denies and a swallow shape notes.
-        # What remains is still text this guard cannot evaluate: where it holds a checker-shaped word and a
-        # pipe, a process substitution or a here-string, a stage that keeps only part of a check's output
+        # The bounded hook-bypass test decides next (_gate_doubt_bypass): behind such a '#' nothing can
+        # bind an option to its subcommand's grammar, so text naming git with a subcommand that accepts
+        # --no-verify plus any dash-prefixed option token denies fail-closed, rather than matching bypass
+        # spellings a new abbreviation, cluster alphabet or token ending could escape (the stated
+        # over-denial: a harmless option there denies too).
+        if _gate_doubt_bypass(scan):
+            return _deny(
+                _hash_doubt_reason("gatdis (gate-discipline)", "its text names git with a subcommand that "
+                                   "accepts --no-verify (commit, merge, push, pull, rebase or am) and "
+                                   "carries a dash-prefixed option this guard cannot bind to that "
+                                   "subcommand's grammar past that '#', so a verification-hook bypass "
+                                   "spelling cannot be ruled out") + " " +
+                _GATE_ALTS,
+                "AIQT guardrail: denied a git call that could bypass verification hooks behind a '#' this "
+                "guard could not read (rule gatdis, fail-closed).")
+        # What remains is still text this guard cannot evaluate: where it holds a checker-shaped word
+        # (_gate_doubt_checker, the parsed recognizer's own name splitter and lexicon, so a swallow or
+        # truncating spelling behind the '#' pairs through its own '|', '<<<' or substitution marker) and
+        # a pipe, a process substitution or a here-string, a stage that keeps only part of a check's output
         # cannot be ruled out past that '#', so the command keeps at least the note the broad tier gives a
         # readable spelling of the same shape, never a silent allow; text with no such pairing allows.
-        kind = _gate_weakening_fallback_kind(scan)
-        if kind is not None:
-            return _gate_weakening_fallback(scan)
-        if _RAW_CHECKER_RE.search(scan) and ("|" in scan or _RAW_FLOW_RE.search(scan)):
+        if _gate_doubt_checker(scan) and ("|" in scan or _RAW_FLOW_RE.search(scan)):
             return _allow_note(
                 "AIQT guardrail (rule gatdis, gate-discipline): this command carries a '#' whose comment "
                 "reading depends on context that the shared lexer could not judge under both readings, and "
