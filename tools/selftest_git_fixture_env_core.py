@@ -50,7 +50,8 @@ from selftest_git_fixture_env import (  # noqa: E402
     CANNOT_EVALUATE, CHECKS_MANIFEST, CONFIG_EXCLUSIONS, CONFIG_MEMBER_BOUNDS,
     CONFIG_MEMBER_BOUND_DEFAULT, CONFIG_MEMBER_DRAIN_SECONDS, CONFIG_MEMBER_REAP_SECONDS,
     CORPUS_SELFTEST, LANE_RETURN_EXPECTED, MAIN_VERDICT_EXPECTED, POISON_VARS, ROOT, SENTINEL,
-    _CLOSE_PROBE_CHILD,
+    SIZING_ACCOUNT_ROSTER, SIZING_ACCOUNT_TIMED, SIZING_LATER_MEASURED, SIZING_MALFORMED_MEASURED,
+    SIZING_MEASURED, _CLOSE_PROBE_CHILD,
     _CLOSE_SWEEP_CHILD, _DELIBERATE_EMPTY_SEND, _GROUP_MEMBER_FIXTURE, _LIFECYCLE_GRAPH_FIXTURE,
     _MEMBERS, _STATE_EVIDENCE, _SWEEP_MODES, _SWEEP_REACHED, _SWEEP_WANT, _allowlist_producers,
     _archive_reads_use_caller_env, _auto_maintenance_children, _binding_calls, _build_decoy,
@@ -61,7 +62,8 @@ from selftest_git_fixture_env import (  # noqa: E402
     _member_group_empty, _member_timeout_timely, _opf_lifecycle_delegates, _oracle_down_sites,
     _partial_timeout_cause, _pid_state, _pidfd_group_signal_supported, _poison_environ,
     _recorded_states, _registered_offenders, _registered_selftests, _release_member_group,
-    _run_bounded, _run_config_member, _run_corpus, _run_corpus_imported, _scan_contract_failures,
+    _roster_figures, _run_bounded, _run_config_member, _run_corpus, _run_corpus_imported,
+    _scan_contract_failures,
     _scenario_timeout_record, _scrub_scoped_first, _slow_control_record, _snapshot_git_dir,
     _stood_down_wants, _stop_member_group, _sweep_call_sites, _sweep_observed, _system_pin_probe,
     _timeout_cause, _verdict)
@@ -1873,27 +1875,207 @@ def _member_bound_checks(roster):
     _run_bounded (a stub patched into the engine module records it; nothing is launched), for
     every override and for one non-member argv that keeps the default (red when the lookup is
     bypassed).
-    config/member-roster-figures: the sizing comment's roster figures hold against the live
-    roster (112 members, 110 in the malformed lane) and, with the sizing account's fixed
-    coverage (89 members timed or bounded, ten measured under the malformed lane), the derived
-    figures (23 members with no recorded time, 100 malformed-lane members unmeasured); red when
-    a roster change leaves that comment stale."""
+    config/member-roster-figures: the frozen sizing account (SIZING_ACCOUNT_ROSTER,
+    SIZING_ACCOUNT_TIMED, SIZING_MEASURED and SIZING_MALFORMED_MEASURED in the engine) still
+    applies to the live roster (_roster_figures reports no problem), keeps its sizes, and keeps
+    its exact content (a digest of those four frozen constants is pinned, so swapping one frozen
+    entry for another of the same size is refused). The figures _roster_figures derives are
+    printed, with one line per member outside the account, and not pinned, so registering a
+    member needs no edit here or in the engine's sizing comment.
+    config/member-roster-oracle: the live figures equal this check's own derivation from the
+    roster and the frozen constants, computed here rather than taken from _roster_figures but
+    not independent of it: every expression except members mirrors the derivation's (red when
+    a derived figure drifts, since the relative vectors below shift actual and expected
+    together and cannot see a constant offset; blind to a formula error shared with the
+    derivation, which the synthetic vector covers for its own inputs).
+    config/member-roster-synthetic: a five-member synthetic account and roster produce figures
+    pinned here as hand-counted literals (red when a derived figure drifts on those inputs,
+    including by an error the oracle recomputation shares; an error that shows only on other
+    inputs, such as a later measurement of an account member, is left to the relative vectors
+    below).
+    Each config/member-roster-* vector runs _roster_figures over a changed roster or table
+    (nothing is launched). -added: a member registered after the account raises every derived
+    figure by one, the two malformed-lane figures only when it is in that lane, and stays green
+    (red when such a member is refused, not counted, or counted in a lane it is excluded from).
+    -account-removed: an account member no longer registered is refused (red when that rule is
+    dropped). -later-removed: a member outside the account no longer registered lowers every
+    derived figure by one and stays green (red when the whole live roster is pinned); when the
+    live roster has no removable member outside the account, a synthetic one is added and then
+    removed, so an account-only roster stays green too.
+    -measured-lane-changed: a measured member moved into or out of the malformed lane is refused
+    (red when either direction is dropped). -bound-unmeasured: a bound on a member with no
+    measurement behind it is refused (red when the bound rule is dropped).
+    -bound-later-measured: the same bound with a SIZING_LATER_MEASURED citation stays green and
+    counts as a recorded time (red when the bound rule ignores that table).
+    -account-later-measured: a citation for an account member (tools/check_secrets.py
+    --self-test, which the check pins as in the malformed lane and outside
+    SIZING_MALFORMED_MEASURED) stays green and changes no figure (red when such a citation
+    lowers the count of members with no recorded time or of malformed-lane members not
+    measured in that lane).
+    -later-measurement-refused: a citation for an unregistered member, a blank one, and one
+    holding a line boundary are each refused. The boundaries tested are LF, CR, a CR LF pair,
+    VT, FF, FS, GS, RS, NEL and U+2029, each inside the line, and U+2028 at the end of the line,
+    which the padding must turn into a split (red when the stale rule or the blank rule is
+    dropped, when any one of those ten characters is no longer refused, when the padding after
+    the citation is dropped, or when CR LF pairs are stripped before the split).
+    -measured-outside-account: a measured member outside the account and a malformed-lane
+    measurement outside SIZING_MEASURED are each refused (red when either rule is dropped)."""
+    import hashlib
     from unittest.mock import patch
-
-    malformed = {argv for argv in roster
-                 if _command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"]}
-    # 89 and 10 are the sizing account's fixed coverage (see the SIZING comment above
-    # CONFIG_MEMBER_BOUND_DEFAULT in the engine); the roster counts are live, so a roster change
-    # turns that comment's figures (112, 110, 23 and 100) red here.
-    check("config/member-roster-figures",
-          (len(roster), len(malformed), len(roster) - 89, len(malformed) - 10),
-          (112, 110, 23, 100))
 
     record = ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert")
     opf_selftest = ("opf/tools/opf.py", "--self-test")
     adopt_observe = ("opf/tools/_opf_adopt_observe.py", "--self-test")
     release_delta = ("tools/check_release_delta.py", "--self-test")
     opf_init = ("opf/tools/check_opf_init.py", "--self-test")
+
+    figures, problems = _roster_figures(roster)
+    print("CONFIG ROSTER FIGURES: {} members, {} in the malformed lane, {} outside the sizing"
+          " account, {} with no recorded time, {} malformed-lane members not measured in that"
+          " lane".format(figures["members"], figures["malformed"], len(figures["later"]),
+                         figures["no_recorded_time"], figures["malformed_unmeasured"]),
+          flush=True)
+    for argv in figures["later"]:
+        citation = SIZING_LATER_MEASURED.get(argv)
+        print("CONFIG ROSTER OUTSIDE SIZING ACCOUNT: " + " ".join(argv)
+              + ("" if citation is None else " (measured later: {})".format(citation)),
+              flush=True)
+    frozen = repr((sorted(SIZING_ACCOUNT_ROSTER), SIZING_ACCOUNT_TIMED, sorted(SIZING_MEASURED),
+                   sorted(SIZING_MALFORMED_MEASURED)))
+    check("config/member-roster-figures",
+          (problems, len(SIZING_ACCOUNT_ROSTER), SIZING_ACCOUNT_TIMED, len(SIZING_MEASURED),
+           len(SIZING_MALFORMED_MEASURED), hashlib.sha256(frozen.encode("utf-8")).hexdigest()),
+          ([], 101, 89, 11, 10,
+           "bcddd3095821382d212e55807556964425b56e99600eff248aa87ee4b3fd0902"))
+    # The oracle recomputes every live figure from the roster and the frozen constants, so an
+    # expectation no longer inherits a drifted figure through the baseline above. It is not an
+    # independent derivation: every expression but members mirrors _roster_figures's, so an
+    # error shared with the derivation passes here and is left to the hand-counted synthetic
+    # vector and the relative vectors below, each of which sees only its own inputs. members is
+    # derived by a different route (account size plus members outside it; the account is fully
+    # registered whenever problems is empty, which the figures check pins).
+    lane = {argv for argv in roster
+            if _command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"]}
+    outside = sorted(set(roster) - SIZING_ACCOUNT_ROSTER)
+    check("config/member-roster-oracle", figures,
+          {"members": len(SIZING_ACCOUNT_ROSTER) + len(outside), "malformed": len(lane),
+           "later": outside,
+           "no_recorded_time": len(SIZING_ACCOUNT_ROSTER) - SIZING_ACCOUNT_TIMED
+           + len([argv for argv in outside if argv not in SIZING_LATER_MEASURED]),
+           "malformed_unmeasured": len(lane - SIZING_MALFORMED_MEASURED)})
+    # A synthetic account whose figures are pinned as hand-counted literals: a, b and c are the
+    # account (a and b timed and measured, a measured in the malformed lane, b excluded from it,
+    # c unmeasured), d and e registered later (e measured later and carrying a bound).
+    a, b, c, d, e = (("tools/check_secrets.py", "--self-test", "--synthetic-" + name)
+                     for name in ("alpha", "beta", "gamma", "delta", "epsilon"))
+    with patch.object(_gfe, "SIZING_ACCOUNT_ROSTER", frozenset({a, b, c})), \
+            patch.object(_gfe, "SIZING_ACCOUNT_TIMED", 2), \
+            patch.object(_gfe, "SIZING_MEASURED", frozenset({a, b})), \
+            patch.object(_gfe, "SIZING_MALFORMED_MEASURED", frozenset({a})), \
+            patch.dict(SIZING_LATER_MEASURED, {e: "Synthetic later measurement."}, clear=True), \
+            patch.dict(CONFIG_MEMBER_BOUNDS, {e: 1800}, clear=True), \
+            patch.dict(CONFIG_EXCLUSIONS["malformed"],
+                       {b: "Synthetic malformed-lane exclusion."}, clear=True):
+        synthetic = _roster_figures({a, b, c, d, e})
+    check("config/member-roster-synthetic", synthetic,
+          ({"members": 5, "malformed": 4, "later": [d, e], "no_recorded_time": 2,
+            "malformed_unmeasured": 3}, []))
+
+    def shifted(step, member, recorded=False, lane=True, base=None):
+        # The figures (base, the live ones by default) with member registered (step 1) or
+        # unregistered (step -1), for a member outside the account, in the malformed lane unless
+        # lane is false, and with no recorded time unless recorded is set.
+        base = figures if base is None else base
+        later = sorted([argv for argv in base["later"] if argv != member]
+                       + ([member] if step > 0 else []))
+        in_lane = step if lane else 0
+        return ({"members": base["members"] + step,
+                 "malformed": base["malformed"] + in_lane, "later": later,
+                 "no_recorded_time": base["no_recorded_time"] + (0 if recorded else step),
+                 "malformed_unmeasured": base["malformed_unmeasured"] + in_lane}, [])
+
+    probe = ("tools/check_secrets.py", "--self-test", "--roster-probe")
+    added = _roster_figures(roster | {probe})
+    with patch.dict(CONFIG_EXCLUSIONS["malformed"],
+                    {probe: "Synthetic malformed-lane exclusion."}):
+        added_excluded = _roster_figures(roster | {probe})
+    check("config/member-roster-added", [added, added_excluded],
+          [shifted(1, probe), shifted(1, probe, lane=False)])
+    secrets = ("tools/check_secrets.py", "--self-test")
+    check("config/member-roster-account-removed", _roster_figures(roster - {secrets})[1],
+          ["sizing account member not registered: {!r}".format(secrets)])
+    # Remove a live member outside the account, in the malformed lane and with no later
+    # measurement; a roster with no such member (every member in the account, measured later or
+    # excluded) falls back to adding a synthetic one and removing that, so the check stays green
+    # there instead of going red with nothing to remove.
+    removed = next((argv for argv in figures["later"]
+                    if _command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"]
+                    and argv not in SIZING_LATER_MEASURED),
+                   ("tools/check_secrets.py", "--self-test", "--roster-removal-probe"))
+    check("config/member-roster-later-removed", _roster_figures((roster | {removed}) - {removed}),
+          shifted(-1, removed, base=_roster_figures(roster | {removed})[0]))
+
+    with patch.dict(CONFIG_EXCLUSIONS["malformed"],
+                    {opf_selftest: "Synthetic malformed-lane exclusion."}):
+        moved_out = _roster_figures(roster)[1]
+    with patch.dict(CONFIG_EXCLUSIONS["malformed"],
+                    {argv: reason for argv, reason in CONFIG_EXCLUSIONS["malformed"].items()
+                     if argv != release_delta}, clear=True):
+        moved_in = _roster_figures(roster)[1]
+    check("config/member-roster-measured-lane-changed", [moved_out, moved_in],
+          [["malformed-lane membership changed on a measured member: {!r}".format(argv)]
+           for argv in (opf_selftest, release_delta)])
+
+    later_probe = ("tools/check_secrets.py", "--self-test", "--later-measurement-probe")
+    with patch.dict(CONFIG_MEMBER_BOUNDS, {later_probe: 3600}):
+        unmeasured = _roster_figures(roster | {later_probe})[1]
+    check("config/member-roster-bound-unmeasured", unmeasured,
+          ["bound with no measurement behind it: {!r}".format(later_probe)])
+    with patch.dict(CONFIG_MEMBER_BOUNDS, {later_probe: 3600}), patch.dict(
+            SIZING_LATER_MEASURED, {later_probe: "Synthetic later measurement."}):
+        later_measured = _roster_figures(roster | {later_probe})
+    check("config/member-roster-bound-later-measured", later_measured,
+          shifted(1, later_probe, recorded=True))
+    # A later measurement of an account member changes no figure: the account does not name its
+    # members with no recorded time, so a citation cannot take one off that count, and the count
+    # of malformed-lane members not measured there reflects only the account's malformed-lane run.
+    # The member must sit in that lane outside SIZING_MALFORMED_MEASURED for the second count to
+    # be able to move, so both facts are pinned with the figures.
+    with patch.dict(SIZING_LATER_MEASURED, {secrets: "Synthetic later measurement."}):
+        account_later = _roster_figures(roster)
+    check("config/member-roster-account-later-measured",
+          (account_later, _command_identity(secrets) not in CONFIG_EXCLUSIONS["malformed"],
+           secrets in SIZING_MALFORMED_MEASURED),
+          ((figures, []), True, False))
+    refused = []
+    for changed, citation in ((roster, "Synthetic later measurement."),
+                              (roster | {later_probe}, " "),
+                              (roster | {later_probe}, "Synthetic\nlater measurement."),
+                              (roster | {later_probe}, "Synthetic\rlater measurement."),
+                              (roster | {later_probe}, "Synthetic\r\nlater measurement."),
+                              (roster | {later_probe}, "Synthetic\x0blater measurement."),
+                              (roster | {later_probe}, "Synthetic\x0clater measurement."),
+                              (roster | {later_probe}, "Synthetic\x1clater measurement."),
+                              (roster | {later_probe}, "Synthetic\x1dlater measurement."),
+                              (roster | {later_probe}, "Synthetic\x1elater measurement."),
+                              (roster | {later_probe}, "Synthetic\x85later measurement."),
+                              (roster | {later_probe}, "Synthetic\u2029later measurement."),
+                              (roster | {later_probe}, "Synthetic later measurement.\u2028")):
+        with patch.dict(SIZING_LATER_MEASURED, {later_probe: citation}):
+            refused.append(_roster_figures(changed)[1])
+    check("config/member-roster-later-measurement-refused", refused,
+          [["stale or unreasoned later measurement: {!r}".format(later_probe)]] * 13)
+
+    # _roster_figures reads the engine's SIZING_* names, so the frozen sets are patched there.
+    with patch.object(_gfe, "SIZING_MEASURED", SIZING_MEASURED | {later_probe}), patch.object(
+            _gfe, "SIZING_MALFORMED_MEASURED", SIZING_MALFORMED_MEASURED | {later_probe}):
+        outside = _roster_figures(roster)[1]
+    with patch.object(_gfe, "SIZING_MALFORMED_MEASURED", SIZING_MALFORMED_MEASURED | {secrets}):
+        unmatched = _roster_figures(roster)[1]
+    check("config/member-roster-measured-outside-account", [outside, unmatched],
+          [["measured member outside the sizing account: {!r}".format(later_probe)],
+           ["malformed-lane measurement outside SIZING_MEASURED: {!r}".format(secrets)]])
+
     overrides = {record: 5100, opf_selftest: 3600, adopt_observe: 1800, release_delta: 1800,
                  opf_init: 1800}
     check("config/member-bound-table",
