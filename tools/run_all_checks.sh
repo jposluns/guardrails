@@ -72,6 +72,8 @@ run_gate "portability-selftest" python3 -I -B tools/check_portability.py --self-
 run_gate "portability" python3 -I -B tools/check_portability.py
 run_gate "derived-command-parameters-selftest" python3 -I -B tools/check_derived_command_parameters.py --self-test
 run_gate "derived-command-parameters" python3 -I -B tools/check_derived_command_parameters.py
+run_gate "relied-exit-pipes-selftest" python3 -I -B tools/check_relied_exit_pipes.py --self-test
+run_gate "relied-exit-pipes" python3 -I -B tools/check_relied_exit_pipes.py
 run_gate "dashes"    python3 -I -B tools/check_no_dashes.py
 run_gate "dashes-selftest" python3 -I -B tools/check_no_dashes.py --self-test
 run_gate "dashes-default-parity" python3 -I -B tools/check_no_dashes.py --default-parity

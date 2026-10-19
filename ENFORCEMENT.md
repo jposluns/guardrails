@@ -43,7 +43,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | A check fails closed on input it cannot read | `chkfcl` | None | Enforcement has not been built yet. |
 | Commit identity | `cmtidn` | Enforced | `hook:commit-identity`, class b |
 | Bind to the explicit target, not the ambient context | `expbnd` | Enforced | `hook:git-discard`, class b; `hook:git-explicit-binding`, class b; `hook:git-stash-ref`, class b; `hook:orch-dispatch-ledger`, class c |
-| Gate discipline | `gatdis` | Enforced | `gate:ci-parity`, class c; `hook:gate-weakening-guard`, class b |
+| Gate discipline | `gatdis` | Enforced | `gate:ci-parity`, class c; `gate:relied-exit-pipes`, class c; `hook:gate-weakening-guard`, class b |
 | A generated artefact is changed only through its source | `gensrc` | Enforced | `gate:adapters-drift`, class a; `gate:agents-drift`, class a; `gate:changelog-drift`, class a; `gate:char-policy-drift`, class a; `gate:claude-drift`, class a; `gate:crosswalk-schema-drift`, class a; `gate:cursor-drift`, class a; `gate:disclosure-drift`, class a; `gate:enforceability-drift`, class a; `gate:enforcement-register-drift`, class a; `gate:first-pin-demo-drift`, class a; `gate:gensrc-failclose`, class a; `gate:gensrc-registry-drift`, class a; `gate:hooks-drift`, class a; `gate:install-drift`, class a; `gate:manifest-gen-drift`, class a; `gate:mappings-page-drift`, class a; `gate:notice-drift`, class a; `gate:reference-roster-drift`, class a; `gate:renderers-drift`, class a; `gate:roadmap-drift`, class a; `gate:rules-drift`, class a; `gate:secret-patterns-drift`, class a; `gate:skill-drift`, class a; `gate:worker-pack-drift`, class a; `hook:gensrc-edit-guard`, class c |
 | Verify licence compatibility before introducing third-party material | `liccmp` | None | Enforcement has not been built yet. |
 | No concealed failure | `nocncl` | Enforced | `hook:orch-truncation-guard`, class b |
@@ -562,6 +562,20 @@ Technical limits (from the enforcement ledger):
 
 ```
 A byte-identity drift gate over the artefact tools/gen_reference_facts.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.
+```
+
+### `gate:relied-exit-pipes`
+
+- Platform: `ci`
+- Default: `block`
+- Entry point: `tools/check_relied_exit_pipes.py`
+- Class: `c`
+- Channel: `repository gate`
+
+Technical limits (from the enforcement ledger):
+
+```
+An adopter-parameterized scan that flags an adopter-declared RELIED-ON command (a producer whose own termination status is the evidence later steps rest on) sitting in a NON-FINAL stage of a shell pipeline, at top level or inside a $( ) or backquote substitution body, in a declared script surface: the pipe reports the last stage's status, so the relied-on exit is discarded (gatdis: a verdict-bearing exit is taken only from a construct that faithfully propagates it). It ships NO command, subcommand or path of its own: with no .aiqt/relied-exit-pipes.toml it is NOT APPLICABLE, and a present but unusable configuration fails closed (exit 2), as does a declared selector matching nothing in its surface, a symlinked or non-UTF-8 surface, a declared command inside shell it cannot parse (an unquoted heredoc, a here-string, a process substitution, an unterminated construct), and a declared command inside the raw text of an sh -c, bash -c or eval argument. Two exemptions clear a flagged pipeline: an earlier top-level set that provably turns pipefail on (set -o pipefail, or a cluster such as -euo pipefail) with no set +o pipefail at any level in between, and a top-level pipeline whose very next simple command reads that stage's PIPESTATUS index or saves the whole array. VERIFIED PREMISES: bash 5.3 was observed propagating an enabled pipefail into $( ) and backquote command substitutions, so the pipefail exemption extends into substitution bodies; dash lists pipefail in its option table only from release 0.5.12 (observed in that release's binary; POSIX Issue 8 adds pipefail), and an older dash rejects the set line itself as an illegal option, failing the script there rather than running on with pipefail silently off. It covers a recognizable SUBSET (class c, partial), residuals disclosed, not chased: which shell actually runs a file is not proven; pipefail inherited from BASH_ENV, SHELLOPTS, a sourced file, the caller's bash -o pipefail or shopt -so is not credited, so the gate can over-fire there (the fix is a spelled-out top-level set -o pipefail); a function, alias or variable that renames the tool, and a relied-on command the adopter did not declare, slip it; status masking that is not a pipe (|| true, ; true, set +e, a backgrounded command, a local x=$(...) assignment) belongs to gatdis and its hook, not here; contexts where set -e is suppressed (conditions, AND/OR lists) are not modelled; the PIPESTATUS read is checked lexically only, never that the script acts on the value; a tool that refuses work but exits 0 is invisible to any exit reader; and non-shell surfaces (Python shell=True, Makefiles, YAML run blocks) are outside it.
 ```
 
 ### `gate:renderers-drift`
