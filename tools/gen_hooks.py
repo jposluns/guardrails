@@ -18,6 +18,18 @@ non-blocking `warn` legal only on a WARN_EVENTS event (PostToolUse, UserPromptSu
 SubagentStop, SessionStart) or under an explicit bake stage, the named handler must exist in the
 source script, and `residue` must be non-empty, so a typo can never silently no-op an enforcement
 control.
+
+Per-hook timeout and derived onFailure, OFF by default. A [[hook]] may author an optional integer
+`timeout` (TIMEOUT_MIN to TIMEOUT_MAX seconds), and the [plugin] table may author
+`claude-code-min-version` plus the render switch `on-failure-render`. While the switch is false or
+absent (this repository's current setting), NEITHER an authored per-hook timeout NOR any onFailure key
+is rendered, so the emitted hooks.json stays byte-identical to the pre-switch output. The switch ships
+off because how a client older than 2.1.295 treats the unknown onFailure key in hooks.json is
+unverified (it could ignore the key, warn, reject that entry, or reject the whole file, and the last
+would silently disable every hook, a fail-open regression). With the switch on, exactly the
+enforce-stage PreToolUse hooks whose default is "block" render "onFailure": "block" plus their
+configured timeout; a warn hook never carries it, and no Stop, TeammateIdle or other non-PreToolUse
+hook ever carries it.
   gen_hooks.py             regenerate the plugin surface
   gen_hooks.py --check     fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
   gen_hooks.py --self-test build synthetic trees and assert the generator's own fail-closed invariants
@@ -78,9 +90,14 @@ NONBLOCK_EVENTS = {"SessionStart"}  # the platform cannot block these: default m
 STAGES = {"bake", "enforce"}  # stage is optional authoring metadata; absent means "enforce"
 
 HOOK_KEYS = {"id", "rules", "platform", "event", "matcher", "handler", "default", "class", "residue",
-             "stage"}
-REQUIRED_HOOK_KEYS = HOOK_KEYS - {"matcher", "stage"}
+             "stage", "timeout"}
+REQUIRED_HOOK_KEYS = HOOK_KEYS - {"matcher", "stage", "timeout"}
 PLUGIN_KEYS = ("name", "version", "description", "author-name", "author-email", "homepage")
+# Optional [plugin] keys. claude-code-min-version records the oldest client version whose documented
+# onFailure semantics the authored fields rely on; on-failure-render gates whether the per-hook timeout
+# and the derived onFailure block are rendered at all (false or absent: the legacy byte-identical
+# output, this repository's current posture; see the module docstring for why it ships off).
+PLUGIN_OPTIONAL_KEYS = ("claude-code-min-version", "on-failure-render")
 PLATFORMS = {"claude-code"}
 DEFAULTS = {"block", "warn"}  # no-ask posture: "ask" is not a permitted default
 CLASSES = {"a", "b", "c", "d"}
@@ -88,7 +105,16 @@ SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")     # a stable kebab-case control id
 CID_RE = re.compile(r"^[a-z0-9]{6,}$")        # a corpus-id (matches gen_rules' own shape)
 HANDLER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
-TIMEOUT = 10  # seconds the platform gives each hook command; the one source of the hook's deadline
+TIMEOUT = 10  # default seconds the platform gives each hook command; while on-failure-render is off,
+# the one source of every hook's deadline (an authored per-hook timeout renders only with the switch on)
+TIMEOUT_MIN, TIMEOUT_MAX = 1, 600  # the accepted range of an authored per-hook timeout, in seconds
+# onFailure is DERIVED, never authored: with the on-failure-render switch on, "onFailure": "block" is
+# rendered exactly when the event is in ONFAILURE_EVENTS, the default is "block" and the stage is
+# "enforce"; never for a warn hook, and never on Stop or TeammateIdle, where the documented behaviour
+# does not apply. The platform hooks documentation (the source of the 2.1.295 floor): "an onFailure:
+# block setting (client 2.1.295 and later) turns a timeout, crash, bad exit or invalid JSON into a
+# block"; without it, a timed-out PreToolUse command hook does not block the tool call.
+ONFAILURE_EVENTS = ("PreToolUse",)
 # The dispatcher mirrors TIMEOUT as HOOK_TIMEOUT_SECONDS and derives its PreToolUse deadline from that
 # mirror as PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - <margin>, so main() fails closed (exit 2) with
 # a named reason before the platform's timeout. check_deadline refuses a mirror that differs from TIMEOUT,
@@ -145,13 +171,20 @@ def load_manifest(path):
     plugin = data.get("plugin")
     if not isinstance(plugin, dict):
         raise ValueError("{}: a [plugin] table is required".format(path.name))
-    p_extra = set(plugin) - set(PLUGIN_KEYS)
+    p_extra = set(plugin) - set(PLUGIN_KEYS) - set(PLUGIN_OPTIONAL_KEYS)
     if p_extra:
         raise ValueError("{}: unknown [plugin] key(s): {}".format(path.name, ", ".join(sorted(p_extra))))
     for key in PLUGIN_KEYS:
         _req_str(plugin, key, "{}: [plugin]".format(path.name))
     if not SEMVER_RE.match(plugin["version"]):
         raise ValueError("{}: [plugin] version must be SemVer (MAJOR.MINOR.PATCH)".format(path.name))
+    if "claude-code-min-version" in plugin:
+        minver = plugin["claude-code-min-version"]
+        if not isinstance(minver, str) or not SEMVER_RE.match(minver):
+            raise ValueError("{}: [plugin] claude-code-min-version must be a SemVer string "
+                             "(MAJOR.MINOR.PATCH)".format(path.name))
+    if "on-failure-render" in plugin and not isinstance(plugin["on-failure-render"], bool):
+        raise ValueError("{}: [plugin] on-failure-render must be a TOML boolean".format(path.name))
     hooks = data.get("hook")
     if not isinstance(hooks, list) or not hooks:
         raise ValueError("{}: at least one [[hook]] entry is required".format(path.name))
@@ -212,6 +245,14 @@ def load_manifest(path):
         if event in NONBLOCK_EVENTS and default != "warn":
             raise ValueError("{}: event {} cannot block at the platform, so default must be 'warn' "
                              "(a block/ask claim there is an overclaim)".format(where, event))
+        if "timeout" in hook:
+            timeout = hook["timeout"]
+            # bool is checked first: a TOML true parses as a Python bool, which is an int subclass and
+            # would otherwise pass as 1, a silently wrong one-second deadline.
+            if isinstance(timeout, bool) or not isinstance(timeout, int) or \
+                    not TIMEOUT_MIN <= timeout <= TIMEOUT_MAX:
+                raise ValueError("{}: timeout must be an integer from {} to {} seconds, got {!r}"
+                                 .format(where, TIMEOUT_MIN, TIMEOUT_MAX, timeout))
         if _req_str(hook, "class", where) not in CLASSES:
             raise ValueError("{}: class must be the EN-5 letter a/b/c/d".format(where))
         _req_str(hook, "residue", where)  # required, never empty: the control's honest coverage gap
@@ -297,7 +338,7 @@ def check_deadline(script_text):
                              .format(SCRIPT_NAME, name, line, bindings or "none"))
 
 
-def render_hooks_json(hooks):
+def render_hooks_json(hooks, on_failure_render=False):
     """The plugin hooks.json, deterministic: events in KNOWN_EVENTS order, entries sorted by id,
     json.dumps(indent=2) plus a trailing newline. Shape per the doc-confirmed plugin schema:
     {description, hooks: {<Event>: [{matcher?, hooks: [{type, command, args, timeout}]}]}}; the command
@@ -305,16 +346,27 @@ def render_hooks_json(hooks):
     matcher is omitted for non-tool events. Every launcher runs isolated: args[0] is "-I" (Python's
     isolated mode), placed before the script path, so a file written beside the dispatcher cannot
     shadow a standard-library import and silently neuter the hook. The generator asserts this invariant
-    in its --self-test, and the check_python_launcher_isolation gate re-checks the rendered surface."""
+    in its --self-test, and the check_python_launcher_isolation gate re-checks the rendered surface.
+    With on_failure_render false (the default, and this repository's current [plugin] setting) the
+    output is byte-identical to the pre-switch render: every launcher carries the default TIMEOUT and
+    no onFailure key, whatever a hook authors. With it true, each launcher carries its configured
+    timeout, and exactly the enforce-stage PreToolUse hooks whose default is "block" also carry
+    "onFailure": "block" (never a warn hook, never any other event)."""
     events = {}
     for hook in sorted(hooks, key=lambda h: (KNOWN_EVENTS.index(h["event"]), h["id"])):
         entry = {}
         if "matcher" in hook:
             entry["matcher"] = hook["matcher"]
-        entry["hooks"] = [{"type": "command",
-                           "command": "python3",
-                           "args": ["-I", SCRIPT_PLUGIN_PATH, hook["handler"]],
-                           "timeout": TIMEOUT}]
+        launcher = {"type": "command",
+                    "command": "python3",
+                    "args": ["-I", SCRIPT_PLUGIN_PATH, hook["handler"]],
+                    "timeout": TIMEOUT}
+        if on_failure_render:
+            launcher["timeout"] = hook.get("timeout", TIMEOUT)
+            if (hook["event"] in ONFAILURE_EVENTS and hook["default"] == "block"
+                    and hook.get("stage", "enforce") == "enforce"):
+                launcher["onFailure"] = "block"
+        entry["hooks"] = [launcher]
         events.setdefault(hook["event"], []).append(entry)
     obj = {"description": "AIQT Guardrails mechanical-enforcement hooks, generated from "
                           ".aiqt/core/hooks/manifest.toml by tools/gen_hooks.py; do not hand-edit.",
@@ -349,7 +401,7 @@ def build_desired(root, src_dir):
         raise ValueError("{} is empty".format(script_src))
     cross_check(hooks, corpus_ids, script_text, manifest_path.name)
     check_deadline(script_text)
-    return {HOOKS_JSON_REL: render_hooks_json(hooks),
+    return {HOOKS_JSON_REL: render_hooks_json(hooks, plugin.get("on-failure-render", False)),
             SCRIPT_REL: script_text,
             PLUGIN_JSON_REL: render_plugin_json(plugin)}
 
@@ -445,7 +497,19 @@ def main():
 #      TIMEOUT, that lacks either deadline line, or that binds either name a second time (in any form, or
 #      with the budget line only inside a string) fails closed (exit 2), while reading the budget is
 #      accepted, and the margin is accepted from DEADLINE_MIN_MARGIN up to just below TIMEOUT and refused
-#      just outside either end.
+#      just outside either end,
+#  17. the optional per-hook `timeout` validates fail-closed: accepted only as an integer from
+#      TIMEOUT_MIN to TIMEOUT_MAX (each end tested just inside, exactly at, and just outside), with a
+#      bool, a string and a float each refused (exit 2); a non-boolean [plugin] on-failure-render and a
+#      non-SemVer claude-code-min-version are refused too,
+#  18. with on-failure-render false or absent, an authored per-hook timeout and the optional [plugin]
+#      keys change NOTHING: hooks.json renders byte-identical to a tree authoring none of them, with no
+#      onFailure key anywhere,
+#  19. with on-failure-render true, exactly the enforce-stage PreToolUse block hooks render
+#      "onFailure": "block" plus their configured timeout, while a PreToolUse warn (bake) hook, a Stop
+#      block hook and a TeammateIdle block hook render neither; a mutant output that drops the
+#      onFailure key, and one that resets the configured timeout, each fail the contract
+#      (discrimination).
 
 _APEX = """---
 corpus-id: apex01
@@ -794,6 +858,128 @@ def self_test_main():
                              (TIMEOUT + 0.1, 2)):
             text = "{:g}".format(margin)
             deadline_case("margin-" + text, _SCRIPT_DEADLINE.format(timeout=TIMEOUT, margin=text), want)
+
+        # 17. The optional per-hook timeout: an integer from TIMEOUT_MIN to TIMEOUT_MAX seconds. Each end
+        #     is tested just inside, exactly at, and just outside it; a bool is refused explicitly (a TOML
+        #     true parses as a Python bool, an int subclass that would otherwise pass as 1), and a string
+        #     and a float are refused as non-integers.
+        def timeout_case(label, toml_value, want):
+            tree = tmp / ("timeout-" + label)
+            tree.mkdir()
+            _build_tree(tree)
+            _mutate(tree, 'default = "block"', 'default = "block"\ntimeout = {}'.format(toml_value))
+            if run_quiet(tree, check=False) != want:
+                failures.append("per-hook timeout ({}): expected exit {}".format(label, want))
+        for label, toml_value, want in (("below-min", TIMEOUT_MIN - 1, 2), ("at-min", TIMEOUT_MIN, 0),
+                                        ("inside-min", TIMEOUT_MIN + 1, 0),
+                                        ("inside-max", TIMEOUT_MAX - 1, 0), ("at-max", TIMEOUT_MAX, 0),
+                                        ("above-max", TIMEOUT_MAX + 1, 2),
+                                        ("bool", "true", 2), ("string", '"10"', 2), ("float", 1.5, 2)):
+            timeout_case(label, toml_value, want)
+        # The optional [plugin] keys validate fail-closed too.
+        plug_anchor = 'homepage = "https://example.invalid"'
+        for label, addition in (("switch-nonbool", 'on-failure-render = "yes"'),
+                                ("minver-shape", 'claude-code-min-version = "2.1"')):
+            tree = tmp / ("plugkey-" + label)
+            tree.mkdir()
+            _build_tree(tree)
+            _mutate(tree, plug_anchor, plug_anchor + "\n" + addition)
+            if run_quiet(tree, check=True) != 2:
+                failures.append("[plugin] {}: expected exit 2 (fail-closed)".format(label))
+
+        # 18. OFF is byte-identity: with on-failure-render false (or absent), an authored per-hook
+        #     timeout and the optional [plugin] keys change NOTHING in the rendered hooks.json, which
+        #     stays byte-identical to a tree authoring none of them, with no onFailure key anywhere.
+        ofr_base = tmp / "ofr-base"
+        ofr_base.mkdir()
+        _build_tree(ofr_base)
+        ofr_off = tmp / "ofr-off"
+        ofr_off.mkdir()
+        _build_tree(ofr_off)
+        _mutate(ofr_off, plug_anchor,
+                plug_anchor + '\nclaude-code-min-version = "2.1.295"\non-failure-render = false')
+        _mutate(ofr_off, 'default = "block"', 'default = "block"\ntimeout = 45')
+        if run_quiet(ofr_base, check=False) != 0 or run_quiet(ofr_off, check=False) != 0:
+            failures.append("off-switch byte-identity setup: both trees expected a clean generate")
+        else:
+            base_json = (ofr_base / HOOKS_JSON_REL).read_text(encoding="utf-8")
+            off_json = (ofr_off / HOOKS_JSON_REL).read_text(encoding="utf-8")
+            if base_json != off_json:
+                failures.append("with on-failure-render false, an authored timeout and the optional "
+                                "[plugin] keys must render byte-identical hooks.json")
+            if "onFailure" in off_json:
+                failures.append("with on-failure-render false, no onFailure key may render")
+
+        # 19. ON renders exactly the enforce-stage PreToolUse block hooks with onFailure "block" and
+        #     their configured timeout; a PreToolUse warn (bake) hook, a Stop block hook and a
+        #     TeammateIdle block hook carry neither. The contract is then shown DISCRIMINATING against
+        #     two mutant outputs, one dropping every onFailure key and one resetting every timeout to
+        #     the default, each of which it must catch.
+        ofr_on = tmp / "ofr-on"
+        ofr_on.mkdir()
+        _build_tree(ofr_on)
+        _mutate(ofr_on, plug_anchor,
+                plug_anchor + '\nclaude-code-min-version = "2.1.295"\non-failure-render = true')
+        _mutate(ofr_on, 'default = "block"', 'default = "block"\ntimeout = 45')
+        on_script = ofr_on / ".aiqt" / "core" / "hooks" / "scripts" / SCRIPT_NAME
+        on_script.write_text(on_script.read_text(encoding="utf-8")
+                             + "def warn_handler(data):\n    return (0, None, None)\n"
+                               "def stop_handler(data):\n    return (0, None, None)\n"
+                               "def idle_handler(data):\n    return (0, None, None)\n", encoding="utf-8")
+        on_manifest = ofr_on / ".aiqt" / "core" / "hooks" / "manifest.toml"
+        on_manifest.write_text(on_manifest.read_text(encoding="utf-8") + (
+            '\n[[hook]]\nid = "selftest-warn-bake"\nrules = ["tsthk1"]\nplatform = "claude-code"\n'
+            'event = "PreToolUse"\nmatcher = "Bash"\nhandler = "warn_handler"\ndefault = "warn"\n'
+            'stage = "bake"\nclass = "b"\nresidue = "A warn bake self-test control."\n'
+            '\n[[hook]]\nid = "selftest-stop-block"\nrules = ["tsthk1"]\nplatform = "claude-code"\n'
+            'event = "Stop"\nhandler = "stop_handler"\ndefault = "block"\nclass = "b"\n'
+            'residue = "A Stop self-test control."\n'
+            '\n[[hook]]\nid = "selftest-idle-block"\nrules = ["tsthk1"]\nplatform = "claude-code"\n'
+            'event = "TeammateIdle"\nhandler = "idle_handler"\ndefault = "block"\nclass = "b"\n'
+            'residue = "A TeammateIdle self-test control."\n'), encoding="utf-8")
+
+        def onfailure_findings(text):
+            """The case-19 contract over one rendered hooks.json: per (event, handler), the exact
+            onFailure value (None where absent) and timeout, compared as a whole map."""
+            try:
+                rendered = json.loads(text)
+            except ValueError as exc:
+                return ["unparseable hooks.json: {}".format(exc)]
+            got = {}
+            for event, entries in rendered.get("hooks", {}).items():
+                for e in entries:
+                    for h in e.get("hooks", ()):
+                        got[(event, h["args"][-1])] = (h.get("onFailure"), h.get("timeout"))
+            want = {("PreToolUse", "test_handler"): ("block", 45),
+                    ("PreToolUse", "warn_handler"): (None, TIMEOUT),
+                    ("Stop", "stop_handler"): (None, TIMEOUT),
+                    ("TeammateIdle", "idle_handler"): (None, TIMEOUT)}
+            if got != want:
+                return ["rendered onFailure/timeout map {} does not equal the expected {}"
+                        .format(got, want)]
+            return []
+
+        if run_quiet(ofr_on, check=False) != 0:
+            failures.append("on-failure-render true: generation expected exit 0")
+        else:
+            on_json = (ofr_on / HOOKS_JSON_REL).read_text(encoding="utf-8")
+            probs = onfailure_findings(on_json)
+            if probs:
+                failures.append("on-failure-render true: " + "; ".join(probs))
+            mutant = json.loads(on_json)
+            for e in mutant["hooks"]["PreToolUse"]:
+                for h in e["hooks"]:
+                    h.pop("onFailure", None)
+            if not onfailure_findings(json.dumps(mutant, indent=2) + "\n"):
+                failures.append("a mutant output dropping onFailure must fail the case-19 contract")
+            mutant = json.loads(on_json)
+            for entries in mutant["hooks"].values():
+                for e in entries:
+                    for h in e["hooks"]:
+                        h["timeout"] = TIMEOUT
+            if not onfailure_findings(json.dumps(mutant, indent=2) + "\n"):
+                failures.append("a mutant output resetting the configured timeout must fail the "
+                                "case-19 contract")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -813,9 +999,16 @@ def self_test_main():
           "all fail closed; the full 'warn' default policy holds across every known event (rejected on "
           "every non-warn event, accepted on every WARN_EVENTS event, plus warn+stage=bake on "
           "PreToolUse and the SessionStart-cannot-block overclaim); a Stop hook renders "
-          "byte-identical hooks.json whether its default is 'block' or 'warn'; and the dispatcher's "
+          "byte-identical hooks.json whether its default is 'block' or 'warn'; the dispatcher's "
           "PreToolUse deadline must mirror TIMEOUT and leave a margin from DEADLINE_MIN_MARGIN up to just "
-          "below TIMEOUT (each end refused just outside it), with no second binding of either name" + note)
+          "below TIMEOUT (each end refused just outside it), with no second binding of either name; an "
+          "authored per-hook timeout is accepted only as an integer from TIMEOUT_MIN to TIMEOUT_MAX "
+          "(each end refused just outside it, bool/string/float refused), with the optional [plugin] "
+          "keys validated fail-closed; with on-failure-render false nothing new renders (hooks.json "
+          "stays byte-identical, no onFailure anywhere); and with it true exactly the enforce-stage "
+          "PreToolUse block hooks carry onFailure 'block' plus their configured timeout, a contract "
+          "shown discriminating against a mutant that drops the key and one that resets the timeout"
+          + note)
     return 0
 
 
