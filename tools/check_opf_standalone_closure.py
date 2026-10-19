@@ -46,9 +46,11 @@ Exit convention (matches the repo's gates):
      itself, never its target, and is refused when one leaves it, so no symlink the copy holds
      reaches outside it), no interpreter, a per-leg bound that cannot be derived, any other exception
      before, around or after the legs (a harness fault, named, whatever it carries, an AssertionError
-     or a SystemExit included, as is a leg result the report cannot read), a leg killed at its
-     wall-clock bound (named as the bound tripping, never as a failure the leg reported; see
-     _LEG_CEILING_S for how each bound is derived), or a leg ended by a signal this gate did not send
+     or a SystemExit included, as is a leg result the report cannot read; one that ends the wait for
+     a launched leg is raised only after that leg is killed, reaped and its pipe closed, any cleanup
+     step that did not complete named beside it), a leg killed at its wall-clock bound (named as the
+     bound tripping, never as a failure the leg reported; see _LEG_CEILING_S for how each bound is
+     derived), or a leg ended by a signal this gate did not send
      (named by its signal; a negative status cannot tell an outside signal, from another process, the
      OOM killer or an interpreter crash, from one the leg or its own process group sent itself, so it
      is never read as a failure the leg reported), with any cleanup after a kill that did not complete
@@ -149,7 +151,8 @@ _SUBSET = [
 # so it must sit ABOVE the work the leg is sanctioned to do: one flat constant below a leg's real work
 # kills a correctly-running leg. ONE bound is a deliberate exception, opf-tooling-selftest's (see
 # DELIBERATE SHORTER DEADLINE below). Each leg bound is the LARGEST of:
-#   * _LOAD_HEADROOM times the slowest run of that leg recorded on this tree (_LEG_CEILING_S);
+#   * _LOAD_HEADROOM times the slowest run of that leg recorded at the opf/ tree named below
+#     (_LEG_CEILING_S; INFERRED for any other opf/ tree, this one included);
 #   * a DELIBERATE DEADLINE derived from the leg's own sources: the SUM of the literal wait SITES they
 #     declare (numeric literals in timeout= arguments and `timeout` parameter defaults, read from the
 #     copied sources on every run by _declared_wait_s), plus _LAUNCH_MARGIN_S. This sum is NOT the
@@ -170,12 +173,15 @@ _SUBSET = [
 # Every ceiling below is whole seconds, rounded up, from ONE source: a serial isolated run of every leg
 # started 2026-10-15T08:38Z and finished 2026-10-15T09:07Z, at the merge of revision
 # da4b403ab55892cdbac837ba0c51e092ab971ffd into this change, whose opf/ subtree (git tree
-# 7bf8107f4c6d23f5c89298ef121af566f5e48614) is byte-identical to that revision's and to this tree's
-# (the change carrying this table touches no file under opf/). Each leg ran as the gate runs it
-# (python3 -I -B against a copy of opf/ alone), plain (no nice), one leg at a time, on a shared 24-CPU
-# host, with the 5-minute load average at the leg's start on its row (13.7 to 24.6). A later refresh
-# that changes opf/ CARRIES THESE FIGURES FORWARD AS INFERRED, not measured, until the legs are
-# re-measured at the refreshed tree.
+# 7bf8107f4c6d23f5c89298ef121af566f5e48614) is byte-identical to that revision's (the change carrying
+# this table touches no file under opf/). That tree is the ONLY one these legs were measured at. Each
+# leg ran as the gate runs it (python3 -I -B against a copy of opf/ alone), plain (no nice), one leg at
+# a time, on a shared 24-CPU host, with the 5-minute load average at the leg's start on its row (13.7
+# to 24.6). A later refresh that changes opf/ CARRIES THESE FIGURES FORWARD AS INFERRED, not measured,
+# until the legs are re-measured at the refreshed tree. Refreshes of this change onto main have changed
+# opf/ since (the first, on 2026-10-16, onto c66fbe560a12b5258c1c2589fdbeba4e82c78afc), so each row's
+# figure is INFERRED for this tree, as for every opf/ tree other than the one named above (compare
+# `git rev-parse HEAD:opf` with it).
 # _LOAD_HEADROOM is the allowance for a slower or more loaded host than that run's. The multiplier is
 # an INFERENCE, not a measurement, and no observation supports it (one measured run contradicts it, see
 # below): the host carried other work during the run, but a host loaded beyond it adds contention these
@@ -183,8 +189,8 @@ _SUBSET = [
 # trips it (exit 2, fail-closed), never passes clean. Two larger figures bear on it. Both were REPORTED
 # during work on another change and measured at that change's tree (another branch; no revision, date
 # or host was recorded). Both are UNVERIFIED: neither has been reproduced, and neither checks the multiplier.
-#   * opf.py --self-test took 1348.7 s on a loaded host, 2.78 times this table's 485.6 s. Were this
-#     tree's run that slow, 3 x 486 = 1458 s would cover it by 109.3 s.
+#   * opf.py --self-test took 1348.7 s on a loaded host, 2.78 times this table's 485.6 s. Were the
+#     opf-tooling-selftest leg that slow, 3 x 486 = 1458 s would cover it by 109.3 s.
 #   * adopt-apply's self-test took 812.8 s inside a loaded opf.py --self-test run (opf.py runs the
 #     same _opf_adopt_apply.self_test in-process), about 99 times this table's 8.2 s. Were the
 #     standalone opf-adopt-apply-selftest leg that slow, slowdown under load would be far from uniform,
@@ -196,8 +202,8 @@ _SUBSET = [
 # 25.1). That is one run at one load: it shows no in-process slowdown here, and says nothing about the
 # heavier load or the host behind the reported figures.
 # The multiplier is capped by the job fit (_job_worst_case_s against the 21600 s default job limit):
-# on this table the worst case is 20576 s at 3 and 22772 s at 4, and the largest multiplier that fits
-# is 3.474.
+# on this table the worst case is 20616 s at 3 and 22812 s at 4, and the largest multiplier that fits
+# is 3.455.
 # The multiplier does NOT cover the one loaded run measured against it, and cannot. One --self-test
 # run on 2026-10-15, at the revision carrying this table, at load5 about 50 (between 42 and 61 while it
 # ran), passed (exit 0) with three legs past their ceilings by unequal factors: opf-doctor-selftest
@@ -207,7 +213,7 @@ _SUBSET = [
 # killed it). That is one run at one load, REPORTED by its account and not reproduced here. Covering it
 # on the headroom term alone needs a multiplier above 299.3 / 69 = 4.33768... (so 4.338 to three
 # places, since 4.337 x 69 = 299.253 falls short of 299.3), above 4, where the job worst case is
-# already 22772 s, over the 21600 s limit. So the multiplier stays 3, and a run under such
+# already 22812 s, over the 21600 s limit. So the multiplier stays 3, and a run under such
 # load CAN exit 2 on a healthy leg: each leg whose bound is the headroom term alone (on this table
 # opf-homes-selftest 273 s, opf-tooling-selftest 1458 s, opf-adopt-selftest 456 s and
 # opf-oplock-selftest 324 s) trips its bound once it runs more than 3 times its ceiling. That exit 2 is
@@ -218,38 +224,38 @@ _SUBSET = [
 # timeout, the 5 s fixture cleanup grace and the 1 s receipt allowance), so the whole self-test grants
 # itself more; this leg's bound (1458 s on this table, 3 x its 486 s ceiling) sits far below that. A
 # bound above it, 5766 + 60 = 5826 s, counts in both sweeps and in the negative leg: 3 x (5826 - 1458)
-# = 13104 s more, a job worst case of 33680 s, over the 21600 s limit. So this bound takes the
+# = 13104 s more, a job worst case of 33720 s, over the 21600 s limit. So this bound takes the
 # kill-timeout rule's exception (AGENTS.md): a deliberately shorter deadline, above the leg's recorded
 # run and cutting a longer run short on purpose, with reaching it attributed to the deadline (LEG BOUND
 # EXCEEDED, exit 2; the self-test's negative leg, under the same bound, reports its trip as cannot
 # evaluate, exit 2), never as a failure the leg reported and never as a pass.
 _LEG_CEILING_S = {
-    "opf-homes-selftest": 91,  # measured: 90.1 s at load5 13.7
-    "opf-homes-contract": 1,  # measured: 0.4 s at load5 13.9
-    "opf-tooling-selftest": 486,  # measured: 485.6 s at load5 13.9
-    "opf-drift-selftest": 3,  # measured: 2.7 s at load5 15.9
-    "opf-doctor-selftest": 69,  # measured: 68.5 s at load5 15.9
-    "opf-init-selftest": 228,  # measured: 227.4 s at load5 16.3
-    "opf-init-contract-validator-selftest": 1,  # measured: 0.1 s at load5 17.6
-    "opf-init-contract-check-selftest": 1,  # measured: 0.1 s at load5 17.6
-    "opf-upgrade-selftest": 96,  # measured: 95.4 s at load5 17.6
-    "opf-adopt-selftest": 152,  # measured: 151.1 s at load5 18.6
-    "opf-adopt-apply-selftest": 9,  # measured: 8.2 s at load5 21.5
-    "opf-adopt-hook-selftest": 1,  # measured: 1.0 s at load5 21.6
-    "opf-import-batch-selftest": 1,  # measured: 0.7 s at load5 21.6
-    "opf-pack-manifest-selftest": 17,  # measured: 16.8 s at load5 21.7
-    "opf-adopt-observe-selftest": 284,  # measured: 283.7 s at load5 21.9
-    "opf-adopt-discover-selftest": 1,  # measured: 0.5 s at load5 23.9
-    "opf-prompt-pack-selftest": 1,  # measured: 0.8 s at load5 23.9
-    "opf-prompt-pack": 1,  # measured: 0.2 s at load5 23.9
-    "opf-oplock-selftest": 108,  # measured: 107.4 s at load5 23.9
-    "opf-init-substrate-selftest": 4,  # measured: 3.4 s at load5 24.5
-    "opf-init-builders-selftest": 1,  # measured: 0.3 s at load5 24.6
-    "opf-init-operation-selftest": 100,  # measured: 99.2 s at load5 24.6
-    "opf-init-p0-selftest": 40,  # measured: 39.8 s at load5 24.3
-    "opf-init-observe-selftest": 2,  # measured: 1.1 s at load5 24.3
-    "commonmark-headings-selftest": 13,  # measured: 12.2 s at load5 24.3
-    "commonmark-conformance": 1,  # measured: 0.2 s at load5 24.2
+    "opf-homes-selftest": 91,  # INFERRED here (measured at 7bf8107f: 90.1 s at load5 13.7)
+    "opf-homes-contract": 1,  # INFERRED here (measured at 7bf8107f: 0.4 s at load5 13.9)
+    "opf-tooling-selftest": 486,  # INFERRED here (measured at 7bf8107f: 485.6 s at load5 13.9)
+    "opf-drift-selftest": 3,  # INFERRED here (measured at 7bf8107f: 2.7 s at load5 15.9)
+    "opf-doctor-selftest": 69,  # INFERRED here (measured at 7bf8107f: 68.5 s at load5 15.9)
+    "opf-init-selftest": 228,  # INFERRED here (measured at 7bf8107f: 227.4 s at load5 16.3)
+    "opf-init-contract-validator-selftest": 1,  # INFERRED here (measured at 7bf8107f: 0.1 s at load5 17.6)
+    "opf-init-contract-check-selftest": 1,  # INFERRED here (measured at 7bf8107f: 0.1 s at load5 17.6)
+    "opf-upgrade-selftest": 96,  # INFERRED here (measured at 7bf8107f: 95.4 s at load5 17.6)
+    "opf-adopt-selftest": 152,  # INFERRED here (measured at 7bf8107f: 151.1 s at load5 18.6)
+    "opf-adopt-apply-selftest": 9,  # INFERRED here (measured at 7bf8107f: 8.2 s at load5 21.5)
+    "opf-adopt-hook-selftest": 1,  # INFERRED here (measured at 7bf8107f: 1.0 s at load5 21.6)
+    "opf-import-batch-selftest": 1,  # INFERRED here (measured at 7bf8107f: 0.7 s at load5 21.6)
+    "opf-pack-manifest-selftest": 17,  # INFERRED here (measured at 7bf8107f: 16.8 s at load5 21.7)
+    "opf-adopt-observe-selftest": 284,  # INFERRED here (measured at 7bf8107f: 283.7 s at load5 21.9)
+    "opf-adopt-discover-selftest": 1,  # INFERRED here (measured at 7bf8107f: 0.5 s at load5 23.9)
+    "opf-prompt-pack-selftest": 1,  # INFERRED here (measured at 7bf8107f: 0.8 s at load5 23.9)
+    "opf-prompt-pack": 1,  # INFERRED here (measured at 7bf8107f: 0.2 s at load5 23.9)
+    "opf-oplock-selftest": 108,  # INFERRED here (measured at 7bf8107f: 107.4 s at load5 23.9)
+    "opf-init-substrate-selftest": 4,  # INFERRED here (measured at 7bf8107f: 3.4 s at load5 24.5)
+    "opf-init-builders-selftest": 1,  # INFERRED here (measured at 7bf8107f: 0.3 s at load5 24.6)
+    "opf-init-operation-selftest": 100,  # INFERRED here (measured at 7bf8107f: 99.2 s at load5 24.6)
+    "opf-init-p0-selftest": 40,  # INFERRED here (measured at 7bf8107f: 39.8 s at load5 24.3)
+    "opf-init-observe-selftest": 2,  # INFERRED here (measured at 7bf8107f: 1.1 s at load5 24.3)
+    "commonmark-headings-selftest": 13,  # INFERRED here (measured at 7bf8107f: 12.2 s at load5 24.3)
+    "commonmark-conformance": 1,  # INFERRED here (measured at 7bf8107f: 0.2 s at load5 24.2)
 }
 # The roster's own pin, recorded apart from both tables: the number of legs in _LEG_CEILING_S and the
 # sha256 of their names, sorted, each followed by one newline (_roster_pin). The whole-roster check
@@ -269,10 +275,10 @@ _DRAIN_MARGIN_S = 10
 # it adds nothing while the two stay equal; it keeps the lower limit explicit should the launch margin
 # change. The self-test discriminates it all the same: it passes _leg_bounds a launch margin one second
 # below the floor and requires every leg whose other terms then sit below the floor to be raised to
-# exactly the floor. At the former 120 s floor this table's job worst case is 22236 s at a headroom of
+# exactly the floor. At the former 120 s floor this table's job worst case is 22276 s at a headroom of
 # 3, over the job limit, and no single multiplier both covers the reported 1348.7 s figure above (that
 # needs a multiplier above 1348.7 / 486 = 2.77510..., so 2.776 to three places, since 2.775 x 486 =
-# 1348.65 falls short) and fits the job (that allows at most 2.705).
+# 1348.65 falls short) and fits the job (that allows at most 2.687).
 _MIN_LEG_BOUND_S = 60
 # The names the isolated copy of opf/ leaves out (bytecode artefacts). _materialize copies through
 # _COPY_IGNORE, and the whole-roster check refuses a script it would leave out through the same
@@ -287,16 +293,20 @@ _CI_SETUP_ALLOWANCE_S = 600    # checkout with full history and setup-python, be
 # _VECTOR_ALLOWANCE_S is the job's work that no leg bound covers: the self-test step's registration,
 # verdict, table, floor, scan, CI-read and time-scaled stub checks, the cleanup doubles, the kill vectors
 # (termination and its marker window, leader reap, partial output, the runner's cleanup report) and
-# their waits for the escapee, plus the opf/ copy and bound scan of each sweep (the self-test's positive
-# and negative legs and the live gate step). It is sized in two parts:
-#   * the deadlines those vectors hold on a passing run, READ FROM SOURCE, sum to 269 s: the half-ceiling
+# their waits for the escapee, the after-launch fault vectors, plus the opf/ copy and bound scan of each
+# sweep (the self-test's positive and negative legs and the live gate step). It is sized in two parts:
+#   * the deadlines those vectors hold on a passing run, READ FROM SOURCE, sum to 311 s: the half-ceiling
 #     kill 11 s, the scaled run 6 s, the hang under 36 s, termination 52 s, the two escape runs 104 s,
-#     the runner's cleanup report 57 s and the cleanup doubles 3 s;
+#     the runner's cleanup report 57 s, the cleanup doubles 3 s, and the after-launch fault vectors 42 s
+#     (the first's readiness 30 s, cleanup 2 s and marker window 4 s, and the 2 s cleanup of each of the
+#     other three);
 #   * the work no deadline bounds (the bound checks and wait scans, and each sweep's copy and bound
-#     scan) MEASURED at most 12.8 s in three runs on 2026-10-15 (plain, load5 about 23 to 26 on a
-#     shared 24-CPU host; the whole vector phase took 43.7 to 44.9 s), given the legs' 3x headroom:
-#     38.4 s. The routing vectors added since (registration drift, harness faults, temporary-directory
-#     and fast-phase errors, the flipped leg's raw output) launch no process and hold no deadline; one
+#     scan) MEASURED at most 12.8 s in three runs on 2026-10-15, at the opf/ tree named above (plain,
+#     load5 about 23 to 26 on a shared 24-CPU host; the whole vector phase took 43.7 to 44.9 s), given
+#     the legs' 3x headroom: 38.4 s. Each sweep's copy and bound scan read opf/, so at a later opf/
+#     tree that figure is INFERRED. The routing vectors added since (registration drift, harness
+#     faults, temporary-directory and fast-phase errors, the flipped leg's raw output) launch no
+#     process and hold no deadline; one
 #     run of the whole vector phase with them was REPORTED at 44.6 s on 2026-10-16 (plain; load not
 #     recorded), a figure NOT reproduced. Nor do the ones added after (every drift shape and harness
 #     fault through run(), the report and flip faults, the self-test's wiring to its fast phase, the
@@ -307,11 +317,13 @@ _CI_SETUP_ALLOWANCE_S = 600    # checkout with full history and setup-python, be
 #     do the ones added last (a roster script that is a symlink, resolves outside opf/tools/ or is a
 #     name the copy leaves out, a copy holding a symlink that leaves it, and an exception or a
 #     SystemExit from the positive leg or escaping the closure legs). With every vector this file
-#     holds, ONE measured run of the whole vector phase on 2026-10-16 took 44.5 s (a single run,
+#     then held, ONE measured run of the whole vector phase on 2026-10-16 took 44.5 s (a single run,
 #     plain, on a shared 24-CPU host, load5 18.1 at its start and 18.2 at its end): one run at one
-#     load, never a bound.
-# 269 + 38.4 = 307.4 s, rounded up to 310 s.
-_VECTOR_ALLOWANCE_S = 310
+#     load, never a bound. The after-launch fault vectors were added after that run; beyond their
+#     deadlines above, their work (four launches, and one throwaway opf/ copy and bound scan through
+#     _run_closure) is NOT measured into the 12.8 s.
+# 311 + 38.4 = 349.4 s, rounded up to 350 s.
+_VECTOR_ALLOWANCE_S = 350
 
 
 class _BoundError(Exception):
@@ -991,9 +1003,17 @@ def _signal_name(rc):
         return "signal {}".format(-rc)
 
 
+def _fault_text(exc):
+    """A harness fault as "<type>: <message>", then each note attached to it (the cleanup steps that
+    did not complete, which _run_one attaches when an exception ends its wait for a launched leg), so
+    a fault report never drops an incomplete cleanup."""
+    return "; ".join(["{}: {}".format(type(exc).__name__, exc)] + list(getattr(exc, "__notes__", ())))
+
+
 def _kill_and_reap(proc, drain_s=_DRAIN_MARGIN_S, killpg=os.killpg):
-    """Kill the timed-out leg's process GROUP (the leg was started as its own session leader, so every
-    descendant that has not itself left the group shares it), then drain its output and reap its
+    """Kill the leg's process GROUP, after its bound or after an exception ended _run_one's wait for it
+    (the leg was started as its own session leader, so every descendant that has not itself left the
+    group shares it), then drain its output and reap its
     LEADER under ONE absolute deadline of drain_s seconds that the two waits SHARE (the reap gets only
     what the drain left, so the whole cleanup costs at most drain_s, the one cleanup term the fit model
     counts per killed leg), and close the output pipe this runner owns in a finally, on EVERY path (a
@@ -1061,9 +1081,12 @@ def _run_one(opf_root, script, args, run_dir, env, bound_s, drain_s=_DRAIN_MARGI
     one the leg or its own process group sent itself), launched is False for a harness failure (a
     missing script, an interpreter that could not start) whose rc 2 is this runner's verdict, NEVER an
     outcome the leg reported, whatever text it carries, and cleanup lists the named faults of a kill
-    whose cleanup did not complete (_kill_and_reap; empty otherwise). cwd is run_dir, which is OUTSIDE
-    any git repository and does not contain the tools/ tree, so only the copied opf/tools/ is
-    reachable to `python3 -I`."""
+    whose cleanup did not complete (_kill_and_reap; empty otherwise). Any OTHER exception that ends
+    the wait after the launch (an OSError from the output pipe, a KeyboardInterrupt) is raised as
+    itself, never turned into a result, but only after the same kill, reap and pipe close, so a
+    launched leg never outlives its runner's error; each cleanup step that did not complete is a note
+    on that exception. cwd is run_dir, which is OUTSIDE any git repository and does not contain the
+    tools/ tree, so only the copied opf/tools/ is reachable to `python3 -I`."""
     def shaped(stdout):
         return (stdout or b"") if raw else _tail(stdout)
 
@@ -1088,6 +1111,20 @@ def _run_one(opf_root, script, args, run_dir, env, bound_s, drain_s=_DRAIN_MARGI
     except subprocess.TimeoutExpired:
         stdout, cleanup = _kill_and_reap(proc, drain_s)
         return None, shaped(stdout), time.monotonic() - start, True, cleanup
+    except BaseException as exc:
+        # Any other end of the wait (an OSError reading the pipe, an interrupt) still owns a launched
+        # leg: its group is killed, its leader reaped and its pipe closed under the same bounded
+        # cleanup, and then the ORIGINAL exception is raised, each cleanup step that did not complete
+        # attached to it as a note (_fault_text names them). An exception that is not an Exception
+        # (an interrupt) raised by the cleanup itself is never swallowed.
+        try:
+            _out, cleanup = _kill_and_reap(proc, drain_s)
+        except Exception as cleanup_exc:
+            cleanup = ["cleanup-error: the cleanup raised {}: {}".format(
+                type(cleanup_exc).__name__, cleanup_exc)]
+        for fault in cleanup:
+            exc.add_note("CLEANUP INCOMPLETE after the leg's {}: {}".format(type(exc).__name__, fault))
+        raise
     return proc.returncode, shaped(stdout), time.monotonic() - start, True, []
 
 
@@ -1206,8 +1243,9 @@ def _run_closure(root, ceilings=None):
     exception or a SystemExit, from a registration check (an opf/tools/ entry that cannot be checked
     included), the copy, the bound scan, the legs or the report of their results (a leg result it
     cannot read included), an AssertionError included, is a harness fault: named, cannot evaluate (2),
-    never a finding, never a traceback and never an exit the raiser chose. The routing vectors rebind
-    the module names this looks up
+    never a finding, never a traceback and never an exit the raiser chose; one raised while a leg ran
+    is named with each cleanup step _run_one could not complete after it (_fault_text). The routing
+    vectors rebind the module names this looks up
     (_harness_routing_self_test), so the path they hold through run() is this one."""
     tmp = None
     try:
@@ -1247,8 +1285,7 @@ def _run_closure(root, ceilings=None):
         results = _run_subset(opf_root, tmp, bounds)
         return _report(results), results, None
     except (Exception, SystemExit) as exc:
-        stopped = "harness fault before, around or after the legs ({}: {})".format(
-            type(exc).__name__, exc)
+        stopped = "harness fault before, around or after the legs ({})".format(_fault_text(exc))
         print("STANDALONE CLOSURE: NOT EVALUATED ({}; never a finding, whatever it carries)".format(
             stopped), file=sys.stderr)
         return 2, None, stopped
@@ -2003,13 +2040,185 @@ def _timeout_vectors_self_test(required):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _after_launch_fault_self_test():
+    """An exception that ends _run_one's wait AFTER a successful launch (here an OSError from the first
+    output read, injected through a real Popen subclass) leaves no leg running, on real processes, and
+    reaches the caller as ITSELF. TERMINATION: the leg writes its pid to a readiness file (aside, then
+    renamed into place), and the read fails only once that file is seen under its OWN 30 s deadline; the
+    same exception object must escape with no note, the leader (the pid the leg wrote) killed by
+    SIGKILL and reaped, the output pipe closed, and the marker the leg would write
+    after_launch_delay_s after its readiness still absent after_launch_margin_s past that moment.
+    CLEANUP FAULTS: with the real cleanup run and one fault added to its result, or the real cleanup
+    run and then an exception raised from it, the original exception still escapes, carrying the fault
+    or the cleanup's exception as a note, the leader still reaped and the pipe closed; and through
+    _run_closure over a throwaway opf/, that note is in the harness fault it names (exit 2). No readiness
+    is a self-test failure, never cleanup credit. Every leg this vector launches that is left unreaped
+    (by a runner that raised without cleaning up) is killed and reaped here after the assertions."""
+    after_launch_delay_s, after_launch_margin_s = 3.0, 1.0
+    injected_text = "injected output-pipe read failure after the launch"
+    scripted = "leader-unreaped: scripted fault added to the real cleanup"
+    real_popen = subprocess.Popen
+    real_cleanup = _kill_and_reap
+    launched = []
+
+    class FailingRead(real_popen):
+        """A real launch whose first output read raises the injected OSError, once ready is seen."""
+        ready = None
+        injected = None
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.ready_at, self.failed = None, False
+            launched.append(self)
+
+        def communicate(self, input=None, timeout=None):
+            if self.failed:
+                return super().communicate(input, timeout)
+            self.failed = True
+            if FailingRead.ready is not None:
+                self.ready_at = _await_file(FailingRead.ready, 30.0)
+            raise FailingRead.injected
+
+    # The real cleanup, under at most a 2 s deadline, with a fault added to its result or followed by
+    # an exception of its own.
+    def with_fault(proc, drain_s=_DRAIN_MARGIN_S):
+        out, faults = real_cleanup(proc, min(drain_s, 2.0))
+        return out, faults + [scripted]
+
+    def raising_after(proc, drain_s=_DRAIN_MARGIN_S):
+        real_cleanup(proc, min(drain_s, 2.0))
+        raise RuntimeError("scripted cleanup failure")
+
+    def run_failing(check, call, ready, rebound):
+        """call() with the first output read failing and the module names in rebound swapped; returns
+        (the OSError that escaped, or else what call returned; the injected OSError; the one leg)."""
+        injected = OSError(injected_text)
+        FailingRead.ready, FailingRead.injected = ready, injected
+        before = len(launched)
+        subprocess.Popen = FailingRead
+        try:
+            with _swapped(**rebound):
+                try:
+                    got = call()
+                except OSError as exc:
+                    escaped = exc
+                except (Exception, SystemExit) as exc:
+                    raise _CheckFailure("closure/{}: the code under test raised {}: {} instead of the "
+                                        "injected OSError".format(check, type(exc).__name__, exc)) from exc
+                else:
+                    escaped = got
+        finally:
+            subprocess.Popen = real_popen
+        legs = launched[before:]
+        if len(legs) != 1:
+            raise _CheckFailure("closure/{}-fixture-shape: {} launch(es), want 1".format(check, len(legs)))
+        return escaped, injected, legs[0]
+
+    def left_no_leg_running(check, leg):
+        if leg.returncode is None or leg.stdout is None or not leg.stdout.closed:
+            raise _CheckFailure("closure/{}: the launched leg was left running or its pipe open "
+                                "(returncode {!r}, pipe closed {})".format(
+                                    check, leg.returncode, leg.stdout is not None and leg.stdout.closed))
+
+    tmp = Path(tempfile.mkdtemp(prefix="opf-closure-after-launch-"))
+    try:
+        stub_root = tmp / "opf"
+        os.makedirs(stub_root / "tools")
+        (stub_root / "tools" / "stub_after_launch.py").write_text(
+            "import os, sys, time\n"
+            "with open(sys.argv[1] + '.tmp', 'w') as f:\n"
+            "    f.write(str(os.getpid()))\n"
+            "os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
+            "time.sleep(float(sys.argv[3]))\n"
+            "with open(sys.argv[2], 'w') as f:\n"
+            "    f.write('ran on after the runner raised')\n", encoding="utf-8")
+        env = _under_test("after-launch-fault-cleans-up", _isolated_env)
+        ready, marker = tmp / "after-launch.pid", tmp / "after-launch-marker.txt"
+        check = "after-launch-fault-cleans-up"
+        escaped, injected, leg = run_failing(check, lambda: _run_one(
+            stub_root, "stub_after_launch.py", [str(ready), str(marker), repr(after_launch_delay_s)],
+            tmp, env, 30.0, drain_s=2.0), ready, {})
+        if escaped is not injected:
+            raise _CheckFailure("closure/{}: _run_one returned {!r} instead of raising the injected "
+                                "OSError".format(check, escaped))
+        if leg.ready_at is None:
+            raise _CheckFailure("closure/{}-readiness-missing: the leg never wrote its readiness file "
+                                "inside its own 30s deadline (a self-test failure, never cleanup "
+                                "credit)".format(check))
+        pid, = _readiness_pids(ready, 1, check)
+        notes = getattr(escaped, "__notes__", [])
+        if (pid != leg.pid or leg.returncode != -signal.SIGKILL or leg.stdout is None
+                or not leg.stdout.closed or notes):
+            raise _CheckFailure("closure/{}: leader pid {} (readiness {}), returncode {!r} (want {}), "
+                                "pipe closed {}, notes {!r}".format(
+                                    check, leg.pid, pid, leg.returncode, -signal.SIGKILL,
+                                    leg.stdout is not None and leg.stdout.closed, notes))
+        while (time.monotonic() < leg.ready_at + after_launch_delay_s + after_launch_margin_s
+               and not marker.exists()):
+            time.sleep(0.1)
+        if marker.exists():
+            raise _CheckFailure("closure/{}: the leg wrote its marker after _run_one raised (it outlived "
+                                "the runner's error)".format(check))
+        print("PASS closure/{} (the injected OSError escaped as itself; leader pid {} killed by SIGKILL "
+              "and reaped, its pipe closed, and no marker {:g}s past the moment it would have been "
+              "written)".format(check, pid, after_launch_margin_s))
+        for check, rebound, want_note in (
+                ("after-launch-cleanup-fault-named", {"_kill_and_reap": with_fault},
+                 "CLEANUP INCOMPLETE after the leg's OSError: " + scripted),
+                ("after-launch-cleanup-error-keeps-the-original", {"_kill_and_reap": raising_after},
+                 "CLEANUP INCOMPLETE after the leg's OSError: cleanup-error: the cleanup raised "
+                 "RuntimeError: scripted cleanup failure")):
+            ready = tmp / (check + ".pid")
+            escaped, injected, leg = run_failing(check, lambda ready=ready, check=check: _run_one(
+                stub_root, "stub_after_launch.py",
+                [str(ready), str(tmp / (check + ".marker")), repr(after_launch_delay_s)],
+                tmp, env, 30.0, drain_s=2.0), None, rebound)
+            notes = getattr(escaped, "__notes__", [])
+            if escaped is not injected or notes != [want_note]:
+                raise _CheckFailure("closure/{}: escaped {!r} (the injected one: {}), notes {!r}, want "
+                                    "[{!r}]".format(check, escaped, escaped is injected, notes, want_note))
+            left_no_leg_running(check, leg)
+            if _fault_text(escaped) != "OSError: {}; {}".format(injected_text, want_note):
+                raise _CheckFailure("closure/{}: the fault text drops the note: {!r}".format(
+                    check, _fault_text(escaped)))
+        check = "after-launch-cleanup-fault-reported-by-the-run"
+        # The first leg's script sleeps, so the leg is still running when the cleanup kills it.
+        base = tmp / "throwaway"
+        (_throwaway_opf(base) / _SUBSET[0][1]).write_text(
+            "import time\ntime.sleep({!r})\n".format(after_launch_delay_s), encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            result, _injected, leg = run_failing(
+                check, lambda: _run_closure(base), None, {"_kill_and_reap": with_fault})
+        said = out.getvalue()
+        want_stop = ("harness fault before, around or after the legs (OSError: {}; CLEANUP INCOMPLETE "
+                     "after the leg's OSError: {})".format(injected_text, scripted))
+        if not isinstance(result, tuple) or result[:3] != (2, None, want_stop) or want_stop not in said:
+            raise _CheckFailure("closure/{}: {!r}, want (2, None, {!r}): {!r}".format(
+                check, result, want_stop, said))
+        left_no_leg_running(check, leg)
+        print("RED an exception after the launch whose cleanup did not complete (a fault added to the "
+              "real cleanup's result, or the cleanup raising) -> the original exception escapes, the "
+              "fault a note on it, the leader reaped and the pipe closed; through _run_closure the "
+              "note is in the harness fault it names, exit 2")
+    finally:
+        subprocess.Popen = real_popen
+        for leg in launched:
+            if leg.returncode is None or (leg.stdout is not None and not leg.stdout.closed):
+                real_cleanup(leg, 2.0)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 _INJECTED_EDGE = "check_versions"
 # The one outcome the flipped copy produces: opf.py's guarded bootstrap (_bootstrap) maps the injected
 # module's ImportError to its exit 2 and prints this one line, newline included, before any self-test
-# runs. Observed on 2026-10-15 at this change's opf/ tree: the flipped opf.py --self-test exited 2,
-# printing exactly this line and nothing else; observed again on 2026-10-16 at the same opf/ tree as
-# the raw bytes of its whole output, stderr merged into stdout as the negative leg runs it: exit 2 and
-# exactly _FLIP_BYTES (56 bytes, ending in one newline).
+# runs. Observed on 2026-10-15 at this change's opf/ tree as it then was: the flipped opf.py
+# --self-test exited 2, printing exactly this line and nothing else; observed again on 2026-10-16 at
+# the same opf/ tree as the raw bytes of its whole output, stderr merged into stdout as the negative
+# leg runs it: exit 2 and exactly _FLIP_BYTES (56 bytes, ending in one newline). Both were recorded at
+# a revision whose opf/ subtree is the tree the ceiling table names (git tree
+# 7bf8107f4c6d23f5c89298ef121af566f5e48614); at a later opf/ tree these bytes are INFERRED until the
+# negative leg, which requires them exactly on every run, has run there.
 _FLIP_EXIT = 2
 _FLIP_OUTPUT = "opf: cannot bootstrap: {} (cannot evaluate)".format(_INJECTED_EDGE)
 _FLIP_BYTES = (_FLIP_OUTPUT + "\n").encode("utf-8")
@@ -2257,7 +2466,7 @@ def _closure_legs(root, required, run_closure=None, run_one=None):
                                          "complete: {}".format("; ".join(cleanup))))
                 except (Exception, SystemExit) as exc:
                     found = [(2, "negative: harness fault running or judging the flipped leg (the flip "
-                                 "was not evaluated): {}: {}".format(type(exc).__name__, exc))]
+                                 "was not evaluated): {}".format(_fault_text(exc)))]
                 verdicts.extend(found)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -2273,8 +2482,9 @@ def _verdict_routing_self_test():
     never read as the real opf/ failing to verify; 0 is clean; a flip outcome that is not the exact
     failure leaves the self-test at 2, as do fixture drift in the flip, a failed copy, a SystemExit
     building the flipped copy, a store whose bytes are not UTF-8, a runner that raises (a SystemExit
-    included), a temporary directory that cannot be created (an OSError, any other exception or a
-    SystemExit from mkdtemp) and an incomplete cleanup after the flipped leg's kill, each named, never
+    included, and an exception carrying an incomplete cleanup as a note, which the text keeps), a
+    temporary directory that cannot be created (an OSError, any other exception or a SystemExit from
+    mkdtemp) and an incomplete cleanup after the flipped leg's kill, each named, never
     the exit a SystemExit carries; a SystemExit or another exception running the positive leg, and a
     SystemExit judging it (_positive_verdict), leave the positive leg unevaluated (2), named, with the
     flip still run; and a definite failure outranks a leg that could not be evaluated, a flip not
@@ -2349,6 +2559,10 @@ def _verdict_routing_self_test():
             (base / "opf" / "tools" / "_opf_store.py").write_bytes(store)
         os.makedirs(absent)
         unreaped = "leader-unreaped: leader pid 4242 was still unreaped at the 10s cleanup deadline"
+        # The note _run_one attaches when an exception ends its wait and the cleanup after it did not
+        # complete.
+        noted = OSError("read failure in the flipped leg (injected)")
+        noted.add_note("CLEANUP INCOMPLETE after the leg's OSError: " + unreaped)
         flipped = [("from check_versions import _parse\n", "opf.py", ["--self-test"], 1458, True)]
         positive_fault = ("SELF-TEST CANNOT EVALUATE: positive: harness fault running or judging the "
                           "positive leg (closure was not evaluated for the real opf/): ")
@@ -2390,6 +2604,11 @@ def _verdict_routing_self_test():
                  RuntimeError("runner fault in the flipped leg"), 2,
                  ("SELF-TEST CANNOT EVALUATE: negative: harness fault running or judging the flipped "
                   "leg (the flip was not evaluated): RuntimeError: runner fault in the flipped leg",),
+                 ("SELF-TEST FAIL",), flipped),
+                ("runner-fault-with-an-incomplete-cleanup", root, None, (0, [clean], None), noted, 2,
+                 ("SELF-TEST CANNOT EVALUATE: negative: harness fault running or judging the flipped "
+                  "leg (the flip was not evaluated): OSError: read failure in the flipped leg "
+                  "(injected); CLEANUP INCOMPLETE after the leg's OSError: " + unreaped,),
                  ("SELF-TEST FAIL",), flipped),
                 ("temporary-directory-oserror", root, full_disk, (0, [clean], None), caught, 2,
                  ("SELF-TEST CANNOT EVALUATE: negative: could not create the temporary directory for "
@@ -2488,7 +2707,8 @@ def _verdict_routing_self_test():
           "incomplete cleanup -> named beside its bound kill, exit 2; fixture drift in the flip, a "
           "failed copy, a store whose bytes are not UTF-8 and a temporary directory that cannot be "
           "created (an OSError, another exception or a SystemExit) -> each named, exit 2, nothing "
-          "launched; a runner that raises (an exception or a SystemExit) and a SystemExit building the "
+          "launched; a runner that raises (an exception or a SystemExit, or one carrying an incomplete "
+          "cleanup as a note, kept in the text) and a SystemExit building the "
           "flipped copy -> named, exit 2; a SystemExit or another exception running the positive leg, "
           "and a SystemExit judging it -> the positive leg CANNOT EVALUATE, named, exit 2, the flip "
           "still run, and exit 1 beside a flip not caught")
@@ -3165,6 +3385,7 @@ def _fast_vectors(root):
     _cleanup_doubles_self_test()
     required = _bounds_self_test(root)
     _timeout_vectors_self_test(required)
+    _after_launch_fault_self_test()
     return required
 
 
@@ -3176,7 +3397,9 @@ def self_test_main():
     a hang is still cut off and named (descendants that stayed in the leg's process group included),
     the post-kill cleanup closes the pipe and names what it could not complete on every path the
     cleanup doubles script (a failed group kill, whether or not the leader kill was delivered; a drain
-    timeout or OSError; a reap timeout or OSError), and the negative-leg verdict, the gate's routing
+    timeout or OSError; a reap timeout or OSError), an exception that ends the runner's wait after a
+    launch leaves no leg running and escapes as itself, any cleanup it could not complete a note on
+    it (_after_launch_fault_self_test), and the negative-leg verdict, the gate's routing
     through run() of what stops a run before, around or after the legs (registration drift, harness
     faults) and the self-test's own exit routing are shown discriminating. That fast phase runs through
     _self_test_phase, which routes by the exception's type: a check's failure (_CheckFailure, a crash or

@@ -1057,8 +1057,11 @@ CONFIG_MEMBER_BOUNDS = {
     # added cleanup vectors one complete run took 1497 s wall and passed. That run predates the
     # member's import-batch leg and its re-measured leg table, so it no longer sizes this bound.
     # MEASURED (2026-10-15, plain, on a shared 24-CPU host, load5 22.8 at the start and 32.6 at the
-    # end), at the member's current legs, leg table and vectors: one complete run took 1667.7 s wall
-    # and passed.
+    # end), at the member's legs, leg table and vectors of that date, recorded at a revision whose
+    # opf/ subtree is git tree 7bf8107f4c6d23f5c89298ef121af566f5e48614 (the tree its leg table was
+    # measured at): one complete run took 1667.7 s wall and passed. The member's vectors and the opf/
+    # tree its legs run have changed since, so for this tree that run time is INFERRED, not measured,
+    # and so is the estimate below, which scales it.
     # ESTIMATED (SIZING's model that wall time grows in proportion to load5 once load5 exceeds the
     # CPU count, applied to that standalone run): 3600 s, about 2.2 times that run (3600 / 1667.7 =
     # 2.159), covers load5 up to about 51.8 scaled from the run's start (its starting load5, 22.8,
@@ -1066,7 +1069,7 @@ CONFIG_MEMBER_BOUNDS = {
     # 51.8), and about 70 from its ending load5 (32.6 x 2.159 = 70.4).
     # DELIBERATE SHORTER DEADLINE: 3600 s sits far BELOW this member's own worst case (its per-leg
     # bounds alone sum to 8839 s, about 2.5 hours, and its self-test's worst case with the negative
-    # leg, cleanup deadlines and vectors is 10877 s; see _LEG_CEILING_S and _job_worst_case_s in the
+    # leg, cleanup deadlines and vectors is 10917 s; see _LEG_CEILING_S and _job_worst_case_s in the
     # member itself), exactly as the default's comment above sanctions: this lane owns no member's
     # verdict, and reaching this 3600 s bound is cannot-evaluate, never a pass or a fail of the
     # member. The member's OWN inner bounds are read differently: when one of its legs is killed at
