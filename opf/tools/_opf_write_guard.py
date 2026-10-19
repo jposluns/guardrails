@@ -11,15 +11,29 @@ and release it only as this run's own. These helpers were MOVED here from opf.py
 takes the calling verb explicitly so its refusals name the operation the operator actually ran.
 
 Stdlib only; the sibling _opf_* helpers are imported directly. Every refusal is a WriteGuardError, which the
-calling verb maps to exit 2. Nothing here stages or commits anything.
+calling verb maps to exit 2. Nothing here stages or commits anything. `--self-test` runs the
+lease message vectors (self_test), which opf.py --self-test also runs.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: _opf_write_guard.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import datetime
 import errno
 import os
 import re
 import socket
 import stat
-import sys
 import tomllib
 from pathlib import Path
 
@@ -38,9 +52,9 @@ class WriteGuardError(Exception):
 
 class LeaseHeldError(WriteGuardError):
     """acquire_lease's held-lease refusal, exactly the EEXIST present-is-held case (spec 5.7). A distinct
-    type so the RECOVERY claim (acquire_lease_for_recovery) can apply the spec 5.7 live-holder rule to
-    exactly this case; every other acquisition failure stays a plain WriteGuardError and is never examined
-    for release."""
+    type so the RECOVERY claim (acquire_lease_for_recovery) can apply the spec 5.7 never-seize and
+    dead-run release clauses to exactly this case; every other acquisition failure stays a plain
+    WriteGuardError and is never examined for release."""
 
 
 # --- write scope: the operation's store files plus every declared render destination ------------------
@@ -63,6 +77,11 @@ def plan_write_scope(machine_rel, manifest_model, store_paths, verb):
         (product if scope == "product" else store).add(relpath)
     findings = []
     _opf_store._validate_unmanaged(manifest_model.get("unmanaged"), findings)
+    # The SAME single authority the doctor reads (F10-1), which itself derives the imported-series
+    # activation from the manifest (spec 8.2/4.2) through the SAME function the doctor driver reads
+    # (_opf_check.imported_series_active, keyed on the homes-2 declaration): once activation makes the
+    # flag true, an [unmanaged] declaration naming an imported leaf refuses here exactly as the doctor
+    # flags it, so the writer and the doctor cannot diverge on the imported managed set.
     classification = _opf_check.classify_containment(manifest_model, machine_rel)
     findings += classification.malformed + classification.colliding
     if findings:
@@ -1090,11 +1109,22 @@ def check_clean(res, write_scope, verb, scope_label):
 
 # --- the single-writer lease (spec 5.7) -----------------------------------------------------------------
 
+# The one case in which opf itself removes another run's lease (acquire_lease_for_recovery), stated
+# wherever a refusal tells the operator what opf does not remove, so no refusal claims it never does.
+FOREIGN_LEASE_SCOPE = ("opf removes another run's lease only while reconciling an interrupted run of the same "
+                       "verb, once that lease's holder is confirmed dead on this host")
+# Where the held-lease refusal's operator remedy begins: _lock_refusal drops that remedy under a
+# concurrently HELD examination lock (a live reconciliation is running, so its condition cannot hold).
+HELD_REMEDY = " If you have confirmed NO opf run is live,"
+
+
 def lease_held_message(pfd, name, lease_rel, verb):
     """Compose the EEXIST held-lease refusal, best-effort naming the existing holder/operation/acquired_at.
     A present-but-unreadable or malformed payload STILL refuses (present-is-held, matching C-LEASE); the
-    lease is never seized or overwritten (spec 5.7). Names the manual reconciliation remedy the tool never
-    performs itself."""
+    lease is never seized or overwritten (spec 5.7). Names the manual reconciliation remedy and the one case
+    in which opf itself releases another run's lease (FOREIGN_LEASE_SCOPE). Its denial names only the lease
+    now present: a refusal met by the claim retried after this run released a confirmed-dead leftover
+    (_claim_after_release) appends that release, so no clause here denies every removal by this run."""
     detail = "a present lease with an unreadable payload"
     try:
         # O_NONBLOCK so a FIFO (or other special file) planted at lease.toml cannot BLOCK the open (an
@@ -1105,18 +1135,28 @@ def lease_held_message(pfd, name, lease_rel, verb):
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 detail = "a present non-regular lease (held)"
             else:
-                raw = os.read(fd, 65536)
-                data = tomllib.loads(raw.decode("utf-8"))
-                if isinstance(data, dict):
-                    detail = "held by {!r} (operation {!r}, acquired_at {!r})".format(
-                        data.get("holder"), data.get("operation"), data.get("acquired_at"))
+                raw = _read_capped(fd)
+                if raw is None:
+                    detail = ("a present lease with an OVERSIZED payload (over the 65536-byte bound, so it is "
+                              "never read as a lease and no holder is taken from a prefix of it)")
+                else:
+                    try:
+                        data = tomllib.loads(raw.decode("utf-8"))
+                    except (ValueError, RecursionError, MemoryError):
+                        # disposed at the parse (deep nesting, a many-part key, an over-long integer or
+                        # undecodable bytes keep the generic detail); the outer handler stays the backstop
+                        data = None
+                    if isinstance(data, dict):
+                        detail = "held by {!r} (operation {!r}, acquired_at {!r})".format(
+                            data.get("holder"), data.get("operation"), data.get("acquired_at"))
         finally:
             _opf_store._journal._close_fd_quietly(fd)
     except Exception:  # noqa: BLE001  a present-but-unreadable lease still refuses (present is held)
         pass
-    return ("another opf run holds the single-writer lease {}: {}. The lease is never seized (spec 5.7). "
-            "If you have confirmed NO opf run is live, release the leftover lease as your own reconciliation "
-            "step (the tool never removes a foreign lease), then re-run opf {}.".format(lease_rel, detail, verb))
+    return ("another opf run holds the single-writer lease {}: {}. The lease is never seized (spec 5.7).{} "
+            "release that lease as your own reconciliation step (this run has not removed the lease now present; "
+            "{}), then re-run "
+            "opf {}.".format(lease_rel, detail, HELD_REMEDY, FOREIGN_LEASE_SCOPE, verb))
 
 
 def lease_holder(verb):
@@ -1172,14 +1212,30 @@ def acquire_lease(root_fd, machine_rel, verb):
                 "{} lease acquisition failed after the lease {} was created ({}); the lease is LEFT in "
                 "place as a leftover from this failed {} and is never seized (spec 5.7). If you have "
                 "confirmed NO opf run is live, release the leftover lease as your own reconciliation step "
-                "(the tool never removes it), then re-run opf {}.".format(
-                    verb, lease_rel, exc, verb, verb)) from exc
+                "(this run never removes it; {}), then re-run opf {}.".format(
+                    verb, lease_rel, exc, verb, FOREIGN_LEASE_SCOPE, verb)) from exc
     finally:
         _opf_store._close_fd_exc_safe(pfd)
     return payload
 
 
-def read_lease_payload(pfd, name):
+def _read_capped(fd):
+    """The COMPLETE bytes of the open file `fd`, read through EOF, or None once more than 65536 bytes
+    arrive: an oversized payload is never truncated into a readable prefix. Descriptor-free: the caller
+    owns the open and the close."""
+    chunks = []
+    total = 0
+    while True:
+        chunk = os.read(fd, 65537 - total)
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > 65536:
+            return None
+        chunks.append(chunk)
+
+
+def read_lease_payload(pfd, name, why=None):
     """Read the lease at (pfd, name) SAFELY for an ownership compare, reusing the round-2 R3 pattern:
     O_RDONLY|O_NOFOLLOW|O_NONBLOCK (a planted FIFO or other special file cannot BLOCK the open), then fstat
     the opened fd and, for any NON-REGULAR file, return None WITHOUT reading. Returns the file's COMPLETE
@@ -1187,37 +1243,64 @@ def read_lease_payload(pfd, name):
     PREFIX of a larger payload (QA round 1: a 64 KiB valid prefix of an oversized malformed lease qualified
     for release under the former single bounded read). Returns None when the file is absent, non-regular,
     unreadable, or larger than the 64 KiB bound: the bound still never trusts the on-disk size, and an
-    oversized payload is never truncated into a readable one (fail-closed, present-is-held upstream)."""
+    oversized payload is never truncated into a readable one (fail-closed, present-is-held upstream).
+    When `why` (a list) is given, a None return appends its one cause, for a DIAGNOSTIC only: "absent",
+    "non-regular", "oversized", or "unreadable (<error>)", so a caller never reports an oversized or
+    non-regular entry as an absent one."""
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
-    except OSError:
+    except FileNotFoundError:
+        if why is not None:
+            why.append("absent")
+        return None
+    except OSError as exc:
+        if why is not None:
+            why.append("non-regular" if exc.errno == errno.ELOOP else "unreadable ({})".format(exc))
         return None
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
+            if why is not None:
+                why.append("non-regular")
             return None
-        chunks = []
-        total = 0
-        while True:
-            chunk = os.read(fd, 65537 - total)
-            if not chunk:
-                return b"".join(chunks)
-            total += len(chunk)
-            if total > 65536:
-                return None
-            chunks.append(chunk)
-    except OSError:
+        raw = _read_capped(fd)
+        if raw is None and why is not None:
+            why.append("oversized")
+        return raw
+    except OSError as exc:
+        if why is not None:
+            why.append("unreadable ({})".format(exc))
         return None
     finally:
         _opf_store._close_fd_exc_safe(fd)
 
 
-def lease_holder_of(raw):
+# What lease_holder_of says of an entry it read no bytes from, by the read_lease_payload cause.
+_UNREAD_ENTRY = {"absent": "the lease is absent",
+                 "non-regular": "the lease is a non-regular entry",
+                 "oversized": "the lease payload is OVERSIZED (over the 65536-byte bound)"}
+
+
+def lease_holder_of(raw, cause=None):
     """Best-effort holder identity from raw lease bytes, for a DIAGNOSTIC message only (never raises, never
-    load-bearing: the ownership decision is the full-payload byte compare in unlink_owned_lease)."""
+    load-bearing: the ownership decision is the full-payload byte compare in unlink_owned_lease). With no
+    bytes (raw None) it names no holder and says why, from `cause` (a read_lease_payload cause: absent,
+    non-regular, oversized, or unreadable with its error), or that the lease was not read when the caller
+    gives no cause; it never reports one cause as another. No shipped caller passes raw None today (the
+    one caller, unlink_owned_lease, names a holder only from bytes it read), so that branch is defensive
+    and self_test exercises it by calling this function directly."""
     if raw is None:
-        return "absent or a non-regular entry"
+        if cause is None:
+            return "no holder named (the lease was not read)"
+        if cause.startswith("unreadable"):
+            return "no holder named (the lease is {})".format(cause)
+        return "no holder named ({})".format(_UNREAD_ENTRY.get(cause, "the lease was not read"))
     try:
-        data = tomllib.loads(raw.decode("utf-8"))
+        try:
+            data = tomllib.loads(raw.decode("utf-8"))
+        except (ValueError, RecursionError, MemoryError):
+            # disposed at the parse (deep nesting, a many-part key, an over-long integer or undecodable
+            # bytes fall through to the malformed-replacement text); the outer handler stays the backstop
+            data = None
         if isinstance(data, dict) and data.get("holder") is not None:
             return "holder {!r}".format(data.get("holder"))
     except Exception:  # noqa: BLE001  diagnostic only; an unreadable replacement still refuses above
@@ -1246,14 +1329,25 @@ def unlink_owned_lease(pfd, name, lease_rel, expected_payload, verb):
     operator-or-peer violation stays the only reachability, within the locking boundary that lock
     discloses (one kernel's flock arbitration; spec section 17). It is vastly smaller than the prior
     ownership-blind unlink and never-seizes under any non-adversarial-mid-window sequence."""
-    on_disk = read_lease_payload(pfd, name)
+    why = []
+    on_disk = read_lease_payload(pfd, name, why)
     if on_disk != expected_payload:
         # FIX3: distinguish a genuine ABSENCE (the lease was deleted, not replaced) from a REPLACEMENT (a
         # present-but-different payload). Both stay fail-closed / never-seize; only the operator-facing
-        # wording differs. read_lease_payload returns None for absent, non-regular, or unreadable.
-        if on_disk is None:
-            detail = ("the lease is ABSENT at release (already removed, or present as a non-regular entry); "
-                      "this run's own lease is gone")
+        # wording differs. read_lease_payload returns None for absent, non-regular, oversized, or
+        # unreadable, and `why` names which, so an oversized or non-regular replacement is never ABSENT.
+        cause = why[0] if why else "unreadable (no cause recorded)"
+        if on_disk is None and cause == "absent":
+            detail = "the lease is ABSENT at release (already removed); this run's own lease is gone"
+        elif on_disk is None and cause == "oversized":
+            detail = ("the lease was REPLACED before release by an OVERSIZED payload (over the 65536-byte "
+                      "bound, never read as a lease, so no holder is named); this run's own lease is gone")
+        elif on_disk is None and cause == "non-regular":
+            detail = ("the lease was REPLACED before release by a non-regular entry; this run's own lease "
+                      "is gone")
+        elif on_disk is None:
+            detail = ("the lease present at release could not be read, {}, so this run cannot prove it is "
+                      "its own".format(cause))
         else:
             detail = ("the lease was REPLACED by another holder ({}) before release; this run's own lease "
                       "is gone".format(lease_holder_of(on_disk)))
@@ -1286,7 +1380,7 @@ def release_lease(root_fd, machine_rel, expected_payload, verb):
         _opf_store._close_fd_exc_safe(pfd)
 
 
-# --- the recovery claim: the spec 5.7 live-holder rule over a leftover lease ----------------------------
+# --- the recovery claim: the spec 5.7 never-seize and dead-run release clauses over a leftover lease ---
 
 # The holder identity acquire_lease stamps (lease_holder): "opf-<verb>:<host>:<pid>". The verb is a
 # lowercase token, so its first ':' ends it and is captured for the verb binding below, and the pid is the
@@ -1303,7 +1397,10 @@ def _closed_lease_model(raw):
     payload each refuse upstream rather than ever reaching the holder comparison."""
     try:
         data = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError, MemoryError):
+        # RecursionError: tomllib's refusal of deep nesting and (CPython 3.14.8 on) a 1001-part key, and
+        # MemoryError, a many-part key under a memory limit: such a lease is malformed like any other and
+        # recovery refuses it as held.
         return None
     if not isinstance(data, dict) or set(data) != set(_opf_check.LEASE_TOP_KEYS):
         return None
@@ -1386,9 +1483,9 @@ def _exclusive_examination(pfd, lease_rel, verb):
         import fcntl
     except ImportError as exc:
         raise WriteGuardError(
-            "reconciling the leftover {} lease {} needs the POSIX fcntl serialization primitive (absent "
+            "reconciling the present {} lease {} needs the POSIX fcntl serialization primitive (absent "
             "on this platform: {}); the lease is never examined or removed without it "
-            "(fail-closed)".format(verb, lease_rel, exc)) from exc
+            "(fail-closed).".format(verb, lease_rel, exc)) from exc
     try:
         fcntl.flock(pfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
@@ -1399,12 +1496,27 @@ def _exclusive_examination(pfd, lease_rel, verb):
                 "lease), and no lease was examined or removed by this run. Re-run opf {} once that "
                 "reconciliation finishes.".format(verb, lease_rel, exc, verb)) from exc
         raise WriteGuardError(
-            "the examination lock that serializes reconciling the leftover {} lease {} could not be taken "
+            "the examination lock that serializes reconciling the present {} lease {} could not be taken "
             "({}): the store's filesystem does not support or refused the directory lock, which is a lock "
             "failure, not a concurrent reconciliation. This run refuses rather than examine without it, and "
-            "no lease was examined or removed by this run. If you have confirmed NO opf run is live, release "
-            "the leftover lease as your own reconciliation step (spec 5.7), then re-run opf {}.".format(
-                verb, lease_rel, exc, verb)) from exc
+            "no lease was examined or removed by this run.".format(verb, lease_rel, exc)) from exc
+
+
+def _lock_refusal(exc, held):
+    """The examination-lock refusal with the held-lease refusal appended as its own sentence: the lock
+    failed before the lease was examined, so whether its holder is live is not known. The refusal names
+    that holder (the held-lease message, read when the claim met the lease) and never calls the lease
+    leftover. Under a concurrently HELD lock the held-lease remedy is dropped: a live reconciliation is
+    running, so its confirmed-no-run-is-live condition cannot hold."""
+    text = str(held)
+    cause = exc.__cause__
+    while cause is not None and not isinstance(cause, OSError):
+        cause = cause.__cause__
+    if cause is not None and cause.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+        # The LAST occurrence: the held-lease refusal ends with the remedy, and the holder it quotes from
+        # the lease file comes before it, so a holder carrying the remedy's words never cuts the text.
+        text = text.rsplit(HELD_REMEDY, 1)[0]
+    return WriteGuardError("{} {}{}".format(exc, text[:1].upper(), text[1:]))
 
 
 def _claim_after_release(pfd, root_fd, machine_rel, verb, lease_rel, released):
@@ -1439,9 +1551,9 @@ def _claim_after_release(pfd, root_fd, machine_rel, verb, lease_rel, released):
 
 def acquire_lease_for_recovery(root_fd, machine_rel, verb):
     """Claim the single-writer lease for a RECONCILIATION write (spec 5.7, 8.8 item 1, 16.1): the ordinary
-    ATOMIC claim first and, exactly when it refuses because a lease is PRESENT, the spec 5.7 live-holder
-    rule under a per-store EXCLUSIVE EXAMINATION LOCK (_exclusive_examination, held from before the
-    leftover is read until after the retried claim): a leftover lease whose complete well-formed payload
+    ATOMIC claim first and, exactly when it refuses because a lease is PRESENT, the spec 5.7 never-seize
+    and dead-run release clauses under a per-store EXCLUSIVE EXAMINATION LOCK (_exclusive_examination,
+    held from before the leftover is read until after the retried claim): a leftover lease whose complete well-formed payload
     names THIS verb's holder on THIS host CONFIRMED DEAD (positive evidence only) is released THROUGH
     this reconciliation, bound to the exact bytes examined (a lease replaced in the interval is never
     removed), and the atomic claim is retried ONCE under the same lock, so at most one of any number of
@@ -1469,7 +1581,10 @@ def acquire_lease_for_recovery(root_fd, machine_rel, verb):
         lease_rel = "{}/{}".format(machine_rel, _opf_check.LEASE_NAME)
         pfd, name = journal._open_parent(root_fd, lease_rel)
         try:
-            _exclusive_examination(pfd, lease_rel, verb)
+            try:
+                _exclusive_examination(pfd, lease_rel, verb)
+            except WriteGuardError as exc:
+                raise _lock_refusal(exc, held) from exc
             raw = read_lease_payload(pfd, name)
             examined = _examined_leftover_holder(raw, verb) if raw is not None else None
             if examined is None or not _lease_holder_confirmed_dead(examined[1]):
@@ -1490,3 +1605,238 @@ def acquire_lease_for_recovery(root_fd, machine_rel, verb):
             return _claim_after_release(pfd, root_fd, machine_rel, verb, lease_rel, released), released
         finally:
             _opf_store._close_fd_exc_safe(pfd)
+
+
+# --- self-test: plain vectors for the lease refusal and release messages (spec 5.7) ---------------------
+
+def self_test():
+    """Plain vectors for the lease messages, each judged against literal text and never against a constant
+    of this module, so a reverted message cannot carry its expectation with it. A failed examination lock
+    (held, failed, or no fcntl at all) names the live holder and never calls its lease leftover; it offers
+    the confirmed-no-run remedy only when no reconciliation holds the lock, and a holder quoting that remedy
+    never cuts the refusal. The held-lease and failed-acquisition refusals state the one case in which opf
+    removes another run's lease, never that it removes none. An oversized lease is reported oversized, never
+    by a holder read from its prefix. The ownership-verified release reports an oversized, non-regular or
+    unreadable replacement as what it is, never ABSENT, and the holder diagnostic names each unread lease by
+    its cause. Each vector runs over a real lease beneath a private temporary root. Returns 0 clean, 1 on a
+    failure, 2 on a harness error."""
+    import shutil
+    import tempfile
+    failures = []
+    checked = [0]
+
+    def check(name, vector):
+        checked[0] += 1
+        try:
+            problem = vector()
+        except Exception as exc:  # noqa: BLE001  a vector that raises is a failure, never a pass
+            problem = "raised {!r}".format(exc)
+        if problem:
+            failures.append("{}: {}".format(name, problem))
+
+    try:
+        base = tempfile.mkdtemp(prefix="opf-write-guard-selftest-")
+    except OSError as exc:
+        print("opf-write-guard self-test: harness error (no writable temporary directory: {}); "
+              "fail-closed".format(exc), file=sys.stderr)
+        return 2
+    try:
+        _self_test_vectors(check, base)
+    except Exception as exc:  # noqa: BLE001  a harness fault is cannot-evaluate, never a pass
+        print("opf-write-guard self-test: harness error ({!r}); fail-closed".format(exc), file=sys.stderr)
+        return 2
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    if failures:
+        print("opf-write-guard self-test: FAIL ({} checks, {} failed):".format(checked[0], len(failures)),
+              file=sys.stderr)
+        for failure in failures:
+            print("  - " + failure, file=sys.stderr)
+        return 1
+    print("opf-write-guard self-test: PASS ({} checks: examination-lock refusals, held-lease and "
+          "failed-acquisition remedies, oversized lease, release over each replacement, holder "
+          "diagnostic)".format(checked[0]))
+    return 0
+
+
+def _self_test_vectors(check, base):
+    """The vectors self_test runs, over the lease m/lease.toml beneath `base`."""
+    import fcntl
+    from unittest import mock
+    os.mkdir(os.path.join(base, "m"))
+    path = os.path.join(base, "m", "lease.toml")
+    holder = "opf-record:{}:{}".format(socket.gethostname(), os.getpid())   # this process: a live holder
+    live = ('acquired_at = "2026-10-12T00:00:00Z"\nholder = "{}"\noperation = "record"\n'
+            'schema = 1\n'.format(holder)).encode("utf-8")
+    remedy = "If you have confirmed NO opf run is live, "
+    scope = ("release that lease as your own reconciliation step (this run has not removed the lease now "
+             "present; opf removes another run's lease only while reconciling an interrupted run of the same "
+             "verb, once that lease's holder is confirmed dead on this host), then re-run opf {}.")
+    own = b"this run's own lease"
+
+    def clear():
+        if os.path.isdir(path) and not os.path.islink(path):
+            os.rmdir(path)
+        elif os.path.lexists(path):
+            os.unlink(path)
+
+    def plant(raw):
+        clear()
+        Path(path).write_bytes(raw)
+
+    def refusal(call):
+        try:
+            call()
+        except WriteGuardError as exc:
+            return str(exc)
+        return None
+
+    def judged(text, present=(), absent=(), named=None, left=None):
+        """The first problem with refusal `text`, or None: each `present` phrase in it, each `absent` phrase
+        not in it outside the echoed holder `named`, and the planted lease `left` byte for byte."""
+        if text is None:
+            return "no refusal"
+        for words in present:
+            if words not in text:
+                return "lacks {!r}: {}".format(words, text)
+        own_words = text if named is None else text.replace(named, "")
+        for words in absent:
+            if words in own_words:
+                return "carries {!r}: {}".format(words, text)
+        if left is not None and Path(path).read_bytes() != left:
+            return "the lease was changed"
+        return None
+
+    def lock_refused(code, lease):
+        """acquire_lease_for_recovery over `lease`, the examination lock failing with OSError(code), or with
+        fcntl unimportable when `code` is None."""
+        plant(lease)
+        claim = lambda: acquire_lease_for_recovery(root_fd, "m", "record")
+        if code is not None:
+            def failing(fd, operation):
+                raise OSError(code, os.strerror(code))
+            with mock.patch.object(fcntl, "flock", failing):
+                return refusal(claim)
+        saved = sys.modules.get("fcntl")
+        sys.modules["fcntl"] = None
+        try:
+            return refusal(claim)
+        finally:
+            sys.modules["fcntl"] = saved
+
+    def released(plant_entry, read_fault=None):
+        """unlink_owned_lease over the entry `plant_entry` leaves, every read failing when `read_fault`."""
+        plant_entry()
+        if read_fault is None:
+            return refusal(lambda: unlink_owned_lease(pfd, "lease.toml", "m/lease.toml", own, "record"))
+        with mock.patch.object(os, "read", read_fault):
+            return refusal(lambda: unlink_owned_lease(pfd, "lease.toml", "m/lease.toml", own, "record"))
+
+    def read_fault(fd, size):
+        raise OSError(errno.EIO, "injected read failure")
+
+    def acquired_failing():
+        """acquire_lease over no lease, its payload write failing after the create."""
+        clear()
+
+        def write_fault(fd, data):
+            raise OSError(errno.EIO, "injected write failure")
+        with mock.patch.object(_opf_store._journal, "_write_all", write_fault):
+            return refusal(lambda: acquire_lease(root_fd, "m", "record"))
+
+    oversized = live + b"#" * (65536 - len(live) - 1) + b"\n" + b"schema = 1\n"
+    crafted = "opf-record:h If you have confirmed NO opf run is live, x:1"
+    root_fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        pfd = os.open(os.path.join(base, "m"), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            check("a held examination lock names the live holder, never leftover, with no remedy", lambda: judged(
+                lock_refused(errno.EWOULDBLOCK, live),
+                present=(holder, "another reconciliation is concurrently examining the record lease m/lease.toml",
+                         ". Another opf run holds the single-writer lease m/lease.toml: held by '{}'".format(holder),
+                         "The lease is never seized (spec 5.7)."),
+                absent=("leftover", remedy, "could not be taken"), named=holder, left=live))
+            check("a failed examination lock names the live holder, never leftover", lambda: judged(
+                lock_refused(errno.ENOLCK, live),
+                present=(holder, "the examination lock that serializes reconciling the present record lease "
+                         "m/lease.toml could not be taken",
+                         ". Another opf run holds the single-writer lease m/lease.toml: held by '{}'".format(holder),
+                         remedy + scope.format("record")),
+                absent=("leftover", "concurrently examining", "never removes a foreign lease"), named=holder,
+                left=live))
+            check("a platform without fcntl names the live holder, never leftover", lambda: judged(
+                lock_refused(None, live),
+                present=(holder, "reconciling the present record lease m/lease.toml needs the POSIX fcntl "
+                         "serialization primitive",
+                         ". Another opf run holds the single-writer lease m/lease.toml: held by '{}'".format(holder),
+                         remedy + scope.format("record")),
+                absent=("leftover",), named=holder, left=live))
+            check("a holder quoting the remedy never cuts the held-lock refusal", lambda: judged(
+                lock_refused(errno.EWOULDBLOCK, 'holder = "{}"\n'.format(crafted).encode("utf-8")),
+                present=("held by '{}'".format(crafted), "The lease is never seized (spec 5.7)."),
+                absent=("opf removes another run's lease only while",), named=crafted))
+            check("the held-lease refusal states the one case opf removes another run's lease", lambda: judged(
+                (plant(live), refusal(lambda: acquire_lease(root_fd, "m", "upgrade")))[1],
+                present=(holder, "The lease is never seized (spec 5.7). " + remedy + scope.format("upgrade")),
+                absent=("leftover", "never removes a foreign lease"), named=holder, left=live))
+            check("an oversized lease is reported oversized, never by its prefix's holder", lambda: (
+                "the fixture's 64 KiB prefix does not parse as the live lease"
+                if tomllib.loads(oversized[:65536].decode("utf-8")).get("holder") != holder else judged(
+                    (plant(oversized), refusal(lambda: acquire_lease(root_fd, "m", "record")))[1],
+                    present=("a present lease with an OVERSIZED payload (over the 65536-byte bound, so it is "
+                             "never read as a lease and no holder is taken from a prefix of it)",),
+                    absent=(holder,), left=oversized)))
+            check("a failed acquisition states the one case opf removes another run's lease", lambda: judged(
+                acquired_failing(),
+                present=("the lease is LEFT in place as a leftover from this failed record",
+                         "(this run never removes it; opf removes another run's lease only while reconciling an "
+                         "interrupted run of the same verb, once that lease's holder is confirmed dead on this "
+                         "host), then re-run opf record."),
+                absent=("the tool never removes it",)))
+            check("an oversized replacement is released as oversized, never ABSENT", lambda: judged(
+                released(lambda: plant(b"#" * 70000)),
+                present=("the lease was REPLACED before release by an OVERSIZED payload (over the 65536-byte "
+                         "bound, never read as a lease, so no holder is named)",),
+                absent=("ABSENT",), left=b"#" * 70000))
+            check("a directory replacement is released as non-regular, never ABSENT", lambda: judged(
+                released(lambda: (clear(), os.mkdir(path))),
+                present=("the lease was REPLACED before release by a non-regular entry",), absent=("ABSENT",))
+                or (None if os.path.isdir(path) else "the replacement was removed"))
+            check("a symlink replacement is released as non-regular, never ABSENT", lambda: judged(
+                released(lambda: (clear(), os.symlink("lease.toml.elsewhere", path))),
+                present=("the lease was REPLACED before release by a non-regular entry",), absent=("ABSENT",))
+                or (None if os.path.islink(path) else "the replacement was removed"))
+            check("an unreadable lease is released as unreadable, never ABSENT", lambda: judged(
+                released(lambda: plant(live), read_fault),
+                present=("the lease present at release could not be read, unreadable (",
+                         "injected read failure", "so this run cannot prove it is its own"),
+                absent=("ABSENT",), left=live))
+            check("an absent lease is released as ABSENT, never a non-regular entry", lambda: judged(
+                released(clear),
+                present=("the lease is ABSENT at release (already removed); this run's own lease is gone",),
+                absent=("non-regular",)))
+        finally:
+            os.close(pfd)
+    finally:
+        os.close(root_fd)
+
+    def diagnosed(cause, words):
+        said = lease_holder_of(None) if cause is None else lease_holder_of(None, cause)
+        return None if said == words else "said {!r}".format(said)
+
+    for cause, words in (("absent", "no holder named (the lease is absent)"),
+                         ("non-regular", "no holder named (the lease is a non-regular entry)"),
+                         ("oversized", "no holder named (the lease payload is OVERSIZED (over the 65536-byte "
+                          "bound))"),
+                         ("unreadable (injected read failure)", "no holder named (the lease is unreadable "
+                          "(injected read failure))"),
+                         (None, "no holder named (the lease was not read)")):
+        check("the holder diagnostic names an unread lease by its cause ({})".format(cause or "none given"),
+              lambda cause=cause, words=words: diagnosed(cause, words))
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
+    print("usage: _opf_write_guard.py --self-test", file=sys.stderr)
+    sys.exit(2)

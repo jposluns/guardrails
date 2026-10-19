@@ -164,7 +164,10 @@ def _validate(pack_dir):
     raw = _read_regular(pack_dir / MANIFEST_NAME, MAX_MANIFEST_BYTES, "manifest")
     try:
         doc = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    except (ValueError, RecursionError, MemoryError) as exc:
+        # ValueError: tomllib.TOMLDecodeError, a UnicodeDecodeError and an over-long integer literal;
+        # RecursionError: deep nesting and (CPython 3.14.8 on) a 1001-part key; MemoryError: a many-part
+        # key under a memory limit.
         raise _Refusal(CANNOT_EVALUATE, "manifest-parse", "pack.toml does not parse: {}".format(exc))
 
     keys = set(doc)
@@ -470,6 +473,29 @@ def _self_test_vectors():
                     "PASS" if ok else "FAIL", got[0], got[1] or "").rstrip())
                 if not ok:
                     failures.append("unreadable-subdirectory: {!r}".format(got))
+
+            # A manifest tomllib refuses with RecursionError (a deeply nested value, and a 1001-part key under
+            # the emulated cap) is the manifest-parse refusal, never the backstop's unexpected error.
+            import _opf_store
+            for name, text, capped in (("manifest-deep-nesting", _opf_store._ST_DEEP_TOML, False),
+                                       ("manifest-key-1001-parts", _opf_store._ST_LONG_KEY_TOML, True)):
+                pack = Path(tmp) / name / "prompt-pack"
+                pack.mkdir(parents=True)
+                (pack / MANIFEST_NAME).write_text(text, encoding="utf-8")
+                try:
+                    if capped:
+                        with _opf_store._StKeyPartCap():
+                            got = validate_pack(pack)
+                    else:
+                        got = validate_pack(pack)
+                except RecursionError as exc:
+                    got = (None, None, "escaped RecursionError: {}".format(exc))
+                count += 1
+                ok = got[:2] == (CANNOT_EVALUATE, "manifest-parse") and "does not parse" in got[2]
+                print("{} {}: {} {}".format("PASS" if ok else "FAIL", name, got[0], got[1] or "").rstrip())
+                if not ok:
+                    failures.append("{} (wanted {} manifest-parse, got {} {}: {})".format(
+                        name, CANNOT_EVALUATE, got[0], got[1], got[2]))
 
             # Use a child timeout so a blocking open is a failed check, never a hung self-test.
             # Probe member reads directly: the walk's earlier refusal must not mask a lost open guard.

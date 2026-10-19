@@ -956,10 +956,15 @@ _RENDERED = b"rendered todo view\n"
 _MOVE_DEST = ".working/archive/moved/adopter/MOVE.md"
 _CONSUMER = "consumer/USES.md"
 _CONSUMER_OLD, _CONSUMER_NEW = b"old consumer\n", b"new consumer\n"
-# The non-CI enforcement members install-pack plants (check 1's destination sweep owns them).
-_PACK = {".opf/hooks/pre-commit": b"#!/bin/sh\nexit 0\n", ".claude/settings.json": b"{}\n",
+# The enforcement members install-pack plants beside the CI floor: the pre-commit launchers and the tool entry
+# point both launcher rows bind under the opf/ mirror (_opf_adopt.canonical_plan_bindings), the deny hook and
+# the instruction files. Check 1's destination sweep owns each but the tool entry point, a CI member too.
+_PACK = {"opf/enforcement/precommit/pre-commit": b"#!/bin/sh\nexit 0\n",
+         "opf/enforcement/precommit/install.sh": b"#!/bin/sh\nexit 0\n",
+         "opf/tools/opf.py": b"tool entry point\n", ".claude/settings.json": b"{}\n",
          "AGENTS.md": b"agents instructions\n", "GEMINI.md": b"gemini instructions\n",
          ".cursor/rules/opf.mdc": b"cursor instructions\n"}
+_HOOK = "opf/enforcement/precommit/pre-commit"   # the pre-commit row's first member
 _LIVE = {"legacy/RULES.md": b"old rules\n", "notes/old.md": b"old notes\n", ".working/TODO.md": b"old todo\n",
          "adopter/MOVE.md": b"move me\n"}
 
@@ -1050,7 +1055,8 @@ def _fixture(root):
     for row in bindings["enforcement"]:
         if row["platform"] == "ci":
             row["members"] = [dict(path=_CI_PATH, digest=_digest(workflow)),
-                              dict(path=_CI_RECIPE_REL, digest=_digest(recipe))]
+                              dict(path=_CI_RECIPE_REL, digest=_digest(recipe))] + [
+                dict(path=m["path"], digest=_digest(_PACK[m["path"]])) for m in row["members"] if m["path"] in _PACK]
         else:
             row["members"] = [dict(path=m["path"], digest=_digest(_PACK[m["path"]])) for m in row["members"]]
             row["members"] += [dict(path=path, digest=_digest(data))
@@ -1679,27 +1685,27 @@ def self_test():
                 check("check-5-member-" + label + "-red", _only(got, pair)
                       and _says(got, WIRING, "claude-code enforcement surface (deny-hook) is not installed")
                       and sorted(set(p for p, _probe in watched.calls)) == ["pre-commit"])
-            # Every member of a probed row is checked, not only the first: with a second pre-commit member
-            # planted and planned (frozen_plan accepts it) the surface is green, and either member absent or
-            # drifted reds checks 1 and 5 and leaves the pre-commit row unprobed. A loop over the first member
-            # alone (or the last alone) passes one of these vectors and fails another.
-            second = ".opf/hooks/zz-second-deny"
-            with mock.patch.object(here, "_EXTRA_MEMBERS", (("pre-commit", second, b"#!/bin/sh\nexit 1\n"),)):
+            # Every member of a probed row is checked, not only the first: the pre-commit row binds the hook,
+            # its installer and the tool entry point (_opf_adopt.enforcement_launch_members), so with all three
+            # planted the surface is green, and the hook or the installer absent, or the installer drifted, reds
+            # checks 1 and 5 and leaves the pre-commit row unprobed. A loop over the first member alone (or the
+            # last alone) passes one of these vectors and fails another.
+            second = "opf/enforcement/precommit/install.sh"
+            watched = _Surface()
+            got = _case(lambda r, i, w=watched: dict(prober=w))
+            check("check-5-second-member-control-valid", got[WIRING].status == VALID and _only(got, {})
+                  and sorted(set(p for p, _probe in watched.calls)) == ["claude-code", "pre-commit"])
+            for label, member, mutate in (
+                    ("second-absent", second, lambda r: _remove(r, second)),
+                    ("second-drifted", second, lambda r: _put(r, second, b"tampered bytes\n")),
+                    ("first-absent", _HOOK, lambda r: _remove(r, _HOOK))):
                 watched = _Surface()
-                got = _case(lambda r, i, w=watched: dict(prober=w))
-                check("check-5-second-member-control-valid", got[WIRING].status == VALID and _only(got, {})
-                      and sorted(set(p for p, _probe in watched.calls)) == ["claude-code", "pre-commit"])
-                for label, member, mutate in (
-                        ("second-absent", second, lambda r: _remove(r, second)),
-                        ("second-drifted", second, lambda r: _put(r, second, b"tampered bytes\n")),
-                        ("first-absent", ".opf/hooks/pre-commit", lambda r: _remove(r, ".opf/hooks/pre-commit"))):
-                    watched = _Surface()
-                    got = _case(lambda r, i, m=mutate, w=watched: (m(r), dict(prober=w))[1])
-                    check("check-5-member-" + label + "-red", _only(got, pair)
-                          and _says(got, WIRING, "pre-commit enforcement surface (staged-pre-commit) is not installed")
-                          and _says(got, WIRING, "member {!r} is absent".format(member) if label.endswith("absent")
-                                    else "member {!r} does not hold its planned bytes".format(member))
-                          and sorted(set(p for p, _probe in watched.calls)) == ["claude-code"])
+                got = _case(lambda r, i, m=mutate, w=watched: (m(r), dict(prober=w))[1])
+                check("check-5-member-" + label + "-red", _only(got, pair)
+                      and _says(got, WIRING, "pre-commit enforcement surface (staged-pre-commit) is not installed")
+                      and _says(got, WIRING, "member {!r} is absent".format(member) if label.endswith("absent")
+                                else "member {!r} does not hold its planned bytes".format(member))
+                      and sorted(set(p for p, _probe in watched.calls)) == ["claude-code"])
             # Instruction members are not the probed surface: their drift moves check 1 only, never check 5.
             check("check-5-instructions-member-not-probed", _only(_case(lambda r, i: _put(
                 r, "AGENTS.md", b"tampered\n")), _red(AUTHORITY)))
@@ -1773,7 +1779,7 @@ def self_test():
         both = dict([(AUTHORITY, INVALID), (WIRING, INVALID)])
         check("flip-1-destination-drift", _only(dest, both)
               and _says(dest, AUTHORITY, "planned destination '.claude/settings.json'"))
-        check("flip-1-destination-absent", _only(_case(lambda r, i: _remove(r, ".opf/hooks/pre-commit")),
+        check("flip-1-destination-absent", _only(_case(lambda r, i: _remove(r, _HOOK)),
                                                  both))
         drifted = _case(lambda r, i: _append(r, ".working/toml/manifest.toml", b"# drift\n"))
         check("check-1-manifest-drift-red", _only(drifted, _red(AUTHORITY))
@@ -2168,12 +2174,19 @@ def self_test():
             _remove(root, _CI_PATH)
 
         check("check-4-ci-other-path", _ci_cannot(_case(_relocated), "'.github/workflows/opf.yml' is absent"))
-        for path in ("ci/opf.yml", ".github/workflows/sub/opf.yml", ".github/opf.yml", ".github/workflows/.yml"):
+        for path in ("ci/opf.yml", ".github/workflows/sub/opf.yml", ".github/opf.yml"):
             with mock.patch.object(here, "_CI_PATH", path):
                 got = _case()
             check("check-4-ci-not-a-workflow-path-" + path, _ci_cannot(got, "is not a file directly under"))
-        with mock.patch.object(here, "_CI_PATH", ".github/workflows/floor.yaml"):
-            check("check-4-ci-plan-named-path-valid", _only(_case(), {}))
+        # A workflow installed under any file name but opf.yml is refused by the frozen plan itself (the CI
+        # launcher is installed as opf.yml, _opf_adopt.ENFORCEMENT_LAUNCHERS), so every check is CANNOT-EVALUATE;
+        # check 4's own legs for such a path (a hidden name, a plan-named path) are direct-call vectors below.
+        for path in (".github/workflows/.yml", ".github/workflows/floor.yaml"):
+            with mock.patch.object(here, "_CI_PATH", path):
+                got = _case()
+            check("check-4-ci-workflow-name-refused-by-plan-" + path,
+                  all(got[name].status == CANNOT_EVALUATE for name in CHECKS)
+                  and _says(got, AUTHORITY, "is neither a launcher, by its installed file name"))
         check("check-4-ci-recipe-edited", _ci_cannot(_case(lambda r, i: _put(r, _CI_RECIPE_REL, recipe + b"# x\n")),
                                                      "does not match its planned bytes",
                                                      "is not the pack's shipped recipe"))
@@ -2319,6 +2332,17 @@ def self_test():
                     path=".github/workflows/second.yml", digest=_digest(template))]), "2 workflow members"))
                 check("check-4-ci-no-workflow-direct", _named(_ci_direct(
                     [dict(path=_CI_RECIPE_REL, digest=_digest(recipe))]), "0 workflow members"))
+                # Check 4 reads the workflow at the path the plan names, never the default: with the default
+                # removed, the template at another plan-named workflow path is VALID, and a hidden name is not a
+                # workflow file GitHub reads.
+                _remove(root, _CI_PATH)
+                _put(root, ".github/workflows/floor.yaml", template)
+                check("check-4-ci-plan-named-path-valid-direct", _ci_direct([dict(
+                    path=".github/workflows/floor.yaml", digest=_digest(template))]).status == VALID)
+                _put(root, ".github/workflows/.yml", template)
+                check("check-4-ci-hidden-workflow-name-direct", _named(_ci_direct([dict(
+                    path=".github/workflows/.yml", digest=_digest(template))]), "is not a file directly under"))
+                _put(root, _CI_PATH, template)
                 for attr, name in (("_SHIPPED_TEMPLATE", "github-actions.yml"), ("_SHIPPED_RECIPE", "opf-ci.sh")):
                     with mock.patch.object(here, attr, "enforcement/ci/absent/" + name):
                         unread = _ci_direct(workflow_only)

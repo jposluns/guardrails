@@ -34,7 +34,11 @@ never a candidate, and a decision naming it refuses.
 A move decision without a destination plans the spec 14.2 default,
 .working/archive/moved/<source-path>, from the source row's own path, never stripped;
 its store base must be observed (an excluded or unobserved nearest ancestor is
-cannot-evaluate) and an occupied default destination is a collision. Every move
+cannot-evaluate) and an occupied default destination is a collision. A declared
+destination whose file name is an enforcement launcher's (opf.yml, opf-ci.sh, pre-commit
+or install.sh, compared case-insensitively) refuses unless it lies beneath that Move
+archive: no enforcement row can name a moved file, so the frozen plan would refuse it as
+an uninspected launcher (_opf_adopt._launcher_writes). Every move
 destination and archive preservation copy is checked against the one
 protected-destination predicate the apply shell shares (_opf_adopt.protected_destination).
 DISCLOSED-STRICTER (disclose-guard-residuals): spec 14.2 requires only the default Move
@@ -543,6 +547,56 @@ def _roots(sources):
     return paths
 
 
+def _require_no_store_manifest(root_fd, resolution):
+    """Prove that a .working the resolver cannot evaluate is foreign content with NO candidate store
+    manifest before reading any of its files. Do not infer this from resolver prose. Source discovery
+    (_opf_adopt_discover) shares this proof: an unresolved manifest may register unmanaged paths."""
+    working = store._journal._lstat_at(root_fd, store.WORKING_DIRNAME)
+    if working is None or not stat.S_ISDIR(working.st_mode):
+        raise PlanError("store resolution cannot be evaluated: " + resolution.detail)
+    wfd = os.open(store.WORKING_DIRNAME,
+                  os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+    try:
+        count = 0
+        with os.scandir(wfd) as listing:
+            for entry in listing:
+                count += 1
+                if count > MAX_ENTRIES:
+                    raise PlanError("store discovery exceeds entry bound")
+                st = os.stat(entry.name, dir_fd=wfd, follow_symlinks=False)
+                if stat.S_ISDIR(st.st_mode):
+                    child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY
+                                    | os.O_NOFOLLOW, dir_fd=wfd)
+                    try:
+                        if store._journal._lstat_at(child, store.MANIFEST_NAME) is not None:
+                            raise PlanError("unresolved store manifest requires repair")
+                    finally:
+                        store._journal._close_fd_propagating(child)
+    finally:
+        store._journal._close_fd_propagating(wfd)
+
+
+def _resolved_unmanaged(manifest, machine_rel):
+    """The resolved manifest's [unmanaged] paths, in order, each a contained path (_path) that neither
+    equals, contains nor lies within a reserved store path: the machine subtree at `machine_rel`, a store
+    control root of the manifest's homes generation, or a declared view target. Source discovery
+    (_opf_adopt_discover) shares this check, so it refuses an [unmanaged] entry exactly where
+    investigation does."""
+    control = list(store.store_control_roots(store.homes_generation(manifest)))
+    paths = []
+    for path in manifest.get("unmanaged", {}).get("paths", []):
+        # Conservative collision check: do not let an exclusion conceal the
+        # machine subtree, a store control root, or a declared view. Fine-grained store
+        # membership remains the doctor's job, not an adoption-planner reimplementation.
+        path = _path(path)
+        reserved = [machine_rel] + control
+        reserved += [v["target"] for v in manifest.get("views", {}).values()]
+        if any(_under(path, p) or _under(p, path) for p in reserved):
+            raise PlanError("unmanaged exclusion overlaps a reserved store path")
+        paths.append(path)
+    return paths
+
+
 def _inventory(root, sources, targets):
     store._journal.require_containment()
     root_fd = store._open_dir_nofollow(root)
@@ -565,31 +619,7 @@ def _inventory(root, sources, targets):
         resolution, manifest_raw = store.resolve_store_fd(root_fd, root)
         excluded = []
         if resolution.status == store.CANNOT_EVALUATE:
-            # Prove that this is foreign content with NO candidate store manifest
-            # before reading any of its files. Do not infer this from resolver prose.
-            working = store._journal._lstat_at(root_fd, store.WORKING_DIRNAME)
-            if working is None or not stat.S_ISDIR(working.st_mode):
-                raise PlanError("store resolution cannot be evaluated: " + resolution.detail)
-            wfd = os.open(store.WORKING_DIRNAME,
-                          os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
-            try:
-                count = 0
-                with os.scandir(wfd) as listing:
-                    for entry in listing:
-                        count += 1
-                        if count > MAX_ENTRIES:
-                            raise PlanError("store discovery exceeds entry bound")
-                        st = os.stat(entry.name, dir_fd=wfd, follow_symlinks=False)
-                        if stat.S_ISDIR(st.st_mode):
-                            child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY
-                                            | os.O_NOFOLLOW, dir_fd=wfd)
-                            try:
-                                if store._journal._lstat_at(child, store.MANIFEST_NAME) is not None:
-                                    raise PlanError("unresolved store manifest requires repair")
-                            finally:
-                                store._journal._close_fd_propagating(child)
-            finally:
-                store._journal._close_fd_propagating(wfd)
+            _require_no_store_manifest(root_fd, resolution)
         if resolution.status == store.RESOLVED:
             manifest_path = resolution.machine_rel + "/" + store.MANIFEST_NAME
             # The exact bytes discovery already read through the .working listing descriptor,
@@ -606,16 +636,8 @@ def _inventory(root, sources, targets):
             # also reserves every store control root and excludes it from investigation (spec 14.2).
             homes = store.homes_generation(manifest)
             control = list(store.store_control_roots(homes))
-            for path in manifest.get("unmanaged", {}).get("paths", []):
-                # Conservative collision check: do not let an exclusion conceal the
-                # machine subtree, a store control root, or a declared view. Fine-grained store
-                # membership remains the doctor's job, not an adoption-planner reimplementation.
-                path = _path(path)
-                reserved = [resolution.machine_rel] + control
-                reserved += [v["target"] for v in manifest.get("views", {}).values()]
-                if any(_under(path, p) or _under(p, path) for p in reserved):
-                    raise PlanError("unmanaged exclusion overlaps a reserved store path")
-                excluded.append({"path": path, "reason": "registered-unmanaged"})
+            excluded.extend({"path": path, "reason": "registered-unmanaged"}
+                            for path in _resolved_unmanaged(manifest, resolution.machine_rel))
             if homes >= 2:
                 excluded.extend({"path": path, "reason": "store-control"} for path in control)
             manifest_digest = _digest(raw)
@@ -723,7 +745,7 @@ def _investigate(product_root, sources, targets):
         doc, homes, views, manifest = _inventory(root, _roots(sources), _roots(targets))
         observed = AdoptResult(store.VALID, observation=_seal(doc, "observation_digest"))
         return observed, homes, views, manifest
-    except (OSError, ValueError, UnicodeError, RecursionError, EmitError,
+    except (OSError, ValueError, UnicodeError, RecursionError, MemoryError, EmitError,
             store.StoreError, store._journal.JournalError) as exc:
         return AdoptResult(store.CANNOT_EVALUATE, [str(exc)]), 1, None, None
 
@@ -807,9 +829,10 @@ def _decisions(observation, decisions, run_id, managed):
     under the adoption archive, a move included. A move destination and every
     preservation destination alike need observed absence (an occupied destination
     is a collision, never an overwrite). A move without a destination takes the spec
-    14.2 default (_default_move_destination). A keep's register-unmanaged row is minted
-    here without its manifest digests, which _bind_registrations adds once the
-    program is ordered."""
+    14.2 default (_default_move_destination); a declared one under a launcher's file
+    name refuses unless it lies beneath the Move archive. A keep's register-unmanaged
+    row is minted here without its manifest digests, which _bind_registrations adds
+    once the program is ordered."""
     if type(decisions) is not list:
         raise PlanError("decisions must be a list")
     machine_rel, view_targets = managed
@@ -860,6 +883,18 @@ def _decisions(observation, decisions, run_id, managed):
                 destination = _default_move_destination(kinds, path)
             else:
                 destination = _path(row["destination"])
+                # A moved file is never an enforcement member (a member is installed by an install op,
+                # which would write its path twice), so the frozen plan refuses a launcher-named move
+                # destination outside the Move archive as uninspected; refuse it here with the remedy.
+                if (schema._launcher_of(destination) is not None
+                        and not schema._in_move_archive(destination, ".")):
+                    raise PlanError(
+                        "move destination {!r} of {!r} has an enforcement launcher's file name "
+                        "(opf.yml, opf-ci.sh, pre-commit or install.sh, in any case) outside {}/, "
+                        "and no enforcement row can name a moved file, so the plan would refuse it "
+                        "as an uninspected launcher; omit the destination to take the default, or "
+                        "choose another file name".format(
+                            destination, path, schema.ARCHIVE_REL + "/moved"))
                 # Only observed absence is accepted: the destination's own absent entry, or an
                 # absent or walked ancestor. Declare a destination outside the walked roots in
                 # targets when investigating, then pass the same targets to plan.
@@ -987,7 +1022,7 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
             return AdoptResult(checked.status, checked.findings, observation=observed.observation)
         return AdoptResult(store.VALID, observation=observed.observation,
                            inventory=inventory_bytes, plan=frozen)
-    except (ValueError, UnicodeError, RecursionError, EmitError) as exc:
+    except (ValueError, UnicodeError, RecursionError, MemoryError, EmitError) as exc:
         return AdoptResult(store.CANNOT_EVALUATE, [str(exc)], observation=observed.observation)
 
 
@@ -1118,8 +1153,9 @@ def self_test():
             self.views = sorted(v["target"] for v in views)
 
         def all_targets(self):
-            # The pre-commit hook lies outside every walked root, so its absence is a declared target.
-            return sorted(set(self.targets) | {".opf/hooks/pre-commit"})
+            # The opf/ mirror the pack row plants (the pre-commit hook, the CI recipe and the tool entry
+            # point) lies outside every walked root, so its absence is a declared target.
+            return sorted(set(self.targets) | {schema.PACK_MIRROR_ROOT})
 
         def base_ops(self):
             # Scaffold the default store (unless one resolves), render its declared views and plant
@@ -1269,7 +1305,8 @@ def self_test():
                                              "preservation": preserved}])
             # The exact effects: the preservation copy, the scaffolded manifest and every enforcement
             # member, each tied to the op that writes it, beside the retire removal.
-            pack = [dict(m) for row in self.bindings["enforcement"] for m in row["members"]]
+            # (a member two rows share, the mirrored tool entry point, is one creation)
+            pack = schema.enforcement_install_op(self.bindings["enforcement"])["members"]
             init, render, _ = self.base_ops()
             creations = sorted([{"path": preserved, "digest": digest}] + init["members"]
                                + render["members"] + pack, key=lambda r: sorted(r.items()))
@@ -1369,6 +1406,46 @@ def self_test():
                 with self.subTest(destination=destination):
                     result = self.make_plan(decisions=[dict(decision, destination=destination)])
                     self.assertEqual(result.status, status, result.findings)
+
+        def test_launcher_named_move_destination(self):
+            # A declared move destination whose file name is a launcher's, in any case, refuses before
+            # the plan freezes, naming the remedy: the frozen plan would refuse it as an uninspected
+            # launcher, since no enforcement row can name a moved file. The default destination, a
+            # declared one beneath the Move archive, and another file name still plan.
+            (self.root / ".opf/hooks").mkdir(parents=True)
+            for name in ("pre-commit", "install.sh"):
+                (self.root / ".opf/hooks" / name).write_bytes(b"#!/bin/sh\n")
+            self.sources = [".opf"]
+            moved = ".working/archive/moved/old/pre-commit"
+            self.targets = ["legacy", moved]
+            for source, destination in ((".opf/hooks/pre-commit", "legacy/hooks/pre-commit"),
+                                        (".opf/hooks/install.sh", "legacy/hooks/install.sh"),
+                                        (".opf/hooks/pre-commit", "legacy/hooks/PRE-COMMIT"),
+                                        (".opf/hooks/pre-commit", "legacy/OPF.yml"),
+                                        (".opf/hooks/install.sh", "legacy/opf-ci.sh")):
+                with self.subTest(destination=destination):
+                    other = (".opf/hooks/install.sh" if source.endswith("pre-commit")
+                             else ".opf/hooks/pre-commit")
+                    result = self.make_plan(decisions=[
+                        dict(path=source, disposition="move", destination=destination, actor="fixture"),
+                        dict(path=other, disposition="retire", actor="fixture")])
+                    self.assertEqual(result.status, store.CANNOT_EVALUATE, result.findings)
+                    self.assertIsNone(result.plan)
+                    self.assertEqual(len(result.findings), 1, result.findings)
+                    self.assertTrue(result.findings[0].startswith(
+                        "move destination {!r} of {!r} has an enforcement launcher's file name".format(
+                            destination, source)), result.findings)
+                    self.assertIn("omit the destination to take the default, or choose another "
+                                  "file name", result.findings[0])
+            for destination in (None, moved, "legacy/hooks/pre-commit.old"):
+                with self.subTest(destination=destination):
+                    decision = dict(path=".opf/hooks/pre-commit", disposition="move", actor="fixture")
+                    if destination is not None:
+                        decision["destination"] = destination
+                    result = self.make_plan(decisions=[
+                        decision,
+                        dict(path=".opf/hooks/install.sh", disposition="retire", actor="fixture")])
+                    self.assertEqual(result.status, store.VALID, result.findings)
 
         def test_default_move_destination(self):
             # A move without a destination plans the spec 14.2 default from the row's own path,
