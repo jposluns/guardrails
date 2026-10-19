@@ -602,8 +602,10 @@ def reserve_allocation(cap, kind, run_id, demand, expected=None):
     written, not even a directory. `expected`, when given, is the claims map the caller planned: a
     derivation that differs raises ReservationDerivationChanged, again before anything is written.
     The run's own entry is left out of the derivation, so a repeat call under the same capability
-    derives the same claims while counters.toml and every other reservation are unchanged; after
-    either moves, the repeat derives other claims and is refused as different bytes. The destination
+    derives the same claims while counters.toml and every other reservation are unchanged. After
+    either moves, the repeat derives again: claims that now differ are refused as different bytes,
+    and a change that leaves the demanded keys' maximum where it was derives the published claims
+    again and is answered from the read-back entry. The destination
     derives from kind and run identity alone; no caller names a path. Publication is _project's
     atomic-exclusive idiom (_create_control_file): the full payload is written and fsynced at a
     staging name, linked exclusively to the final name, the staging name retired and the directory

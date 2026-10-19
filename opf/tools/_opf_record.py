@@ -2488,10 +2488,33 @@ _FAILED_STATE = {"open": "still open",
                  "complete": "COMPLETE (its publication is present, with its render and final doctor never run)"}
 
 
+def _check_planned_ids(ctx, plan):
+    """The plan's ordered ids must be exactly the ones its demand and planned claims imply, checked
+    purely (no store read): under each demanded key, the demanded count of numbers ending at the
+    planned claim, issued in demand order (claim_ids over the high-water just below each claim). The
+    seam compares only the claims, and plan.ids is a separate input the run reports and publishes, so
+    a plan whose ids differ (another number, another order, an id missing or extra) refuses here,
+    before anything is reserved."""
+    counts = collections.Counter(ctx.demand)
+    implied = None
+    if isinstance(ctx.claims, dict) and set(ctx.claims) == set(counts) and all(
+            type(ctx.claims[ns]) is int and ctx.claims[ns] >= n for ns, n in counts.items()):
+        try:
+            implied, _high = claim_ids(ctx.homes, {ns: ctx.claims[ns] - n for ns, n in counts.items()},
+                                       ctx.demand, known_complete=True, reserved={})
+        except RecordError:
+            implied = None
+    if implied is None or list(plan.ids) != implied:
+        raise RecordError("the plan's ids {!r} are not the ids its demand and planned claims imply ({!r} "
+                          "for {!r}); nothing written (fail-closed)".format(
+                              list(plan.ids), implied, ctx.claims))
+
+
 def _reserve_claim(ctx, plan, cap, run_id):
     """Publish the run's irrevocable id reservation (spec 4.2/8.2) UNDER the held operation
     capability. The counters completeness proof (every enabled type's namespace carries a high-water,
-    which needs the manifest) is re-checked here; the derivation itself is the seam's: reserve_allocation
+    which needs the manifest) is re-checked here, and so is the plan's own ids against its demand and
+    planned claims (_check_planned_ids); the derivation itself is the seam's: reserve_allocation
     reads counters.toml and a FRESH reservation scan under the same capability that publishes, derives
     the claims from this run's demand, and refuses (nothing written) when they differ from the planned
     ctx.claims, so a reservation that landed between planning and the capability refuses this run
@@ -2505,6 +2528,7 @@ def _reserve_claim(ctx, plan, cap, run_id):
     if findings:
         raise RecordError("counters.toml cannot license an allocation: {} (fail-closed)".format(
             "; ".join(findings)))
+    _check_planned_ids(ctx, plan)
     try:
         _opf_journal.reserve_allocation(cap, "record", run_id, dict(collections.Counter(ctx.demand)),
                                         expected=ctx.claims)
@@ -2512,10 +2536,10 @@ def _reserve_claim(ctx, plan, cap, run_id):
         raise RecordError("the homes-2 id derivation changed between planning and the held capability "
                           "(an id reservation landed in between); nothing written; re-run (fail-closed)")
     except (_journal.JournalError, OSError) as exc:
-        raise RecordError("the homes-2 id reservation {} for {} could not be published ({}); nothing "
-                          "is offered as recorded, and a reservation this failure may have left "
-                          "standing is irrevocable, its numbers conservatively reserved "
-                          "(fail-closed)".format(
+        raise RecordError("the homes-2 id reservation {} for {} could not be derived or published ({}); "
+                          "nothing is offered as recorded: a refusal while deriving writes nothing, and "
+                          "a reservation a failed publication may have left standing is irrevocable, "
+                          "its numbers conservatively reserved (fail-closed)".format(
                               _opf_store.allocation_record("record", run_id), run_id, exc))
 
 

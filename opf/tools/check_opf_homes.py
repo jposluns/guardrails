@@ -4063,6 +4063,59 @@ def _self_test_vectors():
             check("reservation-leftover-retried-same-capability", lambda: home_journal.reserve_allocation(
                 cap, "record", record_run, {"BI": 7, "WL": 12}) == payload
                 and not leftover.exists() and os.stat(target).st_nlink == 1)
+
+            def fresh_capability():
+                # A second fixture capability on the same store under a NEW operation id (what a retry
+                # after a kill holds when it re-enters through acquire_operation); the caller closes
+                # its anchor descriptor.
+                fresh_cap = oplock.OpCapability.__new__(oplock.OpCapability)
+                fresh_cap._claim = threading.Lock()
+                fresh_cap._claimant = None
+                fresh_cap._released = False
+                fresh_cap._acquirer_pid = os.getpid()
+                fresh_cap._acquirer_pid_start = native_journal._pid_start(os.getpid())
+                fresh_cap._anchor_fd = os.open(str(anchor_file), os.O_RDONLY)
+                fresh_cap._anchor_ident = cap._anchor_ident
+                fresh_cap._machine_ident = cap._machine_ident
+                fresh_cap.store_root = root
+                fresh_cap.machine_rel = ".working/toml"
+                fresh_cap.op_id = "fresh-operation"
+                fresh_cap.holder = "fixture"
+                return fresh_cap
+
+            # A retry after a kill that re-enters through acquire_operation holds a NEW capability (a
+            # fresh op_id per acquisition), and it stays refused: the payload embeds the op_id, so the
+            # bytes differ. It is judged here, while the run's own reservation is the only entry and
+            # counters.toml and the demand are unchanged, so the derivation yields the published claims
+            # again and the operation id alone tells the bytes apart. The killed run's leftover
+            # reservation is the disclosed residual; its numbers stay reserved (conservative). The
+            # byte-equal idempotent answer serves a repeat call under the SAME capability: a plain
+            # repeat, or a resumed init, which attaches the persisted operation id rather than minting
+            # a new one.
+            def new_capability_retry():
+                fresh_cap = fresh_capability()
+                try:
+                    return reservation_refusal(lambda: home_journal.reserve_allocation(
+                        fresh_cap, "record", record_run, {"BI": 7, "WL": 12}))
+                finally:
+                    os.close(fresh_cap._anchor_fd)
+            alone = sorted(os.listdir(target.parent)) == [record_run + ".toml"]
+            fresh = new_capability_retry()
+            check("reservation-new-capability-refused", lambda: alone and fresh is not None
+                  and "already exists with different content" in fresh
+                  and "does not establish that the run holds" in fresh
+                  and target.read_bytes() == payload)
+            # The paired mutation, in place: a payload that does not bind the operation id (the fresh
+            # capability's id replaced by the published one) answers the same retry idempotently, so
+            # the check above turns red on it.
+            real_reservation_payload = home_journal.reservation_payload
+
+            def payload_without_operation(kind, run_id, operation_id, claims):
+                return real_reservation_payload(
+                    kind, run_id, cap.op_id if operation_id == "fresh-operation" else operation_id, claims)
+            with _patch.object(home_journal, "reservation_payload", payload_without_operation):
+                check("reservation-new-capability-flip-unbound-operation",
+                      lambda: new_capability_retry() is None and target.read_bytes() == payload)
             run2 = "record-20260917T120001Z-0123456789abcdef"
             torn = target.parent / oplock._staging_name(run2 + ".toml")
             torn.write_bytes(b"torn")
@@ -4120,39 +4173,18 @@ def _self_test_vectors():
                   and len(stranded_names) == 1 and stranded_names[0] in stranded
                   and "injected unlink failure" in stranded
                   and target.read_bytes() == payload)
-            # Fix round 2 (claude MEDIUM-1, decided stricter-safe; wording fixed in fix round 3):
-            # a retry after a kill that re-enters through acquire_operation holds a NEW capability
-            # (a fresh op_id per acquisition), and it stays refused: the payload embeds the op_id,
-            # so the bytes differ. The killed run's leftover reservation is the disclosed
-            # residual; its numbers stay reserved (conservative). The byte-equal idempotent answer
-            # serves a repeat call under the SAME capability: a plain repeat, or a resumed init,
-            # which attaches the persisted operation id rather than minting a new one.
-            cap2 = oplock.OpCapability.__new__(oplock.OpCapability)
-            cap2._claim = threading.Lock()
-            cap2._claimant = None
-            cap2._released = False
-            cap2._acquirer_pid = os.getpid()
-            cap2._acquirer_pid_start = native_journal._pid_start(os.getpid())
-            cap2._anchor_fd = os.open(str(anchor_file), os.O_RDONLY)
-            cap2._anchor_ident = cap._anchor_ident
-            cap2._machine_ident = cap._machine_ident
-            cap2.store_root = root
-            cap2.machine_rel = ".working/toml"
-            cap2.op_id = "fresh-operation"
-            cap2.holder = "fixture"
-            try:
-                fresh = reservation_refusal(lambda: home_journal.reserve_allocation(
-                    cap2, "record", record_run, {"BI": 7, "WL": 12}))
-            finally:
-                os.close(cap2._anchor_fd)
-            check("reservation-new-capability-refused", lambda: fresh is not None
-                  and "already exists with different content" in fresh
-                  and "does not establish that the run holds" in fresh
+            # The same new-capability retry once another run's reservation has advanced the BI
+            # high-water (run2 at BI = 16): the derivation now yields other claims as well (16 + 7),
+            # so it is refused as different bytes for that reason too, the reservation unchanged.
+            advanced = new_capability_retry()
+            check("reservation-new-capability-after-advance-refused", lambda: advanced is not None
+                  and "already exists with different content" in advanced
+                  and "does not establish that the run holds" in advanced
                   and target.read_bytes() == payload)
             # Fix round 3 (claude MINOR, decided assert): the cleanup-detail vector's comment
             # claimed the stranded leftover is retired as garbage by the next reserving call;
-            # that next call is the cap2 refusal just above, and the retirement is asserted here
-            # rather than claimed, with the reservation keeping its single link.
+            # that next call is the after-advance refusal just above, and the retirement is asserted
+            # here rather than claimed, with the reservation keeping its single link.
             check("reservation-stranded-leftover-retired", lambda: len(stranded_names) == 1
                   and not (target.parent / stranded_names[0]).exists()
                   and os.stat(target).st_nlink == 1)
@@ -4414,6 +4446,99 @@ def _self_test_vectors():
                         and not (derive_root / ".working" / "journals" / "record").exists())
         check("reservation-foreign-{}-refused".format(label), foreign_refused)
 
+    # A symlinked, oversized or FIFO reservation of another run refuses through the seam's own scan too
+    # (the run's own name is the read-back's, tested above), each paired in place with the mutation it
+    # discriminates. The symlink points at a file holding that run's exact canonical payload, so only
+    # the no-follow open refuses it; the oversized entry is that canonical payload under an 8-byte read
+    # cap, so only the cap refuses it.
+    def planted_foreign(derive_root, plant):
+        # One import-kind entry planted under another run's name; the record kind's home stays absent.
+        home = derive_root / ".working" / "journals" / "import" / "allocations"
+        home.mkdir(parents=True)
+        plant(derive_root, home / foreign_name)
+
+    def foreign_attempt(derive_root, held):
+        # The record run's reservation call over the planted entry: its refusal (None when it
+        # reserved) and whether the record kind's home stayed uncreated.
+        message = reservation_refusal(lambda: home_journal.reserve_allocation(
+            held, "record", derive_run("record", 1), {"BI": 1}))
+        return message, not (derive_root / ".working" / "journals" / "record").exists()
+
+    def plant_foreign_symlink(derive_root, path):
+        (derive_root / "elsewhere.toml").write_bytes(foreign_canonical)
+        os.symlink(str(derive_root / "elsewhere.toml"), path)
+
+    def plant_foreign_canonical(derive_root, path):
+        path.write_bytes(foreign_canonical)
+
+    real_read_fd = native_journal._read_fd
+    for label, plant, needle, context, mutant in (
+            ("symlink", plant_foreign_symlink, "cannot read the id reservation", contextlib.nullcontext,
+             lambda: _patch.object(os, "O_NOFOLLOW", 0)),
+            ("oversize", plant_foreign_canonical, "exceeds the 8-byte read cap",
+             lambda: _patch.object(native_journal, "_MAX_PRODUCT_READ_BYTES", 8),
+             lambda: _patch.object(native_journal, "_read_fd",
+                                   lambda fd, cap=None, stop_at_cap=False: real_read_fd(fd)))):
+        def foreign_seam(plant=plant, context=context, mutant=contextlib.nullcontext):
+            with derivation_store({"BI": 0}) as (derive_root, held):
+                planted_foreign(derive_root, plant)
+                with context(), mutant():
+                    return foreign_attempt(derive_root, held)
+
+        def foreign_seam_refused(seam=foreign_seam, needle=needle):
+            message, untouched = seam()
+            return message is not None and foreign_name in message and needle in message and untouched
+        check("reservation-foreign-{}-refused".format(label), foreign_seam_refused)
+        check("reservation-foreign-{}-flip-admitted".format(label), lambda seam=foreign_seam, m=mutant:
+              seam(mutant=m)[0] is None)
+
+    def bounded_child(thunk, deadline):
+        # Run `thunk` in a forked child of this process that exits 7 only when it returns True:
+        # "passed" for that exit within `deadline` seconds, "timed-out" for a child still running at
+        # the deadline (this test's own, killed and reaped), and "failed" for any other end.
+        pid = os.fork()
+        if pid == 0:
+            code = 1
+            try:
+                if thunk():
+                    code = 7
+            except BaseException:
+                code = 1
+            finally:
+                os._exit(code)
+        end = time.monotonic() + deadline
+        status = None
+        while time.monotonic() < end:
+            waited, raw_status = os.waitpid(pid, os.WNOHANG)
+            if waited == pid:
+                status = raw_status
+                break
+            time.sleep(0.05)
+        if status is None:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            return "timed-out"
+        return "passed" if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 7 else "failed"
+
+    # A FIFO reservation of another run refuses AT ONCE (the scan's read opens non-blocking), judged in
+    # a bounded child; the paired mutation, a blocking open, is judged under a short deadline and must
+    # block until it. The store is built and removed by this process; the child only makes the call,
+    # re-binding the fixture capability's acquirer identity to itself.
+    def foreign_fifo(blocking, deadline):
+        with derivation_store({"BI": 0}) as (derive_root, held):
+            planted_foreign(derive_root, lambda _root, path: os.mkfifo(path))
+
+            def attempt():
+                held._acquirer_pid = os.getpid()
+                held._acquirer_pid_start = native_journal._pid_start(os.getpid())
+                with _patch.object(os, "O_NONBLOCK", 0) if blocking else contextlib.nullcontext():
+                    message, untouched = foreign_attempt(derive_root, held)
+                return (message is not None and foreign_name in message
+                        and "is not a regular file" in message and untouched)
+            return bounded_child(attempt, deadline)
+    check("reservation-foreign-fifo-refused", lambda: foreign_fifo(False, 30.0) == "passed")
+    check("reservation-foreign-fifo-flip-blocking", lambda: foreign_fifo(True, 3.0) == "timed-out")
+
     # Every counters.toml the derivation cannot read and validate refuses, naming the file, with
     # nothing written; an absent counter is never read as 0.
     def plant_symlink(machine):
@@ -4482,6 +4607,57 @@ def _self_test_vectors():
             os.waitpid(counters_child, 0)
         check("reservation-counters-fifo-refused", lambda s=counters_status: s is not None
               and os.WIFEXITED(s) and os.WEXITSTATUS(s) == 7)
+
+    # A counters.toml that cannot be opened, and one whose open succeeds but whose read fails, each
+    # refuse naming the file with nothing written. The paired mutation, in place, reads a counters
+    # file the derivation cannot read as a zero high-water, which reserves instead.
+    @contextlib.contextmanager
+    def unreadable_counters(fault):
+        real_open, real_read = os.open, os.read
+        counters_fds = set()
+
+        def opening(path, flags, *args, **kwargs):
+            if path == "counters.toml" and kwargs.get("dir_fd") is not None:
+                if fault == "open":
+                    raise PermissionError(errno.EACCES, "synthetic unopenable counters", path)
+                fd = real_open(path, flags, *args, **kwargs)
+                counters_fds.add(fd)
+                return fd
+            return real_open(path, flags, *args, **kwargs)
+
+        def reading(fd, length):
+            if fd in counters_fds:
+                raise OSError(errno.EIO, "synthetic unreadable counters")
+            return real_read(fd, length)
+        with _patch.object(os, "open", opening), \
+                _patch.object(os, "supports_dir_fd", set(os.supports_dir_fd) | {opening}), \
+                _patch.object(os, "read", reading):
+            yield
+
+    def counters_read_as_zero():
+        real_counter_high = home_journal._counter_high
+
+        def zero_when_unreadable(root_fd, machine_rel, keys):
+            try:
+                return real_counter_high(root_fd, machine_rel, keys)
+            except native_journal.JournalError as exc:
+                if str(exc).startswith("cannot read "):
+                    return {key: 0 for key in keys}
+                raise
+        return _patch.object(home_journal, "_counter_high", zero_when_unreadable)
+
+    for fault, needle in (("open", "synthetic unopenable counters"), ("read", "synthetic unreadable counters")):
+        def counters_fault(fault=fault, needle=needle):
+            with derivation_store({"BI": 0}) as (derive_root, held), unreadable_counters(fault):
+                return refused_unwritten(derive_root, lambda: home_journal.reserve_allocation(
+                    held, "record", derive_run("record", 1), {"BI": 1}), "counters.toml", needle)
+
+        def counters_fault_flipped(fault=fault):
+            with derivation_store({"BI": 0}) as (_derive_root, held), counters_read_as_zero(), \
+                    unreadable_counters(fault):
+                return derived(held, "record", derive_run("record", 1), {"BI": 1}, {"BI": 1})
+        check("reservation-counters-unreadable-{}-refused".format(fault), counters_fault)
+        check("reservation-counters-unreadable-{}-flip-read-as-zero".format(fault), counters_fault_flipped)
 
     # The exhaustion boundary (2**63 - 1, the largest value a reservation carries): just inside, at,
     # and just outside it, plus a counter already at and above it.

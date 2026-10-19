@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T92)
+  check_opf_record.py --self-test                    the fixture suite (T1-T94)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
                                                      through an assertion (_discriminate)
 
@@ -521,10 +521,17 @@ Each case runs on its own copy of that template; the root is removed in a finall
       its own acquired and released operation capability, claim the counter's base + 1 to base + 5:
       the seam derives every claim from counters.toml and every earlier reservation (flip: the
       seam's reservation scan returning nothing, so every run reserves the same number)
-  T92 concurrent runs never share a number: forked processes released together each take the
-      operation capability (retrying while another holds it) and reserve one BI id, claiming exactly
-      base + 1 to base + their count; two threads sharing one held capability either reserve or are
-      refused as the capability being used, and no two reservations share a number (flip: T91's)
+  T92 concurrent runs in separate processes never share a number: forked processes released together
+      each take the operation capability (retrying while another holds it) and reserve one BI id,
+      claiming exactly base + 1 to base + their count (flip: T91's)
+  T93 two threads sharing one held capability, their reservation attempts made to overlap (the first
+      held inside the seam's derivation until the second's attempt ends): the second is refused as the
+      capability being used and only the first's reservation stands, at base + 1 (flip: the seam's
+      held scope without the capability's claim, so both derive the same number and both reserve it)
+  T94 the held reservation step refuses a plan whose ordered ids its demand and planned claims do not
+      imply (a wrong number, another order, an id missing or extra) with nothing reserved, and the
+      plan's own ids then reserve its claims (flip: the planned-id check removed, so only the claims
+      are compared and the wrong ids reserve)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), or, when no assertion fails, a
@@ -6820,11 +6827,68 @@ def t80_two_runs_never_same_id(fx):
 def flip_t80_no_recheck():
     """A held reservation step with no stale-plan comparison: the seam is asked for the run's demand
     without the planned claims as `expected`, so a reservation landing after planning is never noticed
-    and the stale plan's ids go out under another run's numbers."""
+    here and the stale run reserves the next numbers, which its plan does not carry. T80 calls this step
+    directly, so it sees no refusal; on the full record path the publication boundary's claims
+    comparison (_require_reservation) would still refuse the run, leaving that reservation orphaned."""
     def no_recheck(ctx, plan, cap, run_id):
         record._opf_journal.reserve_allocation(cap, "record", run_id,
                                                {ns: ctx.demand.count(ns) for ns in ctx.demand})
     return patch.object(record, "_reserve_claim", no_recheck)
+
+
+def t94_planned_ids_bound_to_claims(fx):
+    """The held reservation step refuses a plan whose ordered ids are not the ones its demand and
+    planned claims imply, before anything is reserved: with the claims unchanged, a wrong number, the
+    right ids in another order, a missing id and an extra id each refuse with no reservation, no
+    transaction and every operand at the prestate; the plan's own ids then reserve exactly its claims."""
+    base = fx.case("t94-homes2-base")
+    with _self_test_homes2_active(base):
+        root = fx.case("t94-homes2-planned-ids", base)
+        res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
+        assert res.status == record._opf_store.RESOLVED, res
+        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+        stamp = "record-20260927T000201Z-" + "c" * 16
+        reservation = Path(root) / record._opf_store.allocation_record("record", stamp)
+        root_fd = record._opf_store._open_dir_nofollow(res.store_root)
+        try:
+            ctx = record.Context(res, str(root), root_fd)
+            ctx.journal_rel = record._record_journal_rel(record._probe_homes(ctx))
+            record._load_manifest(ctx)
+            assert ctx.homes == 2, ("T94 the validated generation", ctx.homes)
+            ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
+            ids = record._claim(ctx, ["BI", "WL"])
+            assert ids == ["BI-1", "WL-1"] and ctx.claims == {"BI": 1, "WL": 1}, ("T94 the plan", ids, ctx.claims)
+
+            def reserve(planned_ids):
+                cap = record._opf_oplock.acquire_operation(str(res.store_root), record.VERB)
+                try:
+                    record._reserve_claim(ctx, record.Plan([], planned_ids), cap, stamp)
+                finally:
+                    record._opf_oplock.release_operation(cap)
+            for label, wrong in (("foreign-number", ["BI-999", "WL-1"]), ("reordered", ["WL-1", "BI-1"]),
+                                 ("missing", ["BI-1"]), ("extra", ["BI-1", "WL-1", "BI-2"])):
+                try:
+                    reserve(wrong)
+                except record.RecordError as exc:
+                    message = str(exc)
+                else:
+                    raise AssertionError(("T94 a plan whose ids its claims do not imply must refuse", label))
+                assert "are not the ids its demand and planned claims imply" in message, (label, message)
+                assert not reservation.exists(), ("T94 the refused plan publishes no reservation", label)
+                assert journal_states(root, TYPED_JOURNAL) == {}, ("T94 no transaction is opened", label)
+                assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, \
+                    ("T94 no operand is published", label)
+            reserve(ids)
+        finally:
+            os.close(root_fd)
+        payload = model(root, record._opf_store.allocation_record("record", stamp))
+        assert payload["claims"] == {"BI": 1, "WL": 1}, ("T94 the plan's own ids reserve its claims", payload)
+
+
+def flip_t94_ids_unchecked():
+    """The held reservation step without its planned-id check: only the claims are compared, so a plan
+    whose ids its claims do not imply reserves and goes on to report and publish those ids."""
+    return patch.object(record, "_check_planned_ids", lambda ctx, plan: None)
 
 
 # --- T81-T83: the cross-kind high-water, the publication boundary, the journal-home reader ---------------
@@ -7364,13 +7428,11 @@ def _t92_reap(pids):
     return [statuses.get(pid) for pid in pids]
 
 
-def t92_seam_concurrent_distinct(fx):
-    """Concurrent runs never share a number. T92_CHILDREN forked processes, released together through a
-    pipe, each take the operation capability (retrying while another holds it: the anchor flock is
-    non-blocking, so a contender is refused, never queued) and reserve one BI id through the seam: every
-    child exits 0 and the claims are exactly base + 1 to base + T92_CHILDREN. Then two threads share ONE
-    held capability and each reserve one BI id: each either reserves or is refused as the capability
-    being used, at least one reserves, and no two reservations on the store share a BI number."""
+def t92_seam_concurrent_processes_distinct(fx):
+    """Concurrent runs in separate processes never share a number. T92_CHILDREN forked processes,
+    released together through a pipe, each take the operation capability (retrying while another holds
+    it: the anchor flock is non-blocking, so a contender is refused, never queued) and reserve one BI id
+    through the seam: every child exits 0 and the claims are exactly base + 1 to base + T92_CHILDREN."""
     root = fx.case("t92-homes2-concurrent")
     with _self_test_homes2_active(root):
         base = model(root, COUNTERS)["counters"]["BI"]
@@ -7393,33 +7455,83 @@ def t92_seam_concurrent_distinct(fx):
         claims = sorted(_seam_reservation_bi(root, run_id) for run_id in runs)
         assert claims == list(range(base + 1, base + 1 + T92_CHILDREN)), \
             ("T92 concurrent runs claim distinct consecutive numbers", base, claims)
-        threaded = ["record-20260928T0002{:02d}Z-".format(n) + "f" * 16 for n in range(2)]
+
+
+# How long T93's first thread is held inside the derivation waiting for the second thread's attempt to end,
+# and the parent's bound on joining both threads.
+T93_OVERLAP_DEADLINE = 30.0
+T93_JOIN_DEADLINE = 60.0
+
+
+def t93_seam_threads_serialised(fx):
+    """Two threads sharing ONE held operation capability never reserve the same number, with the two
+    reservation attempts made to overlap: the first thread is held inside the seam's derivation (under
+    the capability's claim, after it has derived its claims and before it publishes) until the second
+    thread's attempt has ended, and the second thread starts only once the first is held there. The
+    second attempt is refused at once as the capability being used, the first then reserves base + 1,
+    and exactly that one reservation stands. A second attempt that blocks instead of ending releases the
+    first at T93_OVERLAP_DEADLINE and turns this red on the outcomes."""
+    root = fx.case("t93-homes2-threads")
+    with _self_test_homes2_active(root):
+        base = model(root, COUNTERS)["counters"]["BI"]
+        runs = ["record-20260928T0002{:02d}Z-".format(n) + "f" * 16 for n in range(2)]
         outcomes = [None, None]
-        barrier = threading.Barrier(2)
+        held_inside, second_ended = threading.Event(), threading.Event()
+        real_derive = record._opf_journal._derive_claims
+
+        def holding_derive(root_fd, machine_rel, kind, run_id, demand):
+            claims = real_derive(root_fd, machine_rel, kind, run_id, demand)
+            if run_id == runs[0]:
+                held_inside.set()
+                second_ended.wait(T93_OVERLAP_DEADLINE)
+            return claims
 
         def worker(index):
-            barrier.wait(timeout=30)
             try:
-                record._opf_journal.reserve_allocation(cap, "record", threaded[index], {"BI": 1})
+                record._opf_journal.reserve_allocation(cap, "record", runs[index], {"BI": 1})
                 outcomes[index] = "reserved"
             except journal.JournalError as exc:
                 outcomes[index] = str(exc)
+            finally:
+                if index == 1:
+                    second_ended.set()
         cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
         try:
-            threads = [threading.Thread(target=worker, args=(index,)) for index in range(2)]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join(timeout=60)
+            with patch.object(record._opf_journal, "_derive_claims", holding_derive):
+                first = threading.Thread(target=worker, args=(0,))
+                first.start()
+                reached = held_inside.wait(T93_OVERLAP_DEADLINE)
+                second = threading.Thread(target=worker, args=(1,))
+                second.start()
+                for thread in (first, second):
+                    thread.join(timeout=T93_JOIN_DEADLINE)
         finally:
             record._opf_oplock.release_operation(cap)
-        assert not any(thread.is_alive() for thread in threads), "T92 both threads finished"
-        assert "reserved" in outcomes and all(
-            o == "reserved" or "being released or used" in o for o in outcomes), ("T92 thread outcomes", outcomes)
-        standing = [n[:-len(".toml")] for n in os.listdir(Path(root) / record._ALLOCATIONS_REL)]
+        assert reached, ("T93 the first thread is held inside the derivation", outcomes)
+        assert not first.is_alive() and not second.is_alive(), "T93 both threads finished"
+        assert outcomes[0] == "reserved" and "being released or used" in (outcomes[1] or ""), \
+            ("T93 the overlapping second attempt is refused as the capability being used", outcomes)
+        standing = sorted(n[:-len(".toml")] for n in os.listdir(Path(root) / record._ALLOCATIONS_REL))
         numbers = [_seam_reservation_bi(root, run_id) for run_id in standing]
-        assert len(numbers) == T92_CHILDREN + outcomes.count("reserved") and len(set(numbers)) == len(numbers), \
-            ("T92 no two reservations share a BI number", numbers)
+        assert standing == [runs[0]] and numbers == [base + 1], \
+            ("T93 exactly the first thread's reservation stands, at base + 1", base, standing, numbers)
+
+
+@contextlib.contextmanager
+def flip_t93_unserialised():
+    """The seam's held-capability scope without its claim: each entry claims a private twin of the
+    capability (the same store, identity and descriptors, its own unused lock), so a second thread using
+    the same capability is never refused and derives while the first is still inside."""
+    real = record._opf_journal._held_root
+
+    @contextlib.contextmanager
+    def unserialised(cap):
+        twin = copy.copy(cap)
+        twin._claim = threading.Lock()
+        with real(twin) as root_fd:
+            yield root_fd
+    with patch.object(record._opf_journal, "_held_root", unserialised):
+        yield
 
 
 # --- T86: the discriminator binds each flip to an assertion, never a backstop or harness fault ---------
@@ -9125,7 +9237,9 @@ TESTS = (
     ("T89-prior-separator-spelling-bounded", t89_bounded_acceptance, flip_t89_any_bytes),
     ("T90-store-read-cap-before-publication", t90_reader_cap, flip_t90_no_cap),
     ("T91-seam-five-sequential-distinct", t91_seam_five_sequential_distinct, flip_t91_scan_ignored),
-    ("T92-seam-concurrent-distinct", t92_seam_concurrent_distinct, flip_t91_scan_ignored),
+    ("T92-seam-concurrent-processes-distinct", t92_seam_concurrent_processes_distinct, flip_t91_scan_ignored),
+    ("T93-seam-threads-serialised", t93_seam_threads_serialised, flip_t93_unserialised),
+    ("T94-planned-ids-bound-to-claims", t94_planned_ids_bound_to_claims, flip_t94_ids_unchecked),
 )
 
 
