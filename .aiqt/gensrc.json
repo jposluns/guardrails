@@ -232,6 +232,18 @@
       "target": "NOTICE"
     },
     {
+      "kind": "block",
+      "regenerate": "python3 tools/gen_reference_facts.py",
+      "sources": [
+        ".aiqt/core/rules/",
+        ".aiqt/core/gates/manifest.toml",
+        ".aiqt/core/hooks/manifest.toml",
+        ".aiqt/standards/",
+        "ENFORCEMENT.md"
+      ],
+      "target": "README.md"
+    },
+    {
       "kind": "file",
       "regenerate": "python3 tools/gen_roadmap.py",
       "sources": [
