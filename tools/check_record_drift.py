@@ -10,7 +10,13 @@ with no cap, so a PR merged far back is never missed; verified against the live 
 Matching is TYPED refs only (`pr:17`, `decision:GD-110`): a narrative number in prose never matches
 (D9). Fail-closed: a merge_pending row that cannot be parsed, a duplicate ref, an unreadable declared
 register, an unreadable or malformed declared changelog, or unreadable history is exit 2, never a
-silent pass (chkfcl).
+silent pass (chkfcl). Registry PRESENCE uses the register gate's own chain-confirmed entry
+inspection and its non-blocking type-checked reader: only a registry path CONFIRMED absent (every
+missing component a plain ENOENT under a parent that opens, inspected without following links)
+reads as no registry; a dangling symbolic link at the registry path or on its parent chain, any
+other unresolvable registry path, and a registry that is not a regular file (a FIFO included,
+refused by the opened descriptor's type, never a blocked read) are each exit 2, never NOT
+APPLICABLE.
 
 Row grammar the gate reads (only rows carrying `merge_pending` are in scope):
   - <ID> :: OPEN :: merge_pending :: refs=pr:17[,decision:GD-110] :: <title>
@@ -43,6 +49,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
+from check_mistakes_register import (  # noqa: E402
+    CannotEvaluate, _read_following, entry_state)
 
 REGISTRY_FILES = (".aiqt/orchestration.local.json", ".aiqt/orchestration.json")
 ROW_RE = re.compile(r"^-\s+(?P<id>\S+)\s*::\s*(?P<state>\w+)\s*::\s*merge_pending\s*::\s*"
@@ -51,16 +59,23 @@ REF_RE = re.compile(r"^(pr:\d+|decision:[A-Za-z0-9_.-]+)$")
 
 
 def load_registry(root):
+    """The first declared registry, or None only when every registry path is CONFIRMED absent.
+    Presence is the register gate's chain-confirming entry_state (only a missing final name
+    under a parent that opens, or a parent chain itself confirmed absent component by
+    component, reads as no registry; a dangling symbolic link at the registry path or on its
+    parent chain, or any other unresolvable path, raises CannotEvaluate, never NOT
+    APPLICABLE), and the read is the gate's non-blocking type-checked reader, so a registry
+    that is not a regular file (a FIFO included) is refused by name, never a blocked read."""
     for rel in REGISTRY_FILES:
         p = root / rel
-        if p.exists():
-            with open(p, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            # CONV4-CL3 (D13): require the version to be the int 1 by TYPE, so a bool True (1 == True in
-            # Python) or a float 1.0 cannot satisfy the version-1 gate and slip a malformed registry through.
-            if not isinstance(data, dict) or type(data.get("version")) is not int or data.get("version") != 1:
-                raise ValueError("{}: not a version-1 registry".format(rel))
-            return data
+        if entry_state(p) is None:
+            continue  # confirmed absence: the next registry file may still be present
+        data = json.loads(_read_following(p, "the orchestration registry").decode("utf-8"))
+        # CONV4-CL3 (D13): require the version to be the int 1 by TYPE, so a bool True (1 == True in
+        # Python) or a float 1.0 cannot satisfy the version-1 gate and slip a malformed registry through.
+        if not isinstance(data, dict) or type(data.get("version")) is not int or data.get("version") != 1:
+            raise ValueError("{}: not a version-1 registry".format(rel))
+        return data
     return None
 
 
@@ -115,7 +130,7 @@ def changelog_refs(path):
 def run(root):
     try:
         reg = load_registry(root)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, CannotEvaluate) as exc:
         print("error: cannot read the orchestration registry: {}".format(exc))
         return 2
     if reg is None:
@@ -275,12 +290,31 @@ def self_test():
                 {"version": bad_ver, "record": {"findings": str(register)},
                  "truth": {"changelog": "truth/releases.toml"}}), encoding="utf-8")
             _case("bad-version-type {!r} fails".format(bad_ver), run(repo), 2)
-        # no registry -> NOT APPLICABLE pass
+        # no registry -> NOT APPLICABLE pass; the same answer with and without the .aiqt
+        # directory, since each missing component is a confirmed ENOENT (the first-run
+        # control for the chain-confirmed presence read below)
         bare = tmp / "bare"
         bare.mkdir()
         subprocess.run(["git", "init", "-q", str(bare)], check=True, capture_output=True,
                        timeout=30)
         _case("no-registry-not-applicable", run(bare), 0)
+        (bare / ".aiqt").mkdir()
+        _case("no-registry-with-aiqt-not-applicable", run(bare), 0)
+        # an UNRESOLVABLE registry path is exit 2, never NOT APPLICABLE and never a blocked
+        # read: a dangling symlink at the registry path; a dangling entry on the registry's
+        # parent chain; a FIFO registry (refused by the opened descriptor's type, without
+        # blocking, by the shared non-blocking reader)
+        (bare / ".aiqt" / "orchestration.local.json").symlink_to("missing-registry-target")
+        _case("dangling-registry-fails", run(bare), 2)
+        (bare / ".aiqt" / "orchestration.local.json").unlink()
+        chainroot = tmp / "chainroot"
+        chainroot.mkdir()
+        (chainroot / ".aiqt").symlink_to("missing-aiqt-target")
+        _case("unresolvable-registry-parent-fails", run(chainroot), 2)
+        fiforoot = tmp / "fiforoot"
+        (fiforoot / ".aiqt").mkdir(parents=True)
+        os.mkfifo(str(fiforoot / ".aiqt" / "orchestration.local.json"))
+        _case("fifo-registry-fails", run(fiforoot), 2)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if failures:
@@ -289,8 +323,12 @@ def self_test():
             print("  - " + f)
         return 1
     print("SELF-TEST PASS: merged-pr drift is detected across the full first-parent history, the "
-          "registry-declared changelog path is honoured, unmerged and narrative rows pass, and every "
-          "malformed, absent, or unreadable declared input fails closed")
+          "registry-declared changelog path is honoured, unmerged and narrative rows pass, every "
+          "malformed, absent, or unreadable declared input fails closed, and an unresolvable "
+          "registry path (a dangling symlink at the registry path or on its parent chain) or a "
+          "non-regular registry (a FIFO, refused by type without blocking) is exit 2, never NOT "
+          "APPLICABLE, while a registry path confirmed absent down its own chain still reads NOT "
+          "APPLICABLE")
     return 0
 
 
