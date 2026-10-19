@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR\"/plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py gensrc_guard",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
