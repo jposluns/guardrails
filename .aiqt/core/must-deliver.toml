@@ -1,9 +1,12 @@
 # .aiqt/core/must-deliver.toml: rules whose WHOLE text must lie inside the first
 # check_release_build.CAP_BYTES bytes of AGENTS.md; read by tools/check_must_deliver.py.
-# Hand-edited policy, like instruction-budget.toml: additions may be proposed in any PR;
-# a removal needs the maintainer's recorded approval here, dated, with the reason.
+# Hand-edited policy, like instruction-budget.toml: additions may be proposed in any PR.
+# A removal is a reviewed change that the gate does not block: the schema has no field
+# that could record an approval, so review must judge it.
 # warn-margin-bytes: the gate prints a WARNING (still exit 0) when the tightest listed
-# margin drops under this figure, so growth is visible before a listed rule falls out.
+# margin drops under this figure. When this was written the tightest margin was already
+# below it (cmtidn, 8 bytes inside the cap), so every run warns; 512 is kept so a tight
+# margin stays visible rather than being tuned away. The gate prints the live margins.
 format-version = 1
 warn-margin-bytes = 512
 

@@ -6,7 +6,8 @@ The first-pin demonstration (tools/gen_first_pin_demo.py) DERIVES its delivered 
 that list shrinks silently when the rules grow and every byte-identity gate stays green: a rule can fall
 out of the delivered prefix with no check failing. This gate closes that gap for the rules a maintainer
 has declared must stay delivered. The list is hand-edited policy, like .aiqt/core/instruction-budget.toml:
-additions may be proposed in any PR; a removal needs the maintainer's recorded approval.
+additions may be proposed in any PR; a removal is a reviewed change that this gate does not block (the
+schema has no field that could record an approval; see the disclosed residual below).
 
 The spans come from gen_first_pin_demo.measure, the ONE span algorithm the demonstration generator also
 uses: AGENTS.md must be byte-identical to a fresh composition of the rule corpus and the block registry
@@ -65,6 +66,12 @@ TOP_KEYS = frozenset({"format-version", "warn-margin-bytes", "rule"})
 ROW_KEYS = frozenset({"id", "reason"})
 
 
+def _read_decl_bytes(path):
+    """The one read of the declaration's bytes, a module attribute so the self-test can inject a
+    PermissionError here on every runner, including one where a mode-000 file stays readable."""
+    return path.read_bytes()
+
+
 def read_declared(path):
     """The validated must-deliver list: ([rule ids], warn_margin_bytes). Absent, a symlink or
     non-regular entry, unreadable, not UTF-8, not TOML, or outside the exact schema is a DemoError
@@ -78,7 +85,7 @@ def read_declared(path):
     if not stat.S_ISREG(st.st_mode):
         raise DemoError("{} is not a regular file (a symlink, directory or special entry)".format(DECL_REL))
     try:
-        raw = path.read_bytes()
+        raw = _read_decl_bytes(path)
     except OSError as exc:
         raise DemoError("{} is unreadable ({})".format(DECL_REL, exc))
     try:
@@ -95,9 +102,11 @@ def read_declared(path):
     if set(data) != TOP_KEYS:
         raise DemoError("{} must carry exactly the keys {}, found {}".format(
             DECL_REL, sorted(TOP_KEYS), sorted(data)))
-    if data["format-version"] is True or data["format-version"] is False or data["format-version"] != 1:
-        raise DemoError("{}: format-version must be the integer 1, found {!r}".format(
-            DECL_REL, data["format-version"]))
+    version = data["format-version"]
+    # The type is checked before the value: TOML 1.0 parses to a float that compares equal to 1, and a
+    # bool is an int subclass.
+    if isinstance(version, bool) or not isinstance(version, int) or version != 1:
+        raise DemoError("{}: format-version must be the integer 1, found {!r}".format(DECL_REL, version))
     warn = data["warn-margin-bytes"]
     if isinstance(warn, bool) or not isinstance(warn, int) or warn < 1:
         raise DemoError("{}: warn-margin-bytes must be a positive integer, found {!r}".format(DECL_REL, warn))
@@ -186,18 +195,31 @@ def main():
 #   T3  a listed rule STRADDLING the cap is exit 1 (a mutant testing the span START passes a straddler);
 #   T4  spans are UTF-8 BYTES: a listed rule whose character span ends inside the cap and whose byte span
 #       ends past it is exit 1 (a mutant measuring str offsets passes it);
-#   T5  a stale AGENTS.md (corpus edited after it was written) is exit 2, never measured (a mutant that
-#       measures the committed bytes without the identity proof passes stale bytes);
+#   T5  a stale AGENTS.md (corpus edited after it was written) is exit 2 from measure's identity proof,
+#       never measured. A mutant without that proof still exits 2 on this fixture, because the edited rule
+#       body is then not found in the stale bytes ("body is not found"), so the vector catches it only
+#       by asserting the identity proof's own message ("not the gen_agents rendering");
 #   T6  a committed demonstration listing the rule as delivered while the fresh spans put it past the cap
 #       is exit 1 (a mutant reading delivered-prefix-obligations from the file passes);
-#   T7  an id with no span (zzzzzz) and a clause-id (prjint1.1) are each exit 2 naming the id (a mutant
-#       that silently skips unknown ids passes);
+#   T7  an id with no span (zzzzzz) and a clause-id (prjint1.1) are each exit 2 naming the id. zzzzzz is
+#       well-formed and is refused by run's missing-span check (a mutant that silently skips unknown ids
+#       passes it). prjint1.1 is refused earlier, by read_declared's corpus-id shape check (CID_RE); with
+#       that check removed the missing-span check still refuses it, so this half fails only when both
+#       checks are removed;
 #   T8  an absent list, rule = [], and a misspelt [[rules]] table are each exit 2 (a mutant treating an
 #       absent or empty list as "nothing to check" returns 0);
 #   T9  an unknown row key, an integer id, an empty reason, and a duplicate id are each exit 2 (a mutant
-#       ignoring unknown keys or deduplicating silently passes);
-#   T10 a symlinked list, a directory, invalid UTF-8, bad TOML, and a mode-000 list (skipped where the
-#       mode does not bind the runner) are each exit 2 (a catch-all returning 0 passes);
+#       ignoring unknown keys or deduplicating silently passes). The top-level values: format-version
+#       1.0, 0, 2 and "1", and warn-margin-bytes 0 and -1, are each exit 2 naming the key, while
+#       warn-margin-bytes 1 passes (a mutant comparing format-version by value alone passes 1.0, one
+#       coercing it with int() passes "1" and 1.0, one without the value check passes 0 and 2, one
+#       without the lower bound on warn-margin-bytes passes 0 and -1, and one testing warn < 2 fails 1);
+#   T10 a symlinked list, a directory, invalid UTF-8, bad TOML, an injected PermissionError at the
+#       declaration read, and a mode-000 list are each exit 2 (a catch-all returning 0 passes them all;
+#       a read error not reported as unreadable fails the last two). The symlink case asserts the
+#       regular-file check's message; the directory case does not, because without that check the read
+#       raises IsADirectoryError, which also maps to exit 2. The injected error runs on every runner; the
+#       mode-000 case runs only where the mode binds the runner, and the PASS line names it when skipped;
 #   T11 the cap is read from check_release_build.CAP_BYTES at call time: patching it lower flips the
 #       verdict to exit 1 (a mutant with a locally copied cap keeps exit 0);
 #   T12 a before-rules registry block pushing a listed rule past the cap is exit 1 (a mutant reading
@@ -236,6 +258,7 @@ def self_test_main():
         return code, buf.getvalue()
 
     failures = []
+    skipped = []
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-check-must-deliver-selftest-"))
     except OSError as exc:
@@ -361,7 +384,8 @@ def self_test_main():
         if code != 2:
             failures.append("T8: a misspelt [[rules]] table must be exit 2, got {}\n{}".format(code, out))
 
-        # T9. Unknown row key, integer id, empty reason, duplicate id: each exit 2.
+        # T9. Unknown row key, integer id, empty reason, duplicate id, and out-of-schema top-level values:
+        # each exit 2; warn-margin-bytes 1, the smallest accepted value, passes.
         t9 = tmp / "t9"
         gfpd._tuned(t9, base_specs, "ruleaa", CAP - 10)
         bad_rows = (
@@ -384,8 +408,27 @@ def self_test_main():
             code, out = capture(t9)
             if code != 2:
                 failures.append("T9 {}: expected exit 2, got {}\n{}".format(label, code, out))
+        version_msg = "format-version must be the integer 1"
+        warn_msg = "warn-margin-bytes must be a positive integer"
+        value_rows = (
+            ("float format-version 1.0", "format-version = 1.0\nwarn-margin-bytes = 512\n", version_msg),
+            ("format-version 0", "format-version = 0\nwarn-margin-bytes = 512\n", version_msg),
+            ("format-version 2", "format-version = 2\nwarn-margin-bytes = 512\n", version_msg),
+            ("string format-version", 'format-version = "1"\nwarn-margin-bytes = 512\n', version_msg),
+            ("warn margin 0", "format-version = 1\nwarn-margin-bytes = 0\n", warn_msg),
+            ("warn margin -1", "format-version = 1\nwarn-margin-bytes = -1\n", warn_msg),
+        )
+        for label, head, want in value_rows:
+            _decl(t9, [], raw=head + '[[rule]]\nid = "prjint1"\nreason = "x"\n')
+            code, out = capture(t9)
+            if code != 2 or want not in out:
+                failures.append("T9 {}: expected exit 2 with {!r}, got {}\n{}".format(label, want, code, out))
+        _decl(t9, both, warn=1)  # the smallest positive margin is accepted
+        code, out = capture(t9)
+        if code != 0:
+            failures.append("T9 warn margin 1: expected exit 0, got {}\n{}".format(code, out))
 
-        # T10. Symlink, directory, invalid UTF-8, bad TOML, mode 000: each exit 2.
+        # T10. Symlink, directory, invalid UTF-8, bad TOML, injected read error, mode 000: each exit 2.
         t10 = tmp / "t10"
         gfpd._tuned(t10, base_specs, "ruleaa", CAP - 10)
         decl = _decl(t10, both)
@@ -411,10 +454,27 @@ def self_test_main():
         if code != 2 or "does not parse" not in out:
             failures.append("T10: a non-TOML list must be exit 2, got {}\n{}".format(code, out))
         _decl(t10, both)
+        # The injected PermissionError at the declaration read runs on every runner.
+        this = sys.modules[__name__]
+        real_read = this._read_decl_bytes
+
+        def denied(path):
+            raise PermissionError(13, "Permission denied (injected by the self-test)", str(path))
+
+        this._read_decl_bytes = denied
+        try:
+            code, out = capture(t10)
+        finally:
+            this._read_decl_bytes = real_read
+        if code != 2 or "is unreadable" not in out or "injected by the self-test" not in out:
+            failures.append("T10: an injected PermissionError at the declaration read must be exit 2 "
+                            "reporting the list unreadable, got {}\n{}".format(code, out))
         os.chmod(decl, 0)
         try:
             if os.access(decl, os.R_OK):  # root or a DAC bypass: mode 000 is still readable
                 print("SELF-TEST NOTE: mode-000 vector not applicable (file still readable)")
+                skipped.append("the filesystem mode-000 list (this runner can read a mode-000 file; the "
+                               "injected PermissionError covered the unreadable case)")
             else:
                 code, out = capture(t10)
                 if code != 2 or "is unreadable" not in out:
@@ -492,11 +552,14 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: a listed rule ending at the cap passes and one ending one byte past, "
           "straddling it, or byte-measured past it fails naming the rule; a stale AGENTS.md and every "
-          "malformed, absent, empty, symlinked, unreadable or unparseable list fail closed (exit 2); the "
+          "malformed (a non-integer or unsupported format-version, a warn margin below 1), absent, empty, "
+          "symlinked, unreadable (an injected read error) or unparseable list fail closed (exit 2); the "
           "demonstration's own lists are never read; an unknown or clause id fails closed naming it; the "
           "cap is read from check_release_build.CAP_BYTES at call time; a before-rules block moves the "
           "spans it measures; and the margin report, the unlisted-rule line and the warn-margin WARNING "
-          "(still exit 0) are printed exactly.")
+          "(still exit 0) are printed exactly. {}".format(
+              "SKIPPED on this runner: {}.".format("; ".join(skipped)) if skipped
+              else "No case was skipped (the mode-000 list ran too)."))
     return 0
 
 

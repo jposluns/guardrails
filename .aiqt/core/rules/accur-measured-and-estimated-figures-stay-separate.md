@@ -20,6 +20,6 @@ percentage, or a total that an estimated input feeds, is itself an estimate and 
 
 This does not forbid estimates, forecasts, or a combined figure whose composition is stated, such as a
 measured 40 plus an estimated 25 reported as roughly 65. It forbids the unlabelled blend: an estimate
-folded into a measured total and presented as if measured. The label is the release. A figure that
+folded into a measured total, the whole presented as measured. The label is the release. A figure that
 carries its grade honestly is sound however uncertain; one that hides it misreports precision it does
 not have.
