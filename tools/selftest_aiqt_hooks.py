@@ -2546,26 +2546,34 @@ def _test_shell_string_reading(failures, hooks):
     if not any("git status" in text for text in texts):
         failures.append("(shellr-heredoc-pipe) the pipeline text holds the here-document body; got {!r}"
                         .format(texts))
-    # Redirections apply left to right: with two here-documents on one command, the later one replaces the
-    # earlier as its standard input, so the segment records only the LAST body (the earlier body is data no
-    # command reads, and a hazard in it must not deny: the gap-allow override row).
+    # Every body a segment opens is recorded, joined in '<<' operator order: which body standard input
+    # really ends on depends on redirection order and on descriptor and device aliases (3<&0 ... <&3,
+    # /dev/stdin, /dev/fd/N, an opaque >& target) that no static reading resolves soundly, and dropping a
+    # body could only allow, so none is dropped (the fail-closed direction; the gap-deny rows hold hazards
+    # in an earlier, a later and a seemingly overridden body).
     two = hooks._lex_flat("cat <<'A' <<'B'\nfirst\nA\nsecond\nB\n")
-    if two[0].stdin_script != "second\nB\n":
-        failures.append("(shellr-heredoc-override) the segment records only its LAST here-document body; "
+    if two[0].stdin_script != "first\nA\nsecond\nB\n":
+        failures.append("(shellr-heredoc-override) the segment records EVERY body it opened, joined in order; "
                         "got {!r}".format(two[0].stdin_script))
-    # Standard-input provenance runs through descriptor duplication: 3<&0 saves the first body on fd 3 and <&3
-    # restores it as fd 0 after the second here-document opens, so the EARLIER body (not the last) is the
-    # command's standard input, and a hazard in it denies (the restored-descriptor gap-deny row).
     restored = hooks._lex_flat("bash <<'A' 3<&0 <<'B' <&3\nfirst\nA\nsecond\nB\n")
-    if restored[0].stdin_script != "first\nA\n":
-        failures.append("(shellr-heredoc-dup-restore) a body restored through a duplicated descriptor is the "
-                        "standard input; got {!r}".format(restored[0].stdin_script))
-    # A later file redirect moves fd 0 off every here-document: the body is then data no command reads, so the
-    # segment records no standard-input script and a hazard in the body does not deny (the later-file gap-allow row).
+    if restored[0].stdin_script != "first\nA\nsecond\nB\n":
+        failures.append("(shellr-heredoc-dup-restore) a body saved and restored through duplicated descriptors "
+                        "stays recorded with every sibling body; got {!r}".format(restored[0].stdin_script))
+    # A later redirect NEVER drops a body: a /dev or /proc target can alias the very descriptor it redirects
+    # (/dev/stdin, /dev/fd/3, /proc/self/fd/0), so even a seemingly moved-off body stays readable and a
+    # hazard in it still denies.
     overridden = hooks._lex_flat("bash <<'A' </dev/null\nfirst\nA\n")
-    if overridden[0].stdin_script is not None:
-        failures.append("(shellr-heredoc-file-after) a here-document a later file redirect replaces is not the "
-                        "standard input; got {!r}".format(overridden[0].stdin_script))
+    if overridden[0].stdin_script != "first\nA\n":
+        failures.append("(shellr-heredoc-file-after) a here-document body is kept even when a later redirect "
+                        "seems to move standard input off it; got {!r}".format(overridden[0].stdin_script))
+    aliased = hooks._lex_flat("bash <<'A' </dev/stdin\nfirst\nA\n")
+    if aliased[0].stdin_script != "first\nA\n":
+        failures.append("(shellr-heredoc-dev-alias) a /dev/stdin target keeps the here-document body readable; "
+                        "got {!r}".format(aliased[0].stdin_script))
+    dup_out = hooks._lex_flat("bash <<'A' 0>&$Z\nfirst\nA\n")
+    if dup_out[0].stdin_script != "first\nA\n":
+        failures.append("(shellr-heredoc-opaque-dup) an opaque output-duplication target keeps the body "
+                        "readable; got {!r}".format(dup_out[0].stdin_script))
     # Child scopes: a child shell's -c string and a trap action set only on EXIT (also written 0) run apart (a scope
     # of their own); an eval string, and a trap action on a signal or on DEBUG, ERR or RETURN, which the current shell
     # runs, share the scope of the segment holding them.
@@ -3031,68 +3039,68 @@ def _test_shell_string_floor(failures, hooks, cwd):
     return labels
 
 
-# No new false denies. A shell with a script-file operand reads its script from that file, so data piped or
-# here-documented into it is data; a wrapper's operands are read only where the wrapper launches a shell; a cd in a
-# child shell's string moves no later command; interpreter code is read only in its execution forms, each alone, so
-# a spelling in a comment, printed or quoted text, an unbound run or call, a non-pipe open, an argv form running
-# another program, or split across two forms is never denied; protected_line's pipe posture reads only the shell
-# stage. Each row allows, as it does with no shell-string reading.
+# No new false denies. A shell with a script-file operand reads its script from that file, so data piped into
+# it is data; a wrapper's operands are read only where the wrapper launches a shell; a cd in a child shell's
+# string moves no later command; for the guards that keep the structured interpreter reading
+# (commit_msg_subst, commit_identity, git_explicit_binding), a spelling in a comment, printed or quoted text,
+# an unbound run or call, a non-pipe open, an argv form running another program, or split across two forms is
+# never denied; protected_line's pipe posture reads only the shell stage. gate_weakening reads the WHOLE raw
+# text of a command carrying inline interpreter code, a here-document or an unresolved redirection, so its
+# rows here are the minimal-pair controls that keep the construct and carry NO bypass spelling (the same
+# constructs WITH a spelling are the raw-rule deny rows below). Each row allows.
 _HARMLESS_ROWS = (
     ("gate_weakening", "printf 'git commit --no-verify -m y' | bash script.sh"),
-    ("gate_weakening", "bash script.sh <<'EOF'\ngit commit --no-verify -m y\nEOF"),
-    ("gate_weakening", "sh ./x.sh <<'EOF'\ngit commit --no-verify -m y\nEOF"),
+    ("gate_weakening", "bash script.sh <<'EOF'\necho data\nEOF"),
+    ("gate_weakening", "sh ./x.sh <<'EOF'\necho data\nEOF"),
     ("gate_weakening", "printf 'git commit --no-verify -m y' | bash -- run.sh arg"),
     ("gate_weakening", "printf 'a.sh\\n' | xargs sh"),
-    ("gate_weakening", "python3 -c 'print(\"git commit --no-verify\")'"),
-    ("gate_weakening", "python3 -c \"print('git commit --no-verify is forbidden here')\""),
-    ("gate_weakening", "python3 -c \"x = 'git commit --no-verify -m y'\""),
-    ("gate_weakening", "python3 -c 'print(\"os.system(git commit --no-verify)\")'"),
-    ("gate_weakening", "perl -e 'print \"git commit --no-verify\\n\"'"),
-    ("gate_weakening", "ruby -e 'puts \"git commit --no-verify\"'"),
-    ("gate_weakening", "node -e 'console.log(`git commit --no-verify`)'"),
+    ("gate_weakening", "python3 -c 'print(\"git commit ran with its hooks\")'"),
+    ("gate_weakening", "python3 -c \"print('git merge finished cleanly here')\""),
+    ("gate_weakening", "python3 -c \"x = 'git commit -m y ran the hooks'\""),
+    ("gate_weakening", "python3 -c 'print(\"os.system(git status)\")'"),
+    ("gate_weakening", "perl -e 'print \"git commit kept its hooks\\n\"'"),
+    ("gate_weakening", "ruby -e 'puts \"git commit kept its hooks\"'"),
+    ("gate_weakening", "node -e 'console.log(`git commit kept its hooks`)'"),
     ("commit_identity", "python3 -c 'print(\"Co-Authored-By: Claude <c@x>\")'"),
     ("commit_identity", "printf 'git commit --author=Claude -m y' | bash script.sh"),
     ("commit_msg_subst", "python3 -c 'print(\"git commit -m $(date)\")'"),
     ("git_explicit_binding", "python3 -c 'print(\"git add -A && git push origin feat\")'"),
     ("diff_source_pretool", "printf 'git status' | bash script.sh"),
     ("protected_line", "printf 'y\\n' | bash install.sh"),
-    # A wrapper's operands are read only where it launches a shell.
+    # A wrapper's operands are read only where it launches a shell (and no interpreter-family word is
+    # present, so the raw-text rule stays untriggered for the sh and bash rows).
     ("gate_weakening", "printf x | xargs echo sh -c 'git commit --no-verify -m y'"),
     ("gate_weakening", "find . -exec echo sh -c 'git commit --no-verify -m y' \\;"),
     ("gate_weakening", "timeout 5 echo bash -c 'git commit --no-verify -m y'"),
     ("gate_weakening", "command -v bash -c 'git commit --no-verify -m y'"),
-    ("gate_weakening", "xargs echo python3 -c 'import os; os.system(\"git commit --no-verify -m y\")'"),
+    ("gate_weakening", "xargs echo python3 -c 'import os; os.system(\"git status\")'"),
     ("commit_msg_subst", "printf x | xargs echo sh -c 'git commit -m \"$(date)\"'"),
     # A cd in a child shell's string or an EXIT trap action moves no later command.
     ("branch_root", "bash -c 'cd docs && make html' && git checkout -b docs-fix"),
     ("branch_root", "sh -c 'cd /tmp && ls'; git checkout -b topic"),
     ("branch_root", "trap 'cd /' EXIT; git switch -c topic"),
-    # Interpreter callee names are qualified: run and call only when bound to subprocess, open only as a pipe.
-    ("gate_weakening", "python3 -c \"import subprocess; subprocess.run(['echo', 'git commit --no-verify'])\""),
-    ("gate_weakening", "python3 -c \"import asyncio; asyncio.run(main('git commit --no-verify'))\""),
-    ("gate_weakening", "perl -e 'open(my $f, \"<\", \"git commit --no-verify notes\")'"),
-    ("gate_weakening", "ruby -e 'File.open(\"git commit --no-verify\")'"),
-    ("gate_weakening", "perl -e 'system(\"echo\", \"git commit --no-verify -m y\")'"),
-    ("gate_weakening", "node -e \"require('child_process').execFileSync('echo', ['git commit --no-verify'])\""),
-    # An argv form whose other arguments are settled (python keywords other than shell and executable, a node options
-    # object with no shell option) still runs its program with no shell.
+    # Interpreter code with no bypass spelling keeps its posture under the raw-text rule, whatever the form:
+    # calls, argv forms, opens, comments, regex-adjacent text.
+    ("gate_weakening", "python3 -c \"import subprocess; subprocess.run(['echo', 'git status'])\""),
+    ("gate_weakening", "python3 -c \"import asyncio; asyncio.run(main('git status'))\""),
+    ("gate_weakening", "perl -e 'open(my $f, \"<\", \"git status notes\")'"),
+    ("gate_weakening", "ruby -e 'File.open(\"git status\")'"),
+    ("gate_weakening", "perl -e 'system(\"echo\", \"git status ok\")'"),
+    ("gate_weakening", "node -e \"require('child_process').execFileSync('echo', ['git status'])\""),
     ("gate_weakening",
-     "python3 -c \"import subprocess; subprocess.run(['echo', 'git commit --no-verify'], check=True, shell=False)\""),
+     "python3 -c \"import subprocess; subprocess.run(['echo', 'git status'], check=True, shell=False)\""),
     ("gate_weakening",
-     "node -e \"require('child_process').execFileSync('echo', ['git commit --no-verify'], {stdio: 'inherit'})\""),
-    # Interpreter comments are not code (a python '#' outside a string literal, whatever comes before it).
-    ("gate_weakening", "python3 -c 'x = 4 / 2  # os.system(\"git commit --no-verify -m y\")'"),
-    ("gate_weakening", "python3 -c '# os.system(\"git commit --no-verify -m y\")'"),
-    ("gate_weakening", "ruby -e '# system(\"git commit --no-verify -m y\")'"),
-    ("gate_weakening", "perl -e '# system(\"git commit --no-verify -m y\")'"),
-    ("gate_weakening", "node -e '// execSync(\"git commit --no-verify -m y\")'"),
-    ("gate_weakening", "node -e '/* execSync(\"git commit --no-verify -m y\") */'"),
+     "node -e \"require('child_process').execFileSync('echo', ['git status'], {stdio: 'inherit'})\""),
+    ("gate_weakening", "python3 -c 'x = 4 / 2  # os.system(\"git status\")'"),
+    ("gate_weakening", "python3 -c '# os.system(\"git status\")'"),
+    ("gate_weakening", "ruby -e '# system(\"git status\")'"),
+    ("gate_weakening", "perl -e '# system(\"git status\")'"),
+    ("gate_weakening", "node -e '// execSync(\"git status\")'"),
+    ("gate_weakening", "node -e '/* execSync(\"git status\") */'"),
+    # For the guards keeping the structured reading, comments stay no code and each form is judged alone.
     ("commit_msg_subst", "python3 -c '# os.system(\"git commit -m $(date)\")'"),
     ("commit_identity", "python3 -c '# os.system(\"git commit --author=Claude -m y\")'"),
     ("git_explicit_binding", "python3 -c '# os.system(\"git add -A && git push origin feat\")'"),
-    # Each execution form is judged alone: two forms that each carry half a spelling. commit_identity's identity
-    # contexts read one line, and forms never share a line, so its row is a regression guard.
-    ("gate_weakening", "python3 -c 'import os; os.system(\"git commit -m x\"); os.system(\"echo --no-verify\")'"),
     ("commit_msg_subst", "python3 -c 'import os; os.system(\"git commit -m x\"); os.system(\"echo $(date)\")'"),
     ("commit_identity",
      "python3 -c 'import os; os.system(\"git commit -m x --author=\"); os.system(\"echo Claude <c@x>\")'"),
@@ -3185,25 +3193,47 @@ _GAP_DENY_ROWS = (
     "command trap 'git commit --no-verify -m y' EXIT",
     "builtin trap 'git commit --no-verify -m y' EXIT",
     "time trap 'git commit --no-verify -m y' EXIT",
+    # RAW-TEXT RULE over-denials (DISCLOSED). gate_weakening reads the whole raw text of a command carrying a
+    # here-document, inline interpreter code, or a redirection or descriptor duplication it cannot resolve,
+    # and denies a bypass spelling anywhere in it. These rows once allowed (the hazard sat in an overridden
+    # body, a printed or quoted interpreter string, or a keyword value): each now denies, the fail-closed
+    # direction, and the _GAP_ALLOW_ROWS minimal pairs (same construct, no spelling) show the rule discriminates.
+    "cat <<'A'; cat <<'B'\ngit commit --no-verify -m y\nA\nhello\nB",
+    "bash <<'DATA' <<'SCRIPT'\ngit commit --no-verify -m y\nDATA\nprintf harmless\nSCRIPT",
+    "bash <<'A' </dev/null\ngit commit --no-verify -m y\nA",
+    "bash <<'A' </dev/stdin\ngit commit --no-verify -m y\nA",
+    "bash <<'A' 0>&$Z\ngit commit --no-verify -m y\nA",
+    "perl -e 'print(' -e '\"git commit --no-verify is only printed here\")'",
+    "perl -e 'print(\"x' -e 'system(qq(git commit --no-verify -m y))\")'",
+    "python3 -c \"import subprocess; subprocess.run(['echo', 'safe'], input='git commit --no-verify -m y')\"",
+    # An interpreter argv-form short flag, and a ruby line-continuation form, that the structured reading
+    # missed are caught by the raw-text rule (the raw short-n probe reads a '-n' word inside list punctuation).
+    "perl -e 'system(\"/usr/bin/git\",\"commit\",\"-n\")'",
+    "ruby -e 'system \\' -e '(\"git commit --no-verify\")'",
+    # node -p / --print with a following -e, which the structured reading consumed as the print expression,
+    # is read by the raw-text rule.
+    "node -p -e 'require(\"child_process\").execSync(\"git commit --no-verify\")'",
+    "node --print --eval 'require(\"child_process\").execSync(\"git commit --no-verify\")'",
+    # A spelling in a perl comment after a division slash, or any inline-code text, is read raw.
+    "perl -e '$r = 6 / 3; # git commit --no-verify -m y'",
+    "ruby -e 'r = 7 % 3 # git commit --no-verify -m y'",
 )
 _GAP_ALLOW_ROWS = (
-    "cat <<'A'; cat <<'B'\ngit commit --no-verify -m y\nA\nhello\nB",
+    # Minimal-pair controls: the same constructs as the deny rows (a here-document, inline interpreter code, a
+    # /dev-target or opaque redirect) with NO verification-hook bypass spelling in the raw text, so the
+    # raw-text rule leaves each allowing.
     "echo 'git status' | sudo bash",
     "python3 -Ic \"import os; os.system('git status')\"",
-    # An overridden here-document body is data no command reads: the hazard in the replaced (first) body
-    # must not deny (the deny pair above holds the hazard in the effective body).
-    "bash <<'DATA' <<'SCRIPT'\ngit commit --no-verify -m y\nDATA\nprintf harmless\nSCRIPT",
-    # A later file redirect moves standard input off the here-document, so its body is data no command reads
-    # (bash runs its script from the file): the hazard in the overridden body must not deny.
-    "bash <<'A' </dev/null\ngit commit --no-verify -m y\nA",
-    # The fragments of one invocation are joined before the scan: a spelling inside a string that spans
-    # fragments is data, as it is in one fragment.
-    "perl -e 'print(' -e '\"git commit --no-verify is denied here\")'",
-    # The literal opens in the first fragment and closes in the second, carrying the spelling across the join
-    # as data; scanning each fragment alone would mis-read the second fragment as running it.
-    "perl -e 'print(\"x' -e 'system(qq(git commit --no-verify -m y))\")'",
-    # A keyword value that is a plain string stays data (the deny pair above holds a call there).
-    "python3 -c \"import subprocess; subprocess.run(['echo', 'safe'], input='git commit --no-verify -m y')\"",
+    # A here-document whose body carries no bypass spelling allows, even with a second here-document or a
+    # /dev-target redirect that the raw-text rule now treats as unbounded input.
+    "bash <<'DATA' <<'SCRIPT'\ngit status\nDATA\nprintf harmless\nSCRIPT",
+    "bash <<'A' </dev/null\ngit status\nA",
+    "bash <<'A' </dev/stdin\ngit status\nA",
+    # Inline interpreter code with no bypass spelling allows, whatever the form (a printed string, a spanning
+    # literal, a keyword value).
+    "perl -e 'print(' -e '\"git status is fine here\")'",
+    "perl -e 'print(\"x' -e 'system(qq(git status))\")'",
+    "python3 -c \"import subprocess; subprocess.run(['echo', 'safe'], input='git status')\"",
     # A wrapped trap with a harmless action, and a wrapped lookup that sets no handler.
     "command trap 'echo done' EXIT",
     "command trap -p",
@@ -3223,15 +3253,20 @@ def _test_shell_string_gaps(failures, hooks, cwd):
             failures.append("(gap-allow) expected allow, got {} for {!r}".format(got, command))
 
 
-# The reading turns a hazard into no hazard only where a closed grammar settles the construct; anything it cannot
-# classify with certainty is read as the earlier reading read it. Each row: (guard, command, decision). The deny and
-# allow-note rows fail when the reading settles what it cannot: a perl, ruby or node comment opener after a
-# quote-like operator, regex literal, %-literal or ?-character literal on its line; a trap action on a signal read
-# as running apart; time eval; a wrapper with no launch grammar (script); a python list given shell=True; the
-# module __import__ or importlib.import_module returns; a node shell option; a list running a shell that reads its
-# script from its input, or an interpreter. The allow rows are settled by a closed grammar: bash runs time's other
-# options as the command it times, so eval never runs; and subprocess with no import binding it raises NameError,
-# so the row keeps the decision taken with no interpreter reading (a disclosed residual).
+# The structured interpreter reading (kept by commit_msg_subst, commit_identity and git_explicit_binding) turns a
+# hazard into no hazard only where a closed grammar settles the construct; anything it cannot classify with
+# certainty is read as the earlier reading read it. Each row: (guard, command, decision). The deny and allow-note
+# rows fail when the reading settles what it cannot: a perl, ruby or node comment opener after a quote-like
+# operator, regex literal, %-literal or ?-character literal on its line; a trap action on a signal read as running
+# apart; time eval; a wrapper with no launch grammar (script); a python list given shell=True; the module
+# __import__ or importlib.import_module returns; a node shell option; a list running a shell that reads its script
+# from its input, or an interpreter. The allow rows are settled by a closed grammar: bash runs time's other
+# options as the command it times, so eval never runs; and for the structured guards subprocess with no import
+# binding it raises NameError, so those rows keep the decision taken with no interpreter reading (a disclosed
+# residual). gate_weakening does NOT use the structured reading: it reads the whole raw command text once an
+# interpreter-family word (or a here-document, or an unresolved redirect) is present, so every gate_weakening row
+# whose raw text carries a bypass spelling denies through that raw-text rule, whatever the structured reading
+# would make of the construct.
 _CLOSED_GRAMMAR_ROWS = (
     ("gate_weakening", "perl -e 's#a#b#; system(\"git commit --no-verify -m x\")'", "deny"),
     ("gate_weakening", "perl -e 'tr#a#b#; system(\"git commit --no-verify -m x\")'", "deny"),
@@ -3272,12 +3307,20 @@ _CLOSED_GRAMMAR_ROWS = (
     ("gate_weakening", "python3 -c \"import subprocess; subprocess.run(['python3', '-c', 'import os; os.system("
      "\\\"git commit --no-verify -m x\\\")'])\"", "deny"),
     ("gate_weakening", "time -f x eval 'git commit --no-verify -m x'", "allow"),
-    ("gate_weakening", "python3 -c 'subprocess.run(\"git commit --no-verify -m y\")'", "allow"),
-    # A perl '#' after a division '/' on its line: the line-clear predicate cannot prove it a comment (a '/'
-    # may open a regex literal), so the rest of the line is read as code, a DISCLOSED over-read that denies a
-    # spelling written in such a comment (a python '#' outside a string stays a comment, '/' before it or
-    # not: the harmless rows pin that allow).
+    # An unbound subprocess run is NO execution form (python refuses it at run time), so the three guards that
+    # keep the structured reading take the decision reached with no interpreter reading. gate_weakening does
+    # NOT: its raw-text rule reads the whole command once an interpreter-family word is present, so a bypass
+    # spelling anywhere in the raw text denies, whether or not the call is bound (a DISCLOSED over-denial).
+    ("gate_weakening", "python3 -c 'subprocess.run(\"git commit --no-verify -m y\")'", "deny"),
+    ("git_explicit_binding", "python3 -c 'subprocess.run(\"git add -A && git push origin feat\")'", "allow"),
+    # A perl '#' after a division '/' on its line: for the structured reading the line-clear predicate cannot
+    # prove it a comment (a '/' may open a regex literal), so the rest of the line is read as code, a DISCLOSED
+    # over-read that denies a spelling written in such a comment; gate_weakening reaches the same deny through
+    # its raw-text rule (a python '#' outside a string stays a comment for the structured guards, '/' before it
+    # or not: the harmless rows pin that allow).
     ("gate_weakening", "perl -e '$x = 4 / 2; # system(\"git commit --no-verify -m x\")'", "deny"),
+    ("git_explicit_binding",
+     "perl -e '$x = 4 / 2; # system(\"git add -A && git push origin feat\")'", "deny"),
 )
 
 

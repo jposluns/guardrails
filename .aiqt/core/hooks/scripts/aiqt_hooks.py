@@ -466,11 +466,12 @@ _Redirect = collections.namedtuple(
 _Segment = collections.namedtuple(
     "_Segment", ("argv", "sep_after", "redirects", "raw", "opaque_shell", "argv_opaque",
                  "argv_leading_tilde", "stdin_script", "shell_uncertain", "shell_scope"))
-# stdin_script is the text of the QUOTED here-document body the segment's command reads on standard input
-# (the body that fd 0's provenance through the segment's ordered redirections resolves to, since a later file
-# redirect or descriptor duplication can move fd 0 off the last here-document opened, with its closing
-# delimiter line), which _lex_flat skips as data, or None when fd 0 ends on no here-document or the body is
-# empty; only a shell that reads its script from standard input consults it (_shell_reading). shell_uncertain is None, or
+# stdin_script is the text of EVERY QUOTED here-document body the segment opened, joined in the order the
+# '<<' operators appeared (each with its closing delimiter line), which _lex_flat skips as data, or None
+# when the segment opened none or the bodies are empty. No body is dropped for a redirect that seems to
+# move standard input off it: which body the command really reads depends on descriptor and device aliases
+# no static reading resolves soundly, so a hazard in any of them stays readable, the fail-closed direction;
+# only a shell that reads its script from standard input consults it (_shell_reading). shell_uncertain is None, or
 # the (kind, text) pairs a guard's uncertain-segment posture reads for a segment holding a shell string the
 # shared reading could not read, or a shell reading its script from standard input (_expand_shell_strings,
 # _shell_uncertain_texts). shell_scope is the child-shell scope a segment runs in: () for the command's own
@@ -858,52 +859,13 @@ def _target_class(target, t_opaque):
 
 
 # A descriptor-duplication target: a plain fd number, with an optional trailing '-' for the move forms
-# ('<&n-'/'>&n-', which duplicate then close the source). '-' alone (close) is handled before this.
+# ('<&n-'/'>&n-', which duplicate then close the source). A '<&'/'>&' whose target is anything else (other
+# than the lone '-' close) is a duplication the reading cannot resolve, so _raw_unbounded_input treats the
+# command's input as unbounded. No per-descriptor provenance is modelled: tracking which here-document body
+# standard input "really" ends on (through saves, restores, closes and file redirects) proved unsound
+# against descriptor and device aliases, and its only effect was to ALLOW a body the model thought moved
+# off, so every body a segment opens is read with that segment instead (the fail-closed direction).
 _DUP_TARGET_RE = re.compile(r"^(\d+)(-?)$")
-
-
-def _stdin_dup_provenance(fd_prov, dest, target, t_opaque):
-    """Record in fd_prov the provenance a '<&'/'>&' duplication gives descriptor `dest`: a closed descriptor
-    for '-', the source descriptor's own provenance for a numeric target (moving it when the target ends in
-    '-'), an inherited descriptor when the source was never set on this segment (never this command's
-    here-document), or unknown when the target is opaque or not a plain fd number (unresolvable)."""
-    if not t_opaque and target == "-":
-        fd_prov[dest] = ("closed",)
-        return
-    match = _DUP_TARGET_RE.match(target) if not t_opaque else None
-    if match is not None:
-        src = int(match.group(1))
-        fd_prov[dest] = fd_prov.get(src, ("inherit",))
-        if match.group(2):  # the move form duplicates then closes the source
-            fd_prov[src] = ("closed",)
-        return
-    fd_prov[dest] = ("unknown",)
-
-
-def _stdin_fd_after_redirect(fd_prov, op, src_fd, target, t_opaque):
-    """Update fd_prov (descriptor -> standard-input provenance) for one redirect, so a later read of
-    fd_prov[0] tells what the command's standard input is: ("body", i) the i-th here-document body opened on
-    this segment, ("file",) a file (input or read-write) target, ("file-out",) an output target, ("closed",)
-    a closed descriptor, ("inherit",) a descriptor duplicated from one this segment never set (the inherited
-    descriptor, never this command's here-document), or ("unknown",) a duplication whose source cannot be
-    resolved. Redirections apply left to right, so the last write to fd 0 wins; only an input or a
-    duplication can make fd 0 a here-document body. A here-document opener sets fd_prov[0] itself (in the
-    lexer). Purely in-memory, never raises."""
-    if op in ("<", "<>"):
-        fd_prov[0 if src_fd is None else src_fd] = ("file",)
-    elif op in (">", ">>", ">|"):
-        fd_prov[1 if src_fd is None else src_fd] = ("file-out",)
-    elif op in ("&>", "&>>"):
-        fd_prov[1] = ("file-out",)
-        fd_prov[2] = ("file-out",)
-    elif op == "<&":
-        _stdin_dup_provenance(fd_prov, 0 if src_fd is None else src_fd, target, t_opaque)
-    elif op == ">&":
-        dest = 1 if src_fd is None else src_fd
-        if (not t_opaque) and (target == "-" or _DUP_TARGET_RE.match(target)):
-            _stdin_dup_provenance(fd_prov, dest, target, t_opaque)
-        else:
-            fd_prov[dest] = ("file-out",)  # the csh '>&file' both-streams-to-file form
 
 
 def _parse_heredoc_delim(command, at, n):
@@ -1401,7 +1363,7 @@ def _lex_flat(command, partial=False, locale=False, skip_empty=False):
     string, and the default False keeps the reading every other caller relies on.
 
     skip_empty True leaves out every segment with no word and no redirect, whose record would be
-    _Segment([], sep, [], raw, False, [], []) (with, as its stdin_script, the effective body of the quoted
+    _Segment([], sep, [], raw, False, [], []) (with, as its stdin_script, the joined bodies of the quoted
     here-documents it opened, which is left out with it), so a long run of separators ('((((', ';;;;') builds no record,
     list or tuple for it; every other record, its order and the partial-mode flags are unchanged. Only a
     caller that reads nothing from such a segment (not its sep_after, its raw slice, or its place in the
@@ -1416,8 +1378,6 @@ def _lex_flat(command, partial=False, locale=False, skip_empty=False):
     seg_start = [0]
     pending_heredocs = []  # queued (delim, strip_tabs) for QUOTED heredocs whose bodies to skip (finding 17)
     heredoc_owners = []  # per queued heredoc, the index its opening segment has once ended (None: left out)
-    fd_prov = {}  # descriptor -> standard-input provenance for the OPEN segment (reset as each segment ends)
-    stdin_pick = []  # per APPENDED segment, fd_prov[0] at its end: what its standard input resolves to
 
     def end_segment(sep, op_start, next_start):
         # With no word and no redirect there is nothing to reset: argv_opaque, argv_leading_tilde and opaque
@@ -1426,7 +1386,6 @@ def _lex_flat(command, partial=False, locale=False, skip_empty=False):
             segments.append(_Segment(list(argv), sep, list(redirects),
                                       command[seg_start[0]:op_start], opaque[0], list(argv_opaque),
                                       list(argv_leading_tilde)))
-            stdin_pick.append(fd_prov.get(0))  # aligned with segments: this segment's standard-input provenance
             del argv[:]
             del argv_opaque[:]
             del argv_leading_tilde[:]
@@ -1440,7 +1399,6 @@ def _lex_flat(command, partial=False, locale=False, skip_empty=False):
             while k and heredoc_owners[k - 1] == len(segments):
                 k -= 1
                 heredoc_owners[k] = None
-        fd_prov.clear()  # the next segment's descriptors start from the inherited state
         seg_start[0] = next_start
 
     def consume_redirect(op, oplen, at, src_fd):
@@ -1455,7 +1413,6 @@ def _lex_flat(command, partial=False, locale=False, skip_empty=False):
         if not started:
             raise ValueError("malformed redirect target")
         redirects.append(_classify_redirect(op, src_fd, target, t_opaque, t_ltilde))
-        _stdin_fd_after_redirect(fd_prov, op, src_fd, target, t_opaque)
         return k2
 
     try:
@@ -1474,31 +1431,24 @@ def _lex_flat(command, partial=False, locale=False, skip_empty=False):
                     # the bodies of any QUOTED heredocs opened on this line follow the newline; skip them as
                     # literal data (finding 17), then resume lexing after the closing delimiter line(s). The
                     # bodies are read in the order the '<<' operators appeared, and the segment that OPENED a
-                    # heredoc records the one its standard input resolves to (stdin_script): the shell applies
-                    # redirections left to right, so later ones can move fd 0 to a different here-document, to a
-                    # file, or to a duplicated descriptor, and the body fd 0 ends on is that command's standard
-                    # input (a shell there reads that body as its script, _shell_reading; a cat/prose consumer
-                    # carries it harmlessly; an overridden body is data no command reads).
-                    bodies = []  # body text per queued here-document, in the order the '<<' operators appeared
-                    for heredoc in pending_heredocs:
+                    # here-document records EVERY body it opened, joined in that order, as its stdin_script.
+                    # Which body (if any) the command's standard input really ends on depends on redirection
+                    # order and on descriptor and device aliases (a saved-and-restored descriptor, /dev/stdin,
+                    # /dev/fd/N, /proc/self/fd/N, an opaque or non-numeric duplication target) that no static
+                    # reading resolves soundly, and dropping a body that reading thought overridden could only
+                    # ALLOW, so no body is ever dropped: a hazard in any of them is read, the fail-closed
+                    # direction (a shell there reads its standard input as its script, _shell_reading; a
+                    # cat/prose consumer carries the body harmlessly). One pass groups the bodies by owner,
+                    # so the scan stays linear in the command length.
+                    bodies = {}  # owner segment index -> its body texts, in the order the '<<' operators appeared
+                    for g, heredoc in enumerate(pending_heredocs):
                         body_start = i
                         i = _skip_heredoc_bodies(command, i, n, [heredoc])
-                        bodies.append(command[body_start:i])
-                    # Which body (if any) is a segment's standard input follows fd 0's provenance through its
-                    # ordered redirections (stdin_pick, captured as the segment ended): the here-document fd 0
-                    # last named, which a later file redirect or a descriptor duplication can move away from the
-                    # last one opened or off a here-document entirely, or none when fd 0 ended on a file or an
-                    # inherited descriptor. When that provenance cannot be resolved (an opaque or non-numeric
-                    # duplication target), every body the segment opened is taken together, the fail-closed
-                    # direction, so a hazard in any of them is still read.
-                    for owner in dict.fromkeys(o for o in heredoc_owners if o is not None and o < len(segments)):
-                        pick = stdin_pick[owner] if owner < len(stdin_pick) else None
-                        if pick and pick[0] == "body" and pick[1] < len(bodies):
-                            body = bodies[pick[1]]
-                        elif pick and pick[0] == "unknown":
-                            body = "".join(bodies[g] for g, o in enumerate(heredoc_owners) if o == owner)
-                        else:
-                            body = ""
+                        owner = heredoc_owners[g]
+                        if owner is not None and owner < len(segments):
+                            bodies.setdefault(owner, []).append(command[body_start:i])
+                    for owner, texts in bodies.items():
+                        body = "".join(texts)
                         if body:
                             segments[owner] = segments[owner]._replace(stdin_script=body)
                     del pending_heredocs[:]
@@ -1533,7 +1483,6 @@ def _lex_flat(command, partial=False, locale=False, skip_empty=False):
                             # (a '<<' always sits inside the open segment, before its end); end_segment clears it
                             # when skip_empty leaves that segment out.
                             heredoc_owners.append(len(segments))
-                            fd_prov[0] = ("body", len(pending_heredocs))  # fd 0 is this body until a later redirect
                             pending_heredocs.append((_delim, _strip))
                             i = _next_i
                             continue
@@ -2230,8 +2179,11 @@ def _scope_moved(moved, scope):
 
 # --- interpreters given inline code ---------------------------------------------------------------------
 # A command an interpreter runs from inline code (python -c, perl -e/-E, ruby -e, node -e/-p/--eval/--print) is
-# NOT shell, so the shared segment reading cannot read it as a command line. Four guards read the structure of
-# that code instead: gate_weakening, commit_msg_subst, commit_identity and git_explicit_binding. Each reads ONLY
+# NOT shell, so the shared segment reading cannot read it as a command line. gate_weakening does not read the
+# structure of that code at all: it reads the WHOLE raw command text whenever an interpreter-family word (or
+# another construct the reading cannot bound) is present, and denies a bypass spelling anywhere in it
+# (_raw_unbounded_input, the fail-closed direction). Three guards read the structure of
+# that code instead: commit_msg_subst, commit_identity and git_explicit_binding. Each reads ONLY
 # the execution forms in the code (_interp_exec_forms: os.system, subprocess calls, the os.exec and spawn
 # families, perl and ruby system/exec/backquotes/qx/%x and a pipe open, node child_process calls), judges each
 # form's own command text ALONE (never a join of several forms), and denies when that text names a spelling the
@@ -2244,7 +2196,12 @@ def _scope_moved(moved, scope):
 # over-read that can deny a spelling written in such a comment. Where such a construct stands before a QUOTE on
 # its line the quote's string boundary cannot be trusted either, so the whole code is read as one raw text
 # (cannot-evaluate), never silently dropping a later form; anything else the reading cannot classify is
-# read as code, as the earlier reading read it. This structured reading is separate from the raw-text scans that read interpreter code
+# read as code, as the earlier reading read it. DISCLOSED RESIDUAL of this structured reading: the clear-line
+# predicate reads only the quote's OWN line, so a quote-like construct opened on an EARLIER line or in an
+# earlier -e fragment (a perl qq{ or m{, a ruby %q() whose opener ends a previous line) can still make a later
+# line's quote boundary read as a string and swallow an execution form after it; the guards that keep this
+# structured reading carry that residual, while gate_weakening does not (its raw-text rule reads the whole raw
+# command instead). This structured reading is separate from the raw-text scans that read interpreter code
 # only as raw text, as they did before it: protected_line's backstop scans the whole raw command text for a push
 # or commit spelling when no git command was lexed, and git_discard's scope scan reads the raw text of every
 # command. No other guard reads the execution forms of interpreter code.
@@ -2847,8 +2804,11 @@ def _interp_exec_forms(records):
     (cmd = '...'; os.system(cmd)), an execution form the lists do not name, a run or call reached through a name
     the code does not bind to subprocess (subprocess.run with no import of subprocess, which python refuses, is no
     form, as with no interpreter reading), a form inside a string the code interpolates (an f-string, ruby's
-    #{...}), an option outside the grammars that takes a separate value (read as the script operand, which ends
-    the walk), and an interpreter family off the list."""
+    #{...}), a quote-like construct opened on an EARLIER line or fragment (the clear-line predicate reads only a
+    quote's own line, so a perl qq{ or m{, or a ruby %q(, whose opener ends a previous line can swallow a later
+    form inside a misread string), an option outside the grammars that takes a separate value (read as the script
+    operand, which ends the walk), and an interpreter family off the list. gate_weakening does not consume this
+    reading: its raw-text rule reads the whole raw command instead (_raw_unbounded_input)."""
     texts = []
     for seg in records:
         argv = seg.argv
@@ -2892,6 +2852,43 @@ def _interp_records(command):
         return _lex_command(command)
     except ValueError:
         return ()
+
+
+# An interpreter-family word anywhere in the RAW command text (the families whose inline code the reading
+# handles: python, perl, ruby, node, versioned spellings included), wherever it stands: a path prefix is
+# allowed before it (/usr/bin/perl), and a word in prose or in a file name matches too. Deliberately
+# over-matching: the trigger alone denies nothing; a consumer denies only when its own protected spelling
+# is ALSO in the raw text.
+_RAW_INTERP_WORD_RE = re.compile(r"(?i)(?<![\w.-])(?:python[0-9.]*|perl5?|ruby|node(?:js)?)(?![\w-])")
+
+
+def _raw_unbounded_input(command, records):
+    """True when `command` carries a construct whose input or code the shared reading cannot bound with
+    certainty, so a fail-closed consumer reads the WHOLE raw command text (quotes, comments and
+    here-document bodies included) instead of trusting any per-construct reading: an interpreter-family
+    word anywhere in the raw text (inline interpreter code is not shell, and its quote and comment
+    boundaries cannot be proven across fragments and quote-like operators), a '<<' anywhere in the raw text
+    (a here-document or here-string, quoted spellings included), or a lexed redirection that can change what
+    the command reads on STANDARD INPUT and whose effect cannot be resolved (an output redirect to a static
+    file never can): a '<&' input duplication (it defaults to fd 0), or a '0>&' that duplicates onto fd 0,
+    whose target is not the lone '-' close and not a plain fd number (an opaque or non-numeric target the
+    reading cannot resolve to a descriptor), or an input ('<'/'<>') target that is not provably a static
+    ordinary file (an opaque target, or a /dev or /proc path such as /dev/stdin or /proc/self/fd/0, which can
+    alias the very descriptor it redirects). Deliberately over-matching, the
+    fail-closed direction, and linear in the command length: the trigger alone denies nothing; a consumer
+    denies only when its own protected spelling is also in the raw text. records is the shared reading of
+    `command` (the caller already holds it). A plain predicate: it builds no decision."""
+    if "<<" in command or _RAW_INTERP_WORD_RE.search(command):
+        return True
+    for seg in records:
+        for red in seg.redirects:
+            if red.op == "<&" or (red.op == ">&" and red.src_fd == 0):
+                # a duplication onto fd 0 (standard input): unresolved unless it names a plain fd or closes it
+                if red.target_class == "opaque" or not (red.target == "-" or _DUP_TARGET_RE.match(red.target)):
+                    return True
+            elif red.op in ("<", "<>") and red.target_class != "file-real":
+                return True
+    return False
 
 
 def _raw_names_gate_bypass(text):
@@ -11125,11 +11122,14 @@ _GATE_ALTS = (
 # Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct);
 # mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. '--no-ver'
 # deliberately also hits '--no-verbose' (an over-deny on the unparseable path only); the short cluster
-# probe requires a whitespace-preceded single-dash token so a long option ('--amend') never matches.
+# probe requires a single-dash token preceded by whitespace OR by list punctuation (a quote, comma,
+# semicolon, equals sign or an opening bracket), so a '-n' spelled as an interpreter argv word
+# ("git","commit","-n" or ['git', 'commit', '-n']) is read too, while a long option ('--amend') and a
+# hyphenated word ('well-known', whose '-' follows a letter) never match.
 _RAW_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|merge|push|pull|rebase|am)\b")
 _RAW_NOVERIFY_RE = re.compile(r"(?i)--no-ver")
 _RAW_SHORT_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|am)\b")
-_RAW_SHORT_N_RE = re.compile(r"(?:^|\s)-[A-Za-z]*n\b")
+_RAW_SHORT_N_RE = re.compile(r"(?:^|[\s\"';,=([{])-[A-Za-z]*n\b")
 _RAW_CHECKER_RE = re.compile(
     r"(?i)\b(?:pytest|tox|nox|unittest|mypy|pyright|ruff|flake8|pylint|bandit|eslint|tsc|jest|"
     r"vitest|mocha|rspec|rubocop|phpunit|phpstan|golangci-lint|staticcheck|shellcheck|hadolint|"
@@ -11847,11 +11847,15 @@ def gate_weakening(data):
     -exec/-execdir/-ok/-okdir or xargs shell -c string is read as if written in
     place (_lex_command), so a --no-verify there denies. A segment whose string that reading cannot read, and a
     shell that reads its script from a pipe or a here-document, are uncertain alone: the raw fallback reads each
-    of that segment's texts alone (_shell_uncertain_texts), and every other segment is judged as before. Inline
-    interpreter code is not shell, so it cannot be read as a command line; a --no-verify spelling in the command
-    text of one of its execution forms, read alone (_interp_exec_forms, _raw_names_gate_bypass), denies, and a
-    comment, or printed or quoted text outside an execution form, is not read, so the interpreter command
-    otherwise keeps its posture.
+    of that segment's texts alone (_shell_uncertain_texts), and every other segment is judged as before. RAW-TEXT
+    RULE (fail-closed): a command that carries inline interpreter code (an interpreter-family word anywhere in
+    its raw text), a here-document or here-string, or a redirection or descriptor duplication the reading cannot
+    resolve with certainty (_raw_unbounded_input) is ALSO read as ONE raw text: a verification-hook bypass
+    spelling anywhere in it (_raw_names_gate_bypass), inside quotes, comments and here-document bodies included,
+    DENIES. No per-language reading of interpreter code is attempted for this guard: proving such a spelling
+    quoted, printed or commented out cannot be made sound across fragments, quote-like operators and descriptor
+    aliases, and that proof could only allow. DISCLOSED over-denial: a command that merely prints or mentions a
+    bypass spelling beside such a construct is denied; spell it differently or run it without the construct.
     Disclosed residuals: R1 a check inside a shell string piped into a sink notes rather than denies
     (the shell command before it is an earlier command the deny tier does not count as benign), and a check
     inside an xargs or find body that runs no shell, or a string built at run time, is not read; R2 an alias or shell
@@ -11941,6 +11945,25 @@ def gate_weakening(data):
     if hit is not None:
         reason, banner = _verification_sink_message(hit)
         return _deny(reason, banner)
+    # The raw-text rule: a command carrying a construct the reading cannot bound with certainty (inline
+    # interpreter code, a here-document or here-string, or a redirection or descriptor duplication whose
+    # effect on the command's input is unresolved) is read as ONE raw text, and a verification-hook bypass
+    # spelling anywhere in it (inside quotes, comments and here-document bodies included) DENIES. No attempt
+    # is made to prove the spelling quoted, printed or commented out: that proof cannot be made sound across
+    # fragments, quote-like operators and descriptor aliases, and it could only allow. A DISCLOSED
+    # over-denial, the fail-closed direction; the same constructs with no bypass spelling keep their posture.
+    if _raw_unbounded_input(command, records) and _raw_names_gate_bypass(command):
+        return _deny(
+            "AIQT rule gatdis (gate-discipline): this command carries a construct whose input or code the "
+            "hook cannot bound with certainty (inline interpreter code, a here-document or here-string, or a "
+            "redirection or descriptor duplication it cannot resolve), and its raw text names a git "
+            "verification-hook bypass (a --no-verify spelling, or a short -n beside git commit or am). The "
+            "raw text is read whole, quotes, comments and here-document bodies included, so a bypass spelling "
+            "that is only mentioned or printed is denied too, the fail-closed direction. Never weaken a gate "
+            "to obtain a pass; fix the artefact instead, or re-issue the command without that construct or "
+            "without the bypass spelling. {}".format(_GATE_ALTS),
+            "AIQT guardrail: denied a command pairing an unresolvable input or inline-code construct with a "
+            "git verification-hook bypass spelling in its raw text (rule gatdis, fail-closed).")
     # An uncertain segment (a shell string the reading cannot read, or a shell reading its script from a pipe or a
     # here-document) is read under this guard's posture: the raw fallback over each of its texts alone. Its deny
     # (a --no-verify spelling, or a short -n on git commit or am, there) is checked here, ahead of the notes
@@ -11950,23 +11973,6 @@ def gate_weakening(data):
     for text in uncertain:
         if _raw_names_gate_bypass(text):
             return _gate_weakening_fallback(text)
-    # An interpreter given inline code is not shell, so the segments above never read its code: when the command
-    # text of one of its execution forms (_interp_exec_forms: os.system, subprocess calls, system, backquotes,
-    # ...), read alone, names a git verification-hook bypass this guard denies (a --no-verify spelling, or a short
-    # -n on git commit/am - _raw_names_gate_bypass), it DENIES; a comment, and printed or quoted text outside an
-    # execution form, are not read, and otherwise the command keeps its posture (a checker piped to a sink inside
-    # the code is only a note, left to the broad note tier below, so the existing '| head' note on an interpreter
-    # command is unchanged).
-    if any(_raw_names_gate_bypass(text) for text in _interp_exec_forms(records)):
-        return _deny(
-            "AIQT rule gatdis (gate-discipline): this command runs inline interpreter code (python -c, "
-            "perl -e, and the like) whose execution form (os.system, a subprocess call, system, a backquote, "
-            "and the like) runs a command naming a git verification-hook bypass (a --no-verify spelling, or a "
-            "short -n on git commit or am). The code is not shell, so it cannot be read as a command line; it "
-            "is denied because the command it runs names the bypass. Never weaken a gate to obtain a "
-            "pass; fix the artefact instead. {}".format(_GATE_ALTS),
-            "AIQT guardrail: denied inline interpreter code that appears to bypass git verification hooks "
-            "(--no-verify family) (rule gatdis).")
     if pending_note is not None:
         return _allow_note(pending_note)
     flow_note = _gate_flow_note(records, command)
