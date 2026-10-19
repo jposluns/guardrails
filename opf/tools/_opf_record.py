@@ -121,9 +121,17 @@ run (re-run), never a duplicate. The homes-2 publication boundary itself (_publi
 open a transaction unless the canonical reservation of the run id it publishes under stands with this
 plan's claims. An unreadable, malformed or conflicting reservation refuses (exit 2),
 never a silent fallback to the homes-1 counters path; a run killed after reserving and before
-publishing leaves its reservation standing, its numbers conservatively still reserved (the final doctor
-does not yet read reservations, so a store carrying such an orphan grades the orphan's numbers as
-missing records until that later change). This homes-2 path is reached only once activation sets
+publishing leaves its reservation standing, its numbers conservatively still reserved, and the next run
+derives above them. The final doctor reads the reservations (a read that awaits the homes-2 revision of
+spec 4.2) and does not report a reserved number missing where the prior commit held no record with that
+id, so a reservation's [claims] number grades as issued and that next run records. A reservation keeps
+only its run's new high-water per key, so where an orphaned run claimed several numbers under one key,
+its lower numbers are still reported missing and the next run is held at the post-publication gate
+(conservative). A deletion already committed in HEAD is visible only to a doctor run before that commit:
+a published record whose number a reservation records and whose deletion is committed is then graded as
+an orphaned reservation's number and not reported missing, unlike homes 1, where the counters high-water
+keeps that deletion a C-NO-DELETION finding. The homes-2 revision of spec 4.2 must settle this before
+homes 2 is activated. This homes-2 path is reached only once activation sets
 _opf_store.SUPPORTED_HOMES to 2 (and _load_manifest admits the homes-2 spec_version); while
 SUPPORTED_HOMES is 1, every subcommand refuses a store declaring homes 2 before any reconciliation or
 write (_probe_homes), so the shipped verb claims through homes 1 only. A legacy

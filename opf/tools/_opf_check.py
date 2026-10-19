@@ -66,6 +66,7 @@ import ipaddress
 import os
 import re
 import stat
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -390,9 +391,19 @@ _RESIDUALS = (
 )
 # Disclosed only on a homes-2 report, so a legacy report's residuals are unchanged.
 _HOMES2_RESIDUALS = (
-    "Journal contents are not inspected by doctor. A staged plan does not prove recoverability. "
+    "Journal contents are not inspected by doctor, except that it lists the id reservation home of each "
+    "journal kind and reads each reservation file's bytes, for the reserved numbers alone; that read awaits "
+    "the homes-2 revision of spec section 4.2, which still says doctor excludes journals (a release "
+    "dependency). A staged plan does not prove recoverability. "
     "Homes-2 evidence inventories establish local membership, not actor authenticity; losing a whole "
     "bundle, inventory and payload together, requires independent history to detect.",
+    "A reserved number that no present record carries is treated as issued only where the prior committed "
+    "snapshot (HEAD) held no record with that id; where it held one, the absence is a C-NO-DELETION finding, "
+    "and where no prior enumerating its ids was observed it is CANNOT-EVALUATE. Doctor sees the working "
+    "tree, the reservations and that one commit only, so a record published and deleted again with no "
+    "commit holding it in between (before the first commit, or after HEAD) leaves just its reservation, "
+    "which no check can tell from an orphaned one, and a deletion already committed in HEAD is visible only "
+    "to a doctor run before that commit.",
 )
 
 
@@ -1974,20 +1985,232 @@ def _check_links(recs, by_id, all_ids, rep):
                                 "(spec 8.5)".format(r.id, sid))
 
 
-def _check_worklog_contiguous(numbers, rep):
+# A run id suffix in every journal kind run grammar: with the prefix of a kind it names a placeholder run, so
+# the reservation home of each kind is derived from the one path authority (_opf_store.allocation_record).
+_RESERVATION_PLACEHOLDER = "-00000000T000000Z-0000000000000000"
+
+
+def _reservation_run(kind, name):
+    """The run id that a file name in the reservation home of kind binds (the run id plus .toml), or None
+    when the name is not one (_opf_store.allocation_record is the one grammar authority)."""
+    if not name.endswith(".toml"):
+        return None
+    try:
+        _opf_store.allocation_record(kind, name[:-len(".toml")])
+    except ValueError:
+        return None
+    return name[:-len(".toml")]
+
+
+class _PrefixedReport:
+    """Forwards a contained reader's CANNOT-EVALUATE to the report under one check's message prefix, so a
+    read failure the reader words itself still names the check it fails."""
+    __slots__ = ("_rep", "_prefix")
+
+    def __init__(self, rep, prefix):
+        self._rep = rep
+        self._prefix = prefix
+
+    def cant(self, msg):
+        self._rep.cant(self._prefix + msg)
+
+
+def _reserved_numbers(root_fd, rep):
+    """Homes 2: the clean-series numbers the id reservations hold, as {namespace: set of numbers}, and
+    whether every reservation evaluated. C-NO-DELETION and C-CONTIGUITY skip such a number only where no
+    present record carries it and the prior committed snapshot held no record with that id
+    (_split_reserved), so this reads each reservation read-only and for that purpose alone. Spec 8.2
+    defines the reservation and the next-ID derivation, not this grading; reading the journals at all is
+    the one exception to the spec 4.2 sentence that doctor excludes journals, and it awaits the homes-2
+    revision of that section (a release dependency). The homes are the allocations/ home under journals/
+    of every kind in _opf_store.JOURNAL_KINDS (read at call time), each derived through
+    _opf_store.allocation_record, listed and read through the contained no-follow readers; no journal
+    frame, projection or run directory is opened. A reservation is judged as the record writer judges
+    one: its file name binds a run id of its own kind, and its bytes equal the exact canonical payload
+    (_opf_journal.reservation_payload) that its name and content declare. A staging leftover of a
+    reservation publication (a run that died before its exclusive link) carries no reservation and is
+    skipped unread. Owner uniqueness holds for the number each reservation records (its run's high-water
+    per key): that (series key, number) has one owner across every kind's home, so a second reservation
+    recording it is a conflict naming both files. A residual: a run that claimed several numbers under one
+    key records only the highest, so another run recording one of the lower numbers overlaps it unseen
+    (this doctor cannot read a number no reservation records). An underivable or unlistable home, an entry
+    that is not a reservation, an unreadable, absent-at-read, malformed or non-canonical reservation, and
+    a conflict are each a CANNOT-EVALUATE under C-NO-DELETION naming it, and the result is then
+    ({}, False), so the caller grades as though nothing were reserved, never a wider pass. A [claims]
+    value is the number its run reserved under that key; a run that claimed several numbers under one key
+    records only its new high-water, so if it never published, its lower numbers still read as missing
+    (conservative). An imported-series key reserves on the imported number line, which this doctor does
+    not grade, so it is validated and owner-checked but not used."""
+    # Deferred: _opf_journal imports _opf_oplock, which imports this module.
+    import _opf_journal
+    import _opf_oplock
+    owners = {}      # (series key, number) -> the reservation that claims it
+    ok = True
+    read_rep = _PrefixedReport(rep, "C-NO-DELETION: ")
+    for kind in _opf_store.JOURNAL_KINDS:
+        try:
+            home = _opf_store.allocation_record(
+                kind, _opf_store._HOME_RUN_PREFIXES[kind] + _RESERVATION_PLACEHOLDER).rsplit("/", 1)[0]
+        except (KeyError, ValueError) as exc:
+            rep.cant("C-NO-DELETION: the journal kind {} has no reservation home this build can derive ({}); "
+                     "the reserved numbers are unknown (fail-closed)".format(
+                         _safe_display(kind), _safe_display(str(exc))))
+            ok = False
+            continue
+        try:
+            subdirs, files = _list_contained(root_fd, home)
+        except StoreError as exc:
+            rep.cant("C-NO-DELETION: cannot list the id reservations in {}: {} (fail-closed)".format(
+                home, _safe_display(str(exc))))
+            ok = False
+            continue
+        for entry in subdirs or ():
+            rep.cant("C-NO-DELETION: {} is a directory, not an id reservation (fail-closed)".format(
+                _safe_display(_rel(home, entry))))
+            ok = False
+        for entry in files or ():
+            head, marker, _tail = entry.rpartition(_opf_oplock._STAGING_MARKER)
+            if (marker and entry.startswith(".") and _opf_oplock._is_staging_name(entry, head[1:])
+                    and _reservation_run(kind, head[1:]) is not None):
+                continue     # a publication that died before its link left no reservation; never read
+            rel = _rel(home, entry)
+            run_id = _reservation_run(kind, entry)
+            if run_id is None:
+                rep.cant("C-NO-DELETION: {} is not an id reservation of a {} run, nor a staging leftover of "
+                         "one (fail-closed)".format(_safe_display(rel), kind))
+                ok = False
+                continue
+            raw, st = _read_bytes(root_fd, rel, read_rep)
+            if st == "absent":
+                rep.cant("C-NO-DELETION: the id reservation {} was listed but is absent at read "
+                         "(fail-closed)".format(rel))
+            if st != "ok":
+                ok = False
+                continue
+            try:
+                model = tomllib.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
+                # ValueError: tomllib.TOMLDecodeError and an over-long integer literal; RecursionError and
+                # MemoryError: deep nesting and a many-part key.
+                rep.cant("C-NO-DELETION: the id reservation {} is malformed ({}) (fail-closed)".format(
+                    rel, _safe_display(str(exc))))
+                ok = False
+                continue
+            claims = model.get("claims")
+            try:
+                expected = _opf_journal.reservation_payload(kind, run_id, model.get("operation_id"), claims)
+            except (_journal.JournalError, _opf_emit.EmitError) as exc:
+                rep.cant("C-NO-DELETION: the id reservation {} is malformed ({}) (fail-closed)".format(
+                    rel, _safe_display(str(exc))))
+                ok = False
+                continue
+            if raw != expected:
+                rep.cant("C-NO-DELETION: the id reservation {} differs from the exact canonical reservation "
+                         "its name and content declare (a reservation is never rewritten, spec 8.2; "
+                         "fail-closed)".format(rel))
+                ok = False
+                continue
+            for key, number in claims.items():
+                owner = owners.setdefault((key, number), rel)
+                if owner != rel:
+                    rep.cant("C-NO-DELETION: the id reservations {} and {} both claim {} under the series key "
+                             "{} (a reserved number has one owner; fail-closed)".format(owner, rel, number, key))
+                    ok = False
+    if not ok:
+        return {}, False
+    reserved = {}
+    for key, number in owners:
+        if ":" not in key:
+            reserved.setdefault(key, set()).add(number)
+    return reserved, True
+
+
+def _prior_holdings(obs):
+    """What the prior committed snapshot (HEAD) held, for the reserved-number exemption: ((the (namespace,
+    number) of each of its type-index ids, its `held` {namespace: sorted disjoint (lo, hi) intervals}),
+    None), or (None, the reason) when no prior that enumerates every id it held was observed. The
+    type-index records alone cannot decide it: they carry neither the worklog nor the archive."""
+    prior = obs.get("prior")
+    if prior is None:
+        return None, ("the prior committed snapshot observation was supplied but malformed"
+                      if obs.get("prior_malformed") else "no prior committed snapshot was supplied")
+    if prior.get("held") is None:
+        return None, ("the prior committed snapshot does not enumerate every id it held (its worklog and "
+                      "archive included)")
+    ids = {shape for shape in map(_valid_id_shape, prior["records"]) if shape is not None}
+    return (ids, prior["held"]), None
+
+
+def _prior_held(holdings, ns, n):
+    """Whether the prior committed snapshot held a record with the id <ns>-<n> (an interval lookup, never
+    a range expansion; F15)."""
+    ids, held = holdings
+    if (ns, n) in ids:
+        return True
+    spans = held.get(ns, ())
+    i = bisect.bisect_right(spans, n, key=lambda span: span[0])
+    return i > 0 and n <= spans[i - 1][1]
+
+
+def _split_reserved(ns, reserved, present, holdings):
+    """Of the numbers the id reservations hold under ns that no present record carries, (issued,
+    undecided). Issued: the prior committed snapshot held no record with that id, so it is an orphaned
+    reservation's number, never published there, and is not owed. Undecided: no usable prior was
+    observed, so whether a record was published and deleted cannot be established. A number the prior
+    held is in neither: a reservation is irrevocable and outlives the publication it preceded, so a
+    record the prior held and the store now lacks is graded missing exactly as without reservations."""
+    issued, undecided = set(), set()
+    for n in reserved:
+        if n in present:
+            continue
+        if holdings is None:
+            undecided.add(n)
+        elif not _prior_held(holdings, ns, n):
+            issued.add(n)
+    return issued, undecided
+
+
+def _report_undecided(check_id, ns, numbers, reason, rep):
+    """One CANNOT-EVALUATE naming how many reserved numbers no usable prior can decide, and the first."""
+    if numbers:
+        rep.cant("{}: {} reserved {} number(s) that no present record carries, the first {}-{}, cannot be told "
+                 "from deleted records: {}; the reserved-number exemption is not granted (fail-closed)".format(
+                     check_id, len(numbers), ns, ns, min(numbers), reason))
+
+
+def _unreserved(expected, present, skipped):
+    """The first number from expected up to the present number that is not skipped (an issued or undecided
+    reserved number, _split_reserved). It steps over skipped numbers only, so the scan is sized by the
+    reservations actually read, never by a gap (F15)."""
+    while expected < present and expected in skipped:
+        expected += 1
+    return expected
+
+
+def _unreserved_overhang(high, max_present, skipped):
+    """How many allocated numbers in (max_present, high] are not skipped (_split_reserved): the
+    allocated-but-absent count above the highest present number, counted over the reservations read,
+    never by expanding the range (F15)."""
+    return high - max_present - sum(1 for n in skipped if max_present < n <= high)
+
+
+def _check_worklog_contiguous(numbers, rep, skipped=frozenset()):
     """C-CONTIGUITY: read across active + archive the worklog tiles from WL-1 with no gap (OPF-SPEC 6.1),
     so the released spans map to real coverage. A pairwise scan over the sorted present numbers finds the
-    first gap; nothing is sized by a declared high-water (F15)."""
+    first gap; nothing is sized by a declared high-water (F15). A skipped worklog number (an orphaned
+    reservation's, or one no usable prior can decide, which the caller reports; _split_reserved) is not
+    reported missing: the scan steps over skipped numbers only."""
     nums = sorted(n for n in numbers if isinstance(n, int) and not isinstance(n, bool))
     if not nums:
         return
-    if nums[0] != 1:
+    if _unreserved(1, nums[0], skipped) != nums[0]:
         rep.finding("C-CONTIGUITY: the worklog does not start at WL-1 (first present is WL-{}; span tiling "
                     "starts at WL-1, spec 6.1)".format(nums[0]))
     for i in range(1, len(nums)):
-        if nums[i] != nums[i - 1] + 1:
+        missing = _unreserved(nums[i - 1] + 1, nums[i], skipped)
+        if missing != nums[i]:
             rep.finding("C-CONTIGUITY: the worklog (active + archive) is not contiguous; WL-{} is missing "
-                        "(a gap breaks span tiling, spec 6.1/11)".format(nums[i - 1] + 1))
+                        "(a gap breaks span tiling, spec 6.1/11)".format(missing))
             break
 
 
@@ -2594,7 +2817,8 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
                 unmanaged_files.append(full)
         for d in subdirs:
             full = reldir + "/" + d
-            # Journal contents are outside doctor coverage; only journal validation reads them.
+            # Journal contents are outside containment; only journal validation reads them. Doctor reads
+            # just the id reservations, for the reserved numbers (_reserved_numbers).
             # Evidence bytes have their own exact inventory check, distinct from record rotation.
             if full in skipped_roots:
                 continue
@@ -2695,11 +2919,12 @@ def _wellformed_release_row(row):
 
 def _normalize_prior(prior):
     """Validate the injected prior committed snapshot: {releases: list, counters_high: {ns: int},
-    records: {id: (type, status)}, digests: {id: str} (optional)}. Every record id is shape-validated and
-    its namespace reconciled against its declared type's roster namespace, so a malformed id or a
-    namespace/type mismatch makes the WHOLE prior malformed -> CANNOT-EVALUATE naming the observation,
-    never a store INVALID (codex-9/F4). Returns the normalized dict or None when any field is malformed
-    (which the caller routes to CANNOT-EVALUATE, never a permissive pass)."""
+    records: {id: (type, status)}, digests: {id: str} (optional), held: {ns: [[lo, hi], ...]} (optional)}.
+    Every record id is shape-validated and its namespace reconciled against its declared type's roster
+    namespace, so a malformed id or a namespace/type mismatch makes the WHOLE prior malformed ->
+    CANNOT-EVALUATE naming the observation, never a store INVALID (codex-9/F4). Returns the normalized
+    dict or None when any field is malformed (which the caller routes to CANNOT-EVALUATE, never a
+    permissive pass)."""
     if not isinstance(prior, dict):
         return None
     releases = prior.get("releases")
@@ -2747,8 +2972,39 @@ def _normalize_prior(prior):
             if not isinstance(did, str) or not isinstance(dval, str):
                 return None
             norm_digests[did] = dval
+    # `held` (optional): every id the prior commit held, active or archived, worklog included, as
+    # {namespace: [[lo, hi], ...]} inclusive intervals; only the reserved-number exemption reads it, and its
+    # absence makes that exemption CANNOT-EVALUATE. Each bound is an id number in TOML's integer range.
+    held = prior.get("held")
+    norm_held = None
+    if held is not None:
+        if not isinstance(held, dict):
+            return None
+        norm_held = {}
+        for ns, spans in held.items():
+            if not isinstance(ns, str) or ns not in _ROSTER_NS_SET or not isinstance(spans, (list, tuple)):
+                return None
+            rows = []
+            for span in spans:
+                if not (isinstance(span, (list, tuple)) and len(span) == 2
+                        and all(type(v) is int and 1 <= v <= (1 << 63) - 1 for v in span) and span[0] <= span[1]):
+                    return None
+                rows.append((span[0], span[1]))
+            norm_held[ns] = _merge_spans(rows)
     return {"releases": list(releases), "counters_high": norm_high, "records": norm_records,
-            "digests": norm_digests}
+            "digests": norm_digests, "held": norm_held}
+
+
+def _merge_spans(spans):
+    """Inclusive (lo, hi) intervals sorted and merged, so adjacent or overlapping ones become one and a
+    lookup can bisect them."""
+    merged = []
+    for lo, hi in sorted(spans):
+        if merged and lo <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
 
 
 def _normalize_observations(observations):
@@ -3117,19 +3373,33 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         else:
             rep.cant("C-NO-DELETION: the ancestral floor is malformed; the seeded-store deletion floor is "
                      "not evaluable")
+    # Homes 2: a number an id reservation holds is skipped here and under C-CONTIGUITY only where no present
+    # record carries it and the prior committed snapshot held no record with that id (an orphaned
+    # reservation; _split_reserved). A reservation outlives the publication it preceded, so a number whose
+    # record the prior held is owed exactly as without reservations, and one no usable prior can decide is
+    # CANNOT-EVALUATE, never granted. A reservation that does not evaluate is CANNOT-EVALUATE, graded as
+    # though nothing were reserved, never a silently wider pass.
+    reserved, reservations_ok = _reserved_numbers(root_fd, rep) if homes >= 2 else ({}, True)
+    holdings, no_holdings = _prior_holdings(obs)
     present_wl = sorted(merged)
     wl_hw = high.get("WL")
+    wl_issued, wl_undecided = _split_reserved("WL", reserved.get("WL", ()), merged, holdings)
+    wl_skipped = wl_issued | wl_undecided
     if isinstance(wl_hw, int) and not isinstance(wl_hw, bool) and wl_hw >= 0:
         max_present = max(present_wl[-1] if present_wl else 0, floor.get("WL", 0))
-        if wl_hw > max_present:
+        owed = _unreserved_overhang(wl_hw, max_present, wl_skipped)
+        if owed > 0:
             rep.finding("C-NO-DELETION: {} allocated worklog id(s) above WL-{} are absent from both the "
                         "active worklog and the archive (counters WL high-water is {}; nothing is ever "
-                        "deleted, spec 12/13)".format(wl_hw - max_present, max_present, wl_hw))
+                        "deleted, spec 12/13)".format(owed, max_present, wl_hw))
         # The gap below the max is scanned here too, from the floor: C-CONTIGUITY tiles from WL-1 and knows
         # no ancestral floor, so it cannot own a deletion from between floor+1 and the max.
         base = floor.get("WL", 0)
+        _report_undecided("C-NO-DELETION", "WL", [n for n in wl_undecided if base < n <= wl_hw], no_holdings,
+                          rep)
         expected = base + 1
         for n in (n for n in present_wl if n > base):
+            expected = _unreserved(expected, n, wl_skipped)
             if n != expected:
                 rep.finding("C-NO-DELETION: WL-{} is absent from both the active worklog and the archive "
                             "(an allocated id between 1 and WL-{} cannot be deleted; spec 12/13)".format(
@@ -3160,12 +3430,17 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         # and the WL scan's above, skip it deliberately).
         nums = sorted(n for n in present_by_ns.get(ns, ()) if n > base)
         max_present = nums[-1] if nums else base
-        if hw > max_present:
+        ns_issued, ns_undecided = _split_reserved(ns, reserved.get(ns, ()), present_by_ns.get(ns, ()), holdings)
+        ns_skipped = ns_issued | ns_undecided
+        owed = _unreserved_overhang(hw, max_present, ns_skipped)
+        if owed > 0:
             rep.finding("C-NO-DELETION: {} allocated {}-<n> id(s) above {}-{} are absent from both the "
                         "active store and the archive (counters {} high-water is {}; nothing is ever "
-                        "deleted, spec 12/13)".format(hw - max_present, ns, ns, max_present, ns, hw))
+                        "deleted, spec 12/13)".format(owed, ns, ns, max_present, ns, hw))
+        _report_undecided("C-NO-DELETION", ns, [n for n in ns_undecided if base < n <= hw], no_holdings, rep)
         expected = base + 1
         for n in nums:
+            expected = _unreserved(expected, n, ns_skipped)
             if n != expected:
                 rep.finding("C-NO-DELETION: {}-{} is absent from both the active store and the archive (an "
                             "allocated id between 1 and {}-{} cannot be deleted; spec 12/13)".format(
@@ -3178,7 +3453,12 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         rep.finding("C-PARTITION: {}".format(f))
 
     rep.ran("C-CONTIGUITY")
-    _check_worklog_contiguous(merged.keys(), rep)
+    if not reservations_ok:
+        rep.cant("C-CONTIGUITY: the id reservations did not evaluate (see C-NO-DELETION), so a reserved "
+                 "worklog number cannot be told from a missing one (fail-closed)")
+    _report_undecided("C-CONTIGUITY", "WL", [n for n in wl_undecided if present_wl and n < present_wl[-1]],
+                      no_holdings, rep)
+    _check_worklog_contiguous(merged.keys(), rep, wl_skipped)
 
     # --- C-TRACKED / C-SYNC-AGREE: topology, from the injected observations (spec 5.1/5.6) ------------
     rep.ran("C-TRACKED")
@@ -3659,7 +3939,8 @@ def self_test():
                           "counters_high": counters()["counters"],
                           "records": {"BI-1": ("backlog_item", "done"), "BI-2": ("backlog_item", "open"),
                                       "DN-1": ("done", "recorded"), "HO-1": ("handoff", "current")},
-                          "digests": {"DN-1": _record_digest(dn(1, "BI-1"))}}}
+                          "digests": {"DN-1": _record_digest(dn(1, "BI-1"))},
+                          "held": {"BI": [[1, 2]], "DN": [[1, 1]], "HO": [[1, 1]], "WL": [[1, 4]]}}}
 
     base = Path(tempfile.mkdtemp(prefix="opf-check-selftest-")).resolve()
     counter = [0]
@@ -6149,6 +6430,392 @@ def self_test():
         check("c-contiguity-start-not-wl1-named",
               _f6ar is not None and any("C-CONTIGUITY" in f and "does not start at WL-1" in f
                                         for f in _f6ar.findings))
+        # Homes 2: a number an id reservation holds that no present record carries and no record of the
+        # prior committed snapshot held (an orphaned reservation's) is not reported missing by C-NO-DELETION
+        # or C-CONTIGUITY, which read each reservation for that purpose alone; an unreadable or malformed
+        # reservation is CANNOT-EVALUATE. Homes 2 is activated only inside these vectors; the shipped
+        # ceiling stays 1. The gap store holds BI-1, BI-2, BI-4 and WL-1 to WL-4 and WL-6 under BI = 4 and
+        # WL = 6, so BI-3 and WL-5 are allocated with no published record; the clean prior held BI-1, BI-2
+        # and WL-1 to WL-4.
+        from unittest.mock import patch as _patch
+        import _opf_journal as _ojr
+        import _opf_oplock as _oplk
+
+        def h2_manifest(machine):
+            machine = copy.deepcopy(machine)
+            machine["manifest.toml"]["opf"]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
+            machine["manifest.toml"]["opf"]["homes"] = 2
+            return machine
+
+        def h2_run_id(kind, n):
+            return "{}-20260927T00{:04d}Z-{:016x}".format(_opf_store._HOME_RUN_PREFIXES[kind], n, n)
+
+        def h2_reservation(kind, n, claims):
+            # The reservation of one run: its path under .working/ and its canonical bytes.
+            rid = h2_run_id(kind, n)
+            return (_opf_store.allocation_record(kind, rid)[len(WORKING_DIRNAME) + 1:],
+                    _ojr.reservation_payload(kind, rid, "op-{}".format(n), claims).decode("utf-8"))
+
+        def h2(machine, working, product=None, obs="clean"):
+            with _patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+                return run(machine, product=product, working=working, obs=obs)
+
+        def h2_gap(*reservations):
+            machine = h2_manifest(clean_machine())
+            machine["backlog_item.index.toml"] = idx([bi(1, "done"), bi(2, "open"), bi(4, "open")])
+            machine["counters.toml"] = counters(BI=4, WL=6)
+            machine["worklog.toml"] = {"schema": 1, "entry": [wl(3), wl(4), wl(6)]}
+            return machine, dict(reservations)
+
+        def nd(r, needle, check_id="C-NO-DELETION"):
+            return r is not None and any(needle in m for m in r.by_check.get(check_id, []))
+
+        published = h2_reservation("record", 2, {"BI": 4, "WL": 6})
+        orphan = h2_reservation("record", 1, {"BI": 3, "WL": 5})
+        r = h2(h2_manifest(clean_machine()), {})
+        check("homes2-reservations-clean-valid", r is not None and r.status == VALID
+              and "C-EVIDENCE-ENUM" in r.checks)
+        r = h2(*h2_gap(published, orphan))
+        check("homes2-reserved-gap-valid", r is not None and r.status == VALID)
+        check("homes2-reserved-gap-checks-pass", r is not None and r.checks.get("C-NO-DELETION") == "PASS"
+              and r.checks.get("C-CONTIGUITY") == "PASS")
+        r = h2(*h2_gap(published))
+        check("homes2-unreserved-gap-invalid", r is not None and r.status == INVALID
+              and nd(r, "BI-3 is absent") and nd(r, "WL-5 is absent") and nd(r, "WL-5 is missing", "C-CONTIGUITY"))
+        for kind in _opf_store.JOURNAL_KINDS:
+            r = h2(*h2_gap(published, h2_reservation(kind, 1, {"BI": 3, "WL": 5})))
+            check("homes2-reserved-gap-kind-" + kind, r is not None and r.status == VALID)
+        r = h2(*h2_gap(published, h2_reservation("import", 1, {"imported:BI": 3, "imported:WL": 5})))
+        check("homes2-imported-key-reserves-no-clean-number", r is not None and r.status == INVALID
+              and nd(r, "BI-3 is absent") and nd(r, "WL-5 is missing", "C-CONTIGUITY"))
+        # Journal frames, projections and run directories are never opened by doctor: every contained open
+        # passes _journal._open_parent, and while the store is validated (after its resolution) the spy
+        # refuses any path under journals/ but an allocation home and a file directly inside one, recording
+        # each, so a read that ignored the bytes still fails here.
+        journal_root = WORKING_DIRNAME + "/journals"
+        allocation_homes = {_opf_store.allocation_record(kind, h2_run_id(kind, 1)).rsplit("/", 1)[0]
+                            for kind in _opf_store.JOURNAL_KINDS}
+
+        def journal_refused(relpath):
+            return ((relpath == journal_root or relpath.startswith(journal_root + "/"))
+                    and relpath not in allocation_homes and relpath.rsplit("/", 1)[0] not in allocation_homes)
+
+        def h2_spied(machine, working):
+            opened = []
+            real_open_parent = _journal._open_parent
+
+            def spy(root_fd, relpath):
+                opened.append(relpath)
+                if journal_refused(relpath):
+                    raise _journal.JournalError("a journal frame, projection or run path was opened: " + relpath)
+                return real_open_parent(root_fd, relpath)
+            with _patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+                res = resolve_store(build(machine, None, working))
+                if res.status != RESOLVED:
+                    return None, opened
+                with _patch.object(_journal, "_open_parent", spy):
+                    return validate_store(res, observations=clean_prior()), opened
+
+        gm, gw = h2_gap(published, orphan)
+        for kind in _opf_store.JOURNAL_KINDS:
+            gw["journals/{}/journal/frames.log".format(kind)] = "torn"
+            gw["journals/{}/runs/{}/transaction.toml".format(kind, h2_run_id(kind, 1))] = "not toml ["
+        r, opened = h2_spied(gm, gw)
+        check("homes2-journal-frames-unread", r is not None and r.status == VALID
+              and not any(journal_refused(p) for p in opened)
+              and WORKING_DIRNAME + "/" + orphan[0] in opened)
+
+        # Above the highest present number, only the allocated numbers in (max, high] that no reservation
+        # holds are owed: each end tested at, just inside and just outside it.
+        def h2_overhang(*numbers):
+            # BI-1 and BI-2 present under BI = 4: BI-3 and BI-4 are allocated above the highest present.
+            machine = h2_manifest(clean_machine())
+            machine["counters.toml"] = counters(BI=4)
+            return h2(machine, dict(h2_reservation("record", i + 1, {"BI": n}) for i, n in enumerate(numbers)))
+
+        def owed(r, count):
+            return r is not None and r.status == INVALID and nd(r, "C-NO-DELETION: {} allocated BI-".format(count))
+
+        r = h2_overhang(3, 4)
+        check("homes2-overhang-reserved-valid", r is not None and r.status == VALID)
+        check("homes2-overhang-unreserved-counted", owed(h2_overhang(3), 1))
+        check("homes2-overhang-above-high-water-not-counted", owed(h2_overhang(3, 5), 1))
+        check("homes2-overhang-at-max-present-not-counted", owed(h2_overhang(2, 4), 1))
+        check("homes2-overhang-below-max-present-not-counted", owed(h2_overhang(1, 4), 1))
+
+        # The worklog overhang is scanned at its own site and steps over reserved numbers the same way:
+        # WL-1 to WL-4 present under WL = 6, so WL-5 and WL-6 are allocated above the highest present.
+        def h2_wl_overhang(*numbers):
+            machine = h2_manifest(clean_machine())
+            machine["counters.toml"] = counters(WL=6)
+            return h2(machine, dict(h2_reservation("record", i + 1, {"WL": n}) for i, n in enumerate(numbers)))
+
+        r = h2_wl_overhang(5, 6)
+        check("homes2-wl-overhang-reserved-valid", r is not None and r.status == VALID)
+        r = h2_wl_overhang(5)
+        check("homes2-wl-overhang-unreserved-counted", r is not None and r.status == INVALID
+              and nd(r, "C-NO-DELETION: 1 allocated worklog id(s) above WL-4"))
+
+        # Below the highest present number the scan steps over reserved numbers only and names the first
+        # unreserved one.
+        def h2_below(*numbers):
+            # BI-1, BI-2 and BI-5 present under BI = 5: BI-3 and BI-4 lie below the highest present.
+            machine = h2_manifest(clean_machine())
+            machine["backlog_item.index.toml"] = idx([bi(1, "done"), bi(2, "open"), bi(5, "open")])
+            machine["counters.toml"] = counters(BI=5)
+            return h2(machine, dict(h2_reservation("record", i + 1, {"BI": n}) for i, n in enumerate(numbers)))
+
+        r = h2_below(3, 4)
+        check("homes2-gap-reserved-run-valid", r is not None and r.status == VALID)
+        r = h2_below(4)
+        check("homes2-gap-first-unreserved-named", r is not None and r.status == INVALID and nd(r, "BI-3 is absent"))
+        r = h2_below(3)
+        check("homes2-gap-last-unreserved-named", r is not None and r.status == INVALID and nd(r, "BI-4 is absent"))
+        # The worklog may start at a reserved WL-1 (the F-6a store: WL-2 and WL-3 under WL = 3, whose prior
+        # held FN-1, FN-2, WL-2 and WL-3).
+        _f6a_h2_obs = copy.deepcopy(_f6a_obs)
+        _f6a_h2_obs["prior"]["held"] = {"FN": [[1, 2]], "WL": [[2, 3]]}
+        r = h2(h2_manifest(_f6a), dict([h2_reservation("record", 1, {"WL": 1})]), pr_product, _f6a_h2_obs)
+        check("homes2-wl-start-reserved-valid", r is not None and r.status == VALID)
+        r = h2(h2_manifest(_f6a), {}, pr_product, _f6a_h2_obs)
+        check("homes2-wl-start-unreserved-invalid", r is not None and r.status == INVALID
+              and nd(r, "does not start at WL-1", "C-CONTIGUITY"))
+
+        # An unreadable or malformed reservation is CANNOT-EVALUATE under C-NO-DELETION, C-CONTIGUITY points
+        # to it, and both then grade as though nothing were reserved (never a wider pass).
+        def h2_cant(r, needle):
+            return (r is not None and r.status == CANNOT_EVALUATE
+                    and r.checks.get("C-NO-DELETION") == "CANNOT-EVALUATE"
+                    and r.checks.get("C-CONTIGUITY") == "CANNOT-EVALUATE"
+                    and any(needle in m and m in r.cannot_evaluate for m in r.by_check.get("C-NO-DELETION", []))
+                    and nd(r, "BI-3 is absent") and nd(r, "WL-5 is missing", "C-CONTIGUITY"))
+
+        bad = h2_reservation("import", 9, {"BI": 3})
+        import_home = bad[0].rsplit("/", 1)[0]
+        staged = import_home + "/." + h2_run_id("import", 9) + ".toml" + _oplk._STAGING_MARKER
+        for label, entry, needle in (
+                ("not-toml", (bad[0], "not toml [\n"), "is malformed"),
+                ("claims-out-of-range", (bad[0], bad[1].replace("BI = 3", "BI = 0")), "is malformed"),
+                ("non-canonical", (bad[0], bad[1] + "\n"), "differs from the exact canonical"),
+                ("other-kind-payload", (bad[0], _ojr.reservation_payload(
+                    "ingest", h2_run_id("import", 9), "op-9", {"BI": 3}).decode("utf-8")),
+                 "differs from the exact canonical"),
+                ("misnamed", (import_home + "/notes.txt", bad[1]), "is not an id reservation"),
+                ("other-kind-name", (import_home + "/" + h2_run_id("record", 9) + ".toml", bad[1]),
+                 "is not an id reservation"),
+                ("near-staging-name", (staged + "0" * 31, "torn"), "is not an id reservation"),
+                ("directory", (bad[0] + "/inner.toml", bad[1]), "is a directory")):
+            gm, gw = h2_gap(published, orphan)
+            gw[entry[0]] = entry[1]
+            check("homes2-reservation-cannot-evaluate-" + label, h2_cant(h2(gm, gw), needle))
+        gm, gw = h2_gap(published, orphan)
+        gw[staged + "0" * 32] = "torn"
+        r = h2(gm, gw)
+        check("homes2-reservation-staging-leftover-skipped", r is not None and r.status == VALID)
+
+        # A reserved number has one owner across every kind's home: a second canonical reservation claiming
+        # the same number under the same series key is CANNOT-EVALUATE naming both files (dup and first, the
+        # orphan's reservation unless another is given; the store keeps the published and orphan ones).
+        def h2_conflict(dup, needle, first=orphan):
+            r = h2(*h2_gap(published, orphan, first, dup))
+            names = [WORKING_DIRNAME + "/" + p for p in (first[0], dup[0])]
+            return h2_cant(r, needle) and any(needle in m and all(n in m for n in names) for m in r.cannot_evaluate)
+
+        check("homes2-reservation-conflict-same-kind",
+              h2_conflict(h2_reservation("record", 3, {"BI": 3}), "both claim 3 under the series key BI"))
+        check("homes2-reservation-conflict-cross-kind",
+              h2_conflict(h2_reservation("ingest", 3, {"WL": 5}), "both claim 5 under the series key WL"))
+        imported = h2_reservation("import", 3, {"imported:BI": 3})
+        check("homes2-reservation-conflict-imported-key", h2_conflict(
+            h2_reservation("import", 4, {"imported:BI": 3}), "both claim 3 under the series key imported:BI", imported))
+
+        # A reservation read failure names C-NO-DELETION, so the C-CONTIGUITY pointer is accurate: an
+        # unreadable regular file, and one listed but absent at read.
+        orphan_rel = WORKING_DIRNAME + "/" + orphan[0]
+        real_read_contained, real_list_contained = _journal._read_contained, _list_contained
+
+        def unreadable(fd, relpath, *args, **kwargs):
+            if relpath == orphan_rel:
+                raise _journal.JournalError("injected read error")
+            return real_read_contained(fd, relpath, *args, **kwargs)
+
+        phantom = h2_run_id("record", 7) + ".toml"
+
+        def listed_phantom(fd, reldir):
+            subdirs, files = real_list_contained(fd, reldir)
+            if reldir == orphan_rel.rsplit("/", 1)[0]:
+                files = sorted((files or []) + [phantom])
+            return subdirs, files
+
+        with _patch.object(_journal, "_read_contained", unreadable):
+            r = h2(*h2_gap(published, orphan))
+        check("homes2-reservation-cannot-evaluate-unreadable",
+              h2_cant(r, "C-NO-DELETION: cannot read " + orphan_rel))
+        with _patch.dict(globals(), {"_list_contained": listed_phantom}):
+            r = h2(*h2_gap(published, orphan))
+        check("homes2-reservation-cannot-evaluate-absent-at-read", h2_cant(
+            r, "C-NO-DELETION: the id reservation {}/{} was listed but is absent at read".format(
+                orphan_rel.rsplit("/", 1)[0], phantom)))
+
+        def h2_built(mutate):
+            gm, gw = h2_gap(published, orphan)
+            root = build(gm, None, gw)
+            mutate(root / WORKING_DIRNAME)
+            with _patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+                return validate_store(resolve_store(root), observations=clean_prior())
+
+        def symlinked_entry(working):
+            os.symlink("nowhere", str(working / orphan[0].rsplit("/", 1)[0] / (h2_run_id("record", 8) + ".toml")))
+
+        def symlinked_home(working):
+            (working / "journals" / "layout").mkdir(parents=True)
+            os.symlink("nowhere", str(working / "journals" / "layout" / "allocations"))
+
+        def home_not_directory(working):
+            (working / "journals" / "adoption").mkdir(parents=True)
+            (working / "journals" / "adoption" / "allocations").write_text("x", encoding="utf-8")
+
+        for label, mutate in (("symlink-entry", symlinked_entry), ("symlink-home", symlinked_home),
+                              ("home-not-directory", home_not_directory)):
+            check("homes2-reservation-cannot-evaluate-" + label, h2_cant(h2_built(mutate), "cannot list"))
+        with _patch.object(_opf_store, "JOURNAL_KINDS", _opf_store.JOURNAL_KINDS + ("bogus",)):
+            r = h2(*h2_gap(published, orphan))
+        check("homes2-reservation-cannot-evaluate-unknown-kind", h2_cant(r, "no reservation home"))
+        # A legacy store reads no reservation, even under activated tooling: the malformed one is never
+        # read and the gap is reported.
+        gm, gw = h2_gap(published, orphan)
+        gm["manifest.toml"] = clean_machine()["manifest.toml"]
+        gw[bad[0]] = "not toml [\n"
+        r = h2(gm, gw)
+        check("homes1-reservations-unread", r is not None and r.checks.get("C-NO-DELETION") == "FINDING"
+              and r.checks.get("C-CONTIGUITY") == "FINDING" and nd(r, "BI-3 is absent"))
+        # Read-only: the store tree, bytes and modification times, is unchanged by the read.
+        gm, gw = h2_gap(published, orphan)
+        ro_root = build(gm, None, gw)
+
+        def tree(root):
+            return sorted((p.relative_to(root).as_posix(), p.read_bytes() if p.is_file() else b"",
+                           p.stat().st_mtime_ns) for p in root.rglob("*"))
+        ro_before = tree(ro_root)
+        with _patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+            r = validate_store(resolve_store(ro_root), observations=clean_prior())
+        check("homes2-reservations-read-only", r is not None and r.status == VALID and tree(ro_root) == ro_before)
+
+        # A reservation is irrevocable and outlives the publication it preceded, so the exemption holds only
+        # where the prior committed snapshot held no record with that id. BI-1 to BI-4 are allocated (BI = 4),
+        # each reserved by its own record run as homes 2 requires before a publication; `present` are the BI
+        # numbers the store carries, `prior` those the prior's type index held, `archived` those it held in
+        # its archive alone.
+        def h2_history(present, prior=(1, 2), archived=(), obs=None):
+            machine = h2_manifest(clean_machine())
+            machine["backlog_item.index.toml"] = idx([bi(1, "done")] + [bi(n, "open") for n in present if n > 1])
+            machine["counters.toml"] = counters(BI=4)
+            if obs is None:
+                obs = clean_prior()
+                obs["prior"]["counters_high"]["BI"] = max((2,) + tuple(prior) + tuple(archived))
+                obs["prior"]["records"].update({"BI-{}".format(n): ("backlog_item", "open") for n in prior if n > 2})
+                obs["prior"]["held"]["BI"] = [[n, n] for n in sorted(set(prior) | set(archived))]
+            return h2(machine, dict(h2_reservation("record", n, {"BI": n}) for n in (1, 2, 3, 4)), obs=obs)
+
+        r = h2_history((1, 2, 3), prior=(1, 2, 3, 4))
+        check("homes2-published-tail-deleted-invalid", r is not None and r.status == INVALID
+              and nd(r, "C-NO-DELETION: 1 allocated BI-<n> id(s) above BI-3"))
+        r = h2_history((1, 2, 4), prior=(1, 2, 3, 4))
+        check("homes2-published-mid-deleted-invalid", r is not None and r.status == INVALID
+              and nd(r, "C-NO-DELETION: BI-3 is absent"))
+        r = h2_history((1, 2, 3), prior=(1, 2, 3), archived=(4,))
+        check("homes2-archived-at-prior-deleted-invalid", r is not None and r.status == INVALID
+              and r.checks.get("C-HISTORY-RESURRECTION") == "PASS"
+              and nd(r, "C-NO-DELETION: 1 allocated BI-<n> id(s) above BI-3"))
+        r = h2_history((1, 2, 3), prior=(1, 2, 3))
+        check("homes2-orphan-never-committed-valid", r is not None and r.status == VALID)
+        # A record published and deleted again before any commit leaves only its reservation: with no prior
+        # commit (an unborn HEAD's empty prior) it cannot be told from an orphan (the disclosed residual).
+        r = h2_history((1, 2, 3), obs={"tracked": "tracked", "prior": {
+            "releases": [], "counters_high": {}, "records": {}, "digests": {}, "held": {}}})
+        check("homes2-no-prior-commit-residual-valid", r is not None and r.status == VALID)
+
+        # No usable prior: the exemption is CANNOT-EVALUATE, never granted.
+        def no_prior_cant(r, reason, check_id="C-NO-DELETION"):
+            return (r is not None and r.status == CANNOT_EVALUATE and r.checks.get(check_id) == "CANNOT-EVALUATE"
+                    and nd(r, "cannot be told from deleted records: " + reason, check_id))
+
+        malformed = clean_prior()
+        malformed["prior"]["records"] = "not a table"
+        stripped = clean_prior()
+        del stripped["prior"]["held"]
+        for label, obs, reason in (
+                ("malformed", malformed, "the prior committed snapshot observation was supplied but malformed"),
+                ("absent", {"tracked": "tracked"}, "no prior committed snapshot was supplied"),
+                ("no-held", stripped, "the prior committed snapshot does not enumerate every id it held")):
+            check("homes2-prior-" + label + "-cannot-evaluate",
+                  no_prior_cant(h2_history((1, 2, 3), obs=obs), reason))
+
+        # The worklog likewise: WL-5 published, committed and deleted with its reservation standing is owed,
+        # at the tail and mid-series, and with no prior a reserved worklog gap is CANNOT-EVALUATE under
+        # C-CONTIGUITY too.
+        def h2_wl_history(present, high, prior_high, obs=None):
+            machine = h2_manifest(clean_machine())
+            machine["counters.toml"] = counters(WL=high)
+            machine["worklog.toml"] = {"schema": 1, "entry": [wl(n) for n in present if n > 2]}
+            if obs is None:
+                obs = clean_prior()
+                obs["prior"]["counters_high"]["WL"] = prior_high
+                obs["prior"]["held"]["WL"] = [[1, prior_high]]
+            return h2(machine, dict(h2_reservation("record", n, {"WL": n}) for n in range(5, high + 1)), obs=obs)
+
+        r = h2_wl_history((1, 2, 3, 4), 5, 5)
+        check("homes2-wl-published-tail-deleted-invalid", r is not None and r.status == INVALID
+              and nd(r, "C-NO-DELETION: 1 allocated worklog id(s) above WL-4"))
+        r = h2_wl_history((1, 2, 3, 4, 6), 6, 6)
+        check("homes2-wl-published-mid-deleted-invalid", r is not None and r.status == INVALID
+              and nd(r, "C-NO-DELETION: WL-5 is absent") and nd(r, "WL-5 is missing", "C-CONTIGUITY"))
+        r = h2_wl_history((1, 2, 3, 4, 6), 6, 6, obs={"tracked": "tracked"})
+        check("homes2-wl-no-prior-contiguity-cannot-evaluate",
+              no_prior_cant(r, "no prior committed snapshot was supplied", "C-CONTIGUITY")
+              and no_prior_cant(r, "no prior committed snapshot was supplied"))
+
+        # Each end of each new interval, tested just outside, at and just inside it. The prior-held lookup
+        # over BI-3 to BI-5 and BI-8, and FN-1 from the type index alone:
+        bounds = ({("FN", 1)}, {"BI": [(3, 5), (8, 8)]})
+        check("homes2-prior-held-interval-ends",
+              [n for n in range(1, 11) if _prior_held(bounds, "BI", n)] == [3, 4, 5, 8]
+              and _prior_held(bounds, "FN", 1) and not _prior_held(bounds, "FN", 2)
+              and not _prior_held(bounds, "WL", 4))
+
+        # The observed `held` bounds: an id number in 1 to 2**63 - 1, a span low end not above its high end,
+        # a roster namespace; anything else makes the whole prior malformed. Adjacent spans merge.
+        def held_prior(held):
+            prior = clean_prior()["prior"]
+            prior["held"] = held
+            return _normalize_prior(prior)
+
+        top = (1 << 63) - 1
+        check("homes2-prior-held-normalizer-bounds",
+              held_prior({"BI": [[1, 1], [2, top]]})["held"] == {"BI": [(1, top)]}
+              and held_prior({"BI": [[3, 3]]})["held"] == {"BI": [(3, 3)]}
+              and all(held_prior(bad) is None for bad in (
+                  {"BI": [[0, 1]]}, {"BI": [[1, top + 1]]}, {"BI": [[3, 2]]}, {"BI": [[True, 2]]},
+                  {"ZZ": [[1, 1]]}, {"BI": [[1]]}, {"BI": "1-2"}, ["BI"])))
+        # With no prior, the undecided numbers C-NO-DELETION reports lie in (floor, high-water]: WL-5 to WL-7
+        # reserved over WL-1 to WL-4 under WL = 6 report WL-5 and WL-6, not WL-7, and none lies below the
+        # highest present worklog number, so C-CONTIGUITY passes.
+        machine = h2_manifest(clean_machine())
+        machine["counters.toml"] = counters(WL=6)
+        r = h2(machine, dict(h2_reservation("record", n, {"WL": n}) for n in (5, 6, 7)), obs={"tracked": "tracked"})
+        check("homes2-undecided-high-water-end", r is not None and r.status == CANNOT_EVALUATE
+              and nd(r, "C-NO-DELETION: 2 reserved WL number(s) that no present record carries, the first WL-5,")
+              and r.checks.get("C-CONTIGUITY") == "PASS")
+        # Under an ancestral floor of BI = 3, BI-2 (below it) and BI-3 (at it) are not reported, BI-4 is.
+        machine = h2_manifest(clean_machine())
+        machine["backlog_item.index.toml"] = idx([bi(1, "done"), bi(5, "open")])
+        machine["counters.toml"] = counters(BI=5)
+        floor_root = build(machine, None, dict(h2_reservation("record", n, {"BI": n}) for n in (2, 3, 4, 5)))
+        with _patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+            r = validate_store(resolve_store(floor_root), observations={"tracked": "tracked"},
+                               ancestral_floor={"BI": 3})
+        check("homes2-undecided-floor-end", r is not None and r.status == CANNOT_EVALUATE
+              and nd(r, "C-NO-DELETION: 1 reserved BI number(s) that no present record carries, the first BI-4,"))
         # F-6b: the "archived worklog WL-n not enumerated in a worklog_moved span" branch is the SOLE
         # layer catching an archived worklog id no span accounts for. A bucket holding WL-1, WL-2 whose
         # span enumerates only WL-1 is INVALID solely via it.
