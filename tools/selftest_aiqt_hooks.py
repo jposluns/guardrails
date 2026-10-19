@@ -105,17 +105,19 @@ Fixtures are throwaway git repos under the temp tree (a registry-carrying repo, 
 mutable-bad-registry repo, and a plain non-git dir), removed in the finally.
 
 It also covers the adopter-declared operations pair (merge_path_guard, artbr1; prepush_declared_hook,
-reqstp/gatdis) over the shared .aiqt/operations.json: with a merge member declared, every listed merge
-shape DENIES ('gh pr merge' in its flag spellings and under the peeled wrappers, the 'gh api' merge
-endpoints and graphql merge mutations, the shell-body and every-segment raw backstops on merge
-spellings no recognized shape accounts for, and the MCP merge tool), the exact
-declared argv, an explicit target outside the declared repos scope, the read-only forms (--help,
---disable-auto, the GET is-it-merged check), the narrow inert-mention exemption and ordinary commands
-ALLOW, a present-but-bad declaration
-DENIES the matched shapes and leaves other commands alone, an absent declaration or member is inert, and
-a non-git session with a merge shape allows with a note; each discriminating feature carries an allow
-control that differs in that feature (the spelling batteries share controls rather than carrying one
-per vector, and no mutation run certifies complete discrimination), and the declaration byte cap is
+reqstp/gatdis) over the shared .aiqt/operations.json: with a merge member declared, EVERY merge
+spelling the raw scan reads DENIES ('gh pr merge' in its flag spellings, under wrappers and reserved
+words, the 'gh api' merge endpoints and graphql merge mutations, shell bodies, here-document bodies,
+prose mentions in echo/printf/cat/ls/grep/git-commit/git-log arguments, read-only spellings such as
+--help and the GET is-it-merged check, and the MCP merge tool) UNLESS the spelling segment is the
+EXACT declared argv or a recognized 'gh pr merge' whose fully literal argv carries an explicit
+-R/--repo target outside the declared repos scope; commands with no merge spelling ALLOW, a
+present-but-bad declaration DENIES the matched shapes and leaves other commands alone, an absent
+declaration or member is inert, and a non-git session with a merge shape allows with a note. MOST
+denies carry a nearby allow control differing in one feature; the spelling batteries SHARE controls
+rather than carrying one per vector, some wrapper denies reuse the generic no-merge controls, and no
+mutation run certifies complete discrimination here (several deny vectors also denied before this
+redesign and serve as regression pins rather than fresh discrimination). The declaration byte cap is
 pinned at both ends. With a
 prepush member declared, a missing, non-executable, line-less or over-bound pre-push hook WARNS at
 SessionStart, an installed hook carrying the declared line (or the hook_line override) is silent, a bad
@@ -16972,13 +16974,15 @@ def _main_isolated(monitor):
 
         # === merge_path_guard (artbr1) + prepush_declared_hook (reqstp/gatdis): the adopter-declared ====
         # .aiqt/operations.json operations. ONE shared declaration file, two members: merge arms the
-        # PreToolUse deny of bare PR merges (gh pr merge under wrappers, the gh api merge endpoints, the
-        # MCP merge tool), prepush arms the SessionStart warn that the declared required pre-push command
-        # is installed as the clone's pre-push hook. Judged by the STRUCTURED decision. The
-        # discriminating features (target scope, method, member presence, endpoint and flag spellings,
-        # the env binding, the backstop's accounting) each carry an allow control that differs in that
-        # feature; the spelling batteries (wrappers, endpoints) share controls rather than carrying one
-        # per vector, and no mutation run certifies complete discrimination here. The
+        # PreToolUse deny of every merge SPELLING that is not the exact declared argv or an explicit
+        # literal out-of-scope -R/--repo target (gh pr merge in any wrapper or prose position, the gh
+        # api merge endpoints and mutations, here-document bodies, the MCP merge tool), prepush arms
+        # the SessionStart warn that the declared required pre-push command is installed as the
+        # clone's pre-push hook. Judged by the STRUCTURED decision. MOST denies carry a nearby allow
+        # control that differs in one feature; the spelling batteries (wrappers, endpoints, mentions)
+        # share controls rather than carrying one per vector, several deny vectors also denied before
+        # the exact-argv redesign and are retained as regression pins rather than fresh
+        # discrimination, and no mutation run certifies complete discrimination here. The
         # declaration-absent controls (mp-k*) kill an always-deny mutant and the deny battery
         # kills an always-allow one. Fixtures are throwaway git repos under tmp (removed in the finally);
         # ambient GH_REPO is popped for determinism and restored after the section.
@@ -17046,7 +17050,7 @@ def _main_isolated(monitor):
             mp_bad = _mp_init("mpbad")                # mutable bad/edge declarations
             (mp_bad / ".aiqt").mkdir(parents=True, exist_ok=True)
             mp_badreg = mp_bad / ".aiqt" / "operations.json"
-            mp_gh = _mp_init("mpgh")                  # declares a gh-shaped merge argv (prefix allow)
+            mp_gh = _mp_init("mpgh")                  # declares a gh-shaped merge argv (exact allow)
             (mp_gh / ".aiqt").mkdir(parents=True, exist_ok=True)
             (mp_gh / ".aiqt" / "operations.json").write_text(json.dumps(
                 {"version": 1, "merge": {"argv": ["gh", "pr", "merge", "--auto"]}}), encoding="utf-8")
@@ -17057,6 +17061,10 @@ def _main_isolated(monitor):
                 encoding="utf-8")
             mp_plain = tmp / "mpplain"                # plain non-git dir (no resolvable root)
             mp_plain.mkdir(parents=True, exist_ok=True)
+            # undeclared repos INSIDE the plain dir: a decoy sibling name and a deeper repo, so the
+            # set-based cd resolution is exercised against look-alike destinations
+            _mp_init("mpplain/deep")
+            _mp_init("mpplain/mpdecl")
         except (OSError, subprocess.SubprocessError) as exc:
             print("SELF-TEST ERROR: could not build the operations fixtures: {}".format(exc),
                   file=sys.stderr)
@@ -17064,16 +17072,22 @@ def _main_isolated(monitor):
         mpd, mpn, mpb, mpg, mpp = str(mp_decl), str(mp_none), str(mp_bad), str(mp_gh), str(mp_plain)
         mps = str(mp_sh)
         try:
-            # --- DENY: every merge shape the plan lists, in the declaring repo ------------------------
+            # --- DENY: every merge spelling the rule governs, in the declaring repo -------------------
             mpexpect("(mp-d1) bare gh pr merge with flags DENIES", "deny",
                      "gh pr merge 12 --merge --match-head-commit deadbeef", mpd)
-            mpexpect("(mp-d2) wrapped merge (timeout 60 gh pr merge) DENIES through the peel", "deny",
-                     "timeout 60 gh pr merge 12", mpd)
+            mpexpect("(mp-d2) wrapped merge (timeout 60 gh pr merge) DENIES (a wrapper is never the "
+                     "exact declared argv)", "deny", "timeout 60 gh pr merge 12", mpd)
             mpexpect("(mp-d2b) methodless bare gh pr merge DENIES", "deny", "gh pr merge 12", mpd)
             mpexpect("(mp-d3) GH_REPO= segment assignment naming the declared repo DENIES", "deny",
                      "GH_REPO=owner/repo gh pr merge 1", mpd)
+            mpexpect("(mp-d3b) GH_REPO= segment assignment naming an OUTSIDE repo DENIES too (an "
+                     "environment binding never decides scope, only the literal -R/--repo argv does)",
+                     "deny", "GH_REPO=other/x gh pr merge 1", mpd)
             mpexpect("(mp-d4) PR URL operand naming the declared repo DENIES", "deny",
                      "gh pr merge https://github.com/owner/repo/pull/3", mpd)
+            mpexpect("(mp-d4b) PR URL operand naming an OUTSIDE repo DENIES too (an operand never "
+                     "earns the scope exemption)", "deny",
+                     "gh pr merge https://github.com/other/x/pull/3", mpd)
             mpexpect("(mp-d5) -R before the merge verb DENIES (separated -R owner/repo)", "deny",
                      "gh pr -R owner/repo merge 3 --squash", mpd)
             mpexpect("(mp-d5b) attached -Rowner/repo DENIES", "deny", "gh pr merge 3 -Rowner/repo", mpd)
@@ -17101,17 +17115,37 @@ def _main_isolated(monitor):
                      'gh pr merge 3 "unbalanced', mpd)
             mpexpect("(mp-d21) literal absolute cd into the declaring repo DENIES from outside", "deny",
                      "cd {} && gh pr merge 3".format(mpd), mpp)
-            # a literal RELATIVE cd or a pushd is followed too (resolved against the threaded shell
-            # directory), so an undeclared sibling cannot sidestep the destination's declaration
+            # a literal RELATIVE cd or a pushd is followed too, resolved against the session cwd and
+            # every earlier literal destination (a set, never a threaded current directory), so an
+            # undeclared sibling cannot sidestep the destination's declaration
             mpexpect("(mp-d40) literal relative cd into the declaring repo DENIES from outside",
                      "deny", "cd ../mpdecl && gh pr merge 3", mpp)
             mpexpect("(mp-d40b) literal absolute pushd into the declaring repo DENIES from outside",
                      "deny", "pushd {} && gh pr merge 3".format(mpd), mpp)
             mpexpect("(mp-d40c) literal relative pushd into the declaring repo DENIES from outside",
                      "deny", "pushd ../mpdecl && gh pr merge 3", mpp)
+            mpexpect("(mp-d40d) a skipped earlier cd cannot corrupt the resolution of a later one: "
+                     "the relative destination is resolved against EVERY reachable base, so the "
+                     "declaring sibling is still probed (the decoy mpplain/mpdecl is probed too and "
+                     "declares nothing)", "deny",
+                     "false && cd deep; cd ../mpdecl && gh pr merge 3", mpp)
             mpexpect("(mp-a26) the same relative cd into an undeclared repo allows (the destination's "
                      "declaration discriminates)", "allow", "cd ../mpnone && gh pr merge 3", mpp)
-            # loop and conditional bodies: the lexer leaves the reserved word at the segment front
+            mpexpect("(mp-d40e) a cd segment is scanned like any other: a destination spelling the "
+                     "merge words DENIES (cd no longer skips the raw scan on a certain lex)", "deny",
+                     "cd gh-pr-merge && ls", mpd)
+            mpexpect("(mp-a26c) a cd destination with no merge spelling allows", "allow",
+                     "cd pr-merge-dir && ls", mpd)
+            mpexpect("(mp-a26b) the skipped-cd shape into undeclared repos allows too (the probed "
+                     "declarations, not the cd shape, discriminate)", "allow",
+                     "false && cd deep; cd mpdecl && gh pr view 3", mpp)
+            # a command that names more literal destinations than the probe bound fails closed
+            mpexpect("(mp-d45) a merge behind more literal directory changes than the probe bound "
+                     "DENIES fail-closed", "deny",
+                     "; ".join("cd x{}".format(i) for i in range(aiqt_hooks._MERGE_PROBE_CAP + 1))
+                     + "; gh pr merge 3", mpd)
+            # loop and conditional bodies: the lexer leaves the reserved word at the segment front,
+            # and the exact-token peel reads past it to the spelled merge
             mpexpect("(mp-d24) a merge inside a for-loop body DENIES (the do keyword is peeled)",
                      "deny", 'for pr in 1 2; do gh pr merge "$pr" --squash; done', mpd)
             mpexpect("(mp-d24b) a merge inside an if-then body DENIES", "deny",
@@ -17120,17 +17154,15 @@ def _main_isolated(monitor):
                      "while gh pr merge 3; do true; done", mpd)
             mpexpect("(mp-a14) a loop body with no merge still allows (the keyword peel adds no "
                      "over-fire)", "allow", 'for pr in 1 2; do gh pr view "$pr"; done', mpd)
-            # an env assignment at the fresh command position a reserved word opens is consumed too,
-            # so 'do GH_REPO=.. gh pr merge' is still classified (and its GH_REPO still read)
-            mpexpect("(mp-d24d) a GH_REPO= assignment after the loop keyword still peels to the "
-                     "merge and names the declared repo", "deny",
+            mpexpect("(mp-d24d) a GH_REPO= assignment after the loop keyword DENIES (the spelling, "
+                     "not the binding, decides)", "deny",
                      "for i in 1; do GH_REPO=owner/repo gh pr merge 3; done", mpd)
-            mpexpect("(mp-d24e) a plain assignment after then still peels to the merge", "deny",
+            mpexpect("(mp-d24e) a plain assignment after then DENIES", "deny",
                      "if true; then FOO=1 gh pr merge 3; fi", mpd)
-            mpexpect("(mp-d24f) an assignment after do in a while body still peels to the merge",
+            mpexpect("(mp-d24f) an assignment after do in a while body DENIES",
                      "deny", "while true; do GH_TOKEN=x gh pr merge 3 --squash; break; done", mpd)
-            mpexpect("(mp-a14b) a GH_REPO= assignment after the keyword naming an outside repo "
-                     "allows (the scope still discriminates)", "allow",
+            mpexpect("(mp-d24g) a GH_REPO= assignment after the keyword naming an OUTSIDE repo "
+                     "DENIES too (an environment binding never earns the scope exemption)", "deny",
                      "for i in 1; do GH_REPO=other/x gh pr merge 3; done", mpd)
             # option values and stray operands must never move the target out of scope
             mpexpect("(mp-d25) a PR URL inside --body is an option value, never the target", "deny",
@@ -17203,13 +17235,14 @@ def _main_isolated(monitor):
                      "gh api -X PUT https://api.github.com/repos/owner/repo/pulls/3/merge", mpd)
             # an expansion-bearing matched REST endpoint is governed as unprovable: the expansion can
             # name the declared slug once the shell expands it, so the literal text earns no exemption
-            mpexpect("(mp-d38) an expansion in a matched pulls-merge endpoint is unprovable and "
-                     "DENIES, never an outside slug", "deny",
+            mpexpect("(mp-d38) an expansion in a matched pulls-merge endpoint DENIES, never an "
+                     "outside slug", "deny",
                      "gh api -X PUT repos/owner/$REPO/pulls/3/merge", mpd)
             mpexpect("(mp-d38b) an expansion in a matched branch-merge endpoint DENIES too", "deny",
                      "gh api -X POST repos/owner/$REPO/merges -f base=main", mpd)
-            mpexpect("(mp-a24) the literal outside pulls-merge endpoint allows (the scope still "
-                     "discriminates)", "allow", "gh api -X PUT repos/other/x/pulls/3/merge", mpd)
+            mpexpect("(mp-d38c) the literal OUTSIDE pulls-merge endpoint DENIES too (endpoint text "
+                     "never earns the scope exemption; only a gh pr merge -R/--repo argv does)",
+                     "deny", "gh api -X PUT repos/other/x/pulls/3/merge", mpd)
             # GitHub Enterprise Server spellings of the same endpoints
             mpexpect("(mp-d41) a full-URL Enterprise (api/v3) merge endpoint DENIES", "deny",
                      "gh api -X PUT https://ghe.example.com/api/v3/repos/owner/repo/pulls/3/merge",
@@ -17219,8 +17252,11 @@ def _main_isolated(monitor):
                      "query='mutation{mergePullRequest(input:{})}'", mpd)
             mpexpect("(mp-a27) a non-merge Enterprise endpoint allows (the endpoint discriminates)",
                      "allow", "gh api https://ghe.example.com/api/v3/repos/owner/repo/pulls/3", mpd)
-            mpexpect("(mp-a27b) a literal outside Enterprise merge endpoint allows (the scope "
-                     "discriminates)", "allow",
+            mpexpect("(mp-a27c) a non-merge Enterprise graphql mutation allows (the mutation name "
+                     "discriminates)", "allow", "gh api https://ghe.example.com/api/graphql -f "
+                     "query='mutation{closeIssue(input:{})}'", mpd)
+            mpexpect("(mp-d41c) a literal OUTSIDE Enterprise merge endpoint DENIES too (same "
+                     "endpoint-text rule as mp-d38c)", "deny",
                      "gh api -X PUT https://ghe.example.com/api/v3/repos/other/x/pulls/3/merge", mpd)
             # wrappers and shells beside bash
             mpexpect("(mp-d30) nice -n 5 peels to the merge and DENIES", "deny",
@@ -17239,9 +17275,9 @@ def _main_isolated(monitor):
                      "eval 'gh pr merge 3'", mpd)
             mpexpect("(mp-d30g) an xargs-built merge DENIES through the raw backstop", "deny",
                      "echo 3 | xargs gh pr merge", mpd)
-            # the every-segment backstop: a certain-lex segment the grammar does not recognize as a
-            # merge still fails closed when its words spell one (each paired with the same shape
-            # carrying no merge, so the spelling, not the wrapper, discriminates)
+            # the every-segment scan: any segment whose words spell a merge fails closed, whatever
+            # wrapper, prefix or option carries it (paired with the same shapes carrying no merge,
+            # so the spelling, not the wrapper, discriminates)
             mpexpect("(mp-d36) an env assignment after the '!' reserved word still DENIES", "deny",
                      "! GH_TOKEN=x gh pr merge 3", mpd)
             mpexpect("(mp-d36b) an env assignment after 'time' still DENIES", "deny",
@@ -17252,12 +17288,17 @@ def _main_isolated(monitor):
             mpexpect("(mp-d36e) a setsid-wrapped merge DENIES", "deny", "setsid gh pr merge 3", mpd)
             mpexpect("(mp-d36f) a find -exec merge DENIES", "deny",
                      "find . -maxdepth 0 -exec gh pr merge 3 \\;", mpd)
-            mpexpect("(mp-d36g) a brace expansion spelling the merge DENIES (treated as uncertain, "
-                     "never read literally)", "deny", "gh {pr,merge} 3", mpd)
-            mpexpect("(mp-d36h) a merge spelling piped into a shell DENIES (the pipe defeats the "
-                     "inert-mention exemption)", "deny", "echo 'gh pr merge 3' | bash", mpd)
-            mpexpect("(mp-d36i) a wrapper option that stops the peel (nice -10) still DENIES", "deny",
-                     "nice -10 gh pr merge 3", mpd)
+            mpexpect("(mp-d36g) a brace expansion spelling the merge DENIES (the certain-lex raw "
+                     "segment scan reads the spelling; the brace token is never read as gh grammar)",
+                     "deny", "gh {pr,merge} 3", mpd)
+            mpexpect("(mp-d36h) a merge spelling piped into a shell DENIES", "deny",
+                     "echo 'gh pr merge 3' | bash", mpd)
+            mpexpect("(mp-d36i) a wrapper option this guard does not parse (nice -10) still DENIES",
+                     "deny", "nice -10 gh pr merge 3", mpd)
+            mpexpect("(mp-d36j) a time -p wrapped merge DENIES", "deny", "time -p gh pr merge 3", mpd)
+            mpexpect("(mp-d36k) an env -i wrapped merge DENIES", "deny", "env -i gh pr merge 3", mpd)
+            mpexpect("(mp-d36l) a sudo -u wrapped merge DENIES", "deny",
+                     "sudo -u deploy gh pr merge 3", mpd)
             mpexpect("(mp-a22) the '!'-and-assignment shape with no merge allows", "allow",
                      "! GH_TOKEN=x gh pr view 3", mpd)
             mpexpect("(mp-a22b) the time-and-assignment shape with no merge allows", "allow",
@@ -17266,18 +17307,42 @@ def _main_isolated(monitor):
                      "find . -maxdepth 0 -exec gh pr view 3 \\;", mpd)
             mpexpect("(mp-a22d) a brace expansion with no merge allows", "allow",
                      "gh {pr,view} 3", mpd)
-            mpexpect("(mp-d34) a brace-group merge DENIES through the uncertain-lex backstop", "deny",
+            mpexpect("(mp-a22e) a sudo/coproc/setsid shape with no merge allows (one shared control "
+                     "for the wrapper battery)", "allow", "sudo gh pr view 3", mpd)
+            mpexpect("(mp-a22f) a coproc with no merge allows", "allow", "coproc gh pr view 3", mpd)
+            mpexpect("(mp-a22g) a setsid with no merge allows", "allow", "setsid gh pr view 3", mpd)
+            mpexpect("(mp-a22h) a nice -10 with no merge allows", "allow",
+                     "nice -10 gh pr view 3", mpd)
+            mpexpect("(mp-a22i) a time -p with no merge allows", "allow", "time -p gh pr view 3", mpd)
+            mpexpect("(mp-a22j) an env -i with no merge allows", "allow", "env -i gh pr view 3", mpd)
+            mpexpect("(mp-a22k) a sudo -u with no merge allows", "allow",
+                     "sudo -u deploy gh pr view 3", mpd)
+            mpexpect("(mp-d34) a brace-group merge DENIES (the segment spells it)", "deny",
                      "{ gh pr merge 3; }", mpd)
-            # a recognized candidate (outside, note or declared) must not suppress the backstop for
-            # the parts of the command no candidate accounts for
-            mpexpect("(mp-d34b) an out-of-scope merge does not suppress the uncertain-lex backstop "
-                     "for a brace-group merge beside it", "deny",
+            # an exempt candidate (outside-scope, note or declared) must not suppress the scan of any
+            # text it does not account for, including text the lexer keeps outside every segment
+            mpexpect("(mp-d34b) an out-of-scope merge does not suppress the scan of a brace-group "
+                     "merge beside it", "deny",
                      "gh pr merge 1 -R other/x; { gh pr merge 4; }", mpd)
-            mpexpect("(mp-d34c) a graphql note candidate does not suppress the backstop either",
+            mpexpect("(mp-d34c) a graphql note candidate does not suppress the scan either",
                      "deny", "gh api graphql --input q.json; { gh pr merge 4; }", mpd)
+            mpexpect("(mp-d34d) an out-of-scope merge does not suppress a merge hidden in a quoted "
+                     "here-document body (the exempt segment is blanked and the rest rescanned)",
+                     "deny", "gh pr merge 3 -R other/x; bash <<'EOF'\ngh pr merge 3\nEOF", mpd)
+            mpexpect("(mp-a31) the same out-of-scope merge beside a here-document body with no merge "
+                     "allows (the body's spelling discriminates)", "allow",
+                     "gh pr merge 3 -R other/x; bash <<'EOF'\ngh pr view 3\nEOF", mpd)
+            mpexpect("(mp-d34e) a quoted here-document merge body DENIES on its own", "deny",
+                     "bash <<'EOF'\ngh pr merge 3\nEOF", mpd)
+            mpexpect("(mp-d34f) a command substitution inside an out-of-scope merge's option value "
+                     "DENIES (an opaque token refuses the scope exemption)", "deny",
+                     'gh pr merge 3 -R other/x --body "$(gh pr merge 3)"', mpd)
             mpexpect("(mp-a19) the same outside merge beside a brace group carrying no merge allows "
-                     "(only unaccounted parts are scanned)", "allow",
+                     "(only unaccounted parts are rescanned)", "allow",
                      "gh pr merge 1 -R other/x; { gh pr view 4; }", mpd)
+            mpexpect("(mp-a19b) the outside merge with a literal benign --body still allows (the "
+                     "substitution in mp-d34f, not the option, discriminates)", "allow",
+                     "gh pr merge 3 -R other/x --body 'done'", mpd)
             # a real newline inside a quoted wrapper-body string is ONE inner command, so it cannot
             # split the backstop's ordered word walk
             mpexpect("(mp-d30i) a newline inside a quoted wrapper-body string cannot split the "
@@ -17287,10 +17352,16 @@ def _main_isolated(monitor):
             mpexpect("(mp-a20) a multi-line wrapper body whose words never spell a gh merge in order "
                      "still allows (the ordered walk discriminates)", "allow",
                      "bash -c 'git merge main\ngit push'", mpd)
-            # read-down and scope spellings beside the existing pairs
-            mpexpect("(mp-d32) --disable-auto beside a method flag is still a merge", "deny",
+            # read-only and scope spellings: every merge spelling denies, only the literal -R/--repo
+            # out-of-scope read allows
+            mpexpect("(mp-d32) --disable-auto beside a method flag DENIES", "deny",
                      "gh pr merge 3 --disable-auto --squash", mpd)
-            mpexpect("(mp-a17) -h is the help read-down and allows", "allow", "gh pr merge 3 -h", mpd)
+            mpexpect("(mp-d32b) -h DENIES (a read-only spelling of the merge words is still a "
+                     "spelling; the deliberate over-deny)", "deny", "gh pr merge 3 -h", mpd)
+            mpexpect("(mp-d32c) lone gh pr merge --help DENIES (same deliberate over-deny)", "deny",
+                     "gh pr merge --help", mpd)
+            mpexpect("(mp-d32d) gh pr merge --disable-auto DENIES (cancelling is still the merge "
+                     "words; same deliberate over-deny)", "deny", "gh pr merge 3 --disable-auto", mpd)
             mpexpect("(mp-a18) separated --repo outside the scope allows", "allow",
                      "gh pr merge 3 --repo other/x", mpd)
             mpexpect("(mp-d33) --repo= naming the declared repo DENIES", "deny",
@@ -17299,39 +17370,59 @@ def _main_isolated(monitor):
             mpexpect("(mp-a1) gh pr view allows (no merge verb; kills a drop-verb-check mutant)",
                      "allow", "gh pr view 12", mpd)
             mpexpect("(mp-a1b) gh pr checks allows", "allow", "gh pr checks 12 --watch", mpd)
-            mpexpect("(mp-a2) lone gh pr merge --help allows (read-down)", "allow",
-                     "gh pr merge --help", mpd)
-            mpexpect("(mp-a3) gh pr merge --disable-auto allows (cancel, not merge)", "allow",
-                     "gh pr merge 3 --disable-auto", mpd)
             mpexpect("(mp-a4) explicit -R outside the declared repos scope allows", "allow",
                      "gh pr merge 3 -R other/x", mpd)
-            mpexpect("(mp-a5) GH_REPO= segment assignment outside the scope allows", "allow",
-                     "GH_REPO=other/x gh pr merge 1", mpd)
-            mpexpect("(mp-a6) PR URL operand outside the scope allows", "allow",
-                     "gh pr merge https://github.com/other/x/pull/3", mpd)
-            mpexpect("(mp-a7) methodless body-less gh api pulls merge endpoint allows (GET check)",
-                     "allow", "gh api repos/owner/repo/pulls/3/merge", mpd)
-            mpexpect("(mp-a8) the declared command allows (not a merge shape)", "allow",
+            mpexpect("(mp-d25i) a stray operand beside an out-of-scope -R refuses the exemption "
+                     "(an operand with a '/' could itself name the target)", "deny",
+                     "gh pr merge feature/x -R other/x", mpd)
+            mpexpect("(mp-a7) a non-merge gh api endpoint allows (the GET is-it-merged read now "
+                     "DENIES, mp-d6c; the endpoint spelling discriminates)",
+                     "allow", "gh api repos/owner/repo/pulls/3", mpd)
+            mpexpect("(mp-d6c) the methodless body-less GET pulls-merge endpoint DENIES (a read-only "
+                     "endpoint spelling is still a spelling; the deliberate over-deny)", "deny",
+                     "gh api repos/owner/repo/pulls/3/merge", mpd)
+            mpexpect("(mp-a8) the declared command allows (its argv spells no merge, so extra "
+                     "arguments stay free)", "allow",
                      "python3 tools/merge_pr.py --pr 12 --method merge", mpd)
-            mpexpect("(mp-a9) a commit message mentioning gh pr merge allows (an inert mention "
-                     "wholly inside git commit's -m value)", "allow",
-                     'git commit -m "document gh pr merge"', mpd)
-            # the inert-mention exemption, both directions: only an all-literal, unpiped
-            # echo/printf/cat/ls/grep argument list or the named git prose values are exempt from the
-            # every-segment backstop; every other mention denies as unprovable
-            mpexpect("(mp-a23) an echo mentioning the merge allows (echo never executes its "
-                     "arguments)", "allow", "echo 'gh pr merge 3'", mpd)
-            mpexpect("(mp-a23b) a grep for the merge spelling allows", "allow",
+            # prose mentions: there is NO inert-mention exemption any more; every mention of the
+            # merge words in a declaring repo denies, whatever command carries it (echo, printf, cat,
+            # grep, a commit message), because proving a command never executes its arguments is
+            # shell-semantics modelling this guard no longer performs (printf -v executes an array
+            # subscript in its target). Each deny is paired with the same command carrying no merge.
+            mpexpect("(mp-d37d) a commit message mentioning gh pr merge DENIES (prose mentions are "
+                     "no longer exempt)", "deny", 'git commit -m "document gh pr merge"', mpd)
+            mpexpect("(mp-d37e) the attached -mVALUE spelling DENIES identically (the two spellings "
+                     "no longer diverge)", "deny", 'git commit -m"document gh pr merge"', mpd)
+            mpexpect("(mp-a9) a commit message with no merge spelling allows", "allow",
+                     'git commit -m "document the merge guard"', mpd)
+            mpexpect("(mp-d37f) an echo mentioning the merge DENIES", "deny",
+                     "echo 'gh pr merge 3'", mpd)
+            mpexpect("(mp-d37g) a grep for the merge spelling DENIES", "deny",
                      "grep -rn 'gh pr merge' docs", mpd)
-            mpexpect("(mp-a23c) a git log --grep for the merge spelling allows", "allow",
+            mpexpect("(mp-d37h) a git log --grep for the merge spelling DENIES", "deny",
                      "git log --grep 'gh pr merge'", mpd)
-            mpexpect("(mp-d37) a merge spelling in a non-exempt command's arguments DENIES (the "
-                     "program may execute them)", "deny", "python3 run.py 'gh pr merge 3'", mpd)
-            mpexpect("(mp-d37b) a merge-spelling word outside git commit's prose values DENIES (the "
-                     "value slot, not the git verb, earns the exemption)", "deny",
+            mpexpect("(mp-d37i) printf -v with the merge inside a single-quoted array subscript "
+                     "DENIES (printf -v can execute it; the allowlist that exempted printf is gone)",
+                     "deny", "printf -v 'arr[$(gh pr merge 3)]' %s 0", mpd)
+            mpexpect("(mp-d37j) printf storing the merge for a later expansion DENIES", "deny",
+                     "printf -v NAME 'gh pr merge 3'; $NAME", mpd)
+            mpexpect("(mp-d37k) an echo redirect carrying the merge spelling DENIES (the write, not "
+                     "only the later run, is stopped)", "deny", "echo 'gh pr merge 3' > f; bash f",
+                     mpd)
+            mpexpect("(mp-a23) an echo with no merge spelling allows", "allow",
+                     "echo 'gh pr view 3'", mpd)
+            mpexpect("(mp-a23b) a grep with no merge spelling allows", "allow",
+                     "grep -rn 'merge queue' docs", mpd)
+            mpexpect("(mp-a23c) a git log --grep with no merge spelling allows", "allow",
+                     "git log --grep 'release notes'", mpd)
+            mpexpect("(mp-a23d) a printf -v with no merge spelling allows", "allow",
+                     "printf -v 'arr[$(gh pr view 3)]' %s 0", mpd)
+            mpexpect("(mp-d37) a merge spelling in any other command's arguments DENIES", "deny",
+                     "python3 run.py 'gh pr merge 3'", mpd)
+            mpexpect("(mp-d37b) a merge-spelling path operand beside git commit -m DENIES", "deny",
                      "git commit -m fix docs/gh-pr-merge-notes.md", mpd)
-            mpexpect("(mp-d37c) an uncertain-lex mention still DENIES (an unquoted '#' defeats the "
-                     "exemption)", "deny", "echo docs: gh pr merge # note", mpd)
+            mpexpect("(mp-d37c) an uncertain-lex mention DENIES too (an unquoted '#')", "deny",
+                     "echo docs: gh pr merge # note", mpd)
             mpexpect("(mp-a10) plain graphql query without a merge mutation allows", "allow",
                      "gh api graphql -f query='query{viewer{login}}'", mpd)
             # declaration-absent controls: the same denies are inert with no declaration (or no member)
@@ -17341,97 +17432,128 @@ def _main_isolated(monitor):
                      "gh api -XPUT repos/owner/repo/pulls/3/merge", mpn)
             mpexpect("(mp-k3) shell-body merge allows with no declaration", "allow",
                      "bash -c 'gh pr merge 3'", mpn)
+            mpexpect("(mp-k6) a prose mention allows with no declaration (the over-deny of mentions "
+                     "is scoped to declaring repositories)", "allow", "echo 'gh pr merge 3'", mpn)
             mp_badreg.write_text(json.dumps({"version": 1}), encoding="utf-8")
             mpexpect("(mp-k4) declaration without a merge member stays inert", "allow",
                      "gh pr merge 12", mpb)
-            # ambient GH_REPO, both directions (the hook's own environment)
+            # GH_REPO is IGNORED in every direction: the hook's own environment, an env-wrapper
+            # assignment and a rebinding earlier in the command never decide scope (only the literal
+            # -R/--repo argv read does), so a merge with no explicit out-of-scope -R/--repo denies
+            # whatever GH_REPO says, and no rebinding can disarm or re-aim the guard
             os.environ["GH_REPO"] = "owner/repo"
-            mpexpect("(mp-d22) ambient GH_REPO naming the declared repo DENIES", "deny",
+            mpexpect("(mp-d22) ambient GH_REPO naming the declared repo: the merge DENIES", "deny",
                      "gh pr merge 1", mpd)
             os.environ["GH_REPO"] = "other/x"
-            mpexpect("(mp-a11) ambient GH_REPO outside the scope allows", "allow", "gh pr merge 1", mpd)
-            # an env-wrapper assignment is what the invoked process receives, so it outranks the
-            # hook's ambient value in BOTH directions (bash last-wins)
-            mpexpect("(mp-d27) env GH_REPO= naming the declared repo DENIES over an outside ambient",
-                     "deny", "env GH_REPO=owner/repo gh pr merge 3", mpd)
+            mpexpect("(mp-d22b) ambient GH_REPO naming an OUTSIDE repo: the merge still DENIES (the "
+                     "ambient environment never earns the scope exemption)", "deny",
+                     "gh pr merge 1", mpd)
+            mpexpect("(mp-a11) ambient GH_REPO outside the scope with an explicit out-of-scope -R "
+                     "still allows (the argv read, not the environment, decides)", "allow",
+                     "gh pr merge 1 -R other/x", mpd)
+            mpexpect("(mp-d27) env GH_REPO= naming the declared repo DENIES", "deny",
+                     "env GH_REPO=owner/repo gh pr merge 3", mpd)
             os.environ["GH_REPO"] = "owner/repo"
-            mpexpect("(mp-a16) env GH_REPO= outside the scope allows over a declared ambient",
-                     "allow", "env GH_REPO=other/x gh pr merge 3", mpd)
+            mpexpect("(mp-d27c) env GH_REPO= naming an OUTSIDE repo DENIES too (an env wrapper never "
+                     "earns the scope exemption)", "deny", "env GH_REPO=other/x gh pr merge 3", mpd)
             os.environ.pop("GH_REPO", None)
-            mpexpect("(mp-d27b) a plain env assignment still peels to the merge", "deny",
+            mpexpect("(mp-d27b) a plain env-wrapped merge DENIES", "deny",
                      "env FOO=1 gh pr merge 3", mpd)
-            # GH_REPO rebound EARLIER IN THE SAME COMMAND outranks the hook's ambient value in both
-            # directions: the invoked gh receives the rebinding, not the hook's environment
-            os.environ["GH_REPO"] = "other/x"
-            mpexpect("(mp-d35) a plain GH_REPO= rebinding earlier in the command names the declared "
-                     "repo and DENIES over an outside ambient", "deny",
-                     "GH_REPO=owner/repo; gh pr merge 3", mpd)
+            mpexpect("(mp-d35) a plain GH_REPO= rebinding earlier in the command naming the declared "
+                     "repo: the merge DENIES", "deny", "GH_REPO=owner/repo; gh pr merge 3", mpd)
             mpexpect("(mp-d35b) an export GH_REPO= rebinding earlier in the command DENIES too",
                      "deny", "export GH_REPO=owner/repo; gh pr merge 3", mpd)
-            mpexpect("(mp-d35c) an unset GH_REPO earlier in the command leaves the target implicit "
-                     "(governed), never the outside ambient", "deny",
+            mpexpect("(mp-d35c) an unset GH_REPO earlier in the command DENIES too", "deny",
                      "unset GH_REPO; gh pr merge 3", mpd)
-            os.environ["GH_REPO"] = "owner/repo"
-            mpexpect("(mp-a21) a plain rebinding to an outside repo allows over a declared ambient "
-                     "(the mp-a16 direction, threaded across segments)", "allow",
+            mpexpect("(mp-d35d) a plain rebinding to an OUTSIDE repo DENIES too (no rebinding "
+                     "tracking: a rebinding never earns the scope exemption)", "deny",
                      "GH_REPO=other/x; gh pr merge 3", mpd)
-            os.environ.pop("GH_REPO", None)
-            # the tracker honours only a rebinding that provably runs, and persists, in the current
-            # shell: a conditional, subshell, piped, backgrounded or option-bearing rebinding reads
-            # unprovable and the merge stays governed (mp-a25 is the unconditional same-shell control)
-            mpexpect("(mp-d39) a short-circuited export earns no outside exemption", "deny",
+            mpexpect("(mp-d39g) the unconditional same-shell export to an outside repo DENIES too "
+                     "(the rebinding tracker that honoured it was removed: proving a rebinding runs, "
+                     "persists and succeeds is shell-semantics modelling this guard no longer "
+                     "performs)", "deny", "export GH_REPO=other/x; gh pr merge 3", mpd)
+            # the removed tracker's historical fail-open shapes, pinned as denies: skipped
+            # conditional or loop bodies, a conditional across a newline, a failed redirect, and a
+            # readonly collision all left the export unexecuted while the tracker honoured it
+            mpexpect("(mp-d39) a short-circuited export: the merge DENIES", "deny",
                      "false && export GH_REPO=other/x; gh pr merge 3", mpd)
-            mpexpect("(mp-d39b) an export inside a conditional body earns no outside exemption",
+            mpexpect("(mp-d39b) an export inside a conditional body: the merge DENIES",
                      "deny", "if false; then export GH_REPO=other/x; fi; gh pr merge 3", mpd)
-            mpexpect("(mp-d39c) an export inside a subshell earns no outside exemption", "deny",
+            mpexpect("(mp-d39h) an export later in a conditional body (after another command): the "
+                     "merge DENIES", "deny",
+                     "if false; then :; export GH_REPO=other/x; fi; gh pr merge 3", mpd)
+            mpexpect("(mp-d39i) an export later in a loop body: the merge DENIES", "deny",
+                     "while false; do :; export GH_REPO=other/x; done; gh pr merge 3", mpd)
+            mpexpect("(mp-d39j) a conditional export across a newline: the merge DENIES", "deny",
+                     "false &&\nexport GH_REPO=other/x; gh pr merge 3", mpd)
+            mpexpect("(mp-d39k) an export whose redirect fails: the merge DENIES", "deny",
+                     "export GH_REPO=other/x >/dev/null/no-file; gh pr merge 3", mpd)
+            mpexpect("(mp-d39l) an export after readonly: the merge DENIES", "deny",
+                     "readonly GH_REPO=owner/repo; export GH_REPO=other/x; gh pr merge 3", mpd)
+            mpexpect("(mp-d39c) an export inside a subshell: the merge DENIES", "deny",
                      "(export GH_REPO=other/x); gh pr merge 3", mpd)
-            mpexpect("(mp-d39d) an export feeding a pipe earns no outside exemption", "deny",
+            mpexpect("(mp-d39d) an export feeding a pipe: the merge DENIES", "deny",
                      "export GH_REPO=other/x | true; gh pr merge 3", mpd)
-            mpexpect("(mp-d39e) a backgrounded export earns no outside exemption", "deny",
+            mpexpect("(mp-d39e) a backgrounded export: the merge DENIES", "deny",
                      "export GH_REPO=other/x & gh pr merge 3", mpd)
-            mpexpect("(mp-d39f) an export -n un-export is unmodelled and stays governed", "deny",
+            mpexpect("(mp-d39f) an export -n un-export: the merge DENIES", "deny",
                      "export GH_REPO=other/x; export -n GH_REPO; gh pr merge 3", mpd)
-            mpexpect("(mp-a25) the unconditional same-shell export to an outside repo still allows "
-                     "(the provability conditions discriminate)", "allow",
-                     "export GH_REPO=other/x; gh pr merge 3", mpd)
-            # the declared argv as a gh shape: the exact prefix allows, any other spelling denies
-            mpexpect("(mp-a12) the declared gh argv allows by exact prefix", "allow",
+            mpexpect("(mp-a25) the same rebinding shapes with no merge allow (one shared control for "
+                     "the rebinding battery; the merge spelling discriminates)", "allow",
+                     "if false; then :; export GH_REPO=other/x; fi; gh pr view 3", mpd)
+            # the declared argv as a gh shape: ONLY the exact declared argv allows; any extra token,
+            # even a benign-looking operand or flag, is a different command and denies (the
+            # deliberate over-deny of the exact-argv rule: declare the full fixed argv, or declare a
+            # wrapper script that takes the variable part as its own arguments)
+            mpexpect("(mp-a12) the exact declared gh argv allows", "allow",
                      "gh pr merge --auto", mpg)
-            mpexpect("(mp-a12b) declared prefix plus extra operands still allows", "allow",
-                     "gh pr merge --auto --delete-branch", mpg)
-            mpexpect("(mp-d23) a spelling short of the declared prefix DENIES", "deny",
+            mpexpect("(mp-a12b) the exact declared argv inside a conditional body allows (the "
+                     "reserved word is grammar, not argv)", "allow",
+                     "if true; then gh pr merge --auto; fi", mpg)
+            mpexpect("(mp-d23) a spelling short of the declared argv DENIES", "deny",
                      "gh pr merge", mpg)
-            mpexpect("(mp-d23b) a different method spelling DENIES beside the declared prefix", "deny",
+            mpexpect("(mp-d23b) a different method spelling DENIES beside the declared argv", "deny",
                      "gh pr merge 3 --squash", mpg)
-            mpexpect("(mp-d23c) an extra merge behaviour flag past the declared prefix DENIES "
-                     "(--admin is not the declared path)", "deny", "gh pr merge --auto --admin 3", mpg)
-            # the sanction is parsed option semantics, not token membership: every spelling of a
-            # behaviour flag past the declared words, and any expansion there, stays governed
-            mpexpect("(mp-d23d) an =value spelling of a behaviour flag past the declared prefix "
+            mpexpect("(mp-d23c) an extra merge behaviour flag past the declared argv DENIES", "deny",
+                     "gh pr merge --auto --admin 3", mpg)
+            mpexpect("(mp-d23d) an =value spelling of a behaviour flag past the declared argv "
                      "DENIES", "deny", "gh pr merge --auto --admin=true 3", mpg)
-            mpexpect("(mp-d23e) a short cluster carrying a method flag past the declared prefix "
-                     "DENIES", "deny", "gh pr merge --auto -ds 3", mpg)
-            mpexpect("(mp-d23f) an =value method spelling past the declared prefix DENIES", "deny",
+            mpexpect("(mp-d23e) a short cluster past the declared argv DENIES", "deny",
+                     "gh pr merge --auto -ds 3", mpg)
+            mpexpect("(mp-d23f) an =value method spelling past the declared argv DENIES", "deny",
                      "gh pr merge --auto --squash=true 3", mpg)
-            mpexpect("(mp-d23g) an expansion past the declared prefix DENIES (it can become a "
+            mpexpect("(mp-d23g) an expansion past the declared argv DENIES (it can become a "
                      "behaviour flag once the shell expands it)", "deny",
                      'gh pr merge --auto "$X" 3', mpg)
-            mpexpect("(mp-d23h) the declared command does not suppress the uncertain-lex backstop "
-                     "for a brace-group merge beside it", "deny",
+            mpexpect("(mp-d23h) the declared command does not suppress the scan of a brace-group "
+                     "merge beside it", "deny",
                      "gh pr merge --auto; { gh pr merge 4 --admin; }", mpg)
-            mpexpect("(mp-a12c) a known boolean short past the declared prefix allows (the cluster "
-                     "walk tells -d from -ds)", "allow", "gh pr merge --auto -d 3", mpg)
-            # a declared shell-script merge command whose NAME spells gh..pr..merge: the declared
-            # prefix exempts the backstop candidate, while any other spelling of the words stays
-            # governed (the discriminating pair for the exemption)
-            mpexpect("(mp-a29) the declared script argv allows even though its name spells the "
-                     "merge words", "allow", "bash tools/gh-pr-merge.sh 3", mps)
-            mpexpect("(mp-d43) the declared script plus a merge behaviour flag DENIES (not the "
-                     "declared path)", "deny", "bash tools/gh-pr-merge.sh --admin 3", mps)
-            mpexpect("(mp-d43b) another script fed the merge words DENIES (the declared words must "
-                     "lead)", "deny", "bash tools/other.sh 'gh pr merge 3'", mps)
-            mpexpect("(mp-a30) reading the declared script allows (an inert mention inside cat's "
-                     "arguments)", "allow", "cat tools/gh-pr-merge.sh", mps)
+            mpexpect("(mp-d23i) the declared argv plus extra operands DENIES (exact argv only; the "
+                     "earlier prefix sanction of extras was removed with the option-grammar "
+                     "modelling behind it)", "deny", "gh pr merge --auto --delete-branch", mpg)
+            mpexpect("(mp-d23j) a known boolean short past the declared argv DENIES too (exact argv "
+                     "only)", "deny", "gh pr merge --auto -d 3", mpg)
+            mpexpect("(mp-d23k) the declared command does not suppress a merge hidden in a quoted "
+                     "here-document body beside it", "deny",
+                     "gh pr merge --auto; bash <<'EOF'\ngh pr merge 4 --admin\nEOF", mpg)
+            mpexpect("(mp-a12c) the declared command beside a here-document body with no merge "
+                     "allows (the body's spelling discriminates)", "allow",
+                     "gh pr merge --auto; bash <<'EOF'\ngh pr view 4\nEOF", mpg)
+            # a declared shell-script merge command whose NAME spells gh..pr..merge: the exact argv
+            # exempts the spelled segment, while any other spelling of the words stays governed
+            mpexpect("(mp-a29) the exact declared script argv allows even though its name spells "
+                     "the merge words", "allow", "bash tools/gh-pr-merge.sh", mps)
+            mpexpect("(mp-d43c) the declared script plus an operand DENIES (exact argv only)",
+                     "deny", "bash tools/gh-pr-merge.sh 3", mps)
+            mpexpect("(mp-d43) the declared script plus a merge behaviour flag DENIES", "deny",
+                     "bash tools/gh-pr-merge.sh --admin 3", mps)
+            mpexpect("(mp-d43b) another script fed the merge words DENIES", "deny",
+                     "bash tools/other.sh 'gh pr merge 3'", mps)
+            mpexpect("(mp-d43d) reading the declared script with cat DENIES (the inert-mention "
+                     "exemption for cat and friends was removed)", "deny",
+                     "cat tools/gh-pr-merge.sh", mps)
+            mpexpect("(mp-a30) reading a script whose name spells no merge allows", "allow",
+                     "cat tools/merge-helper.sh", mps)
             # --- present-but-bad declarations: DENY merge shapes, leave ordinary commands alone --------
             mp_badreg.write_text("{ not json", encoding="utf-8")
             mpexpect("(mp-d14) malformed JSON declaration DENIES a merge shape", "deny",
@@ -18695,9 +18817,10 @@ def _main_isolated(monitor):
           "be self-declared through a guarded tool; the general Bash-write path stays the disclosed wrtscp "
           "residual. "
           "artbr1 (merge_path_guard) is inert without an .aiqt/operations.json merge member, "
-          "DENIES-and-educates every matched merge shape in a declaring repository (naming the declared "
-          "command) and a present-but-bad declaration, ALLOWS the declared argv, the read-only forms and "
-          "explicit out-of-scope targets, and ALLOWS WITH A NOTE a merge shape in a non-git session and "
+          "DENIES-and-educates every merge SPELLING in a declaring repository (naming the declared "
+          "command), including prose mentions and read-only forms, and a present-but-bad declaration, "
+          "ALLOWS only the exact declared argv and a literal explicit out-of-scope -R/--repo target, and "
+          "ALLOWS WITH A NOTE a merge shape in a non-git session and "
           "an opaque graphql body. reqstp/gatdis (prepush_declared_hook) is a SessionStart WARN: silent "
           "without a prepush member or with the declared hook line installed, one non-blocking warning "
           "when the declared pre-push command is not the clone's installed hook or the declaration "
