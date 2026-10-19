@@ -492,6 +492,13 @@ CONFIG_EXCLUSIONS = {
             "A bare launch is a real timing measurement of the shipped hooks, not a self-test:"
             " minutes at its defaults, and the hooks' own git calls drop GIT_CONFIG_NOSYSTEM by"
             " design; its self-test stays in this roster as the hook-latency-selftest suite step.",
+        ("tools/check_internal_names.py",):
+            "A bare launch is the real gate over this checkout, whose tracked-file read drops the"
+            " GIT_* environment but deliberately keeps the caller's on-disk configuration (where"
+            " safe.directory trust for the checkout lives), so a poisoned caller home fails it"
+            " closed by design; its self-test stays in this roster as the internal-names-selftest"
+            " suite step, whose launcher sanitizes the child environment, and that self-test's own"
+            " isolation cases prove the poisoned-configuration immunity of its fixture runs.",
     },
     "archive": {
         ("tools/check_release_build.py", "--self-test"):
