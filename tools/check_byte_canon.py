@@ -14,10 +14,11 @@ overriding the root one.
 
 The 3.1 scan forbids the zero-width and bidirectional control codepoints held in _byte_canon.FORBIDDEN
 and, in this gate only, a literal U+2028 LINE SEPARATOR or U+2029 PARAGRAPH SEPARATOR (str.splitlines()
-splits on both). The separators stay out of FORBIDDEN because opf's record emitter and view generator read
-that set; no allowance clears them. Like the rest of the 3.1 scan, the separator scan reads every in-scope
-path except the [checkout].binary roster, and it matches only the UTF-8 encoding of each separator: a file
-in another encoding (UTF-16, say) that holds one is not reported.
+splits on both), held in _byte_canon.LINE_SEPARATORS. The separators stay out of FORBIDDEN because opf's
+view generator reads that set (opf's record emitter escapes both sets); no allowance clears them. Like the
+rest of the 3.1 scan, the separator scan reads every in-scope path except the [checkout].binary roster, and
+it matches only the UTF-8 encoding of each separator: a file in another encoding (UTF-16, say) that holds
+one is not reported.
 
 check_no_dashes.py stays separate (3.1). Hashing elsewhere stays byte-literal (3.2): this gate
 canonicalizes at release; no verifier normalizes.
@@ -63,7 +64,7 @@ import gen_manifest  # noqa: E402  reuse the validated scope loader; never a sec
 # The pure byte legs and forbidden-codepoint sets are the ONE shared source in _byte_canon; re-imported
 # here so this gate and the OPF tooling scan identical bytes and cannot fork (OPF-SELF-CONTAIN).
 from _byte_canon import (  # noqa: E402
-    ZERO_WIDTH, BIDI, FORBIDDEN, FORBIDDEN_RE, BOM, scan_bytes, _is_two_space_break,
+    ZERO_WIDTH, BIDI, FORBIDDEN, FORBIDDEN_RE, BOM, LINE_SEPARATORS, scan_bytes, _is_two_space_break,
 )
 
 POLICY_REL = ".aiqt/core/gates/byte-canon.toml"
@@ -97,14 +98,13 @@ CLASS_FINDING = {
     "empty": "empty file",
 }
 
-# U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR: str.splitlines() splits on both, so a literal one
-# inside a string or comment changes how a tool that splits lines with str.splitlines() reads the file (a
-# reader that splits only on LF, such as _has_two_space_break below, is unaffected; an editor can decode the
-# escape text into the character itself). They are refused by THIS repository gate only, never added to
-# _byte_canon.FORBIDDEN: that set also drives opf's record emitter (which escapes every member) and opf's
-# view generator (which refuses a render carrying any member), so widening it would change what opf writes
-# and renders in an adopter's store. No allowance can clear them; write the escape text instead.
-LINE_SEPARATORS = {ch.encode("utf-8"): ch for ch in (chr(0x2028), chr(0x2029))}
+# U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR (_byte_canon.LINE_SEPARATORS): str.splitlines()
+# splits on both, so a literal one inside a string or comment changes how a tool that splits lines with
+# str.splitlines() reads the file (a reader that splits only on LF, such as _has_two_space_break below, is
+# unaffected; an editor can decode the escape text into the character itself). Of the release-scope gates,
+# only THIS one refuses them; they are never added to _byte_canon.FORBIDDEN, which also drives opf's view
+# generator (it refuses a render carrying any member), so widening it would make opf refuse to render or
+# record in an adopter's store that holds one. No allowance can clear them; write the escape text instead.
 LINE_SEPARATORS_RE = re.compile(b"|".join(re.escape(b) for b in sorted(LINE_SEPARATORS)))
 
 
@@ -431,6 +431,7 @@ def self_test_main():
     if not (scan_bytes is _bc.scan_bytes and FORBIDDEN is _bc.FORBIDDEN
             and FORBIDDEN_RE is _bc.FORBIDDEN_RE and BOM is _bc.BOM
             and ZERO_WIDTH is _bc.ZERO_WIDTH and BIDI is _bc.BIDI
+            and LINE_SEPARATORS is _bc.LINE_SEPARATORS
             and _is_two_space_break is _bc._is_two_space_break):
         failures.append("byte-canon primitives are not the single _byte_canon source (a silent fork)")
     # Pure 3.1 cases: (name, bytes, expect_finding).
@@ -466,7 +467,7 @@ def self_test_main():
         failures.append("an out-of-span allowance wrongly cleared a codepoint")
     # Line and paragraph separators: the repository-only leg flags each literal U+2028 and U+2029, in a
     # string and in a comment, one finding per occurrence. They stay outside _byte_canon.FORBIDDEN (opf's
-    # emitter and view generator read that set), so scan_bytes alone must still pass them.
+    # view generator reads that set), so scan_bytes alone must still pass them.
     for name, text, cp in (
             ("line-separator-in-string", 'x = "a{}b"\n'.format(chr(0x2028)), "U+2028"),
             ("paragraph-separator-in-string", 'x = "a{}b"\n'.format(chr(0x2029)), "U+2029"),
@@ -525,8 +526,13 @@ def self_test_main():
         g.update(saved_inputs)
     for cp in (0x2028, 0x2029):
         if chr(cp) in FORBIDDEN.values():
-            failures.append("U+{:04X} is in _byte_canon.FORBIDDEN, which also drives opf's record "
-                            "emitter and view generator".format(cp))
+            failures.append("U+{:04X} is in _byte_canon.FORBIDDEN, which also drives opf's view "
+                            "generator".format(cp))
+        if LINE_SEPARATORS.get(chr(cp).encode("utf-8")) != chr(cp):
+            failures.append("U+{:04X} is missing from _byte_canon.LINE_SEPARATORS".format(cp))
+    if len(LINE_SEPARATORS) != 2:
+        failures.append("_byte_canon.LINE_SEPARATORS holds {} entries; expected exactly U+2028 and "
+                        "U+2029".format(len(LINE_SEPARATORS)))
     # Control: a printable non-ASCII letter (U+00E9) passes both legs, and the escape text passes too.
     for name, data in (("e-acute", 'x = "caf{}"\n'.format(chr(0x00E9)).encode("utf-8")),
                        ("escape-text", b'x = "a\\u2028b\\u2029c"\n')):
