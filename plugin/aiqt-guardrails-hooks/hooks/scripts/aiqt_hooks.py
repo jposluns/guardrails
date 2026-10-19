@@ -3512,7 +3512,7 @@ _REMOVED_DISCARD_PREFIX_NOTE = (
 # git AND a recognized work-losing verb: any of the always-lossy verbs, or 'branch' in ANY form. On the
 # raw path we do NOT parse branch flags: an unparseable 'git branch -d -f topic <heredoc>' / '-df' /
 # '--del --for' cannot be told from a create or a list, so ANY raw 'git' + 'branch' is treated as lossy
-# regardless of a delete flag. A hit on an unparseable command -> DENY (D-423-NARROW: the guard cannot
+# regardless of a delete flag. A hit on an unparseable command -> DENY (the unparseable-command fallback: the guard cannot
 # prove it safe and cannot establish a snapshot basis); no hit -> ALLOW (the true boundary). This
 # over-denies a benign unparseable 'git branch --list' (rare, safe), a disclosed fallback cost. No
 # override exists on this path (or any other): an unparseable in-scope command DENIES whatever prefix it
@@ -4936,7 +4936,7 @@ def _worktree_within_repo(wt_dir, repo_probe):
 
 
 def _git_discard_fallback(command):
-    """D-423-NARROW fail-closed fallback when the shared tokenizer cannot parse the command (an unbalanced
+    """The fail-closed unparseable-command fallback when the shared tokenizer cannot parse the command (an unbalanced
     quote or an unsupported construct): the closed allowlist grammar cannot be applied to a command that
     cannot be segmented, so the ONLY allow is the true boundary - the raw scan, run on the FULL raw
     command (ROUND 8: heredoc bodies are no longer stripped on this path; stripping removed text, so
@@ -5653,7 +5653,7 @@ def _gitdir_is_session_repo(tokens, cwd):
     return gd_c == sess_c
 
 
-# PR #423 D-423-NARROW ROUND 8: the POSITIVE LITERAL closed allowlist grammar for a NON-PRISTINE
+# PR #423: the POSITIVE LITERAL closed allowlist grammar for a NON-PRISTINE
 # in-scope command. The round-7 walk MODELLED shell behaviour (heredoc stripping, builtin
 # directory-neutrality, environment tracking) and each round left a sibling of a closed class accepted
 # (R7C blockers 1-4, majors 5-6). ROUND 8 stops modelling: the grammar RECOGNIZES a closed positive
@@ -6423,8 +6423,8 @@ def _discard_git_segment_grammar(words, eff):
 
 
 def _discard_positive_grammar(command, cwd):
-    """Judge a NON-PRISTINE in-scope command against the positive literal grammar (D-423-NARROW
-    ROUND 8; see the block comment above _SAFE_STASH_OPS), directly on the RAW command string. `cwd`
+    """Judge a NON-PRISTINE in-scope command against the positive literal grammar (the closed
+    allowlist grammar; see the block comment above _SAFE_STASH_OPS), directly on the RAW command string. `cwd`
     is the session working directory (the caller already denied when none exists). The effective
     directory for a git segment starts at `cwd` and changes ONLY through an accepted absolute-literal
     cd, and only while every join from that cd to the git segment is '&&' (across ';' or a newline
@@ -6507,7 +6507,7 @@ def _discard_positive_grammar(command, cwd):
     return out
 
 
-# The deny texts for each positive-grammar violation class (D-423-NARROW ROUND 8). {0} is the
+# The deny texts for each positive-grammar violation class. {0} is the
 # offending byte, token or form, {1} the safe-alternatives text. Every reason names the closed
 # allowlist grammar, so a denial is attributable to the grammar (not to a snapshot failure), and each
 # names the plain spelling that would be accepted. None steers toward a destructive spelling.
@@ -6737,7 +6737,7 @@ def git_discard(data):
     config-forced porcelain probe reports no tracked change AND no untracked entry) - in which cases ALLOW.
     A pristine single bare WHOLE-TREE clobber (reset --hard, checkout -f with no pathspec, switch
     --force/--discard-changes) on a probed-DIRTY tree DENIES. EVERYTHING ELSE in scope is judged by the
-    POSITIVE LITERAL closed allowlist grammar (D-423-NARROW ROUND 8, _discard_positive_grammar,
+    POSITIVE LITERAL closed allowlist grammar (_discard_positive_grammar,
     judged on the RAW command string): a non-pristine in-scope command is accepted ONLY when every
     token is a bare literal word over the closed character class (letters, digits and
     _ . / @ : = + , % -) or ONE standalone single-quoted literal; every command word, spelled bare,
@@ -6802,8 +6802,8 @@ def git_discard(data):
     skipped when no per-user location resolves, the path would land inside the repo, or the write fails), on
     the ALLOW and ASK paths alike (the hook fires once, with no post-approval callback). It NEVER mutates the real index, worktree, HEAD, or any
     branch. If a warranted snapshot cannot be made, a would-be ALLOW is downgraded to ASK ('no recovery point
-    could be created'); an already-ASK/DENY decision is left as-is with the failure surfaced. D-423-NARROW:
-    an ACCEPTED non-pristine in-scope command is snapshot-backed against EACH worktree the grammar
+    could be created'); an already-ASK/DENY decision is left as-is with the failure surfaced. Under the
+    closed allowlist grammar, an ACCEPTED non-pristine in-scope command is snapshot-backed against EACH worktree the grammar
     resolves (a plain git segment's own literal -C chain over the '&&'-followed literal cd chain) PLUS
     the session cwd as a best-effort catch-all for EVERY in-scope command (a verb that actually acts on
     the session repository stays recoverable even when no segment resolved it); a resolved plain stash
@@ -6837,7 +6837,7 @@ def git_discard(data):
         # it reads only the single segment that ends the command, and drops that one too when it has no word.
         segments = _segments(command, skip_empty=True)
     except ValueError:
-        # Conservative raw scan, not a silent allow (D-423-NARROW): an unparseable command the raw scan
+        # Conservative raw scan, not a silent allow (the unparseable-command fallback): an unparseable command the raw scan
         # flags is denied outright; only a command the scan clears is allowed at the true boundary.
         return _git_discard_fallback(command)
 
@@ -6866,7 +6866,7 @@ def git_discard(data):
     # a real discard and widen acceptance (the round-7 stripper erased a real 'git -C stash clear'
     # behind nested heredoc data). The cost is disclosed: a lossy keyword quoted inside heredoc prose
     # now brings the harmless outer command in scope, where the positive grammar denies the heredoc
-    # operator itself - an over-deny, the safe direction under D-423-NARROW.
+    # operator itself - an over-deny, the safe direction under the closed allowlist grammar.
     # Beside the raw text the scope scan reads the JOINED text (_join_continuations,
     # continuations removed as bash removes them) and the DE-QUOTED copy (_dequoted_text: continuations
     # joined, a '$' before a quote, quote characters and backslashes removed), unstripped like the raw text
@@ -6900,7 +6900,7 @@ def git_discard(data):
         if not lossy and _lex_uncertain(command):
             lossy = _uncertain_line_lossy(command)
         kind = lossy[0][1] if lossy else "a git work-losing verb"
-        # D-423-NARROW ROUND 8: a non-pristine in-scope command is accepted ONLY when its RAW text
+        # A non-pristine in-scope command is accepted ONLY when its RAW text
         # fits the positive literal grammar (_discard_positive_grammar); anything outside it DENIES with the
         # grammar reason. An accepted command keeps the preserve-then-allow posture of the pin: every
         # resolved stash drop/clear preserves its target repository's stash under durable refs first (or
@@ -17401,12 +17401,19 @@ def _orch_register_authority(root, path):
     except (OSError, ValueError):
         rel = None
     if rel and not rel.startswith(os.pardir + os.sep) and rel != os.pardir:
+        # The tracked/untracked DECISION is an authority read (the same rule as the gate's
+        # verify_append_only): git confirms "not tracked" only with exit 1; any other exit (a
+        # corrupt index: 128, a non-repository root), launch error or timeout leaves the
+        # question open and is a HOLD, never a fall-through into the anchor leg.
         try:
-            tracked = subprocess.run(["git", "-C", root, "ls-files", "--error-unmatch", rel],
-                                     capture_output=True, timeout=10, env=env).returncode == 0
+            probe = subprocess.run(["git", "-C", root, "ls-files", "--error-unmatch", rel],
+                                   capture_output=True, timeout=10, env=env)
         except (OSError, subprocess.SubprocessError) as exc:
             return ("hold", "cannot determine register tracking ({})".format(exc), None)
-        if tracked:
+        if probe.returncode not in (0, 1):
+            return ("hold", "cannot determine register tracking (git ls-files exited "
+                    "{})".format(probe.returncode), None)
+        if probe.returncode == 0:
             try:
                 base = subprocess.run(["git", "-C", root, "merge-base", "HEAD", "origin/HEAD"],
                                       capture_output=True, text=True, timeout=10, env=env)
@@ -17425,15 +17432,48 @@ def _orch_register_authority(root, path):
                         "register is not an append-only extension of its merge-base state", None)
             return _orch_register_tip(lines)
     anchor = path + ".anchor"
+    # The gate's anchor rule: the anchor is opened ONCE, non-blocking and without following a
+    # final symlink, its type is checked on the OPENED descriptor, and its bytes are read from
+    # that same descriptor, so a symlink (live or dangling), a directory, a FIFO or any other
+    # non-regular entry is a HOLD, never a file the link names and never a blocked hook.
     try:
-        with open(anchor, "r", encoding="utf-8") as fh:
-            a = json.load(fh)
-        n, digest = int(a["seq"]), str(a["digest"])
-    except (OSError, ValueError, KeyError, TypeError):
+        fd = os.open(anchor, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+                     | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return ("hold", "the register anchor is a symlink, which is never followed", None)
         return ("hold", "declared register has no readable anchor authority", None)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ("hold", "the register anchor is not a regular file", None)
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except OSError:
+        return ("hold", "declared register has no readable anchor authority", None)
+    finally:
+        os.close(fd)
+    try:
+        a = json.loads(b"".join(chunks).decode("utf-8"))
+    except ValueError:
+        return ("hold", "declared register has no readable anchor authority", None)
+    # The same strict anchor shape as the gate: an object whose seq is an int (bools excluded)
+    # of at least 1 and whose digest is 64 lowercase hex. A zero, negative or false seq, a
+    # wrong-length or non-hex digest, and a non-object anchor are each a HOLD, never a
+    # bypassed digest comparison.
+    n = a.get("seq") if isinstance(a, dict) else None
+    digest = a.get("digest") if isinstance(a, dict) else None
+    if (not isinstance(n, int) or isinstance(n, bool) or n < 1
+            or not isinstance(digest, str) or len(digest) != 64
+            or set(digest) - set("0123456789abcdef")):
+        return ("hold", "the register anchor is malformed (an anchor is an object with an "
+                "integer seq >= 1 and a 64-hex digest)", None)
     if len(lines) < n:
         return ("hold", "register is shorter than its verified anchor (rows removed)", None)
-    if n > 0 and _orch_sha256_hex(lines[n - 1]) != digest:
+    if _orch_sha256_hex(lines[n - 1]) != digest:
         return ("hold", "the anchored row was rewritten (tamper or reorder)", None)
     return _orch_register_tip(lines)
 

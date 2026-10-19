@@ -978,16 +978,17 @@ def _config_poison_fixture(base):
 # tools/check_python_host_pin.py --self-test and tools/check_leaks.py --self-test. The
 # hook-latency harness added a tenth (tools/check_selftest_execution.py --suite
 # hook-latency-selftest; the bare runner that step expands to is a CONFIG_EXCLUSIONS["all"]
-# entry). The child-status change (2026-10-17) added four more
+# entry). The change adding tools/orch_register.py --self-test added an eleventh, that member
+# itself, not one a merge brought in. The child-status change (2026-10-17) added four more
 # (opf/tools/_child_status.py --self-test, tools/check_child_status_coverage.py, and
 # tools/check_selftest_execution.py --suite child-status-selftest and the same with
-# --suite child-status-coverage-selftest). The merged roster is 115 members, 113 of them in
+# --suite child-status-coverage-selftest). The merged roster is 116 members, 114 of them in
 # the malformed lane (counted by running _registered_selftests() on the merged tree,
-# 2026-10-17; config/member-roster-figures asserts these counts and the two derived counts
+# 2026-10-19; config/member-roster-figures asserts these counts and the two derived counts
 # below against _registered_selftests(), so a later roster change turns this comment red
 # instead of stale).
 # NOT MEASURED, though these bounds govern those reruns all the same: the system lane; the
-# malformed lane's configuration for the 103 of its 113 members outside those ten; and the
+# malformed lane's configuration for the 104 of its 114 members outside those ten; and the
 # fsmonitor pass's own configuration (fsmonitor set in both config files, ignore and attributes
 # files removed, its four members run one at a time).
 # The opf.py --self-test times above and below and its 3600 s entry were sized before the
@@ -1000,17 +1001,18 @@ def _config_poison_fixture(base):
 # bound) are not fed to the formula; the factor's headroom is meant to allow for them, but a run
 # that reached a bound has no known length, so no bound here is shown to cover it (below).
 # Roster coverage: the account of the whole-roster run gives a time or an upper bound for 89 of
-# the 115 members (every member registered when it was taken; the nine added by the 2026-10-13,
-# 2026-10-14, 2026-10-15 and 2026-10-16 merges, the hook-latency suite step and the four added
-# by the child-status change on 2026-10-17 are outside it).
+# the 116 members (every member registered when it was taken; the nine added by the 2026-10-13,
+# 2026-10-14, 2026-10-15 and 2026-10-16 merges, the hook-latency suite step, the eleventh that
+# the orch_register change adds, and the four added by the child-status change on 2026-10-17
+# are outside it).
 # Five took over 180 s and carry the entries below. The other 84 took 180 s or less: nine named
 # here (the six shorter opf/tools self-tests, check_python_floor.py, check_release_cut.py
 # --self-test --red-on-revert and check_selftest_execution.py --suite orch-behaviour-selftest),
 # the slowest 142.55 s; and 75 REPORTED by that account as each 62.42 s or less, with no
-# per-member time and no names given. The remaining 26 roster members have no recorded time (the
+# per-member time and no names given. The remaining 27 roster members have no recorded time (the
 # 12 the account does not name, plus the nine added by those merges, the hook-latency suite
-# step and the four child-status members, named above), so their default bound is NOT sized
-# from a measurement.
+# step, the orch_register self-test and the four child-status members, named above), so their
+# default bound is NOT sized from a measurement.
 # For every member, reaching its bound is cannot-evaluate, never a pass.
 # The factor is 40 / 24 * 4. 40 / 24 covers load5 40 under the model that wall time grows in
 # proportion to load5 once load5 exceeds the 24 CPUs, and not below (every measured run had load5
@@ -4284,7 +4286,7 @@ _SCAN_ALLOWED_UNPINNED = (
      " merge-base reads for the post-release revision binding, QA round-2); read-only by"
      " design, and production launches stay unchanged"),
     ("tools/check_release_delta.py", "_stage1_git", ("git",),
-     "stage-1 re-execution read funnel (QA round 5, D-397-REEXEC-FROM-COMMITTED): rev-parse and"
+     "stage-1 re-execution read funnel (a design decision): rev-parse and"
      " cat-file --batch reads only, with --no-replace-objects and -c core.commitGraph=false -c"
      " core.fsmonitor=false in option position plus an INLINE GIT_* scrub (GIT_NO_REPLACE_OBJECTS=1,"
      " GIT_GRAFT_FILE pinned to os.devnull); the env is built inline rather than through"
