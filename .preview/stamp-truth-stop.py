@@ -80,7 +80,10 @@ after OFFSET. The file is written when this hook blocks, and on a pass once a st
 unavailable. LATE-ARRIVAL EXCEPTION: at a block, when the blocked final message is NOT yet in the transcript,
 its SHA-256 is recorded as pending (at most MAX_PENDING, 8, the OLDEST hash evicted when a ninth is
 stored); a later record with that text is skipped ONCE (the pending entry is consumed) because it arrived
-after OFFSET only through transcript lag. Consumption is by COUNT, not position: each pending entry
+after OFFSET only through transcript lag. Only a Stop that actually BLOCKS records an entry: a capped or
+fail-open ALLOW stores none (its warning already names the violation, and the arrival is checked like any
+other record at the next Stop, still under the cap), so the entries never outnumber the refusals
+delivered. Consumption is by COUNT, not position: each pending entry
 excuses exactly ONE matching record, the entries are consumed by the EARLIEST matching records of the
 scan in order, the final included whether it is supplied or read from the transcript, and every matching
 record beyond the count of entries is checked. A final within the count consumes an entry: read from the
@@ -2249,7 +2252,12 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
         # readable Stop re-reads it past the held unmoved boundary), the disclosed cost of holding
         # the pair
         if final_bad or earlier_bad:
-            late = [_sha(lam.strip())] if lam is not None and not lam_in_transcript else []
+            # only an actual block records a pending entry: a capped or fail-open ALLOW stores none, so
+            # the entries never outnumber the refusals delivered (before, such an allow stored one too,
+            # and that entry later excused the message's arrival although no refusal of it was ever
+            # delivered); the unexcused arrival is diagnosed again at the next Stop, still under the cap
+            late = ([_sha(lam.strip())]
+                    if will_block and lam is not None and not lam_in_transcript else [])
             saved = save(*(held if held is not None else (t["end"], t["tail"], remaining + late)))
             if not saved:
                 earlier_bad = []  # the boundary cannot be PERSISTED: only the final message may block
@@ -6401,11 +6409,12 @@ def _self_test():
 
         def test_r43_readable_violating_stop_state_fault_keeps_pending(self):
             # the readable-branch recovery holds on the VIOLATING
-            # faulting Stop too (the save that records the new late hash), for the field omitted,
-            # explicitly true and explicitly false alike, and the saved boundary is EXACTLY the
-            # readable scan complete-record offset and tail hash: red when the recovery is
-            # restricted to non-violating Stops, and red when the save keeps the OLD boundary
-            # from the re-read
+            # faulting Stop too, for the field omitted, explicitly true and explicitly false alike,
+            # and the saved boundary is EXACTLY the readable scan complete-record offset and tail
+            # hash: red when the recovery is restricted to non-violating Stops, and red when the
+            # save keeps the OLD boundary from the re-read. Only the explicit-false leg BLOCKS and
+            # so records its new late hash; the fail-open allows keep the stored entry and store
+            # none of their own (only an actual block owes a late arrival)
             bad = "[2026-09-23T20:00Z] still wrong"
             missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
             late2 = "[2026-09-23T22:00Z] also wrong and also not yet in the transcript"
@@ -6436,17 +6445,20 @@ def _self_test():
                 extra = {}
                 off, tl, pend, ok = load_state(sdir, self.tr, extra)
                 self.assertTrue(ok, i)
-                self.assertEqual(pend, [_sha(missing), _sha(late2)], i)  # kept, plus the new late hash
                 t = turn_messages(self.tr)
                 self.assertGreater(t["end"], st0[0], i)  # the boundaries differ, so EXACT discriminates
                 self.assertEqual((off, tl), (t["end"], t["tail"]), i)  # the readable scan boundary
                 if field.get("stop_hook_active") is False:
                     self.assertTrue(r, i)  # the explicit false restarts the count: refused
                     self.assertEqual((extra["blocks"], extra["unknown"]), (1, False), i)
+                    self.assertEqual(pend, [_sha(missing), _sha(late2)], i)  # kept, plus the refusal's
+                    # own new late hash
                 else:
                     self.assertIsNone(r, i)  # the unknown count fails open, loudly
                     self.assertTrue(notes and "block count unknown" in notes[0], i)
                     self.assertEqual((extra["blocks"], extra["unknown"]), (BLOCK_CAP, True), i)
+                    self.assertEqual(pend, [_sha(missing)], i)  # kept; the fail-open ALLOW stores no
+                    # new late hash, so no entry ever outnumbers the refusals delivered
 
         def test_r43_recovered_pending_hash_of_arrived_message_is_consumed(self):
             # the defect: the first merge of the recovered pending
@@ -6525,17 +6537,20 @@ def _self_test():
         def test_r43_pending_capacity_evicts_oldest_at_max_pending(self):
             # "keeps every stored pending hash" was always bounded by
             # the MAX_PENDING (8) eviction that every save applies; the docstring now states it. A
-            # CONTRACT test at the capacity boundary, green at the pin by design: the eighth stored
-            # hash still fits (just inside), and a ninth, recorded by a state-faulting Stop whose
-            # recovery read all eight back, evicts exactly the oldest (just past the limit)
+            # CONTRACT test at the capacity boundary: the eighth stored hash still fits (just
+            # inside), and a ninth, recorded by a state-faulting Stop whose recovery read all eight
+            # back, evicts exactly the oldest (just past the limit). Every seeding Stop carries the
+            # explicit false, so each one BLOCKS and stores its hash (only an actual refusal stores
+            # one; a stop allowed at the cap stores none, so a capped run could not seed this)
             self.assertEqual(MAX_PENDING, 8)
             lates = [f"[2026-09-23T21:0{k}Z] not yet in the transcript, number {k}" for k in range(9)]
             real_load = load_state
             sdir = os.path.join(self.tmp, "state43s")
             self.write([self.user("go")])
             for k in range(8):  # eight refusals whose final messages never reach the transcript
-                kind, _ = self.r38_ev(sdir, lates[k])
-                self.assertEqual(kind, "block" if k < BLOCK_CAP else "cap", k)
+                r = evaluate({"transcript_path": self.tr, "stop_hook_active": False,
+                              "last_assistant_message": lates[k]}, self.now, self.start, sdir)
+                self.assertTrue(r, k)
             st = load_state(sdir, self.tr, {})
             self.assertTrue(st[3])
             self.assertEqual(st[2], [_sha(x) for x in lates[:8]])  # exactly at the limit: all kept
@@ -6546,11 +6561,12 @@ def _self_test():
                 globals()["load_state"] = real_load
                 return 0, None, [], False
             globals()["load_state"] = transient_load
-            try:
-                kind, _ = self.r38_ev(sdir, lates[8])  # the ninth hash, recorded through the recovery
+            try:  # the ninth hash, recorded by a refusal through the recovery read under the lock
+                r = evaluate({"transcript_path": self.tr, "stop_hook_active": False,
+                              "last_assistant_message": lates[8]}, self.now, self.start, sdir)
             finally:
                 globals()["load_state"] = real_load
-            self.assertEqual(kind, "open")  # the unknown count fails open, loudly
+            self.assertTrue(r)  # the explicit false restarts the count: the ninth is refused too
             self.assertTrue(fails)  # the state load was attempted and actually failed
             st = load_state(sdir, self.tr, {})
             self.assertTrue(st[3])
@@ -7154,6 +7170,62 @@ def _self_test():
                     self.assertTrue(ok, (i, violating))
                     # kept EXACTLY as stored: the boundary, the tail and the nonempty pending list
                     self.assertEqual((off, tl, pend), (st0[0], st0[1], st0[2]), (i, violating))
+
+        def test_r46_capped_and_fail_open_allows_store_no_pending_entry(self):
+            # the defect: a pending entry was stored whenever the diagnosed final message was absent
+            # from the transcript, on a capped or fail-open ALLOW too, so the entries could outnumber
+            # the refusals delivered: three refusals and one capped allow of one lagging text stored
+            # FOUR entries, and the fourth later excused, in silence, a record whose only refusal was
+            # never delivered. Only an actual block stores an entry: the capped allow still warns, and
+            # the unexcused fourth arrival is diagnosed again at its own Stop, still capped, never silent
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            sdir = os.path.join(self.tmp, "state46c")
+            self.write([self.user("go")])
+            kinds = [self.r38_ev(sdir, missing)[0] for _ in range(BLOCK_CAP + 1)]
+            self.assertEqual(kinds, ["block"] * BLOCK_CAP + ["cap"])
+            # the capped allow stored NO entry beyond the three the refusals stored
+            self.assertEqual(load_state(sdir, self.tr, {})[2], [_sha(missing)] * BLOCK_CAP)
+            # every owed arrival and the unexcused fourth land in ONE scan: the three entries excuse
+            # the three owed arrivals, and the fourth record, the final, is diagnosed and allowed at
+            # the cap with the warning naming it, never passed over in silence
+            self.write([self.asst(missing)] * (BLOCK_CAP + 1), "a")
+            notes, report = [], []
+            r = evaluate({"transcript_path": self.tr, "stop_hook_active": True},
+                         self.now, self.start, sdir, notes, report)
+            self.assertIsNone(r)
+            self.assertTrue(notes and "block cap hit" in notes[0], notes)
+            self.assertTrue(any("your final message" in v for v in report), report)
+            st = load_state(sdir, self.tr, {})
+            self.assertTrue(st[3])
+            self.assertEqual(st[2], [])  # the spent entries were not saved back
+            # the fail-open allow stores none either: one refusal stores one entry, then a transient
+            # state-read fault at the next Stop (its counter unknown: fail open, loudly) supplies a
+            # SECOND lagging text; only the refused text's entry is stored
+            missing2 = "[2026-09-23T22:00Z] a second text not yet in the transcript"
+            real_load = load_state
+            sdir2 = os.path.join(self.tmp, "state46o")
+            self.write([self.user("go")])
+            self.assertEqual(self.r38_ev(sdir2, missing)[0], "block")
+            fails = []
+
+            def transient_load(*a, **k):  # ONE unavailable read; the re-read recovers
+                fails.append(1)
+                globals()["load_state"] = real_load
+                return 0, None, [], False
+            globals()["load_state"] = transient_load
+            notes2, report2 = [], []
+            try:
+                r2 = evaluate({"transcript_path": self.tr, "last_assistant_message": missing2},
+                              self.now, self.start, sdir2, notes2, report2)
+            finally:
+                globals()["load_state"] = real_load
+            self.assertTrue(fails)  # the state load actually failed
+            self.assertIsNone(r2)
+            self.assertTrue(notes2 and "block count unknown" in notes2[0], notes2)
+            self.assertTrue(any("your final message" in v for v in report2), report2)
+            st2 = load_state(sdir2, self.tr, {})
+            self.assertTrue(st2[3])
+            self.assertEqual(st2[2], [_sha(missing)])  # the refused text's entry alone survives
 
         def test_r43_open_stop_both_reads_failing_rereads_the_state(self):
             # the round-43 re-read runs on EVERY Stop of the
