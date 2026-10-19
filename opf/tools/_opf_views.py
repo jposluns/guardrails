@@ -3872,7 +3872,9 @@ def self_test():
         # its recorded status, it is surfaced only under Imported history with that full status, never as
         # the current handoff (red when the Current group counts importer-authored rows again).
         check("handoff-imported-history-section", "## Imported history" in pho)
-        _himp = pho.index("## Imported history")
+        # A missing section fails the three named checks (an empty tail holds neither needle), never an
+        # uncaught ValueError that would mask every later check in this run.
+        _himp = pho.index("## Imported history") if "## Imported history" in pho else len(pho)
         check("handoff-imported-not-current", "HO-3" not in pho[:_sup] and "HO-3" in pho[_himp:])
         check("handoff-imported-shows-full-status", "- HO-3 (current) migrated history" in pho[_himp:])
 

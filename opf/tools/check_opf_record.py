@@ -30,12 +30,21 @@ Each case runs on its own copy of that template; the root is removed in a finall
       mid-apply can leave an operand's bytes torn (neither the prestate nor the poststate), so BEFORE
       reconciliation the matrix asserts the write-ahead evidence instead (whenever any operand's bytes
       differ from the prestate, the killed run's own journal transaction is present to drive recovery).
+      The spec 8.5 at-most-one-current handoff rule additionally holds CONTINUOUSLY, not only once
+      reconciled: at every kill point the matrix asserts that the on-disk handoff index, wherever its
+      bytes parse at all, holds at most one clean current handoff, so no intermediate on-disk state of a
+      post ever shows a reader a second current handoff (a torn, unparseable payload counts none and is
+      recovery's business).
       The next run releases that confirmed-dead holder's
       leftover lease through its own reconciliation (spec 5.7, the T74 dead-run release clause) and
       reconciles, leaving the operands exactly the prestate or exactly the poststate, the poststate iff
       the transaction is COMPLETE, and no killed run reports an id (flips: write counters outside the
       journaled transaction; write the handoff index outside it, which only the handoff-superseding
-      scenario can catch, so a green run proves that scenario discriminates on its own)
+      scenario can catch, so a green run proves that scenario discriminates on its own; land the handoff
+      index at a parseable two-current state inside the journaled apply, which the write-ahead evidence
+      cannot catch: the continuous at-most-one-current assertion turns red on the exposure itself, at the
+      kill point, where without it the corruption would surface only later and indirectly, as the
+      reconciliation refusing a changed operand)
   T6  an assistant `transition BI done` lands done/proposed with zero receipts; an assistant
       done-with-receipt refuses before the store is resolved, and a maintainer `transition BI done`
       refuses, both with every byte untouched; a maintainer done-with-receipt (ratifying done/proposed, or
@@ -521,8 +530,16 @@ Each case runs on its own copy of that template; the root is removed in a finall
       change, and is doctor VALID once committed with HANDOFF.md showing exactly one current handoff
       (flips: the planner performs no supersession, the reviewed head's append-only create, which only the
       independent oracle refuses; a supersession that demands a previous current handoff, under which the
-      first posting is refused; a supersession landed unqualified whatever the actor, which the oracle's
-      own per-actor derivation refuses). A legacy importer-authored current handoff is history outside
+      first posting is refused; a supersession landed unqualified whatever the actor, which the planner's
+      own validate_transition refuses, spec 8.4, the oracle's per-actor derivation covered by the unit
+      vectors). A maintainer rejecting the posting's supersession proposal back to current while the new
+      handoff stands current refuses whole, with the named two-current-handoffs diagnostic and every byte
+      untouched (spec 8.8 restores only the one named record and settles no outcome for the newer post,
+      so the writer invents none and keeps the spec 8.5 at-most-one-current rule); ratifying the proposal
+      to superseded still passes, and a rejection with no other clean current handoff (a
+      transition-proposed supersession) still restores current (flip: drop the sole-current rule, under
+      which the rejection publishes two current handoffs and fails its own final doctor only after the
+      store is dirtied). A legacy importer-authored current handoff is history outside
       every current-state join (spec 8.6): it neither blocks a clean posting nor receives the
       supersession, its bytes stay untouched, and the doctor and HANDOFF.md keep it out of the
       current-handoff join once posted over (flip: count importer-authored rows back into the writer's
@@ -1351,6 +1368,28 @@ def _publish(ctx, plan, subcommand, cap=None):
 record._publish = _publish
 """
 
+# The two-current T5 flip, applied inside the killed child: at the torn-payload kill point of the HANDOFF
+# INDEX, instead of the torn prefix the flip leaves a PARSEABLE index whose superseded row reads current
+# again beside the appended current handoff, then dies. The journaled transaction is already present (the
+# kill point is inside apply), so the write-ahead evidence assertion stays green, the kill and lease
+# assertions stay green, and the first assertion to turn red is the continuous at-most-one-current check
+# over the intermediate on-disk state, naming the exposure itself (without that check the corruption
+# surfaces only later and indirectly, as the reconciliation refusing a changed operand). The needle bytes
+# exist only in a superseding handoff index payload, so every other scenario, and every other operand,
+# keeps the engine's own torn behaviour.
+FLIP_T5_TWO_CURRENT = """
+import _journal
+_torn = _journal._maybe_torn_payload
+def _two_current(fd, data, i):
+    if (os.environ.get(_journal.KILL_ENV, "") == "torn-payload:{}".format(i)
+            and b'"superseded/proposed"' in data):
+        _journal._write_all(fd, data.replace(b'"superseded/proposed"', b'"current"', 1))
+        os.fsync(fd)
+        os._exit(137)
+    _torn(fd, data, i)
+_journal._maybe_torn_payload = _two_current
+"""
+
 
 def child(env, root, args, kill=None, flip=""):
     script = _CHILD.format(tools=str(TOOLS), flip=flip)
@@ -1380,6 +1419,20 @@ def journal_states(root, rel=None):
         return {t.name: journal.classify_state(jr_fd, t) for t in journal._journal_txn_dirs(jr_fd, jroot)}
     finally:
         os.close(jr_fd)
+
+
+def _clean_current_handoffs(data):
+    """The clean (non-importer) current-handoff count of one on-disk handoff index state (the spec 8.5/8.6
+    join over these bytes alone). Bytes that do not parse as TOML count no handoff: a torn payload is
+    neither state, shows a reader no second current handoff, and is recovery's business (the write-ahead
+    evidence assertion)."""
+    try:
+        rows = tomllib.loads(data.decode("utf-8")).get("record", [])
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return 0
+    return sum(1 for r in rows if isinstance(r, dict) and r.get("type") == "handoff"
+               and r.get("status") == "current"
+               and not (isinstance(r.get("actor"), dict) and r["actor"].get("kind") == "importer"))
 
 
 def _t5_scenarios(fx):
@@ -1438,6 +1491,16 @@ def _t5_matrix(fx, label, base, args, operands):
         opened = {name for name in journal_states(root) if name not in retained}
         assert all(interim[rel] == pre[rel] for rel in operands) or opened, (
             "T5 an operand changed with no journal transaction to drive recovery", point)
+        # The spec 8.5 at-most-one-current rule holds CONTINUOUSLY, not only once reconciled: at every
+        # kill point, wherever the on-disk handoff index parses at all, it holds at most one clean
+        # current handoff, so no intermediate state of a post shows a reader a second current handoff.
+        # The write-ahead evidence above cannot catch this (a two-current intermediate can sit inside a
+        # journaled apply): this assertion reds on the exposure itself, at the kill point, where the
+        # later recovery assertions would see it only indirectly, as a reconciliation refusal of a
+        # changed operand. FLIP_T5_TWO_CURRENT drives it red.
+        if HO_INDEX in operands:
+            seen = _clean_current_handoffs(interim[HO_INDEX])
+            assert seen <= 1, ("T5 an intermediate on-disk state holds two current handoffs", point, seen)
         result = record_cli(env, root, CREATE)
         refused(result, "was reconciled")
         assert "leftover single-writer lease" in result[2], ("T5 the released leftover lease is named",
@@ -2884,8 +2947,10 @@ def flip_t89_required_target():
 
 def flip_t89_unqualified():
     """A supersession landed unqualified whatever the posting actor (the spec-8.4 bypass this gate must
-    catch): the landing derivation always returns the bare state. The independent oracle derives the
-    per-actor landing on its own, so the assistant posting refuses and its test goes red."""
+    catch): the landing derivation always returns the bare state. The planner's own validate_transition
+    refuses that landing (an assistant terminal transition must land '/proposed', spec 8.4), so the
+    assistant posting refuses and its test goes red; the independent oracle's per-actor derivation is
+    covered by the unit vectors."""
     return patch.object(record, "_derived_status", lambda kind, spec, cur_state, target: target)
 
 
@@ -2916,8 +2981,8 @@ def flip_t89_first_current():
     rule on its own and still refuses, so the named refusal this flip removes turns its test red."""
     original = record._current_handoffs
 
-    def first_only(ctx, rows):
-        return original(ctx, rows)[:1]
+    def first_only(ctx, rows, verb="create handoff"):
+        return original(ctx, rows, verb=verb)[:1]
     return patch.object(record, "_current_handoffs", first_only)
 
 
@@ -2966,7 +3031,7 @@ def flip_t89_importer():
     must catch): the posting then wrongly supersedes the imported history. The independent oracle keeps
     its own importer exclusion and expects no supersession, so the posting refuses and the test goes
     red."""
-    def counted(ctx, rows):
+    def counted(ctx, rows, verb="create handoff"):
         archived, problems = opf_check.archived_records(ctx.root_fd, ctx.machine_rel, ctx.types,
                                                         ctx.vendors, ctx.import_status, homes=ctx.homes)
         if problems:
@@ -3010,7 +3075,7 @@ def flip_t89_archived():
     """Drop the named archived-current classification back to the generic archive-walk refusal (the
     unreachable-diagnostic regression this gate must catch): the posting still refuses fail-closed, but
     not with the named diagnostic, so the needle assertion goes red."""
-    def generic_only(ctx, rows):
+    def generic_only(ctx, rows, verb="create handoff"):
         archived, problems = opf_check.archived_records(ctx.root_fd, ctx.machine_rel, ctx.types,
                                                         ctx.vendors, ctx.import_status, homes=ctx.homes)
         if problems:
@@ -3022,6 +3087,51 @@ def flip_t89_archived():
                 if rec.rtype == record.HANDOFF and rec.state == "current" and rec.qual is None
                 and rec.actor_kind != "importer"]
     return patch.object(record, "_current_handoffs", generic_only)
+
+
+def t89_reject_supersession(fx):
+    """A maintainer rejecting the supersession proposal an assistant posting created, back to current,
+    while the new handoff stands current, refuses whole with the named two-current-handoffs diagnostic
+    and every byte untouched, never published and then failed at the final doctor: spec 8.8 bounds a
+    rejection to restoring the one named record and settles no outcome for the newer post, so the writer
+    invents none and keeps the spec 8.5 at-most-one-current rule after every reachable sequence.
+    Ratifying the proposal to unqualified superseded still passes and leaves exactly one current handoff;
+    a rejection with no other clean current handoff (a transition-proposed supersession over the sole
+    handoff) still restores current, so the sole-current rule refuses nothing the spec allows."""
+    env = fx.env
+    root = fx.case("t89-reject-supersession")
+    with ticking():
+        step(fx, root, HO_CREATE + ASSISTANT, "HO-1")
+        step(fx, root, HO_CREATE + ASSISTANT, "HO-2 supersedes HO-1")
+        assert row(root, "HO-1", HO_INDEX)["status"] == "superseded/proposed", row(root, "HO-1", HO_INDEX)
+        reject = ["transition", "HO-1", "current", "--reason", "the old handoff still stands"] + MAINTAINER
+        refused_untouched(env, root, reject, "two-current-handoffs")
+        out = step(fx, root, ["transition", "HO-1", "superseded"] + MAINTAINER, "HO-1 ratified")
+        assert '"change": "HO-1 superseded/proposed -> superseded"' in out, out[-800:]
+        done = row(root, "HO-1", HO_INDEX)
+        assert done["status"] == "superseded" and "proposed_from" not in done, done
+        doctor_valid(env, root)
+        assert _handoff_section(root, "Current") == ["- HO-2 resume here"], read(root, HANDOFF_VIEW)
+    root = fx.case("t89-reject-sole-current")
+    with ticking():
+        step(fx, root, HO_CREATE + ASSISTANT, "HO-1")
+        step(fx, root, ["transition", "HO-1", "superseded"] + ASSISTANT, "HO-1 proposed superseded")
+        pending = row(root, "HO-1", HO_INDEX)
+        assert pending["status"] == "superseded/proposed" and pending["proposed_from"] == "current", pending
+        out = step(fx, root, ["transition", "HO-1", "current", "--reason", "not superseded"] + MAINTAINER,
+                   "HO-1 rejection restores current")
+        assert '"change": "HO-1 superseded/proposed -> current"' in out, out[-800:]
+        restored = row(root, "HO-1", HO_INDEX)
+        assert restored["status"] == "current" and "proposed_from" not in restored, restored
+        doctor_valid(env, root)
+        assert _handoff_section(root, "Current") == ["- HO-1 resume here"], read(root, HANDOFF_VIEW)
+
+
+def flip_t89_reject_guard():
+    """The sole-current rule dropped from the rejection path (the reviewed head's behaviour): the
+    rejection publishes a second current handoff and only the final doctor, after the store is dirtied,
+    finds the C-HANDOFF, so the bytes-untouched assertion goes red."""
+    return patch.object(record, "_require_sole_current_handoff", lambda ctx, rows, rid, rel: None)
 
 
 def t8_collision(fx):
@@ -9106,6 +9216,7 @@ TESTS = (
     ("T89-two-current-handoffs-refused", t89_two_current_refused, flip_t89_first_current),
     ("T89-importer-history-clean-posting", t89_importer_history_posts, flip_t89_importer),
     ("T89-archived-current-handoff-refused", t89_archived_current_refused, flip_t89_archived),
+    ("T89-reject-supersession-sole-current", t89_reject_supersession, flip_t89_reject_guard),
 )
 
 
@@ -9171,6 +9282,9 @@ def _self_test_isolated():
             check("red-on-revert-T5-handoff-unjournaled-index",
                   lambda: _discriminate("T5-handoff", lambda: t5_crash(fx),
                                         lambda: _child_flip_handoff(fx)))
+            check("red-on-revert-T5-handoff-two-current-interim",
+                  lambda: _discriminate("T5-two-current", lambda: t5_crash(fx),
+                                        lambda: _child_flip_two_current(fx)))
             check("red-on-revert-T75-concurrent-recovery-single-writer",
                   lambda: _discriminate("T75", lambda: t75_concurrent_recovery(fx),
                                         lambda: _t75_child_flip(fx)))
@@ -9210,6 +9324,20 @@ def _child_flip_handoff(fx):
     FLIP_T5_HANDOFF, under which every scenario but the handoff-superseding one stays green, so the
     red it must produce can come only from that scenario's own matrix."""
     _t5_flip[0] = FLIP_T5_HANDOFF
+    try:
+        yield
+    finally:
+        _t5_flip[0] = ""
+
+
+@contextlib.contextmanager
+def _child_flip_two_current(fx):
+    """The two-current T5 flip as a context: while active, t5_crash's killed children run with
+    FLIP_T5_TWO_CURRENT, under which the handoff-superseding scenario's torn-payload kill leaves a
+    PARSEABLE two-current handoff index inside a journaled apply. Every assertion before the continuous
+    at-most-one-current check stays green there (the child is killed, its lease stands, and the
+    write-ahead evidence is present), so that check is the first to red, on the exposure itself."""
+    _t5_flip[0] = FLIP_T5_TWO_CURRENT
     try:
         yield
     finally:

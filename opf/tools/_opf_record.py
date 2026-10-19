@@ -234,7 +234,15 @@ current handoff is readable history that neither blocks the posting nor receives
 bytes untouched. A prior state the spec forbids refuses with every byte untouched before anything is
 written, each refusal carrying a named diagnostic: more than one clean current handoff
 (two-current-handoffs, a C-HANDOFF finding already) and a current handoff found in the archive, which
-never holds one (archived-current-handoff, spec 12). Three contribution cases stay outside this verb:
+never holds one (archived-current-handoff, spec 12). The same join guards the one transition that lands
+a handoff back at `current`, the maintainer rejection of a supersession proposal: spec 8.8 fixes the
+rejection's restore target (exactly the recorded `proposed_from`) and bounds its delta to the one named
+record, and no spec section settles what that rejection does to a newer current handoff whose posting
+proposed the supersession, so this verb invents no second status change: while another clean current
+handoff stands, the rejection refuses whole (two-current-handoffs, nothing written), keeping the
+section 8.5 at-most-one-current rule over every reachable sequence; the operator ratifies the proposal
+instead, or posts a new handoff restating the rejected one, which supersedes the newer post in its own
+act. Three contribution cases stay outside this verb:
 an assistant or automation send under a
 standing authorization (spec 8.4) still lands `sent/proposed`, since the verb does not read the
 declaration; a planned delivery at `proposed` cannot be written (create takes no `delivery`) and a row
@@ -1009,7 +1017,7 @@ def _check_request(req, ctx):
         _operand_rel(req, ctx)
 
 
-def _current_handoffs(ctx, rows):
+def _current_handoffs(ctx, rows, verb="create handoff"):
     """The current handoffs of the section 8.5 at-most-one-current join (a handoff at `current` with no
     qualifier, authored by a non-importer actor: spec 8.6 requires every current-state join to evaluate
     only clean records authored by non-importer actors, so an importer-authored row is readable history
@@ -1018,7 +1026,9 @@ def _current_handoffs(ctx, rows):
     walk (_opf_check.archived_records). A current handoff the walk finds rotated to the archive, which
     never holds one (spec 12), refuses with the named archived-current-handoff diagnostic; any other
     archive input the walk finds missing, unreadable or malformed refuses with the walk's own problems,
-    never skipped (spec 8.8, 12). Either refusal lands before anything is written."""
+    never skipped (spec 8.8, 12). Either refusal lands before anything is written, named for the acting
+    `verb` (the handoff create's posting join, and the sole-current rule a transition landing a handoff
+    at `current` applies, _require_sole_current_handoff)."""
     archived, problems = _opf_check.archived_records(ctx.root_fd, ctx.machine_rel, ctx.types, ctx.vendors,
                                                      ctx.import_status, homes=ctx.homes)
     recs = [_opf_check._make_rec(r, HANDOFF, "active") for r in rows if isinstance(r, dict)] + archived
@@ -1026,16 +1036,17 @@ def _current_handoffs(ctx, rows):
                and rec.actor_kind != "importer"]
     rotated = [rec for rec in current if rec.location != "active"]
     if rotated:
-        raise RecordError("create handoff refused (archived-current-handoff): the current handoff {} sits "
-                          "in {}; the current handoff never rotates (spec 12) and this verb writes the "
-                          "active index only, so the supersession posting requires (spec 8.5) cannot be "
-                          "performed. Repair the rotation first; nothing written (fail-closed)".format(
-                              _opf_store._safe_display(rotated[0].id), rotated[0].location))
+        raise RecordError("{} refused (archived-current-handoff): the current handoff {} sits "
+                          "in {}; the current handoff never rotates (spec 12), this verb writes the "
+                          "active index only, and the at-most-one-current rule (spec 8.5) is judged over "
+                          "the records the doctor reads. Repair the rotation first; nothing written "
+                          "(fail-closed)".format(verb, _opf_store._safe_display(rotated[0].id),
+                                                 rotated[0].location))
     if problems:
-        raise RecordError("the archive does not pass the doctor's own archive walk ({}), so this handoff "
-                          "create is refused: posting a new handoff supersedes the current one (spec 8.5), "
-                          "and the current-handoff set reads the records the doctor reads, every archived "
-                          "record included. Nothing written; fail-closed".format("; ".join(problems)))
+        raise RecordError("the archive does not pass the doctor's own archive walk ({}), so this {} "
+                          "is refused: the at-most-one-current handoff rule (spec 8.5) reads the records "
+                          "the doctor reads, every archived record included. Nothing written; "
+                          "fail-closed".format("; ".join(problems), verb))
     return current
 
 
@@ -1461,6 +1472,29 @@ def _require_one_current_resolution(ctx, rows, rid, rel):
                                   if held else ""))
 
 
+def _require_sole_current_handoff(ctx, rows, rid, rel):
+    """A transition that lands a handoff at unqualified `current` (the maintainer rejection of a
+    supersession proposal, which must restore exactly the recorded `proposed_from` state, spec 8.8) must
+    leave the store with at most one clean current handoff (spec 8.5; spec 8.6 keeps importer-authored
+    history outside the join): the section 8.5 join of _current_handoffs, run over the planned index
+    (`rows`, the restored row included) together with every archived record, before anything is written.
+    Spec 8.8 fixes the rejection's restore target and bounds its delta to the one named record, and no
+    section settles what such a rejection does to a NEWER current handoff (one whose posting proposed
+    this supersession, spec 8.5), so no second status change is invented here: while another clean
+    current handoff stands, the restore refuses whole, fail-closed, and the operator either ratifies the
+    proposal or posts a new handoff restating it, which supersedes the newer one in its own act."""
+    current = _current_handoffs(ctx, rows, verb="transition to current")
+    others = [rec.id for rec in current if rec.id != rid]
+    if others:
+        raise RecordError("transition refused (two-current-handoffs): restoring {} to current would "
+                          "stand it beside the current handoff {} in {}; at most one current handoff "
+                          "exists across the store (spec 8.5, C-HANDOFF), and a rejection restores only "
+                          "the one named record (spec 8.8), never re-superseding another. Ratify the "
+                          "proposal to superseded, or post a new handoff restating it (which supersedes "
+                          "the newer one in its own act); nothing written (fail-closed)".format(
+                              rid, ", ".join(_opf_store._safe_display(o) for o in others), rel))
+
+
 def _plan_transition(req, ctx, operand, now):
     """`transition ID STATE`: one status change checked by validate_transition (spec 8.4, 8.5). The target
     status is derived from the actor: an assistant or automation landing a terminal or gated state gets
@@ -1480,7 +1514,10 @@ def _plan_transition(req, ctx, operand, now):
     index and the archive). A contribution's `proposed -> sent` writes its delivery bundle (_delivery_fields)
     and the rejection of `sent/proposed` removes it (_proposal_keys); `sent -> acknowledged` with
     --receipt-ref adds the receipt keys, and the rejection of `acknowledged/proposed` removes them
-    (_rejected_delivery). The change is `status`, `updated_at`, the
+    (_rejected_delivery). A transition that lands a handoff at unqualified `current` (the rejection of a
+    supersession proposal) must leave at most one clean current handoff across the planned index and the
+    archive (_require_sole_current_handoff, spec 8.5/8.6): while another clean current handoff stands,
+    the rejection refuses whole with nothing written. The change is `status`, `updated_at`, the
     `proposed_from` write or removal, those bundle writes or removals, and that link append on that one
     record, plus its own worklog entry."""
     rid, target = req.positionals
@@ -1543,6 +1580,9 @@ def _plan_transition(req, ctx, operand, now):
     if rtype == PENDING_DECISION and to_status == "decided":
         _require_one_current_resolution(ctx, [new_row if isinstance(r, dict) and r.get("id") == rid else r
                                               for r in _index_rows(operand)], rid, operand.rel)
+    if rtype == HANDOFF and to_status == "current":
+        _require_sole_current_handoff(ctx, [new_row if isinstance(r, dict) and r.get("id") == rid else r
+                                            for r in _index_rows(operand)], rid, operand.rel)
     (wid,) = _claim(ctx, [_opf_release.WL_NAMESPACE])
     detail = "opf-record transition {} {} -> {}".format(rid, current, to_status)
     if "--reason" in req.values:
@@ -4237,6 +4277,46 @@ def _self_test_handoff(check, plan, post, full, now):
     op.new_model["record"][-1]["links"] = [{"rel": SUPERSEDES, "id": "HO-1"}]
     check("the postcondition refuses a supersedes link written on a first handoff",
           _refuses(lambda: post(p, c, plain), "postcondition failed"))
+    # -- the rejection of a supersession proposal is bounded by the at-most-one-current rule ---------------
+    # Spec 8.8 fixes the restore target (exactly the recorded proposed_from) and bounds the delta to the
+    # one named record; spec 8.5 allows at most one clean current handoff. While another clean current
+    # handoff stands, the rejection refuses whole (_require_sole_current_handoff), and with none it
+    # restores current as any rejection does.
+    reject = ["transition", "HO-1", "current", "--actor", "maintainer", "--reason", "the old one stands"]
+    pending = dict(ho(1, "superseded/proposed"), proposed_from="current")
+    check("a rejection that would stand the restored handoff beside another clean current one refuses "
+          "(two-current-handoffs)",
+          _refuses(lambda: plan(reject, rows=[pending, ho(2, "current")], counters=dict(counters, HO=2)),
+                   "two-current-handoffs"))
+    p, c, op = plan(reject, rows=[pending], counters=counters)
+    check("a rejection with no other clean current handoff restores exactly the recorded pre-proposal "
+          "state and passes the postcondition",
+          op.new_model["record"][0]["status"] == "current"
+          and PROPOSED_FROM not in op.new_model["record"][0]
+          and p.transition == ("HO-1", "superseded/proposed", "current") and post(p, c, reject) is None)
+    p, c, op = plan(reject, rows=[pending, ho(2, "current", kind="importer")],
+                    counters=dict(counters, HO=2))
+    check("an importer-authored current handoff is history outside the rejection's join (spec 8.6)",
+          op.new_model["record"][0]["status"] == "current" and post(p, c, reject) is None)
+    ratify = ["transition", "HO-1", "superseded", "--actor", "maintainer"]
+    p, c, op = plan(ratify, rows=[pending, ho(2, "current")], counters=dict(counters, HO=2))
+    check("the ratification of the proposal lands superseded beside the newer current handoff",
+          op.new_model["record"][0]["status"] == "superseded"
+          and PROPOSED_FROM not in op.new_model["record"][0]
+          and p.transition == ("HO-1", "superseded/proposed", "superseded") and post(p, c, ratify) is None)
+    for label, archived, problems, needle in (
+            ("a current handoff rotated to the archive", [_opf_check._make_rec(ho(2, "current"), HANDOFF,
+                                                                               "archive/2026")],
+             ["C-ROTATION: archived record 'HO-2' (handoff) is not in an unqualified terminal state"],
+             "archived-current-handoff"),
+            ("an archive the walk cannot read", [],
+             ["C-ARCHIVE-ENUM: the 2026 bucket is unreadable"], "doctor's own archive walk")):
+        _opf_check.archived_records = lambda *a, **kw: (list(archived), list(problems))
+        try:
+            check("a rejection refuses {} ({})".format(label, needle), _refuses(
+                lambda: plan(reject, rows=[pending], counters=dict(counters, HO=2)), needle))
+        finally:
+            _opf_check.archived_records = walk
 
 
 def _self_test_delivery(check, plan, post, full, now):
