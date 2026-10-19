@@ -25,7 +25,7 @@ only when the target and branch have a unique merge-base and the supplied ref na
 one merge-base, or the ref is only a common ancestor, it is rejected (two merge-bases can disagree on a
 section, so accepting one would let a real drop read as pre-existing).
 
-Config schema:
+Config schema (version 1, unchanged):
 
   schema-version = 1
   opt-out-marker = "<!-- aiqt-record-section: superseded -->"
@@ -37,12 +37,55 @@ Config schema:
 The marker is recognized only as a whole line inside the branch-owned section it excuses. A global marker,
 a marker in another section, or a marker added only to the post-merge file does not excuse a missing section.
 
+Config schema (version 2) adds a [[table]] record kind for append-only tables whose rows are keyed on
+declared columns. A version-1 config keeps exactly the version-1 behaviour above. In a version-2 config the
+[[record]] kind (with its opt-out-marker) is optional, [[table]] is optional, and at least one of the two
+kinds must be declared; [[record]] and opt-out-marker come together:
+
+  schema-version = 2
+
+  [[table]]
+  path = "docs/done-log.md"
+  format = "markdown"                    # or "toml" with array = "<top-level array name>"
+  header = "| id | pr | closed | note |" # exact header line; table = header, delimiter row, |-lines
+  key = ["id", "pr"]                     # row identity; must be unique per snapshot
+  edit = "frozen"                        # or "key-stable": non-key cells may be corrected in place
+
+Row identity. For a Markdown table, exactly one line of the file must equal `header` and be followed by a
+GFM delimiter row; the table's rows are the consecutive following lines that start with `|`; cells are split
+on unescaped `|` and trimmed of surrounding whitespace; the cell count must equal the header's cell count;
+lines are split on LF only and a CR inside a table line is exit 2. For a TOML table, rows are the declared
+top-level array, which must be an array of tables whose key fields are present strings or integers, compared
+by parsed value so key order and layout do not matter. A row's identity is the tuple of its `key` columns; a
+duplicate key in any snapshot is exit 2, matching the duplicate-heading rule.
+
+Table invariants. R1 (base-row preservation): every key present at the POST-MERGE COMMIT'S FIRST PARENT (the
+pre-merge target, never the merge-base, which usually predates a row the target gained after the fork) is
+present in the post-merge commit; the table declarations for R1 come from that first parent's config at the
+same repo-relative path TOGETHER WITH the working config, so one merge cannot remove a table's declaration
+and drop its rows at the same time. R1 needs only the post-merge commit and its first parent, so a
+version-2 config declaring only tables is evaluable on a single-parent (squash) commit with no --branch-ref;
+[[record]] entries keep the version-1 graph requirements. R2 (the row analogue of the heading leg): every
+key on the branch tip that is absent at the merge-base is present in the post-merge commit. R3 (edit =
+"frozen" only): a key present at both the first parent and the post-merge commit with any cell changed is a
+finding. Reordering, appending or inserting rows anywhere, re-padding or alignment changes, TOML
+reformatting, and (in key-stable mode) non-key cell edits are all allowed. Rows have no deletion opt-out: a
+supersession is a new row or, in key-stable mode, a non-key cell edit. A whole declared file deleted while
+it existed at the compared base counts as every row disappearing (exit 1); a declared table absent from a
+file that still exists post-merge is ambiguous and fails closed (exit 2).
+
 Exit convention:
-  0  every in-scope branch-owned heading is present after the merge, or explicitly opted out; also NOT
+  0  every in-scope branch-owned heading is present after the merge, or explicitly opted out, and every
+     in-scope table row obligation (R1, R2, R3) holds; also NOT
      APPLICABLE when the default config is absent AND was not present at the pre-merge target, because this
      checkout never adopted the gate
-  1  at least one in-scope branch-owned heading was dropped from the post-merge commit
-  2  malformed or unreadable config/input, a config path whose canonicalization net-redirects through a
+  1  at least one in-scope branch-owned heading was dropped from the post-merge commit, a declared table
+     row key disappeared (R1 or R2), a frozen row was edited (R3), or a declared table file that existed
+     at the compared base was deleted
+  2  malformed or unreadable config/input, a missing, duplicate or misshapen declared table, a duplicate
+     row key in any snapshot, a missing key column, a CR in a table line, a declared TOML array that is
+     not an array of tables or carries a non-scalar key value, a version-2 config with unknown keys,
+     a config path whose canonicalization net-redirects through a
      symlink (its real target differs from the literal name) or that resolves outside the repository root,
      an invalid config path (for example one carrying an embedded NUL byte), a default config the merge
      itself removed, an
@@ -51,6 +94,15 @@ Exit convention:
      explicit-base path, an explicit --base-ref that is not that unique merge-base, a branch ref that cannot be
      inferred, an explicit --branch-ref that disagrees with the observable second parent of a two-parent
      post-merge commit, or an octopus (three-or-more-parent) post-merge commit
+
+RESIDUAL, table leg. Key-stable mode lets a row's content be gutted while its key survives. Only declared
+tables and the stated grammar are covered; HTML tables and lists are not. Archive rotation of rows to
+another file reads as disappearance, an over-deny, since no archive path list exists. The config is trusted
+adopter input: reading the first parent's config closes declaration narrowing within the same merge, but not
+narrowing landed in an earlier, separate commit. Only the endpoints of a squash are compared. A pull-request
+check evaluates the test merge, so if the target moves afterwards the live run on the target is still
+needed. The gate detects drops; it does not prevent a resolver from running. And it does not prove that a
+row's claim is true; that semantic burden stays with the rules the records serve.
 
 RESIDUAL. This gate proves heading preservation only for newly introduced headings selected by the adopter's
 patterns. It does not compare section bodies, cover edits to a heading already present at merge-base, detect a
@@ -109,7 +161,7 @@ import io
 import os
 import re
 import subprocess
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -130,6 +182,10 @@ CONFIG_REL = ".aiqt/record-sections.toml"
 OID_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 TOP_KEYS = {"schema-version", "opt-out-marker", "record"}
 ROW_KEYS = {"path", "heading-pattern"}
+V2_TOP_KEYS = {"schema-version", "opt-out-marker", "record", "table"}
+TABLE_KEYS_MARKDOWN = {"path", "format", "header", "key", "edit"}
+TABLE_KEYS_TOML = {"path", "format", "array", "key", "edit"}
+DELIMITER_CELL_RE = re.compile(r":?-+:?")
 
 
 class GateError(Exception):
@@ -140,6 +196,31 @@ class GateError(Exception):
 class RecordSpec:
     path: str
     heading_pattern: re.Pattern
+
+
+@dataclass(frozen=True)
+class TableSpec:
+    """One declared append-only table. header/header_cells/key_positions are markdown-only; array is
+    toml-only; the unused fields hold their empty defaults so the spec stays hashable for deduplication
+    when the first parent's config and the working config declare the same table."""
+    path: str
+    table_format: str
+    header: str
+    header_cells: tuple
+    key: tuple
+    key_positions: tuple
+    edit: str
+    array: str
+
+
+@dataclass(frozen=True)
+class Config:
+    """A loaded adopter config: schema version, the heading leg (marker plus record specs, version-1
+    semantics), and the version-2 table leg. A version-1 config always has tables == ()."""
+    version: int
+    marker: object
+    records: tuple
+    tables: tuple
 
 
 def _clean_env():
@@ -310,17 +391,28 @@ def load_config(path, allow_absent=False):
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
     except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("cannot parse config {} ({})".format(path, exc))
+    if isinstance(data, dict) and type(data.get("schema-version")) is int and data["schema-version"] == 2:
+        return _load_config_v2(data, path)
     if not isinstance(data, dict) or set(data) != TOP_KEYS:
         raise GateError("{}: top-level keys must be exactly {}".format(path, sorted(TOP_KEYS)))
     version = data.get("schema-version")
     if type(version) is not int or version != 1:
         raise GateError("{}: schema-version must be integer 1".format(path))
+    marker = _load_marker(data, path)
+    specs = _load_record_specs(data.get("record"), path)
+    return Config(1, marker, specs, ())
+
+
+def _load_marker(data, path):
     marker = data.get("opt-out-marker")
     if (not isinstance(marker, str) or not marker or marker != marker.strip()
             or "\n" in marker or "\r" in marker or marker.startswith("## ")):
         raise GateError("{}: opt-out-marker must be one non-heading line with no surrounding whitespace"
                         .format(path))
-    rows = data.get("record")
+    return marker
+
+
+def _load_record_specs(rows, path):
     if not isinstance(rows, list) or not rows:
         raise GateError("{}: at least one [[record]] table is required".format(path))
     specs = []
@@ -343,7 +435,76 @@ def load_config(path, allow_absent=False):
         if compiled.fullmatch(""):
             raise GateError("{}: heading-pattern must not match the empty string".format(where))
         specs.append(RecordSpec(record_path, compiled))
-    return marker, tuple(specs)
+    return tuple(specs)
+
+
+def _check_v2_top_keys(data, path):
+    """Refuse unknown top-level keys in a version-2 config: a misspelt or extra key could silently carry
+    an intended declaration the gate then never enforces, so it is ambiguous input, not a pass."""
+    unknown = set(data) - V2_TOP_KEYS
+    if unknown:
+        raise GateError("{}: unknown top-level keys {} in a schema-version 2 config"
+                        .format(path, sorted(unknown)))
+
+
+def _load_config_v2(data, path):
+    _check_v2_top_keys(data, path)
+    if ("record" in data) != ("opt-out-marker" in data):
+        raise GateError("{}: [[record]] entries and opt-out-marker are declared together or not at all"
+                        .format(path))
+    marker = _load_marker(data, path) if "record" in data else None
+    records = _load_record_specs(data.get("record"), path) if "record" in data else ()
+    tables = _load_table_specs(data.get("table"), path) if "table" in data else ()
+    if not records and not tables:
+        raise GateError("{}: at least one [[record]] or [[table]] table is required".format(path))
+    return Config(2, marker, records, tables)
+
+
+def _load_table_specs(rows, path):
+    if not isinstance(rows, list) or not rows:
+        raise GateError("{}: table must be a non-empty array of [[table]] tables".format(path))
+    specs = []
+    seen = set()
+    for number, row in enumerate(rows, 1):
+        where = "{} [[table]] #{}".format(path, number)
+        if not isinstance(row, dict):
+            raise GateError("{}: each [[table]] entry must be a table".format(where))
+        table_format = row.get("format")
+        if table_format not in ("markdown", "toml"):
+            raise GateError("{}: format must be 'markdown' or 'toml'".format(where))
+        wanted = TABLE_KEYS_MARKDOWN if table_format == "markdown" else TABLE_KEYS_TOML
+        if set(row) != wanted:
+            raise GateError("{}: keys must be exactly {} for format {}"
+                            .format(where, sorted(wanted), table_format))
+        table_path = _record_path(row.get("path"), where)
+        if table_path in seen:
+            raise GateError("{}: duplicate table path {}".format(where, table_path))
+        seen.add(table_path)
+        key = row.get("key")
+        if (not isinstance(key, list) or not key
+                or any(not isinstance(name, str) or not name or name != name.strip()
+                       or "\n" in name or "\r" in name or "|" in name for name in key)
+                or len(set(key)) != len(key)):
+            raise GateError("{}: key must be a non-empty list of unique, non-empty, trimmed column names"
+                            .format(where))
+        edit = row.get("edit")
+        if edit not in ("frozen", "key-stable"):
+            raise GateError("{}: edit must be 'frozen' or 'key-stable'".format(where))
+        if table_format == "markdown":
+            header = row.get("header")
+            if (not isinstance(header, str) or "\n" in header or "\r" in header
+                    or not header.startswith("|")):
+                raise GateError("{}: header must be one |-prefixed line".format(where))
+            header_cells = _normalize_cells(_split_cells(header, where + " header"))
+            positions = _key_positions(header_cells, tuple(key), where)
+            specs.append(TableSpec(table_path, "markdown", header, header_cells,
+                                   tuple(key), positions, edit, ""))
+        else:
+            array = row.get("array")
+            if not isinstance(array, str) or not array or "\n" in array or "\r" in array:
+                raise GateError("{}: array must name one top-level TOML array".format(where))
+            specs.append(TableSpec(table_path, "toml", "", (), tuple(key), (), edit, array))
+    return tuple(specs)
 
 
 def _resolve_commit(root, ref, label):
@@ -536,6 +697,273 @@ def compare_record(spec, marker, base_text, branch_text, post_text):
     return len(owned), opted_out, findings
 
 
+def _check_no_cr(line, where):
+    """A CR inside a table line is ambiguous input (the grammar splits on LF only), so it fails closed."""
+    if "\r" in line:
+        raise GateError("{}: a table line contains a carriage return".format(where))
+
+
+def _split_cells(line, where):
+    """Split one |-delimited table line into raw cell strings, honouring backslash escapes.
+
+    The line must start with `|` and end with an unescaped `|` (trailing spaces or tabs allowed); an
+    escaped `\\|` stays inside its cell, so a naive split on every pipe cannot change the cell count.
+    """
+    trimmed = line.rstrip(" \t")
+    if not trimmed.startswith("|"):
+        raise GateError("{}: a table line must start with a pipe".format(where))
+    parts = []
+    current = []
+    index = 0
+    while index < len(trimmed):
+        char = trimmed[index]
+        if char == "\\" and index + 1 < len(trimmed):
+            current.append(char + trimmed[index + 1])
+            index += 2
+            continue
+        if char == "|":
+            parts.append("".join(current))
+            current = []
+            index += 1
+            continue
+        current.append(char)
+        index += 1
+    parts.append("".join(current))
+    if len(parts) < 3 or parts[-1] != "":
+        raise GateError("{}: a table line must end with an unescaped pipe and carry at least one cell"
+                        .format(where))
+    return parts[1:-1]
+
+
+def _normalize_cells(parts):
+    """Cell identity trims surrounding whitespace only, so re-padding or alignment changes compare equal."""
+    return tuple(part.strip() for part in parts)
+
+
+def _check_cell_count(count, expected, where):
+    if count != expected:
+        raise GateError("{}: a table row has {} cell(s), the header has {}".format(where, count, expected))
+
+
+def _locate_header(lines, header, where):
+    """Index of the unique line equal to the declared header, None when absent, fail-closed on duplicates.
+
+    Textual equality is deliberate: a second copy of the header line anywhere in the file (for example
+    inside a code fence) makes the table's location ambiguous, so it fails closed rather than guessing.
+    """
+    matches = [index for index, line in enumerate(lines) if line == header]
+    if len(matches) > 1:
+        raise GateError("{}: the declared header line appears {} times".format(where, len(matches)))
+    if not matches:
+        return None
+    return matches[0]
+
+
+def _key_positions(header_cells, key, where):
+    """Positions of the declared key columns in the header, each present exactly once, else fail closed."""
+    positions = []
+    for name in key:
+        matches = [index for index, cell in enumerate(header_cells) if cell == name]
+        if len(matches) != 1:
+            raise GateError("{}: key column {!r} must appear exactly once in the header, found {}"
+                            .format(where, name, len(matches)))
+        positions.append(matches[0])
+    return tuple(positions)
+
+
+def _register_key(rows, key, row, where):
+    """Record one row under its key tuple; a duplicate key in a snapshot is ambiguous identity (exit 2)."""
+    if key in rows:
+        raise GateError("{}: duplicate row key {}".format(where, _key_label(key)))
+    rows[key] = row
+
+
+def _key_label(key):
+    return "(" + ", ".join(repr(part) for part in key) + ")"
+
+
+def _toml_rows_array(data, array, where):
+    """The declared top-level array, validated as an array of tables; None when the key is absent."""
+    if not isinstance(data, dict) or array not in data:
+        return None
+    rows = data[array]
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise GateError("{}: {} must be an array of tables".format(where, array))
+    return rows
+
+
+def _toml_row_value(value, where):
+    """A key field must be a string or an integer; anything else (a bool included) is ambiguous identity."""
+    if type(value) not in (str, int):
+        raise GateError("{}: a key field must be a string or an integer, got {}"
+                        .format(where, type(value).__name__))
+    return value
+
+
+def _toml_row_key(row, key, where):
+    values = []
+    for name in key:
+        if name not in row:
+            raise GateError("{}: key column {!r} is missing".format(where, name))
+        values.append(_toml_row_value(row[name], "{} key column {!r}".format(where, name)))
+    return tuple(values)
+
+
+def _read_table_rows(text, decl, where):
+    """Parse one snapshot of a declared table into an ordered {key tuple: row value} mapping.
+
+    Returns None when the table is absent from the snapshot (no declared header line, or no declared TOML
+    array); the caller decides whether absence is skippable (the compared base: the table did not exist
+    yet) or fail-closed (post-merge: see _require_present). Rows are compared by parsed value: a Markdown
+    row is its tuple of trimmed cells, a TOML row is its parsed table, so layout changes compare equal.
+    """
+    if decl.table_format == "toml":
+        try:
+            data = tomllib.loads(text)
+        except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+            raise GateError("{}: cannot parse TOML ({})".format(where, exc))
+        raw_rows = _toml_rows_array(data, decl.array, where)
+        if raw_rows is None:
+            return None
+        rows = {}
+        for number, row in enumerate(raw_rows, 1):
+            key = _toml_row_key(row, decl.key, "{} row #{}".format(where, number))
+            _register_key(rows, key, row, where)
+        return rows
+    lines = text.split("\n")
+    start = _locate_header(lines, decl.header, where)
+    if start is None:
+        return None
+    if start + 1 >= len(lines):
+        raise GateError("{}: the header line is not followed by a delimiter row".format(where))
+    delimiter = lines[start + 1]
+    _check_no_cr(delimiter, where)
+    delimiter_cells = _normalize_cells(_split_cells(delimiter, where))
+    if (len(delimiter_cells) != len(decl.header_cells)
+            or not all(DELIMITER_CELL_RE.fullmatch(cell) for cell in delimiter_cells)):
+        raise GateError("{}: the line after the header is not a matching delimiter row".format(where))
+    rows = {}
+    for line in lines[start + 2:]:
+        if not line.startswith("|"):
+            break
+        _check_no_cr(line, where)
+        cells = _normalize_cells(_split_cells(line, where))
+        _check_cell_count(len(cells), len(decl.header_cells), where)
+        key = tuple(cells[position] for position in decl.key_positions)
+        _register_key(rows, key, cells, where)
+    return rows
+
+
+def _require_present(rows, decl, where):
+    """A declared table absent from a file that still exists post-merge is ambiguous and fails closed.
+
+    Whole-file deletion is handled by the caller (every row disappeared, a finding, exit 1); a surviving
+    file whose declared header or array vanished cannot be told apart from a reformatting that silently
+    orphaned the rows, so it is exit 2 rather than a guess in either direction.
+    """
+    if rows is None:
+        raise GateError("{}: the declared table ({}) is absent post-merge while the file exists"
+                        .format(where, decl.header or decl.array))
+    return rows
+
+
+def _r1_base_commit(target, base):
+    """R1 compares against the post-merge commit's FIRST PARENT (the pre-merge target), never the
+    merge-base: the lost row usually landed on the target after the branch forked, so the merge-base
+    would not hold it and a merge-base comparison would read the drop as pre-existing."""
+    del base
+    return target
+
+
+def _r1_findings(decl, base_rows, post_rows):
+    """R1, base-row preservation: every key at the pre-merge target survives into the post-merge commit."""
+    return ["{}: row {} present at the pre-merge target is absent post-merge"
+            .format(decl.path, _key_label(key))
+            for key in base_rows if key not in post_rows]
+
+
+def _r2_findings(decl, mergebase_rows, branch_rows, post_rows):
+    """R2, the row analogue of the heading leg: every branch-owned key (at the branch tip, absent at the
+    merge-base) survives into the post-merge commit. Rows have no opt-out marker."""
+    return ["{}: branch-owned row {} is absent post-merge".format(decl.path, _key_label(key))
+            for key in branch_rows if key not in mergebase_rows and key not in post_rows]
+
+
+def _r3_findings(decl, base_rows, post_rows):
+    """R3, frozen rows: a key present at both the pre-merge target and post-merge with any cell changed."""
+    return ["{}: frozen row {} was edited post-merge".format(decl.path, _key_label(key))
+            for key in base_rows if key in post_rows and post_rows[key] != base_rows[key]]
+
+
+def _base_config_tables(root, config_path, target):
+    """Table declarations read from the pre-merge target's own config, so the same merge cannot remove a
+    table's declaration and drop that table's rows at once.
+
+    Reads the first parent's tree at the working config's repo-relative path. An absent config there, a
+    config outside the repository root, or a schema-version-1 config contributes no tables; a config that
+    is present but unreadable or malformed fails closed, because the declarations it may carry cannot be
+    known. Declaration narrowing landed in an EARLIER, separate commit is out of scope (trusted config).
+    """
+    config_rel = _repo_relative(root, config_path)
+    if config_rel is None:
+        return ()
+    text = _tree_text(root, target, config_rel)
+    if text is None:
+        return ()
+    where = "{} at the pre-merge target".format(config_rel)
+    try:
+        data = tomllib.loads(text)
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        raise GateError("{}: cannot parse ({})".format(where, exc))
+    if not (isinstance(data, dict) and type(data.get("schema-version")) is int
+            and data["schema-version"] == 2):
+        return ()
+    _check_v2_top_keys(data, where)
+    if "table" not in data:
+        return ()
+    return _load_table_specs(data.get("table"), where)
+
+
+def _compare_tables(root, decls, target, graph, post_merge):
+    """Evaluate R1 (and R3 for frozen tables) against the first parent, plus R2 when the branch graph is
+    resolvable, for every declared table. Returns (checked key count, findings)."""
+    findings = []
+    checked = 0
+    r1_base = _r1_base_commit(target, graph[0] if graph else None)
+    for decl in decls:
+        base_text = _tree_text(root, r1_base, decl.path)
+        base_rows = (None if base_text is None else
+                     _read_table_rows(base_text, decl,
+                                      "{} at the pre-merge target".format(decl.path)))
+        post_where = "{} at post-merge".format(decl.path)
+        post_text = _tree_text(root, post_merge, decl.path)
+        if post_text is None:
+            # The whole declared file was deleted: every row it held disappeared (a finding per base or
+            # branch-owned key below), never a skip.
+            post_rows = {}
+        else:
+            post_rows = _require_present(
+                _read_table_rows(post_text, decl, post_where), decl, post_where)
+        if base_rows is not None:
+            checked += len(base_rows)
+            findings.extend(_r1_findings(decl, base_rows, post_rows))
+            if decl.edit == "frozen":
+                findings.extend(_r3_findings(decl, base_rows, post_rows))
+        if graph is not None:
+            mergebase_commit, branch_commit = graph
+            mergebase_text = _tree_text(root, mergebase_commit, decl.path)
+            mergebase_rows = ({} if mergebase_text is None else
+                              _read_table_rows(mergebase_text, decl,
+                                               "{} at merge-base".format(decl.path)) or {})
+            branch_text = _tree_text(root, branch_commit, decl.path)
+            branch_rows = ({} if branch_text is None else
+                           _read_table_rows(branch_text, decl,
+                                            "{} at branch tip".format(decl.path)) or {})
+            checked += sum(1 for key in branch_rows if key not in mergebase_rows)
+            findings.extend(_r2_findings(decl, mergebase_rows, branch_rows, post_rows))
+    return checked, findings
+
+
 def _config_removed_by_merge(root, config_rel, post_merge_ref):
     """True only when the config is provably present at the pre-merge target but absent now.
 
@@ -580,34 +1008,77 @@ def run(root, config_path, config_required, post_merge_ref="HEAD",
             print("NOT APPLICABLE: {} is absent; this checkout has not adopted "
                   "the record-section gate".format(CONFIG_REL))
             return 0
-        marker, specs = config
-        base, branch, post_merge = resolve_graph(
-            root, post_merge_ref, branch_ref, base_ref)
+        version = config.version
+        marker, specs = config.marker, config.records
+        tables_declared = 0
+        table_keys_checked = 0
+        if version == 1:
+            base, branch, post_merge = resolve_graph(
+                root, post_merge_ref, branch_ref, base_ref)
+            graph = (base, branch)
+            target = None
+        else:
+            post_merge_commit = _resolve_commit(root, post_merge_ref, "post-merge ref")
+            parents = _parents(root, post_merge_commit)
+            if not parents:
+                raise GateError("post-merge commit has no first parent")
+            target = parents[0]
+            if len(parents) == 1 and branch_ref is None and not specs:
+                # R1 needs only the post-merge commit and its first parent, so a tables-only config is
+                # evaluable on a single-parent (squash) commit with no --branch-ref; R2 has no observable
+                # branch tip there and is skipped. [[record]] entries keep the version-1 graph rules, and
+                # an octopus or rootless commit still fails closed through the shared paths.
+                graph = None
+                post_merge = post_merge_commit
+            else:
+                base, branch, post_merge = resolve_graph(
+                    root, post_merge_ref, branch_ref, base_ref)
+                graph = (base, branch)
         total = 0
         opted_out = 0
         findings = []
         for spec in specs:
+            heading_base, heading_branch = graph
             owned, opted, record_findings = compare_record(
                 spec, marker,
-                _tree_text(root, base, spec.path),
-                _tree_text(root, branch, spec.path),
+                _tree_text(root, heading_base, spec.path),
+                _tree_text(root, heading_branch, spec.path),
                 _tree_text(root, post_merge, spec.path))
             total += owned
             opted_out += opted
             findings.extend(record_findings)
+        if version == 2:
+            decls = tuple(dict.fromkeys(
+                config.tables + _base_config_tables(root, config_path, target)))
+            tables_declared = len(decls)
+            table_keys_checked, table_findings = _compare_tables(
+                root, decls, target, graph, post_merge)
+            findings.extend(table_findings)
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
     if findings:
-        print("FAIL: {} of {} branch-owned record section(s) were dropped post-merge"
-              .format(len(findings), total))
+        if version == 1:
+            print("FAIL: {} of {} branch-owned record section(s) were dropped post-merge"
+                  .format(len(findings), total))
+        else:
+            print("FAIL: {} record preservation finding(s) post-merge (branch-owned "
+                  "sections dropped, table row keys gone under R1 or R2, or frozen "
+                  "rows edited under R3)".format(len(findings)))
         for finding in findings:
             print("  " + finding)
         return 1
-    print("PASS: {} branch-owned record section(s) were preserved; {} carried the "
-          "explicit opt-out. SCOPE: selected new headings only; bodies and "
-          "pre-existing headings are not compared."
-          .format(total - opted_out, opted_out))
+    if version == 1:
+        print("PASS: {} branch-owned record section(s) were preserved; {} carried the "
+              "explicit opt-out. SCOPE: selected new headings only; bodies and "
+              "pre-existing headings are not compared."
+              .format(total - opted_out, opted_out))
+    else:
+        print("PASS: {} branch-owned record section(s) were preserved ({} opted out); "
+              "{} declared table(s) with {} checked row key(s) intact under R1/R2/R3. "
+              "SCOPE: selected new headings and declared table rows only; bodies, "
+              "pre-existing headings, and undeclared surfaces are not compared."
+              .format(total - opted_out, opted_out, tables_declared, table_keys_checked))
     return 0
 
 
@@ -632,6 +1103,23 @@ def _selftest_git(root, args, input_text=None):
 def _quiet_run(*args):
     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
         return run(*args)
+
+
+@contextmanager
+def _swapped(name, value):
+    """Swap one module-level helper for a mutant or naive variant during a self-test case and restore it.
+
+    The self-test proves each refusal is load-bearing by showing the same fixture PASS once the specific
+    check is removed, and proves each allowed change is deliberate by showing it FAIL under the naive
+    variant it guards against. Mutation is attribute patching only, never generated code.
+    """
+    module = sys.modules[__name__]
+    original = getattr(module, name)
+    setattr(module, name, value)
+    try:
+        yield
+    finally:
+        setattr(module, name, original)
 
 
 def self_test():
@@ -1318,6 +1806,8 @@ def _self_test_isolated():
                 "unique merge-base, non-merge-base explicit ancestor rejected",
                 _quiet_run(cxu, cxu_config, True, cxu_post, None, cxu_c),
                 2)
+
+            failures.extend(_v2_self_test_cases(Path(directory)))
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         print("error: self-test could not build its synthetic git fixture "
               "({}); fail-closed".format(exc), file=sys.stderr)
@@ -1343,8 +1833,512 @@ def _self_test_isolated():
           ".git/info/grafts file rewriting a merge's parents, a legitimate "
           "'//abs' config path, an embedded NUL in the config path, and a "
           "symlink cancelled back to the same literal config path all "
-          "produce the required 0/1/2 decisions")
+          "produce the required 0/1/2 decisions; the schema-version-2 table "
+          "leg refuses every dropped or edited row class (R1 against the "
+          "first parent, R2 for branch-owned rows, R3 for frozen rows, the "
+          "exit-2 refusals), each refusal shown load-bearing against a "
+          "mutant with that check removed, and allows reorder, insertion, "
+          "re-padding, TOML reformatting, escaped pipes, key-stable "
+          "corrections and new tables, each shown failing under the naive "
+          "variant it guards against")
     return 0
+
+
+def _v2_branch_commit(root, name, base, writes, message):
+    """One fixture branch commit: check out a new branch at base, apply the writes (None deletes), commit."""
+    _selftest_git(root, ["checkout", "-q", "-b", name, base])
+    for rel, content in writes.items():
+        path = root / rel
+        if content is None:
+            path.unlink()
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+    _selftest_git(root, ["add", "-A"])
+    _selftest_git(root, ["commit", "-q", "-m", message])
+    return _selftest_git(root, ["rev-parse", "HEAD"])
+
+
+def _v2_synthetic_merge(root, tree_source, parents, message):
+    """A post-merge commit with an exact resolved tree, so a fixture controls what the resolver kept."""
+    tree = _selftest_git(root, ["rev-parse", "{}^{{tree}}".format(tree_source)])
+    args = ["commit-tree", tree]
+    for parent in parents:
+        args.extend(["-p", parent])
+    return _selftest_git(root, args, input_text=message + "\n")
+
+
+def _v2_self_test_cases(directory):
+    """Schema-version-2 [[table]] fixtures: every refuse case and control for the table leg.
+
+    Each refusal is shown load-bearing by re-running its fixture with the specific check swapped out
+    (_swapped) and expecting PASS, and each allowed change is shown deliberate by re-running its fixture
+    under the naive variant it guards against and expecting a failure. Returns failure strings.
+    """
+    failures = []
+
+    def expect(name, got, want):
+        if got != want:
+            failures.append("v2 {}: got {}, want {}".format(name, got, want))
+
+    header = "| id | pr | closed | note |"
+    delimiter = "| --- | --- | --- | --- |"
+    row_y = "| Y | PR0 | 2026-01-01 | base row |"
+    row_x1 = "| X | PR1 | 2026-02-01 | target row |"
+    row_x2 = "| X | PR2 | 2026-02-02 | branch row |"
+
+    def md(*rows):
+        return ("# Done log\n\n" + header + "\n" + delimiter + "\n"
+                + "".join(row + "\n" for row in rows))
+
+    notes_base = '[[done]]\nid = "N1"\npr = "PR0"\nnote = "base note"\n'
+
+    cfg_dir = directory / "v2cfg"
+    cfg_dir.mkdir()
+
+    def cfg(name, text):
+        path = cfg_dir / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    md_table = ('[[table]]\npath = "done.md"\nformat = "markdown"\n'
+                'header = "| id | pr | closed | note |"\nkey = ["id", "pr"]\n')
+    cfg_frozen = cfg("frozen.toml",
+                     "schema-version = 2\n\n" + md_table + 'edit = "frozen"\n')
+    cfg_keystable = cfg("keystable.toml",
+                        "schema-version = 2\n\n" + md_table + 'edit = "key-stable"\n')
+    cfg_toml = cfg("toml.toml",
+                   'schema-version = 2\n\n[[table]]\npath = "notes.toml"\nformat = "toml"\n'
+                   'array = "done"\nkey = ["id", "pr"]\nedit = "key-stable"\n')
+    cfg_idonly = cfg("idonly.toml",
+                     'schema-version = 2\n\n[[table]]\npath = "done.md"\nformat = "markdown"\n'
+                     'header = "| id | pr | closed | note |"\nkey = ["id"]\nedit = "key-stable"\n')
+    cfg_badheader = cfg("badheader.toml",
+                        'schema-version = 2\n\n[[table]]\npath = "done.md"\nformat = "markdown"\n'
+                        'header = "| id | status |"\nkey = ["id"]\nedit = "frozen"\n')
+    cfg_typokey = cfg("typokey.toml",
+                      'schema-version = 2\n\n[[table]]\npath = "done.md"\nformat = "markdown"\n'
+                      'header = "| id | pr | closed | note |"\nkey = ["id", "typo"]\nedit = "frozen"\n')
+    cfg_two = cfg("two.toml",
+                  "schema-version = 2\n\n" + md_table + 'edit = "frozen"\n\n'
+                  '[[table]]\npath = "newlog.md"\nformat = "markdown"\n'
+                  'header = "| id | pr |"\nkey = ["id", "pr"]\nedit = "frozen"\n')
+    cfg_tomlbad = cfg("tomlbad.toml",
+                      'schema-version = 2\n\n[[table]]\npath = "notes2.toml"\nformat = "toml"\n'
+                      'array = "bad"\nkey = ["id"]\nedit = "key-stable"\n')
+    cfg_unknown = cfg("unknown.toml",
+                      "schema-version = 2\nsurprise = 1\n\n" + md_table + 'edit = "frozen"\n')
+    cfg_mixed = cfg("mixed.toml",
+                    'schema-version = 2\n'
+                    'opt-out-marker = "<!-- aiqt-record-section: superseded -->"\n\n'
+                    '[[record]]\npath = "done.md"\n'
+                    "heading-pattern = '^## NEVER-MATCHES-ANY-REAL-HEADING$'\n\n"
+                    + md_table + 'edit = "frozen"\n')
+
+    root = directory / "v2repo"
+    root.mkdir()
+    _selftest_git(root, ["init", "-q", "-b", "main"])
+    _selftest_git(root, ["config", "user.name", "AIQT Self-Test"])
+    _selftest_git(root, ["config", "user.email", "selftest@example.invalid"])
+    (root / "done.md").write_text(md(row_y), encoding="utf-8")
+    (root / "notes.toml").write_text(notes_base, encoding="utf-8")
+    _selftest_git(root, ["add", "-A"])
+    _selftest_git(root, ["commit", "-q", "-m", "fork point"])
+    fork = _selftest_git(root, ["rev-parse", "HEAD"])
+    (root / "done.md").write_text(md(row_y, row_x1), encoding="utf-8")
+    _selftest_git(root, ["add", "-A"])
+    _selftest_git(root, ["commit", "-q", "-m", "target gains X PR1 after the fork"])
+    target = _selftest_git(root, ["rev-parse", "HEAD"])
+
+    feat = _v2_branch_commit(root, "v2-feat", fork,
+                             {"done.md": md(row_y, row_x2)}, "branch adds X PR2")
+
+    # The seed: the resolver kept the branch's (X, PR2) and replaced the target's (X, PR1).
+    m1 = _v2_synthetic_merge(root, feat, [target, feat], "resolver replaced X PR1")
+    expect("seed: the target's (X, PR1) row replaced by the branch's (X, PR2)",
+           _quiet_run(root, cfg_frozen, True, m1, None, None), 1)
+    with _swapped("_r1_findings", lambda decl, base_rows, post_rows: []):
+        expect("seed passes once the R1 check is removed (mutant)",
+               _quiet_run(root, cfg_frozen, True, m1, None, None), 0)
+    with _swapped("_r1_base_commit",
+                  lambda target_commit, base_commit:
+                  base_commit if base_commit is not None else target_commit):
+        expect("seed passes when R1 compares the merge-base instead of the first parent (mutant)",
+               _quiet_run(root, cfg_frozen, True, m1, None, None), 0)
+
+    # The mirror: the resolver kept (X, PR1) and dropped the branch's (X, PR2).
+    m2 = _v2_synthetic_merge(root, target, [target, feat], "resolver dropped X PR2")
+    expect("mirror: the branch's (X, PR2) row dropped",
+           _quiet_run(root, cfg_frozen, True, m2, None, None), 1)
+    with _swapped("_r2_findings",
+                  lambda decl, mergebase_rows, branch_rows, post_rows: []):
+        expect("mirror passes once the R2 check is removed (mutant)",
+               _quiet_run(root, cfg_frozen, True, m2, None, None), 0)
+
+    # Side-by-side control: both rows preserved; id-only keying would refuse this legitimate state.
+    m3_tree = _v2_branch_commit(root, "v2-m3tree", target,
+                                {"done.md": md(row_y, row_x1, row_x2)}, "both rows kept")
+    m3 = _v2_synthetic_merge(root, m3_tree, [target, feat], "both rows preserved")
+    expect("control: (X, PR1) and (X, PR2) side by side are both preserved",
+           _quiet_run(root, cfg_frozen, True, m3, None, None), 0)
+    with _swapped("_key_positions", lambda header_cells, key, where: (0,)):
+        expect("side-by-side rows fail under id-only keying (naive variant)",
+               _quiet_run(root, cfg_frozen, True, m3, None, None), 2)
+    expect("duplicate key under a declared id-only key",
+           _quiet_run(root, cfg_idonly, True, m3, None, None), 2)
+    with _swapped("_register_key",
+                  lambda rows, key, row, where: rows.__setitem__(key, row)):
+        expect("duplicate key accepted once the duplicate guard is removed (mutant)",
+               _quiet_run(root, cfg_idonly, True, m3, None, None), 0)
+
+    # A plain branch deletion of a base row survives a clean merge only if the gate refuses it.
+    deleter = _v2_branch_commit(root, "v2-del", fork, {"done.md": md()},
+                                "branch deletes the base row")
+    del_tree = _v2_branch_commit(root, "v2-del-tree", target, {"done.md": md(row_x1)},
+                                 "clean-merge resolution without Y")
+    m_del = _v2_synthetic_merge(root, del_tree, [target, deleter], "clean merge, Y gone")
+    expect("a plain branch deletion of a base row",
+           _quiet_run(root, cfg_frozen, True, m_del, None, None), 1)
+    with _swapped("_r1_findings", lambda decl, base_rows, post_rows: []):
+        expect("base-row deletion passes once the R1 check is removed (mutant)",
+               _quiet_run(root, cfg_frozen, True, m_del, None, None), 0)
+
+    # The resolver ran on the branch (target merged into the branch) before the PR merge.
+    resolver_on_branch = _v2_synthetic_merge(root, feat, [feat, target],
+                                             "branch merges target, resolver drops X PR1")
+    m4 = _v2_synthetic_merge(root, feat, [target, resolver_on_branch], "PR merge")
+    expect("resolver ran on the branch before the merge",
+           _quiet_run(root, cfg_frozen, True, m4, None, None), 1)
+    with _swapped("_r1_findings", lambda decl, base_rows, post_rows: []):
+        expect("resolver-on-branch passes once the R1 check is removed (mutant)",
+               _quiet_run(root, cfg_frozen, True, m4, None, None), 0)
+
+    # A single-parent squash commit, no --branch-ref: R1 alone must still run (and only R1).
+    squash_drop = _v2_branch_commit(root, "v2-squash-drop", target,
+                                    {"done.md": md(row_y)}, "squash drops X PR1")
+    squash_clean = _v2_branch_commit(
+        root, "v2-squash-clean", target,
+        {"done.md": md(row_y, row_x1, "| Z | PR3 | 2026-02-20 | squash row |")},
+        "squash appends Z PR3")
+    expect("a single-parent squash dropping a row, no --branch-ref",
+           _quiet_run(root, cfg_frozen, True, squash_drop, None, None), 1)
+    with _swapped("_r1_findings", lambda decl, base_rows, post_rows: []):
+        expect("the squash drop passes once the R1 check is removed (mutant)",
+               _quiet_run(root, cfg_frozen, True, squash_drop, None, None), 0)
+    expect("a clean single-parent squash, no --branch-ref",
+           _quiet_run(root, cfg_frozen, True, squash_clean, None, None), 0)
+
+    # Relabelling a key cell is a disappearance of the old key, even in key-stable mode.
+    relabel = _v2_branch_commit(
+        root, "v2-relabel", target,
+        {"done.md": md(row_y, "| X | PR9 | 2026-02-01 | target row |")},
+        "key cell PR1 relabelled to PR9")
+    m6 = _v2_synthetic_merge(root, relabel, [target, relabel], "relabel lands")
+    expect("a relabelled key cell reads as a disappearance in key-stable mode",
+           _quiet_run(root, cfg_keystable, True, m6, None, None), 1)
+    with _swapped("_r1_findings", lambda decl, base_rows, post_rows: []):
+        expect("the relabel passes once the R1 check is removed (mutant)",
+               _quiet_run(root, cfg_keystable, True, m6, None, None), 0)
+
+    # A non-key cell edit: refused in frozen mode (R3), allowed in key-stable mode, and the key-stable
+    # allowance fails under exact-row identity (the naive variant that cannot tell edits from drops).
+    edited = _v2_branch_commit(
+        root, "v2-edit", target,
+        {"done.md": md("| Y | PR0 | 2026-01-01 | corrected row |", row_x1)},
+        "note cell corrected in place")
+    m7 = _v2_synthetic_merge(root, edited, [target, edited], "correction lands")
+    expect("a frozen row edited in place",
+           _quiet_run(root, cfg_frozen, True, m7, None, None), 1)
+    with _swapped("_r3_findings", lambda decl, base_rows, post_rows: []):
+        expect("the frozen edit passes once the R3 check is removed (mutant)",
+               _quiet_run(root, cfg_frozen, True, m7, None, None), 0)
+    expect("control: a key-stable row corrected in place",
+           _quiet_run(root, cfg_keystable, True, m7, None, None), 0)
+    with _swapped("_key_positions",
+                  lambda header_cells, key, where: tuple(range(len(header_cells)))):
+        expect("the in-place correction fails under exact-row identity (naive variant)",
+               _quiet_run(root, cfg_keystable, True, m7, None, None), 1)
+
+    # A blank line inserted mid-table orphans the tail rows out of the table.
+    blanked = _v2_branch_commit(
+        root, "v2-blank", target,
+        {"done.md": "# Done log\n\n" + header + "\n" + delimiter + "\n"
+                    + row_y + "\n\n" + row_x1 + "\n"},
+        "blank line splits the table")
+    m8 = _v2_synthetic_merge(root, blanked, [target, blanked], "split table lands")
+    expect("a blank line mid-table orphans the tail rows",
+           _quiet_run(root, cfg_frozen, True, m8, None, None), 1)
+    with _swapped("_r1_findings", lambda decl, base_rows, post_rows: []):
+        expect("the orphaned tail passes once the R1 check is removed (mutant)",
+               _quiet_run(root, cfg_frozen, True, m8, None, None), 0)
+
+    # The whole declared file deleted: every row disappeared.
+    file_deleter = _v2_branch_commit(root, "v2-delete-file", target,
+                                     {"done.md": None}, "declared file deleted")
+    m10 = _v2_synthetic_merge(root, file_deleter, [target, file_deleter],
+                              "deletion lands")
+    expect("the declared file deleted",
+           _quiet_run(root, cfg_frozen, True, m10, None, None), 1)
+    with _swapped("_r1_findings", lambda decl, base_rows, post_rows: []):
+        expect("the file deletion passes once the R1 check is removed (mutant)",
+               _quiet_run(root, cfg_frozen, True, m10, None, None), 0)
+
+    # Reordering, mid-table insertion, re-padding, TOML reformatting, and escaped pipes are allowed, and
+    # each fails under the naive comparison it was designed against.
+    resorted = _v2_branch_commit(root, "v2-resort", target,
+                                 {"done.md": md(row_x1, row_y)}, "rows re-sorted")
+    mrs = _v2_synthetic_merge(root, resorted, [target, resorted], "re-sort lands")
+
+    def prefix_r1(decl, base_rows, post_rows):
+        base_list = list(base_rows.values())
+        post_list = list(post_rows.values())
+        if post_list[:len(base_list)] != base_list:
+            return ["{}: prefix mismatch".format(decl.path)]
+        return []
+
+    expect("control: the table re-sorted",
+           _quiet_run(root, cfg_frozen, True, mrs, None, None), 0)
+    with _swapped("_r1_findings", prefix_r1):
+        expect("re-sorting fails under a prefix comparison (naive variant)",
+               _quiet_run(root, cfg_frozen, True, mrs, None, None), 1)
+
+    inserted = _v2_branch_commit(
+        root, "v2-insert", target,
+        {"done.md": md(row_y, "| M | PR5 | 2026-02-10 | inserted |", row_x1)},
+        "row inserted mid-table")
+    mmi = _v2_synthetic_merge(root, inserted, [target, inserted], "insertion lands")
+    expect("control: a row inserted mid-table",
+           _quiet_run(root, cfg_frozen, True, mmi, None, None), 0)
+    with _swapped("_r1_findings", prefix_r1):
+        expect("mid-table insertion fails under a prefix comparison (naive variant)",
+               _quiet_run(root, cfg_frozen, True, mmi, None, None), 1)
+
+    repadded = _v2_branch_commit(
+        root, "v2-repad", target,
+        {"done.md": "# Done log\n\n" + header + "\n| :--- | ---: | :-: | --- |\n"
+                    "|  Y   | PR0 | 2026-01-01 |   base row |\n"
+                    "|   X | PR1  | 2026-02-01 | target row  |\n"},
+        "cells re-padded, alignment row changed")
+    mrp = _v2_synthetic_merge(root, repadded, [target, repadded], "re-padding lands")
+
+    def byte_rows(text, decl, where):
+        lines = text.split("\n")
+        start = _locate_header(lines, decl.header, where)
+        if start is None:
+            return None
+        rows = {}
+        for line in lines[start + 2:]:
+            if not line.startswith("|"):
+                break
+            rows[(line,)] = (line,)
+        return rows
+
+    expect("control: re-padding and an alignment-row change",
+           _quiet_run(root, cfg_frozen, True, mrp, None, None), 0)
+    with _swapped("_read_table_rows", byte_rows):
+        expect("re-padding fails under a byte comparison (naive variant)",
+               _quiet_run(root, cfg_frozen, True, mrp, None, None), 1)
+
+    reformatted = _v2_branch_commit(
+        root, "v2-toml-reformat", target,
+        {"notes.toml": 'done = [ { note = "base note", pr = "PR0", id = "N1" } ]\n'},
+        "TOML reformatted, same parsed rows")
+    mtr = _v2_synthetic_merge(root, reformatted, [target, reformatted],
+                              "reformatting lands")
+
+    def text_rows(text, decl, where):
+        return {(line,): (line,) for line in text.split("\n") if line.strip()}
+
+    expect("control: TOML key order and layout reformatted",
+           _quiet_run(root, cfg_toml, True, mtr, None, None), 0)
+    with _swapped("_read_table_rows", text_rows):
+        expect("TOML reformatting fails under a text comparison (naive variant)",
+               _quiet_run(root, cfg_toml, True, mtr, None, None), 1)
+
+    escaped = _v2_branch_commit(
+        root, "v2-escaped", target,
+        {"done.md": md(row_y, row_x1, "| E1 | PR6 | 2026-03-05 | a \\| b |")},
+        "escaped pipe inside a cell")
+    mep = _v2_synthetic_merge(root, escaped, [target, escaped], "escaped pipe lands")
+
+    def naive_split(line, where):
+        return line.rstrip(" \t").split("|")[1:-1]
+
+    expect("control: an escaped pipe inside a cell",
+           _quiet_run(root, cfg_frozen, True, mep, None, None), 0)
+    with _swapped("_split_cells", naive_split):
+        expect("an escaped pipe fails under a naive split (naive variant)",
+               _quiet_run(root, cfg_frozen, True, mep, None, None), 2)
+
+    # A table introduced since the base has nothing for R1; R2 still covers its branch-owned rows.
+    new_table = _v2_branch_commit(
+        root, "v2-newtable", target,
+        {"newlog.md": "| id | pr |\n| --- | --- |\n| L1 | PR4 |\n"},
+        "new declared table introduced on the branch")
+    mnt = _v2_synthetic_merge(root, new_table, [target, new_table], "new table lands")
+    expect("control: a table introduced since the base",
+           _quiet_run(root, cfg_two, True, mnt, None, None), 0)
+
+    # No config now and none at the pre-merge target stays NOT APPLICABLE.
+    expect("control: no config now or at the target is not applicable",
+           _quiet_run(root, root / ".aiqt" / "absent.toml", False, m3, None, None), 0)
+
+    # Ambiguous or malformed inputs fail closed, and each refusal is load-bearing.
+    expect("the declared header absent from a present file",
+           _quiet_run(root, cfg_badheader, True, m3, None, None), 2)
+    with _swapped("_require_present",
+                  lambda rows, decl, where: {} if rows is None else rows):
+        expect("the absent table passes once the presence check is removed (mutant)",
+               _quiet_run(root, cfg_badheader, True, m3, None, None), 0)
+
+    doubled = _v2_branch_commit(
+        root, "v2-doubled-header", target,
+        {"done.md": md(row_y, row_x1) + "\n```\n" + header + "\n```\n"},
+        "header duplicated inside a code fence")
+    m11 = _v2_synthetic_merge(root, doubled, [target, doubled], "doubled header lands")
+    expect("the header present twice (once inside a code fence)",
+           _quiet_run(root, cfg_frozen, True, m11, None, None), 2)
+    with _swapped("_locate_header",
+                  lambda lines, table_header, where:
+                  lines.index(table_header) if table_header in lines else None):
+        expect("the doubled header passes once the uniqueness check is removed (mutant)",
+               _quiet_run(root, cfg_frozen, True, m11, None, None), 0)
+
+    expect("a key column missing from the header",
+           _quiet_run(root, cfg_typokey, True, mrs, None, None), 2)
+    with _swapped("_key_positions",
+                  lambda header_cells, key, where:
+                  tuple(header_cells.index(name) for name in key if name in header_cells)):
+        expect("the missing key column passes once the column check is removed (mutant)",
+               _quiet_run(root, cfg_typokey, True, mrs, None, None), 0)
+
+    toml_missing = _v2_branch_commit(
+        root, "v2-toml-missing", target,
+        {"notes.toml": notes_base + '\n[[done]]\nid = "N2"\n'},
+        "TOML row missing a key field")
+    mtm = _v2_synthetic_merge(root, toml_missing, [target, toml_missing],
+                              "missing key field lands")
+    expect("a TOML row missing a key column",
+           _quiet_run(root, cfg_toml, True, mtm, None, None), 2)
+    with _swapped("_toml_row_key",
+                  lambda row, key, where:
+                  tuple(str(row.get(name, "")) for name in key)):
+        expect("the missing TOML key field passes once the per-row check is removed (mutant)",
+               _quiet_run(root, cfg_toml, True, mtm, None, None), 0)
+
+    extra_cell = _v2_branch_commit(
+        root, "v2-extra-cell", target,
+        {"done.md": md(row_y, row_x1, "| W | PR7 | 2026-03-01 | extra | spill |")},
+        "row with one cell too many")
+    mwc = _v2_synthetic_merge(root, extra_cell, [target, extra_cell],
+                              "extra cell lands")
+    expect("a row with one cell too many",
+           _quiet_run(root, cfg_frozen, True, mwc, None, None), 2)
+    with _swapped("_check_cell_count", lambda count, expected, where: None):
+        expect("the wrong cell count passes once the count check is removed (mutant)",
+               _quiet_run(root, cfg_frozen, True, mwc, None, None), 0)
+    few_cells = _v2_branch_commit(
+        root, "v2-few-cells", target,
+        {"done.md": md(row_y, row_x1, "| V | PR8 |")},
+        "row with cells missing")
+    mwf = _v2_synthetic_merge(root, few_cells, [target, few_cells],
+                              "missing cells land")
+    expect("a row with one cell too few",
+           _quiet_run(root, cfg_frozen, True, mwf, None, None), 2)
+
+    cr_row = _v2_branch_commit(
+        root, "v2-cr", target,
+        {"done.md": md(row_y, row_x1, "| C | PR9 | 2026-03-02 | a\rb |")},
+        "CR inside a table line")
+    mcr = _v2_synthetic_merge(root, cr_row, [target, cr_row], "CR lands")
+    expect("a CR inside a table line",
+           _quiet_run(root, cfg_frozen, True, mcr, None, None), 2)
+    with _swapped("_check_no_cr", lambda line, where: None):
+        expect("the CR passes once the CR check is removed (mutant)",
+               _quiet_run(root, cfg_frozen, True, mcr, None, None), 0)
+
+    bad_array = _v2_branch_commit(root, "v2-toml-badarray", target,
+                                  {"notes2.toml": "bad = [1, 2]\n"},
+                                  "declared TOML array of non-tables")
+    mtb = _v2_synthetic_merge(root, bad_array, [target, bad_array],
+                              "bad array lands")
+    expect("a declared TOML array that is not an array of tables",
+           _quiet_run(root, cfg_tomlbad, True, mtb, None, None), 2)
+    with _swapped("_toml_rows_array",
+                  lambda data, array, where:
+                  ([row for row in data[array] if isinstance(row, dict)]
+                   if isinstance(data, dict) and array in data
+                   and isinstance(data[array], list) else None)):
+        expect("the non-table array passes once the shape check is removed (mutant)",
+               _quiet_run(root, cfg_tomlbad, True, mtb, None, None), 0)
+
+    non_scalar = _v2_branch_commit(
+        root, "v2-toml-nonscalar", target,
+        {"notes.toml": notes_base + '\n[[done]]\nid = "N3"\npr = ["PR1"]\nnote = "x"\n'},
+        "non-scalar key value")
+    mts = _v2_synthetic_merge(root, non_scalar, [target, non_scalar],
+                              "non-scalar key value lands")
+    expect("a non-scalar TOML key value",
+           _quiet_run(root, cfg_toml, True, mts, None, None), 2)
+    with _swapped("_toml_row_value",
+                  lambda value, where:
+                  value if type(value) in (str, int) else repr(value)):
+        expect("the non-scalar key value passes once the scalar check is removed (mutant)",
+               _quiet_run(root, cfg_toml, True, mts, None, None), 0)
+
+    expect("a version-2 config with unknown top-level keys",
+           _quiet_run(root, cfg_unknown, True, m3, None, None), 2)
+    with _swapped("_check_v2_top_keys", lambda data, path: None):
+        expect("the unknown config key passes once the key check is removed (mutant)",
+               _quiet_run(root, cfg_unknown, True, m3, None, None), 0)
+
+    # The graph handling is shared with the heading leg: a version-2 config mixing both kinds works on a
+    # two-parent merge, keeps the version-1 graph rules when [[record]] entries are present, and an
+    # octopus merge stays fail-closed for the table leg too.
+    expect("a version-2 config mixing [[record]] and [[table]]",
+           _quiet_run(root, cfg_mixed, True, m3, None, None), 0)
+    expect("[[record]] entries keep the branch-graph requirement on a single parent",
+           _quiet_run(root, cfg_mixed, True, squash_clean, None, None), 2)
+    octopus = _v2_synthetic_merge(root, target, [target, feat, deleter],
+                                  "octopus merge")
+    expect("an octopus merge fails closed for the table leg",
+           _quiet_run(root, cfg_frozen, True, octopus, None, None), 2)
+
+    # A merge that deletes a [[table]] declaration and that table's rows together: the first parent's
+    # config still governs R1, so the drop is refused unless the base-config read is removed.
+    nine = directory / "v2nine"
+    nine.mkdir()
+    _selftest_git(nine, ["init", "-q", "-b", "main"])
+    _selftest_git(nine, ["config", "user.name", "AIQT Self-Test"])
+    _selftest_git(nine, ["config", "user.email", "selftest@example.invalid"])
+    (nine / ".aiqt").mkdir()
+    extra_decl = ('[[table]]\npath = "extra.md"\nformat = "markdown"\n'
+                  'header = "| id | pr |"\nkey = ["id", "pr"]\nedit = "frozen"\n')
+    (nine / ".aiqt" / "record-sections.toml").write_text(
+        "schema-version = 2\n\n" + md_table + 'edit = "frozen"\n\n' + extra_decl,
+        encoding="utf-8")
+    (nine / "done.md").write_text(md(row_y, row_x1), encoding="utf-8")
+    (nine / "extra.md").write_text("| id | pr |\n| --- | --- |\n| A1 | PR0 |\n",
+                                   encoding="utf-8")
+    _selftest_git(nine, ["add", "-A"])
+    _selftest_git(nine, ["commit", "-q", "-m", "adopted config and tables"])
+    nine_base = _selftest_git(nine, ["rev-parse", "HEAD"])
+    nine_narrow = _v2_branch_commit(
+        nine, "v2-narrow", nine_base,
+        {".aiqt/record-sections.toml": "schema-version = 2\n\n" + extra_decl,
+         "done.md": md(row_y)},
+        "declaration and row removed together")
+    m9 = _v2_synthetic_merge(nine, nine_narrow, [nine_base, nine_narrow],
+                             "narrowing merge lands")
+    nine_config = nine / ".aiqt" / "record-sections.toml"
+    expect("a merge removing a [[table]] declaration and its rows together",
+           _quiet_run(nine, nine_config, True, m9, None, None), 1)
+    with _swapped("_base_config_tables",
+                  lambda root_path, config_path, target_commit: ()):
+        expect("the declaration removal passes once the base-config read is removed (mutant)",
+               _quiet_run(nine, nine_config, True, m9, None, None), 0)
+
+    return failures
 
 
 def _parser():
