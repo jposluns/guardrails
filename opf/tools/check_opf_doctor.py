@@ -2234,7 +2234,7 @@ def _claude_hook_self_test():
     real path), a symlinked store tree fails closed, the registration is protected at its real
     path, the reserved imports store home denies, TodoWrite takes R7's scan, and a malformed
     unknown-tool envelope (a null tool_input, no session cwd, an empty tool_name) fails closed.
-    The round-6 change inverts the Bash rule (D-DISCARD-SOUND-RULE): instead of soundly lexing
+    The round-6 decision inverts the Bash rule: instead of soundly lexing
     every exotic shell form, the hook decides PROVABLY PLAIN first (plain words, simple whole-word
     quotes, no substitution, no parameter or arithmetic expansion, no eval, no line continuation, no
     ANSI-C or locale quoting, no unquoted here-document, no interpreter with inline code; a QUOTED
@@ -3147,7 +3147,7 @@ def _claude_hook_self_test():
             deny("edit-frozen-real-dir-denied",
                  payload("Edit", dict(file_path=os.path.join(root4, "site_docs", "OLD.md"),
                                       old_string="a", new_string="b"), root4), "frozen")
-            # ROUND 6 (QA round 6, D-DISCARD-SOUND-RULE): the hook decides PROVABLY PLAIN first and
+            # ROUND 6 (QA round 6, sound-lexing rule dropped): the hook decides PROVABLY PLAIN first and
             # judges every other command coarsely (deny when the cwd or a literal path word lies in
             # a product root, else allow). The three round-6 bypass reproductions each hid the
             # protected path from the old sound scan; each now denies as not-provably-plain from a
@@ -3426,7 +3426,7 @@ def _claude_hook_self_test():
                  env=dict(GIT_TRACE=os.path.join(root, "TODO.md")))
             allow("bash-r9-ambient-git-trace-flag-allowed",
                   payload("Bash", dict(command="git status"), elsewhere), env=dict(GIT_TRACE="1"))
-            # ROUND 10 (QA round 10, ruling D-RESCOPES-A): the container rule kept losing to
+            # ROUND 10 (QA round 10 ruling): the container rule kept losing to
             # spelling, so it no longer parses toward completeness. (1) A directory-plus-basename
             # join is container-checked even when another word already resolves to it (one extra
             # word spelling the joined directory, a cp backup suffix or a second operand, hid it).
@@ -4333,7 +4333,7 @@ def _claude_hook_self_test():
           "structured deny, an empty tool_name exits 2, and a single-quoted literal newline "
           "keeps a writer spelling non-pristine. ROUND 6: the Bash rule decides "
           "provably plain first and judges every other command by a coarse "
-          "product-root check (D-DISCARD-SOUND-RULE); an unquoted here-document "
+          "product-root check (sound-lexing rule dropped); an unquoted here-document "
           "substitution, a commented-parenthesis command substitution and a line "
           "continuation before ANSI-C quoting each deny from a product cwd (the "
           "round-6 reproductions), a plain command touching nothing protected and "
