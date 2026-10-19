@@ -42,9 +42,15 @@ never carries onFailure, and no Stop, TeammateIdle or other non-PreToolUse hook 
 the switch on, an authored timeout at or below the dispatcher's PreToolUse budget plus the margin its
 deadline line reserves (PRETOOL_BUDGET_SECONDS + (HOOK_TIMEOUT_SECONDS - PRETOOL_BUDGET_SECONDS), both
 read from the dispatcher, which is TIMEOUT because check_deadline holds the mirror to it) fails closed
-(exit 2, naming the hook and the minimum), for a hook of any event, so every rendered timeout leaves
-the dispatcher more time past its budget than the margin its own deadline design reserves. While the
-switch is off an authored timeout is not rendered, so only the TIMEOUT_MIN to TIMEOUT_MAX range applies.
+(exit 2, naming the hook and the minimum), for a hook of any event, default or stage, so every
+rendered AUTHORED timeout leaves the dispatcher more time past its budget than the margin its own
+deadline design reserves. A hook that authors no timeout is the exception: it renders TIMEOUT, which is
+exactly the budget plus the margin, the value an author may not write. Refusing an authored value above
+the budget but not above budget plus margin (9 or 10 seconds today) is a chosen stricter policy, not a
+mechanical need: today's 8-second budget is at least 1 second below those timeouts, no less than the
+DEADLINE_MIN_MARGIN slack check_deadline accepts for the default timeout, so a PreToolUse hook can still
+fail closed at the dispatcher's own deadline. While the switch is off an authored timeout is not
+rendered, so only the TIMEOUT_MIN to TIMEOUT_MAX range applies.
   gen_hooks.py             regenerate the plugin surface
   gen_hooks.py --check     fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
   gen_hooks.py --self-test build synthetic trees and assert the generator's own fail-closed invariants
@@ -157,7 +163,8 @@ HANDLER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 TIMEOUT = 10  # default seconds the platform gives each hook command; while on-failure-render is off,
 # the one source of every hook's deadline (an authored per-hook timeout renders only with the switch on)
 TIMEOUT_MIN, TIMEOUT_MAX = 1, 600  # the accepted range of an authored per-hook timeout, in seconds
-# (with on-failure-render on, check_authored_timeouts also refuses one the dispatcher deadline cannot fit)
+# (with on-failure-render on, check_authored_timeouts also refuses one at or below the dispatcher's
+# PreToolUse budget plus its margin)
 # onFailure is DERIVED, never authored: with the on-failure-render switch on, "onFailure": "block" is
 # rendered exactly when the event is in ONFAILURE_EVENTS, the default is "block" and the stage is
 # "enforce"; never for a warn hook, and never on Stop or TeammateIdle, where the documented behaviour
@@ -396,16 +403,22 @@ def check_deadline(script_text):
 
 
 def check_authored_timeouts(hooks, margin, name):
-    """Fail closed (ValueError) when, with the on-failure-render switch on, a hook authors a timeout the
-    dispatcher's deadline cannot fit. margin is the dispatcher's own margin as check_deadline returns it,
-    so its budget is PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - margin (HOOK_TIMEOUT_SECONDS equals
-    TIMEOUT, which check_deadline enforces). An authored timeout at or below that budget plus the same
-    margin is refused, so an accepted one leaves the hook more time past its budget than the slack the
-    dispatcher's own deadline line reserves (the platform's stop is never configured to land inside the
-    budget or that slack). budget + margin is HOOK_TIMEOUT_SECONDS by construction, so authoring the
-    default itself is refused too (leaving the timeout unauthored renders it). The rule covers a hook of
-    any event, the stricter reading: with the switch on every launcher renders its authored timeout, and
-    a hook stopped by the platform loses any decision it has not yet written. The arithmetic is exact
+    """Fail closed (ValueError) when, with the on-failure-render switch on, a hook authors a timeout at or
+    below the dispatcher's PreToolUse budget plus its margin. margin is the dispatcher's own margin as
+    check_deadline returns it, so its budget is PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - margin
+    (HOOK_TIMEOUT_SECONDS equals TIMEOUT, which check_deadline enforces). An authored timeout at or below
+    that budget plus the same margin is refused, so an accepted AUTHORED timeout leaves the hook more time
+    past its budget than the slack the dispatcher's own deadline line reserves. budget + margin is
+    HOOK_TIMEOUT_SECONDS by construction, so authoring the default itself is refused too, while a hook
+    that authors no timeout is not checked and renders TIMEOUT, exactly the budget plus the margin: the
+    guarantee covers authored timeouts only. Refusing a value above the budget but not above budget plus
+    margin (9 or 10 seconds today) is a chosen stricter policy, not a mechanical need: today's 8-second
+    budget is at least 1 second below those timeouts, no less than the DEADLINE_MIN_MARGIN slack
+    check_deadline accepts for the default timeout, so a PreToolUse hook can still fail closed at the
+    dispatcher's own deadline. The rule covers a
+    hook of any event, default or stage, the stricter reading: with the switch on every launcher renders
+    its configured timeout (the authored value where one is authored), and a hook stopped by the platform
+    loses any decision it has not yet written. The arithmetic is exact
     (Fraction), so no float rounding can move the boundary. The caller runs this only with the switch on;
     while it is off no authored timeout renders, and only load_manifest's TIMEOUT_MIN to TIMEOUT_MAX
     range applies."""
@@ -436,7 +449,8 @@ def render_hooks_json(hooks, on_failure_render=False):
     timeout, and exactly the enforce-stage PreToolUse hooks whose default is "block" also carry
     "onFailure": "block" (never a warn hook, never any other event). This function renders what it is
     given; build_desired runs check_authored_timeouts first, so the generator never renders an authored
-    timeout the dispatcher deadline cannot fit."""
+    timeout at or below the dispatcher's budget plus its margin (a hook that authors none renders
+    TIMEOUT, which equals that sum)."""
     events = {}
     for hook in sorted(hooks, key=lambda h: (KNOWN_EVENTS.index(h["event"]), h["id"])):
         entry = {}
@@ -751,8 +765,10 @@ def main():
 #      plus the margin its deadline line reserves fails closed (exit 2, the refusal naming the hook and
 #      the minimum), tested just below, exactly at and just above the boundary on a PreToolUse and a
 #      Stop hook, and with a stub margin of 3.5 (the boundary holds and the refusal names the budget and
-#      margin read from the stub); with the switch false or absent those values still generate and
-#      render the default timeout.
+#      margin read from the stub); a warn hook, a bake-stage block hook and a second hook are each
+#      refused just below it and generate just above it, so the rule cannot narrow to the onFailure
+#      predicate or to the first hook; with the switch false or absent the below, at and above values
+#      still generate and render the default timeout.
 # Every vector that removes the entries its own faults caused (cases 20b, 21b, 27 and 28)
 # does so by PROVENANCE, never by message text: each named entry from the staged cleanup,
 # the removal and absence helpers and the launch diagnostic carries its stage and the
@@ -3586,23 +3602,40 @@ def self_test_main(_nested=False):
                 failures.append("project-settings switch case: hooks.json must show the switch "
                                 "applied (the authored timeout and onFailure on the project control)")
 
-        # 35. With on-failure-render true, an authored timeout the dispatcher deadline cannot fit fails
-        #     closed: at or below the stub's PreToolUse budget plus the margin its own deadline line
-        #     reserves (10 seconds with the stub's lines) it exits 2 with a message naming the hook and
-        #     the minimum, and one second above it generates and renders. The boundary values and the
-        #     minimum are spelled literally (never built from the module constants). Each is tested just
-        #     below, exactly at and just above the boundary on a PreToolUse block hook and on a Stop
-        #     hook (the rule covers every event); a stub whose margin is 3.5 moves the budget but not
-        #     the boundary, and its refusal names the budget and margin read from that stub, so a
-        #     boundary built from a literal margin is caught. With the switch false or absent, the same
-        #     values still generate and render the default 10 (the off render is unchanged).
-        def fit_case(label, switch_line, timeout, want, event="PreToolUse", margin="2.0", needles=()):
+        # 35. With on-failure-render true, an authored timeout at or below the stub's PreToolUse budget
+        #     plus the margin its own deadline line reserves (10 seconds with the stub's lines) fails
+        #     closed: it exits 2 with a message naming the hook and the minimum, and one second above it
+        #     generates and renders. The boundary values and the minimum are spelled literally (never
+        #     built from the module constants). Each is tested just below, exactly at and just above the
+        #     boundary on a PreToolUse block hook and on a Stop hook (the rule covers every event); a
+        #     stub whose margin is 3.5 moves the budget but not the boundary, and its refusal names the
+        #     budget and margin read from that stub, so a boundary built from a literal margin is caught.
+        #     The rule's scope is pinned by shape: a warn (bake) hook and a bake-stage block hook, which
+        #     never carry onFailure, and a second hook behind a first that authors a fitting 11, are each
+        #     refused at 9 and generate at 11, so a check narrowed to block defaults, to the enforce
+        #     stage or to the first hook is caught. With the switch false or absent, 9, 10 and 11 still
+        #     generate and render the default 10 (the off render is unchanged).
+        def fit_case(label, switch_line, timeout, want, event="PreToolUse", margin="2.0", needles=(),
+                     shape="block"):
             tree = tmp / ("fit-" + label)
             tree.mkdir()
             _build_tree(tree)
             if switch_line:
                 _mutate(tree, plug_anchor, plug_anchor + "\n" + switch_line)
-            _mutate(tree, 'default = "block"', 'default = "block"\ntimeout = {}'.format(timeout))
+            first_lines = {"block": 'default = "block"', "warn": 'default = "warn"\nstage = "bake"',
+                           "bake": 'default = "block"\nstage = "bake"', "second": 'default = "block"'}[shape]
+            _mutate(tree, 'default = "block"', first_lines + "\ntimeout = {}".format(
+                11 if shape == "second" else timeout))
+            if shape == "second":
+                hooks_dir = tree / ".aiqt" / "core" / "hooks"
+                for path, tail in ((hooks_dir / "manifest.toml", (
+                        '\n[[hook]]\nid = "selftest-second"\nrules = ["tsthk1"]\nplatform = "claude-code"\n'
+                        'event = "PreToolUse"\nmatcher = "Bash"\nhandler = "second_handler"\n'
+                        'default = "block"\ntimeout = {}\nclass = "b"\n'
+                        'residue = "A second self-test control."\n'.format(timeout))),
+                        (hooks_dir / "scripts" / SCRIPT_NAME,
+                         "def second_handler(data):\n    return (0, None, None)\n")):
+                    path.write_text(path.read_text(encoding="utf-8") + tail, encoding="utf-8")
             if event != "PreToolUse":
                 _mutate(tree, 'event = "PreToolUse"\nmatcher = "Bash"', 'event = "{}"'.format(event))
             if margin != "2.0":
@@ -3625,7 +3658,9 @@ def self_test_main(_nested=False):
                                     .format(label, needle, out.getvalue().strip()))
             if want == 0:
                 rendered = json.loads((tree / HOOKS_JSON_REL).read_text(encoding="utf-8"))
-                got = rendered["hooks"][event][0]["hooks"][0].get("timeout")
+                handler = "second_handler" if shape == "second" else "test_handler"
+                launchers = [h for e in rendered["hooks"][event] for h in e["hooks"] if h["args"][-1] == handler]
+                got = launchers[0].get("timeout") if len(launchers) == 1 else launchers
                 expected = timeout if switch_line == "on-failure-render = true" else 10
                 if got != expected:
                     failures.append("dispatcher-fit timeout ({}): expected a rendered timeout of {}, got {!r}"
@@ -3646,9 +3681,20 @@ def self_test_main(_nested=False):
                 ("margin-3.5-above", switch_on, 11, 0, "PreToolUse", "3.5", ()),
                 ("off-below", "on-failure-render = false", 9, 0, "PreToolUse", "2.0", ()),
                 ("off-at", "on-failure-render = false", 10, 0, "PreToolUse", "2.0", ()),
+                ("off-above", "on-failure-render = false", 11, 0, "PreToolUse", "2.0", ()),
                 ("absent-below", None, 9, 0, "PreToolUse", "2.0", ()),
-                ("absent-at", None, 10, 0, "PreToolUse", "2.0", ())):
+                ("absent-at", None, 10, 0, "PreToolUse", "2.0", ()),
+                ("absent-above", None, 11, 0, "PreToolUse", "2.0", ())):
             fit_case(label, switch_line, timeout, want, event, margin, needles)
+        for label, shape, timeout, want, needles in (
+                ("warn-below", "warn", 9, 2, refusal + ("timeout 9 ",)),
+                ("warn-above", "warn", 11, 0, ()),
+                ("bake-below", "bake", 9, 2, refusal + ("timeout 9 ",)),
+                ("bake-above", "bake", 11, 0, ()),
+                ("second-below", "second", 9, 2,
+                 ("[[hook]] selftest-second", "timeout 9 ", "minimum authored timeout is 11")),
+                ("second-above", "second", 11, 0, ())):
+            fit_case(label, switch_on, timeout, want, needles=needles, shape=shape)
     finally:
         try:
             _rmtree_verified(tmp, "suite temp cleanup")
@@ -3773,7 +3819,8 @@ def self_test_main(_nested=False):
           "tree's hooks.json shows the switch applied; with the switch on, an authored timeout at or "
           "below the dispatcher's budget plus its own margin is refused naming the hook and the "
           "minimum (just below, at and just above the boundary, on a PreToolUse and a Stop hook and "
-          "under a moved margin), while with it off or absent those values still render the default"
+          "under a moved margin), a warn hook, a bake-stage hook and a second hook each refused at 9 "
+          "and generating at 11, while with it off or absent 9, 10 and 11 still render the default"
           + note)
     return 0
 
