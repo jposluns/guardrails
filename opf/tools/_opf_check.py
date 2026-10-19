@@ -2019,7 +2019,7 @@ class _PrefixedReport:
 
 
 def _reserved_numbers(root_fd, rep):
-    """Homes 2: the clean-series numbers the id reservations hold, as {namespace: set of numbers}, and
+    """Homes 2: the numbers the id reservations hold, per series key as {series key: set of numbers}, and
     whether every reservation evaluated. C-NO-DELETION and C-CONTIGUITY skip such a number only where no
     present record carries it and the prior committed snapshot held no record with that id
     (_split_reserved), so this reads each reservation read-only and for that purpose alone. Spec 8.2
@@ -2042,8 +2042,10 @@ def _reserved_numbers(root_fd, rep):
     ({}, False), so the caller grades as though nothing were reserved, never a wider pass. A [claims]
     value is the number its run reserved under that key; a run that claimed several numbers under one key
     records only its new high-water, so if it never published, its lower numbers still read as missing
-    (conservative). An imported-series key reserves on the imported number line, which this doctor does
-    not grade, so it is validated and owner-checked but not used."""
+    (conservative). An imported-series key reserves on its own imported number line (spec 8.2: the next-ID
+    derivation applies per series key), so its numbers are returned under the quoted key: the imported
+    deletion and contiguity checks read them where the series is active, and any other key is simply never
+    looked up."""
     # Deferred: _opf_journal imports _opf_oplock, which imports this module.
     import _opf_journal
     import _opf_oplock
@@ -2123,8 +2125,7 @@ def _reserved_numbers(root_fd, rep):
         return {}, False
     reserved = {}
     for key, number in owners:
-        if ":" not in key:
-            reserved.setdefault(key, set()).add(number)
+        reserved.setdefault(key, set()).add(number)
     return reserved, True
 
 
@@ -2153,6 +2154,29 @@ def _prior_held(holdings, ns, n):
     spans = held.get(ns, ())
     i = bisect.bisect_right(spans, n, key=lambda span: span[0])
     return i > 0 and n <= spans[i - 1][1]
+
+
+def _imported_prior_holdings(obs):
+    """What the prior committed snapshot held on the imported number lines, for the reserved-number
+    exemption: ((the (series key, number) of every id its imported baseline enumerates, {}), None), or
+    (None, the reason) when no usable baseline was observed. Imported records never rotate (spec 12), so
+    the baseline enumerates every imported id the prior held, and the empty interval table lets
+    _prior_held and _split_reserved grade an imported key exactly as a clean namespace. A prior whose
+    imported member is absent or malformed decides nothing: the exemption is then CANNOT-EVALUATE
+    (_report_undecided), never granted."""
+    prior = obs.get("prior")
+    if prior is None:
+        return None, ("the prior committed snapshot observation was supplied but malformed"
+                      if obs.get("prior_malformed") else "no prior committed snapshot was supplied")
+    if prior["imported_malformed"]:
+        return None, "the prior committed snapshot observation was supplied but malformed"
+    if prior["imported"] is None:
+        return None, "the prior committed snapshot carries no imported-series baseline"
+    ids = set()
+    for rid in prior["imported"]:
+        shape = parse_series_id(rid)
+        ids.add((shape[0], shape[2]))
+    return (ids, {}), None
 
 
 def _split_reserved(ns, reserved, present, holdings):
@@ -2269,34 +2293,40 @@ def _gather_imported_rows(root_fd, machine_rel, enabled_types, rep):
     return rows, unread
 
 
-def _check_imported_worklog_contiguous(numbers, rep):
+def _check_imported_worklog_contiguous(numbers, rep, skipped=frozenset()):
     """C-CONTIGUITY on the imported:WL number line, graded apart from the clean worklog (spec 8.2: contiguity
     evaluates each series independently): the imported worklog tiles from imported:WL-1 with no gap. The two
     lines never merge, so an imported gap never breaks clean release tiling and an imported entry never fills
     a clean gap (clean release spans tile only the clean WL line, spec 8.2). A pairwise scan over the sorted
-    distinct present numbers, never sized by a high-water (F15); a duplicate is the C-ID-SPACE finding."""
+    distinct present numbers, never sized by a high-water (F15); a duplicate is the C-ID-SPACE finding. A
+    skipped number (an orphaned imported:WL reservation's, or one no usable baseline can decide, which the
+    caller reports; _split_reserved) is not reported missing, exactly as on the clean worklog line."""
     nums = sorted(set(numbers))
     if not nums:
         return
-    if nums[0] != 1:
+    if _unreserved(1, nums[0], skipped) != nums[0]:
         rep.finding("C-CONTIGUITY: the imported worklog does not start at imported:WL-1 (first present is "
                     "imported:WL-{}; each series tiles its own number line, spec 8.2)".format(nums[0]))
     for i in range(1, len(nums)):
-        if nums[i] != nums[i - 1] + 1:
+        missing = _unreserved(nums[i - 1] + 1, nums[i], skipped)
+        if missing != nums[i]:
             rep.finding("C-CONTIGUITY: the imported worklog is not contiguous; imported:WL-{} is missing (the "
-                        "imported line is graded apart from clean release tiling, spec 8.2)".format(
-                            nums[i - 1] + 1))
+                        "imported line is graded apart from clean release tiling, spec 8.2)".format(missing))
             break
 
 
-def _check_imported_no_deletion(rows, unread, high, floor, namespaces, rep):
+def _check_imported_no_deletion(rows, unread, high, floor, namespaces, reserved, holdings, no_holdings, rep):
     """C-NO-DELETION over the imported series (spec 8.2/8.3): for each required imported counter row, the
     present imported ids must be exactly floor+1 .. high-water on that row own number line, apart from the
     clean one. Imported records never rotate (spec 12), so the imported leaves are their only location. The
     same O(present) arithmetic as the clean scan: an overhang COUNT above the max present id, then the first
-    gap below it, never a range() expansion of the high-water (F15). A key whose leaf is unread is a named
-    CANNOT-EVALUATE for this check, never read as a deletion and never a silent per-series pass; a key whose
-    counter is absent or malformed (the C-COUNTERS finding) is skipped here."""
+    gap below it, never a range() expansion of the high-water (F15). A number an id reservation holds under
+    the key is skipped exactly as on the clean lines (spec 8.2: recovery treats a reserved number as issued),
+    only where no present row carries it and the prior imported baseline (`holdings`,
+    _imported_prior_holdings) held no record with that id (_split_reserved); one no usable baseline can
+    decide is a named CANNOT-EVALUATE (_report_undecided), never granted. A key whose leaf is unread is a
+    named CANNOT-EVALUATE for this check, never read as a deletion and never a silent per-series pass; a key
+    whose counter is absent or malformed (the C-COUNTERS finding) is skipped here."""
     present = {}
     for key, rid, _row in rows:
         present.setdefault(key, set()).add(parse_series_id(rid)[2])
@@ -2311,12 +2341,17 @@ def _check_imported_no_deletion(rows, unread, high, floor, namespaces, rep):
         base = floor.get(key, 0)
         nums = sorted(n for n in present.get(key, ()) if n > base)
         max_present = nums[-1] if nums else base
-        if hw > max_present:
+        issued, undecided = _split_reserved(key, reserved.get(key, ()), present.get(key, ()), holdings)
+        skipped = issued | undecided
+        owed = _unreserved_overhang(hw, max_present, skipped)
+        if owed > 0:
             rep.finding("C-NO-DELETION: {} allocated {}-<n> id(s) above {}-{} are absent from the imported "
                         "leaves (counters {} high-water is {}; imported records are immutable after "
-                        "publication, spec 8.2/8.3)".format(hw - max_present, key, key, max_present, key, hw))
+                        "publication, spec 8.2/8.3)".format(owed, key, key, max_present, key, hw))
+        _report_undecided("C-NO-DELETION", key, [n for n in undecided if base < n <= hw], no_holdings, rep)
         expected = base + 1
         for n in nums:
+            expected = _unreserved(expected, n, skipped)
             if n != expected:
                 rep.finding("C-NO-DELETION: {}-{} is absent from the imported leaves (an allocated id between "
                             "1 and {}-{} cannot be deleted; spec 8.2/8.3)".format(key, expected, key, max_present))
@@ -3575,6 +3610,10 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # though nothing were reserved, never a silently wider pass.
     reserved, reservations_ok = _reserved_numbers(root_fd, rep) if homes >= 2 else ({}, True)
     holdings, no_holdings = _prior_holdings(obs)
+    # The imported number lines take the SAME exemption, decided against the prior imported baseline
+    # (spec 8.2 derives the next ID per series key, the quoted "imported:<NS>" ones included, so an
+    # imported reservation's number is issued on its own line exactly as a clean one is on its own).
+    imp_holdings, imp_no_holdings = _imported_prior_holdings(obs) if imported else (None, None)
     present_wl = sorted(merged)
     wl_hw = high.get("WL")
     wl_issued, wl_undecided = _split_reserved("WL", reserved.get("WL", ()), merged, holdings)
@@ -3642,10 +3681,12 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                 break
             expected += 1
 
-    # The imported series owns BOTH sides per imported counter row too, on its own number line (spec 8.2/8.3).
+    # The imported series owns BOTH sides per imported counter row too, on its own number line (spec 8.2/8.3),
+    # with the reserved-number exemption read per imported key.
     if imported:
         _check_imported_no_deletion(imported_rows, imported_unread, high, floor,
-                                    _imported_counter_namespaces(enabled_types), rep)
+                                    _imported_counter_namespaces(enabled_types), reserved,
+                                    imp_holdings, imp_no_holdings, rep)
 
     rep.ran("C-PARTITION")
     for f in check_ids_partition(active_wl_ids, archive_wl_ids):
@@ -3659,15 +3700,24 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                       no_holdings, rep)
     _check_worklog_contiguous(merged.keys(), rep, wl_skipped)
     # imported:WL tiles its own line, apart from the clean tiling above (spec 8.2): `merged` stays clean-only,
-    # so clean release spans, frozen coverage and the changelog gates never read an imported entry. An unread
+    # so clean release spans, frozen coverage and the changelog gates never read an imported entry. A number
+    # an imported:WL reservation holds is skipped exactly as a reserved clean worklog number is, decided
+    # against the prior imported baseline. An unread
     # imported worklog leaf is a named CANNOT-EVALUATE for this check, never a silent per-series pass.
     if imported:
-        if IMPORTED_PREFIX + "WL" in imported_unread:
+        imp_wl_key = IMPORTED_PREFIX + "WL"
+        if imp_wl_key in imported_unread:
             rep.cant("C-CONTIGUITY: the imported:WL imported leaf could not be read; imported worklog "
                      "contiguity (spec 8.2) is not evaluated")
         else:
-            _check_imported_worklog_contiguous([parse_series_id(rid)[2] for key, rid, _row in imported_rows
-                                                if key == IMPORTED_PREFIX + "WL"], rep)
+            imp_wl_present = {parse_series_id(rid)[2] for key, rid, _row in imported_rows
+                              if key == imp_wl_key}
+            imp_wl_issued, imp_wl_undecided = _split_reserved(
+                imp_wl_key, reserved.get(imp_wl_key, ()), imp_wl_present, imp_holdings)
+            _report_undecided("C-CONTIGUITY", imp_wl_key,
+                              [n for n in imp_wl_undecided if imp_wl_present and n < max(imp_wl_present)],
+                              imp_no_holdings, rep)
+            _check_imported_worklog_contiguous(imp_wl_present, rep, imp_wl_issued | imp_wl_undecided)
 
     # --- C-TRACKED / C-SYNC-AGREE: topology, from the injected observations (spec 5.1/5.6) ------------
     rep.ran("C-TRACKED")
@@ -5872,6 +5922,79 @@ def self_test():
             check("imported-wl-not-from-one-finding",
                   _i3_wl1 is not None and any("does not start at imported:WL-1" in f
                                               for f in _i3_msgs(_i3_wl1, "C-CONTIGUITY")))
+            # Reservations on the imported number lines (spec 8.2: the next-ID derivation applies per
+            # series key, so recovery treats a reserved number as issued even where no published record
+            # carries it). An orphaned imported reservation's number, one the prior imported baseline
+            # held no record with, is skipped by the imported deletion and contiguity scans exactly as a
+            # clean one is on its own line (red when the imported scans ignore the reservations and owe
+            # the number); an unreserved number stays owed (the unreserved controls are the deletion and
+            # gap vectors above); a reserved number the baseline HELD is owed despite the reservation (a
+            # reservation is irrevocable and outlives the publication it preceded); and with no usable
+            # baseline the exemption is a named CANNOT-EVALUATE, never granted. The overhang count is
+            # bounded at both ends: a reservation above the high-water or at/below the max present number
+            # exempts nothing.
+            import _opf_journal as _i3_jr
+
+            def _i3_rsv(n, claims):
+                rid = "{}-20260927T00{:04d}Z-{:016x}".format(_opf_store._HOME_RUN_PREFIXES["import"], n, n)
+                return (_opf_store.allocation_record("import", rid)[len(WORKING_DIRNAME) + 1:],
+                        _i3_jr.reservation_payload("import", rid, "op-{}".format(n), claims).decode("utf-8"))
+
+            def _i3_rrun(machine, numbers, obs=None, key="imported:BI"):
+                return run(machine, working=dict(_i3_rsv(i + 1, {key: n}) for i, n in enumerate(numbers)),
+                           obs=_i3_obs() if obs is None else obs)
+
+            def _i3_ovm():
+                # imported:BI-1 and imported:BI-2 present under imported:BI = 4: 3 and 4 are allocated
+                # above the highest present number.
+                return _i3_machine(imp={"imported:BI": 4}, leaves=copy.deepcopy(_i3_bi2))
+
+            def _i3_owed(r, count):
+                return (r is not None and r.checks.get("C-NO-DELETION") == "FINDING"
+                        and any("{} allocated imported:BI-<n> id(s) above imported:BI-2".format(count) in f
+                                for f in _i3_msgs(r, "C-NO-DELETION")))
+
+            check("imported-reserved-overhang-exempt", _i3_clean_active(_i3_rrun(_i3_ovm(), (3, 4))))
+            check("imported-overhang-unreserved-still-owed", _i3_owed(_i3_rrun(_i3_ovm(), (3,)), 1))
+            check("imported-overhang-reserved-above-high-water-not-counted",
+                  _i3_owed(_i3_rrun(_i3_ovm(), (3, 5)), 1))
+            check("imported-overhang-reserved-at-max-present-not-counted",
+                  _i3_owed(_i3_rrun(_i3_ovm(), (2, 4)), 1))
+            check("imported-overhang-reserved-below-max-present-not-counted",
+                  _i3_owed(_i3_rrun(_i3_ovm(), (1, 4)), 1))
+            _i3_rgap = _i3_rrun(_i3_machine(imp={"imported:BI": 3}, leaves={
+                "backlog_item.imported.index.toml": idx([_i3_row("imported:BI-1"), _i3_row("imported:BI-3")])}),
+                (2,))
+            check("imported-reserved-gap-exempt", _i3_clean_active(_i3_rgap))
+            _i3_one_rsv = {"backlog_item.imported.index.toml": idx([_i3_row("imported:BI-1")])}
+            _i3_rheld = _i3_rrun(_i3_machine(imp={"imported:BI": 2}, leaves=copy.deepcopy(_i3_one_rsv)), (2,),
+                                 obs=_i3_obs({"imported:BI-1": _record_digest(_i3_row("imported:BI-1")),
+                                              "imported:BI-2": _record_digest(_i3_row("imported:BI-2"))},
+                                             {"imported:BI": 2}))
+            check("imported-reserved-number-prior-held-still-owed",
+                  _i3_rheld is not None and _i3_rheld.checks.get("C-NO-DELETION") == "FINDING"
+                  and any("1 allocated imported:BI-<n> id(s) above imported:BI-1" in f
+                          for f in _i3_msgs(_i3_rheld, "C-NO-DELETION")))
+            _i3_rnob = _i3_rrun(_i3_machine(imp={"imported:BI": 2}, leaves=copy.deepcopy(_i3_one_rsv)), (2,),
+                                obs=clean_prior())
+            check("imported-reserved-number-undecided-without-baseline",
+                  _i3_rnob is not None and _i3_rnob.checks.get("C-NO-DELETION") == "CANNOT-EVALUATE"
+                  and any("1 reserved imported:BI number(s)" in m and "the first imported:BI-2" in m
+                          for m in _i3_msgs(_i3_rnob, "C-NO-DELETION"))
+                  and not any("allocated imported:BI-<n>" in m for m in _i3_msgs(_i3_rnob, "C-NO-DELETION")))
+            _i3_rwm = _i3_machine(imp={"imported:WL": 3}, leaves={
+                "worklog.imported.toml": {"schema": 1, "entry": [imp_wl(1), imp_wl(3)]}})
+            check("imported-reserved-wl-gap-exempt",
+                  _i3_clean_active(_i3_rrun(copy.deepcopy(_i3_rwm), (2,), key="imported:WL")))
+            check("imported-reserved-wl-start-exempt",
+                  _i3_clean_active(_i3_rrun(_i3_machine(imp={"imported:WL": 2}, leaves={
+                      "worklog.imported.toml": {"schema": 1, "entry": [imp_wl(2)]}}), (1,), key="imported:WL")))
+            _i3_rwn = _i3_rrun(_i3_rwm, (2,), obs=clean_prior(), key="imported:WL")
+            check("imported-reserved-wl-undecided-without-baseline",
+                  _i3_rwn is not None and _i3_rwn.checks.get("C-CONTIGUITY") == "CANNOT-EVALUATE"
+                  and any("1 reserved imported:WL number(s)" in m and "the first imported:WL-2" in m
+                          for m in _i3_msgs(_i3_rwn, "C-CONTIGUITY"))
+                  and not any("imported:WL-2 is missing" in m for m in _i3_msgs(_i3_rwn, "C-CONTIGUITY")))
             # Append-only history over the imported leaves (spec 8.3): an unchanged prior imported record
             # passes; an edited or vanished one is a finding; a prior with no imported baseline is a named
             # CANNOT-EVALUATE; an imported counter regression is a C-HISTORY-COUNTERS finding.
@@ -6123,7 +6246,7 @@ def self_test():
             # when the grading reads the homes-2 generation alone).
             _opf_store.SUPPORTED_SPEC_VERSION = _i3_prev_ssv
             _i3_sup = run(clean_machine())
-            check("imported-grading-off-without-homes2-declaration",
+            check("imported-grading-off-without-series-declaration",
                   _i3_sup is not None and _i3_sup.status == VALID)
             _i3_h2 = run(_i3_machine(imp={"imported:BI": 1}, leaves=_i3_bi2))
             check("imported-grading-off-at-homes2-without-imported-support",
@@ -6136,23 +6259,30 @@ def self_test():
         # that carries the same definition must leave ONE copy when both merge, and a textual merge can keep
         # two without a conflict. The census counts these binding forms, anywhere in the source: a def, a
         # class, an assignment or other name store (comprehension and walrus targets included), an import
-        # alias, an except name, a function parameter of any kind, and a structural-pattern capture (a case
-        # name, a star capture, or a mapping rest), so a second binding by any of them is caught as well as
-        # a second def (red when the module binds it twice).
+        # binding (what the statement BINDS: an unaliased `import a.b` binds its first dotted component,
+        # never the full dotted alias name), an except name, a function parameter of any kind, and a
+        # structural-pattern capture (a case name, a star capture, or a mapping rest), so a second binding
+        # by any of them is caught as well as a second def (red when the module binds it twice).
         import ast
         import inspect
 
         def _i3_census(tree, name):
-            return [n for n in ast.walk(tree)
-                    if (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-                        and n.name == name)
-                    or (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
-                        and n.id == name)
-                    or (isinstance(n, ast.alias) and (n.asname or n.name) == name)
-                    or (isinstance(n, ast.ExceptHandler) and n.name == name)
-                    or (isinstance(n, ast.arg) and n.arg == name)
-                    or (isinstance(n, (ast.MatchAs, ast.MatchStar)) and n.name == name)
-                    or (isinstance(n, ast.MatchMapping) and n.rest == name)]
+            binds = []
+            for n in ast.walk(tree):
+                if isinstance(n, (ast.Import, ast.ImportFrom)):
+                    dotted = isinstance(n, ast.Import)
+                    binds.extend(a for a in n.names
+                                 if (a.asname or (a.name.partition(".")[0] if dotted else a.name)) == name)
+                elif ((isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                       and n.name == name)
+                      or (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+                          and n.id == name)
+                      or (isinstance(n, ast.ExceptHandler) and n.name == name)
+                      or (isinstance(n, ast.arg) and n.arg == name)
+                      or (isinstance(n, (ast.MatchAs, ast.MatchStar)) and n.name == name)
+                      or (isinstance(n, ast.MatchMapping) and n.rest == name)):
+                    binds.append(n)
+            return binds
 
         _i3_tree = ast.parse(inspect.getsource(sys.modules[__name__]))
         _i3_binds = _i3_census(_i3_tree, "imported_series_active")
@@ -6168,6 +6298,20 @@ def self_test():
                   "match v:\n    case imported_series_active:\n        pass\n",
                   "match v:\n    case [*imported_series_active]:\n        pass\n",
                   "match v:\n    case {**imported_series_active}:\n        pass\n")] == [1, 1, 1, 1])
+        # The census counts what an import statement BINDS: an unaliased dotted `import a.b` binds its first
+        # component `a` (its ast.alias carries the full dotted name), an alias binds the asname alone, and a
+        # `from` import binds the imported name or its asname, never the module (red when an unaliased
+        # dotted import of the name goes uncounted, or when a dotted name is matched whole).
+        check("imported-series-active-census-counts-import-bindings",
+              [len(_i3_census(ast.parse(_i3_src), "imported_series_active")) for _i3_src in (
+                  "import imported_series_active\n",
+                  "import imported_series_active.child\n",
+                  "import imported_series_active.child as other\n",
+                  "import other.imported_series_active\n",
+                  "import pkg as imported_series_active\n",
+                  "from pkg import imported_series_active\n",
+                  "from pkg import other as imported_series_active\n",
+                  "from imported_series_active import other\n")] == [1, 1, 0, 0, 1, 1, 1, 0])
         # The declaration alone never activates: at the shipped SUPPORTED_SPEC_VERSION the tooling does
         # not support the series, so an imported counter row is still the former C-COUNTERS finding and
         # the leaves are never read (red when the flag reads the declaration without tooling support).
@@ -6183,7 +6327,7 @@ def self_test():
         _i3_pm = clean_prior()
         _i3_pm["prior"]["imported"] = "not a table"
         _i3_pmr = run(clean_machine(), obs=_i3_pm)
-        check("imported-prior-inert-on-homes1",
+        check("imported-prior-inert-when-inactive",
               _i3_pkr is not None and _i3_pkr.checks.get("C-HISTORY-COUNTERS") == "CANNOT-EVALUATE"
               and any("malformed" in m for m in _i3_msgs(_i3_pkr, "C-HISTORY-COUNTERS"))
               and _i3_pmr is not None and _i3_pmr.status == VALID)

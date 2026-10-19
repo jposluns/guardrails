@@ -1255,9 +1255,11 @@ def self_test_isolated():
     extracted from a committed HEAD (records and the immutable-body digest matching the engine's own
     _record_digest over the same committed content); an unborn HEAD -> the honest empty prior; a
     non-repository directory -> the remote and prior fields OMITTED with a note while tracked reads
-    "untracked"; the imported baseline of a homes-2 HEAD (empty unless the imported series is active,
-    the committed leaf rows under the engine's digest once it is, the whole prior omitted on a row with no
-    id); and the prior's `held` ids, the active worklog (both generations) and every archive bucket
+    "untracked"; the imported baseline of a HEAD that ACTIVATES the series (the member absent while it is
+    inactive, the committed leaf rows under the engine's digest once it is active, on a homes-2 and a
+    homes-1 declaration alike, and the whole prior omitted on a row with no id, a leaf that does not read
+    or parse, a row list that is not an array, a row that cannot be canonicalized, or a machine tree that
+    cannot be listed); and the prior's `held` ids, the active worklog (both generations) and every archive bucket
     file included, omitted alone with a note when an archive entry is not a bucket file, when a bucket file
     or the active worklog.toml does not parse or holds a row table that is not an array, when the active
     worklog.toml or the archive/ listing cannot be read, when the HEAD manifest's worklog generation is
@@ -1566,6 +1568,62 @@ def self_test_isolated():
             obs, notes = gather(_Res(homes2_repo, machine_rel))
             check("homes2-prior-imported-row-without-id-omitted",
                   "prior" not in obs and any("carries a row with no string id" in n for n in notes))
+            # An imported-baseline read failure PROPAGATES: a listed leaf that does not parse, one whose
+            # row list is not an array, and a row that cannot be canonicalized each omit the WHOLE prior
+            # with a note naming the failed input. The valid imported worklog leaf stays committed beside
+            # the broken index leaf throughout, so a dropped propagation would keep a PARTIAL prior whose
+            # baseline carries the worklog entry alone (red when a failed leaf read is skipped and the
+            # other leaves still supply a baseline).
+            _write(homes2_repo, leaf_rel, "record = [ not toml")
+            _git_setup(homes2_repo, home, "commit", "-am", "an unparseable imported leaf")
+            obs, notes = gather(_Res(homes2_repo, machine_rel))
+            check("homes2-prior-imported-unparseable-leaf-omitted",
+                  "prior" not in obs
+                  and any("backlog_item.imported.index.toml" in n and "not valid TOML" in n for n in notes))
+            _write(homes2_repo, leaf_rel, 'schema = 1\nrecord = "x"\n')
+            _git_setup(homes2_repo, home, "commit", "-am", "an imported leaf whose rows are not an array")
+            obs, notes = gather(_Res(homes2_repo, machine_rel))
+            check("homes2-prior-imported-non-array-leaf-omitted",
+                  "prior" not in obs
+                  and any("backlog_item.imported.index.toml [[record]] is not an array" in n for n in notes))
+            _write(homes2_repo, leaf_rel,
+                   'schema = 1\n\n[[record]]\nid = "imported:BI-1"\nweight = nan\n')
+            _git_setup(homes2_repo, home, "commit", "-am", "an imported row that cannot canonicalize")
+            obs, notes = gather(_Res(homes2_repo, machine_rel))
+            check("homes2-prior-imported-uncanonicalizable-row-omitted",
+                  "prior" not in obs
+                  and any("cannot canonicalize the body of imported record" in n for n in notes))
+            # The restored store is the success control: the baseline carries BOTH leaves' rows again and
+            # the prior's held intervals stand beside it (the reserved-number exemption and the imported
+            # baseline come from the one reconstruction; red when either member is lost).
+            _write(homes2_repo, leaf_rel, 'schema = 1\n\n' + leaf_row.replace(
+                '[[record]]\n', '[[record]]\nid = "imported:BI-1"\n'))
+            _git_setup(homes2_repo, home, "commit", "-am", "restore the valid imported leaf")
+            obs, notes = gather(_Res(homes2_repo, machine_rel))
+            check("homes2-prior-imported-and-held-together",
+                  isinstance(obs.get("prior"), dict)
+                  and obs["prior"].get("imported") == {"imported:BI-1": leaf_digest,
+                                                       "imported:WL-1": wl_digest}
+                  and obs["prior"].get("held", {}).get("BI") == [[1, 1]])
+            # A failed imported-tree ENUMERATION omits the whole prior too, never reads as an empty tree:
+            # only the baseline's --name-only listing is forced to fail (every other git read, the held
+            # ids' ls-tree -z included, still succeeds), so the omission is attributable to that one leg
+            # (red when a failed listing leaves the committed leaves silently out of the baseline).
+            _saved_run_git = globals()["_run_git"]
+
+            def _fail_name_listing(git_bin, store_root, args, **kwargs):
+                if args[:2] == ["ls-tree", "--name-only"]:
+                    return _saved_run_git(git_bin, store_root,
+                                          ["ls-tree", "--name-only", "HEAD:no-such-tree"], **kwargs)
+                return _saved_run_git(git_bin, store_root, args, **kwargs)
+
+            globals()["_run_git"] = _fail_name_listing
+            try:
+                obs, notes = gather(_Res(homes2_repo, machine_rel))
+            finally:
+                globals()["_run_git"] = _saved_run_git
+            check("homes2-prior-imported-unlistable-tree-omitted",
+                  "prior" not in obs and any("cannot be listed at HEAD" in n for n in notes))
         finally:
             _opf_store.SUPPORTED_HOMES = prev_homes
             _opf_store.SUPPORTED_SPEC_VERSION = prev_ssv
