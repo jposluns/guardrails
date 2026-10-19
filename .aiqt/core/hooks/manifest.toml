@@ -26,10 +26,15 @@
 #   timeout  OPTIONAL: this hook's platform timeout in seconds, an integer from 1 to 600. Rendered into
 #            hooks.json only while the [plugin] on-failure-render switch is true; while it is false
 #            (today's setting) every hook renders the generator's default timeout and no onFailure key,
-#            byte-identical to the pre-switch surface. onFailure itself is never authored: with the
-#            switch on, the generator derives "onFailure": "block" for an enforce-stage PreToolUse hook
-#            whose default is "block", never for a warn hook, and never on Stop or TeammateIdle, whose
-#            events the documented onFailure behaviour does not cover.
+#            byte-identical to the pre-switch surface. With the switch on, the generator refuses (exit
+#            2, naming the hook and the minimum) a timeout, on a hook of any event, at or below the
+#            dispatcher's PreToolUse budget plus the margin its deadline line reserves (both read from
+#            scripts/aiqt_hooks.py; together 10 seconds today, so the minimum is 11), so a rendered
+#            timeout always leaves the dispatcher more time past its budget than that margin.
+#            onFailure itself is never authored: with the switch on, the generator derives
+#            "onFailure": "block" for an enforce-stage PreToolUse hook whose default is "block", never
+#            for a warn hook, and never on Stop or TeammateIdle, whose events the documented onFailure
+#            behaviour does not cover.
 #   class    the EN-5 enforceability letter (a deterministic-gate, b hook-detectable, c partial,
 #            d judgement), carried through so the surface traces to its enforceability claim
 #   residue  REQUIRED, never empty: what this control does NOT catch, so the shipped surface stays
