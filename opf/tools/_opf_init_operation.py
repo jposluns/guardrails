@@ -22,7 +22,7 @@ existing `.working` exactly as before, pinned by the seam self-tests. A resume i
 recorded plan: the adoption kind, the ancestral evidence commit, the admitted inventory and a
 caller-named operation id must each match, else it refuses (_resume_binding_or_refuse).
 
-The Architect's rulings it implements (PD-D2B-PR3-SCHEMA, decided 2026-09-24), by site:
+The maintainer's rulings it implements (PD-D2B-PR3-SCHEMA, decided 2026-09-24), by site:
 
   1. Bootstrap capability. The shared mutex is taken first (_opf_oplock.acquire_init_operation, a
      pre-store InitHolder: no control record, no lease); the plan and the directory journal are
@@ -2370,7 +2370,7 @@ def _planned_view_targets():
     tools/check_python_floor.py), refusing as InitOperationError, never an escaping parse error."""
     try:
         return {v["target"] for v in tomllib.loads(_opf_init.build_manifest())["views"].values()}
-    except (ValueError, RecursionError, MemoryError) as exc:   # UnicodeDecodeError, TOMLDecodeError included
+    except (ValueError, RecursionError, MemoryError) as exc:   # TOMLDecodeError included
         raise InitOperationError("the default manifest does not parse as TOML ({}); refused".format(exc))
 
 
@@ -3189,12 +3189,15 @@ def _run_self_test_isolated():
 
     # The tomllib parse-site floor (tools/check_python_floor.py, tomllib leg): the planned-view-target
     # parse disposes of RecursionError, MemoryError and the ValueError family in its own function,
-    # refusing as InitOperationError. Deep nesting feeds a real RecursionError; MemoryError shares the
-    # handler (the static floor scan is its per-site guard).
+    # refusing as InitOperationError. Deep nesting feeds a real RecursionError and an over-long integer
+    # literal a real bare ValueError; MemoryError shares the handler (the static floor scan is its
+    # per-site guard).
     real_build_manifest = _opf_init.build_manifest
-    _opf_init.build_manifest = lambda: "x = " + "[" * 6000 + "]" * 6000
     try:
-        refuses("D-planned-views-deep-nesting", _planned_view_targets, needle="does not parse as TOML")
+        for label, text in (("deep-nesting", "x = " + "[" * 6000 + "]" * 6000),
+                            ("long-integer", "x = " + "9" * 5000)):
+            _opf_init.build_manifest = lambda: text
+            refuses("D-planned-views-" + label, _planned_view_targets, needle="does not parse as TOML")
     finally:
         _opf_init.build_manifest = real_build_manifest
 

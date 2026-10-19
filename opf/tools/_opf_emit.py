@@ -45,7 +45,10 @@ byte-canon for an arbitrary captured body (a CRLF, a line with trailing whitespa
 codepoint would land in the bytes verbatim). The subset supports strings of any content, including
 newlines; the canonical FORM of that support is escaping. _byte_canon is the authority for the
 byte rules; the self-test reconciles this module's forbidden-codepoint set against it and runs every
-emitted vector through _byte_canon.scan_bytes, so the two cannot drift. The en dash (U+2013) and em
+emitted vector through _byte_canon.scan_bytes, so the two cannot drift. The line and paragraph separators
+U+2028 and U+2029 (_byte_canon.LINE_SEPARATORS, outside the forbidden set) are escaped too and reconciled
+the same way; an earlier emitter wrote them literally, and matches_store_bytes and prior_separator_spelling
+let a caller accept a store file or a recorded digest in that spelling. The en dash (U+2013) and em
 dash (U+2014) escaping is a SEPARATE house-style no-dash guarantee, not part of the byte_canon forbidden
 set, so the emitted bytes are dash-free by construction independent of what byte_canon covers.
 
@@ -106,6 +109,13 @@ _BIDI = frozenset(chr(c) for c in (0x061C, 0x200E, 0x200F)
                   + tuple(range(0x202A, 0x202F)) + tuple(range(0x2066, 0x206A)))
 _FORBIDDEN_CODEPOINTS = _ZERO_WIDTH | _BIDI
 
+# U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR (_byte_canon.LINE_SEPARATORS, kept apart from the
+# forbidden set so render and record do not refuse a store that holds one): str.splitlines() splits on both,
+# so they are escaped too and never reach the emitted bytes literally. The self-test asserts this constant
+# equals _byte_canon.LINE_SEPARATORS, as it does for the forbidden set. An emitter before this escape wrote
+# them literally; matches_store_bytes and prior_separator_spelling accept that earlier spelling.
+_LINE_SEPARATORS = frozenset((chr(0x2028), chr(0x2029)))
+
 # House-style no-dash guarantee, separate from byte_canon (which does not cover dashes): the en dash
 # (U+2013) and em dash (U+2014) are escaped so they never reach the emitted bytes literally, whatever
 # the input carries, so the emitted document always satisfies the repo's no-dash convention.
@@ -146,13 +156,14 @@ _MAX_EMIT_BYTES = 64 * 1024 * 1024
 def _escape_basic(s):
     """Render `s` as a TOML basic string (with surrounding quotes), escaping every character that must
     not appear literally: the two structural characters (\\ and \"), the C0 controls and DEL and the C1
-    controls, and the byte-canon forbidden codepoints. The en dash (U+2013) and em dash (U+2014) are also
-    escaped, so the emitted bytes are dash-free whatever the input carries; that is a house-style no-dash
-    guarantee, separate from byte_canon (which does not cover dashes). Everything else, including ordinary
-    printable unicode, is left literal. A lone surrogate has no UTF-8 encoding, so it is rejected
-    fail-closed (EmitError) rather than returned in a document whose bytes cannot be encoded. The result
-    contains no raw CR, no forbidden codepoint, no dash byte, and (because the closing quote follows the
-    content) never leaves a line with trailing whitespace."""
+    controls, the byte-canon forbidden codepoints, and the line and paragraph separators U+2028 and U+2029.
+    The en dash (U+2013) and em dash (U+2014) are also escaped, so the emitted bytes are dash-free whatever
+    the input carries; that is a house-style no-dash guarantee, separate from byte_canon (which does not
+    cover dashes). Everything else, including ordinary printable unicode, is left literal. A lone surrogate
+    has no UTF-8 encoding, so it is rejected fail-closed (EmitError) rather than returned in a document
+    whose bytes cannot be encoded. The result contains no raw CR, no forbidden codepoint, no line or
+    paragraph separator, no dash byte, and (because the closing quote follows the content) never leaves a
+    line with trailing whitespace."""
     out = []
     for ch in s:
         o = ord(ch)
@@ -160,7 +171,8 @@ def _escape_basic(s):
             raise EmitError("string contains a lone surrogate (U+{:04X}) with no UTF-8 encoding".format(o))
         if ch in _NAMED_ESCAPES:
             out.append(_NAMED_ESCAPES[ch])
-        elif o < 0x20 or 0x7F <= o <= 0x9F or ch in _FORBIDDEN_CODEPOINTS or ch in _HOUSE_STYLE_DASHES:
+        elif (o < 0x20 or 0x7F <= o <= 0x9F or ch in _FORBIDDEN_CODEPOINTS or ch in _LINE_SEPARATORS
+              or ch in _HOUSE_STYLE_DASHES):
             out.append("\\u{:04X}".format(o))
         else:
             out.append(ch)
@@ -565,6 +577,39 @@ def emit_checked(document):
     return text
 
 
+# Each separator's UTF-8 bytes paired with the escape text the emitter now writes for it inside a basic string.
+_SEPARATOR_ESCAPES = tuple(sorted((ch.encode("utf-8"), "\\u{:04X}".format(ord(ch)).encode("ascii"))
+                                  for ch in _LINE_SEPARATORS))
+# One escape of an emitted basic string that the earlier spelling depends on: an escaped backslash (matched
+# whole, so the text after it is never read as an escape) or the escape of a separator.
+_SEPARATOR_ESCAPE_RE = re.compile(r"\\(?:\\|u({}))".format(
+    "|".join("{:04X}".format(ord(ch)) for ch in sorted(_LINE_SEPARATORS))))
+
+
+def matches_store_bytes(raw, fresh):
+    """True iff `raw`, the bytes read from a store file, reproduce `fresh`, the canonical emission (UTF-8
+    bytes) of raw's own parsed model: exactly, or as an emitter before the U+2028/U+2029 escape wrote them,
+    meaning that replacing every literal U+2028 and U+2029 in `raw` with its escape text gives exactly
+    `fresh`. Accepting that earlier spelling is sound because TOML admits either character only inside a
+    string or a comment, a canonical document carries no comment and only basic strings, and inside a basic
+    string the literal character and its escape read back as the same value. A literal one in a comment or
+    in a literal string, and any other byte difference, still fail. The caller's next write re-spells the
+    file with the escapes."""
+    if raw == fresh:
+        return True
+    for literal, escape in _SEPARATOR_ESCAPES:
+        raw = raw.replace(literal, escape)
+    return raw == fresh
+
+
+def prior_separator_spelling(text):
+    """`text`, a canonical emission, as an emitter before the U+2028/U+2029 escape spelled it: each
+    `\\u2028` and `\\u2029` escape written as the literal character. Every backslash in emitted text opens
+    an escape inside a basic string, so an escaped backslash is consumed whole and the text after it is never
+    read as a separator escape. A digest recorded over a body before that escape is the digest of this text."""
+    return _SEPARATOR_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)) if m.group(1) else m.group(0), text)
+
+
 # --- self-test --------------------------------------------------------------------------------------
 
 def _load_byte_canon_authority():
@@ -769,15 +814,19 @@ def _fixture_send_subject(peer, subject, subject_fd):
 
 def _fixture_ack_subject(fd):
     """Release the subject, strictly AFTER the receipt send returned: an acknowledged
-    subject is always addressable through its delivered receipt (QA18 codex F2). A
-    subject that already died is tolerated (its wait status is authoritative), and the
-    write end closes either way, so a guardian that dies before acknowledging always
-    hands the blocked subject an EOF."""
+    subject is always addressable through its delivered receipt (QA18 codex F2). The
+    write is reported, observed: True only when os.write wrote the one ack byte, and
+    False when it failed with OSError -- a subject that already died is tolerated (its
+    wait status is authoritative). The write end closes either way, so a guardian that
+    dies before acknowledging always hands the blocked subject an EOF. The guardian
+    ignores the report (supervision reads the subject's status); a caller certifying
+    the release to a third party publishes only on True, never on a swallowed
+    failure."""
     import os
     try:
-        os.write(fd, b"A")
+        return os.write(fd, b"A") == 1
     except OSError:
-        pass  # the subject is already gone: supervision reads its status
+        return False  # the subject is already gone: supervision reads its status
     finally:
         os.close(fd)
 
@@ -3720,9 +3769,10 @@ def self_test():
               file=sys.stderr)
         return 2
     if not (isinstance(getattr(byte_canon, "FORBIDDEN", None), dict)
+            and isinstance(getattr(byte_canon, "LINE_SEPARATORS", None), dict)
             and callable(getattr(byte_canon, "scan_bytes", None))):
-        print("error: the byte-canon authority lacks the expected FORBIDDEN/scan_bytes interface; "
-              "fail-closed", file=sys.stderr)
+        print("error: the byte-canon authority lacks the expected FORBIDDEN/LINE_SEPARATORS/scan_bytes "
+              "interface; fail-closed", file=sys.stderr)
         return 2
 
     # The forbidden-codepoint set MUST match the authority's, so a body carrying any of them is escaped.
@@ -3731,6 +3781,13 @@ def self_test():
         failures.append("forbidden-codepoint set disagrees with _byte_canon.FORBIDDEN "
                         "(missing {}, extra {})".format(sorted(authority - set(_FORBIDDEN_CODEPOINTS)),
                                                         sorted(set(_FORBIDDEN_CODEPOINTS) - authority)))
+    # The line and paragraph separators are escaped too; that set MUST match the authority's separate
+    # LINE_SEPARATORS constant the same way (it is kept out of FORBIDDEN, so the check above cannot see it).
+    separator_authority = set(byte_canon.LINE_SEPARATORS.values())
+    if set(_LINE_SEPARATORS) != separator_authority:
+        failures.append("line-separator set disagrees with _byte_canon.LINE_SEPARATORS "
+                        "(missing {}, extra {})".format(sorted(separator_authority - set(_LINE_SEPARATORS)),
+                                                        sorted(set(_LINE_SEPARATORS) - separator_authority)))
 
     # sys.modules-substitution pin: the authority is loaded from its pinned sibling FILE, not the ambient
     # sys.modules cache, so a poisoned _byte_canon entry cannot substitute an always-clean scanner
@@ -3765,6 +3822,11 @@ def self_test():
         findings = byte_canon.scan_bytes(text.encode("utf-8"))
         if findings:
             failures.append("{}: emitted bytes are not byte-canonical: {}".format(label, findings))
+        # scan_bytes leaves the separators to the repository gate, so check the authority's set directly.
+        literal = sorted(ch for b, ch in byte_canon.LINE_SEPARATORS.items() if b in text.encode("utf-8"))
+        if literal:
+            failures.append("{}: emitted bytes carry a literal line or paragraph separator: {}".format(
+                label, ["U+{:04X}".format(ord(ch)) for ch in literal]))
 
     def _round_trips(document, label):
         try:
@@ -3797,6 +3859,7 @@ def self_test():
                            "    boom()\r\nRuntimeError: boom\t(with a tab)"),
         "empty-string": "",
         "quotes-and-equals": 'a = "b" # not a comment, just a body',
+        "line-separators": "one" + chr(0x2028) + "two" + chr(0x2029) + "three \\u2028 text",
     }
     for name, body in fuzz.items():
         # As a top-level leaf, nested in a table, and as a field inside an array of tables, so the body
@@ -3810,7 +3873,8 @@ def self_test():
             failures.append("fuzz/{}: body did not round-trip faithfully".format(name))
 
     # A forbidden / awkward codepoint in a KEY is quoted and escaped, and still round-trips.
-    _round_trips({"a" + chr(0x200B) + "b": "x", "BACKLOG.md": "y", "with space": "z", "": "empty-key"},
+    _round_trips({"a" + chr(0x200B) + "b": "x", "BACKLOG.md": "y", "with space": "z", "": "empty-key",
+                  "c" + chr(0x2028) + "d" + chr(0x2029): "w"},
                  "fuzz/keys")
 
     # --- constrained-subset coverage: every accepted shape --------------------------------------------
@@ -3859,6 +3923,53 @@ def self_test():
         failures.append("house-style/dashes: an en/em dash reached the emitted bytes literally")
     if tomllib.loads(dash_text)["body"] != dashes:
         failures.append("house-style/dashes: the dash body did not round-trip faithfully")
+
+    # Line and paragraph separators: U+2028 and U+2029 are written with TOML's own \u2028 and \u2029 escapes,
+    # in a value and in a quoted key, and read back unchanged. Their neighbours U+2027 and U+2030 stay
+    # literal, so the escape covers exactly the two.
+    ls, ps = chr(0x2028), chr(0x2029)
+    seps = "a{}b{}c".format(ls, ps)
+    sep_model = {"body": seps, "k" + ls: "v"}
+    sep_text = emit(sep_model)
+    if sep_text != 'body = "a\\u2028b\\u2029c"\n"k\\u2028" = "v"\n':
+        failures.append("line-separators: the separators are not written as the \\u2028 and \\u2029 "
+                        "escapes ({!r})".format(sep_text))
+    if tomllib.loads(sep_text) != sep_model:
+        failures.append("line-separators: a separator value or key did not round-trip faithfully")
+    _round_trips(sep_model, "line-separators/round-trip")
+    neighbours = chr(0x2027) + chr(0x2030)
+    if emit({"body": neighbours}) != 'body = "{}"\n'.format(neighbours):
+        failures.append("line-separators: U+2027 or U+2030 was escaped; only U+2028 and U+2029 are")
+
+    # The earlier spelling: an emitter before that escape wrote the separators literally. matches_store_bytes
+    # accepts stored bytes only when replacing each literal separator with its escape gives exactly the fresh
+    # emission; a literal separator in a comment or a literal string, and any other byte difference, fail.
+    fresh = emit({"body": seps}).encode("utf-8")
+    prior = 'body = "{}"\n'.format(seps).encode("utf-8")
+    slash = emit({"body": "\\" + ls}).encode("utf-8")
+    for label, raw, canonical, want in (
+            ("exact", fresh, fresh, True),
+            ("prior-spelling", prior, fresh, True),
+            ("prior-backslash-then-separator", 'body = "\\\\{}"\n'.format(ls).encode("utf-8"), slash, True),
+            ("comment-separator", "# n{}\n".format(ls).encode("utf-8") + prior, fresh, False),
+            ("comment-separator-only", "# n{}\n".format(ls).encode("utf-8") + fresh, fresh, False),
+            ("literal-string", "body = 'a{}b{}c'\n".format(ls, ps).encode("utf-8"), fresh, False),
+            ("other-byte", prior.replace(b"body = ", b"body  = "), fresh, False),
+            ("extra-newline", prior + b"\n", fresh, False)):
+        if matches_store_bytes(raw, canonical) is not want:
+            failures.append("store-bytes/{}: matches_store_bytes returned {}; expected {}".format(
+                label, not want, want))
+    # prior_separator_spelling turns each separator escape back into the literal character, never the text
+    # after an escaped backslash, and its result reads back as the same model.
+    for label, model, want in (
+            ("separators", {"body": seps}, 'body = "{}"\n'.format(seps)),
+            ("escaped-backslash-then-text", {"body": "x\\u2028y"}, 'body = "x\\\\u2028y"\n'),
+            ("backslash-then-separator", {"body": "\\" + ps}, 'body = "\\\\{}"\n'.format(ps)),
+            ("separator-key", {"k" + ls: "v"}, '"k{}" = "v"\n'.format(ls)),
+            ("no-separator", {"body": "plain"}, 'body = "plain"\n')):
+        got = prior_separator_spelling(emit(model))
+        if got != want or tomllib.loads(got) != model:
+            failures.append("prior-spelling/{}: got {!r}; expected {!r}".format(label, got, want))
 
     # Signed-zero canonicalization: the two model-equal float inputs 0.0 and -0.0 emit byte-identically
     # (-0.0 normalizes to 0.0), and -0.0 still round-trips (it is model-equal to its 0.0 reparse).

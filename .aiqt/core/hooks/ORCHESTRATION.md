@@ -1,8 +1,9 @@
 # The orchestrator-integrity suite
 
-Six controls over one substrate: a stop-work guard (Stop, TeammateIdle, and the scheduled-yield
+Seven controls over one substrate: a stop-work guard (Stop, TeammateIdle, and the scheduled-yield
 tools), a record-drift gate, a background-dispatch truncation guard, an unattended-ask blocker, a
-resume audit with a mutation barrier, and a mistakes register. One registry declares the adopter's
+resume audit with a mutation barrier, a lease-heartbeat keeper (PostToolUse and Stop, warn-only),
+and a mistakes register. One registry declares the adopter's
 bindings; one pure decision core (decide_yield in scripts/aiqt_hooks.py) makes every yield judgement,
 so a new yield path is covered by adding a binding, never by re-implementing judgement.
 
@@ -165,14 +166,19 @@ directory below, and a declaration there arms slice confinement.
   "record": {"findings": "path", "pending_decisions": "path", "handoff": "path"},
   "truth": {"changelog": "changelog.toml", "merged_pr_history": true},
   "mode": {"path": "path"},
-  "lease": {"path": "path", "max_age_hours": 24},
+  "lease": {"path": "path", "max_age_hours": 24, "holder_is_session_id": true,
+            "heartbeat": {"mode": "warn", "format": "lines", "holder_field": "holder",
+                          "field": "heartbeat_utc", "state_field": "state",
+                          "active_values": ["active"], "refresh_after_minutes": 10,
+                          "warn_after_minutes": 30, "lock_path": "path"}},
   "state_dir": "path",
   "yield_tools": ["ScheduleWakeup", "CronCreate"],
   "dispatch_tools": [],
   "review_dispatch": {"commands": ["orch-dispatch"], "brief_option": "--brief",
                       "labels": {"target": "Review-target:", "revision": "Reviewed-revision:",
                                  "path": "Review-path:", "repo": "Review-repo:",
-                                 "branch": "Review-branch:"},
+                                 "branch": "Review-branch:", "draft": "Review-draft:",
+                                 "skip": "Review-skip:"},
                       "authority": {"argv": ["python3", "tools/task_revision.py"], "timeout": 5},
                       "max_brief_bytes": 1048576},
   "mistakes_register": "path",
@@ -186,7 +192,8 @@ directory below, and a declaration there arms slice confinement.
 `state_dir` defaults to `${XDG_STATE_HOME:-$HOME/.local/state}/aiqt-guardrails/orch/<repo-key>/`
 (repo-key is a digest of the root path). The machine-written state there is `dispatch-ledger.jsonl`,
 `guard-events.jsonl`, `turn-state.json`, `resume-barrier.json`, `pending-asks.jsonl`,
-`backlog-checkpoint.json`, `attestations-validated.json`, and, when their events occur,
+`backlog-checkpoint.json`, `attestations-validated.json`, `lease-heartbeat.json` (the
+lease-heartbeat keeper's past-holder memory), and, when their events occur,
 `escape-spoof.json` (renamed with a `.surfaced` suffix once the resume audit has raised it; each rename
 replaces the earlier `.surfaced` file, a failed rename leaves it to be raised again, and a later sentinel
 recorded before that audit overwrites it, so the lasting record of each ignored sentinel is its
@@ -198,7 +205,14 @@ banner), which asks for a manual record, and leaves no row) and the append-only 
 own row, each normally raised once, at least once if recording that it was raised fails, tracked by a
 companion `forced-exit-surfaced.json`). The whole-file JSON records (`turn-state.json`,
 `backlog-checkpoint.json`, its `checkpoint-init.marker`, `attestations-validated.json` and
-`forced-exit-surfaced.json`) are each saved by one writer: it opens the state directory once as a
+`forced-exit-surfaced.json`; NOT `lease-heartbeat.json`, whose keeper has its OWN writer,
+described under "The lease heartbeat" below: that writer binds to the holder's held
+state-directory descriptor, opened `O_RDONLY|O_DIRECTORY|O_NOFOLLOW`, so it needs read and
+search permission on the state directory and refuses a symlink at the directory's own name; it
+creates its exclusive temporary with mode 0600 and does NOT carry over the target's permission
+bits; it REFUSES a non-regular, multi-link or lease-aliased replace target rather than
+replacing a symlink; and it unlinks its own temporary only while the name still carries the
+inode it created, disclosing one whose identity was never learned) are each saved by one writer: it opens the state directory once as a
 directory descriptor (with `O_PATH` where the platform has it, so the open needs no permission on that
 directory itself, only search permission on its ancestors, while the later stat, create, rename and cleanup
 need search permission on it, the last three write permission too, and a write-and-search-only state
@@ -263,7 +277,17 @@ from a stalled filesystem, or what a device driver's open does). The scope check
 yield guards, the dispatch ledger and the prompt stamp reads the mode record through the same reader, and
 every fail-closed result counts there as a declared mode, so scope is live: a read failure (a file not valid
 UTF-8 or a path not strict UTF-8 included) and a read text whose declaration or JSON marker is malformed or
-unrecognized alike. The escape sentinel (default
+unrecognized alike. A DECLARED lease `max_age_hours` that is not usable (a boolean, zero, negative, NaN,
+infinite or a non-number) on a lease that would otherwise read live is a scope CANNOT-EVALUATE, never
+unlimited freshness and never a silent guards-off: the stop, idle and yield guards route it into their
+existing cannot-evaluate deny path (the loop bound, the schedule cap and the operator escape still
+release), while the dispatch ledger and the prompt stamp keep recording and surface it as a note; a live
+mode record outranks it, and a session the lease does not name stays a non-holder under it. This is a
+CHANGE for adopters: the scope check previously read a `max_age_hours` of zero, a negative number, a
+non-number such as the string `"24"`, `false` or NaN as no horizon at all (the lease never went stale),
+`true` as a one-hour horizon and infinity as a horizon never reached; with such a value the stop, idle
+and yield guards now deny through that cannot-evaluate path until it is corrected to a positive finite
+number of hours. The escape sentinel (default
 `<state_dir>/ESCAPE-ALLOW-YIELD`) is operator-owned by enforced acceptance, not convention: it is
 honoured only as a regular file (never a symlink), owned by a uid other than the assistant's
 effective uid, and not group- or other-writable. A present sentinel failing any condition is ignored
@@ -309,13 +333,331 @@ effect.
 
 A declared `attestations` register is a chained, append-only row file (AT-N ids; the
 mistakes-register machinery under a different prefix: `tools/orch_register.py append --prefix AT`
-writes it and `tools/check_mistakes_register.py` gates it). It is validated at audit cadence (the
+writes it, its first row with `--bootstrap`, which establishes the anchor later appends require,
+and `tools/check_mistakes_register.py` gates it). It is validated at audit cadence (the
 resume audit and `tools/orch_doctor.py --resume-audit`), never synchronously at yield time: the
 validation pass writes `attestations-validated.json`, and the stop guard classifies an external or
 foreign-lease blocker as blocked only when its ref is covered by a fresh validated row (the
 evidence-freshness check still applies). Undeclared means the free-text evidence path stands,
 byte-identical to prior behaviour; declared but with no readable fresh snapshot holds the affected
 items (cannot-evaluate), never blocked and never actionable.
+
+## The lease heartbeat
+
+The incident class this keeper exists for: a live session's lease heartbeat goes stale because
+refresh is manual, after which the scope check reads the lease as dead and every lease-scoped guard
+silently goes out of scope. Two warn-only controls, `orch-lease-heartbeat-post` (PostToolUse,
+matcher `.*`) and `orch-lease-heartbeat-stop` (Stop), run one core (two controls because the
+generator requires a distinct handler per control). Both are inert unless the registry's `lease`
+declares `holder_is_session_id` and a valid `heartbeat` block (see the registry schema above); the
+registry is the confinement's trust root, so the opt-in, and the wider `refresh` mode, is an
+operator act there, and an invalid block never writes, never falls back to another mode, and is
+surfaced (a Stop warning and a resume-audit finding; never a guard-events row or a memory save:
+no descriptor proof exists before the first open, and a bookkeeping writer with no held
+descriptor withholds).
+
+- Declaration. `mode` is `warn` (never writes the lease; bookkeeping rows and saves still
+  run, through the same held-descriptor discipline as every other bookkeeping write) or
+  `refresh`. `format` is `lines` (one `key: value`
+  per PHYSICAL line, which ends only at a line feed, a carriage return directly before it being part
+  of the line ending, so a Unicode separator such as U+2028, a form feed or a lone carriage return
+  inside a value never starts a new line, and a declared field's value carrying a carriage return
+  is a cannot-evaluate: a lease whose lines end with a lone carriage return is ONE physical line,
+  so it is a cannot-evaluate, never a holder read as foreign; prose and other lines are allowed, so
+  the lease may share a file with the mode record) or `json` (a top-level object, duplicate keys
+  rejected). `holder_field`
+  names the holder;
+  `field` (optional) names the heartbeat timestamp, a UTC time ending `Z` or `+00:00`; `state_field`
+  and `active_values` (together or not at all) gate on a lease state; `refresh_after_minutes` <
+  `warn_after_minutes`, and `warn_after_minutes` stays at least two clock skews (600 s) under
+  `max_age_hours`; the declared lease path and `lock_path` must be USABLE path values, judged on
+  the strings alone BEFORE any path resolution (an embedded NUL, or an empty component from a
+  doubled, leading or trailing separator, is the named invalid-declaration refusal on Stop,
+  never a late resolution fault or a silent allow); `lock_path` (optional) names an existing flock
+  file taken BEFORE the lease is read and held across the whole read-prove-write span, so
+  every proof holds inside its critical section (busy: that event refreshes nothing; a later
+  one does); the lock must be a STABLE, SEPARATE coordination file NO writer of
+  this plugin ever replaces, so a `lock_path` that names, or resolves to the same identity as,
+  the declared lease or ANY file a whole-file writer of this plugin replaces (the past-holder
+  memory, the guard-events log, every `_orch_write_json_atomic` target such as
+  `turn-state.json` and `backlog-checkpoint.json`, and anything else inside the state
+  directory) is refused by ONE shared read-only validation, run on paths and destinations
+  resolved from the authoritative root at declaration validation, at the resume audit and at
+  the entry check (resolved path, COMPONENT-aware resolved-path containment in the state
+  directory, so a state directory of `/` contains every lock and a sibling that merely shares
+  the directory's textual prefix is not inside it, parent
+  identity and inode, so an alternate or relative spelling that resolves to a refused target
+  refuses too; a stat fault other than absence, or a containment comparison fault, is the
+  named refusal, and nothing is created),
+  and AGAIN by
+  descriptor identity under the held lock, where every state-directory entry is also swept by
+  fstat identity against the held lock descriptor (flock attaches to the open file description, so a
+  keeper whose own save or refresh replaced its lock file would leave the next cooperating
+  keeper locking the replacement while this one still holds the orphaned inode, voiding the
+  critical section); once held, the lease is RE-OPENED under it, so a cooperating takeover
+  between the first open and the lock reads as "lease taken" or "lease lost", never as a
+  cannot-evaluate, and a flock fault other than busy (ENOLCK, EINVAL...) is a named refusal
+  surfaced on Stop with the fault named exactly ONCE per turn end (a due refresh's banner
+  names the fault and carries the bookkeeping consequence, with the deferral dropped rather
+  than rendered a second time), never a silent skip.
+- Holder proof. The payload `session_id` must EXACTLY equal the one parsed holder field: a
+  whole-token presence test is never used, because a decoy line such as `previous_holder: <sid>`
+  passes it. The lease must be a single-link regular file owned by the effective uid, at most
+  64 KiB, strict UTF-8, reached by a component-wise no-follow descriptor walk (`..` refused, a
+  symlink at any component refuses, ancestors included).
+- Decision. The lease age is the OLDER of the file mtime age and the declared heartbeat field's
+  age, so bumping only the mtime cannot hide a stale recorded liveness value. Inside
+  `refresh_after_minutes` nothing happens (idempotent). Every event first pays the
+  git-toplevel resolution (one subprocess), a whole-registry read (the registry file is
+  read to EOF; that read is not byte-bounded, and this keeper does not change it; the keeper's
+  bookkeeping destinations are derived once from that same read, never by a second read), and
+  the lease/bookkeeping separation proof (path resolutions of the lease and of both bookkeeping
+  destinations, one stat of the lease, up to one stat per destination and up to two
+  parent-directory stats; an absent state directory is created here, so the parent-identity leg
+  always compares real identities) before any lease check, and where `lock_path` is declared
+  the shared lock validation runs TWICE per event before the quick path (once inside the
+  declaration validation and once at the entry check, after the separation proof may have
+  created the state directory; each run is up to ten path resolutions and up to eleven stats:
+  the lock, the lease, both bookkeeping destinations, the five whole-file-writer targets, the
+  state directory and the lock's parent directory); an event that reaches the lease open
+  re-proves the separation on the opened descriptor (one fstat plus up to one stat per
+  destination, one state-directory open and two fstats); on PostToolUse a healthy lease then
+  adds one
+  `lstat` where no `field` is declared
+  (the quick mtime path, which a declared `field` disables: a fresh mtime cannot prove the
+  field's own recorded time fresh, so there the bounded walk-and-read runs on each call).
+  In `refresh` mode a due refresh touches the mtime (no declared `field`: a clock read on
+  the open descriptor, no content change, and no permission bit changed, so the touch still runs
+  on a lease carrying a setuid, setgid or sticky bit) or rewrites ONLY the declared field's value
+  (the field write alone is refused, with nothing written, for a lease carrying a setuid, setgid
+  or sticky bit, which a replace cannot carry over faithfully; otherwise an exclusive
+  temporary file beside the lease, given the lease's group before its first byte (on Linux a
+  new file starts in the creating process's effective group, or in the directory's group where
+  the directory is setgid or the filesystem is mounted with grpid, so it need not be the
+  lease's; a failure to set it is the named no-write refusal, with nothing published, so where
+  it always fails, for example for a process without CAP_CHOWN whose effective and
+  supplementary groups do not include the lease's group, writing where a new file does not
+  start in that group, or on a filesystem that refuses the change, EVERY field refresh is
+  refused: Stop warns of that refusal only while the lease is still eligible for a refresh,
+  and once the lease is inside two clock skews of its staleness horizon Stop warns instead that
+  it is too close to renew, then, once stale, that it has lapsed), the original permission bits
+  in full (a failure to set them is the same named no-write refusal), fsync,
+  an identity re-check against the proof fstat, a descriptor-anchored replace, a directory fsync
+  whose failure is a write that HAPPENED but may not be durable, never plain success: reported
+  as the Stop warning, or on PostToolUse as the result's error text, with an attempted
+  guard-events row (best-effort: a failed append is reported through the withheld-bookkeeping
+  warning instead), and
+  a post-replace verification whose failure is reported as a write that HAPPENED, on both
+  events alike (the Stop warning, or on PostToolUse the result's error text, with an attempted
+  guard-events row); the failure
+  cleanup runs from a finally for ANY exception class and unlinks the temporary name only when
+  one stat just before the unlink finds it still carrying the inode the write created, so an
+  entry whose ownership is unestablished at that stat is never removed (the unlink itself is by
+  name, and POSIX offers no unlink-if-inode: an entry swapped onto the name between that stat and
+  the unlink is removed in its place, a window of the same-user concurrency class below), and a
+  temporary that may remain (a failed unlink, an identity never learned, a
+  cleanup stat fault) is disclosed by name (save for the residuals below): in the refusal, or
+  in the withheld report while an
+  exception of any other class is propagating, the channel chosen by that propagation and
+  never by whether a failure was named, so a named refusal followed by an interrupting close
+  fault still discloses through the withheld report, after the named failure; a fault of any
+  other class raised inside the cleanup itself, at its stat or its unlink, names the temporary
+  in the withheld report before it propagates (with the same residuals), even when that
+  fault's own text cannot be
+  rendered (the fixed disclosure is formatted before the temporary is created and recorded
+  before that text is rendered, and the rendered text replaces only that very record, bound
+  by its position and identity, never by its value), and the first fault wins, except that a
+  stop raised there, while rendering that fault's text, or while that record is built,
+  recorded or replaced (an interrupt or an exit, not an `Exception`), propagates ahead of an
+  `Exception` already propagating and never displaces a stop already propagating; where that
+  record cannot be built (a fault of either kind while building it), a preformatted record
+  naming the temporary is recorded in its place, and where the refusal's detail cannot be
+  built because of an ordinary `Exception`, the refusal carries the preformatted fallback
+  TEXT naming the temporary in its place (a stop raised there is the detail residual below,
+  and then no refusal is returned). Disclosed
+  residuals: a stop raised while a withheld record naming the temporary is itself appended,
+  before that append has taken effect, propagates, ordered as above, WITHOUT the disclosure
+  (nothing is recorded, and no
+  preformatted record can be, because recording one needs the very append that stopped), and
+  so does a stop raised while the refusal's detail is built (no fault already propagating:
+  the refusal is never returned); this
+  order holds for faults raised inside those guards; memory exhaustion so
+  severe that a fixed-size step fails (a call, the append that records the entry) can lose
+  the record, and a stop delivered as a signal at an instant outside the guards leaves the
+  cleanup at that point, unordered). The new
+  value is the event's own clock read, never a recalled value, keeping the old value's `Z` or
+  `+00:00` suffix; the `json` form replaces only the declared field's value text in place and
+  never re-serializes the object (which would rewrite other members: `1e400` as `Infinity`, a long
+  decimal as its shortest float, non-ASCII text as escapes), and it refuses the write, with nothing
+  written, unless the re-parsed result carries the same members in the same order, every other
+  member's value text byte-identical and its parsed value exactly equal.
+- Never. It never creates, seizes, revives or releases a lease, and never renews a LAPSED one
+  (refreshing a live, proven-held lease in the declared refresh mode is the feature): an
+  absent lease is never
+  created (a past holder is told "lease lost"), a foreign holder is never touched (a past holder is
+  told "lease taken", anyone else sees silence), a non-active state is never revived, a stale lease
+  is never renewed ("lapsed: re-acquire through the acquire step"), a future-dated time is left in
+  place as a record of the clock skew or tampering, a lease inside two clock skews of its staleness horizon is too close to renew
+  safely, and a git-tracked lease (one outside the repository work tree cannot be tracked
+  there, so the tracking gate passes it: outside-ness is decided on RESOLVED paths, never a
+  lexical spelling) or a protected path (a `.git`, `.aiqt` or `.claude`
+  component, `plugin/`, anywhere inside the state directory's or another protected
+  directory's subtree, judged by ancestor-identity containment and never by enumerating a
+  directory's immediate children, or an inode alias of a registry file) is refused IN BOTH
+  refresh forms, the mtime touch included (there the mtime IS the recorded liveness value, so
+  a touch changes lease semantics even with no content byte changed); a
+  protection check that cannot be evaluated refuses too. The keeper's bookkeeping is
+  descriptor-bound at the WRITE itself: both destinations (the past-holder memory and the
+  guard-events log) are resolved ONCE per event from the same registry read and carried, with
+  the HELD lease descriptor the separation proof was made on, the lease parent-directory
+  descriptor it was opened under, and a state-directory descriptor opened ONCE
+  (`O_DIRECTORY|O_NOFOLLOW`) when the proof passed (building the holder is refused outright
+  when the state directory and the lease's parent are the same directory by fstat identity),
+  as ONE per-event holder that
+  EVERY bookkeeping writer consumes (the row append, the event append, the memory save, the
+  tracking backoff save and the crash recorder: none re-reads anything, so a registry re-read
+  failing or changing mid-event can no longer redirect any writer onto a destination the proof
+  never examined, and none writes without the holder's held descriptor). They are checked
+  DISTINCT from the declared lease at the entry (by resolved path, by inode, and by parent
+  identity: a lease directly in the state directory is refused outright, so an alias spelling
+  realpath cannot fold can never let a first append create the lease's own file; a lease path
+  that IS the state directory or an ANCESTOR of it is refused BEFORE that directory would be
+  created, with nothing created; otherwise an absent state directory is created first,
+  idempotently under concurrent creation, so the parent-identity leg always has a real identity
+  to compare, and a creation fault is the named cannot-evaluate whose remediation names the
+  state-record fault while a faulted lease access names the lease path, each chosen from the
+  fault itself, never from a substring of the detail) and AGAIN AT EVERY WRITE: each append
+  opens its destination by NAME relative to the held state-directory descriptor (`dir_fd`)
+  with `O_WRONLY|O_APPEND|O_CREAT|O_NOFOLLOW|O_NONBLOCK|O_NOCTTY` (an absent log is created; a
+  planted symlink is refused, never followed; a FIFO, with or without a reader, returns
+  promptly and is refused on the descriptor's own stat, never a blocked hook), fstats the very
+  descriptor it writes through, and writes only a regular file with exactly one hard link
+  whose identity differs from the held lease descriptor's AND from an lstat of the lease name
+  taken relative to the held lease parent-directory descriptor AFTER the destination fstat;
+  the memory and backoff saves create their temporary file exclusively, check the temporary
+  DESCRIPTOR before its first byte (a regular file with exactly one hard link, distinct from
+  the held lease descriptor and from a fresh lstat of the lease name, so a temporary renamed
+  onto the lease name, hard-linked or unlinked before the first write is refused with nothing
+  written through the descriptor) and replace relative to
+  that same held state-directory descriptor on both sides (`src_dir_fd` and `dst_dir_fd`),
+  after the same identity checks on the replace target and an identity re-check of the
+  temporary NAME immediately before the replace (a re-pointed temporary name publishes
+  nothing, and the failure cleanup unlinks the temporary name only when one stat just before
+  the unlink finds it still carrying the inode the save created, with the same by-name window as
+  the field write; a temporary that may remain is named in the withheld report, an
+  interrupted cleanup included, before any fault propagates (save for the residuals below),
+  even when that fault's own text
+  cannot be rendered (the fixed disclosure is formatted before the temporary is created and
+  recorded before that text is rendered, and the rendered text replaces only that very
+  record), and the first fault wins, except that a stop raised in the cleanup, while
+  rendering its fault's text, or while that record is built, recorded or replaced,
+  propagates ahead of an `Exception` already propagating and never displaces a stop already
+  propagating, with the same disclosed residuals as the field write: a stop raised while a
+  withheld record naming the temporary is itself appended, before that append has taken
+  effect, propagates, ordered the same way, without the disclosure; memory
+  exhaustion at a fixed-size step can lose the record; and a stop delivered as a signal
+  outside those guards leaves the cleanup at that point, unordered); a refused or FAILED write is withheld
+  and reported through the hook result (the Stop banner, or the result's error text, which the
+  dispatcher writes to stderr), never into a file. The write authorization IS the held descriptor: opening the lease, taking the
+  declared lock and re-opening under it each EMPTY the holder, only the separation re-proof on
+  the descriptor then in hand (at the first open, and again on the re-open under a declared
+  lock) fills it, and cleanup empties it BEFORE any descriptor or lock is released (each
+  terminal cleanup attempts EVERY remaining close, the lock's last, even when an earlier close
+  raises any exception class, never retries the faulted one, and then propagates the FIRST
+  such fault), so a branch
+  holding no proven descriptor writes and records NOTHING (the
+  BUSY- and FAULTED-lock branches, the no-holder branches that still run the decision table,
+  record their bookkeeping refusal as a deferral surfaced on Stop ONLY, at most once per turn
+  end, the faulted-lock deferral NAMING the fault, rendered once (a due refresh's Stop banner
+  names the fault and the deferral is dropped), never a report on every PostToolUse call, and
+  a deferral made on a PostToolUse event is DROPPED with that event's holder, so a core fault
+  deferred there surfaces only where the Stop event reproduces it, a disclosed narrowing;
+  every OTHER no-holder refusal or core fault rides the hook result of the event it happened
+  on, PostToolUse included, as the result's error text, surfaced AS the named fault, never
+  folded into a lock deferral): the entry
+  path before the first open, an invalid declaration, a failed first open, a failed under-lock
+  re-open, a busy or faulted lock, a crash before the proof or after cleanup, and an unknown or
+  unusable lease path all withhold every row and save (a refusal never records into the refused
+  lease; the hook result is the only surfacing: the Stop warning, joined there by any deferral
+  or withheld report, or the result's error text on the event the refusal happened, a
+  disclosed narrowing of the guard-events
+  record on exactly those branches), while a core fault inside the judged table records its one
+  crash row from within the critical section, before descriptors or lock are released, on the
+  branches where the proven descriptor is held. Every
+  other cannot-evaluate is a named no-write warning on Stop plus an attempted (best-effort)
+  guard-events row, never a
+  write; a refusal that persists unchanged is recorded once per state change,
+  never once per call, and its git tracking probe is backed off until the lease identity
+  changes or the backoff elapses.
+- Fail direction. Neither binding ever exits 2, blocks or asks: each returns exit 0, and only a
+  stop raised inside the core (an interrupt or an exit, not an `Exception`) propagates past the
+  binding, where it can end the hook process with another non-zero status, never 2: each
+  binding re-raises an exit whose status would be 2 (an integer code congruent to 2 modulo 256
+  within the signed 64-bit range the interpreter converts it through, so 258 as well) as an exit
+  with status 1, and every other stop propagates unchanged; PostToolUse surfaces no
+  message (a withheld or failed bookkeeping write, a written-unverified refresh and a
+  written-not-durable refresh ride the result's error text to the dispatcher's stderr); the
+  bindings catch the core's own faults (a
+  fault inside the judged table becomes one guard-events row ONLY on the branches where the
+  proven descriptor is held,
+  recorded while it is held; on a busy or faulted lock the table runs with no held descriptor,
+  so a fault there records no row and joins the Stop-only deferrals, dropped with a
+  PostToolUse event's holder; a fault outside the table records no row and is surfaced AS the
+  named core fault through the result of its own event; none becomes a per-tool-call banner);
+  and the
+  keeper never changes another guard's decision (a refresh only keeps a fresh lease fresh, so its
+  order against the stop guard on Stop does not matter).
+- Residuals. A session that makes no tool call and ends no turn produces no heartbeat (staleness is
+  then the correct outcome; a long foreground tool call delays the refresh by its own length). Two
+  processes sharing one `session_id` both refresh, undetected. The declared lock is taken
+  before the lease is read, so every writer that takes that lock is serialized against the
+  whole read-prove-write span; a writer that IGNORES the lock, or any writer where none is
+  declared, can still race the re-check-to-replace window, where an unlinked lease is
+  revived by the replace or a swapped-in acquire is overwritten: the identity re-check
+  narrows that window (it cannot remove it), and the post-replace verification does not report
+  either case (it reads the replace's own content, which carries this session's refreshed
+  value, so the revived lease or the overwritten acquire reads as a clean refresh; it can
+  report a change that lands between the replace and its own re-read, or a verification fault,
+  where the refreshed lease cannot be re-opened, re-read or re-parsed, and it can undo
+  nothing). Bash can still rewrite
+  the lease or the registry. The past-holder memory
+  (`lease-heartbeat.json`) and the guard-events append are best-effort, and every bookkeeping
+  open, lstat, exclusive temporary create and replace runs RELATIVE to the held
+  state-directory and lease parent-directory descriptors, with the saves' temporary descriptor
+  checked before its first byte, the temporary name re-checked immediately before the
+  replace, and the failure cleanup unlinking the temporary only when one stat just before the
+  unlink finds its name still carrying the inode the save created, running from a finally for
+  ANY exception class (one whose
+  identity was never learned, because the pre-write stat itself faulted, is disclosed in the
+  report and never unlinked, and a cleanup stat fault other than confirmed absence also never
+  unlinks and discloses the name and the fault, save for the residuals stated with the memory
+  save above: a stop raised while that withheld record is itself appended, before the append
+  has taken effect, propagates without it, memory exhaustion at a fixed-size step can lose
+  it, and a stop delivered as a signal outside the guards leaves the cleanup unordered; the
+  field write's own residuals, the stop raised while its refusal detail is built included,
+  are stated with it above). The DISCLOSED residual of
+  the bookkeeping is the SAME-USER CONCURRENCY CLASS, stated
+  here once and completely (it subsumes every narrower residual sentence of earlier rounds): a
+  concurrently running process of the same user can rename, re-point, link or replace ANY entry
+  between ANY check and its use (the state directory, the lease's parent directory, the lease,
+  a bookkeeping destination, a temporary file), so a row can land at a declared path (the suite
+  keeps a disclosed-residual WITNESS vector that re-points the lease's parent directory at the
+  state directory between the destination open and the identity read and shows the row landing
+  at the declared lease path) or a bookkeeping write can be lost, and the failure cleanup of a
+  field write or a save, whose unlink is by NAME after one identity stat because POSIX offers no
+  unlink-if-inode, removes an entry swapped onto the temporary name between that stat and the
+  unlink in its place, leaving the moved temporary undisclosed (the suite keeps a WITNESS vector
+  for this window too); the checks cover ACCIDENTAL
+  mis-targeting and a stale or replaced lease, and they do not guarantee a boundary against a
+  same-user concurrent actor, which needs OS isolation (distinct users, or a state directory
+  and lease directory private to this keeper). A refused append can still have CREATED an empty destination file (the
+  `O_CREAT` side effect of the append open); no row byte lands anywhere.
+  Extended attributes and
+  ACLs are not carried over by a field write, and the final parent directory needs read permission
+  for the fsync. A fresh heartbeat proves only liveness, never progress: it must never count as
+  activity for yield decisions. Whether the platform fires `.*` PostToolUse matchers everywhere,
+  and whether `session_id` is stable across resume, compaction and subagents, are deployment checks
+  before enabling `refresh` (ship `warn` first, read the guard-events rows, then widen).
 
 ## The adopter enumeration interface (AEI), protocol v1
 
@@ -367,7 +709,8 @@ malformed.
 
 - `commands` lists the basenames of the commands that dispatch a review.
 - `brief_option` is the option that names the brief file, as `--brief PATH` or `--brief=PATH`.
-- `labels` names the five brief labels. They must be distinct.
+- `labels` names the five brief labels, and optionally two more, `draft` and `skip`, declared
+  together or not at all, which turn on the worker draft census below. They must be distinct.
 - `authority.argv` is a fixed argv, never a shell string. The hook runs it from the repository root
   with the brief's absolute path appended and every `GIT_*` variable removed from its environment, as
   for the hook's own git reads, and it must print exactly one full commit id: the
@@ -421,15 +764,22 @@ boundary other than a physical newline.
   defaults to the session repository root.
 - `Review-branch:` (optional) is informational. If it does not resolve to the pin, the dispatch is
   allowed with a note.
+- `Review-draft:` (optional, only where the binding declares the `draft` label) is the absolute path
+  of the worker draft the commit applies, once.
+- `Review-skip:` lines (only with the `skip` label) each name one drafted path deliberately left out
+  of the commit, kept exactly as written.
 
 For a `revision` target, the hook checks the following in order. The first failure decides.
 
 1. The pin resolves to exactly that commit. A tag object id is not accepted.
 2. The authority prints the same commit id.
 3. Every parent named in the raw commit is present.
-4. The commit's changed set equals the declared paths. The base is the sole parent, the first parent
+4. Where the binding declares the draft labels, the worker draft census below passes: `Review-skip:`
+   lines in a brief with no `Review-draft:` line are refused, and where the brief names a draft, the
+   paths the draft's headers name, less the skipped ones, join the declared paths.
+5. The commit's changed set equals the declared paths. The base is the sole parent, the first parent
    of a merge, or the empty tree for a root commit.
-5. No declared path is staged against the pin, and the working tree matches the pin at every
+6. No declared path is staged against the pin, and the working tree matches the pin at every
    declared path. The working tree is compared by content: the hook hashes each declared file, or
    reads each symlink target, and compares the result and the file mode with the pin's tree entry.
    An assume-unchanged or skip-worktree flag, `core.ignoreStat`, the stat cache, an fsmonitor answer
@@ -442,6 +792,127 @@ fsmonitor, the untracked cache and submodule recursion, and takes no optional lo
 and the staged state are read with `--ignore-submodules=none`, so a `.gitmodules` `ignore` value
 cannot hide a submodule change. A file the pin replaces with a directory holding the pin's own
 entries counts as clean.
+
+### The worker draft census
+
+A hand-written `Review-path:` list is checked against the commit, so a drafted file that the apply
+left out, and that the list leaves out too, shows no divergence. Where the binding declares the
+`draft` and `skip` labels, a revision brief can name the worker draft the commit applies, and the
+declared review set is then built from the draft's own diff headers, less the paths the brief
+records as skipped, together with any `Review-path:` lines (for paths the commit changes beyond the
+draft). A drafted path that is neither committed nor recorded as skipped is refused, and the refusal
+names it as drafted. The hook reads the draft once, by its absolute path, under `max_brief_bytes`,
+split on LF only, as `git apply` reads a patch. Unlike a brief, a draft under `/proc` or `/dev` (such
+as `/dev/shm`) is not withheld, since the census is made from what the hook itself reads there.
+
+The draft is a git diff (`git diff`, `git diff --cached` or `git format-patch` output). The census
+reads it conservatively, as the diff output git writes by default, so some forms that `git apply`
+accepts but git does not write are refused rather than read: a localized no-newline marker, a context
+marker that only added lines follow, an added-line marker that more added lines follow, and a line
+beginning with a backslash, other than git's exact marker, right after a hunk's counted lines or
+their marker. Not every such form is refused: an added-line marker that a removed line follows and an
+empty line read as context are read. After a hunk's counted lines, git's exact no-newline marker is
+read as the marker; any other line beginning with a backslash there is refused; a hunk header, a
+`diff --git` line or a `---` line naming a path goes on to the next hunk or section; a `diff --cc`
+or `diff --combined` line is refused as a combined diff; a line that begins as another diff header is
+refused as outside a file section; a `Content-Transfer-Encoding:` line naming an encoding other than
+7bit or 8bit is refused as a transfer-encoded mailbox part; a `Submodule` line that shows a
+submodule's own changes inline (as `--submodule=log` or `--submodule=diff` writes it) is refused as a
+submodule shown inline; and any other line is read as prose. Whatever line follows it, each hunk is
+consumed by the line counts in its own header, so no path is hidden.
+A file section opens at a `diff --git` line, or at a `---` line naming a path, which a `+++` line
+and a hunk header must follow. Each hunk is consumed by the line counts in its own header, so an
+added line that reads `++ b/x` (shown as `+++ b/x`) is content, not a header. Git's exact
+`\ No newline at end of file` marker is read only where git writes one, after the last line of each
+side of the file it marks. A marker after a removed line marks the old side, after an added line the
+new side, and after a context line both. So a marker is read only where the hunk header's count for
+each side it marks is met, and only in the section's last hunk. A line after a hunk's counted lines
+and its marker is not part of the hunk: as `git apply` reads it, it is prose unless it opens a section
+or begins as a diff header or a marker does, so a hunk with extra lines after its counted ones is not
+refused for them. The exception is a line right after the counted lines, or right after their
+marker, that begins with a backslash, with or without a space after it: git writes nothing there but
+its exact marker, so any other such line is refused. A section completes with a hunk, a binary
+marker (`Binary files ... differ` or `GIT binary patch`), or a creation, deletion, mode change,
+rename or copy header. A section names at most one old path (its `---`, `rename from` and
+`copy from` headers) and one new path (its `+++`, `rename to` and `copy to` headers), and its
+`diff --git` line names exactly those, `a/` then `b/`, as git writes them from one pair. A rename
+names both of its paths (`rename from` and `rename to`), a copy only its destination (`copy to`), a
+deletion or a creation the one path that is not `/dev/null`, and a section with no path header (a
+mode change, an empty file, a binary change) the one path its `diff --git` line names twice. C-quoted
+names are decoded, and a name is read up to a tab.
+
+Outside a section, a line is prose and is skipped unless it begins as a diff header or a no-newline
+marker does. Prose covers what git writes around its sections (the mailbox headers and the commit
+message, the `---` separator, alone or with trailing blanks, the diffstat and its summary, the `-- `
+signature and the version line after it, and a binary patch's encoded lines) and blank or indented
+lines. A line that begins as a diff header or a marker does is not prose, wherever it stands (after a
+section, at the end, or before prose), since a section cut short or mangled would otherwise drop out
+of the census unseen: a `+++` line, a hunk header, an extended header such as `index` or
+`rename from` (including the older `rename old` and `rename new`), a binary marker, a line beginning
+with a backslash and a space, and a `diff -` line other than `diff --git` (besides it, git writes
+only `diff --cc` and `diff --combined`, for a merge, which are refused as combined diffs, so
+`diff -ruN` output is refused too). A `---` line naming a path always opens a section.
+
+Among a hunk's counted lines, `git apply` reads a line beginning with a backslash and a space as a
+no-newline marker when it is at least eleven bytes long (counted in bytes before the line feed, so a
+short line of non-ASCII text can reach it) and rejects a shorter one as a corrupt patch; right after
+a hunk's counted lines it accepts any such line, reading one of eleven bytes or more as a marker and
+passing over a shorter one. The census refuses every such line other than git's exact marker in both
+places.
+
+- More than one `Review-draft:` line, a relative draft path, a draft that cannot be read (missing, a
+  symlink, not a regular file, over the cap, not UTF-8, a NUL), an empty `Review-skip:` value, and a
+  draft that names no file in a diff header are withheld as `UNVERIFIABLE:`, with a reason naming the
+  draft and the cause.
+- A draft the census cannot read is withheld as `UNVERIFIABLE:`, with a reason naming the cause: a
+  combined diff (`diff --cc` or `diff --combined`), a header path without git's default `a/` or `b/`
+  prefix in its place (written with `--no-prefix`, `diff.noprefix`, `diff.mnemonicPrefix` or custom
+  prefixes, or by `git diff -R`, which swaps them), a `---` line naming a path with no `+++` line after
+  it (the `---` line of a context-format `diff -c` section among them), a `+++` line with no hunk after
+  it, a section that ends with no hunk, binary marker, or creation, deletion, mode, rename or copy
+  header (a draft cut short inside a section), a rename, copy or mode header without its pair, a
+  `diff --git` line naming two paths with no rename or copy header, a section whose `---`, `+++`,
+  rename or copy headers name two old or two new paths, or other paths than its `diff --git` line
+  names (a mangled or hand-edited section, which is refused rather than counted by one of its
+  headers), an unreadable quoted name, a hunk header that cannot be read, a hunk that ends before its
+  header's counts are met or holds more lines for one side than its header counts while the other
+  side's count is not yet met, a hunk line beginning with a backslash that is not git's exact
+  `\ No newline at end of file` marker after a context, removed or added line, a marker before the
+  last line its hunk header counts for a side it marks (such as a marker after a removed line that
+  another removed line follows, or one after a context line in the middle of a hunk, as `git diff -w`,
+  `-b` or `--ignore-space-at-eol` can write), a hunk after a marker in its section, any other line
+  beginning with a backslash right after a hunk's counted lines or their marker, and a diff header or
+  marker line outside a section. Where a `diff --git` line names its paths under `b/` and then `a/`, as
+  `git diff -R` writes it, in a section with no `---` line (a mode change, a binary change, an empty
+  file, a pure rename or a pure copy), the reason names that swap; a section with a `---` line, as most
+  `git diff -R` output has, is refused first with the reason that its `---` or `+++` line names no
+  path under git's prefix for its side.
+- A header or hunk line that ends in a carriage return before its LF is withheld as `UNVERIFIABLE:`,
+  with a reason naming CRLF, since a header's names would end in the return. This covers a draft
+  saved with CRLF line ends, which must be written again with LF line ends, and a draft holding a
+  hunk of a file whose own lines end in CRLF, which is withheld however it is saved.
+- A mailbox part whose `Content-Transfer-Encoding` is other than `7bit` or `8bit` (base64,
+  quoted-printable) is withheld as `UNVERIFIABLE:`, since `git am` decodes and applies the file
+  headers it holds, which a line reader cannot see.
+- A submodule shown inline by `git diff --submodule=log` or `--submodule=diff` (a
+  `Submodule <path> <old>..<new>` line, whose own changes follow under the submodule's path) is
+  withheld as `UNVERIFIABLE:`, with a reason naming `--submodule=short`, the default, which shows the
+  submodule as its one gitlink section.
+- A `Review-skip:` line that names a path the draft does not name, or a path the commit changes, is
+  refused, and so are `Review-skip:` lines in a brief with no `Review-draft:` line.
+
+The census applies to a `revision` target only. It reads paths, not content: a draft that names a file
+only in prose, a partial apply inside one file (a hunk dropped from a file the commit still changes),
+and a section indented from column 0 (which GNU `patch` reads and `git apply` does not), which is read
+as prose, are not caught, and neither is an apply whose brief does not name its draft. The census
+reads the draft the brief names, and nothing proves that draft is the one the commit applied: a
+trimmed copy, or a draft cut short between two complete sections, reads as a complete draft of fewer
+files. A commit message line in a mailbox draft that begins as a diff header or a no-newline marker
+does (such as one starting `index ` or `\ `), that reads as an inline submodule header (such as
+`Submodule sub 1234567..89abcde: bumped`), or that reads as a `Content-Transfer-Encoding:` header with
+a value other than `7bit` or `8bit` is refused with the rest, which can withhold a correct draft:
+telling a message line from a part header or a section's line needs the mailbox structure, which a
+draft can mangle, so the census refuses such a line wherever it stands.
 
 The hook refuses with a deny that names the reason. When it cannot evaluate, it denies with the
 reason prefixed `UNVERIFIABLE:`, so that outcome stays distinct. Cannot-evaluate cases include a
@@ -536,6 +1007,12 @@ Limits:
   redirect output another way.
 - Uncommitted edits inside a checked-out submodule whose HEAD is at the pinned commit are not read. A declared file whose checkout was converted (line
   endings or a filter) differs by content from the pin and is refused.
+- A path the change needs that is missing from both the commit and the declaration is caught only
+  where the brief names the worker draft that drafts it; the census reads the draft's diff headers,
+  so a file the draft names only in prose and a partial apply inside one file are not caught. The
+  census reads the draft the brief names, which is not proven to be the draft the commit applied.
+  A draft with CRLF line ends, or one holding a hunk of a CRLF file, is withheld as `UNVERIFIABLE:`
+  rather than censused.
 
 ## Platforms without hooks
 

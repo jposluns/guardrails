@@ -993,6 +993,13 @@ jobs:
       - run: python3 -I -B tools/g_empty.py
 """
 
+_ROSTER_MSG_YML = """name: Message leaks
+jobs:
+  msg-leaks:
+    steps:
+      - run: python3 -I -B tools/g_empty.py
+"""
+
 # ruleaa + rulebb -> gate-alpha (ruleaa enforced, rulebb partial); rulecc -> hook-one (enforced); ruledd +
 # apex01 -> prose-only. ruledd is left none, apex01 is set pending, so all four statuses appear.
 _ROADMAP = """version = 1
@@ -1074,6 +1081,7 @@ def _build(base):
     workflows = base / ".github" / "workflows"
     workflows.mkdir(parents=True)
     (workflows / "quality.yml").write_text(_ROSTER_YML, encoding="utf-8")
+    (workflows / "msg-leaks.yml").write_text(_ROSTER_MSG_YML, encoding="utf-8")
     # Write a matching ledger via the reused builder, so load_ledger's byte-identity check passes.
     (base / ".aiqt" / "enforceability.json").write_text(
         gen_enforceability.build_ledger(base), encoding="utf-8")
