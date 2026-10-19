@@ -11172,7 +11172,15 @@ _MERGE_VALUE_LONGS = frozenset((
 # NEWLINE does not split a chunk: a quoted wrapper-body string can carry a real newline inside ONE
 # inner command (a multi-line graphql query), so splitting there hid the merge; where a newline really
 # separates two inner commands, the merged chunk can only ADD a match, the disclosed over-deny
-# direction for text this guard already cannot parse.
+# direction for text this guard already cannot parse. A DESCRIPTOR-REDIRECTION spelling ('2>&1',
+# '>&2', '<&-', '&>file', '&>>file') does not split a chunk either: its '&' belongs to one command's
+# redirect, never to a command separator, so those spellings are blanked (replaced with a space)
+# BEFORE the split; otherwise 'gh pr 2>&1 merge' would scatter one command's words across two chunks
+# and hide the spelling. Blanking is purely ADDITIVE for detection: it can only merge text into one
+# chunk (more matches, the disclosed over-deny direction), never authorize a shape; where a
+# declaration arms the rule, the single-simple-command read still judges every redirect through the
+# real lexer.
+_RAW_REDIRECT_NEUTRAL_RE = re.compile(r"\d*[<>]&|&>>?")
 _RAW_CHUNK_SPLIT_RE = re.compile(r"[;|&]")
 _RAW_GH_RE = re.compile(r"(?i)\bgh\b")
 _RAW_PR_RE = re.compile(r"(?i)\bpr\b")
@@ -11310,10 +11318,23 @@ def _merge_path_note(detail):
         "bare PR merge is denied; this one proceeds under the user's own permission flow.".format(detail))
 
 
-# git's confirmed-absence wordings for the operations work-tree probe, matched against stderr with the
-# locale pinned to C by the probe itself. Any OTHER failure (a timeout, a spawn error, a repository git
-# refuses to read, an unusable answer) is a discovery FAULT, never evidence that nothing opted in.
-_OPERATIONS_NONREPO_MARKS = ("not a git repository", "must be run in a work tree")
+# git's confirmed-absence diagnostics for the operations work-tree probe, matched as the COMPLETE
+# first line of stderr with the locale pinned to C by the probe itself, never as a substring
+# anywhere in stderr: git's failed-directory-change error quotes the directory name, and a pathname
+# can itself carry these words ('.../nonexistent-not a git repository'), so a substring read would
+# mistake a discovery failure for confirmed absence. Any OTHER failure (a timeout, a spawn error, a
+# failed directory change, a repository git refuses to read, an unusable answer, a rewording by a
+# future git) is a discovery FAULT, the over-deny direction, never evidence that nothing opted in.
+_OPERATIONS_NONREPO_LINES = (
+    "fatal: not a git repository (or any of the parent directories): .git",
+    "fatal: this operation must be run in a work tree",
+)
+# git's filesystem-boundary wording of the same confirmed absence embeds the kernel-derived mount
+# point ('fatal: not a git repository (or any parent up to mount point /srv)'), so it is matched
+# by its fixed first-line prefix: the suffix is a real mount point resolved by git from the
+# filesystem, never text a probed pathname controls (a pathname echoed by the failed-chdir
+# diagnostic sits on a first line with a different fixed prefix, which stays a fault).
+_OPERATIONS_NONREPO_PREFIX = "fatal: not a git repository (or any parent up to mount point "
 
 
 def _operations_toplevel(path):
@@ -11321,10 +11342,14 @@ def _operations_toplevel(path):
     from a discovery fault: ("ok", toplevel), ("none", None) when git CONFIRMS path is in no work tree
     (so no .aiqt/operations.json can have opted a checkout in), or ("fault", detail) when the probe
     itself failed. A fault must never read as absence: a present declaration behind a faulting probe
-    (a loaded host timing out the 5-second git call, an ownership refusal) would otherwise silently
-    disarm the merge gate, so the merge guard denies its matched shapes on a fault and the pre-push
-    check warns. The probe pins LC_ALL=C so the absence wordings are matched in one locale; an
-    unrecognized failure therefore reads as a fault, the over-deny direction, never as absence."""
+    (a loaded host timing out the 5-second git call, an ownership refusal, a directory git cannot
+    change into) would otherwise silently disarm the merge gate, so the merge guard denies its
+    matched shapes on a fault and the pre-push check warns. Absence is confirmed ONLY when the FIRST
+    stderr line equals one of git's complete non-repository diagnostics (_OPERATIONS_NONREPO_LINES):
+    a substring read anywhere in stderr would let a pathname echoed inside another diagnostic (the
+    failed-chdir error quotes the directory name) read as absence. The probe pins LC_ALL=C so those
+    diagnostics are matched in one locale; an unrecognized failure therefore reads as a fault, the
+    over-deny direction, never as absence."""
     try:
         result = _recovery_git(path, ["rev-parse", "--show-toplevel"],
                                env_extra={"LC_ALL": "C"}, timeout=5)
@@ -11333,7 +11358,8 @@ def _operations_toplevel(path):
         return ("fault", "the git work-tree probe failed ({})".format(exc or type(exc).__name__))
     if result.returncode != 0:
         err = result.stderr if isinstance(result.stderr, str) else ""
-        if any(mark in err for mark in _OPERATIONS_NONREPO_MARKS):
+        first = err.splitlines()[0] if err else ""
+        if first in _OPERATIONS_NONREPO_LINES or first.startswith(_OPERATIONS_NONREPO_PREFIX):
             return ("none", None)
         return ("fault", "git could not resolve the work tree (exit status {})"
                 .format(result.returncode))
@@ -11353,8 +11379,9 @@ def _operations_toplevel(path):
 _MERGE_SHELL_KEYWORDS = frozenset(("if", "then", "elif", "else", "do", "while", "until"))
 # The bound on the ADVISORY discovery probes behind the 'gh api' cannot-read note (the session cwd
 # plus every literal cd/pushd destination, each relative one resolved against every earlier reachable
-# directory): past it no further destination is probed. No deny rests on these probes; a
-# merge-spelling command never reaches them.
+# directory): past it no further destination is probed. No merge ALLOW rests on these probes, and a
+# merge-spelling command never reaches them; a bad declaration or a discovery fault found at a
+# probed destination still denies, never a silent pass.
 _MERGE_PROBE_CAP = 16
 
 
@@ -11610,14 +11637,20 @@ def _merge_simple_gh(command):
     function definitions and process substitutions, no backtick or '$(', no unbalanced quote or
     trailing backslash, no line continuation the lexer reads differently once joined, and nothing
     else the full lexer refuses); the joined text must lex to exactly ONE segment with no trailing
-    separator (';', '&&', '||', '|', '|&', '&', or a newline between commands; blank-line empty
-    segments are skipped); the segment must carry a command word; that word must be the literal,
+    separator (';', '&&', '||', '|', '|&', '&', or a newline between commands; a BLANK-LINE empty
+    segment, whose separator is the bare newline, is skipped so a trailing newline stays the one
+    command, but an empty segment carrying a REAL separator - a leading ';', a ';' or '&' alone on
+    a line, spellings bash itself refuses - refuses the shape with that separator named); the
+    segment must carry a command word; that word must be the literal,
     unquoted word 'gh', BOTH as the decoded first token AND as the raw spelling at the start of
     the segment, so a wrapper, an assignment prefix, a path spelling (/usr/bin/gh), a quote or an
     escape in the word, and a leading redirect before the word all refuse (the last a deliberate
-    over-deny: the sanctioned shape puts the command word first); and every redirect must be a
-    literal descriptor duplication or close ('>&'/'<&' with a plain numeric or '-' target: 2>&1,
-    >&2, <&-) or a plain literal file target (_merge_plain_target). Loops, conditionals and
+    over-deny: the sanctioned shape puts the command word first); the segment's raw text must be
+    free of ANSI-C $'...' and locale $\"...\" quoting (_commit_quote_bytes_known: the lexer does
+    not reproduce the execution-time bytes of those spellings byte-for-byte as bash does, so no
+    exact-argv or out-of-scope proof may rest on a token they decoded); and every redirect must
+    be a literal descriptor duplication or close ('>&'/'<&' with a plain numeric or '-' target:
+    2>&1, >&2, <&-) or a plain literal file target (_merge_plain_target). Loops, conditionals and
     reserved words refuse through these same tests: their separators or keywords never lex as the
     one 'gh' command word."""
     causes = _lex_uncertain_causes(command)
@@ -11625,10 +11658,21 @@ def _merge_simple_gh(command):
         return _MERGE_SIMPLE_CAUSE_TEXT[causes[0]], None
     joined, _raw_index = _join_continuations(command)
     try:
-        segments = _lex_command(joined, skip_empty=True)
+        lexed = _lex_command(joined)
     except ValueError:
         # defensive: with no reported cause the lexer accepted this text once already
         return _MERGE_SIMPLE_CAUSE_TEXT["lexer"], None
+    segments = []
+    for cand in lexed:
+        if cand.argv or cand.redirects:
+            segments.append(cand)
+        elif cand.sep_after:
+            # an empty segment carrying a real separator (a leading ';', a ';' or '&' alone on
+            # a line) is never part of one clean simple command: bash itself refuses these
+            # spellings, so the shape refuses them too rather than letting the separator-only
+            # segment vanish before the single-segment test. Only blank-line empty segments
+            # (separator '': a bare newline) are skipped.
+            return "a command separator ({!r})".format(cand.sep_after), None
     if len(segments) != 1 or segments[0].sep_after:
         seps = [seg.sep_after for seg in segments if seg.sep_after]
         if seps:
@@ -11643,6 +11687,13 @@ def _merge_simple_gh(command):
         return ("a command word that is not the one literal, unquoted word 'gh' (a wrapper, an "
                 "assignment prefix, a path, a quoted or escaped spelling, a leading redirect, "
                 "or another command entirely)"), None
+    if not _commit_quote_bytes_known(seg.raw):
+        # bash decodes ANSI-C escapes ($'own\x65r' runs as owner) where this lexer keeps the
+        # escape letters, so a token spelled with these quotings can execute with DIFFERENT
+        # bytes than the ones any exact-argv or out-of-scope comparison would read: no proof
+        # may rest on such a token, and the shape refuses it outright.
+        return ("an ANSI-C $'...' or locale $\"...\" quoting, whose execution-time bytes this "
+                "guard's lexer does not establish"), None
     for red in seg.redirects:
         if red.op in (">&", "<&") and (red.target == "-" or red.target.isdigit()):
             continue  # a literal descriptor duplication or close: 2>&1, >&2, <&-
@@ -11655,7 +11706,9 @@ def _merge_simple_gh(command):
 
 def _merge_raw_hit(text):
     """True when the raw merge backstop sees a gh pr-merge or gh api merge spelling in text: within one
-    chunk (no ; | or & between them; a newline does not split, see _RAW_CHUNK_SPLIT_RE), 'gh' then 'pr'
+    chunk (no ; | or & between them; a newline does not split, see _RAW_CHUNK_SPLIT_RE, and neither
+    does the '&' of a descriptor redirection such as 2>&1, >&2, <&- or &>file, blanked first via
+    _RAW_REDIRECT_NEUTRAL_RE because it belongs to one command, not to a separator), 'gh' then 'pr'
     then 'merge' as words in order, or 'gh'
     then 'api' then a merge endpoint or mutation name, with no bound on the gaps. Backslash-newline
     pairs are dropped first, so a line continuation inside a wrapper body cannot split a pair of words
@@ -11663,6 +11716,7 @@ def _merge_raw_hit(text):
     exists exactly when this walk finds one, because an earlier first word only widens where the later
     words may sit."""
     text = text.replace("\\\n", "")
+    text = _RAW_REDIRECT_NEUTRAL_RE.sub(" ", text)
     for chunk in _RAW_CHUNK_SPLIT_RE.split(text):
         start = _RAW_GH_RE.search(chunk)
         if start is None:
@@ -11702,18 +11756,20 @@ _MERGE_NO_CWD_BANNER = (
     "AIQT guardrail: denied a merge-shaped {} call because the session reported no working directory "
     "(rule artbr1, fail-closed on cannot-evaluate).")
 _MERGE_STRICT_REASON = (
-    "AIQT rule artbr1 (branch-and-merge-on-green): this checkout declares its merge path in "
-    ".aiqt/operations.json, and this command carries an apparent PR merge spelling without being "
-    "a single simple literal-'gh' command: it carries {}. Where a merge path is declared, a merge "
-    "spelling may run ONLY as one simple command whose command word is the literal word 'gh' and "
-    "whose argv is exactly the declared merge command (or names an explicit separated -R/--repo "
-    "target outside the declared scope). Any other shape can rebind what runs before the merge, "
-    "so the declared gate cannot be proven to decide it; it fails closed. Run the merge alone, as "
-    "one simple command with nothing else on the line.")
+    "AIQT rule artbr1 (branch-and-merge-on-green): the checkout at '{1}' declares its merge path "
+    "in .aiqt/operations.json (declared merge command: '{2}'), and this command carries an "
+    "apparent PR merge spelling without being a single simple literal-'gh' command: it carries "
+    "{0}. Where a merge path is declared, a merge spelling may run ONLY as one simple command "
+    "whose command word is the literal word 'gh' and whose argv is exactly the declared merge "
+    "command (or names an explicit -R/--repo target outside the declared scope, spelled as the "
+    "separated '-R VALUE' / '--repo VALUE' or as '--repo=VALUE'). Any other shape can rebind "
+    "what runs before the merge, so the declared gate cannot be proven to decide it; it fails "
+    "closed. Run the merge alone, as one simple command with nothing else on the line.")
 _MERGE_STRICT_BANNER = (
-    "AIQT guardrail: denied a Bash command carrying an apparent PR merge in a checkout that "
-    "declares its merge path, because it is not a single simple 'gh' command: it carries {} "
-    "(rule artbr1, fail-closed); run the declared merge command alone.")
+    "AIQT guardrail: denied a Bash command carrying an apparent PR merge in the checkout at "
+    "'{1}', whose .aiqt/operations.json declares its merge path, because it is not a single "
+    "simple 'gh' command: it carries {0} (rule artbr1, fail-closed); run the declared merge "
+    "command alone.")
 
 
 def merge_path_guard(data):
@@ -11725,20 +11781,28 @@ def merge_path_guard(data):
     never silently disarm the merge gate.
     DISCOVERY, for every Bash command whose raw or de-quoted text ANYWHERE carries a merge spelling
     (_merge_raw_hit, line continuations joined first: gh..pr..merge as ordered words within one
-    ;|&-split chunk, or gh..api.. followed by a merge REST endpoint or merge-mutation name, in the
+    ;|&-split chunk, with descriptor-redirection spellings (2>&1, >&2, <&-, &>file) blanked before
+    the split so their '&' never scatters one command's words across chunks, or gh..api.. followed
+    by a merge REST endpoint or merge-mutation name, in the
     command text, a quoted string, a shell-string or eval body, a here-document body or plain prose
     alike): the declaration is read from the git toplevel of the SESSION CWD alone. Where no
     .aiqt/operations.json is found there, or one with no merge member, the command allows untouched
     WHATEVER ITS SHAPE: the hook ships to every plugin user, and a repository that never declared a
     merge path sees no merge deny (adopters opt in). A session git CONFIRMS is in no work tree
+    (confirmed only by one of git's complete first-line diagnostics, never by a substring a
+    pathname echoed in another diagnostic could carry)
     allows with a note (nothing has opted in); a work-tree DISCOVERY FAULT (a git timeout, a
-    repository git refuses to read) or a payload with NO USABLE CWD denies fail-closed (neither is
+    failed directory change, a repository git refuses to read) or a payload with NO USABLE CWD
+    denies fail-closed (neither is
     evidence that nothing opted in); a present-but-bad declaration denies as above.
     THE RULE where a merge declaration IS found, deliberately blunt, with NO shell-structure
     modelling behind any allow: the merge-spelling command is allowed ONLY when ALL of these hold:
     (1) it lexes cleanly as exactly ONE simple command (_merge_simple_gh): no ';', '&&', '||', '|',
     '|&', '&' or newline separator, no subshell, group, loop, conditional or function definition, no
     here-document or here-string, no process or command substitution or backtick, no unquoted '#',
+    no ANSI-C $'...' or locale $"..." quoting anywhere in its raw text (the lexer does not
+    establish the execution-time bytes of those spellings, so neither exemption below may rest on
+    a token they decoded),
     and no redirect other than a literal descriptor duplication (2>&1, >&2, <&-) or a plain literal
     relative or absolute file target with no expansion (merge.log, ../merge.log, /tmp/merge.log; an
     expansion/glob/brace character or a leading tilde in the decoded target refuses);
@@ -11781,9 +11845,15 @@ def merge_path_guard(data):
     body, a loop), is NOT seen: discovery reads the session cwd's git toplevel only, never a
     destination the command would reach, so the guard stays inert for it. Adopters who need that
     covered run their agent sessions from the declaring checkout itself; the rule then needs no
-    destination modelling. Also unseen: a merge whose spelling never survives into the
-    command text or its de-quoted reading (assembled at run time from fragments or from a brace or
-    glob expansion inside one token such as m{e..e}rge, read from a file written in an earlier
+    destination modelling. No directory change is needed either: an EXPLICIT-TARGET merge run
+    from such an undeclared session (a -R/--repo value, a PR URL operand, or a 'gh api' path
+    naming a declaring repository) reaches that repository while staying unseen, because
+    discovery reads only the session cwd and there is no network lookup of a target repository's
+    own declaration. Also unseen: a merge whose spelling never survives into the
+    command text or its de-quoted reading (assembled at run time from fragments, from a brace or
+    glob expansion inside one token such as m{e..e}rge, or through stdin to a command that builds
+    the argv at run time, as in 'echo merge 3 | xargs gh pr', whose pipe splits the chunks the
+    raw scan reads; read from a file written in an earlier
     command or session, a gh alias or extension, a renamed binary, another forge, a raw curl, or a
     tool outside the Bash and MCP matchers; an alias or function REBINDING THE LITERAL 'gh' WORD
     established outside this command, e.g. in a shell profile, since a single simple 'gh' command
@@ -11873,28 +11943,29 @@ def merge_path_guard(data):
             return _allow()  # the inert boundary: no merge member declares a required path
         # the strict rule, armed by the discovered declaration: the merge-spelling command is
         # allowed only as one simple literal-'gh' command carrying the exact declared argv or
-        # a literal separated out-of-scope -R/--repo target; anything else denies with the
-        # first disqualifying construct named
+        # a literal out-of-scope -R/--repo target in one of the three read spellings; anything
+        # else denies with the first disqualifying construct named
+        declared = " ".join(cfg["argv"])
         reason, seg = _merge_simple_gh(command)
         if reason is not None:
-            return _deny(_MERGE_STRICT_REASON.format(reason),
-                         _MERGE_STRICT_BANNER.format(reason))
+            return _deny(_MERGE_STRICT_REASON.format(reason, root, declared),
+                         _MERGE_STRICT_BANNER.format(reason, root))
         if _merge_declared_exact(seg.argv, seg.argv_opaque, cfg["argv"]):
             return _allow()  # PROVABLY the declared command, run exactly as declared
         slug = _merge_scope_slug(seg.argv, seg.argv_opaque)
         if slug is not None and cfg["repos"] is not None and slug not in cfg["repos"]:
             return _allow()  # an explicit, fully literal -R/--repo target outside this scope
-        declared = " ".join(cfg["argv"])
         what = "an apparent PR merge spelled outside the exact declared merge command"
         return _deny(
-            "AIQT rule artbr1 (branch-and-merge-on-green): this repository declares its merge "
-            "path in .aiqt/operations.json, and this command carries {}, which bypasses it. The "
-            "protected line integrates only through the declared merge command; run '{}' "
-            "instead, so the declared gate decides the merge. An explicit target outside the "
-            "declared repos scope is not governed by this guard.".format(what, declared),
-            "AIQT guardrail: denied {} in a repository whose .aiqt/operations.json declares "
-            "the merge command '{}' (rule artbr1); run the declared command instead."
-            .format(what, declared))
+            "AIQT rule artbr1 (branch-and-merge-on-green): the checkout at '{}' declares its "
+            "merge path in .aiqt/operations.json, and this command carries {}, which bypasses "
+            "it. The protected line integrates only through the declared merge command; run "
+            "'{}' instead, so the declared gate decides the merge. An explicit target outside "
+            "the declared repos scope is not governed by this guard."
+            .format(root, what, declared),
+            "AIQT guardrail: denied {} in the checkout at '{}', whose .aiqt/operations.json "
+            "declares the merge command '{}' (rule artbr1); run the declared command instead."
+            .format(what, root, declared))
     # NO merge spelling anywhere in the raw or de-quoted reading: the command is unaffected,
     # except that a recognized 'gh api' call whose body cannot be read is surfaced with an
     # ADVISORY note wherever a probed checkout declares a merge path
