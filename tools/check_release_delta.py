@@ -37,7 +37,7 @@ RELEASING steps 6a/6b; see _post_release_head); whole-surface delta otherwise, w
 strictly increase over the newest row); --repin --target V (10.4 adopter mode, rollback branch keyed on the
 pin-history match plus wholesale target validation plus recorded authorization); --self-test.
 
-Launch (QA round 5, D-397-REEXEC-FROM-COMMITTED): a plain run re-executes the COMMITTED copy of this
+Launch (a design decision): a plain run re-executes the COMMITTED copy of this
 gate. Stage 1 (the launched file: standard library only, no checkout import, no sys.path change)
 materializes HEAD's committed tree through a verified re-hashing walk and re-executes
 tools/check_release_delta.py from that materialization under -I -B with a fresh pycache prefix; stage 2
@@ -90,8 +90,8 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
     os._exit(2)
 
 
-# ===== STAGE 1: re-execute the COMMITTED gate (QA round 5; orchestrator decision ====================
-# D-397-REEXEC-FROM-COMMITTED). Round 5 demonstrated that vetting checkout code from INSIDE a process
+# ===== STAGE 1: re-execute the COMMITTED gate (a design decision) ===================================
+# Round 5 demonstrated that vetting checkout code from INSIDE a process
 # that already imported it cannot close the class: an untracked shadow module imported later (an
 # untracked tools/tempfile.py), a crafted __pycache__ .pyc behind a byte-identical .py, and a
 # repo-config core.fsmonitor hook that plants a file mid-run each flipped a refusal to exit 0 under
@@ -242,7 +242,7 @@ _GIT_DIR_MARKERS = ("HEAD", "objects", "refs", "commondir", "gitdir")
 
 def _stage1_repository_in_ancestry(*dirs):
     """False ONLY when an inspection that is a SUPERSET of git's own repository discovery finds
-    nothing (D-397-DISCOVERY-SUPERSET, QA round 8); the ONE helper both absence predicates use. For
+    nothing (the superset-of-discovery decision); the ONE helper both absence predicates use. For
     every directory given, BOTH its lexical ancestry (os.path.abspath) and its physical ancestry
     (os.path.realpath) are walked up to `/`: `git -C` changes into the directory, so discovery
     walks the PHYSICAL ancestors, and a symlinked launch path past a damaged ancestor otherwise
@@ -280,7 +280,7 @@ def _stage1_repository_in_ancestry(*dirs):
 
 def _stage1_gate_paths():
     """(gate root, inspection directories) for the RUNNING gate file (QA round-9 codex blocker /
-    claude B1, extending D-397-DISCOVERY-SUPERSET). The gate root is derived ONLY from the PHYSICAL
+    claude B1, extending the superset-of-discovery rule). The gate root is derived ONLY from the PHYSICAL
     path of the file actually executing: os.path.realpath of the raw launch path joined to the cwd
     resolves each symlink before the `..` that follows it, as the kernel does, and follows a
     symlinked gate FILE. abspath erases `link/..` as text, so a root derived from it can name a
@@ -1859,8 +1859,8 @@ def _assert_gate_code_matches_head(root, head_oid):
     patch of this very function) can run arbitrary code and fabricate any verdict; no in-process
     self-comparison can defend a process against its own launcher. What this check closes is the
     demonstrated R4-1 class: an in-place checkout edit changing the verdict of an otherwise honest
-    launch. CI runs the gate on a fresh clone, where the checkout and HEAD coincide. QA round 5
-    (D-397-REEXEC-FROM-COMMITTED): under the two-stage launch this check runs INSIDE the committed
+    launch. CI runs the gate on a fresh clone, where the checkout and HEAD coincide. By design,
+    under the two-stage launch this check runs INSIDE the committed
     copy (stage 2), where it pins the stage-2 materialized modules to the judged HEAD; the
     launch-control residual concentrates entirely in the stage-1 launched file."""
     pack, files = _gate_module_files()
@@ -1976,7 +1976,7 @@ def _post_release_head(root, prev_row, release_rows, head_version):
     blob it consumes against the requesting id (_release_schema), so a decoy GIT_DIR, an
     object-directory overlay, or an overwritten loose object cannot substitute a judged byte.
 
-    QA round-5 (D-397-REEXEC-FROM-COMMITTED): a plain launch re-executes the COMMITTED copy of this
+    By design, a plain launch re-executes the COMMITTED copy of this
     gate from a verified materialization of HEAD (stage 1), so no checkout Python file beyond the
     launched file itself (an untracked shadow module, a crafted __pycache__ .pyc, a planted sibling)
     participates in this branch; every child validator launches under -I -B with a fresh pycache
@@ -2506,8 +2506,8 @@ def _committed_post_release_state(root, head_oid):
 
 def run(root):
     try:
-        # BRANCH ROUTING FROM COMMITTED OBJECTS ONLY (QA round-5 claude M1; orchestrator decision
-        # D-397-REEXEC-FROM-COMMITTED): whether the post-release branch runs is decided from HEAD's
+        # BRANCH ROUTING FROM COMMITTED OBJECTS ONLY (QA round-5 claude M1; part of the committed-copy
+        # re-execution decision): whether the post-release branch runs is decided from HEAD's
         # COMMITTED copies of the routing records (the release rows and the changelog head version),
         # read through the verified funnel, never from the checkout.
         head_oid_route = _head_commit_or_none(root)
@@ -2719,11 +2719,22 @@ def run(root):
 # --- self-test --------------------------------------------------------------------------------------
 # Pure classification cases (every 6.5 table row over in-memory inputs) always run and are deterministic.
 # The git-independent genesis and unreachable-predecessor cases build minimal record trees in a private
-# tempdir and are skipped with a printed note (never a false pass) where no writable tempdir exists.
+# tempdir; where no writable tempdir exists they cannot run, which is a NOT RUN failure (never a pass).
 
 def _run_quiet_root(root):
     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
         return run(root)
+
+
+def _run_quiet_root_err(root):
+    """run(root) quiet, returning (rc, stderr text). The first-block record-tree assertions check
+    the INTENDED diagnostic, never exit 2 alone (round-5 codex 5): a git lost after the suite
+    starts also yields exit 2 there, for an unrelated reason, so the exit code alone cannot tell
+    a structural refusal from a missing git."""
+    err = io.StringIO()
+    with redirect_stdout(io.StringIO()), redirect_stderr(err):
+        rc = run(root)
+    return rc, err.getvalue()
 
 
 def _floors(events):
@@ -2801,7 +2812,12 @@ def _pin_fixture_version(repo, failures, version="1.0.0"):
             failures.append("fixture setup ({}): could not init/stage the archive-extracted tree for "
                             "version pinning; the archive-backed case cannot be normalized".format(repo.name))
             return False
-    if subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(repo)],
+    # The sibling gen_manifest runs by ABSOLUTE path under the isolated interpreter: a bare
+    # "python3 tools/gen_manifest.py" resolved both the interpreter and the script through the
+    # caller's working directory, so the self-test failed at setup from any directory other than
+    # the repo root, and a planted tools/gen_manifest.py in that directory would have run instead.
+    if subprocess.run([sys.executable, "-I", "-B",
+                       str(Path(__file__).resolve().parent / "gen_manifest.py"), "--root", str(repo)],
                       capture_output=True, env=env).returncode != 0:
         failures.append("fixture setup ({}): gen_manifest --root failed while pinning to {}; a fixture-setup "
                         "gen failure FAILS the self-test rather than silently passing as the intended "
@@ -2818,7 +2834,10 @@ def _regen_fixture_manifest(root, case, failures, env):
     verdict assertion, where a coincidental exit (a stale/broken manifest ALSO drives exit 2) could
     otherwise be misread as the intended gate verdict and pass by luck. Returns True only when the manifest
     was actually regenerated."""
-    if subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(root)],
+    # The sibling gen_manifest by ABSOLUTE path under the isolated interpreter, exactly as
+    # _pin_fixture_version launches it: never resolved through the caller's working directory.
+    if subprocess.run([sys.executable, "-I", "-B",
+                       str(Path(__file__).resolve().parent / "gen_manifest.py"), "--root", str(root)],
                       capture_output=True, env=env).returncode != 0:
         failures.append("fixture setup ({}): gen_manifest --root failed; a fixture-setup gen failure FAILS "
                         "the self-test rather than silently passing as the intended assertion".format(case))
@@ -2889,13 +2908,1003 @@ def _edit_clause_consistently(repo):
     return target["clause-id"]
 
 
+_REAL_PACK_CASES = "the real full-pack two-release run() cases (findings 1/2, rounds 3-8)"
+_E2E_TMP_PREFIX = "aiqt-release-delta-selftest-"
+
+
+def _not_run(failures, case, cause):
+    """Record a self-test case that could not run as a NAMED failure (a counted cannot-evaluate that
+    fails the run), never a printed note beside a PASS: coverage that did not run is not coverage."""
+    failures.append("NOT RUN: {}: {}; coverage that did not run FAILS the self-test, never a silent "
+                    "PASS".format(case, cause))
+
+
+# One label per git-availability gate in _self_test_main_isolated, in SOURCE order: the i-th _git_gate
+# call passes the literal _GIT_GATE_LABELS[i], and the LAST entry is the final gate, which dispatches
+# the real full-pack / POST-RELEASE case sets. The transient-availability vectors in
+# _not_run_net_vectors replay a failed probe over this order; the alignment (every probe through
+# _git_gate, one _git_gate call per label, the label indices in source order as exact ints, no
+# indirect reference to the probe or to _git_gate) is enforced by _git_gate_alignment_failures
+# over the module source in the self-test, never left to a comment (PR #530 QA round-3 claude
+# MINOR-4; round-4 codex 1 / claude MINOR-2; round-5 codex 1/2/4). Round-6 (codex 1 / claude
+# MEDIUM-1): that static scan is a BACKSTOP; the runtime guarantee is _GATE_IMPORT_BINDINGS (gate
+# and probe captured at import), _gate_identity_failures (identity at each gated block and at the
+# end; its exact guarantee and disclosed limits are stated there) and the per-label accounting
+# (_gate_accounting_failures, one red-on-revert vector per label since round-7).
+# Reviewed sites in _self_test_main_isolated that reach git CODE without a gate (round-4 claude
+# MINOR-3): the duplicate-CLI main() calls are rejected at option parsing before any git runs; the
+# single-named-ref-read anchor cases run with _rev_parse/_object_type stubbed; the R6
+# dubious-ownership cases run with _stage1_git and _git patched to a canned refusal; and the
+# FIRST-BLOCK _run_quiet_root record trees (genesis, genesis-mismatch, unreachable predecessor)
+# assert exit 2 AND the intended diagnostic text (round-5 codex 5: an absent git also yields exit
+# 2, for an unrelated reason, so exit alone cannot discriminate there). The later _genesis_base
+# and predecessor malformed-record assertions still check exit 2 only, so any ONE of those single
+# assertions can be satisfied by a git lost after the suite starts: reduced discrimination,
+# disclosed (git absent at the START stops the whole suite in fixture_git_lifecycle, which raises
+# RuntimeError: self-test requires git). The F-TOML-BARE-VALUEERROR-CLASS fixture commit
+# is REAL git work, so it runs behind the gate at label 0.
+_GIT_GATE_LABELS = (
+    "the F-TOML-BARE-VALUEERROR-CLASS fixture commit (the bare-ValueError / RecursionError class)",
+    "the materialized executable/plain-file mode cases (round-7 finding 4)",
+    "the duplicate-predecessor-clause inventory case (finding 1, predecessor object)",
+    "the predecessor-ownership-via-git-plumbing case (VC-4 QA #11)",
+    "the drift-advisory, fsmonitor-pin and promisor cases (QA rounds 6-10)",
+    "the real full-pack and POST-RELEASE run() cases",
+)
+
+
+def _git_gate(label, failures):
+    """One NAMED availability gate per git-dependent block of _self_test_main_isolated (PR #530 QA
+    round-2 codex MAJOR): when the probe fails, the gated block is a recorded NOT RUN failure naming the
+    block, never a silent skip beside a PASS, so a TRANSIENTLY failed probe at one gate can no longer
+    leave its block unrun while a later probe succeeds and the suite still prints SELF-TEST PASS.
+    Round-6/7: the self-test also verifies the gate and probe BINDINGS by identity at each gated
+    block (_gate_identity_failures over _GATE_IMPORT_BINDINGS) and accounts for exactly one record
+    per label (_gate_accounting_failures). The identity guarantee, exactly (round-8: the checker
+    validates the public capture against its own definition-time reference, so this holds under
+    a co-rebinding of the capture; round-9: the checker reads the namespace the gated calls
+    resolve through and takes no reference from a caller; the checker itself is a trusted input
+    carried by review alone, stated at _gate_identity_failures): a module rebinding that is
+    still in place at a checkpoint is
+    detected whatever its spelling; a temporary rebinding
+    restored between checkpoints, and a local shadow that never rebinds the module, are not
+    detected by the identity check (the static backstop covers the spellings it lists), while the
+    accounting still fails a run whose gated blocks leave no record.
+    Red-on-revert: the transient-availability scenarios and the rebound-gate run in
+    _not_run_net_vectors (round-7: one assertion per identity checkpoint and per gate label)."""
+    if _git_available():
+        return True
+    _not_run(failures, label, "git is unavailable at this block's probe (QA round-4 codex R4-3 / "
+             "claude m4; a transient probe failure never skips a block silently)")
+    return False
+
+
+# Round-6 (codex 1 / claude MEDIUM-1): the gate function and the availability probe objects,
+# captured ONCE at import as a module-private constant. The self-test verifies at each gated
+# block and again at the end that the module's _git_gate and _git_available are THESE exact
+# objects (identity, read through the module's own namespace). The guarantee, exactly (round-7
+# codex 3 / claude MEDIUM-2): a module rebinding that is still in place at a checkpoint is
+# detected whatever its spelling, where rounds 4 to 6 each produced a new one; a temporary
+# rebinding restored between checkpoints, and a local shadow that never rebinds the module, are
+# not detected by the identity check; the static _git_gate_alignment_failures scan below covers
+# the spellings it lists, and the per-label accounting catches a gate that leaves blocks without
+# a record whatever the binding. Round-8 (codex 1): _gate_identity_failures holds its OWN
+# definition-time reference to these objects and validates this public capture against it at
+# every checkpoint, so rebinding THIS name together with the gate no longer blinds the
+# checkpoints. Round-9 (claude 1/2): that reference and the namespace it reads are closure-held,
+# so no caller can supply either; the checker itself is a trusted input that review alone
+# carries, stated there.
+_GATE_IMPORT_BINDINGS = (_git_gate, _git_available)
+
+
+def _gate_identity_checker(space, ref):
+    """Build _gate_identity_failures ONCE at import (below), over the module namespace and the
+    import capture held in its closure; the docstring of the returned checker states its
+    guarantee, its trusted inputs and its red-on-revert vectors."""
+    def _gate_identity_failures(failures, where):
+        """Append a named failure for each module gate/probe binding that is no longer the object
+        captured at import: identity through the module namespace the gated calls resolve
+        through, never a spelling scan. Round-8 (codex 1): the reference is bound ONCE at
+        definition time (import) to the import capture, never reread from the module namespace;
+        the round-7 checker read _GATE_IMPORT_BINDINGS at each call, so rebinding the capture
+        TOGETHER with the gate blinded every checkpoint. The public capture is validated against
+        that reference at every checkpoint, so that co-rebinding is a named identity failure.
+        Round-9 (claude 1): BOTH the namespace and the reference are closure-held. The namespace
+        is the globals() dict captured at import, the very dict through which the gated calls of
+        _self_test_main_isolated resolve _git_gate (its __globals__), never sys.modules[__name__],
+        so a module object swapped into sys.modules cannot hide an in-place rebinding. The
+        reference is no parameter, so no checkpoint can supply its own (a third argument or a
+        keyword is a TypeError, fail-closed); the round-8 _ref default could be passed the
+        rebound capture explicitly, which restored the round-7 blindness. This checker is a
+        TRUSTED INPUT: a rebinding of the module name _gate_identity_failures, or a store into
+        its closure cells (cell_contents), is outside what the check can observe, and the static
+        backstop has NO rule for either, so review alone carries that boundary; the check
+        detects drift of the gate, the probe and the public capture, never of itself. The
+        guarantee, exactly (round-7 codex 3 / claude MEDIUM-2; round-8 scopes it to an intact
+        checker): a module rebinding that is still in place at a checkpoint is detected whatever
+        its spelling; a temporary rebinding restored between checkpoints, and a local shadow (a
+        parameter, a local def, class or match capture) that never rebinds the module, are not
+        detected by the identity check; the static backstop covers the spellings it lists, and
+        the per-label accounting (_gate_accounting_failures) fails a run whose gated blocks
+        leave no record whatever the binding. The restore-between-checkpoints escape is
+        reproduced by a disclosed-residual witness in the self-test. The round-5 static checker
+        admitted globals(), sys.modules and import-binding respellings of _git_gate, each of
+        which skipped all six gated blocks beside SELF-TEST PASS (round-6 codex 1 / claude
+        MEDIUM-1). The reviewed probe swap in _not_run_net_vectors is active only inside nested
+        runs whose nonzero exit their caller asserts, so an identity failure recorded there
+        never reaches a PASS. Red-on-revert: the planted rebindings, the planted co-rebinding of
+        the capture and the gate (round-8, red at the round-7 pin), the sys.modules swap beside
+        an in-place rebinding and the explicitly supplied reference (round-9, each red at the
+        round-8 pin), and the rebound-gate nested run, whose output must carry this diagnostic
+        for every checkpoint by name (round-7: one assertion per checkpoint)."""
+        if space.get("_GATE_IMPORT_BINDINGS") is not ref:
+            failures.append("(git-gate identity) {}: _GATE_IMPORT_BINDINGS is not the capture "
+                            "made at import (round-8: the checkpoints validate the module "
+                            "capture against a definition-time reference held outside the "
+                            "module namespace, so a co-rebinding cannot blind them)".format(where))
+        for name, bound in zip(("_git_gate", "_git_available"), ref):
+            if space.get(name) is not bound:
+                failures.append("(git-gate identity) {}: {} is not the object captured at "
+                                "import (rebound by some spelling; identity decides, so the "
+                                "spelling does not matter)".format(where, name))
+    return _gate_identity_failures
+
+
+_gate_identity_failures = _gate_identity_checker(globals(), _GATE_IMPORT_BINDINGS)
+
+
+def _gate_accounting_failures(failures, gate_ran):
+    """The per-label accounting (round-6 codex 1 / claude MEDIUM-1; extracted round-7 so each
+    label's obligation has its own red-on-revert vector): every gate label must account for
+    exactly one record, its gated body's last statement (an entry in gate_ran) or its NOT RUN
+    line (already in failures), so a bypassed or vanished block is a named failure at run time
+    whatever the gate binding looked like. Red-on-revert: the per-label unit vectors in the
+    self-test (each feeds this check a record list missing exactly one label and requires the
+    diagnostic naming that label and no other) and the rebound-gate nested run, whose output
+    must name every label."""
+    for label_acct in _GIT_GATE_LABELS:
+        ran_acct = gate_ran.count(label_acct)
+        notrun_acct = sum(1 for f_acct in failures
+                          if f_acct.startswith("NOT RUN: " + label_acct))
+        if ran_acct + notrun_acct != 1:
+            failures.append("(git-gate accounting) {!r}: exactly one record per gate label is "
+                            "required (body ran, or its NOT RUN line); got ran={}, "
+                            "not-run={}".format(label_acct, ran_acct, notrun_acct))
+
+
+def _git_gate_alignment_failures(source):
+    """The _GIT_GATE_LABELS/_git_gate alignment as an AST CHECK over module source, not a comment (PR
+    #530 QA round-3 claude MINOR-4; round-4 codex 1 / claude MINOR-2 widened it beyond bare-name
+    calls; round-5 codex 1/2/4 and claude MINOR-2 scoped the allowances exactly; round-6 codex 1 /
+    claude MEDIUM-1 narrowed it to a BACKSTOP behind the runtime identity and accounting checks).
+    Findings (empty when aligned):
+      - any Name reference to _git_available outside the EXECUTABLE BODY of the single top-level
+        _git_gate def (a bare call, an alias, a callback element, and equally a call in a
+        decorator, a default or an annotation of the gate, which runs at definition time, or in
+        a class body inside it); the ONE reviewed exception is _not_run_net_vectors, which swaps
+        the probe for its nested runs: there, in its DIRECT scope only (never a nested scope),
+        the Name load on the right of the exact assignment `real_probe = _git_available` (that
+        target name, one target, EXACTLY once) and the string key of a
+        `globals()["_git_available"]` store target are allow-listed BY SHAPE AND LOCATION,
+        nothing else; a second or nested def of _not_run_net_vectors is itself a finding;
+      - any _git_available reference inside a function nested in _git_gate (a closure exported
+        through globals() would probe outside the gate, unnamed on failure);
+      - any import of the probe name, plain or aliased (round-5: an ImportFrom alias is an
+        indirect probe);
+      - any attribute reference ending in _git_available, any string constant equal to
+        "_git_available" (a getattr, globals() or sys.modules lookup) and any bytes constant that
+        decodes to it (round-5: a decoded-bytes key), the strings of this checker itself excepted;
+      - more or less than one top-level def of _git_gate;
+      - any reference to _git_gate other than a direct call (round-5: an alias, a functools.partial
+        argument or a rebinding would route gated blocks around the counted, ordered calls);
+      - a _git_gate call count different from len(_GIT_GATE_LABELS), and the i-th _git_gate call in
+        source order not passing the literal _GIT_GATE_LABELS[i] with an index of EXACT type int
+        (a swapped or computed index would name the WRONG block on failure; round-5: bool is an int
+        subclass and 0.0 == 0, so either would satisfy an equality-only test);
+      - round-6: a binding of EITHER name as a parameter, a global/nonlocal declaration, an except
+        alias or a keyword argument (a parameter default such as a lambda bound to the probe name
+        resolves the gate's own body call to the parameter); string, bytes, attribute and import
+        references to _git_gate exactly as for the probe (a globals()/sys.modules store or lookup,
+        a getattr key, an import binding); real_probe used anywhere but inside _planned_probe or as
+        the restore statement's value (an ungated early return through the reviewed alias); ZERO
+        `real_probe = _git_available` swaps (a stand-in bound under the reviewed name) refused like
+        two; the globals() stores of both names COUNTED against the reviewed code (two each); a
+        GeneratorExp or TypeAlias inside the gate treated as a DEFERRED scope (either carries the
+        probe out of the gate uncalled); and the `_GATE_IMPORT_BINDINGS` capture required exactly
+        once at module top level.
+      - round-7: a binding of EITHER name by a match capture (MatchAs.name, MatchStar.name or
+        MatchMapping.rest) or by a class definition (binding nodes the round-6 scan missed); any
+        call through a _GATE_IMPORT_BINDINGS subscript (an indirect probe or an uncounted gate
+        call through the import capture); any store or delete of _GATE_IMPORT_BINDINGS other
+        than the one reviewed capture (round-7: a co-rebinding blinded the then checkpoints;
+        round-8: the checkpoints validate the capture at run time, leaving this rule defence
+        in depth over the Name store/delete spellings it sees);
+        and, in _not_run_net_vectors, more or less than one def of _planned_probe and any use of
+        _planned_probe other than as the reviewed probe-store value (a second def or a direct
+        call would wrap real_probe into an ungated early return).
+    This check is a BACKSTOP (round-6 codex 1 / claude MEDIUM-1): rounds 4 to 6 each produced a new
+    spelling, and a spelling scan over Python source cannot be closed. Its residual is every DYNAMIC
+    spelling (a name assembled at run time from string fragments, an attribute chain through another
+    module), and a git-dependent block with NO probe at all stays invisible to it (git absence there
+    surfaces as an unnamed exception, fail-closed but not a named NOT RUN); the round-5 scope note
+    stands: exec/eval are refused across tools/ and opf/tools/ by the maintenance-pin scan, outside
+    its counted per-function dynamic-site exceptions. The guarantee is carried at run time
+    instead, and it is exactly this (round-7 codex 3 / claude MEDIUM-2): _GATE_IMPORT_BINDINGS
+    captures the gate and probe objects once at import, and _gate_identity_failures verifies BOTH
+    module bindings by identity at each gated block and at the end, against its own
+    definition-time reference, validating the public capture against that reference too
+    (round-8: a co-rebinding of the capture together with the gate is a named identity
+    failure; round-9: the namespace and the reference are closure-held, and the checker itself
+    is a trusted input that review alone carries, since this backstop has no rule for it), so a
+    module rebinding that is
+    still in place at a checkpoint is detected whatever its spelling; a temporary rebinding
+    restored between checkpoints (reproduced by the disclosed-residual witness in the self-test)
+    and a local shadow that never rebinds the module are NOT detected by the identity check, and
+    this backstop covers only the spellings it lists; the per-label accounting
+    (_gate_accounting_failures) requires exactly one record per gate label (its body ran, or its
+    NOT RUN line), so skipped blocks never sit silently beside SELF-TEST PASS whatever the
+    binding. The self-test plants every refused shape above and requires each to be a finding."""
+    import ast
+    tree = ast.parse(source)
+    findings = []
+    probe = "_git_available"
+
+    gate_defs = [node for node in ast.walk(tree)
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and node.name == "_git_gate"]
+    top_defs = [node for node in gate_defs if node in tree.body]
+    if len(gate_defs) != 1 or len(top_defs) != 1:
+        findings.append("line(s) {}: _git_gate must have exactly one top-level def (a second or "
+                        "nested def could carry an unchecked probe)".format(
+                            ", ".join(str(node.lineno) for node in gate_defs) or "none"))
+    nested_ids = set()
+    allowed_ids = set()
+    for gate_def in top_defs:
+        for inner in ast.walk(gate_def):
+            if inner is not gate_def and isinstance(
+                    inner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
+                            ast.GeneratorExp, ast.TypeAlias)):
+                nested_ids.update(id(sub) for sub in ast.walk(inner))
+        # Round-5 (codex 1): only the EXECUTABLE BODY of the gate may call the probe. Scanning
+        # gate_def.body keeps the signature (decorators, defaults, annotations) out of the
+        # allowance; class bodies and annotations INSIDE the body are excluded explicitly, and
+        # nested scopes stay excluded via nested_ids.
+        off_body = set()
+        for inner in ast.walk(gate_def):
+            if inner is not gate_def and isinstance(inner, ast.ClassDef):
+                off_body.update(id(sub) for sub in ast.walk(inner))
+            elif isinstance(inner, ast.AnnAssign):
+                off_body.update(id(sub) for sub in ast.walk(inner.annotation))
+        for stmt in gate_def.body:
+            for node in ast.walk(stmt):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id == probe and id(node.func) not in nested_ids
+                        and id(node.func) not in off_body):
+                    allowed_ids.add(id(node.func))
+    net_defs = [node for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "_not_run_net_vectors"]
+    top_nets = [node for node in net_defs if node in tree.body]
+    if len(net_defs) != 1 or len(top_nets) != 1:
+        findings.append("line(s) {}: _not_run_net_vectors must have exactly one top-level def "
+                        "(round-5: the swap allowance extends to no second or nested "
+                        "definition)".format(
+                            ", ".join(str(node.lineno) for node in net_defs) or "none"))
+    for fn in (top_nets if len(net_defs) == 1 and len(top_nets) == 1 else ()):
+        # Round-5 (codex 2): the swap allowance holds in the DIRECT scope of fn only, and the
+        # alias allowance is the single exact reviewed assignment, by target name.
+        inner_scope = set()
+        for inner in ast.walk(fn):
+            if inner is not fn and isinstance(
+                    inner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef,
+                            ast.GeneratorExp, ast.TypeAlias)):
+                inner_scope.update(id(sub) for sub in ast.walk(inner))
+        swaps = []
+        probe_stores, gate_stores = [], []
+        restore_ids = set()
+        for stmt in ast.walk(fn):
+            if not isinstance(stmt, ast.Assign) or id(stmt) in inner_scope:
+                continue
+            if (isinstance(stmt.value, ast.Name) and stmt.value.id == probe
+                    and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
+                    and stmt.targets[0].id == "real_probe"):
+                swaps.append(stmt)
+            for target in stmt.targets:
+                if (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Call)
+                        and isinstance(target.value.func, ast.Name)
+                        and target.value.func.id == "globals" and not target.value.args
+                        and isinstance(target.slice, ast.Constant)
+                        and target.slice.value in (probe, "_git_gate")):
+                    allowed_ids.add(id(target.slice))
+                    (probe_stores if target.slice.value == probe else gate_stores).append(stmt)
+                    if (target.slice.value == probe and isinstance(stmt.value, ast.Name)
+                            and stmt.value.id == "real_probe"):
+                        restore_ids.add(id(stmt.value))
+        # Round-6: ZERO swaps are refused like two (a stand-in probe bound under the reviewed
+        # target name would otherwise read as the allowance), and the globals() stores of BOTH
+        # names are counted against the reviewed code, never just allow-listed by shape.
+        if len(swaps) != 1:
+            findings.append("line(s) {}: the reviewed `real_probe = {}` swap must appear exactly "
+                            "once in the direct scope of _not_run_net_vectors (round-6: zero and "
+                            "two are both refused)".format(
+                                ", ".join(str(stmt.lineno) for stmt in swaps) or "none", probe))
+        else:
+            allowed_ids.add(id(swaps[0].value))
+        for stores, count in ((probe_stores, 2), (gate_stores, 2)):
+            if len(stores) != count:
+                findings.append("line(s) {}: {} globals() store(s) of the {} name in the direct "
+                                "scope of _not_run_net_vectors; the reviewed code has exactly {} "
+                                "(round-6: the stores are counted)".format(
+                                    ", ".join(str(stmt.lineno) for stmt in stores) or "none",
+                                    len(stores), "probe" if stores is probe_stores else "gate",
+                                    count))
+        # Round-6 (claude MEDIUM-2): real_probe is itself an indirect probe handle; it may be
+        # USED only inside _planned_probe and as the restore statement's value, so an ungated
+        # early return through the reviewed alias is a finding.
+        planned_ids = set()
+        for inner in ast.walk(fn):
+            if (isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and inner.name == "_planned_probe"):
+                planned_ids.update(id(sub) for sub in ast.walk(inner))
+        swap_target_ids = {id(stmt.targets[0]) for stmt in swaps}
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Name) and node.id == "real_probe"
+                    and id(node) not in planned_ids and id(node) not in restore_ids
+                    and id(node) not in swap_target_ids):
+                findings.append("line {}: real_probe is used outside _planned_probe and the "
+                                "restore statement (round-6: an ungated early return through "
+                                "the reviewed alias)".format(node.lineno))
+        # Round-7: _planned_probe is the only reviewed wrapper around real_probe, so its def
+        # count and its uses are pinned: a second def, or a use other than as the reviewed
+        # probe-store value, wraps real_probe into an ungated early return.
+        planned_defs = [inner for inner in ast.walk(fn)
+                        if isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and inner.name == "_planned_probe"]
+        if len(planned_defs) != 1:
+            findings.append("line(s) {}: exactly one def of _planned_probe in "
+                            "_not_run_net_vectors (round-7: a second def could wrap real_probe "
+                            "for an ungated early return)".format(
+                                ", ".join(str(d.lineno) for d in planned_defs) or "none"))
+        planned_use_ids = {id(stmt.value) for stmt in probe_stores
+                           if isinstance(stmt.value, ast.Name)
+                           and stmt.value.id == "_planned_probe"}
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Name) and node.id == "_planned_probe"
+                    and id(node) not in planned_use_ids):
+                findings.append("line {}: _planned_probe is used other than as the reviewed "
+                                "probe-store value (round-7: a direct call wraps real_probe "
+                                "into an ungated early return)".format(node.lineno))
+    for fn in tree.body:
+        if isinstance(fn, ast.FunctionDef) and fn.name in ("_git_gate_alignment_failures",
+                                                           "_gate_identity_checker"):
+            allowed_ids.update(id(node) for node in ast.walk(fn)
+                               if isinstance(node, ast.Constant)
+                               and node.value in (probe, "_git_gate"))
+    # Round-6: the import-time capture the runtime identity check reads; the exact reviewed
+    # tuple, exactly once at module top level, is the one allowed indirect reference to the
+    # gate and probe objects.
+    captures = [stmt for stmt in tree.body
+                if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name)
+                and stmt.targets[0].id == "_GATE_IMPORT_BINDINGS"
+                and isinstance(stmt.value, ast.Tuple) and len(stmt.value.elts) == 2
+                and all(isinstance(elt, ast.Name) for elt in stmt.value.elts)
+                and [elt.id for elt in stmt.value.elts] == ["_git_gate", probe]]
+    capture_ids = set()
+    capture_target_ids = set()
+    if len(captures) == 1:
+        allowed_ids.add(id(captures[0].value.elts[1]))
+        capture_ids.add(id(captures[0].value.elts[0]))
+        capture_target_ids.add(id(captures[0].targets[0]))
+    else:
+        findings.append("line(s) {}: the import-time gate/probe capture must appear exactly "
+                        "once at module top level (round-6: the runtime identity check reads "
+                        "it; zero loses that check and a second could alias the probe)".format(
+                            ", ".join(str(stmt.lineno) for stmt in captures) or "none"))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                for bound in (probe, "_git_gate"):
+                    if bound in (alias.name, alias.asname):
+                        findings.append("line {}: import of {} (round-5/6: an import alias or "
+                                        "binding is an indirect probe or a rebound gate outside "
+                                        "the named gate)".format(node.lineno, bound))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == probe and id(node) not in allowed_ids:
+            if id(node) in nested_ids:
+                findings.append("line {}: a {} reference inside a nested or deferred scope "
+                                "escapes _git_gate (an exported closure, generator or type "
+                                "alias would probe unnamed on failure)".format(
+                                    node.lineno, probe))
+            else:
+                findings.append("line {}: {} is referenced outside _git_gate (a bare, aliased or "
+                                "callback probe, unnamed on failure)".format(node.lineno, probe))
+        elif isinstance(node, ast.Attribute) and node.attr in (probe, "_git_gate"):
+            findings.append("line {}: attribute reference to {} (round-6: an indirect probe or a "
+                            "sys.modules gate rebinding bypasses the named gate)".format(
+                                node.lineno, node.attr))
+        elif (isinstance(node, ast.Constant) and node.value in (probe, "_git_gate")
+                and id(node) not in allowed_ids):
+            findings.append("line {}: string reference to {} (round-6: a getattr, globals() or "
+                            "sys.modules lookup or store bypasses or rebinds the named "
+                            "gate)".format(node.lineno, node.value))
+        elif (isinstance(node, ast.Constant) and isinstance(node.value, bytes)
+                and node.value in (probe.encode("ascii"), "_git_gate".encode("ascii"))):
+            findings.append("line {}: bytes reference to {} (round-5/6: a decoded-bytes globals() "
+                            "or getattr key routes around the named gate)".format(
+                                node.lineno, node.value.decode("ascii")))
+        elif isinstance(node, ast.arg) and node.arg in (probe, "_git_gate"):
+            findings.append("line {}: {} bound as a parameter (round-6: a signature binding "
+                            "shadows the module binding inside the very function that calls "
+                            "the probe)".format(node.lineno, node.arg))
+        elif isinstance(node, (ast.Global, ast.Nonlocal)) and (
+                probe in node.names or "_git_gate" in node.names):
+            findings.append("line {}: a global or nonlocal declaration of the gate or probe name "
+                            "(round-6: a rebinding route)".format(node.lineno))
+        elif isinstance(node, ast.ExceptHandler) and node.name in (probe, "_git_gate"):
+            findings.append("line {}: the gate or probe name bound as an except alias (round-6: "
+                            "a binding route the Name scan missed)".format(node.lineno))
+        elif isinstance(node, ast.keyword) and node.arg in (probe, "_git_gate"):
+            findings.append("line {}: the gate or probe name bound as a keyword argument "
+                            "(round-6)".format(node.lineno))
+        elif (isinstance(node, (ast.MatchAs, ast.MatchStar))
+                and node.name in (probe, "_git_gate")):
+            findings.append("line {}: {} bound by a match capture pattern (round-7: MatchAs and "
+                            "MatchStar are binding nodes the round-6 scan missed)".format(
+                                node.lineno, node.name))
+        elif isinstance(node, ast.MatchMapping) and node.rest in (probe, "_git_gate"):
+            findings.append("line {}: {} bound by a match mapping rest pattern (round-7: a "
+                            "binding node the round-6 scan missed)".format(
+                                node.lineno, node.rest))
+        elif isinstance(node, ast.ClassDef) and node.name in (probe, "_git_gate"):
+            findings.append("line {}: {} bound by a class definition (round-7: a class statement "
+                            "rebinds or shadows the name)".format(node.lineno, node.name))
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Subscript)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "_GATE_IMPORT_BINDINGS"):
+            findings.append("line {}: a call through a _GATE_IMPORT_BINDINGS subscript (round-7: "
+                            "an indirect probe or an uncounted gate call through the import "
+                            "capture)".format(node.lineno))
+        elif (isinstance(node, ast.Name) and node.id == "_GATE_IMPORT_BINDINGS"
+                and isinstance(node.ctx, (ast.Store, ast.Del))
+                and id(node) not in capture_target_ids):
+            findings.append("line {}: _GATE_IMPORT_BINDINGS is rebound or deleted outside the "
+                            "reviewed import-time capture (round-7; round-8: the runtime "
+                            "checkpoints validate the capture against a definition-time "
+                            "reference, so this rule is defence in depth over the Name "
+                            "spellings it sees)".format(node.lineno))
+    gate_calls = sorted((node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                         and isinstance(node.func, ast.Name) and node.func.id == "_git_gate"),
+                        key=lambda call: (call.lineno, call.col_offset))
+    direct_call_ids = {id(call.func) for call in gate_calls}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Name) and node.id == "_git_gate"
+                and id(node) not in direct_call_ids and id(node) not in capture_ids):
+            findings.append("line {}: _git_gate is referenced other than by a direct call "
+                            "(round-5: an alias, functools.partial or rebinding would route a "
+                            "gated block around the counted, ordered calls)".format(node.lineno))
+    if len(gate_calls) != len(_GIT_GATE_LABELS):
+        findings.append("{} _git_gate call(s) (lines {}) for {} label(s) in _GIT_GATE_LABELS".format(
+            len(gate_calls), ", ".join(str(call.lineno) for call in gate_calls) or "none",
+            len(_GIT_GATE_LABELS)))
+    for position, call in enumerate(gate_calls):
+        arg = call.args[0] if call.args else None
+        if not (isinstance(arg, ast.Subscript) and isinstance(arg.value, ast.Name)
+                and arg.value.id == "_GIT_GATE_LABELS" and isinstance(arg.slice, ast.Constant)
+                and type(arg.slice.value) is int and arg.slice.value == position):
+            findings.append("line {}: _git_gate call {} must pass the literal _GIT_GATE_LABELS[{}]: "
+                            "the label indices follow source order, so a swapped, computed or "
+                            "non-int-typed index (round-5: bool is an int subclass and 0.0 == 0) "
+                            "would name the wrong block".format(call.lineno, position, position))
+    return findings
+
+
+def _plant_notice_omission(mpath, failures):
+    """Drop the NOTICE [[sources]] row from the regenerated manifest at mpath (the round-8 finding 1
+    fixture). Corpus content decides whether that row exists, so this can fail in CI: a manifest without
+    exactly one NOTICE row ahead of its [[artifacts]] rows records a NOT RUN failure and returns False."""
+    mblocks = mpath.read_text(encoding="utf-8").split("\n[[sources]]")
+    kept = [mblocks[0]] + ["\n[[sources]]" + b for b in mblocks[1:] if 'path = "NOTICE"\n' not in b]
+    if len(kept) == len(mblocks) - 1 and "[[artifacts]]" in "".join(kept):
+        mpath.write_text("".join(kept), encoding="utf-8")
+        return True
+    _not_run(failures, "the under-claimed predecessor manifest case (round-8 finding 1)",
+             "the regenerated manifest does not carry exactly one NOTICE [[sources]] row ahead of "
+             "its [[artifacts]] rows, so the omission cannot be planted")
+    return False
+
+
+def _plant_noncanon_source_path(cp, failures):
+    """Rewrite the first source-path in the clauses.toml at cp to a NON-CANONICAL form that resolves to the
+    same file (dir/sub/../sub/file; the round-5 finding 1 fixture). Corpus content decides whether such a
+    path exists, so this can fail in CI: a clauses.toml with no source-path that has a parent directory
+    records a NOT RUN failure and returns False."""
+    import re
+    text = cp.read_text(encoding="utf-8")
+    m = re.search(r'source-path = "([^"]+)"', text)
+    parts = m.group(1).split("/") if m else []
+    if len(parts) < 2:
+        _not_run(failures, "the non-canonical HEAD clause source-path case (round-5 finding 1)",
+                 "the archived clauses.toml has no source-path with a parent directory to rewrite")
+        return False
+    noncanon = "/".join(parts[:-1] + ["..", parts[-2], parts[-1]])   # dir/sub/../sub/file (same file)
+    cp.write_text(text.replace('source-path = "{}"'.format(m.group(1)),
+                               'source-path = "{}"'.format(noncanon), 1), encoding="utf-8")
+    return True
+
+
+def _e2e_git_cases(tmp, failures):
+    """Run the two real git end-to-end case sets. Each returns False when it could not run; a False return
+    that recorded no cause is itself a NOT RUN failure (the two caller nets), so neither set can end early
+    without failing the self-test."""
+    n_real = len(failures)
+    if not _real_pack_e2e(tmp, failures) and len(failures) == n_real:
+        _not_run(failures, _REAL_PACK_CASES, "the case ended early without recording a cause")
+    n_post = len(failures)
+    if not _post_release_e2e(tmp, failures) and len(failures) == n_post:
+        _not_run(failures, "the POST-RELEASE head cases", "the case ended early without recording a "
+                 "cause")
+
+
+def _real_pack_not_run_vectors(tmp, failures):
+    """Red-on-revert vectors for the two early ends of _real_pack_e2e that printed a SKIPPED note and
+    returned False with NO failure, so the self-test still passed: a fixture git repo that cannot be
+    built, and a clause inventory with no sole-coverer clause to edit (corpus content, so reachable in
+    CI). Each drives the real _real_pack_e2e over a tiny stub archive (only the archive read and the
+    version pin are stubbed; the real extract, git add/commit/tag and clause search run) and requires a
+    False return AND a NOT RUN failure naming the cause. The per-site failure-injection vectors for the
+    later fixtures (_real_pack_fault_vectors) dispatch from here, so a nested self-test run that stubs
+    this set skips them with it."""
+    import tarfile
+    env = _selftest_env()
+    # Two clauses that both cover lines 1-2 of one source: no line has a sole coverer, so the real
+    # _edit_clause_consistently finds nothing to edit and returns None.
+    files = {
+        "rules/stub.md": "First stub sentence.\nSecond stub sentence.\n",
+        CLAUSES_REL: ("[[clause]]\nclause-id = \"stub.1\"\nsource-path = \"rules/stub.md\"\n"
+                      "start-line = 1\nend-line = 2\ncanonical-text = \"First stub sentence.\"\n\n"
+                      "[[clause]]\nclause-id = \"stub.2\"\nsource-path = \"rules/stub.md\"\n"
+                      "start-line = 1\nend-line = 2\ncanonical-text = \"Second stub sentence.\"\n"),
+    }
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for rel, text in sorted(files.items()):
+            data = text.encode("utf-8")
+            info = tarfile.TarInfo(rel)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    stub_arch = buf.getvalue()
+
+    def _stub_pin(lock_index):
+        def _pin(repo, _failures, version="1.0.0"):
+            for args in (["init", "-q"], ["add", "-A"]):
+                subprocess.run(["git", "-C", str(repo), *args], capture_output=True, env=env)
+            if lock_index:
+                # a stale index lock: the fixture build then fails at its own git add
+                (repo / ".git" / "index.lock").write_text("", encoding="utf-8")
+            return True
+        return _pin
+
+    # Saved by name, so _archive_head is referenced only as _archive_head(repo_root()) (the git-fixture-env
+    # trust check pins that one call shape); each globals() key is a constant string, since gen_renderers.py
+    # refuses a computed key (one could name RENDERER_DECL at run time).
+    saved = {"_archive_head": globals()["_archive_head"],
+             "_pin_fixture_version": globals()["_pin_fixture_version"]}
+    for name, lock_index, want in (("not-run-commit", True, "could not build the fixture git repo"),
+                                   ("not-run-clause", False, "no sole-coverer clause to edit")):
+        got = []
+        globals()["_archive_head"] = lambda _root: stub_arch
+        globals()["_pin_fixture_version"] = _stub_pin(lock_index)
+        try:
+            with redirect_stderr(io.StringIO()):
+                ran = _real_pack_e2e(tmp / name, got)
+        finally:
+            globals().update(saved)
+        if ran is not False or not any(f.startswith("NOT RUN: ") and want in f for f in got):
+            failures.append("(NOT RUN {}) _real_pack_e2e must return False AND record a NOT RUN failure "
+                            "naming {!r}, never print a SKIPPED note beside a PASS (got ran={!r}, "
+                            "failures={})".format(name, want, ran, got))
+    _real_pack_fault_vectors(tmp, failures)
+
+
+def _real_pack_fault_vectors(tmp, failures):
+    """Failure-injection vectors, one per _not_run site PAST _real_pack_e2e's primary cases (sites an
+    ordinary run never reaches because the host, git and the archive all behave, so removing one
+    recording call would otherwise leave the self-test green): the per-fixture archive extractions,
+    the two fixture version pins that return True early, the per-fixture predecessor commits, the
+    smudge worktree set-up proof, the genesis staging, and the profiles symlink. Each vector drives
+    the REAL _real_pack_e2e over a small stub archive with exactly ONE failure injected (an
+    extraction that raises for one named fixture, a version pin that reports failure, a stale index
+    lock that fails the fixture's next git index write, a pre-created worktree path, a pre-planted
+    regular file at the symlink target) and requires the documented True return AND a NOT RUN
+    failure naming that site's case and cause. Everything else the stubbed run records is ignored,
+    so each assertion is red exactly when its own site stops recording. The run() legs and the
+    manifest regeneration are stubbed: these vectors pin the failure RECORDING contract, never the
+    delta semantics, which the unstubbed end-to-end cases pin."""
+    import tarfile
+    env = _selftest_env()
+    # A stub tree rich enough to carry _real_pack_e2e past its primary cases: a sole-coverer clause
+    # (so the consistent edit succeeds), the files the later fixtures read or mutate, and the
+    # record-file parents the later fixtures write into.
+    files = {
+        "rules/stub.md": "First stub sentence.\nSecond stub line follows.\n",
+        "tools/_gen_common.py": "# stub closure module\n",
+        ".gitattributes": "",
+        "NOTICE": "stub notice\n",
+        CLAUSES_REL: ('[[clause]]\nclause-id = "stub.1"\nsource-path = "rules/stub.md"\n'
+                      'start-line = 1\nend-line = 1\ncanonical-text = "First stub sentence."\n'),
+        MANIFEST_REL: ('format-version = 1\n\n[[sources]]\npath = "NOTICE"\n\n[[sources]]\n'
+                       'path = "README.md"\n\n[[artifacts]]\npath = "a.md"\n'),
+        RELEASES_REL: "format-version = 1\n",
+        DISPOSITIONS_REL: "format-version = 1\n",
+        IDHISTORY_REL: "format-version = 1\n",
+        ORDER_REL: 'families = ["apex", "aiqt", "security"]\nmembers = ["PROGR"]\n',
+        RENDERERS_REL: 'targets = ["AGENTS.md"]\n',
+    }
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for rel, text in sorted(files.items()):
+            data = text.encode("utf-8")
+            info = tarfile.TarInfo(rel)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    stub_arch = buf.getvalue()
+
+    def _fault_extract(raise_name, lock_name):
+        # One injected extraction fault: raise for the one named fixture, or extract and plant a
+        # stale index lock in it (git init accepts the pre-made .git directory; the fixture's next
+        # git index write then fails on the lock, at the exact site under test).
+        def _ext(arch_bytes, dest):
+            if dest.name == raise_name:
+                raise OSError("injected: archive extraction failed")
+            saved["_extract"](arch_bytes, dest)
+            if lock_name is not None and dest.name == lock_name:
+                (dest / ".git").mkdir(exist_ok=True)
+                (dest / ".git" / "index.lock").write_text("", encoding="utf-8")
+            return dest
+        return _ext
+
+    def _fault_pin(fail_name):
+        # The pin helper, stubbed: init + stage the stub tree (its gen_manifest leg has its own
+        # fixture-setup failure contract and is not under test here), or report a pin failure for
+        # the ONE named fixture exactly as the real helper does: append and return False.
+        def _pin(repo, pin_failures, version="1.0.0"):
+            if repo.name == fail_name:
+                pin_failures.append("fixture setup ({}): injected pin failure".format(repo.name))
+                return False
+            (repo / "VERSION").write_text(version + "\n", encoding="utf-8")
+            (repo / CHANGELOG_REL).write_text('[[release]]\nversion = "{}"\n'.format(version),
+                                              encoding="utf-8")
+            for args in (["init", "-q"], ["add", "-A"]):
+                subprocess.run(["git", "-C", str(repo), *args], capture_output=True, env=env)
+            return True
+        return _pin
+
+    def _occupy_worktree(vtmp):
+        # git worktree add refuses an existing non-empty directory at its path.
+        (vtmp / "smudge-wt").mkdir(parents=True)
+        (vtmp / "smudge-wt" / "occupied.txt").write_text("occupied\n", encoding="utf-8")
+
+    def _occupy_profiles(vtmp):
+        # os.symlink refuses an existing entry at the target path (the archive extraction leaves
+        # the pre-planted regular file in place: it is not an archive member).
+        core = vtmp / "genesis-profiles-loop" / ".aiqt" / "core"
+        core.mkdir(parents=True)
+        (core / "profiles.toml").write_text("occupied\n", encoding="utf-8")
+
+    # (vector name, extraction that raises, stale-lock fixture, failing pin fixture, pre-plant,
+    #  the case the site must name, the cause the site must name)
+    vectors = (
+        ("smudge-extract", "real-pack-smudge", None, None, None,
+         "the smudge-filter predecessor case and every later real full-pack case",
+         "could not extract the archive"),
+        ("smudge-pin", None, None, "real-pack-smudge", None,
+         "the smudge-filter predecessor case and every later real full-pack case",
+         "the fixture version pin failed"),
+        ("smudge-commit", None, "real-pack-smudge", None, None,
+         "the smudge-filter predecessor case (round-4 findings 1/4)",
+         "could not build the predecessor commit"),
+        ("smudge-worktree", None, None, None, _occupy_worktree,
+         "the smudge-filter attack set-up proof (round-4 findings 1/4)",
+         "could not add a checkout worktree"),
+        ("omit-extract", "real-pack-omit", None, None, None,
+         "the under-claimed predecessor manifest case and every later real full-pack case",
+         "could not extract the archive"),
+        ("omit-pin", None, None, "real-pack-omit", None,
+         "the under-claimed predecessor manifest case and every later real full-pack case",
+         "the fixture version pin failed"),
+        ("omit-commit", None, "real-pack-omit", None, None,
+         "the under-claimed predecessor manifest case (round-8 finding 1)",
+         "could not build the predecessor commit"),
+        ("pred-extract", "real-pack-pred-idhist", None, None, None,
+         "predecessor-record case (real-pack-pred-idhist)",
+         "could not extract the archive"),
+        ("pred-commit", None, "real-pack-pred-idhist", None, None,
+         "predecessor-record case (real-pack-pred-idhist)",
+         "could not build the predecessor commit"),
+        ("genesis-extract", "genesis-clean", None, None, None,
+         "real genesis full-pack case (genesis-clean)",
+         "could not extract the archive"),
+        ("genesis-stage", None, "genesis-clean", None, None,
+         "real genesis full-pack case (genesis-clean)",
+         "could not stage the extracted tree"),
+        ("profiles-symlink", None, None, None, _occupy_profiles,
+         "the self-referential profiles.toml symlink case (round-5 finding 5)",
+         "could not create the symlink"),
+    )
+    # Saved and rebound by name: each globals() key is a constant string (gen_renderers.py refuses
+    # a computed key), and _archive_head is referenced only through its string key (the
+    # git-fixture-env trust check pins its one direct call shape).
+    saved = {"_archive_head": globals()["_archive_head"],
+             "_pin_fixture_version": globals()["_pin_fixture_version"],
+             "_extract": globals()["_extract"],
+             "_regen_fixture_manifest": globals()["_regen_fixture_manifest"],
+             "_run_quiet_root": globals()["_run_quiet_root"]}
+    for name, raise_name, lock_name, pin_fail, preplant, want_case, want_cause in vectors:
+        vtmp = tmp / ("fault-" + name)
+        vtmp.mkdir(parents=True)
+        if preplant is not None:
+            preplant(vtmp)
+        got = []
+        globals()["_archive_head"] = lambda _root: stub_arch
+        globals()["_pin_fixture_version"] = _fault_pin(pin_fail)
+        globals()["_extract"] = _fault_extract(raise_name, lock_name)
+        globals()["_regen_fixture_manifest"] = lambda _root, _case, _failures, _env: True
+        globals()["_run_quiet_root"] = lambda _root: 0
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                ran = _real_pack_e2e(vtmp, got)
+        finally:
+            globals().update(saved)
+        wanted = "NOT RUN: " + want_case + ": "
+        if ran is not True or not any(f.startswith(wanted) and want_cause in f for f in got):
+            failures.append("(real-pack fault {}) _real_pack_e2e must return True AND record a NOT "
+                            "RUN failure naming {!r} with cause {!r} (got ran={!r}, "
+                            "failures={})".format(name, want_case, want_cause, ran, got))
+
+
+def _not_run_net_vectors(tmp, failures):
+    """Red-on-revert vectors for the NOT RUN sites that an ordinary run never reaches (the real corpus,
+    git and host all behave), so reverting one of them would otherwise leave the self-test green: a failed
+    end-to-end temp-directory allocation (the nested self-test must exit nonzero, never a partial PASS),
+    the corpus-dependent NOTICE-row and source-path fixtures, the two caller nets in _e2e_git_cases (an
+    end-to-end function that returns False without recording a cause), and the POST-RELEASE cases that
+    lose their discriminating power on a git that ignores a planted replace ref, graft or filter mask, or
+    for a root user (os.geteuid patched to 0); and the git-availability gates (_git_gate over
+    _GIT_GATE_LABELS, PR #530 QA round-2 codex MAJOR), replayed with a TRANSIENT probe (every earlier
+    gate fails while the final gate succeeds: the nested self-test must exit nonzero, name each skipped
+    block, and still dispatch the final gate's case sets) and with git unavailable at every gate (every
+    block named, the final one included), so a revert of any single gate's recorded failure is red. A git
+    that STOPS honouring info/grafts makes the grafts case a STANDING NOT RUN failure of this self-test
+    on that host (fail-closed and disclosed, resolved by porting the case, never by skipping it).
+    Round-6 (codex 1 / claude MEDIUM-1) and round-7 (fix item 1): a third gate scenario REBINDS
+    _git_gate itself to an always-False stand-in; the nested run must exit nonzero and its output
+    must carry the identity diagnostic for EACH of the seven checkpoints by name and the
+    accounting diagnostic for EACH of the six gate labels, so removing any one checkpoint call or
+    dropping any one label from the accounting is red under its own assertion. The FIRST nested
+    run (the failed temp-allocation scenario) doubles as the gate-0 lost-git vector (round-7
+    codex 4 / claude MINOR-5): with the toml-class fixture commit made to fail after a successful
+    probe, that run must record the block's NOT RUN naming the observed cause."""
+    import tempfile
+    # The nested self-test (the self_test_main entry, which sets up its own git lifecycle) with ONLY the
+    # end-to-end temp allocation failing. It cannot recurse: without that temp directory it never reaches
+    # this function.
+    real_mkdtemp = tempfile.mkdtemp
+
+    def _no_e2e_tmp(*args, **kwargs):
+        if kwargs.get("prefix") == _E2E_TMP_PREFIX:
+            raise PermissionError("injected: no writable temp directory")
+        return real_mkdtemp(*args, **kwargs)
+
+    # Round-7 (codex 4 / claude MINOR-5): the same nested run carries the gate-0 lost-git vector.
+    # The toml-class fixture commit (the only caller passing this message) fails AFTER its gate's
+    # successful probe; the nested run must record that block's NOT RUN naming the OBSERVED cause
+    # (the exception type and text), never a silent skip or an unnamed traceback.
+    real_init_commit = _git_init_commit
+
+    def _lost_git_commit(repo, msg, init=True):
+        if msg == "toml class fixtures":
+            raise FileNotFoundError("injected: git vanished after the probe")
+        return real_init_commit(repo, msg, init)
+
+    out = io.StringIO()
+    tempfile.mkdtemp = _no_e2e_tmp
+    globals()["_git_init_commit"] = _lost_git_commit
+    try:
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            rc = self_test_main()
+    finally:
+        tempfile.mkdtemp = real_mkdtemp
+        globals()["_git_init_commit"] = real_init_commit
+    if rc == 0 or "NOT RUN: every end-to-end case" not in out.getvalue():
+        failures.append("(NOT RUN temp) a failed end-to-end temp-directory allocation must record a NOT RUN "
+                        "failure and exit nonzero, never a partial PASS (got rc={}: {})".format(
+                            rc, out.getvalue().strip()[-300:]))
+    if ("NOT RUN: " + _GIT_GATE_LABELS[0] not in out.getvalue()
+            or "FileNotFoundError: injected: git vanished after the probe" not in out.getvalue()):
+        failures.append("(NOT RUN git-gate) gate 0 lost git: a fixture commit that fails after "
+                        "this block's successful probe must be the block's NOT RUN failure "
+                        "naming the observed cause (got rc={}: {})".format(
+                            rc, out.getvalue().strip()[-300:]))
+
+    # The corpus-dependent fixtures, each with a control that plants and a corpus that cannot.
+    vdir = tmp / "not-run-vectors"
+    vdir.mkdir()
+    for plant, text, want in (
+            (_plant_notice_omission, 'format-version = 1\n\n[[sources]]\npath = "NOTICE"\n\n[[sources]]\n'
+             'path = "README.md"\n\n[[artifacts]]\npath = "a.md"\n', None),
+            (_plant_notice_omission, 'format-version = 1\n\n[[sources]]\npath = "README.md"\n\n'
+             '[[artifacts]]\npath = "a.md"\n', "the omission cannot be planted"),
+            (_plant_noncanon_source_path, '[[clause]]\nsource-path = "rules/stub.md"\n', None),
+            (_plant_noncanon_source_path, '[[clause]]\nsource-path = "stub.md"\n',
+             "no source-path with a parent directory")):
+        path = vdir / "fixture.toml"
+        path.write_text(text, encoding="utf-8")
+        got = []
+        planted = plant(path, got)
+        if want is None:
+            ok = planted is True and not got and path.read_text(encoding="utf-8") != text
+        else:
+            ok = planted is False and any(f.startswith("NOT RUN: ") and want in f for f in got)
+        if not ok:
+            failures.append("(NOT RUN corpus) {} over {!r}: expected {} (got {!r}, failures={})".format(
+                plant.__name__, text, "a planted fixture" if want is None else
+                "False and a NOT RUN failure naming {!r}".format(want), planted, got))
+
+    # The caller nets: an end-to-end function that returns False and records nothing.
+    saved = {"_real_pack_e2e": _real_pack_e2e, "_post_release_e2e": _post_release_e2e}
+    got = []
+    globals().update(_real_pack_e2e=lambda _tmp, _failures: False,
+                     _post_release_e2e=lambda _tmp, _failures: False)
+    try:
+        _e2e_git_cases(tmp, got)
+    finally:
+        globals().update(saved)
+    for case in (_REAL_PACK_CASES, "the POST-RELEASE head cases"):
+        if not any(f.startswith("NOT RUN: {}: the case ended early".format(case)) for f in got):
+            failures.append("(NOT RUN net) a False return from {} that recorded no cause must be a NOT RUN "
+                            "failure (got {})".format(case, got))
+
+    # The POST-RELEASE cases on a git that ignores the planted replace ref (GIT_NO_REPLACE_OBJECTS), the
+    # graft (an empty GIT_GRAFT_FILE) and the filter mask (a required smudge that fails, so the checkout
+    # leaves the status dirty), run as a simulated root user.
+    real_env, real_geteuid = _selftest_env, os.geteuid
+
+    def _misbehaving_git_env():
+        env = real_env()
+        env["GIT_NO_REPLACE_OBJECTS"] = "1"
+        env["GIT_GRAFT_FILE"] = os.devnull
+        count = int(env.get("GIT_CONFIG_COUNT", "0"))
+        for index, (key, value) in enumerate((("filter.mask.smudge", "false"),
+                                              ("filter.mask.required", "true"))):
+            env["GIT_CONFIG_KEY_{}".format(count + index)] = key
+            env["GIT_CONFIG_VALUE_{}".format(count + index)] = value
+        env["GIT_CONFIG_COUNT"] = str(count + 2)
+        return env
+
+    pdir = tmp / "not-run-post-release"
+    pdir.mkdir()
+    got = []
+    globals()["_selftest_env"] = _misbehaving_git_env
+    os.geteuid = lambda: 0
+    try:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            _post_release_e2e(pdir, got, only=("(refs/replace, R3-1)", "(info/grafts)", "(codex R3-2)",
+                                               "(R9 unsearchable ancestor)"))
+    finally:
+        globals()["_selftest_env"] = real_env
+        os.geteuid = real_geteuid
+    for want in ("did not substitute the planted replace ref", "ignores info/grafts",
+                 "did not leave a clean status", "running as root"):
+        if not any(f.startswith("NOT RUN: ") and want in f for f in got):
+            failures.append("(NOT RUN post-release) a case that loses its discriminating power must record a "
+                            "NOT RUN failure naming {!r} (got {})".format(want, got))
+
+    # The git-availability gates (PR #530 QA round-2 codex MAJOR), two red-on-revert scenarios over a
+    # nested self-test run. Scenario 1, TRANSIENT: every earlier gate reports no git while the FINAL
+    # gate reports git present; the nested run must exit nonzero and NAME each earlier gate's block.
+    # The three case sets behind the final gate are replaced for the nested run by recording sentinels
+    # (so this vector is not re-entered from the nested run, and the final gate's dispatch is itself
+    # observed). Scenario 2: no gate reports git, so every block must be named, the final one included.
+    real_probe = _git_available
+    saved_sets = {"_real_pack_not_run_vectors": _real_pack_not_run_vectors,
+                  "_not_run_net_vectors": _not_run_net_vectors, "_e2e_git_cases": _e2e_git_cases}
+    for scenario, answers, named, unnamed in (
+            ("transient probe (final gate succeeds)",
+             [False] * (len(_GIT_GATE_LABELS) - 1) + [True],
+             _GIT_GATE_LABELS[:-1], _GIT_GATE_LABELS[-1:]),
+            ("git unavailable at every gate",
+             [False] * len(_GIT_GATE_LABELS), _GIT_GATE_LABELS, ())):
+        plan = list(answers)
+        final_ran = []
+
+        def _planned_probe(plan=plan):
+            return plan.pop(0) if plan else real_probe()
+
+        def _sentinel(which, ran=final_ran):
+            def _record(_tmp, _failures):
+                ran.append(which)
+            return _record
+
+        globals()["_git_available"] = _planned_probe
+        globals()["_real_pack_not_run_vectors"] = _sentinel("real-pack")
+        globals()["_not_run_net_vectors"] = _sentinel("net")
+        globals()["_e2e_git_cases"] = _sentinel("e2e")
+        out = io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                rc = self_test_main()
+        finally:
+            globals().update(saved_sets)
+            globals()["_git_available"] = real_probe
+        text = out.getvalue()
+        if rc == 0:
+            failures.append("(NOT RUN git-gate) {}: the nested self-test must exit nonzero, never "
+                            "SELF-TEST PASS beside an unrun git-gated block".format(scenario))
+        for label in named:
+            if "NOT RUN: " + label not in text:
+                failures.append("(NOT RUN git-gate) {}: the nested self-test must NAME the skipped "
+                                "block {!r} (output ended {!r})".format(
+                                    scenario, label, text.strip()[-300:]))
+        for label in unnamed:
+            if "NOT RUN: " + label in text:
+                failures.append("(NOT RUN git-gate) {}: the final gate's block must RUN when its "
+                                "probe succeeds, not record {!r}".format(scenario, label))
+        if scenario.startswith("transient") and sorted(final_ran) != ["e2e", "net", "real-pack"]:
+            failures.append("(NOT RUN git-gate) transient probe: the final gate must dispatch all "
+                            "three case sets when its probe succeeds (ran {})".format(final_ran))
+
+    # Round-6 (codex 1 / claude MEDIUM-1): a REBOUND GATE must be a NAMED failure at run time,
+    # never six silently skipped blocks beside SELF-TEST PASS (the round-5 static checker admitted
+    # a globals()/sys.modules rebinding of _git_gate; an IN-PLACE module rebinding is caught by
+    # identity whatever its spelling, so this one rebinding stands for that class, while the
+    # restored-between-checkpoints and local-shadow escapes are disclosed at
+    # _gate_identity_failures). Round-7 (fix item 1): the nested run must exit nonzero and its
+    # output must carry the identity diagnostic for EVERY checkpoint by name (the six gate labels
+    # and the end-of-suite checkpoint) and the accounting diagnostic for EVERY gate label, one
+    # assertion each, so removing one checkpoint call or dropping one label from the accounting
+    # is red under its own assertion, never satisfied by a diagnostic another checkpoint or the
+    # identity unit test produced.
+    real_gate = _GATE_IMPORT_BINDINGS[0]
+    globals()["_git_gate"] = lambda label, failures: False
+    out = io.StringIO()
+    try:
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            rc = self_test_main()
+    finally:
+        globals()["_git_gate"] = real_gate
+    text = out.getvalue()
+    if rc == 0:
+        failures.append("(NOT RUN git-gate) rebound gate: the nested self-test must exit nonzero, "
+                        "never SELF-TEST PASS beside six silently skipped blocks")
+    for where_chk in _GIT_GATE_LABELS + ("at the end of the self-test",):
+        if ("(git-gate identity) " + where_chk
+                + ": _git_gate is not the object captured at import") not in text:
+            failures.append("(NOT RUN git-gate) rebound gate: the identity checkpoint {!r} must "
+                            "name the drifted gate binding (output ended {!r})".format(
+                                where_chk, text.strip()[-300:]))
+    for label_chk in _GIT_GATE_LABELS:
+        if "(git-gate accounting) {!r}".format(label_chk) not in text:
+            failures.append("(NOT RUN git-gate) rebound gate: the per-label accounting must name "
+                            "the unaccounted block {!r} (output ended {!r})".format(
+                                label_chk, text.strip()[-300:]))
+
+
 def _real_pack_e2e(tmp, failures):
     """Build REAL full-pack two-release git repos from `git archive HEAD` of THIS repo and drive the real
     run() through the delta path: a clean CONSISTENTLY-edited id-keyed PATCH (finding 2), malformed-loader
     variants (findings 1/3), a wrong-version disposition (round-3 finding 3), and a smudge-filter predecessor
     renderer-closure attack that the raw-blob materialization defeats (round-4 findings 1/4), and genesis
-    full-pack manifest/profiles/invalid-UTF-8 mutations (round-5 findings 1/3/5). Returns True if it ran,
-    False if skipped (archive unavailable). Hermetic: private temp git repos, neutralized identity."""
+    full-pack manifest/profiles/invalid-UTF-8 mutations (round-5 findings 1/3/5). Returns True when the
+    primary cases ran and False when they could not. A path that ends a case early records a failure
+    first, never a printed note beside a PASS: 16 named NOT RUN sites (_not_run: 14 in this body, and one
+    each in _plant_notice_omission and _plant_noncanon_source_path for the two corpus-dependent
+    fixtures), the existing NOT RUN failures for an unavailable or unextractable archive, and the existing
+    fixture-setup failures that _pin_fixture_version and _regen_fixture_manifest record; a failed
+    `git tag` raises (check=True). The caller (_e2e_git_cases) adds a NOT RUN failure for a False return
+    that recorded none. Every _not_run site past the primary cases has its own failure-injection vector
+    in _real_pack_fault_vectors, the true-return paths included. Hermetic: private temp git repos,
+    neutralized identity."""
     import re
     env = _selftest_env()
     arch = _archive_head(repo_root())
@@ -2922,8 +3931,8 @@ def _real_pack_e2e(tmp, failures):
         return False
     for args in (["add", "-A"], ["commit", "-q", "-m", "release 1.0.0", "--no-verify"]):
         if subprocess.run(["git", "-C", str(repo), *args], capture_output=True, env=env).returncode != 0:
-            print("SELF-TEST NOTE: could not build the fixture git repo; real full-pack case SKIPPED",
-                  file=sys.stderr)
+            _not_run(failures, _REAL_PACK_CASES, "could not build the fixture git repo (git {} "
+                     "failed)".format(args[0]))
             return False
     commit1 = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True,
                              text=True).stdout.strip()
@@ -2935,7 +3944,10 @@ def _real_pack_e2e(tmp, failures):
                           capture_output=True, text=True).stdout.strip()
     cid = _edit_clause_consistently(repo)   # predecessor (commit1) keeps the original text
     if cid is None:
-        print("SELF-TEST NOTE: no sole-coverer clause to edit; real full-pack case SKIPPED", file=sys.stderr)
+        # Corpus content decides this, so it can happen in CI: a NOT RUN failure, never a skip.
+        _not_run(failures, _REAL_PACK_CASES, "no sole-coverer clause to edit (no clause is the only "
+                 "coverer of every line in its span with a once-only canonical-text), so the "
+                 "consistently-edited PATCH fixture cannot be built")
         return False
 
     def _set_head_version(version):
@@ -3136,8 +4148,10 @@ def _real_pack_e2e(tmp, failures):
     repo2 = tmp / "real-pack-smudge"
     try:
         _extract(arch, repo2)
-    except Exception:  # noqa: BLE001
-        return True  # the primary cases already ran
+    except Exception as exc:  # noqa: BLE001
+        _not_run(failures, "the smudge-filter predecessor case and every later real full-pack case",
+                 "could not extract the archive ({})".format(exc))
+        return True  # the primary cases already ran; the cause is recorded in failures
     # Pin to 1.0.0 FIRST, on the CLEAN extracted tree (shared helper: writes VERSION + changelog, inits,
     # stages, and regenerates the manifest), THEN introduce the undeclared closure edit and the smudge
     # filter and re-commit. Pinning before the edit keeps the committed manifest's _gen_common.py digest at
@@ -3145,7 +4159,11 @@ def _real_pack_e2e(tmp, failures):
     # attack under test); it only binds release-version to 1.0.0 so the gate reaches that check instead of
     # failing at the version-binding rejection. A gen failure is recorded in `failures` by the helper.
     if not _pin_fixture_version(repo2, failures):
-        return True  # the primary cases already ran; the setup failure is recorded in failures
+        # The helper recorded its own fixture-setup failure; ALSO name the cases this early return
+        # skips, exactly as the extract-failure path above names them.
+        _not_run(failures, "the smudge-filter predecessor case and every later real full-pack case",
+                 "the fixture version pin failed (the setup failure is recorded beside this one)")
+        return True  # the primary cases already ran; both causes are recorded in failures
     orig_gcommon = (repo2 / gcommon).read_text(encoding="utf-8")
     (repo2 / gcommon).write_text(orig_gcommon + "\n# predecessor-only undeclared edit\n", encoding="utf-8")
     attrs = repo2 / ".gitattributes"
@@ -3155,6 +4173,8 @@ def _real_pack_e2e(tmp, failures):
     for args in (["config", "filter.hide.smudge", "sed '/predecessor-only undeclared edit/d'"],
                  ["add", "-A"], ["commit", "-q", "-m", "release 1.0.0", "--no-verify"]):
         if subprocess.run(["git", "-C", str(repo2), *args], capture_output=True, env=env).returncode != 0:
+            _not_run(failures, "the smudge-filter predecessor case (round-4 findings 1/4)",
+                     "could not build the predecessor commit (git {} failed)".format(args[0]))
             ok = False
             break
     if ok:
@@ -3173,6 +4193,9 @@ def _real_pack_e2e(tmp, failures):
                                 "attack is not set up, so the raw-materialization regression is not proven")
             subprocess.run(["git", "-C", str(repo2), "worktree", "remove", "--force", str(wt)],
                            capture_output=True, env=env)
+        else:
+            _not_run(failures, "the smudge-filter attack set-up proof (round-4 findings 1/4)",
+                     "could not add a checkout worktree to confirm the filter hides the edit")
         (repo2 / gcommon).write_text(orig_gcommon, encoding="utf-8")   # HEAD restores the original closure
         (repo2 / RELEASES_REL).write_text(
             'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
@@ -3197,22 +4220,27 @@ def _real_pack_e2e(tmp, failures):
     repo3 = tmp / "real-pack-omit"
     try:
         _extract(arch, repo3)
-    except Exception:  # noqa: BLE001  the primary cases already ran
+    except Exception as exc:  # noqa: BLE001  the primary cases already ran
+        _not_run(failures, "the under-claimed predecessor manifest case and every later real full-pack "
+                 "case", "could not extract the archive ({})".format(exc))
         return True
     # Pin to 1.0.0 FIRST (the shared helper regenerates a CLEAN, complete manifest at 1.0.0), THEN drop the
     # NOTICE [[sources]] row from that regenerated manifest so the ONLY inconsistency under test is the
     # under-claimed predecessor manifest, now reachable past the version-binding check. A gen failure is
     # recorded in `failures` by the helper.
     if not _pin_fixture_version(repo3, failures):
-        return True  # the primary cases already ran; the setup failure is recorded in failures
-    mpath = repo3 / MANIFEST_REL
-    mblocks = mpath.read_text(encoding="utf-8").split("\n[[sources]]")
-    kept = [mblocks[0]] + ["\n[[sources]]" + b for b in mblocks[1:] if 'path = "NOTICE"\n' not in b]
-    if len(kept) == len(mblocks) - 1 and "[[artifacts]]" in "".join(kept):
-        mpath.write_text("".join(kept), encoding="utf-8")
+        # The helper recorded its own fixture-setup failure; ALSO name the cases this early return
+        # skips, exactly as the extract-failure path above names them.
+        _not_run(failures, "the under-claimed predecessor manifest case and every later real "
+                 "full-pack case",
+                 "the fixture version pin failed (the setup failure is recorded beside this one)")
+        return True  # the primary cases already ran; both causes are recorded in failures
+    if _plant_notice_omission(repo3 / MANIFEST_REL, failures):
         ok3 = True
         for args in (["add", "-A"], ["commit", "-q", "-m", "release 1.0.0", "--no-verify"]):
             if subprocess.run(["git", "-C", str(repo3), *args], capture_output=True, env=env).returncode != 0:
+                _not_run(failures, "the under-claimed predecessor manifest case (round-8 finding 1)",
+                         "could not build the predecessor commit (git {} failed)".format(args[0]))
                 ok3 = False
                 break
         if ok3:
@@ -3253,7 +4281,9 @@ def _real_pack_e2e(tmp, failures):
         rp = tmp / dirname
         try:
             _extract(arch, rp)
-        except Exception:  # noqa: BLE001  the primary cases already ran
+        except Exception as exc:  # noqa: BLE001  the primary cases already ran
+            _not_run(failures, "predecessor-record case ({})".format(dirname),
+                     "could not extract the archive ({})".format(exc))
             return
         mutate(rp)
         # Pin to 1.0.0 AND regenerate the predecessor manifest via the shared helper, AFTER the mutation, so
@@ -3266,6 +4296,8 @@ def _real_pack_e2e(tmp, failures):
             return  # the setup failure is recorded in failures
         for args in (["add", "-A"], ["commit", "-q", "-m", "release 1.0.0", "--no-verify"]):
             if subprocess.run(["git", "-C", str(rp), *args], capture_output=True, env=env).returncode != 0:
+                _not_run(failures, "predecessor-record case ({})".format(dirname),
+                         "could not build the predecessor commit (git {} failed)".format(args[0]))
                 return
         pcommit = subprocess.run(["git", "-C", str(rp), "rev-parse", "HEAD"], capture_output=True,
                                  text=True).stdout.strip()
@@ -3400,7 +4432,9 @@ def _real_pack_e2e(tmp, failures):
         dest = tmp / name
         try:
             _extract(arch, dest)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            _not_run(failures, "real genesis full-pack case ({})".format(name),
+                     "could not extract the archive ({})".format(exc))
             return None
         # git-init + add so the HEAD manifest freshness/integrity checks (this round's #1, now run in the
         # genesis path too) have a tracked path set to read; no commit or identity is needed. A malformation
@@ -3408,6 +4442,8 @@ def _real_pack_e2e(tmp, failures):
         for argv in (["init", "-q"], ["add", "-A"]):
             if subprocess.run(["git", "-C", str(dest), *argv], capture_output=True,
                               env=_selftest_env()).returncode != 0:
+                _not_run(failures, "real genesis full-pack case ({})".format(name),
+                         "could not stage the extracted tree (git {} failed)".format(argv[0]))
                 return None
         return dest
 
@@ -3596,8 +4632,10 @@ def _real_pack_e2e(tmp, failures):
         try:
             os.symlink("profiles.toml", gprof / ".aiqt" / "core" / "profiles.toml")
             made = True
-        except OSError:
+        except OSError as exc:
             made = False
+            _not_run(failures, "the self-referential profiles.toml symlink case (round-5 finding 5)",
+                     "could not create the symlink ({})".format(exc))
         if made and _run_quiet_root(gprof) != 2:
             failures.append("real genesis full-pack run(): a self-referential profiles.toml symlink must "
                             "fail closed exit 2 (round-5 finding 5)")
@@ -3617,18 +4655,10 @@ def _real_pack_e2e(tmp, failures):
     # strict_clause_inventory now rejects the non-canonical form, exit 2. The manifest is regenerated so the
     # sole thing under test is the path form (neutering the source-path check makes this fixture pass).
     g1 = _extract_genesis("genesis-clause-noncanon-path")
-    if g1 is not None:
-        cp = g1 / CLAUSES_REL
-        text = cp.read_text(encoding="utf-8")
-        m = re.search(r'source-path = "([^"]+)"', text)
-        parts = m.group(1).split("/") if m else []
-        if len(parts) >= 2:
-            noncanon = "/".join(parts[:-1] + ["..", parts[-2], parts[-1]])   # dir/sub/../sub/file (same file)
-            cp.write_text(text.replace('source-path = "{}"'.format(m.group(1)),
-                                       'source-path = "{}"'.format(noncanon), 1), encoding="utf-8")
-            if _genesis_regen(g1) and _run_quiet_root(g1) != 2:
-                failures.append("real genesis full-pack run(): a non-canonical HEAD clause source-path that "
-                                "resolves to the real file must fail closed exit 2 (round-5 finding 1)")
+    if g1 is not None and _plant_noncanon_source_path(g1 / CLAUSES_REL, failures):
+        if _genesis_regen(g1) and _run_quiet_root(g1) != 2:
+            failures.append("real genesis full-pack run(): a non-canonical HEAD clause source-path that "
+                            "resolves to the real file must fail closed exit 2 (round-5 finding 1)")
 
     # (round-5 finding 3) a genesis default-correction row that is fully valid EXCEPT a captured-source whose
     # host carries a raw SPACE ('https://exa mple.com/...'): the pre-fix urlparse-only check accepted it (a
@@ -3715,7 +4745,15 @@ def _post_release_e2e(tmp, failures, only=None):
     CRLF tag line, the tag key before the version line).
 
     `only` (an iterable of label substrings) runs a subset, for out-of-tree mutant-discrimination
-    drivers and focused debugging. Returns True if it ran, False if skipped."""
+    drivers and focused debugging; the unselected cases then do not run, by request. Returns False when a
+    fixture a case needs could not be built (each such return records a failure first, and the caller
+    nets a False return that recorded none), True otherwise. A case that would lose its discriminating
+    power on this host records a NOT RUN failure instead of passing: a git that does not substitute the
+    planted replace ref, ignores info/grafts, or leaves the filter-masked status dirty, and a root user,
+    for whom directory search permission is not enforced. DISCLOSED: a git that stops honouring
+    info/grafts (a removed or disabled grafts mechanism) therefore makes the grafts case a STANDING NOT
+    RUN failure of this self-test on that host; that fails closed, and is resolved by porting the case,
+    never by skipping it."""
     env = _selftest_env()
     arch = _archive_head(repo_root())
     if arch is None:
@@ -3955,8 +4993,8 @@ def _post_release_e2e(tmp, failures, only=None):
                 failures.append("fixture setup ({}): git replace failed".format(labelR))
             else:
                 if b"2000-01-01" in _g(repo, "show", "HEAD:" + CHANGELOG_REL).stdout:
-                    print("SELF-TEST NOTE: this git did not substitute the planted replace ref; the "
-                          "blob-replacement case still asserts the funnel reads", file=sys.stderr)
+                    _not_run(failures, labelR, "this git did not substitute the planted replace ref, so "
+                             "the case cannot show that the --no-replace-objects pins defeat one")
                 # The funnel itself must return the RECORDED committed bytes while the replacement is
                 # active: this assertion fails ALONE when the _git pins are bypassed (claude F3), even
                 # where a redundant downstream guard would still exit 2.
@@ -4010,8 +5048,8 @@ def _post_release_e2e(tmp, failures, only=None):
             (repo / ".git" / "info" / "grafts").write_text(orphan_oid + " " + commit1 + "\n",
                                                            encoding="utf-8")
             if _g(repo, "merge-base", "--is-ancestor", commit1, "HEAD").returncode != 0:
-                print("SELF-TEST NOTE: this git ignores info/grafts; the graft case still asserts the "
-                      "funnel reads", file=sys.stderr)
+                _not_run(failures, labelGf, "this git ignores info/grafts, so the case cannot show "
+                         "that the GIT_GRAFT_FILE pin defeats a planted graft")
             # The funnel must refuse the grafted parent: fails ALONE when the GIT_GRAFT_FILE pin is
             # bypassed (claude F3).
             if _git_raw(repo, ["merge-base", "--is-ancestor", commit1, "HEAD"]).returncode == 0:
@@ -4070,8 +5108,8 @@ def _post_release_e2e(tmp, failures, only=None):
                     man_path.unlink()
                     _g(repo, "checkout", "--", MANIFEST_REL)
                     if _g(repo, "status", "--porcelain=v1").stdout.strip():
-                        print("SELF-TEST NOTE: the filter mask did not clean the status; the masked-"
-                              "manifest case still asserts the committed verdict", file=sys.stderr)
+                        _not_run(failures, labelF, "the filter mask did not leave a clean status, so "
+                                 "the working tree does not hide the corrupt committed manifest")
                     # The working tree now shows the VALID manifest and status is clean, yet the
                     # COMMITTED manifest is corrupt: only the materialized-committed-tree legs catch it.
                     _check(repo, labelF, 2, "head manifest")
@@ -4154,7 +5192,7 @@ def _post_release_e2e(tmp, failures, only=None):
             return False
         if _edit_clause_consistently(r2) is None:
             failures.append("fixture setup (two-release): no clause admits a consistent edit")
-            return True
+            return False
         (r2 / "VERSION").write_text("1.0.1\n", encoding="utf-8")
         (r2 / CHANGELOG_REL).write_text(
             '[[release]]\nversion = "1.0.0"\n\n[[release]]\nversion = "1.0.1"\n', encoding="utf-8")
@@ -4376,7 +5414,7 @@ def _post_release_e2e(tmp, failures, only=None):
                                     "copy (got rc={}: {})".format(labelV, proc_v.returncode,
                                                                    out_v.strip()[-300:]))
 
-    # ---- QA round 5 (D-397-REEXEC-FROM-COMMITTED): launch re-execution and committed routing --------
+    # ---- Committed-copy decision: launch re-execution and committed routing -------------------------
     # The launch-attack cases drive the EXACT CI launch (python3 -I -B tools/check_release_delta.py) so
     # the stage-1 re-execution of the COMMITTED gate copy is itself under test, not the in-process
     # run(). They use a DEDICATED fresh fixture (immune to any prior case's state) carrying a STALE
@@ -4764,7 +5802,7 @@ def _post_release_e2e(tmp, failures, only=None):
                 finally:
                     _shutil7.rmtree(nr7, ignore_errors=True)
 
-        # ---- QA round 8 (D-397-DISCOVERY-SUPERSET): absence holds only when an inspection that
+        # ---- Superset-of-discovery decision: absence holds only when an inspection that
         # is a SUPERSET of git discovery finds nothing. Each case plants the checkout tripwire;
         # the CLI must exit 2 from stage 1 and BOTH absence predicates must refuse. (R8 symlinked
         # launch) carries codex blocker 1 and claude F1 reproductions A and B: `git -C` walks the
@@ -4974,8 +6012,8 @@ def _post_release_e2e(tmp, failures, only=None):
             import tempfile as _tempfile9u
             base9u = _marker_free_base7()
             if os.geteuid() == 0:
-                print("SKIP {}: running as root, directory search permission is not enforced "
-                      "(the OSError branch is unreachable this way)".format(label9u))
+                _not_run(failures, label9u, "running as root, directory search permission is not "
+                         "enforced, so the fail-closed OSError branch cannot be reached this way")
             elif base9u is None:
                 failures.append(label9u + ": no marker-free temp path exists (fixture-env)")
             else:
@@ -5817,6 +6855,514 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     from _git_fixture_env import scrub_git_environment
     scrub_git_environment()
     failures = []
+    # Round-6 per-block accounting (codex 1 / claude MEDIUM-1): each gated block appends its
+    # label here as its body's LAST statement; the gate records a NOT RUN failure instead when
+    # its probe fails; the final verdict requires EXACTLY ONE record per gate label.
+    gate_ran = []
+
+    # PR #530 QA round-3 claude MINOR-4, round-4 codex 1 / claude MINOR-2, round-5 codex 1/2/4: the
+    # _GIT_GATE_LABELS/_git_gate alignment is a CHECK over the module source, not a comment, and it
+    # refuses INDIRECT probes too. Planted vectors: the bare probe and the extra gate call were
+    # findings under the round-3 checker already; the EIGHT round-4 shapes (an alias, a callback
+    # tuple, a getattr, a globals() lookup, a sys.modules attribute, a second def of _git_gate, a
+    # probe closure escaping _git_gate, and a swapped label index) each returned [] from it; and
+    # the round-5 shapes (an import alias, a bytes globals() key, a second def of
+    # _not_run_net_vectors, an alias / functools.partial / rebinding of _git_gate, decorator,
+    # default and annotation probes on the gate, a class-body probe, an unrelated early-return
+    # alias, a duplicated and a nested real_probe swap, and a bool and a float label index) each
+    # returned [] from the round-4 checker; the round-6 shapes (a globals()/sys.modules/import
+    # rebinding or lookup of _git_gate, a parameter shadowing of the probe, a generator-expression
+    # and a type-alias escape, an early return through real_probe, a zero-swap stand-in, and a
+    # third globals() store) each returned [] from the round-5 checker, while the round-6
+    # duplicated import capture drew TWO round-5 findings (an indirect probe reference and an
+    # indirect gate reference, neither capture-specific) and the missing capture cannot be
+    # evaluated at round-5 at all, that revision having no capture to remove (round-7 codex 4 /
+    # claude MINOR-3 corrected the earlier claim that every round-6 shape returned []); and the
+    # round-7 shapes (the match captures and the class-definition binding, the calls through a
+    # _GATE_IMPORT_BINDINGS subscript, the capture co-rebinding, and the second def of and the
+    # ungated call to _planned_probe) each returned [] from the round-6 checker, which also had
+    # five rules with no planted vector at all (a global declaration, an except alias, a keyword
+    # argument, a bytes gate key, the gate-store count; claude MINOR-2), vectored now. Round-8
+    # (codex 2): the capture-deletion and zero-_planned_probe-def inputs were already findings
+    # under the round-7 checker; their new fixtures pin the ast.Del arm and the LOWER side of the
+    # def-count bound, each previously unvectored (round-9 claude 3: the zero-def fixture pins
+    # the lower side; the earlier two-def vector, round-7, pins the upper side, so together
+    # they pin both sides). Round-8 (codex 1): the co-rebinding RUNTIME
+    # vector below was red at the round-7 pin (its checker reread the rebound module capture).
+    # Round-6/7: this battery keeps the checker honest as a BACKSTOP; the runtime identity
+    # checkpoints (_gate_identity_failures at every gate and at the end) and the per-label
+    # accounting (_gate_accounting_failures) before the verdict carry the guarantee, whose exact
+    # statement and disclosed limits live at _gate_identity_failures. Residual
+    # (disclosed): a git-dependent block with NO probe at all is invisible to the static check; see
+    # the checker docstring.
+    own_source = Path(__file__).resolve().read_text(encoding="utf-8")
+    align = _git_gate_alignment_failures(own_source)
+    if align:
+        failures.append("(git-gate alignment) this module must probe git only through _git_gate, one "
+                        "call per label: {}".format("; ".join(align)))
+    for tagg, plantg, wantg in (
+            ("a planted bare probe",
+             "def _planted_probe_vector():\n    return _git_available()\n",
+             "outside _git_gate"),
+            ("a planted alias probe (round-4)",
+             "def _planted_alias_vector():\n    _probe = _git_available\n    return _probe()\n",
+             "outside _git_gate"),
+            ("a planted callback-tuple probe (round-4)",
+             "def _planted_tuple_vector():\n    return any(fn() for fn in (_git_available,))\n",
+             "outside _git_gate"),
+            ("a planted getattr probe (round-4)",
+             "def _planted_getattr_vector():\n"
+             "    return getattr(sys.modules[__name__], \"_git_available\")()\n",
+             "string reference"),
+            ("a planted globals() probe (round-4)",
+             "def _planted_globals_vector():\n    return globals()[\"_git_available\"]()\n",
+             "string reference"),
+            ("a planted sys.modules attribute probe (round-4)",
+             "def _planted_modattr_vector():\n    return sys.modules[__name__]._git_available()\n",
+             "attribute reference"),
+            ("a planted second def of _git_gate (round-4)",
+             "def _git_gate(label, failures):\n    return True\n",
+             "exactly one top-level def"),
+            ("a planted extra gate call",
+             "def _planted_gate_vector(failures):\n"
+             "    return _git_gate(_GIT_GATE_LABELS[0], failures)\n",
+             "label(s) in _GIT_GATE_LABELS"),
+            ("a planted import alias of the probe (round-5)",
+             "from planted_mod import _git_available as _planted_import\n",
+             "import of"),
+            ("a planted bytes-keyed globals() lookup (round-5)",
+             "def _planted_bytes_vector():\n"
+             "    return globals()[b\"_git_available\".decode()]()\n",
+             "bytes reference"),
+            ("a planted second def of _not_run_net_vectors (round-5)",
+             "def _not_run_net_vectors(tmp, failures):\n    return None\n",
+             "_not_run_net_vectors must have exactly one top-level def"),
+            ("a planted alias of _git_gate (round-5)",
+             "def _planted_gate_alias_vector(failures):\n    _gate = _git_gate\n"
+             "    return _gate(_GIT_GATE_LABELS[0], failures)\n",
+             "other than by a direct call"),
+            ("a planted functools.partial over _git_gate (round-5)",
+             "def _planted_gate_partial_vector(failures):\n    import functools\n"
+             "    return functools.partial(_git_gate, _GIT_GATE_LABELS[0])\n",
+             "other than by a direct call"),
+            ("a planted rebinding of _git_gate (round-5)",
+             "_git_gate = lambda label, failures: False\n",
+             "other than by a direct call"),
+            ("a planted globals() rebinding of _git_gate (round-6)",
+             "globals()[\"_git_gate\"] = lambda label, failures: False\n",
+             "string reference to _git_gate"),
+            ("a planted sys.modules rebinding of _git_gate (round-6)",
+             "sys.modules[__name__]._git_gate = lambda label, failures: False\n",
+             "attribute reference to _git_gate"),
+            ("a planted import binding of _git_gate (round-6)",
+             "from planted_mod import replacement as _git_gate\n",
+             "import of _git_gate"),
+            ("a planted getattr lookup of _git_gate (round-6)",
+             "def _planted_gate_lookup_vector(failures):\n"
+             "    return getattr(sys.modules[__name__], \"_git_gate\")("
+             "_GIT_GATE_LABELS[0], failures)\n",
+             "string reference to _git_gate"),
+            ("a planted duplicate import capture (round-6)",
+             "_GATE_IMPORT_BINDINGS = (" + "_git_gate, " + "_git_available)\n",
+             "capture must appear exactly"),
+            ("a planted match capture of _git_gate (round-7)",
+             "def _planted_matchas_vector(x):\n    match x:\n        case _git_gate:\n"
+             "            pass\n",
+             "match capture pattern"),
+            ("a planted match star capture of the probe (round-7)",
+             "def _planted_matchstar_vector(x):\n    match x:\n        case [*_git_available]:\n"
+             "            pass\n",
+             "match capture pattern"),
+            ("a planted match mapping rest capture (round-7)",
+             "def _planted_matchmap_vector(x):\n    match x:\n        case {**_git_gate}:\n"
+             "            pass\n",
+             "match mapping rest"),
+            ("a planted class-definition binding of the probe (round-7)",
+             "def _planted_class_vector():\n    class _git_available:\n        pass\n",
+             "bound by a class definition"),
+            ("a planted probe call through the import capture (round-7)",
+             "def _planted_capture_probe_vector():\n    return _GATE_IMPORT_BINDINGS[1]()\n",
+             "call through a _GATE_IMPORT_BINDINGS subscript"),
+            ("a planted gate call through the import capture (round-7)",
+             "def _planted_capture_gate_vector(failures):\n"
+             "    return _GATE_IMPORT_BINDINGS[0](_GIT_GATE_LABELS[0], failures)\n",
+             "call through a _GATE_IMPORT_BINDINGS subscript"),
+            ("a planted co-rebinding of the import capture (round-7)",
+             "_GATE_IMPORT_BINDINGS = (lambda label, failures: False, lambda: True)\n",
+             "rebound or deleted outside the reviewed import-time capture"),
+            ("a planted deletion of the import capture (round-7 rule, vectored round-8)",
+             "del _GATE_IMPORT_BINDINGS\n",
+             "rebound or deleted outside the reviewed import-time capture"),
+            ("a planted global declaration of the probe (round-6 rule, vectored round-7)",
+             "def _planted_global_vector():\n    global _git_available\n",
+             "global or nonlocal declaration"),
+            ("a planted except alias of _git_gate (round-6 rule, vectored round-7)",
+             "def _planted_except_vector():\n    try:\n        pass\n"
+             "    except Exception as _git_gate:\n        pass\n",
+             "except alias"),
+            ("a planted keyword-argument binding of _git_gate (round-6 rule, vectored round-7)",
+             "def _planted_kw_vector():\n    return dict(_git_gate=None)\n",
+             "keyword argument"),
+            ("a planted bytes-keyed lookup of _git_gate (round-6 rule, vectored round-7)",
+             "def _planted_gate_bytes_vector():\n"
+             "    return globals()[b\"_git_gate\".decode()]()\n",
+             "bytes reference to _git_gate")):
+        gotg = _git_gate_alignment_failures(own_source + "\n\n" + plantg)
+        if not any(wantg in fg for fg in gotg):
+            failures.append("(git-gate alignment) {} must be a finding naming {!r} (got {})".format(
+                tagg, wantg, gotg))
+    # Round-4: the escaped-closure and swapped-label-index vectors EDIT the real source instead of
+    # appending to it (an appended def cannot reach inside _git_gate or reorder its calls); so
+    # do the round-5 class-body, definition-time, swap-allowance and index-type vectors below.
+    _gate_probe_line = "    if " + "_git_available():"
+    if own_source.count(_gate_probe_line + "\n") != 1:
+        failures.append("(git-gate alignment) expected exactly one direct gate probe line to edit "
+                        "for the escaped-closure vector")
+    else:
+        _escaped = own_source.replace(
+            _gate_probe_line + "\n",
+            "    def _esc():\n        return " + "_git_available()\n"
+            "    globals()[\"_escaped_gate_probe\"] = _esc\n    if _esc():\n")
+        gote = _git_gate_alignment_failures(_escaped)
+        if not any("escapes _git_gate" in fg for fg in gote):
+            failures.append("(git-gate alignment) a probe closure escaping _git_gate must be a "
+                            "finding (got {})".format(gote))
+        # Round-5 (codex 1): a class-body call inside the gate sits outside its executable body.
+        _classed = own_source.replace(
+            _gate_probe_line + "\n",
+            "    class _PlantedProbe:\n        available = " + "_git_available()\n"
+            "    if _PlantedProbe.available:\n")
+        gotc = _git_gate_alignment_failures(_classed)
+        if not any("outside _git_gate" in fc for fc in gotc):
+            failures.append("(git-gate alignment) a class-body probe inside _git_gate (round-5) "
+                            "must be a finding naming outside _git_gate (got {})".format(gotc))
+        # Round-6: a GENERATOR EXPRESSION and a TYPE ALIAS are deferred scopes; either carries
+        # the probe out of the gate uncalled, and whoever evaluates the exported object probes
+        # OUTSIDE the gate, unnamed on failure.
+        for tag_esc, plant_esc in (
+                ("a generator-expression escape",
+                 "    globals()[\"_planted_escape\"] = (" + "_git_available() for _ in (0,))\n"),
+                ("a type-alias escape",
+                 "    type _PlantedAlias = " + "_git_available()\n")):
+            got_esc = _git_gate_alignment_failures(own_source.replace(
+                _gate_probe_line + "\n", plant_esc + _gate_probe_line + "\n"))
+            if not any("escapes _git_gate" in f_esc for f_esc in got_esc):
+                failures.append("(git-gate alignment) {} from the gate body (round-6: a deferred "
+                                "scope) must be a finding (got {})".format(tag_esc, got_esc))
+    # Round-5 (codex 1): definition-time probes in the signature of the gate; each EDITS the def
+    # line (an appended second def trips the one-def finding, never the targeted one).
+    _gate_def_line = "\ndef _git_gate(label, failures):\n"
+    if own_source.count(_gate_def_line) != 1:
+        failures.append("(git-gate alignment) expected exactly one _git_gate def line to edit for "
+                        "the round-5 definition-time vectors")
+    else:
+        for tagd, repld in (
+                ("a decorator probe",
+                 "\n@_planted_deco(" + "_git_available())\ndef _git_gate(label, failures):\n"),
+                ("a default-argument probe",
+                 "\ndef _git_gate(label, failures, _cached=" + "_git_available()):\n"),
+                ("a return-annotation probe",
+                 "\ndef _git_gate(label, failures) -> " + "_git_available():\n")):
+            gotd = _git_gate_alignment_failures(own_source.replace(_gate_def_line, repld))
+            if not any("outside _git_gate" in fd for fd in gotd):
+                failures.append("(git-gate alignment) {} on _git_gate (round-5: the probe is "
+                                "allowed only in the executable body of the gate) must be a "
+                                "finding (got {})".format(tagd, gotd))
+        # Round-6 (codex 3): a PARAMETER named after the probe shadows the module binding inside
+        # the gate itself, so the body's probe call resolves to the parameter; ast.arg bindings
+        # are findings now.
+        got_param = _git_gate_alignment_failures(own_source.replace(
+            _gate_def_line,
+            "\ndef _git_gate(label, failures, " + "_git_available=lambda: True):\n"))
+        if not any("bound as a parameter" in f_param for f_param in got_param):
+            failures.append("(git-gate alignment) a parameter shadowing of the probe (round-6) "
+                            "must be a finding naming the parameter binding (got {})".format(
+                                got_param))
+    # Round-5 (codex 2): the swap allowance is the exact reviewed assignment, in the direct
+    # scope of _not_run_net_vectors, exactly once; anything else there is a finding.
+    _swap_line = "    real_probe = " + "_git_available\n"
+    if own_source.count(_swap_line) != 1:
+        failures.append("(git-gate alignment) expected exactly one reviewed real_probe swap line "
+                        "to edit for the round-5 swap-allowance vectors")
+    else:
+        for tags, repls, wants in (
+                ("an unrelated early-return alias",
+                 "    _unrelated_probe = " + "_git_available\n"
+                 "    if not _unrelated_probe():\n        return\n" + _swap_line,
+                 "outside _git_gate"),
+                ("a second real_probe assignment",
+                 _swap_line + _swap_line, "exactly once"),
+                ("a nested-scope swap",
+                 "    def _planted_nested_swap():\n"
+                 "        real_probe = " + "_git_available\n        return real_probe()\n"
+                 + _swap_line,
+                 "outside _git_gate"),
+                ("an early return through the reviewed alias (round-6)",
+                 _swap_line + "    if not real_probe():\n        return\n",
+                 "outside _planned_probe"),
+                ("a zero-swap stand-in probe (round-6)",
+                 "    real_probe = lambda: True\n",
+                 "exactly once"),
+                ("a third globals() probe store (round-6)",
+                 _swap_line + "    globals()[\"" + "_git_available\"] = real_probe\n",
+                 "the stores are counted"),
+                ("a second def of _planned_probe (round-7)",
+                 _swap_line + "    def _planned_probe():\n        return real_probe()\n",
+                 "exactly one def of _planned_probe"),
+                ("an ungated call to _planned_probe (round-7)",
+                 _swap_line + "    if not _planned_probe():\n        return\n",
+                 "other than as the reviewed probe-store value"),
+                ("a third globals() gate store (round-6 rule, vectored round-7)",
+                 _swap_line + "    globals()[\"" + "_git_gate\"] = None\n",
+                 "store(s) of the gate name")):
+            gots5 = _git_gate_alignment_failures(own_source.replace(_swap_line, repls, 1))
+            if not any(wants in f5 for f5 in gots5):
+                failures.append("(git-gate alignment) {} in _not_run_net_vectors (round-5) must "
+                                "be a finding naming {!r} (got {})".format(tags, wants, gots5))
+    _swapped = own_source.splitlines(keepends=True)
+    _call_mark = "if " + "_git_gate(_GIT_GATE_LABELS["
+    _call_rows = [index for index, line in enumerate(_swapped)
+                  if line.lstrip().startswith(_call_mark)]
+    if len(_call_rows) < 2:
+        failures.append("(git-gate alignment) expected at least two gate call lines to swap")
+    else:
+        # Round-5 (codex 4): a bool or float index satisfies an equality-only test (False == 0,
+        # 0.0 == 0), so the checker requires EXACT type int; each vector edits the first call row.
+        for _lit5 in ("False", "0.0"):
+            _typed = own_source.splitlines(keepends=True)
+            _typed[_call_rows[0]] = _typed[_call_rows[0]].replace("[0]", "[" + _lit5 + "]", 1)
+            gott = _git_gate_alignment_failures("".join(_typed))
+            if not any("source order" in ft for ft in gott):
+                failures.append("(git-gate alignment) a {} label index (round-5: exact type int "
+                                "required) must be a finding naming the source order "
+                                "(got {})".format(_lit5, gott))
+        _swapped[_call_rows[0]] = _swapped[_call_rows[0]].replace("[0]", "[1]", 1)
+        _swapped[_call_rows[1]] = _swapped[_call_rows[1]].replace("[1]", "[0]", 1)
+        gots = _git_gate_alignment_failures("".join(_swapped))
+        if not any("source order" in fg for fg in gots):
+            failures.append("(git-gate alignment) a swapped label index must be a finding naming "
+                            "the source order (got {})".format(gots))
+
+    # Round-6: the import capture itself, edited OUT (the duplicate is an appended vector above).
+    _capture_line = "_GATE_IMPORT_BINDINGS = (" + "_git_gate, " + "_git_available)\n"
+    if own_source.count(_capture_line) != 1:
+        failures.append("(git-gate alignment) expected exactly one import-capture line to edit "
+                        "for the round-6 zero-capture vector")
+    else:
+        got_cap = _git_gate_alignment_failures(own_source.replace(_capture_line, "", 1))
+        if not any("capture must appear exactly" in f_cap for f_cap in got_cap):
+            failures.append("(git-gate alignment) a missing import capture (round-6: the runtime "
+                            "identity check reads it) must be a finding (got {})".format(got_cap))
+
+    # Round-8 (codex 2): the _planned_probe def, edited OUT (a SECOND def is a swap-line
+    # vector above); zero defs and two defs are both findings, so the exactly-one def bound
+    # is red-on-revert on BOTH sides (a `> 1` relaxation would readmit a removed def).
+    _planned_def_block = ("        def _planned_probe(plan=plan):\n"
+                          "            return plan.pop(0) if plan else " + "real_probe()\n")
+    if own_source.count(_planned_def_block) != 1:
+        failures.append("(git-gate alignment) expected exactly one _planned_probe def block to "
+                        "edit for the round-8 zero-def vector")
+    else:
+        got_zero = _git_gate_alignment_failures(own_source.replace(_planned_def_block, "", 1))
+        if not any("exactly one def of _planned_probe" in f_zero for f_zero in got_zero):
+            failures.append("(git-gate alignment) ZERO defs of _planned_probe (round-8: the "
+                            "def-count bound is two-sided) must be a finding naming the def "
+                            "count (got {})".format(got_zero))
+
+    # Round-6: the RUNTIME identity check, red-on-revert for the rebinding class the static scan
+    # kept missing across rounds 4 to 6: identity through the module's own namespace decides, so
+    # one IN-PLACE module rebinding stands for every spelling of that class (a globals() store, a
+    # sys.modules attribute store, an import binding). A temporary rebinding restored between
+    # checkpoints and a local shadow that never rebinds the module sit OUTSIDE that class; the
+    # witness below holds the first escape visible, and _gate_identity_failures states the
+    # guarantee exactly (round-7). The module key is found BY IDENTITY too, so this test needs no
+    # name literal the static backstop would have to allow. Round-9: the planted rebindings go
+    # into globals(), the namespace the gated calls resolve through, never sys.modules[__name__].
+    space_idn = globals()
+    for tag_idn, bound_idn in zip(("the gate", "the probe"), _GATE_IMPORT_BINDINGS):
+        name_idn = next((key_idn for key_idn, val_idn in space_idn.items()
+                         if val_idn is bound_idn), None)
+        if name_idn is None:
+            # Already rebound before this test ran (the rebound-gate nested run reaches here):
+            # that drift is itself a named identity failure, and the per-gate and end-of-suite
+            # identity checks name it with the drifted binding.
+            failures.append("(git-gate identity) the object captured at import for {} is bound "
+                            "to no module name (rebound before this test ran)".format(tag_idn))
+            continue
+        got_idn = []
+        space_idn[name_idn] = lambda *_args_idn: False
+        try:
+            _gate_identity_failures(got_idn, "under a planted rebinding")
+        finally:
+            space_idn[name_idn] = bound_idn
+        if not any("captured at import" in f_idn and name_idn in f_idn for f_idn in got_idn):
+            failures.append("(git-gate identity) a rebinding of {} must be an identity failure "
+                            "naming {} (got {})".format(tag_idn, name_idn, got_idn))
+    got_idn = []
+    _gate_identity_failures(got_idn, "with the bindings intact")
+    if got_idn:
+        failures.append("(git-gate identity) intact bindings must pass the identity check "
+                        "(got {})".format(got_idn))
+
+    # Round-7 (codex 3 / claude MEDIUM-2) DISCLOSED-RESIDUAL WITNESS: a temporary rebinding
+    # restored between checkpoints escapes the identity check BY DESIGN (checkpoints observe
+    # states, never the dispatch between them). The witness reproduces the escape: a stand-in
+    # gate is bound, dispatched through the module namespace, and restored between two
+    # checkpoint reads; the failure list must stay empty and the stand-in must have run.
+    # Round-8 (codex 3): the witness dispatches through the module namespace read HERE, at
+    # the witness itself, independently of the production gate calls (the static backstop
+    # pins those to direct _git_gate names), so it demonstrates ONLY this residual and makes
+    # no claim about changes to production dispatch, which it cannot observe.
+    gate_name_res = next((key_res for key_res, val_res in space_idn.items()
+                          if val_res is _GATE_IMPORT_BINDINGS[0]), None)
+    if gate_name_res is not None:
+        got_res = []
+        _gate_identity_failures(got_res, "before a temporary rebinding")
+        ran_res = []
+        space_idn[gate_name_res] = lambda *_args_res: bool(ran_res.append(True))
+        try:
+            stood_res = space_idn[gate_name_res]("a label the stand-in ignores", [])
+        finally:
+            space_idn[gate_name_res] = _GATE_IMPORT_BINDINGS[0]
+        _gate_identity_failures(got_res, "after the restore")
+        if got_res or ran_res != [True] or stood_res is not False:
+            failures.append("(git-gate identity) the restore-between-checkpoints witness moved: "
+                            "a temporary rebinding restored between checkpoints is the DISCLOSED "
+                            "residual of the identity check (got failures={}, ran={}, "
+                            "returned={!r})".format(got_res, ran_res, stood_res))
+
+    # Round-8 (codex 1): the CO-REBINDING vector, red at the round-7 pin: the gate and the
+    # public import capture rebound TOGETHER through the module namespace (both keys found by
+    # identity, so this test needs no name literal). The round-7 checker reread its reference
+    # from the rebound module binding and reported nothing; the checker now validates the
+    # module capture against its definition-time reference, so BOTH rebindings are named.
+    cap_key_co = next((key_co for key_co, val_co in space_idn.items()
+                       if val_co is _GATE_IMPORT_BINDINGS), None)
+    gate_key_co = next((key_co for key_co, val_co in space_idn.items()
+                        if val_co is _GATE_IMPORT_BINDINGS[0]), None)
+    if cap_key_co is None or gate_key_co is None:
+        failures.append("(git-gate identity) the import capture or the gate has no module "
+                        "binding, so the co-rebinding vector cannot run (that drift is "
+                        "itself a named identity failure above)")
+    else:
+        real_cap_co = space_idn[cap_key_co]
+        real_gate_co = real_cap_co[0]
+        got_co = []
+        space_idn[gate_key_co] = lambda *_args_co: False
+        space_idn[cap_key_co] = (space_idn[gate_key_co], real_cap_co[1])
+        try:
+            _gate_identity_failures(got_co, "under a planted co-rebinding")
+        finally:
+            space_idn[cap_key_co] = real_cap_co
+            space_idn[gate_key_co] = real_gate_co
+        if not any("is not the capture made at import" in f_co for f_co in got_co) or not any(
+                gate_key_co in f_co and "is not the object captured at import" in f_co
+                for f_co in got_co):
+            failures.append("(git-gate identity) a co-rebinding of the gate and the import "
+                            "capture must name BOTH the drifted capture and the drifted gate "
+                            "(round-8: the round-7 checker read its reference from the "
+                            "rebound module binding and reported nothing; got {})".format(
+                                got_co))
+
+    # Round-9 (claude 1), red at the round-8 pin: a SYS.MODULES SWAP beside an in-place
+    # rebinding. The gate is rebound in the module namespace (key found by identity) while
+    # sys.modules[__name__] holds a decoy module carrying the ORIGINAL objects. The round-8
+    # checker read vars(sys.modules[__name__]) and reported nothing although the gated calls
+    # resolve through the rebound namespace; the checker now reads that namespace itself.
+    import types
+    gate_key_sw = next((key_sw for key_sw, val_sw in space_idn.items()
+                        if val_sw is _GATE_IMPORT_BINDINGS[0]), None)
+    if gate_key_sw is None:
+        failures.append("(git-gate identity) the gate has no module binding, so the "
+                        "sys.modules-swap vector cannot run (that drift is itself a named "
+                        "identity failure above)")
+    else:
+        real_mod_sw = sys.modules[__name__]
+        decoy_sw = types.ModuleType(__name__)
+        vars(decoy_sw).update(space_idn)
+        got_sw = []
+        space_idn[gate_key_sw] = lambda *_args_sw: False
+        sys.modules[__name__] = decoy_sw
+        try:
+            _gate_identity_failures(got_sw, "beside a planted sys.modules swap")
+        finally:
+            sys.modules[__name__] = real_mod_sw
+            space_idn[gate_key_sw] = _GATE_IMPORT_BINDINGS[0]
+        if not any(gate_key_sw in f_sw and "is not the object captured at import" in f_sw
+                   for f_sw in got_sw):
+            failures.append("(git-gate identity) an in-place rebinding of the gate beside a "
+                            "sys.modules swap must name the drifted gate (round-9: the round-8 "
+                            "checker read the swapped module and reported nothing; got "
+                            "{})".format(got_sw))
+
+    # Round-9 (claude 1), red at the round-8 pin: a checkpoint that SUPPLIES the reference. The
+    # gate and the capture are co-rebound (keys found by identity) and the rebound capture is
+    # passed explicitly, positionally and by keyword. The round-8 checker took it as its _ref
+    # and reported nothing; the checker now holds its reference in a closure and accepts only
+    # (failures, where), so either call is a TypeError, never a silent pass.
+    if cap_key_co is not None and gate_key_co is not None:
+        real_cap_ex = space_idn[cap_key_co]
+        rebound_ex = (lambda *_args_ex: False, real_cap_ex[1])
+        for tag_ex, call_ex in (
+                ("positionally", lambda got_ex: _gate_identity_failures(
+                    got_ex, "with a supplied reference", rebound_ex)),
+                ("by keyword", lambda got_ex: _gate_identity_failures(
+                    got_ex, "with a supplied reference", _ref=rebound_ex))):
+            got_ex = []
+            space_idn[gate_key_co] = rebound_ex[0]
+            space_idn[cap_key_co] = rebound_ex
+            try:
+                call_ex(got_ex)
+            except TypeError:
+                refused_ex = True
+            else:
+                refused_ex = False
+            finally:
+                space_idn[cap_key_co] = real_cap_ex
+                space_idn[gate_key_co] = real_cap_ex[0]
+            if not refused_ex:
+                failures.append("(git-gate identity) a reference supplied {} must be refused "
+                                "(round-9: the round-8 checker took the rebound capture as its "
+                                "reference and reported nothing; got {})".format(tag_ex, got_ex))
+
+    # Round-7 (fix item 1): the per-label accounting, one unit vector per gate label. Each
+    # vector feeds _gate_accounting_failures a record list missing EXACTLY ONE label and
+    # requires the diagnostic naming that label and no other, so dropping any single label
+    # from the accounting is red under its own vector, never masked by a diagnostic a
+    # different label produced. The intact, NOT-RUN-record and duplicate-record cases pin
+    # both sides of the exactly-one bound (0 records and 2 records are each findings; 1,
+    # from either source, never is).
+    # Round-8 (codex 4), correcting the round-7 account: omitting label 0 from the accounting
+    # draws THREE assertions, not two (its unit vector here, the duplicate-record vector
+    # below, whose expected ran=2 finding the omission suppresses, and the rebound-gate run's
+    # per-label assertion); labels 1-5 each draw two (unit vector and rebound-gate assertion).
+    got_av = []
+    _gate_accounting_failures(got_av, list(_GIT_GATE_LABELS))
+    if got_av:
+        failures.append("(git-gate accounting) a complete record list must satisfy the "
+                        "accounting (got {})".format(got_av))
+    for miss_av, miss_label_av in enumerate(_GIT_GATE_LABELS):
+        got_av = []
+        _gate_accounting_failures(got_av, [lab_av for lab_av in _GIT_GATE_LABELS
+                                           if lab_av is not miss_label_av])
+        named_av = [f_av for f_av in got_av
+                    if "(git-gate accounting) {!r}".format(miss_label_av) in f_av]
+        if len(got_av) != 1 or len(named_av) != 1:
+            failures.append("(git-gate accounting) label {} left unaccounted must draw exactly "
+                            "one diagnostic, naming {!r} (got {})".format(
+                                miss_av, miss_label_av, got_av))
+    got_av = ["NOT RUN: " + _GIT_GATE_LABELS[0] + ": its probe failed (unit vector)"]
+    _gate_accounting_failures(got_av, list(_GIT_GATE_LABELS[1:]))
+    if len(got_av) != 1:
+        failures.append("(git-gate accounting) a NOT RUN line is a label's one record and must "
+                        "satisfy the accounting (got {})".format(got_av[1:]))
+    got_av = []
+    _gate_accounting_failures(got_av, list(_GIT_GATE_LABELS) + [_GIT_GATE_LABELS[0]])
+    if not any("(git-gate accounting) {!r}".format(_GIT_GATE_LABELS[0]) in f_av
+               and "ran=2" in f_av for f_av in got_av):
+        failures.append("(git-gate accounting) a DUPLICATE record (ran=2) must be a finding "
+                        "naming the label; exactly one is a two-sided bound (got {})".format(
+                            got_av))
 
     # QA round-9 codex minor: the drift consumer requires EXACTLY ONE DRIFT-STATES record. A
     # duplicate (identical or contradictory) and a malformed record are failures that a later
@@ -5856,35 +7402,57 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     # interpreter limit, so a fixed body overflows under one recursion limit and parses (or trips an unrelated
     # refusal) under another.
     import tempfile as _tempfile
-    with _tempfile.TemporaryDirectory(prefix="aiqt-delta-toml-class-") as tc_dir:
-        tc_repo = Path(tc_dir)
-        (tc_repo / "bigint.toml").write_text("big = " + "9" * 4400 + "\n", encoding="utf-8")
-        (tc_repo / "deep.toml").write_text("deep = 1  # injected-overflow\n", encoding="utf-8")
-        _git_init_commit(tc_repo, "toml class fixtures")
-        prev_digits = sys.get_int_max_str_digits()
-        sys.set_int_max_str_digits(4300)
-        real_loads, real_load = tomllib.loads, tomllib.load
+    # The fixture commit is REAL git work (init/add/commit with check=True), so it runs behind
+    # a named gate (round-4 claude MINOR-3); git absent at the START stops the whole suite in
+    # fixture_git_lifecycle, which raises RuntimeError: self-test requires git (round-5), and a
+    # fixture commit that fails AFTER this block's successful probe is caught below and recorded
+    # as this block's NOT RUN naming the OBSERVED cause, the exception type and text (round-6
+    # codex 6; round-7 codex 4 / claude MINOR-5: a CalledProcessError can also mean a refused
+    # commit, so the message no longer asserts git was lost, and the first nested run in
+    # _not_run_net_vectors carries the in-suite vector), never an unnamed traceback.
+    _gate_identity_failures(failures, _GIT_GATE_LABELS[0])
+    if _git_gate(_GIT_GATE_LABELS[0], failures):
+        with _tempfile.TemporaryDirectory(prefix="aiqt-delta-toml-class-") as tc_dir:
+            tc_repo = Path(tc_dir)
+            (tc_repo / "bigint.toml").write_text("big = " + "9" * 4400 + "\n", encoding="utf-8")
+            (tc_repo / "deep.toml").write_text("deep = 1  # injected-overflow\n", encoding="utf-8")
+            try:
+                _git_init_commit(tc_repo, "toml class fixtures")
+            except (OSError, subprocess.CalledProcessError) as tc_exc:
+                _not_run(failures, _GIT_GATE_LABELS[0], "its fixture commit failed after this "
+                         "block's successful probe ({}: {}); a lost git and a refused commit "
+                         "both land here, fail-closed under the observed cause".format(
+                             type(tc_exc).__name__, tc_exc))
+            else:
+                prev_digits = sys.get_int_max_str_digits()
+                sys.set_int_max_str_digits(4300)
+                real_loads, real_load = tomllib.loads, tomllib.load
 
-        def overflowing_loads(text, **kwargs):
-            if "injected-overflow" in text:
-                raise RecursionError("injected parser overflow")
-            return real_loads(text, **kwargs)
+                def overflowing_loads(text, **kwargs):
+                    if "injected-overflow" in text:
+                        raise RecursionError("injected parser overflow")
+                    return real_loads(text, **kwargs)
 
-        tomllib.loads = overflowing_loads
-        tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
-        try:
-            for tc_name, tc_needle in (("bigint.toml", ""), ("deep.toml", "injected parser overflow")):
+                tomllib.loads = overflowing_loads
+                tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"),
+                                                                      **kwargs)
                 try:
-                    _show_toml(tc_repo, "HEAD", tc_name)
-                    failures.append("_show_toml accepted {}".format(tc_name))
-                except GateError as exc:
-                    if tc_needle not in str(exc):
-                        failures.append("_show_toml refused {} without its finding ({})".format(tc_name, exc))
-                except (ValueError, RecursionError) as exc:
-                    failures.append("_show_toml let a bare {} escape on {}".format(type(exc).__name__, tc_name))
-        finally:
-            tomllib.loads, tomllib.load = real_loads, real_load
-            sys.set_int_max_str_digits(prev_digits)
+                    for tc_name, tc_needle in (("bigint.toml", ""),
+                                               ("deep.toml", "injected parser overflow")):
+                        try:
+                            _show_toml(tc_repo, "HEAD", tc_name)
+                            failures.append("_show_toml accepted {}".format(tc_name))
+                        except GateError as exc:
+                            if tc_needle not in str(exc):
+                                failures.append("_show_toml refused {} without its finding "
+                                                "({})".format(tc_name, exc))
+                        except (ValueError, RecursionError) as exc:
+                            failures.append("_show_toml let a bare {} escape on {}".format(
+                                type(exc).__name__, tc_name))
+                finally:
+                    tomllib.loads, tomllib.load = real_loads, real_load
+                    sys.set_int_max_str_digits(prev_digits)
+                gate_ran.append(_GIT_GATE_LABELS[0])
 
     # QA round-11 claude F1: main() reached by IMPORTING this module (never through the `if
     # __name__ == "__main__" and sys.argv[1:] == []` guard that invokes _stage1_main) leaves
@@ -6489,7 +8057,8 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
 
     # --- materialize_tree_raw preserves git file modes (round-7 finding 4) ------------------------
     import stat as _stat
-    if _git_available():
+    _gate_identity_failures(failures, _GIT_GATE_LABELS[1])
+    if _git_gate(_GIT_GATE_LABELS[1], failures):
         import shutil as _sh4
         import tempfile as _tf4
         mtmp = Path(_tf4.mkdtemp(prefix="aiqt-delta-mode-"))
@@ -6513,6 +8082,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                                 "(finding 4)")
         finally:
             _sh4.rmtree(mtmp, ignore_errors=True)
+        gate_ran.append(_GIT_GATE_LABELS[1])
 
     # --- bump computation --------------------------------------------------------------------------
     if _claimed_rank("1.0.0", "1.0.1") != PATCH or _claimed_rank("1.0.0", "1.1.0") != MINOR \
@@ -6554,17 +8124,13 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     import shutil
     import tempfile
     try:
-        tmp = Path(tempfile.mkdtemp(prefix="aiqt-release-delta-selftest-"))
-    except OSError:
+        tmp = Path(tempfile.mkdtemp(prefix=_E2E_TMP_PREFIX))
+    except OSError as exc:
         tmp = None
+        _not_run(failures, "every end-to-end case (genesis, unreachable-predecessor, real full-pack and "
+                 "POST-RELEASE)", "no writable temp directory ({})".format(exc))
 
-    if tmp is None:
-        print("SELF-TEST NOTE: no writable temp directory; the genesis and unreachable-predecessor "
-              "end-to-end cases were SKIPPED (the classification-leg coverage above still ran)",
-              file=sys.stderr)
-        e2e_ran = False
-    else:
-        e2e_ran = True
+    if tmp is not None:
 
         def _valid_manifest(genesis):
             # A STRUCTURALLY valid manifest carrying the EXACT mandatory top-level keyset (round-5 finding
@@ -6583,9 +8149,13 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             (g / ".aiqt" / "manifest.toml").write_text(_valid_manifest("true"), encoding="utf-8")
             for rel in (RELEASES_REL, ORDER_REL, RENDERERS_REL, CLAUSES_REL, DISPOSITIONS_REL):
                 (g / rel).write_text("format-version = 1\n", encoding="utf-8")
-            if _run_quiet_root(g) != 2:
+            rc_g, err_g = _run_quiet_root_err(g)
+            if rc_g != 2 or "apex-corpus-id must be" not in err_g:
                 failures.append("genesis structural: a record tree whose structure cannot be validated "
-                                "must fail closed exit 2 (QA #1), not pass")
+                                "must fail closed exit 2 NAMING the structural finding (QA #1; "
+                                "round-5 codex 5: an absent git also exits 2, which must not satisfy "
+                                "this assertion), got rc={} stderr={!r}".format(
+                                    rc_g, err_g.strip()[-200:]))
 
             # (genesis-mismatch) zero rows but a valid manifest whose genesis is not true -> exit 2.
             gm = tmp / "genesis-mismatch"
@@ -6593,8 +8163,11 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             (gm / ".aiqt" / "manifest.toml").write_text(_valid_manifest("false"), encoding="utf-8")
             for rel in (RELEASES_REL, ORDER_REL, RENDERERS_REL, CLAUSES_REL, DISPOSITIONS_REL):
                 (gm / rel).write_text("format-version = 1\n", encoding="utf-8")
-            if _run_quiet_root(gm) != 2:
-                failures.append("genesis flag mismatch: expected fail-closed exit 2")
+            rc_gm, err_gm = _run_quiet_root_err(gm)
+            if rc_gm != 2 or "does not declare genesis = true" not in err_gm:
+                failures.append("genesis flag mismatch: expected fail-closed exit 2 naming the 2.5 "
+                                "mismatch (round-5: exit 2 alone cannot tell it from an absent "
+                                "git), got rc={} stderr={!r}".format(rc_gm, err_gm.strip()[-200:]))
 
             # (unreachable predecessor) a one-row releases record (a COMPLETE attestation row, so the strict
             # loader passes and the failure is genuinely the unresolvable commit, not the schema) whose
@@ -6611,8 +8184,17 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             (u / CHANGELOG_REL).write_text(
                 '[[release]]\nversion = "1.1.0"\n', encoding="utf-8")
             (u / DISPOSITIONS_REL).write_text("format-version = 1\n", encoding="utf-8")
-            if _run_quiet_root(u) != 2:
-                failures.append("unreachable predecessor: expected fail-closed exit 2")
+            rc_u, err_u = _run_quiet_root_err(u)
+            # Round-6 (claude MINOR-2): the needle carries the PLANTED commit id: the bare
+            # "cannot resolve" substring was also satisfied by the HEAD-resolution GateError of
+            # a git that RUNS but FAILS ("git cannot resolve HEAD at ..."), not only by an
+            # absent git's distinct message.
+            if rc_u != 2 or "cannot resolve {!r}".format("a" * 40 + "^{commit}") not in err_u:
+                failures.append("unreachable predecessor: expected fail-closed exit 2 naming the "
+                                "unresolvable PLANTED commit (round-5/6: an absent git and a git "
+                                "that runs but fails also exit 2, and neither may satisfy this "
+                                "assertion), got rc={} stderr={!r}".format(
+                                    rc_u, err_u.strip()[-200:]))
 
             # === REAL run()/CLI MALFORMED-INPUT FIXTURES (finding 9) ===================================
             # Each drives the REAL run(root) on a real record tree (a genesis-base tree, or a real
@@ -6697,7 +8279,8 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             # object). Commit 1 carries a malformed clause inventory; the working tree (HEAD) carries a
             # one-row releases record pointing at commit 1, so run() resolves the predecessor via git show
             # and the strict inventory validator fails closed exit 2 BEFORE any delta leg runs.
-            if _git_available():
+            _gate_identity_failures(failures, _GIT_GATE_LABELS[2])
+            if _git_gate(_GIT_GATE_LABELS[2], failures):
                 def _predecessor_dupclause(dirname):
                     repo = tmp / dirname
                     (repo / ".aiqt" / "core").mkdir(parents=True)
@@ -6727,12 +8310,14 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                 if _run_quiet_root(_predecessor_dupclause("m-pred-dupclause")) != 2:
                     failures.append("real run(): a duplicate clause-id in the PREDECESSOR inventory must "
                                     "fail closed exit 2 (finding 1, predecessor object)")
+                gate_ran.append(_GIT_GATE_LABELS[2])
 
             # (predecessor ownership via git PLUMBING, VC-4 QA #11) build a real two-commit git repo with
             # an ownership map and tracked files; _ownership_classes_at must read the FIRST commit's tree
             # via git show / git ls-tree (never a materialized worktree) and classify it, while HEAD carries
             # an extra file. Env is neutralized (git_tracked strips GIT_*; commits use a fixed identity).
-            if _git_available():
+            _gate_identity_failures(failures, _GIT_GATE_LABELS[3])
+            if _git_gate(_GIT_GATE_LABELS[3], failures):
                 repo = tmp / "own-repo"
                 (repo / ".aiqt" / "core").mkdir(parents=True)
                 (repo / "pkg").mkdir()
@@ -6768,6 +8353,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                     if len(wt) != 1:
                         failures.append("predecessor ownership: a worktree was materialized ({} listed); "
                                         "the git-show path must create none".format(len(wt)))
+                gate_ran.append(_GIT_GATE_LABELS[3])
 
             # === REAL FULL-PACK TWO-RELEASE run() (finding 9, findings 1 + 2) =========================
             # A COMPLETE pack tree (a `git archive HEAD` of this repo) is committed as the predecessor
@@ -6779,7 +8365,9 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             # not be: on the pre-fix gate the CLEAN case FAILS exit 1 (finding 2: the id-keyed row was matched
             # by the invented `subject`, left unconsumed, so a PATCH became an undispositioned MAJOR) and the
             # format-version case PASSES exit 0 (finding 1: the loader never validated format-version). Both
-            # now behave (0 and 2). Skipped with a printed note where git or archive is unavailable.
+            # now behave (0 and 2). A case that cannot run (no git, no archive, a fixture that cannot be
+            # built, or corpus content it needs) is a NAMED NOT RUN failure, never a skip beside a PASS;
+            # so is a case that loses its discriminating power on this host's git or as root.
             # ---- QA round-6 codex blocker 1 / claude 3: a git REFUSAL is never the checkout
             # path. Simulated dubious-ownership refusals (a real safe.directory refusal needs a
             # foreign-OWNED repository, which an unprivileged self-test cannot create and the
@@ -6816,7 +8404,8 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             finally:
                 globals()["_git"] = _real_g6
 
-            if _git_available():
+            _gate_identity_failures(failures, _GIT_GATE_LABELS[4])
+            if _git_gate(_GIT_GATE_LABELS[4], failures):
                 # ---- QA round-6 codex majors 3/4 / claude 2, extended round 7 (claude F1/F2):
                 # the drift advisory reads nothing it must not, blocks on nothing, and classifies
                 # every special-file swap as drift. The outside copies behind the symlinked parent
@@ -6988,17 +8577,26 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                     if mark6.exists():
                         failures.append("{}: the core.sshCommand marker RAN; a lazy fetch "
                                         "started a transport mid-read".format(label6p))
+                gate_ran.append(_GIT_GATE_LABELS[4])
 
-            if _git_available():
-                real_ran = _real_pack_e2e(tmp, failures)
-                post_ran = _post_release_e2e(tmp, failures)
-            else:
-                real_ran = post_ran = False
-                failures.append("NOT RUN: the real full-pack and POST-RELEASE run() cases: git is "
-                                "unavailable; coverage that did not run FAILS the self-test (QA round-4 "
-                                "codex R4-3 / claude m4)")
+            _gate_identity_failures(failures, _GIT_GATE_LABELS[5])
+            if _git_gate(_GIT_GATE_LABELS[5], failures):
+                _real_pack_not_run_vectors(tmp, failures)
+                _not_run_net_vectors(tmp, failures)
+                _e2e_git_cases(tmp, failures)
+                gate_ran.append(_GIT_GATE_LABELS[5])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    # Round-6 (codex 1 / claude MEDIUM-1): the gate and probe bindings are verified BY IDENTITY at
+    # each gated block above and here at the end, and every gate label must account for exactly
+    # one record, its body's last statement or its NOT RUN line (_gate_accounting_failures,
+    # extracted round-7 with one red-on-revert vector per label), so a module rebinding still in
+    # place at a checkpoint and a bypassed or vanished block are each a named failure at run time,
+    # whatever the static backstop missed; the restored-rebinding and local-shadow escapes are
+    # disclosed at _gate_identity_failures.
+    _gate_identity_failures(failures, "at the end of the self-test")
+    _gate_accounting_failures(failures, gate_ran)
 
     if failures:
         print("SELF-TEST FAIL:")
@@ -7011,90 +8609,83 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             "the id-lifecycle born/retirement release-and-uniqueness rows and corpus-id diff (#3), the "
             "combined multi-leg consumption, the Step-2 disposition-schema acceptance and id-uniqueness "
             "(#5), the repin/self-test mode resolution (#9), and the PATCH/MINOR/MAJOR bump computation")
-    if e2e_ran:
-        full_pack = ("; and the REAL FULL-PACK two-release run() clean CONSISTENTLY-edited id-keyed PATCH "
-                     "(exit 0, finding 2), its format-version variants (exit 2, finding 1), a wrong-version "
-                     "disposition (exit 1, round-3 finding 3), a SMUDGE-FILTER predecessor closure attack "
-                     "defeated by raw materialization (exit 2, round-4 findings 1/4), and the GENESIS "
-                     "full-pack manifest bogus-artifact/missing-sources (exit 2, round-5 finding 1), a "
-                     "self-referential profiles symlink (exit 2, round-5 finding 5), an invalid-UTF-8 "
-                     "child capture (round-5 finding 3), the round-6 non-string block-id (finding 2), "
-                     "an unknown clauses.toml top-level key (finding 3), and a non-vocabulary class-change "
-                     "class (finding 6) each exit 2, and the round-7 predecessor anchoring/version-binding "
-                     "(a tree-oid commit_sha and a changelog/manifest version disagreement each exit 2, "
-                     "finding 2), a manifest ../escape path and a list-valued artifact kind (finding 1), and "
-                     "a renderers.toml integer target (finding 8) each exit 2 hold") \
-                    if real_ran else \
-                    "; the REAL FULL-PACK two-release run() case was SKIPPED (git archive unavailable)"
-        full_pack += ("; and the POST-RELEASE head (RELEASING steps 6a/6b, round-2 rewrite over COMMITTED "
-                      "revisions: the attestation row alone and plus the correctly placed changelog tag key "
-                      "exit 0; another committed path, a smudge-masked committed edit, a quoted-path edit, a "
-                      "mode-only change or a deletion on each post-release path, a non-descendant head "
-                      "(bare, and masked by an info/grafts parent rewrite), a stale manifest, an "
-                      "extra or altered prior row, a predecessor-manifest version mismatch, a changelog edit "
-                      "other than the tag key (bare, and masked by a refs/replace blob substitution, with "
-                      "the funneled _show read asserted directly), a corrupt or stale COMMITTED manifest "
-                      "masked by a blob replacement, a clean/smudge filter, or skip-worktree, "
-                      "a mis-placed tag key (EOF/older table, the TOML-only catch), "
-                      "and a head version below the newest row each fail; a staged-only edit and untracked "
-                      "files are a stderr ADVISORY over an exit-0 committed verdict, an assume-unchanged "
-                      "working-tree overwrite never reaches the verdict, and the three admitted byte-level "
-                      "variants (a releases.toml comment, a CRLF tag line, the tag key before the version "
-                      "line) exit 0 (QA round-3); the round-4 substitution and provenance cases (a "
-                      "GIT_DIR decoy, a forged object-directory overlay with the funneled _show read "
-                      "asserted directly, an overwritten loose object refused by the per-object "
-                      "re-hash, a committed profiles artifact with the checkout copy deleted, a gate "
-                      "import diverging from the committed HEAD copy, and the materialized committed "
-                      "tree running its OWN validator copies) each refuse exit 2, and a skipped "
-                      "archive/extract/build coverage set now FAILS the self-test; the QA round-5 "
-                      "launch cases over a dedicated fixture (stage-1 re-execution of the committed "
-                      "gate copy, with an untracked tools/tempfile.py shadow, a crafted __pycache__ "
-                      ".pyc, a repo-config core.fsmonitor hook, and a repo-config clean filter and "
-                      "post-index-change hook each left inert at exit 2, the "
-                      "checkout routing records reverted to the release still routed POST-RELEASE "
-                      "from committed objects, an inherited PYTHONPATH/sitecustomize ignored by "
-                      "every -I child, and the accepted state re-executing to exit 0) and the "
-                      "per-object re-hash refusing a forged commit, tree and tag (not only a blob), "
-                      "and the verified ancestry walk refusing a forged intermediate commit, "
-                      "each hold; the QA round-6 fail-closed launch (a corrupt HEAD, a bad config "
-                      "and a missing git each exit 2 from stage 1 with a checkout tripwire inert; "
-                      "a simulated dubious-ownership refusal fails closed in stage 1 and in "
-                      "routing; and round 7: a corrupt ancestor .git/HEAD and a dangling ancestor "
-                      ".git file each exit 2 with the tripwire inert while the no-.git-anywhere "
-                      "control still reaches the checkout gate; and round 8: a damaged ancestor "
-                      "reached through a symlinked launch path, a bare ancestor with a corrupt "
-                      "HEAD, and dangling, looping and unreadable ancestor .git entries each exit "
-                      "2 with the tripwire inert while an unborn ancestor HEAD still reaches the "
-                      "checkout gate; and round 9: a symlink followed by `..` and a symlinked "
-                      "gate file never hide the gate's physical repository, an unsearchable "
-                      "ancestor fails closed, and the refusal names the marker it found; and "
-                      "round 10: a pipe read through /dev/fd/N and a source run with no __file__ "
-                      "each exit 2 with no traceback, and a non-git copy run from inside another "
-                      "repository judges its own root, not the cwd; and round 11: an imported "
-                      "main() with no stage-1 hand-off exits 2 by name), the no-follow bounded drift "
-                      "advisory (a symlinked parent, a swapped-in FIFO, an over-cap UNCHECKED "
-                      "file; and round 7: a final-component symlink to an outside committed copy, "
-                      "an empty-blob FIFO, a refused dot-dot/dot component, per-path drift "
-                      "states judged by exact name, a child-bounded FIFO open; and rounds 9 "
-                      "and 10: exactly one DRIFT-STATES record, with no key repeated inside it, "
-                      "and the fsmonitor pins held on the genesis route and on "
-                      "git_tracked/_index_materialized_tree), the promisor lazy-fetch "
-                      "refusal (GIT_NO_LAZY_FETCH pinned, no transport, no sshCommand), and the "
-                      "stage-2 sitecustomize isolation hold; and the replayed "
-                      "pre-row gate "
-                      "(round-2 B1: an undispositioned later release exits 1 after its row lands, with its "
-                      "pre-row control; a malformed genesis tree exits 2) holds) hold") if post_ran else \
-                     "; the POST-RELEASE head cases were SKIPPED (git archive unavailable)"
-        print("SELF-TEST PASS: {}; the end-to-end genesis-structural fail-closed (exit 2, #1), "
-              "genesis-flag-mismatch (exit 2), unreachable-predecessor (exit 2), and git-plumbing "
-              "predecessor-ownership (#11, no worktree materialized) cases hold; the REAL run() "
-              "malformed-input fixtures (releases/dispositions/order/MANIFEST format-version and unknown "
-              "top-level key, a duplicate manifest source, junk default-correction and classless "
-              "class-change, a duplicate predecessor clause row) each fail closed exit 2 (findings 1/3/4, "
-              "round-3 finding 1){}".format(core, full_pack))
-    else:
-        print("SELF-TEST PASS (PARTIAL): {}; the end-to-end cases were SKIPPED (no writable temp "
-              "directory), so those paths are UNVERIFIED this run".format(core))
+    full_pack = ("; and the REAL FULL-PACK two-release run() clean CONSISTENTLY-edited id-keyed PATCH "
+                 "(exit 0, finding 2), its format-version variants (exit 2, finding 1), a wrong-version "
+                 "disposition (exit 1, round-3 finding 3), a SMUDGE-FILTER predecessor closure attack "
+                 "defeated by raw materialization (exit 2, round-4 findings 1/4), and the GENESIS "
+                 "full-pack manifest bogus-artifact/missing-sources (exit 2, round-5 finding 1), a "
+                 "self-referential profiles symlink (exit 2, round-5 finding 5), an invalid-UTF-8 "
+                 "child capture (round-5 finding 3), the round-6 non-string block-id (finding 2), "
+                 "an unknown clauses.toml top-level key (finding 3), and a non-vocabulary class-change "
+                 "class (finding 6) each exit 2, and the round-7 predecessor anchoring/version-binding "
+                 "(a tree-oid commit_sha and a changelog/manifest version disagreement each exit 2, "
+                 "finding 2), a manifest ../escape path and a list-valued artifact kind (finding 1), and "
+                 "a renderers.toml integer target (finding 8) each exit 2 hold")
+    full_pack += ("; and the POST-RELEASE head (RELEASING steps 6a/6b, round-2 rewrite over COMMITTED "
+                  "revisions: the attestation row alone and plus the correctly placed changelog tag key "
+                  "exit 0; another committed path, a smudge-masked committed edit, a quoted-path edit, a "
+                  "mode-only change or a deletion on each post-release path, a non-descendant head "
+                  "(bare, and masked by an info/grafts parent rewrite), a stale manifest, an "
+                  "extra or altered prior row, a predecessor-manifest version mismatch, a changelog edit "
+                  "other than the tag key (bare, and masked by a refs/replace blob substitution, with "
+                  "the funneled _show read asserted directly), a corrupt or stale COMMITTED manifest "
+                  "masked by a blob replacement, a clean/smudge filter, or skip-worktree, "
+                  "a mis-placed tag key (EOF/older table, the TOML-only catch), "
+                  "and a head version below the newest row each fail; a staged-only edit and untracked "
+                  "files are a stderr ADVISORY over an exit-0 committed verdict, an assume-unchanged "
+                  "working-tree overwrite never reaches the verdict, and the three admitted byte-level "
+                  "variants (a releases.toml comment, a CRLF tag line, the tag key before the version "
+                  "line) exit 0 (QA round-3); the round-4 substitution and provenance cases (a "
+                  "GIT_DIR decoy, a forged object-directory overlay with the funneled _show read "
+                  "asserted directly, an overwritten loose object refused by the per-object "
+                  "re-hash, a committed profiles artifact with the checkout copy deleted, a gate "
+                  "import diverging from the committed HEAD copy, and the materialized committed "
+                  "tree running its OWN validator copies) each refuse exit 2, and a skipped "
+                  "archive/extract/build coverage set now FAILS the self-test; the QA round-5 "
+                  "launch cases over a dedicated fixture (stage-1 re-execution of the committed "
+                  "gate copy, with an untracked tools/tempfile.py shadow, a crafted __pycache__ "
+                  ".pyc, a repo-config core.fsmonitor hook, and a repo-config clean filter and "
+                  "post-index-change hook each left inert at exit 2, the "
+                  "checkout routing records reverted to the release still routed POST-RELEASE "
+                  "from committed objects, an inherited PYTHONPATH/sitecustomize ignored by "
+                  "every -I child, and the accepted state re-executing to exit 0) and the "
+                  "per-object re-hash refusing a forged commit, tree and tag (not only a blob), "
+                  "and the verified ancestry walk refusing a forged intermediate commit, "
+                  "each hold; the QA round-6 fail-closed launch (a corrupt HEAD, a bad config "
+                  "and a missing git each exit 2 from stage 1 with a checkout tripwire inert; "
+                  "a simulated dubious-ownership refusal fails closed in stage 1 and in "
+                  "routing; and round 7: a corrupt ancestor .git/HEAD and a dangling ancestor "
+                  ".git file each exit 2 with the tripwire inert while the no-.git-anywhere "
+                  "control still reaches the checkout gate; and round 8: a damaged ancestor "
+                  "reached through a symlinked launch path, a bare ancestor with a corrupt "
+                  "HEAD, and dangling, looping and unreadable ancestor .git entries each exit "
+                  "2 with the tripwire inert while an unborn ancestor HEAD still reaches the "
+                  "checkout gate; and round 9: a symlink followed by `..` and a symlinked "
+                  "gate file never hide the gate's physical repository, an unsearchable "
+                  "ancestor fails closed, and the refusal names the marker it found; and "
+                  "round 10: a pipe read through /dev/fd/N and a source run with no __file__ "
+                  "each exit 2 with no traceback, and a non-git copy run from inside another "
+                  "repository judges its own root, not the cwd; and round 11: an imported "
+                  "main() with no stage-1 hand-off exits 2 by name), the no-follow bounded drift "
+                  "advisory (a symlinked parent, a swapped-in FIFO, an over-cap UNCHECKED "
+                  "file; and round 7: a final-component symlink to an outside committed copy, "
+                  "an empty-blob FIFO, a refused dot-dot/dot component, per-path drift "
+                  "states judged by exact name, a child-bounded FIFO open; and rounds 9 "
+                  "and 10: exactly one DRIFT-STATES record, with no key repeated inside it, "
+                  "and the fsmonitor pins held on the genesis route and on "
+                  "git_tracked/_index_materialized_tree), the promisor lazy-fetch "
+                  "refusal (GIT_NO_LAZY_FETCH pinned, no transport, no sshCommand), and the "
+                  "stage-2 sitecustomize isolation hold; and the replayed "
+                  "pre-row gate "
+                  "(round-2 B1: an undispositioned later release exits 1 after its row lands, with its "
+                  "pre-row control; a malformed genesis tree exits 2) holds) hold")
+    print("SELF-TEST PASS: {}; the end-to-end genesis-structural fail-closed (exit 2, #1), "
+          "genesis-flag-mismatch (exit 2), unreachable-predecessor (exit 2), and git-plumbing "
+          "predecessor-ownership (#11, no worktree materialized) cases hold; the REAL run() "
+          "malformed-input fixtures (releases/dispositions/order/MANIFEST format-version and unknown "
+          "top-level key, a duplicate manifest source, junk default-correction and classless "
+          "class-change, a duplicate predecessor clause row) each fail closed exit 2 (findings 1/3/4, "
+          "round-3 finding 1){}".format(core, full_pack))
     return 0
 
 
@@ -7169,7 +8760,7 @@ def main():
               "--self-test is a mixed or incomplete mode and is rejected fail-closed", file=sys.stderr)
         return 2
     if mode == "stage2":
-        # Stage 2 of the re-execution (QA round 5, D-397-REEXEC-FROM-COMMITTED): this process IS the
+        # Stage 2 of the re-execution (a design decision): this process IS the
         # committed copy, launched by stage 1 from a verified materialization of HEAD's tree. Sanity:
         # the running gate file must live under the named tree; then judge the named repository.
         tree = Path(opts["stage2_tree"]).resolve()

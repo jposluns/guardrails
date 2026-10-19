@@ -7904,7 +7904,7 @@ def _self_test_checks():
               bool(fired) and raised is fired[0] and isinstance(raised.__context__, FileNotFoundError)
               and "FileNotFoundError" in " ".join(getattr(raised, "__notes__", []) or []) and not leaked,
               observed="exception={!r} injected={!r} leaked={!r}".format(raised, fired, leaked))
-        # 6a'''b3k (D-U10-SECOND-FAULT): the run's FIRST interrupt propagates as itself, and every close
+        # 6a'''b3k (the second-fault rule): the run's FIRST interrupt propagates as itself, and every close
         # exception is named where a reader sees it, never only in a note on an exception a caller drops.
         # Each injection makes the real close first, then raises. A fault then an interrupt at the closes of
         # one close-out (_close_held, _open_parent's cleanup directly and under the refused run's sweep)
@@ -8023,7 +8023,7 @@ def _self_test_checks():
                            ("observation-report-names-what-is-noted", _observation_raised_said([carrier])),
                            ("release-report-names-what-is-noted", _release_raised_said([carrier]))):
             check(name, repr(_InjectedCloseFault("noted close fault")) in (said or ""), observed=said)
-        # 6a'''b3l (D-U10-SECOND-FAULT, round 14): every close the transaction reaches resolves through the
+        # 6a'''b3l (the second-fault rule): every close the transaction reaches resolves through the
         # one first-interrupt selection (_journal._first_interrupt), so the FIRST interrupt propagates as
         # itself. Each injection makes the real close first, then raises. The store probe's close with the
         # discovery's interrupt in flight keeps that interrupt, the close fault noted on it (red against
@@ -8217,7 +8217,7 @@ def _self_test_checks():
               and "an injected compose refusal" in text and not leaked,
               observed="exception={!r} injected={!r} note={!r} leaked={!r}".format(
                   raised, fired, text[-600:], leaked))
-        # 6a'''b3m (D-U10-SECOND-FAULT, round 16): _release_outcome's OUTCOME TABLE, one vector per row.
+        # 6a'''b3m (the second-fault rule): _release_outcome's OUTCOME TABLE, one vector per row.
         # The release raises R and its read-back B, each nothing, "own" (OSError, JournalError), "ordinary"
         # or "interrupt"; this run's lock identity is known or unavailable (`mine` None); the run commits
         # or refuses. The release leaves the lock in place, so the read-back reads it. Each row requires
@@ -8291,7 +8291,7 @@ def _self_test_checks():
                       and "may not be durable" in full and not leaked,
                       observed="exception={!r} injected={!r} rendering={!r} leaked={!r}".format(
                           raised, fired, full[-900:], leaked))
-        # 6a'''b3n (D-U10-SECOND-FAULT, round 17): a JournalError a CLOSE inside the release's owner read
+        # 6a'''b3n (the second-fault rule): a JournalError a CLOSE inside the release's owner read
         # raises is never read as release_lock's unreadable-lock signal and dropped. An EIO at
         # read_lock_owner_at's close, then a JournalError at read_lock_owner's (the EIO recorded on it), and
         # that JournalError alone: on a commit and on a refusal every injected exception is named in the

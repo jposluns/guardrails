@@ -245,7 +245,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "mstreg"
 status = "enforced"
-mechanisms = ["gate:mistakes-register"]
+mechanisms = ["gate:mistakes-register", "gate:mistakes-register-append-selftest"]
 
 [[rule]]
 corpus-id = "mtchcd"
