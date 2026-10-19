@@ -2550,6 +2550,19 @@ def _test_shell_string_reading(failures, hooks):
     if two[0].stdin_script != "second\nB\n":
         failures.append("(shellr-heredoc-override) the segment records only its LAST here-document body; "
                         "got {!r}".format(two[0].stdin_script))
+    # Standard-input provenance runs through descriptor duplication: 3<&0 saves the first body on fd 3 and <&3
+    # restores it as fd 0 after the second here-document opens, so the EARLIER body (not the last) is the
+    # command's standard input, and a hazard in it denies (the restored-descriptor gap-deny row).
+    restored = hooks._lex_flat("bash <<'A' 3<&0 <<'B' <&3\nfirst\nA\nsecond\nB\n")
+    if restored[0].stdin_script != "first\nA\n":
+        failures.append("(shellr-heredoc-dup-restore) a body restored through a duplicated descriptor is the "
+                        "standard input; got {!r}".format(restored[0].stdin_script))
+    # A later file redirect moves fd 0 off every here-document: the body is then data no command reads, so the
+    # segment records no standard-input script and a hazard in the body does not deny (the later-file gap-allow row).
+    overridden = hooks._lex_flat("bash <<'A' </dev/null\nfirst\nA\n")
+    if overridden[0].stdin_script is not None:
+        failures.append("(shellr-heredoc-file-after) a here-document a later file redirect replaces is not the "
+                        "standard input; got {!r}".format(overridden[0].stdin_script))
     # Child scopes: a child shell's -c string and a trap action set only on EXIT (also written 0) run apart (a scope
     # of their own); an eval string, and a trap action on a signal or on DEBUG, ERR or RETURN, which the current shell
     # runs, share the scope of the segment holding them.
@@ -2894,14 +2907,26 @@ def _test_shell_runners(failures, hooks, cwd):
             ("(runner-interp-text-node-options) node options with no shell option run no shell",
              "node -e \"execFileSync('echo', ['x'], {stdio: 'inherit'})\"", []),
             # An invocation's repeated -e fragments are joined into the one program perl and ruby run (a line
-            # per fragment), so a form split across fragments is scanned as one form; a form name inside a
-            # string that spans fragments stays data.
+            # per fragment), so a form split across fragments is scanned as one form, including one split
+            # between its name and its opening parenthesis; a form name inside a string that truly spans the
+            # fragments stays data.
             ("(runner-interp-text-split-e) repeated perl -e fragments are one program",
              "perl -e 'system(' -e '1)'", ["\n1"]),
             ("(runner-interp-text-split-e-ruby) repeated ruby -e fragments are one program",
              "ruby -e 'system(' -e '1)'", ["\n1"]),
-            ("(runner-interp-text-split-e-string) a string spanning fragments is data",
-             "perl -e 'print(' -e '\"a b\")'", []),
+            ("(runner-interp-text-split-name-paren) a call split between its name and '(' is still read",
+             "perl -e system -e '(\"a b\")'", ['"a b"']),
+            ("(runner-interp-text-split-name-paren-ruby) a ruby call split before its '(' is read",
+             "ruby -e system -e '(\"a b\")'", ['"a b"']),
+            # The literal '"x\nsystem(qq(a b))"' opens in the first fragment and closes in the second, so the
+            # join carries one string across them and the form spelling inside it stays data; scanning each
+            # fragment alone would mis-read the second as a call.
+            ("(runner-interp-text-split-e-string) a string literal that spans fragments is data",
+             "perl -e 'print(\"x' -e 'system(qq(a b))\")'", []),
+            # node runs only one of its repeated --eval fragments, so each is scanned alone and the forms are
+            # unioned: a form in a later fragment is read whichever node runs.
+            ("(runner-interp-text-node-repeated-eval) a form in a later node -e fragment is read",
+             "node -e '1' -e \"execSync('a b')\"", ["'a b'"]),
             # A call evaluates each argument expression before it runs, so a form inside an argument is read
             # even where the outer call resolves to a harmless program; a plain string value stays data.
             ("(runner-interp-text-arg-nested) a form inside a harmless argv call's argument is read",
@@ -3129,9 +3154,26 @@ _GAP_DENY_ROWS = (
     "find . -maxdepth 0 -exec env A=1 sh -c 'git commit --no-verify -m y' \\;",
     # A later here-document replaces an earlier one: the hazard in the EFFECTIVE (last) body denies.
     "bash <<'DATA' <<'SCRIPT'\nprintf harmless\nDATA\ngit commit --no-verify -m y\nSCRIPT",
-    # Repeated -e fragments are one program: a form split across two fragments is still a form.
+    # A descriptor duplication restores an EARLIER body as standard input (3<&0 saves it, <&3 restores it after
+    # the second here-document), so the hazard in that restored body denies even though it is not the last one.
+    "bash <<'A' 3<&0 <<'B' <&3\ngit commit --no-verify -m y\nA\nprintf harmless\nB",
+    # Repeated -e fragments are one program: a form split across two fragments is still a form, including one
+    # split between its name and its opening parenthesis.
     "perl -e 'system(' -e '\"git commit --no-verify -m y\")'",
     "ruby -e 'system(' -e '\"git commit --no-verify -m y\")'",
+    "perl -e system -e '(\"git commit --no-verify -m y\")'",
+    "ruby -e system -e '(\"git commit --no-verify -m y\")'",
+    # A quote the reading cannot bound (one inside or after a construct it does not parse: a regex, a perl
+    # quote-like operator, a ruby %-literal or ?-character literal) no longer hides a later execution form,
+    # whether that form is in the same fragment or a later one: the whole code is read as one raw text.
+    "perl -e 'm/\"/' -e 'system(\"git commit --no-verify -m y\")'",
+    "perl -e '$r = 6 / 3; # a' -e 'system(\"git commit --no-verify -m y\")'",
+    "ruby -e 'x = ?\"' -e 'system(\"git commit --no-verify -m y\")'",
+    "ruby -e 'r = 7 % 3 # a' -e 'system(\"git commit --no-verify -m y\")'",
+    "perl -e 'm/\"/; system(\"git commit --no-verify -m y\")'",
+    "ruby -e 'x = %q(\"); system(\"git commit --no-verify -m y\")'",
+    # node runs only one of its repeated --eval fragments, so a hazard in any of them denies.
+    "node -e '1' -e \"require('child_process').execSync('git commit --no-verify -m y')\"",
     # A call evaluates its argument expressions before it runs: an execution form inside an argument of a
     # harmless argv call is still read.
     "python3 -c \"import subprocess; subprocess.run(['echo', 'safe'], "
@@ -3148,9 +3190,15 @@ _GAP_ALLOW_ROWS = (
     # An overridden here-document body is data no command reads: the hazard in the replaced (first) body
     # must not deny (the deny pair above holds the hazard in the effective body).
     "bash <<'DATA' <<'SCRIPT'\ngit commit --no-verify -m y\nDATA\nprintf harmless\nSCRIPT",
+    # A later file redirect moves standard input off the here-document, so its body is data no command reads
+    # (bash runs its script from the file): the hazard in the overridden body must not deny.
+    "bash <<'A' </dev/null\ngit commit --no-verify -m y\nA",
     # The fragments of one invocation are joined before the scan: a spelling inside a string that spans
     # fragments is data, as it is in one fragment.
     "perl -e 'print(' -e '\"git commit --no-verify is denied here\")'",
+    # The literal opens in the first fragment and closes in the second, carrying the spelling across the join
+    # as data; scanning each fragment alone would mis-read the second fragment as running it.
+    "perl -e 'print(\"x' -e 'system(qq(git commit --no-verify -m y))\")'",
     # A keyword value that is a plain string stays data (the deny pair above holds a call there).
     "python3 -c \"import subprocess; subprocess.run(['echo', 'safe'], input='git commit --no-verify -m y')\"",
     # A wrapped trap with a harmless action, and a wrapped lookup that sets no handler.
@@ -3200,6 +3248,11 @@ _CLOSED_GRAMMAR_ROWS = (
     ("git_explicit_binding", "trap 'cd /tmp' INT; git commit -am x", "allow-note"),
     ("gate_weakening", "time eval 'git commit --no-verify -m x'", "deny"),
     ("gate_weakening", "time -p eval 'git commit --no-verify -m x'", "deny"),
+    # Only the reserved word 'time' runs its command as a builtin in the current shell: an external
+    # /usr/bin/time execs its command, and a 'time' that command launches is the external program, so a trap
+    # under either sets no handler here and the command allows (the keyword 'time trap' deny pair is a gap row).
+    ("gate_weakening", "/usr/bin/time trap 'git commit --no-verify -m x' EXIT", "allow"),
+    ("gate_weakening", "command time trap 'git commit --no-verify -m x' EXIT", "allow"),
     ("commit_msg_subst", "time eval 'git commit -m \"$(date)\"'", "deny"),
     ("commit_msg_subst", "time -p eval 'git commit -m \"$(date)\"'", "deny"),
     ("gate_weakening", "script -q /dev/null sh -c 'git commit --no-verify -m x'", "deny"),

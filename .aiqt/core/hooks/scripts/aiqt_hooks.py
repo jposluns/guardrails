@@ -467,9 +467,10 @@ _Segment = collections.namedtuple(
     "_Segment", ("argv", "sep_after", "redirects", "raw", "opaque_shell", "argv_opaque",
                  "argv_leading_tilde", "stdin_script", "shell_uncertain", "shell_scope"))
 # stdin_script is the text of the QUOTED here-document body the segment's command reads on standard input
-# (the body of the LAST heredoc the segment opened, since a later stdin redirection replaces an earlier one,
-# with its closing delimiter line), which _lex_flat skips as data, or None when it opens none or the effective
-# body is empty; only a shell that reads its script from standard input consults it (_shell_reading). shell_uncertain is None, or
+# (the body that fd 0's provenance through the segment's ordered redirections resolves to, since a later file
+# redirect or descriptor duplication can move fd 0 off the last here-document opened, with its closing
+# delimiter line), which _lex_flat skips as data, or None when fd 0 ends on no here-document or the body is
+# empty; only a shell that reads its script from standard input consults it (_shell_reading). shell_uncertain is None, or
 # the (kind, text) pairs a guard's uncertain-segment posture reads for a segment holding a shell string the
 # shared reading could not read, or a shell reading its script from standard input (_expand_shell_strings,
 # _shell_uncertain_texts). shell_scope is the child-shell scope a segment runs in: () for the command's own
@@ -854,6 +855,55 @@ def _target_class(target, t_opaque):
     if ".." in norm.replace("\\", "/").split("/") or ".." in target.replace("\\", "/").split("/"):
         return "opaque"  # a '..' component -> could resolve to a device; cannot be proven a plain file
     return "file-real"
+
+
+# A descriptor-duplication target: a plain fd number, with an optional trailing '-' for the move forms
+# ('<&n-'/'>&n-', which duplicate then close the source). '-' alone (close) is handled before this.
+_DUP_TARGET_RE = re.compile(r"^(\d+)(-?)$")
+
+
+def _stdin_dup_provenance(fd_prov, dest, target, t_opaque):
+    """Record in fd_prov the provenance a '<&'/'>&' duplication gives descriptor `dest`: a closed descriptor
+    for '-', the source descriptor's own provenance for a numeric target (moving it when the target ends in
+    '-'), an inherited descriptor when the source was never set on this segment (never this command's
+    here-document), or unknown when the target is opaque or not a plain fd number (unresolvable)."""
+    if not t_opaque and target == "-":
+        fd_prov[dest] = ("closed",)
+        return
+    match = _DUP_TARGET_RE.match(target) if not t_opaque else None
+    if match is not None:
+        src = int(match.group(1))
+        fd_prov[dest] = fd_prov.get(src, ("inherit",))
+        if match.group(2):  # the move form duplicates then closes the source
+            fd_prov[src] = ("closed",)
+        return
+    fd_prov[dest] = ("unknown",)
+
+
+def _stdin_fd_after_redirect(fd_prov, op, src_fd, target, t_opaque):
+    """Update fd_prov (descriptor -> standard-input provenance) for one redirect, so a later read of
+    fd_prov[0] tells what the command's standard input is: ("body", i) the i-th here-document body opened on
+    this segment, ("file",) a file (input or read-write) target, ("file-out",) an output target, ("closed",)
+    a closed descriptor, ("inherit",) a descriptor duplicated from one this segment never set (the inherited
+    descriptor, never this command's here-document), or ("unknown",) a duplication whose source cannot be
+    resolved. Redirections apply left to right, so the last write to fd 0 wins; only an input or a
+    duplication can make fd 0 a here-document body. A here-document opener sets fd_prov[0] itself (in the
+    lexer). Purely in-memory, never raises."""
+    if op in ("<", "<>"):
+        fd_prov[0 if src_fd is None else src_fd] = ("file",)
+    elif op in (">", ">>", ">|"):
+        fd_prov[1 if src_fd is None else src_fd] = ("file-out",)
+    elif op in ("&>", "&>>"):
+        fd_prov[1] = ("file-out",)
+        fd_prov[2] = ("file-out",)
+    elif op == "<&":
+        _stdin_dup_provenance(fd_prov, 0 if src_fd is None else src_fd, target, t_opaque)
+    elif op == ">&":
+        dest = 1 if src_fd is None else src_fd
+        if (not t_opaque) and (target == "-" or _DUP_TARGET_RE.match(target)):
+            _stdin_dup_provenance(fd_prov, dest, target, t_opaque)
+        else:
+            fd_prov[dest] = ("file-out",)  # the csh '>&file' both-streams-to-file form
 
 
 def _parse_heredoc_delim(command, at, n):
@@ -1366,6 +1416,8 @@ def _lex_flat(command, partial=False, locale=False, skip_empty=False):
     seg_start = [0]
     pending_heredocs = []  # queued (delim, strip_tabs) for QUOTED heredocs whose bodies to skip (finding 17)
     heredoc_owners = []  # per queued heredoc, the index its opening segment has once ended (None: left out)
+    fd_prov = {}  # descriptor -> standard-input provenance for the OPEN segment (reset as each segment ends)
+    stdin_pick = []  # per APPENDED segment, fd_prov[0] at its end: what its standard input resolves to
 
     def end_segment(sep, op_start, next_start):
         # With no word and no redirect there is nothing to reset: argv_opaque, argv_leading_tilde and opaque
@@ -1374,6 +1426,7 @@ def _lex_flat(command, partial=False, locale=False, skip_empty=False):
             segments.append(_Segment(list(argv), sep, list(redirects),
                                       command[seg_start[0]:op_start], opaque[0], list(argv_opaque),
                                       list(argv_leading_tilde)))
+            stdin_pick.append(fd_prov.get(0))  # aligned with segments: this segment's standard-input provenance
             del argv[:]
             del argv_opaque[:]
             del argv_leading_tilde[:]
@@ -1387,6 +1440,7 @@ def _lex_flat(command, partial=False, locale=False, skip_empty=False):
             while k and heredoc_owners[k - 1] == len(segments):
                 k -= 1
                 heredoc_owners[k] = None
+        fd_prov.clear()  # the next segment's descriptors start from the inherited state
         seg_start[0] = next_start
 
     def consume_redirect(op, oplen, at, src_fd):
@@ -1401,6 +1455,7 @@ def _lex_flat(command, partial=False, locale=False, skip_empty=False):
         if not started:
             raise ValueError("malformed redirect target")
         redirects.append(_classify_redirect(op, src_fd, target, t_opaque, t_ltilde))
+        _stdin_fd_after_redirect(fd_prov, op, src_fd, target, t_opaque)
         return k2
 
     try:
@@ -1419,18 +1474,31 @@ def _lex_flat(command, partial=False, locale=False, skip_empty=False):
                     # the bodies of any QUOTED heredocs opened on this line follow the newline; skip them as
                     # literal data (finding 17), then resume lexing after the closing delimiter line(s). The
                     # bodies are read in the order the '<<' operators appeared, and the segment that OPENED a
-                    # heredoc records only its LAST body (stdin_script): the shell applies redirections left
-                    # to right, so a later stdin here-document replaces an earlier one on the same command and
-                    # only the last body is that command's standard input (a shell there reads that body as
-                    # its script, _shell_reading; a cat/prose consumer carries it harmlessly; an overridden
-                    # body is data no command reads).
-                    effective = {}  # owner -> the body of its LAST heredoc, the one the shell applies
-                    for heredoc, owner in zip(pending_heredocs, heredoc_owners):
+                    # heredoc records the one its standard input resolves to (stdin_script): the shell applies
+                    # redirections left to right, so later ones can move fd 0 to a different here-document, to a
+                    # file, or to a duplicated descriptor, and the body fd 0 ends on is that command's standard
+                    # input (a shell there reads that body as its script, _shell_reading; a cat/prose consumer
+                    # carries it harmlessly; an overridden body is data no command reads).
+                    bodies = []  # body text per queued here-document, in the order the '<<' operators appeared
+                    for heredoc in pending_heredocs:
                         body_start = i
                         i = _skip_heredoc_bodies(command, i, n, [heredoc])
-                        if owner is not None and owner < len(segments):
-                            effective[owner] = command[body_start:i]
-                    for owner, body in effective.items():
+                        bodies.append(command[body_start:i])
+                    # Which body (if any) is a segment's standard input follows fd 0's provenance through its
+                    # ordered redirections (stdin_pick, captured as the segment ended): the here-document fd 0
+                    # last named, which a later file redirect or a descriptor duplication can move away from the
+                    # last one opened or off a here-document entirely, or none when fd 0 ended on a file or an
+                    # inherited descriptor. When that provenance cannot be resolved (an opaque or non-numeric
+                    # duplication target), every body the segment opened is taken together, the fail-closed
+                    # direction, so a hazard in any of them is still read.
+                    for owner in dict.fromkeys(o for o in heredoc_owners if o is not None and o < len(segments)):
+                        pick = stdin_pick[owner] if owner < len(stdin_pick) else None
+                        if pick and pick[0] == "body" and pick[1] < len(bodies):
+                            body = bodies[pick[1]]
+                        elif pick and pick[0] == "unknown":
+                            body = "".join(bodies[g] for g, o in enumerate(heredoc_owners) if o == owner)
+                        else:
+                            body = ""
                         if body:
                             segments[owner] = segments[owner]._replace(stdin_script=body)
                     del pending_heredocs[:]
@@ -1465,6 +1533,7 @@ def _lex_flat(command, partial=False, locale=False, skip_empty=False):
                             # (a '<<' always sits inside the open segment, before its end); end_segment clears it
                             # when skip_empty leaves that segment out.
                             heredoc_owners.append(len(segments))
+                            fd_prov[0] = ("body", len(pending_heredocs))  # fd 0 is this body until a later redirect
                             pending_heredocs.append((_delim, _strip))
                             i = _next_i
                             continue
@@ -1849,18 +1918,33 @@ def _launched_programs(argv, opaque, start):
     programs = []
     overread = None
     terminators = []  # terminators[j]: the index of the first find terminator at or after j; built on first need
-    work = [(start, n, False, True)]
+    work = [(start, n, False, True, True)]  # (index, end, through_xargs, builtin_ok, keyword_position)
     while work:
-        k, end, xargs, builtin_ok = work.pop()
+        k, end, xargs, builtin_ok, kw_pos = work.pop()
         if k >= end:
             continue
         word = "" if opaque[k] else _gate_word(argv[k])
         if word in _LAUNCH_GRAMMARS:
             kind, program = _launch_walk(argv, opaque, k, word, end)
             if kind == "program":
-                keyword = word != "time" or all(argv[m] in _LAUNCH_TIME_KEYWORD_WORDS for m in range(k + 1, program))
-                work.append((program, end, xargs or word == "xargs",
-                             builtin_ok and word in _LAUNCH_BUILTIN_WRAPPERS and keyword))
+                if word == "time":
+                    # bash's reserved word 'time' runs its command (eval, trap, a '{ }' group) in the current
+                    # shell only when it is the LITERAL word 'time' (an external /usr/bin/time execs its command
+                    # instead and runs no builtin here), it stands in keyword position (command and builtin look
+                    # up a builtin or an external and bypass reserved words, so a 'time' they launch is external),
+                    # and its only words before the command are -p or '--' (bash reads any other option as the
+                    # command it times). Otherwise it launches a program like env, so it carries no builtin on.
+                    kw = (kw_pos and argv[k] == "time"
+                          and all(argv[m] in _LAUNCH_TIME_KEYWORD_WORDS for m in range(k + 1, program)))
+                    next_ok = builtin_ok and kw
+                    next_kw = kw_pos and kw
+                elif word in _LAUNCH_BUILTIN_WRAPPERS:  # command, builtin: run a builtin here, but bypass keywords
+                    next_ok = builtin_ok
+                    next_kw = False
+                else:
+                    next_ok = False
+                    next_kw = False
+                work.append((program, end, xargs or word == "xargs", next_ok, next_kw))
             elif kind == "unknown" and (overread is None or k < overread[0]):
                 overread = (k, xargs or word == "xargs")
             continue
@@ -1881,7 +1965,7 @@ def _launched_programs(argv, opaque, start):
             while j < end:
                 if argv[j] in _FIND_EXEC_PRIMARIES and not opaque[j]:
                     stop = min(terminators[j + 1], end)
-                    work.append((j + 1, stop, xargs, False))
+                    work.append((j + 1, stop, xargs, False, False))
                     j = stop + 1
                     continue
                 j += 1
@@ -2157,15 +2241,18 @@ def _scope_moved(moved, scope):
 # turns a form into no form only where a closed grammar settles it: a comment is skipped only where nothing
 # before it on its line can open such a construct (_interp_line_clear), so a perl, ruby or node comment the
 # predicate cannot prove (a division '/' earlier on its line among the guards) is read as code, a DISCLOSED
-# over-read that can deny a spelling written in such a comment; anything else the reading cannot classify is
+# over-read that can deny a spelling written in such a comment. Where such a construct stands before a QUOTE on
+# its line the quote's string boundary cannot be trusted either, so the whole code is read as one raw text
+# (cannot-evaluate), never silently dropping a later form; anything else the reading cannot classify is
 # read as code, as the earlier reading read it. This structured reading is separate from the raw-text scans that read interpreter code
 # only as raw text, as they did before it: protected_line's backstop scans the whole raw command text for a push
 # or commit spelling when no git command was lexed, and git_discard's scope scan reads the raw text of every
 # command. No other guard reads the execution forms of interpreter code.
 # The interpreter families by command word, with each family's option grammar: 'code' letters take the inline
 # code (the rest of the cluster when 'attached' and the rest is not empty, else the next word); 'ends' tells
-# whether the code ends the options (python and node) or more code options may follow (perl and ruby, whose -e
-# options join); 'value' letters take the rest of the cluster, else the next word; 'rest' letters take the rest
+# whether the code ends the options (python, whose -c consumes the rest as script arguments) or more code
+# options may follow (perl and ruby, whose -e fragments join, and node, whose repeated --eval each run but only
+# the last takes effect); 'value' letters take the rest of the cluster, else the next word; 'rest' letters take the rest
 # of the cluster only; 'digits' letters take the digits after them; 'stop' letters end the options with no
 # inline code (python -m MODULE); 'long_code' and 'long_value' are the long options taking the code or a value
 # (as --name=VALUE or as the next word).
@@ -2176,7 +2263,7 @@ _INTERP_GRAMMARS = {
                  long_code=(), long_value=()),
     "ruby": dict(code="e", attached=True, ends=False, value="IrCEF", rest="xWTKi", digits="0", stop="",
                  long_code=(), long_value=("--encoding", "--external-encoding", "--internal-encoding")),
-    "node": dict(code="ep", attached=False, ends=True, value="rC", rest="", digits="", stop="",
+    "node": dict(code="ep", attached=False, ends=False, value="rC", rest="", digits="", stop="",
                  long_code=("--eval", "--print"),
                  long_value=("--require", "--import", "--loader", "--experimental-loader", "--conditions",
                              "--input-type", "--title", "--env-file", "--inspect-port")),
@@ -2234,9 +2321,10 @@ _INTERP_COMMENT_GUARD_RE = {
     "ruby": re.compile(r"[/%?]"),
     "node": re.compile(r"/"),
 }
-# The rescan bound of one inline code's scan: a call that turns out to be no execution form (an unbound python run,
-# a perl open that opens no pipe) has its arguments scanned again as code, and once those rescans pass this many
-# times the code's length, the whole code is read as one command text instead, so the scan stays linear.
+# The rescan bound of one inline code's scan: every parenthesized call's argument text is scanned again as code
+# (a form inside an argument runs even when the outer call is harmless or is no form, an unbound python run or a
+# perl open that opens no pipe among them), and once those rescans pass this many times the code's length, the
+# whole code is read as one command text instead, so the scan stays linear.
 _INTERP_RESCAN_FACTOR = 8
 
 
@@ -2666,12 +2754,22 @@ def _interp_exec_regions(code, family):
     i = 0
     while i < n:
         c = code[i]
-        if c == "`" and family in ("perl", "ruby"):
-            end = _interp_skip_string(code, i, family)
-            regions.append(code[i + 1:end - 1])
-            i = end
-            continue
-        if c in "'\"" or c == "`":
+        if c in "'\"`":
+            # A quote or backquote is certainly a string opener (or, for perl/ruby, a backquote command) only
+            # where nothing earlier on its line can open a construct this reading does not parse (a regex, a
+            # perl quote-like operator, a ruby %-literal or ?-character literal; python has none, so its
+            # quotes always open a string). With such a construct before it the quote may sit inside it, so its
+            # run to the next quote cannot be trusted to bound a string and could swallow a later execution
+            # form (its own fragment's, or - once fragments are joined - a later fragment's). The whole code is
+            # then read as one raw text, cannot-evaluate, so a protected spelling anywhere in it is still read:
+            # the fail-closed direction, never a quieter outcome than the raw backstop would take.
+            if family in _INTERP_COMMENT_GUARD_RE and not _interp_line_clear(code, i, family, lines):
+                return [code]
+            if c == "`" and family in ("perl", "ruby"):
+                end = _interp_skip_string(code, i, family)
+                regions.append(code[i + 1:end - 1])
+                i = end
+                continue
             i = _interp_skip_string(code, i, family)
             continue
         if c in "#/":
@@ -2697,8 +2795,8 @@ def _interp_exec_regions(code, family):
                 i = end + 1
                 continue
         k = j
-        while k < n and code[k] in " \t":
-            k += 1
+        while k < n and code[k] in " \t\n":  # a newline too: perl and ruby join -e fragments a line apart, and
+            k += 1                            # a call name and its '(' may land on either side of that join
         if name in names and k < n and code[k] == "(":
             qualified = True
             if family == "python" and name in _INTERP_PY_QUALIFIED:
@@ -2741,9 +2839,10 @@ def _interp_exec_forms(records):
     wrappers that launch it, _launched_programs) whose _gate_word names an interpreter family (_interp_family);
     after a wrapper option outside its grammar, or a wrapper with no grammar (script), every later word naming an
     interpreter is read as one (the earlier safe-direction over-read). Its inline code is read with the family's
-    option grammar (_interp_codes), an invocation's repeated code fragments joined into the one program the
-    interpreter runs (a line per fragment, as perl and ruby join them), and only the execution forms in that
-    program are returned (_interp_exec_regions). Disclosed residuals: a command the code holds in a variable or
+    option grammar (_interp_codes). perl and ruby join an invocation's repeated -e/-E fragments into the one
+    program they run (a line per fragment); python reads its one -c; node reads each repeated -e/--eval fragment
+    alone and unions their forms, since node runs only one of them. Only the execution forms are returned
+    (_interp_exec_regions). Disclosed residuals: a command the code holds in a variable or
     builds at run time
     (cmd = '...'; os.system(cmd)), an execution form the lists do not name, a run or call reached through a name
     the code does not bind to subprocess (subprocess.run with no import of subprocess, which python refuses, is no
@@ -2771,12 +2870,18 @@ def _interp_exec_forms(records):
                 continue
             codes = []
             _interp_codes(argv, opaque, k + 1, family, visited, codes, end)
-            if codes:
-                # perl and ruby join an invocation's repeated -e/-E fragments into one program, a
-                # line per fragment, so the fragments are scanned as that one program, never one at
-                # a time: a form split across two fragments is still a form. python and node take
-                # one code per invocation, for which the join is that code itself.
-                texts.extend(_interp_exec_regions("\n".join(codes), family))
+            if family in ("perl", "ruby"):
+                # perl and ruby join an invocation's repeated -e/-E fragments into one program, a line per
+                # fragment, so the fragments are scanned as that one program, never one at a time: a form
+                # split across two fragments is still a form.
+                if codes:
+                    texts.extend(_interp_exec_regions("\n".join(codes), family))
+            else:
+                # python takes one -c; node takes repeated -e/--eval but runs only ONE of them (the last),
+                # never a join, so each fragment is scanned alone and the forms are unioned. This reads a form
+                # in whichever fragment node runs without depending on which it is, the fail-closed direction.
+                for code in codes:
+                    texts.extend(_interp_exec_regions(code, family))
     return texts
 
 
