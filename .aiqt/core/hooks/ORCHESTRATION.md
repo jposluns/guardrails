@@ -1052,33 +1052,45 @@ The adopter's steps:
 3. Dispatch each review on a dedicated worktree per review, as the review dispatch binding's limits
    above already advise.
 
-While a live marker pins a worktree, the hook denies a recognized mutating git command whose target
-resolves to that worktree. The target is read from an explicit `-C`, a preceding literal `cd` or
-`pushd`, or the session working directory, through the shared lexer and wrapper peel, and worktree
-identity is compared by git's absolute git directory, never by path string, so a symlinked alias of
-the held worktree is the same worktree and a sibling path that merely shares a prefix is not.
-`git worktree remove` and `git worktree move` of the held worktree (named by path or by git's
-shorthand of the unique last components of its path), and `git update-ref` or `git symbolic-ref`
-writes of the branch the held worktree has checked out or of its HEAD through git's cross-worktree
-ref paths (`worktrees/<id>/HEAD`, `main-worktree/HEAD`), are denied from any worktree of the
-repository; a `worktree remove`/`move` operand that resolves to no worktree is denied as
-`UNVERIFIABLE:` while a hold is live. A mutating git command whose target cannot be resolved (an
-expansion, glob or brace pattern in `-C`, a `--git-dir`/`--work-tree` override, a
-`-c`/`--config-env` configuration override, a `GIT_DIR`-class environment assignment on the command
-or inherited by the session, an `env` or `sudo` wrapper carrying options or assignments before git,
-an unknown shell working directory after `popd`, an opaque `cd`, a `cd` run in a pipeline,
-background or subshell position, a target that resolves to no worktree identity, or a command the
-lexer cannot parse that names git beside a mutating verb) is denied with the reason prefixed
-`UNVERIFIABLE:`, only while the session repository has a live hold; a `cd` to a destination that
-does not exist or cannot be entered fails in place, so it reads as the directory the shell was
-already in. An unreadable or malformed marker directory, including a `review-holds` path that
-exists but is not a directory, denies mutating git commands only (fail closed); recognized
-read-only git commands (`git worktree list` included) and non-git commands pass, though a dry-run
-spelling of a mutating verb (`git clean -n`, `git commit --dry-run`) is read as mutating, a safe
-over-deny. When a live marker's recorded `head` differs from the held worktree's
-current HEAD, the hook surfaces a drift note (the in-flight review is invalidated; re-dispatch per
-rvwpin.4) on each check without denying, which catches a move made outside the session after the
-fact.
+While a live marker pins a worktree, the rule is certain-or-fail-closed. A mutating git command's
+target is CERTAIN only when git is the command word of its segment (after the shared peel of a bare
+`command`, `exec`, `builtin`, `env` or `sudo`), its only directory moves are literal `-C` operands
+resolved physically (`os.path.realpath`), no `--git-dir`/`--work-tree` or `-c`/`--config-env`
+override appears, no `GIT_` variable is assigned, exported or unset anywhere in the command or set
+in the hook's own environment, no `cd`, `pushd`, `popd`, `eval` or `source` ran earlier in the
+command, and the resolved repository's configuration sets no `core.worktree`. A mutating command
+with a certain target is denied when a live marker pins that worktree; identity is compared by
+git's absolute git directory on physically resolved paths, never by path string, so a symlinked
+alias of the held worktree (`-C link/..` included) is the same worktree and a sibling path that
+merely shares a prefix is not. `git worktree remove` and `git worktree move` of the held worktree
+are denied by name shorthand or exact path BEFORE any path resolution (git prefers the
+registered-worktree name over an ordinary directory carrying the same name) and by resolved
+identity after it, and `git update-ref` or `git symbolic-ref` writes of the held worktree's HEAD,
+of its cross-worktree ref paths (`worktrees/<id>/HEAD`, `main-worktree/HEAD`) or of any ref in its
+symbolic HEAD chain (the checked-out branch included; a delete in any accepted spelling, `--del`
+and clustered `-qd` included) are denied from any worktree of the repository; a `worktree
+remove`/`move` operand that resolves to no worktree is denied as `UNVERIFIABLE:` while a hold is
+live. EVERY OTHER mutating git command is UNCERTAIN: an expansion, glob or brace pattern, an
+override or `GIT_` assignment named above, a git behind a wrapper the peel cannot see through
+(`env`/`sudo` carrying options or assignments, `timeout`, `nice`, `nohup`, `xargs`, `sh -c`,
+`bash -c`, `eval` and kin; a wrapped read-only git still passes), any earlier directory change
+(succeeding, failing or conditionally skipped alike: a failed or skipped `cd` leaves the shell
+where it was while the text suggests otherwise, so neither reading is trusted), a target resolving
+to no worktree identity, or a command the lexer cannot parse that names git beside a mutating verb.
+An uncertain mutation is denied with the reason prefixed `UNVERIFIABLE:` while the session
+repository OR any repository in the command's hold set has a live hold, where the hold set is the
+union of the repositories of the session working directory, every literal `-C` operand, every
+literal `cd`/`pushd` operand and every literal path assigned to a `GIT_` variable anywhere in the
+command (quoted `sh -c` bodies included), each resolved physically; a repository-file
+`core.worktree` adds the configured worktree's repository to that set. An unreadable or malformed
+marker directory, in the session, target or hold-set repositories and including a `review-holds`
+path that exists but is not a directory, denies mutating git commands only (fail closed);
+recognized read-only git commands (`git worktree list` and wrapped read-only forms included) and
+non-git commands pass, though a dry-run spelling of a mutating verb (`git clean -n`, `git commit
+--dry-run`) is read as mutating, a safe over-deny. When a live marker's recorded `head` differs
+from the held worktree's current HEAD, the hook surfaces a drift note (the in-flight review is
+invalidated; re-dispatch per rvwpin.4) on each check without denying, which catches a move made
+outside the session after the fact.
 
 Limits:
 
@@ -1087,7 +1099,14 @@ Limits:
   note, and only on the next hooked Bash call in a session; they are prevented only where the
   adopter's tool runs the preflight above.
 - Indirect git is not seen: an alias, a shell function, a script, or git configured to run programs
-  (a `post-checkout` hook, `core.fsmonitor`).
+  (a `post-checkout` hook, `core.fsmonitor`). A relative `cd` resolved through `CDPATH` can land in
+  a repository the hold set does not name.
+- The held BRANCH is pinned only against the ref writes named above: from another worktree of the
+  same repository, `git push . <rev>:<held-branch>`, a `git fetch` into the held branch, or a
+  `git switch --ignore-other-worktrees` checkout followed by a commit can still move it, as can a
+  push from another repository; these surface after the fact as the drift note. Plumbing that
+  rewrites the files or index without a recognized mutating verb (`checkout-index`, `read-tree`,
+  `filter-branch`) is likewise not denied.
 - File edits inside a held worktree (the Write and Edit tools, `sed -i`, `cp`) are covered by the
   rule but not by this hook; extending the write-scope hook is a separate follow-on.
 - Marker accuracy is the adopter's: a missing marker, an early removal, a wrong `workdir`, or a
