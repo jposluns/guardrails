@@ -2666,8 +2666,10 @@ def _procsubst_copying_walk(command):
 def _procsubst_equal_copy_walk(command):
     """A wrong segments walk for _procsubst_taken_failures: at each process substitution's '(' it walks a
     fresh full-length copy EQUAL to the command in value, which still allocates per substitution in time
-    quadratic in the command's length and which only the object-identity record catches (a value
-    comparison, segment equality and the bounded timed rows all pass it)."""
+    quadratic in the command's length. A value comparison and segment equality both pass it. The 1 MB
+    timed row failed it when measured (about 7.9 to 8.2 s of CPU for one protected_line call, over its
+    7-second bound, in-process on a 24-core host with Python 3.14.4, 2026-10-18), but a faster host can
+    bring it under that bound, so the object-identity record is what catches it by design."""
     n = len(command)
     for i in range(1, n):
         if command[i] == "(" and command[i - 1] in "<>":
@@ -2685,8 +2687,8 @@ def _procsubst_taken_failures():
     check above holds just as well for a split that copies, so only this record pins the call site; the
     bounded timed rows do not (the copying split stayed under the 1 MB CPU bound when measured). The
     copying call shape it replaced must be caught by the same record (dl-procsubst-taken-red), and so
-    must a per-substitution full-length copy equal in value, which only the identity comparison can see
-    (dl-procsubst-taken-red-equal), so the record discriminates."""
+    must a per-substitution full-length copy equal in value, which of the record's comparisons only the
+    identity comparison can see (dl-procsubst-taken-red-equal), so the record discriminates."""
     if not callable(getattr(aiqt_hooks, "_skip_quoting_from", None)):
         return ["(dl-procsubst-taken-missing) aiqt_hooks has no _skip_quoting_from to record the walk on"]
     command = "cat " + "<(x) >(x) " * 1200 + "; git push --force origin main"
@@ -2997,9 +2999,9 @@ _DEADLINE_SHAPES = {
     "breadth_push_after_unbal": lambda n, base: ("Bash", {"command": _repeat(
         "git add x ", n, "; git commit -a -m x; git push origin '")}),
     # One key run of quoted '-c' mirror options with no '.mirror' and no blank, which the single
-    # mirror-configuration regex read in time quadratic in its length (0.9 to 1.6 s at 64 KB and 6.8 to
-    # 11.2 s at 180 KB for the push backstop alone, in-process on a 24-core host, 2026-10-18), then a
-    # force-push to a protected branch.
+    # mirror-configuration regex read in time quadratic in its length (about 0.8 s of CPU at 64 KB and 6.2
+    # to 6.5 s at 180 KB for one call of the push backstop alone, in-process on a 24-core host with Python
+    # 3.14.4, 2026-10-18), then a force-push to a protected branch.
     "mirror_cfg_run_after": lambda n, base: ("Bash", {"command": "git push " + _repeat(
         "'-c'remote.", n - 9, "; git push --force origin main")}),
     # A run of adjacent process substitutions, which the push backstop's segment split walked by copying

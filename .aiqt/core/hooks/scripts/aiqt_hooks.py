@@ -202,10 +202,12 @@ fallback scans are _RawSequence probes of linear cost: the single regexes they r
 square or the cube of the command length, and five guards ran past the hook timeout on some shape at or
 below 64 KB. The push backstop's raw mirror-configuration scan is a _RawMirrorConfig probe of linear cost,
 and its segment split walks a '<(' or '>(' process substitution in place: the single regex grew with the
-square of a run of quoted '-c' options with no blank (6.8 to 11.2 s at 180 KB in-process on a 24-core
-host, 2026-10-18), and a copy of the rest of the command for each substitution with the square of a run of them
-(4.7 s at 1 MB). Measured in-process on a 24-core host with Python 3.14.4 over runs on 2026-10-15 and
-2026-10-16, the slowest PreToolUse handler call on the worst shapes tools/selftest_aiqt_hooks.py times
+square of a run of quoted '-c' options with no blank (about 6.2 to 6.5 s of CPU for one call of the push
+backstop alone at 180 KB, against about 0.37 s at 1 MB with the probe), and a copy of the rest of the
+command for each substitution with the square of a run of them (about 3.4 s of CPU for one call of the
+copying split alone at 1 MB, against about 0.11 s for the in-place walk), each in-process on a 24-core
+host with Python 3.14.4, 2026-10-18. Measured in-process on a 24-core host with Python 3.14.4 over runs on
+2026-10-15 and 2026-10-16, the slowest PreToolUse handler call on the worst shapes tools/selftest_aiqt_hooks.py times
 took at most 0.10 s of wall-clock time at 64 KB, 0.49 s at 256 KB and 2.07 s at 1 MB (nest_parens under
 git_stash_ref). With the raw-text push backstop and the joined and de-quoted readings of the command,
 runs on 2026-10-17 on a 24-core host with Python 3.14.4 that was running other work measured at most
@@ -7473,9 +7475,10 @@ class _RawMirrorConfig:
     '.mirror' after its first character), or None, at linear cost. The regex reads the whole key run after
     each option it finds and gives it back one character at a time looking for '.mirror', so a run holding
     many options and no '.mirror' (git push '-c'remote.'-c'remote. and so on, with no blank to end the run)
-    cost time quadratic in its length: 6.8 to 11.2 s at 180 KB. Here `option` finds each option once, in order,
-    `key` reads the run after it and `mirror` looks for '.mirror' in that run once; an option whose key
-    starts inside a run already read with no '.mirror' after that earlier key is passed over, because its
+    cost time quadratic in its length: about 3.1 s of CPU for one search of a 180 KB run, against about
+    0.02 s for this probe on a 1 MB run (in-process on a 24-core host with Python 3.14.4, 2026-10-18).
+    Here `option` finds each option once, in order, `key` reads the run after it and `mirror` looks for
+    '.mirror' in that run once; an option whose key starts inside a run already read with no '.mirror' after that earlier key is passed over, because its
     own run is a tail of that one. `option` matches what the regex's two alternatives match before their
     shared key run; at a given start at most one alternative can match, and only up to one place, so each
     option the regex can start from is read with the key it would read. No option match starts inside
